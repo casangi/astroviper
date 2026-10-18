@@ -213,7 +213,12 @@ around to the opposite edge), separable spectra with real (half spectrum)
 transforms, no transform for point components, no end of the model
 update after a Hogbom run (CASA's, kept as
 `cycle_control_params["asp_stop_after_hogbom_run"]`), and no "diverging" guard
-(`AspMatrixCleaner` "5. Diverging" of CASA and LibRA).
+(`AspMatrixCleaner` "5. Diverging" of CASA and LibRA). Beyond CASA, the
+imager's Asp starts each model update with components shaped by the residual
+(Ma, Zhang & Zhang 2026) and cleans smoothed residual that is significant at
+its scale below the threshold (`asp_residual_components`,
+`asp_scale_significance`, on by default; the kernel options are `AspOptions`
+in `include/asp_clean.hpp`, off by default there).
 Like Hogbom and MTMFS it takes the divergence test shared by the
 deconvolvers (`deconvolvers/include/plane_stop_test.hpp`); `asp_clean()`
 gives it the RMS limit at `(1 + gain)` times the lowest RMS and no peak

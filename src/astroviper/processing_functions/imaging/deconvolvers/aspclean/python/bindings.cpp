@@ -45,7 +45,8 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
                            int largestscale, int stoppointmode, int norm_method,
                            bool verbose, int max_iter_divergence,
                            double divergence_rms_factor, double divergence_peak_factor,
-                           int processing_function_threads, bool stop_after_hogbom_run) {
+                           int processing_function_threads, bool stop_after_hogbom_run,
+                           const aspclean::AspOptions& options) {
     const int ny = static_cast<int>(residual.shape(0));
     const int nx = static_cast<int>(residual.shape(1));
     const std::vector<py::ssize_t> shp = {ny, nx};
@@ -72,7 +73,8 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
             static_cast<T*>(ri.ptr), static_cast<T*>(mi.ptr),
             static_cast<const T*>(pi.ptr), mask_ptr, nx, ny, gain, threshold_per_cycle,
             max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale, stoppointmode,
-            norm_method, stop_after_hogbom_run, verbose, divergence, processing_function_threads);
+            norm_method, stop_after_hogbom_run, verbose, divergence, processing_function_threads,
+            options);
     }
 
     py::dict out;
@@ -96,7 +98,21 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     timing["n_point_components"] = res.n_point_components;
     timing["n_fits"] = res.n_fits;
     timing["n_fit_evaluations"] = res.n_fit_evaluations;
+    timing["residual_components"] = res.t_residual_components;
+    timing["n_residual_components"] = res.n_residual_components;
+    timing["n_residual_fit_evaluations"] = res.n_residual_fit_evaluations;
     out["timing"] = timing;
+    if (options.record_components) {
+        const py::ssize_t n = static_cast<py::ssize_t>(res.components.size() / 4);
+        py::array_t<double> components({n, static_cast<py::ssize_t>(4)});
+        std::memcpy(components.mutable_data(), res.components.data(), res.components.size() * sizeof(double));
+        out["components"] = components;
+        const py::ssize_t m = static_cast<py::ssize_t>(res.residual_fits.size() / 6);
+        py::array_t<double> fits({m, static_cast<py::ssize_t>(6)});
+        if (m) std::memcpy(fits.mutable_data(), res.residual_fits.data(), res.residual_fits.size() * sizeof(double));
+        out["residual_fits"] = fits;
+    }
+    if (options.scale_significance) out["scale_noise"] = res.scale_noise;
     return out;
 }
 
@@ -107,7 +123,21 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                int norm_method, bool verbose, int max_iter_divergence,
                                double divergence_rms_factor,
                                double divergence_peak_factor,
-                               int processing_function_threads, bool stop_after_hogbom_run) {
+                               int processing_function_threads, bool stop_after_hogbom_run,
+                               bool scale_significance, double significance,
+                               bool record_components, bool residual_components,
+                               double rc_noise_floor, double rc_frac_min, double rc_eps_max,
+                               double rc_switch_factor, bool rc_floor_at_threshold) {
+    aspclean::AspOptions options;
+    options.scale_significance = scale_significance;
+    options.significance = significance;
+    options.record_components = record_components;
+    options.residual_components = residual_components;
+    options.rc_noise_floor = rc_noise_floor;
+    options.rc_frac_min = rc_frac_min;
+    options.rc_eps_max = rc_eps_max;
+    options.rc_switch_factor = rc_switch_factor;
+    options.rc_floor_at_threshold = rc_floor_at_threshold;
     if (residual.ndim() != 2)
         throw std::runtime_error("residual must be a 2D array [ny, nx]");
     auto dt = residual.dtype();
@@ -116,13 +146,13 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                  max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
                                  stoppointmode, norm_method, verbose, max_iter_divergence,
                                  divergence_rms_factor, divergence_peak_factor,
-                                 processing_function_threads, stop_after_hogbom_run);
+                                 processing_function_threads, stop_after_hogbom_run, options);
     if (dt.is(py::dtype::of<double>()))
         return plane_impl<double>(residual, psf, model, mask, gain, threshold_per_cycle,
                                   max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
                                   stoppointmode, norm_method, verbose, max_iter_divergence,
                                   divergence_rms_factor, divergence_peak_factor,
-                                  processing_function_threads, stop_after_hogbom_run);
+                                  processing_function_threads, stop_after_hogbom_run, options);
     throw std::runtime_error("residual must be float32 or float64");
 }
 
@@ -133,7 +163,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
                           int largestscale, int stoppointmode, int norm_method,
                           int processing_function_threads, int max_iter_divergence,
                           double divergence_rms_factor, double divergence_peak_factor,
-                          bool stop_after_hogbom_run) {
+                          bool stop_after_hogbom_run, const aspclean::AspOptions& options) {
     const int nt = static_cast<int>(residual.shape(0));
     const int nf = static_cast<int>(residual.shape(1));
     const int np_img = static_cast<int>(residual.shape(2));
@@ -190,7 +220,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
             static_cast<const T*>(pi.ptr), mask_ptr, nt, nf, np_img, np_psf, nx,
             ny, gain, thr_ptr, nit_ptr, fusedthreshold, psf_width, largestscale,
             stoppointmode, norm_method, stop_after_hogbom_run, processing_function_threads,
-            divergence, results.data());
+            divergence, results.data(), options);
     }
 
     py::array_t<int> iters({nt, nf, np_img});
@@ -235,7 +265,20 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     int largestscale, int stoppointmode,
                                     int norm_method, int processing_function_threads,
                                     int max_iter_divergence, double divergence_rms_factor,
-                                    double divergence_peak_factor, bool stop_after_hogbom_run) {
+                                    double divergence_peak_factor, bool stop_after_hogbom_run,
+                                    bool scale_significance, double significance,
+                                    bool residual_components, double rc_noise_floor,
+                                    double rc_frac_min, double rc_eps_max, double rc_switch_factor,
+                                    bool rc_floor_at_threshold) {
+    aspclean::AspOptions options;
+    options.scale_significance = scale_significance;
+    options.significance = significance;
+    options.residual_components = residual_components;
+    options.rc_noise_floor = rc_noise_floor;
+    options.rc_frac_min = rc_frac_min;
+    options.rc_eps_max = rc_eps_max;
+    options.rc_switch_factor = rc_switch_factor;
+    options.rc_floor_at_threshold = rc_floor_at_threshold;
     if (residual.ndim() != 5)
         throw std::runtime_error(
             "residual must be a 5D array [time, frequency, polarization, y, x]");
@@ -245,13 +288,13 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                 max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
                                 stoppointmode, norm_method, processing_function_threads,
                                 max_iter_divergence, divergence_rms_factor,
-                                divergence_peak_factor, stop_after_hogbom_run);
+                                divergence_peak_factor, stop_after_hogbom_run, options);
     if (dt.is(py::dtype::of<double>()))
         return cube_impl<double>(residual, psf, model, mask, gain, threshold_per_cycle,
                                  max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
                                  stoppointmode, norm_method, processing_function_threads,
                                  max_iter_divergence, divergence_rms_factor,
-                                 divergence_peak_factor, stop_after_hogbom_run);
+                                 divergence_peak_factor, stop_after_hogbom_run, options);
     throw std::runtime_error("residual must be float32 or float64");
 }
 
@@ -334,7 +377,23 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "2-D transform. stop_after_hogbom_run ends the model update after a "
           "Hogbom run unless the RMS of the residual has fallen, by less than "
           "a factor 1.5, since its start (CASA and LibRA); off, the model "
-          "update goes on to its threshold or iteration limit.",
+          "update goes on to its threshold or iteration limit. Options beyond "
+          "CASA and LibRA (all off by default here, see AspOptions in "
+          "asp_clean.hpp): residual_components cleans first with components "
+          "shaped by the residual (Ma, Zhang & Zhang 2026), C = R tanh((sR - "
+          "T) / eps) on the mask pixels with sR >= T, T = max(frac |R_peak|, "
+          "rc_noise_floor x noise, and the threshold with "
+          "rc_floor_at_threshold), (frac, eps) fitted within [rc_frac_min, "
+          "0.99] x [1e-3, rc_eps_max] by least squares of the masked "
+          "residual, down to rc_switch_factor x threshold_per_cycle; then the "
+          "Asp iterations. scale_significance measures the noise of the "
+          "residual smoothed with each initial scale and, with the peak below "
+          "threshold_per_cycle, goes on cleaning the most significant smoothed "
+          "residual while its significance reaches that of the threshold at "
+          "scale 0 (or significance, when > 0); scale_noise is returned. "
+          "record_components returns the Asp components (i, j, scale, flux) "
+          "and the residual-shaped fits (peak, frac, eps_frac, 0, 0, "
+          "objective).",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
           py::arg("threshold_per_cycle") = 0.0, py::arg("max_iter_per_cycle_updated") = 100,
@@ -343,7 +402,11 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("norm_method") = 1, py::arg("verbose") = false,
           py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
           py::arg("divergence_peak_factor") = 1.0, py::arg("processing_function_threads") = 1,
-          py::arg("stop_after_hogbom_run") = false);
+          py::arg("stop_after_hogbom_run") = false, py::arg("scale_significance") = false,
+          py::arg("significance") = 0.0, py::arg("record_components") = false,
+          py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
+          py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
+          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true);
 
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp model update independently on every (time, frequency, "
@@ -352,7 +415,9 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "Iteration control is independent per plane: threshold_per_cycle "
           "(float64) and max_iter_per_cycle_updated (int32) are (nt, nf, np) "
           "arrays giving each plane its own threshold and iteration limit; the "
-          "divergence test and stop_after_hogbom_run are those of clean. "
+          "divergence test, stop_after_hogbom_run and the options beyond "
+          "CASA (residual_components, scale_significance, ...) are those of "
+          "clean. "
           "Returns per-plane arrays of shape (nt, nf, np), stop_code among "
           "them.",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
@@ -362,7 +427,11 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("largestscale") = -1, py::arg("stoppointmode") = -1,
           py::arg("norm_method") = 1, py::arg("processing_function_threads") = 1,
           py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
-          py::arg("divergence_peak_factor") = 1.0, py::arg("stop_after_hogbom_run") = false);
+          py::arg("divergence_peak_factor") = 1.0, py::arg("stop_after_hogbom_run") = false,
+          py::arg("scale_significance") = false, py::arg("significance") = 0.0,
+          py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
+          py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
+          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true);
 
     m.def("psf_gaussian_width", &psf_width_helper,
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "

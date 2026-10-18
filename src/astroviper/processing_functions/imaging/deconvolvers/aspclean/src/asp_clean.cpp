@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <deque>
 #include <numeric>
 #include <thread>
@@ -390,7 +391,8 @@ public:
             double gain, double threshold, int max_iter_per_cycle_updated, double fusedthreshold,
             double psf_width, int largestscale, int stoppointmode,
             int norm_method, bool stop_after_hogbom_run, bool verbose,
-            const deconvolvers::DivergenceControl<double>& divergence, const FftThreads& fft_threads)
+            const deconvolvers::DivergenceControl<double>& divergence, const FftThreads& fft_threads,
+            const AspOptions& options = AspOptions{})
         : residual_(residual), model_(model), psf_(psf), mask_(mask),
           nx_(nx), ny_(ny), gain_(gain), threshold_(threshold),
           maxNiter_(max_iter_per_cycle_updated), fusedThreshold_(fusedthreshold),
@@ -399,7 +401,7 @@ public:
           normMethod_(norm_method <= 0 ? 1 : norm_method),
           stopAfterHogbomRun_(stop_after_hogbom_run), verbose_(verbose),
           psfWidthInput_(psf_width), divergence_(divergence),
-          fftThreads_(fft_threads) {}
+          fftThreads_(fft_threads), options_(options) {}
 
     AspResult run() {
         auto t0 = std::chrono::steady_clock::now();
@@ -424,6 +426,8 @@ public:
         res.model_flux = modelSum();
         res.switched_to_hogbom = switchedToHogbom_;
         res.psf_width = psfWidth_;
+        res.components = components_;
+        res.scale_noise = noiseScale_;
         return res;
     }
 
@@ -447,6 +451,10 @@ private:
     double psfWidthInput_;
     deconvolvers::DivergenceControl<double> divergence_;
     FftThreads fftThreads_;  // threads of every 2-D transform
+    AspOptions options_;               // see asp_clean.hpp
+    std::vector<double> noiseScale_;   // noise of residual (*) scale s
+    double maxSignificance_ = 0.0;     // of the last all-scale search
+    bool lastSearchAllScales_ = false; // the last search covered every scale
 
     // --- derived / state ---
     double psfWidth_ = 0.0;
@@ -491,6 +499,7 @@ private:
     double sumSquares_ = 0.0;  // of the masked residual, set with peakResidual_
     double bboxSumSquares_ = 0.0;  // of the residual over [blc, trc], set with peakResidual_
     AspResult timing_;         // section timings and counts
+    std::vector<double> components_;  // (i, j, scale, flux) per component
 
     // ---- accessors into caller buffers ----
     double dirtyAt(int i, int j) const {
@@ -558,10 +567,248 @@ private:
 
         if (noClean_) return;
 
+        if (options_.scale_significance || options_.residual_components) estimateScaleNoise();
+
         // getActiveSetAspen() once to seed the first optimum, then defineAspScales.
         std::vector<double> scaleSizes = getActiveSetAspen();
         scaleSizes.push_back(0.0);
         defineAspScales(scaleSizes);
+    }
+
+    // Robust (1.4826 MAD) noise of the residual (scale 0) and of the
+    // residual convolved with each initial scale, outside the clean mask and a
+    // border of three scale sizes (the search convolutions are circular).
+    void estimateScaleNoise() {
+        const int ns = static_cast<int>(initScaleSizes_.size());
+        noiseScale_.assign(ns, std::numeric_limits<double>::infinity());
+        std::vector<double> dirtyd(static_cast<std::size_t>(nx_) * ny_);
+        for (std::size_t k = 0; k < dirtyd.size(); ++k) dirtyd[k] = static_cast<double>(residual_[k]);
+        std::vector<cd> spec;
+        if (ns > 1) aspfft::rfft2_half(dirtyd.data(), nx_, ny_, spec, fftThreads_.get());
+        std::vector<double> conv;
+        const std::size_t n_all = static_cast<std::size_t>(nx_) * ny_;
+        const std::size_t stride = std::max<std::size_t>(1, n_all / 400000);
+        for (int s = 0; s < ns; ++s) {
+            const std::vector<double>* img = &dirtyd;
+            if (s > 0) { convolveInitScale(spec, s, conv); img = &conv; }
+            const int border = static_cast<int>(3.0 * initScaleSizes_[s]) + 1;
+            std::vector<double> vals;
+            for (std::size_t k = 0; k < n_all; k += stride) {
+                const int i = static_cast<int>(k % nx_), j = static_cast<int>(k / nx_);
+                if (i < border || j < border || i >= nx_ - border || j >= ny_ - border) continue;
+                if (maskMat_(i, j) > 1e-6) continue;
+                vals.push_back((*img)[k]);
+            }
+            if (vals.size() < 100) continue;
+            auto mid = vals.begin() + static_cast<std::ptrdiff_t>(vals.size() / 2);
+            std::nth_element(vals.begin(), mid, vals.end());
+            const double med = *mid;
+            for (double& v : vals) v = std::fabs(v - med);
+            std::nth_element(vals.begin(), mid, vals.end());
+            noiseScale_[s] = 1.4826 * (*mid);
+        }
+    }
+
+    // Exact linear convolution with the PSF (or its adjoint) of an
+    // image held on a box, evaluated on the box: the box at the origin of an
+    // lx x ly grid with the PSF cutout of PsfCutoutSpectra (lx >= 2 bx - 1).
+    void boxConvolve(const std::vector<cd>& psfFT, int bx, int by, int lx, int ly,
+                     const std::vector<double>& in, std::vector<double>& out, bool adjoint,
+                     std::vector<double>& grid, std::vector<cd>& spec) {
+        grid.assign(static_cast<std::size_t>(lx) * ly, 0.0);
+        for (int j = 0; j < by; ++j)
+            std::copy(in.begin() + static_cast<std::ptrdiff_t>(j) * bx,
+                      in.begin() + static_cast<std::ptrdiff_t>(j + 1) * bx,
+                      grid.begin() + static_cast<std::ptrdiff_t>(j) * lx);
+        aspfft::rfft2_half(grid.data(), lx, ly, spec, fftThreads_.get());
+        for (std::size_t k = 0; k < spec.size(); ++k)
+            spec[k] = aspfft::mul(spec[k], adjoint ? std::conj(psfFT[k]) : psfFT[k]);
+        aspfft::irfft2_half(spec.data(), lx, ly, grid.data(), fftThreads_.get());
+        out.resize(static_cast<std::size_t>(bx) * by);
+        for (int j = 0; j < by; ++j)
+            std::copy(grid.begin() + static_cast<std::ptrdiff_t>(j) * lx,
+                      grid.begin() + static_cast<std::ptrdiff_t>(j) * lx + bx,
+                      out.begin() + static_cast<std::ptrdiff_t>(j) * bx);
+    }
+
+    // The residual-shaped component phase (AspOptions). Works on
+    // the box of the clean mask with exact local convolutions, then subtracts
+    // the components it found from the whole residual with the exact padded
+    // convolution, so the residual stays exact. Returns STOP_NONE or
+    // STOP_DIVERGED.
+    int residualComponentPhase() {
+        auto clock = std::chrono::steady_clock::now();
+        const Box& box = initScaleMaskBoxes_[0];
+        if (box.i1 < box.i0) return deconvolvers::STOP_NONE;
+        const int bx = box.i1 - box.i0 + 1, by = box.j1 - box.j0 + 1;
+        const int lx = good_fft_size(2 * bx - 1), ly = good_fft_size(2 * by - 1);
+        const std::vector<cd> psfFT = psfCutouts_.get(lx, ly);  // a copy: the cache may evict it
+        const std::size_t nb = static_cast<std::size_t>(bx) * by;
+        std::vector<double> R(nb), inMask(nb), acc(nb, 0.0), C(nb), dCdT(nb), dCde(nb), CP(nb), r(nb), adj(nb);
+        std::vector<double> grid;
+        std::vector<cd> spec;
+        for (int j = 0; j < by; ++j)
+            for (int i = 0; i < bx; ++i) {
+                const std::size_t k = static_cast<std::size_t>(j) * bx + i;
+                R[k] = dirtyAt(box.i0 + i, box.j0 + j);
+                inMask[k] = initScaleMasks_[0](box.i0 + i, box.j0 + j) != 0.0 ? 1.0 : 0.0;
+            }
+        double floor = (!noiseScale_.empty() && std::isfinite(noiseScale_[0]))
+                           ? options_.rc_noise_floor * noiseScale_[0] : 0.0;
+        // A component takes no pixel below the threshold of the model update.
+        if (options_.rc_floor_at_threshold) floor = std::max(floor, threshold_);
+        const double flo = options_.rc_frac_min, fhi = options_.rc_frac_max;
+        const double elo = options_.rc_eps_min, ehi = options_.rc_eps_max;
+        // (frac, log eps_frac), clamped to their bounds; fitted by a bounded
+        // Levenberg-Marquardt on the masked residual vector, warm started from
+        // the last component's.
+        const double llo = std::log(elo), lhi = std::log(ehi);
+        std::vector<double> J1(nb), J2(nb);
+        double frac = std::min(std::max(0.7, flo), fhi);
+        double logEps = std::min(std::max(std::log(1.0), llo), lhi);
+        int status = deconvolvers::STOP_NONE;
+        while (iteration_ < maxNiter_) {
+            double A = 0.0, peak = 0.0, sumSquares = 0.0;
+            for (std::size_t k = 0; k < nb; ++k) {
+                if (inMask[k] == 0.0) continue;
+                sumSquares += R[k] * R[k];
+                if (std::fabs(R[k]) > A) { A = std::fabs(R[k]); peak = R[k]; }
+            }
+            if (A <= options_.rc_switch_factor * threshold_) break;
+            if (stopTest_.check_divergence(A, sumSquares, divergence_) != deconvolvers::STOP_NONE) {
+                status = deconvolvers::STOP_DIVERGED;
+                break;
+            }
+            const double s = peak > 0 ? 1.0 : -1.0;
+            // C (and dC/dT, dC/deps) of (frac, eps_frac)
+            auto component = [&](double fr, double epsf, bool derivatives, bool& floorActive) {
+                const double T0 = fr * A;
+                floorActive = floor > T0;
+                const double level = std::max(T0, floor), eps = epsf * A;
+                for (std::size_t k = 0; k < nb; ++k) {
+                    const double sR = s * R[k];
+                    if (inMask[k] == 0.0 || sR < level) {
+                        C[k] = 0.0;
+                        if (derivatives) { dCdT[k] = 0.0; dCde[k] = 0.0; }
+                        continue;
+                    }
+                    const double u = (sR - level) / eps;
+                    const double th = std::tanh(u);
+                    C[k] = R[k] * th;
+                    if (derivatives) {
+                        const double sech2 = 1.0 - th * th;
+                        dCdT[k] = -R[k] * sech2 / eps;
+                        dCde[k] = -R[k] * sech2 * u / eps;
+                    }
+                }
+            };
+            // misfit f = sum_mask (R - C (*) psf)^2 at (fr, le); with jacobian
+            // the columns J1 = d(residual)/dfrac, J2 = d(residual)/dlog eps_frac.
+            auto misfit = [&](double fr, double le, bool jacobian) {
+                bool floorActive = false;
+                const double epsf = std::exp(le);
+                component(fr, epsf, jacobian, floorActive);
+                boxConvolve(psfFT, bx, by, lx, ly, C, CP, false, grid, spec);
+                double f = 0.0;
+                for (std::size_t k = 0; k < nb; ++k) {
+                    r[k] = inMask[k] * (R[k] - CP[k]);
+                    f += r[k] * r[k];
+                }
+                if (jacobian) {
+                    // dC/dfrac = dC/dT * A (0 when the floor sets T);
+                    // dC/dlog eps_frac = dC/deps * eps = dC/deps * epsf * A
+                    boxConvolve(psfFT, bx, by, lx, ly, dCdT, J1, false, grid, spec);
+                    boxConvolve(psfFT, bx, by, lx, ly, dCde, J2, false, grid, spec);
+                    const double c1 = floorActive ? 0.0 : -A, c2 = -epsf * A;
+                    for (std::size_t k = 0; k < nb; ++k) {
+                        J1[k] = inMask[k] * c1 * J1[k];
+                        J2[k] = inMask[k] * c2 * J2[k];
+                    }
+                }
+                ++timing_.n_residual_fit_evaluations;
+                return f;
+            };
+            double f = misfit(frac, logEps, true);
+            double lambda = 1e-3;
+            for (int it = 0; it < options_.rc_fit_iterations; ++it) {
+                double a11 = 0, a12 = 0, a22 = 0, g1 = 0, g2 = 0;
+                for (std::size_t k = 0; k < nb; ++k) {
+                    a11 += J1[k] * J1[k]; a12 += J1[k] * J2[k]; a22 += J2[k] * J2[k];
+                    g1 += J1[k] * r[k]; g2 += J2[k] * r[k];
+                }
+                bool accepted = false;
+                for (int tries = 0; tries < 8 && !accepted; ++tries) {
+                    const double m11 = a11 * (1 + lambda) + 1e-30, m22 = a22 * (1 + lambda) + 1e-30;
+                    const double det = m11 * m22 - a12 * a12;
+                    if (!(std::fabs(det) > 0)) { lambda *= 10; continue; }
+                    const double d1 = -(m22 * g1 - a12 * g2) / det, d2 = -(m11 * g2 - a12 * g1) / det;
+                    const double nf = std::min(std::max(frac + d1, flo), fhi);
+                    const double nl = std::min(std::max(logEps + d2, llo), lhi);
+                    const double fTrial = misfit(nf, nl, false);
+                    if (fTrial < f) {
+                        const double rel = (f - fTrial) / std::max(f, 1e-300);
+                        frac = nf; logEps = nl; f = fTrial; accepted = true;
+                        lambda = std::max(lambda / 3.0, 1e-9);
+                        if (rel < 1e-7) it = options_.rc_fit_iterations;  // converged
+                    } else {
+                        lambda *= 5.0;
+                    }
+                }
+                if (!accepted) break;
+                if (it + 1 < options_.rc_fit_iterations) f = misfit(frac, logEps, true);
+            }
+            if (options_.record_components) {
+                const double rec[6] = {peak, frac, std::exp(logEps), 0.0, 0.0, f};
+                timing_.residual_fits.insert(timing_.residual_fits.end(), rec, rec + 6);
+            }
+            // No progress: the fit cannot lower the misfit any more (its best
+            // component is no better than none), so the Asp iterations take over.
+            bool floorActive = false;
+            component(frac, std::exp(logEps), false, floorActive);
+            boxConvolve(psfFT, bx, by, lx, ly, C, CP, false, grid, spec);
+            double fNone = 0.0, fComp = 0.0;
+            for (std::size_t k = 0; k < nb; ++k) {
+                if (inMask[k] == 0.0) continue;
+                fNone += R[k] * R[k];
+                const double d = R[k] - gain_ * CP[k];
+                fComp += d * d;
+            }
+            if (!(fComp < fNone * (1.0 - 1e-6))) break;
+            for (std::size_t k = 0; k < nb; ++k) {
+                acc[k] += gain_ * C[k];
+                R[k] -= gain_ * CP[k];
+            }
+            ++iteration_;
+            ++timing_.n_residual_components;
+        }
+        // The components on the whole image: model, and the residual with the
+        // exact convolution on the padded grid.
+        bool any = false;
+        for (double v : acc) any = any || v != 0.0;
+        if (any) {
+            std::vector<double> padded(static_cast<std::size_t>(padNx_) * padNy_, 0.0);
+            for (int j = 0; j < by; ++j)
+                for (int i = 0; i < bx; ++i) {
+                    const double v = acc[static_cast<std::size_t>(j) * bx + i];
+                    padded[static_cast<std::size_t>(box.j0 + j) * padNx_ + box.i0 + i] = v;
+                    modelAdd(box.i0 + i, box.j0 + j, v);
+                }
+            std::vector<cd>& pspec = work_.specA;
+            aspfft::rfft2_half(padded.data(), padNx_, padNy_, pspec, fftThreads_.get());
+            for (std::size_t k = 0; k < pspec.size(); ++k) pspec[k] = aspfft::mul(pspec[k], psfXfrPad_[k]);
+            aspfft::irfft2_half(pspec.data(), padNx_, padNy_, padded.data(), fftThreads_.get());
+            for (int j = 0; j < ny_; ++j)
+                for (int i = 0; i < nx_; ++i)
+                    dirtySet(i, j, dirtyAt(i, j) - padded[static_cast<std::size_t>(j) * padNx_ + i]);
+        }
+        timing_.t_residual_components += lap(clock);
+        return status;
+    }
+
+    // The significance a smoothed residual must reach to be cleaned.
+    double significanceLimit() const {
+        if (options_.significance > 0.0) return options_.significance;
+        return threshold_ / noiseScale_[0];
     }
 
     // setInitScales: choose 0, w, 2w, 4w, 8w (restricted by largestscale).
@@ -771,6 +1018,26 @@ private:
             }
         }
 
+        // With the peak below the threshold, the most significant
+        // smoothed residual (|max| / noise of its scale) is cleaned next while
+        // it reaches the significance limit.
+        lastSearchAllScales_ = nInitScales_ > 1;
+        if (options_.scale_significance && nInitScales_ > 1 && !noiseScale_.empty()) {
+            maxSignificance_ = 0.0;
+            int sigScale = -1;
+            for (int s = 1; s < nInitScales_; ++s) {
+                const double sig = std::abs(maxima[s]) / noiseScale_[s];
+                if (sig > maxSignificance_) { maxSignificance_ = sig; sigScale = s; }
+            }
+            if (std::abs(maxima[0]) < threshold_ && sigScale > 0 &&
+                maxSignificance_ >= significanceLimit()) {
+                optimumScale = sigScale;
+                strengthOptimum = maxima[sigScale];
+                posI = posMaxI[sigScale];
+                posJ = posMaxJ[sigScale];
+            }
+        }
+
         if (optimumScale > 0) {
             const double normalization = std::sqrt(
                 kTwoPi / (std::pow(1.0 / psfWidth_, 2) +
@@ -897,6 +1164,22 @@ private:
         double initRMSResidual = 1000.0;
 
         iteration_ = startingIter_;
+        if (options_.residual_components) {
+            // Residual-shaped components down to the threshold,
+            // then the Asp iterations (from a new search of the residual).
+            if (residualComponentPhase() == deconvolvers::STOP_DIVERGED) {
+                stopCode_ = deconvolvers::STOP_DIVERGED;
+                peakResidual_ = peakResidualMasked();
+                return -3;
+            }
+            startingIter_ = iteration_;
+            // The noise of the smoothed residuals, now that the sidelobes of
+            // the emission cleaned are gone from outside the mask too.
+            if (options_.scale_significance) estimateScaleNoise();
+            std::vector<double> scaleSizes = getActiveSetAspen();
+            scaleSizes.push_back(0.0);
+            defineAspScales(scaleSizes);
+        }
 
         peakResidual_ = peakResidualMasked();
 
@@ -916,7 +1199,7 @@ private:
             // Hogbom mode). The same scale is used for the residual update
             // below, even if the Hogbom switch flips in between, so the model
             // and residual updates always describe the same component.
-            const double usedScale = switchedToHogbom_ ? 0.0 : optimumScaleSize_;
+            double usedScale = switchedToHogbom_ ? 0.0 : optimumScaleSize_;
             timing_.t_bookkeeping += lap(clock);
 
             // hogbom-switch heuristics (norm method 1 only)
@@ -947,7 +1230,20 @@ private:
             if (ii == startingIter_) maximumResidual_ = std::abs(peakResidual_);
 
             // 0. below cycle threshold
-            if (std::abs(peakResidual_) < computeThreshold()) {
+            bool significantScale = false;
+            if (options_.scale_significance && std::abs(peakResidual_) < computeThreshold() &&
+                !noiseScale_.empty()) {
+                // Before stopping, search every scale of the current
+                // residual; go on while a smoothed residual is significant.
+                if (!lastSearchAllScales_ || switchedToHogbom_) {
+                    switchedToHogbom_ = false;
+                    numHogbomIter_ = 0;
+                    getActiveSetAspen();
+                }
+                significantScale = optimumScale_ > 0 && maxSignificance_ >= significanceLimit();
+                if (significantScale) usedScale = optimumScaleSize_;
+            }
+            if (std::abs(peakResidual_) < computeThreshold() && !significantScale) {
                 converged = 1;
                 stopCode_ = deconvolvers::STOP_THRESHOLD;
                 switchedToHogbom_ = false;
@@ -997,6 +1293,12 @@ private:
             // with the image-sized PSF (see setup()), so residual == dirty -
             // model (*) psf holds on the whole image, as for the Hogbom kernels.
             const double scaleFactor = gain_ * strengthOptimum_;
+            if (options_.record_components) {
+                components_.push_back(static_cast<double>(posOptI_));
+                components_.push_back(static_cast<double>(posOptJ_));
+                components_.push_back(usedScale);
+                components_.push_back(scaleFactor);
+            }
             lap(clock);
             if (usedScale == 0.0) {
                 // A point component: the shifted PSF, no transform needed.
@@ -1202,7 +1504,7 @@ AspResult clean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int largestscale, int stoppointmode, int norm_method,
                          bool stop_after_hogbom_run, bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence,
-                         const FftThreads& fft_threads) {
+                         const FftThreads& fft_threads, const AspOptions& options = AspOptions{}) {
     // A pixel outside the search region that is not finite would spread over
     // the plane through the scale convolutions and the fit: it is zero during
     // the model update and gets its value back afterwards.
@@ -1219,7 +1521,7 @@ AspResult clean_plane(T* residual, T* model, const T* psf, const T* mask,
     Cleaner<T> cleaner(residual, model, psf, mask, nx, ny, gain, threshold_per_cycle,
                        max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
                        stoppointmode, norm_method, stop_after_hogbom_run, verbose, divergence,
-                       fft_threads);
+                       fft_threads, options);
     const AspResult result = cleaner.run();
     for (const auto& [k, value] : nonFinite) residual[k] = value;
     return result;
@@ -1234,11 +1536,11 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int largestscale, int stoppointmode, int norm_method,
                          bool stop_after_hogbom_run, bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence,
-                         int fft_threads) {
+                         int fft_threads, const AspOptions& options) {
     return clean_plane<T>(residual, model, psf, mask, nx, ny, gain, threshold_per_cycle,
                           max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
                           stoppointmode, norm_method, stop_after_hogbom_run, verbose, divergence,
-                          FftThreads{std::max(1, fft_threads), nullptr});
+                          FftThreads{std::max(1, fft_threads), nullptr}, options);
 }
 
 template <typename T>
@@ -1249,7 +1551,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                    double psf_width, int largestscale, int stoppointmode,
                    int norm_method, bool stop_after_hogbom_run, int processing_function_threads,
                    const deconvolvers::DivergenceControl<double>& divergence,
-                   AspResult* results) {
+                   AspResult* results, const AspOptions& options) {
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) return;
     const std::size_t plane = static_cast<std::size_t>(ny) * nx;
@@ -1282,7 +1584,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                                            threshold_per_cycle[p], max_iter_per_cycle_updated[p], fusedthreshold,
                                            psf_width, largestscale, stoppointmode,
                                            norm_method, stop_after_hogbom_run, false, divergence,
-                                           fft_threads);
+                                           fft_threads, options);
         }
         active.fetch_sub(1, std::memory_order_relaxed);
     };
@@ -1301,21 +1603,23 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
 template AspResult aspclean_plane<float>(float*, float*, const float*, const float*,
                                          int, int, double, double, int, double,
                                          double, int, int, int, bool, bool,
-                                         const deconvolvers::DivergenceControl<double>&, int);
+                                         const deconvolvers::DivergenceControl<double>&, int,
+                                         const AspOptions&);
 template AspResult aspclean_plane<double>(double*, double*, const double*, const double*,
                                           int, int, double, double, int, double,
                                           double, int, int, int, bool, bool,
-                                          const deconvolvers::DivergenceControl<double>&, int);
+                                          const deconvolvers::DivergenceControl<double>&, int,
+                                          const AspOptions&);
 template void aspclean_cube<float>(float*, float*, const float*, const float*, int,
                                    int, int, int, int, int, double, const double*,
                                    const int*, double, double, int, int, int, bool, int,
                                    const deconvolvers::DivergenceControl<double>&,
-                                   AspResult*);
+                                   AspResult*, const AspOptions&);
 template void aspclean_cube<double>(double*, double*, const double*, const double*,
                                     int, int, int, int, int, int, double,
                                     const double*, const int*, double, double, int,
                                     int, int, bool, int,
                                     const deconvolvers::DivergenceControl<double>&,
-                                    AspResult*);
+                                    AspResult*, const AspOptions&);
 
 }  // namespace aspclean

@@ -147,6 +147,12 @@ def _validate_deconvolve_params(deconvolve_params):
         - ``asp_stop_after_hogbom_run`` : bool, end an Asp model update after
           a Hogbom run as CASA and LibRA do (see :func:`asp_clean`). Default
           ``False``.
+        - ``asp_residual_components`` : bool, start each Asp model update with
+          components shaped by the residual (see :func:`asp_clean`). Default
+          ``True``.
+        - ``asp_scale_significance`` : bool, let Asp clean a smoothed residual
+          that is significant at its scale below the threshold (see
+          :func:`asp_clean`). Default ``True``.
 
     Returns
     -------
@@ -176,6 +182,8 @@ def _validate_deconvolve_params(deconvolve_params):
         "record_iteration_history": False,
         "exact_psf_subtraction": False,
         "asp_stop_after_hogbom_run": False,
+        "asp_residual_components": True,
+        "asp_scale_significance": True,
     }
 
     for key, default_value in default_params.items():
@@ -220,6 +228,8 @@ def _validate_deconvolve_params(deconvolve_params):
             "record_iteration_history",
             "exact_psf_subtraction",
             "asp_stop_after_hogbom_run",
+            "asp_residual_components",
+            "asp_scale_significance",
         ):
             if not isinstance(value, bool | np.bool_):
                 raise ValueError(f"{key} must be a bool; got {value!r}.")
@@ -1456,6 +1466,39 @@ def asp_clean(
           one, so by default (``False``) the model update goes on to its
           ``threshold_per_cycle``, its iteration limit or the divergence
           test, which takes fewer imaging cycles.
+        - ``asp_residual_components`` : bool, start each model update with
+          components shaped by the residual (Ma, Zhang & Zhang 2026, A&A 713,
+          A164): ``C = R tanh((s R - T) / eps)`` on the mask pixels with
+          ``s R >= T``, where ``R`` is the residual, ``s`` the sign of its
+          peak ``R_p``, ``T = max(frac |R_p|, threshold_per_cycle)`` and
+          ``eps = eps_frac |R_p|``, with ``(frac, eps_frac)`` fitted by least
+          squares of the masked residual. They take the residual down to
+          ``threshold_per_cycle``, and the Asp iterations go on from there.
+          They remove the ring residuals Asp leaves on resolved emission in
+          far fewer iterations; on a plane of noise they take up no more
+          noise than Asp. Default ``True``.
+        - ``asp_scale_significance`` : bool, measure the noise of the
+          residual smoothed with each initial scale and, once the peak is
+          below ``threshold_per_cycle``, go on cleaning the most significant
+          smoothed residual while it is as significant as the threshold is
+          at scale 0. Default ``True``.
+        - ``asp_significance`` : float, the significance the smoothed
+          residual must reach instead, when ``> 0``. Default 0.0.
+        - ``asp_rc_frac_min``, ``asp_rc_eps_max`` : float, lower bound of
+          ``frac`` (upper 0.99) and upper bound of ``eps_frac`` (lower 1e-3)
+          in the fit of the residual-shaped components. Defaults 0.3 and
+          10.0; a lower ``frac`` or a larger ``eps_frac`` makes broad weak
+          components that fail on crescent-like emission.
+        - ``asp_rc_noise_floor`` : float, ``T`` is also at least this many
+          times the robust noise of the residual outside the mask. Default
+          2.0.
+        - ``asp_rc_switch_factor`` : float, hand over to the Asp iterations at
+          this multiple of ``threshold_per_cycle``. Default 1.0 (handing over
+          earlier brings the rings back).
+        - ``asp_rc_floor_at_threshold`` : bool, keep ``T`` at least
+          ``threshold_per_cycle``; without it a component takes residual
+          below the threshold (down to ``asp_rc_noise_floor``), which takes
+          up noise. Default ``True``.
 
         Note: ``clean_box`` is ignored by the Asp algorithm (use a mask
         instead).
@@ -1593,6 +1636,19 @@ def asp_clean(
         processing_function_threads=int(processing_function_threads),
         stop_after_hogbom_run=bool(
             deconvolve_params.get("asp_stop_after_hogbom_run", False)
+        ),
+        # Options beyond CASA and LibRA (off by default in the kernel).
+        scale_significance=bool(deconvolve_params.get("asp_scale_significance", True)),
+        significance=float(deconvolve_params.get("asp_significance", 0.0)),
+        residual_components=bool(
+            deconvolve_params.get("asp_residual_components", True)
+        ),
+        rc_noise_floor=float(deconvolve_params.get("asp_rc_noise_floor", 2.0)),
+        rc_frac_min=float(deconvolve_params.get("asp_rc_frac_min", 0.3)),
+        rc_eps_max=float(deconvolve_params.get("asp_rc_eps_max", 10.0)),
+        rc_switch_factor=float(deconvolve_params.get("asp_rc_switch_factor", 1.0)),
+        rc_floor_at_threshold=bool(
+            deconvolve_params.get("asp_rc_floor_at_threshold", True)
         ),
         **_divergence_kwargs(deconvolve_params, asp=True),
     )

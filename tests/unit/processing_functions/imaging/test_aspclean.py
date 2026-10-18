@@ -1024,3 +1024,234 @@ class TestResolvedSource:
         assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
             1e-9 * np.abs(dirty).max()
         )
+
+
+# ---------------------------------------------------------------------------
+# Ring cleaning: options beyond CASA and LibRA (AspOptions)
+# ---------------------------------------------------------------------------
+
+
+class TestRingCleaning:
+    """The options of the kernel that clean Asp's ring residuals:
+    components shaped by the residual (Ma, Zhang & Zhang 2026, A&A 713, A164)
+    before the Asp iterations of a model update, the switch to Asp at a
+    multiple of the threshold, the noise floor of their threshold, and Asp's
+    test of significance per scale. The kernel leaves them off by default
+    (``asp_clean`` turns them on)."""
+
+    @staticmethod
+    def _scene(faint=False):
+        """A disk with a gap and a core (or, ``faint``, a broad Gaussian whose
+        dirty peak is twice the noise), observed with a PSF of 80 % filled uv
+        coverage, plus noise convolved with the PSF; mask of radius 40."""
+        n = 128
+        rng = np.random.default_rng(2)
+        ku, kv = np.meshgrid(np.fft.fftfreq(n), np.fft.fftfreq(n), indexing="ij")
+        sampling = ((np.hypot(ku, kv) < 0.15) & (rng.random((n, n)) < 0.8)).astype(
+            float
+        )
+        sampling += sampling[::-1, ::-1]  # Hermitian uv coverage
+        psf = np.fft.fftshift(np.real(np.fft.ifft2(sampling)))
+        psf = np.ascontiguousarray(psf / psf.max())
+        yy, xx = np.mgrid[0:n, 0:n]
+        r = np.hypot(xx - n // 2, yy - n // 2)
+        noise = _linear_convolution(rng.standard_normal((n, n)), psf)
+        if faint:
+            noise /= noise.std()
+            sky = np.exp(-0.5 * (r / 12.0) ** 2)
+            sky *= 2.0 / _linear_convolution(sky, psf).max()
+        else:
+            sky = np.exp(-0.5 * (r / 14.0) ** 2) * (
+                1 - 0.7 * np.exp(-0.5 * ((r - 10) / 2.0) ** 2)
+            ) + 0.3 * np.exp(-0.5 * (r / 2.0) ** 2)
+            noise *= 0.002 * np.abs(_linear_convolution(sky, psf)).max() / noise.std()
+        dirty = np.ascontiguousarray(_linear_convolution(sky, psf) + noise)
+        mask = (r < 40).astype(float)
+        return psf, sky, dirty, mask, 5.0 * noise.std()
+
+    @staticmethod
+    def _clean(psf, dirty, mask, threshold, **kwargs):
+        resid = dirty.copy()
+        model = np.zeros_like(dirty)
+        out = aspclean.clean(
+            resid,
+            psf,
+            model,
+            mask,
+            gain=0.1,
+            threshold_per_cycle=threshold,
+            max_iter_per_cycle_updated=3000,
+            max_iter_divergence=-1,
+            **kwargs,
+        )
+        return out, resid, model
+
+    def test_off_by_default(self):
+        psf, _, dirty, mask, threshold = self._scene()
+        default, resid, model = self._clean(psf, dirty, mask, threshold)
+        off, resid_off, model_off = self._clean(
+            psf,
+            dirty,
+            mask,
+            threshold,
+            residual_components=False,
+            scale_significance=False,
+            record_components=False,
+            rc_switch_factor=1.0,
+        )
+        np.testing.assert_array_equal(resid, resid_off)
+        np.testing.assert_array_equal(model, model_off)
+        assert default["timing"]["n_residual_components"] == 0
+        assert not {"components", "residual_fits", "scale_noise"} & set(default)
+
+    def test_residual_components_clean_the_disk_in_fewer_iterations(self):
+        psf, sky, dirty, mask, threshold = self._scene()
+        asp, *_ = self._clean(psf, dirty, mask, threshold)
+        out, resid, model = self._clean(
+            psf, dirty, mask, threshold, residual_components=True
+        )
+        assert out["timing"]["n_residual_components"] > 10
+        assert out["stop_code"] == 2  # the threshold
+        assert out["peak_residual"] <= threshold
+        assert out["iterations_performed"] < 0.7 * asp["iterations_performed"]
+        np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.05)
+        # the residual update stays the exact linear convolution
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+
+    def test_switch_factor_hands_over_to_asp_earlier(self):
+        psf, _, dirty, mask, threshold = self._scene()
+        counts = {}
+        for factor in (1.0, 10.0):
+            out, *_ = self._clean(
+                psf,
+                dirty,
+                mask,
+                threshold,
+                residual_components=True,
+                rc_switch_factor=factor,
+                record_components=True,
+            )
+            fits = out["residual_fits"]
+            # every fit starts from a peak above the switch level
+            assert np.all(fits[:, 0] > factor * threshold)
+            counts[factor] = out["timing"]["n_residual_components"]
+            assert out["peak_residual"] <= threshold
+        assert 0 < counts[10.0] < counts[1.0]
+
+    @pytest.mark.parametrize(
+        "kwargs", [{"rc_switch_factor": 1e3}, {"rc_noise_floor": 1e9}]
+    )
+    def test_no_residual_component_leaves_asp_as_it_is(self, kwargs):
+        """A switch level above the peak, or a noise floor above it, makes no
+        residual-shaped component (the phase ends without one) and Asp runs as
+        without the option."""
+        psf, _, dirty, mask, threshold = self._scene()
+        _, resid, model = self._clean(psf, dirty, mask, threshold)
+        out, resid_rc, model_rc = self._clean(
+            psf, dirty, mask, threshold, residual_components=True, **kwargs
+        )
+        assert out["timing"]["n_residual_components"] == 0
+        np.testing.assert_array_equal(resid, resid_rc)
+        np.testing.assert_array_equal(model, model_rc)
+
+    @pytest.mark.parametrize("at_threshold", [False, True])
+    def test_floor_at_threshold(self, at_threshold):
+        """With ``rc_floor_at_threshold`` a residual-shaped component takes no
+        pixel below the threshold of the model update; without it, it reaches
+        down to ``rc_frac_min`` of the peak. One iteration: one component."""
+        psf, _, dirty, mask, _ = self._scene()
+        peak = np.abs(dirty[mask > 0]).max()
+        resid = dirty.copy()
+        model = np.zeros_like(dirty)
+        out = aspclean.clean(
+            resid,
+            psf,
+            model,
+            mask,
+            gain=0.1,
+            threshold_per_cycle=0.6 * peak,
+            max_iter_per_cycle_updated=1,
+            max_iter_divergence=-1,
+            residual_components=True,
+            rc_floor_at_threshold=at_threshold,
+        )
+        assert out["timing"]["n_residual_components"] == 1
+        lowest = dirty[model != 0].min() / peak
+        if at_threshold:
+            assert lowest >= 0.6
+        else:
+            assert lowest < 0.35  # rc_frac_min is 0.3
+
+    def test_record_components(self):
+        psf, _, dirty, mask, threshold = self._scene()
+        out, *_ = self._clean(
+            psf,
+            dirty,
+            mask,
+            threshold,
+            residual_components=True,
+            record_components=True,
+        )
+        timing = out["timing"]
+        # one row (x, y, scale, amplitude) per Asp component
+        assert out["components"].shape == (
+            timing["n_scale_components"] + timing["n_point_components"],
+            4,
+        )
+        # one row per fit: the last one, which finds no better component than
+        # none, is not taken
+        fits = out["residual_fits"]
+        assert fits.shape == (timing["n_residual_components"] + 1, 6)
+        assert np.all((fits[:, 1] >= 0.3) & (fits[:, 1] <= 0.99))  # frac
+        assert np.all((fits[:, 2] >= 1e-3) & (fits[:, 2] <= 10.0))  # eps_frac
+
+    def test_scale_significance_cleans_a_faint_broad_source(self):
+        """A broad source whose dirty peak is below the threshold: Asp alone
+        takes nothing; with the test of significance per scale it takes the
+        source at the scales where it stands out of their noise."""
+        psf, sky, dirty, mask, threshold = self._scene(faint=True)
+        assert np.abs(dirty[mask > 0]).max() < threshold
+        _, _, model = self._clean(psf, dirty, mask, threshold)
+        assert not model.any()
+        out, resid, model = self._clean(
+            psf, dirty, mask, threshold, scale_significance=True
+        )
+        noise = np.asarray(out["scale_noise"])
+        np.testing.assert_allclose(noise[0], 1.0, rtol=0.1)  # the dirty noise
+        assert out["timing"]["n_scale_components"] > 0
+        assert model.sum() > 0.1 * sky.sum()
+        # centred on the source (the wings of scale components reach past the mask)
+        peak = np.unravel_index(np.argmax(model), model.shape)
+        assert np.hypot(peak[0] - 64, peak[1] - 64) < 10
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+
+    def test_cube_matches_per_plane(self):
+        psf, _, dirty, mask, threshold = self._scene()
+        kwargs = dict(
+            residual_components=True, scale_significance=True, rc_switch_factor=3.0
+        )
+        planes = np.stack([dirty, 0.5 * dirty])
+        resid = planes[None, :, None].copy()  # planes stays the reference
+        model = np.zeros_like(resid)
+        aspclean.clean_cube(
+            resid,
+            np.ascontiguousarray(np.broadcast_to(psf, resid.shape)),
+            model,
+            np.ascontiguousarray(np.broadcast_to(mask, resid.shape)),
+            gain=0.1,
+            threshold_per_cycle=np.full((1, 2, 1), threshold),
+            max_iter_per_cycle_updated=np.full((1, 2, 1), 3000, dtype=np.int32),
+            max_iter_divergence=-1,
+            processing_function_threads=2,
+            **kwargs,
+        )
+        for f in range(2):
+            _, r1, m1 = self._clean(
+                psf, np.ascontiguousarray(planes[f]), mask, threshold, **kwargs
+            )
+            np.testing.assert_array_equal(resid[0, f, 0], r1)
+            np.testing.assert_array_equal(model[0, f, 0], m1)

@@ -41,6 +41,7 @@
 // the CASA source.
 
 #include <cstddef>
+#include <vector>
 
 #include "../../include/plane_stop_test.hpp"
 
@@ -73,6 +74,50 @@ struct AspResult {
     int n_point_components = 0;
     int n_fits = 0;
     int n_fit_evaluations = 0;
+    // Every Asp component the model update subtracted,
+    // as (i, j, scale, flux) per component, when AspOptions::record_components.
+    std::vector<double> components;
+    // Noise of the residual smoothed with each initial scale
+    // (AspOptions::scale_significance).
+    std::vector<double> scale_noise;
+    // Residual-shaped components (AspOptions::residual_components) and their time.
+    int n_residual_components = 0;
+    int n_residual_fit_evaluations = 0;
+    double t_residual_components = 0.0;
+    // Per residual-shaped component fit (peak, frac, eps_frac, 0, 0, the
+    // objective at the end of the fit), when record_components.
+    std::vector<double> residual_fits;
+};
+
+// Options of Asp beyond CASA's and LibRA's AspMatrixCleaner, all off by default
+// in the kernel; deconvolution.asp_clean() turns scale_significance and
+// residual_components on: together they clean the ring residuals Asp leaves
+// on resolved emission, with far fewer iterations.
+//   scale_significance: measure the noise of the residual smoothed with each
+//     initial scale (robust, outside the mask) and, once the peak is below
+//     the threshold, go on cleaning the most significant smoothed residual
+//     while it is as significant as the threshold is at scale 0 (or as
+//     `significance` times its noise when that is > 0).
+//   record_components: return the components in AspResult::components.
+//   residual_components: before the Asp iterations of a model update, clean
+//     with components shaped by the residual (Ma, Zhang & Zhang 2026, A&A
+//     713, A164): C = R tanh((sR - T) / eps) on the mask pixels with sR >= T,
+//     T = max(frac |R_peak|, rc_noise_floor * noise[, the threshold when
+//     rc_floor_at_threshold, the default]), eps = eps_frac |R_peak|,
+//     s = sign R_peak; (frac, eps_frac) fitted within their bounds by least
+//     squares of the masked residual, down to rc_switch_factor times the
+//     threshold; the Asp iterations take it on to the threshold.
+struct AspOptions {
+    bool scale_significance = false;
+    double significance = 0.0;
+    bool record_components = false;
+    bool residual_components = false;
+    double rc_frac_min = 0.3, rc_frac_max = 0.99;
+    double rc_eps_min = 1e-3, rc_eps_max = 10.0;
+    double rc_noise_floor = 2.0;
+    double rc_switch_factor = 1.0;
+    bool rc_floor_at_threshold = true;
+    int rc_fit_iterations = 10;
 };
 
 // Estimate the PSF Gaussian width (mean FWHM in pixels) that seeds the Asp
@@ -104,7 +149,7 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int largestscale, int stoppointmode, int norm_method,
                          bool stop_after_hogbom_run, bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence,
-                         int fft_threads = 1);
+                         int fft_threads = 1, const AspOptions& options = AspOptions{});
 
 // Run aspclean_plane independently on every (time, frequency, polarization)
 // plane of a 5-D cube [nt, nf, np, ny, nx], in place, across `processing_function_threads`
@@ -125,6 +170,6 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask,
                    int stoppointmode, int norm_method, bool stop_after_hogbom_run,
                    int processing_function_threads,
                    const deconvolvers::DivergenceControl<double>& divergence,
-                   AspResult* results);
+                   AspResult* results, const AspOptions& options = AspOptions{});
 
 }  // namespace aspclean
