@@ -3177,11 +3177,11 @@ def model_update_continuum_single_field(
     # -------------------------------------------------------------
     start = time.time()
 
+    # The model update decides nothing: its iterations, its stop code and the
+    # no progress and divergence runs are booked for the stop test on the next
+    # refreshed residual. stopcode and stopdesc stay those of the check above.
     controller.update_counts(deconvolve_dict)
-
-    stopcode, stopdesc = controller.check_convergence(
-        deconvolve_dict, model_update_ran=True
-    )
+    controller.record_model_update(deconvolve_dict)
 
     combined_deconvolve_dict = merge_imaging_dicts(
         [

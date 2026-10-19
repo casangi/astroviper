@@ -26,7 +26,6 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (  # Sto
     MODEL_UPDATE_CONTINUE,
     MODEL_UPDATE_DIVERGENCE,
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,
-    MODEL_UPDATE_STOP_DESCRIPTIONS,
     MODEL_UPDATE_THRESHOLD_PER_CYCLE,
     CycleController,
     StopCode,
@@ -1099,7 +1098,7 @@ class TestCheckConvergence(unittest.TestCase):
         self.assertIn("Continue", desc)
 
     def test_preserves_model_update_stop_code(self):
-        """A post-model-update check keeps the native minor-cycle reason."""
+        """A post-model-update check keeps the deconvolver's reason per plane."""
         controller = CycleController(max_iter=1000, threshold=0.01)
         rd = ImagingDict()
         rd.add(
@@ -1118,20 +1117,25 @@ class TestCheckConvergence(unittest.TestCase):
 
         stopcode, desc = controller.check_convergence(rd, model_update_ran=True)
 
-        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(stopcode.model_update, MODEL_UPDATE_MAX_ITER_PER_CYCLE)
+        self.assertEqual(
+            stopcode,
+            StopCode(imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE),
+        )
         self.assertEqual(
             controller.stop_code_model_update[0, 0, 0],
             MODEL_UPDATE_MAX_ITER_PER_CYCLE,
         )
-        self.assertEqual(rd.sel(time=0, pol=0, chan=0)["stop_code"], stopcode)
         self.assertEqual(
-            desc,
-            MODEL_UPDATE_STOP_DESCRIPTIONS[MODEL_UPDATE_MAX_ITER_PER_CYCLE],
+            rd.sel(time=0, pol=0, chan=0)["stop_code"],
+            StopCode(
+                imaging=IMAGING_CONTINUE,
+                model_update=MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+            ),
         )
+        self.assertEqual(desc, "Continue imaging cycles")
 
-    def test_fresh_residual_check_clears_model_update_stop_code(self):
-        """A later residual-only check does not inherit a provisional stop."""
+    def test_fresh_residual_check_keeps_model_update_stop_code(self):
+        """A later residual-only check keeps the code until the next model update."""
         controller = CycleController(max_iter=1000, threshold=0.01)
         rd = ImagingDict()
         rd.add(
@@ -1155,7 +1159,10 @@ class TestCheckConvergence(unittest.TestCase):
             stopcode,
             StopCode(imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE),
         )
-        self.assertEqual(controller.stop_code_model_update[0, 0, 0], 0)
+        self.assertEqual(
+            controller.stop_code_model_update[0, 0, 0],
+            MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+        )
         self.assertEqual(desc, "Continue imaging cycles")
 
     def test_aggregates_mixed_model_update_stop_codes(self):
@@ -1181,13 +1188,15 @@ class TestCheckConvergence(unittest.TestCase):
 
         stopcode, desc = controller.check_convergence(rd, model_update_ran=True)
 
-        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
-        self.assertEqual(stopcode.model_update, MODEL_UPDATE_DIVERGENCE)
+        self.assertEqual(
+            stopcode,
+            StopCode(imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE),
+        )
         np.testing.assert_array_equal(
             controller.stop_code_model_update[0, 0],
             [MODEL_UPDATE_THRESHOLD_PER_CYCLE, MODEL_UPDATE_DIVERGENCE],
         )
-        self.assertEqual(desc, "Model updates stopped (mixed reasons)")
+        self.assertEqual(desc, "Continue imaging cycles")
         self.assertEqual(
             [entry["stop_code"].model_update for entry in rd.data.values()],
             [MODEL_UPDATE_THRESHOLD_PER_CYCLE, MODEL_UPDATE_DIVERGENCE],

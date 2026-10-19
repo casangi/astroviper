@@ -701,6 +701,7 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
+        MODEL_UPDATE_CONTINUE,
         MODEL_UPDATE_MAX_ITER_PER_CYCLE,
     )
 
@@ -794,11 +795,13 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
     )
 
     assert not result["residual_converged"]
+    # The model update is booked, not tested: the stop code is that of the
+    # check on the refreshed residual, the model update codes are per plane.
     assert result["stopcode"] == StopCode(
         imaging=IMAGING_CONTINUE,
-        model_update=MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+        model_update=MODEL_UPDATE_CONTINUE,
     )
-    assert result["stopdesc"] == "Reached max_iter_per_cycle"
+    assert result["stopdesc"] == "Continue imaging cycles"
     assert controller.total_iter_done == 3
     assert controller.cycles_done == 1
     assert controller.max_cycles == 2
