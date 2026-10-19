@@ -230,6 +230,61 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
 
 
 @pytest.mark.parametrize(
+    "params,max_iter,threshold",
+    [
+        ({"max_iter_per_cycle": 2, "threshold": 0.05}, 2, 0.05),
+        ({"max_iter_per_cycle": 10, "threshold": 0.05}, 5, 0.05),
+        ({"max_iter_per_cycle": -1}, 5, 0.0),
+        ({}, 5, 0.0),
+        ({"max_iter_per_cycle": 2, "threshold": None}, 2, 0.0),
+        (
+            {
+                "max_iter_per_cycle": 2,
+                "threshold": 0.2,
+                "max_iter_per_cycle_updated": None,
+                "threshold_per_cycle": None,
+            },
+            2,
+            0.2,
+        ),
+    ],
+)
+def test_native_mtmfs_default_per_cycle_limits_follow_deconvolve(
+    monkeypatch, params, max_iter, threshold
+):
+    """Without the per-cycle limits: min(max_iter_per_cycle, max_iter), a
+    negative cap meaning no cap, and threshold_per_cycle = threshold."""
+    image, _ = _native_mtmfs_continuum_image(2, (8, 8), np.float64, "mask")
+    calls = []
+
+    def native_clean(residual, psf, model, **kwargs):
+        calls.append(kwargs)
+        return {
+            "iterations_performed": 0,
+            "peak_residual": 0.0,
+            "model_flux": 0.0,
+            "stop_code": mtmfs.STOP_THRESHOLD,
+            "scales": np.asarray([0.0]),
+            "hessian_condition_number": np.asarray([1.0]),
+        }
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        native_clean,
+    )
+    model_update_mtmfs_single_field(
+        image,
+        "mtmfs",
+        {"max_iter": 5, "gain": 0.1, "scales": [0.0], **params},
+    )
+
+    assert len(calls) == 4
+    for kwargs in calls:
+        assert kwargs["max_iter_per_cycle_updated"] == max_iter
+        assert kwargs["threshold_per_cycle"] == pytest.approx(threshold)
+
+
+@pytest.mark.parametrize(
     "params,match",
     [
         ({"gain": 0.0}, "gain must be between 0 and 1"),
