@@ -230,6 +230,40 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
 
 
 @pytest.mark.parametrize(
+    "params,match",
+    [
+        ({"gain": 0.0}, "gain must be between 0 and 1"),
+        ({"gain": -0.5}, "gain must be between 0 and 1"),
+        ({"gain": 1.5}, "gain must be between 0 and 1"),
+        ({"max_iter_divergence": 0}, "max_iter_divergence must be"),
+        ({"max_iter_divergence": True}, "max_iter_divergence must be"),
+        ({"max_iter_divergence": 1.0}, "max_iter_divergence must be"),
+    ],
+)
+def test_native_mtmfs_refuses_gain_and_divergence_values_deconvolve_refuses(
+    monkeypatch, params, match
+):
+    """The divergence limits come from the gain, so no adaptive gain."""
+    image, _ = _native_mtmfs_continuum_image(2, (8, 8), np.float64, "mask")
+    residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
+    calls = []
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        lambda *args, **kwargs: calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match=match):
+        model_update_mtmfs_single_field(
+            image,
+            "mtmfs",
+            {"max_iter": 5, "gain": 0.1, "scales": [0.0], **params},
+        )
+
+    assert calls == []
+    xr.testing.assert_identical(image.SKY_RESIDUAL, residual_snapshot)
+
+
+@pytest.mark.parametrize(
     "nterms,image_shape",
     [(2, (8, 8)), (3, (7, 10)), (4, (10, 7))],
 )

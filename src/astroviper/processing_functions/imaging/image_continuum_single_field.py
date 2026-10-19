@@ -1999,10 +1999,26 @@ def _model_update_native_mtmfs(
     # can rise by more than gain / 10 above its lowest value (a component
     # subtracted where that residual is not shaped like the PSF raises it),
     # and the tighter limit stopped such updates after a few components.
-    # The peak limit is Hogbom's; it stops a runaway.
-    _, limit = _divergence_factors(deconvolve_params.get("gain", 0.1))
+    # The peak limit is Hogbom's; it stops a runaway. gain and
+    # max_iter_divergence are checked as deconvolve() checks them: the
+    # limits need 0 < gain <= 1, so the kernel's adaptive gain (gain <= 0)
+    # is refused as on the Hogbom path.
+    gain = deconvolve_params.get("gain", 0.1)
+    max_iter_divergence = deconvolve_params.get("max_iter_divergence", 1)
+    if not 0 < gain <= 1:
+        raise ValueError("CLEAN gain must be between 0 and 1.")
+    if (
+        isinstance(max_iter_divergence, bool)
+        or not isinstance(max_iter_divergence, int | np.integer)
+        or not (max_iter_divergence == -1 or max_iter_divergence >= 1)
+    ):
+        raise ValueError(
+            "max_iter_divergence must be a positive integer, or -1 to "
+            f"disable the divergence test; got {max_iter_divergence!r}."
+        )
+    _, limit = _divergence_factors(gain)
     divergence = {
-        "max_iter_divergence": int(deconvolve_params.get("max_iter_divergence", 1)),
+        "max_iter_divergence": int(max_iter_divergence),
         "divergence_rms_factor": limit,
         "divergence_peak_factor": limit,
     }
@@ -2160,7 +2176,9 @@ def model_update_mtmfs_single_field(
         when its RMS has been above ``(1 + gain)`` times the lowest RMS of
         the model update for that many iterations in a row (the limit of
         Asp), or at once when its peak exceeds ``(1 + gain)`` times the
-        peak at the start of the model update.
+        peak at the start of the model update. ``gain``
+        (``0 < gain <= 1``) and ``max_iter_divergence`` are checked as in
+        the cube deconvolver.
 
     is_n_iter_0 : bool, optional
         Indicates whether this is the first model update.
