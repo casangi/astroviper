@@ -105,11 +105,19 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
 
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
-    'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
-    "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
-    'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
-    '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
-    "are refused before anything is written."
+    'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
+    '(C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)\n'
+    "cleans Taylor term zero only and needs\n"
+    '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
+    "(``asp_scale_significance``) needs an explicit ``clean_mask``: Asp\n"
+    "measures the noise on the pixels outside its mask, which without a\n"
+    "clean mask lie outside the primary-beam support, where MVC sets the\n"
+    "residual to 0, so the test cleans nothing below ``threshold_per_cycle``\n"
+    '(a warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
+    "synthesis) cleans the Taylor terms together and needs\n"
+    '``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``\n'
+    'it falls back to ``"hogbom"`` with a warning. Other values are refused\n'
+    "before anything is written."
 )
 
 _CONTINUUM_MODE_DOC = (

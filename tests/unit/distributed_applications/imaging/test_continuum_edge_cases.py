@@ -7,6 +7,7 @@ import xarray as xr
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _resolve_continuum_deconvolver,
     _resolve_continuum_taylor_expansion,
+    _warn_on_mvc_asp_significance_without_clean_mask,
     combine_continuum_imaging_weight_chunks,
     combine_continuum_weight_density_chunks,
     image_continuum_single_field,
@@ -115,6 +116,58 @@ def test_public_api_refuses_asp_without_exactly_one_taylor_term(
 ):
     with pytest.raises(error, match=message):
         _resolve_continuum_deconvolver(deconvolver, params)
+
+
+@pytest.mark.parametrize(
+    "continuum_mode,deconvolver,cycle_control_params,clean_mask,warns",
+    [
+        ("mvc", "asp", {}, None, True),
+        ("mvc", "asp", {"asp_scale_significance": True}, None, True),
+        ("mvc", "asp", {"asp_scale_significance": False}, None, False),
+        ("mvc", "asp", {}, np.ones((8, 8), dtype=bool), False),
+        ("mfs", "asp", {}, None, False),
+        ("mvc", "hogbom", {}, None, False),
+        ("mvc", "mtmfs", {}, None, False),
+    ],
+)
+def test_mvc_asp_significance_without_a_clean_mask_warns(
+    monkeypatch, continuum_mode, deconvolver, cycle_control_params, clean_mask, warns
+):
+    """MVC sets the residual to 0 outside the primary-beam support, where Asp
+    measures the noise of its significance test when there is no clean mask."""
+    import toolviper.utils.logger
+
+    messages = []
+    monkeypatch.setattr(
+        toolviper.utils.logger,
+        "warning",
+        lambda message, *args, **kwargs: messages.append(message),
+    )
+    _warn_on_mvc_asp_significance_without_clean_mask(
+        continuum_mode, deconvolver, cycle_control_params, clean_mask
+    )
+    assert len(messages) == int(warns)
+    if warns:
+        assert "Give a clean_mask" in messages[0]
+
+
+def test_public_api_refuses_multi_term_asp_before_writing(tmp_path):
+    """The graph layer refuses Asp with two Taylor terms before it opens the
+    input or creates the image store."""
+    ps_store = tmp_path / "input.ps.zarr"
+    ps_store.mkdir()
+    image_store = tmp_path / "output.img.zarr"
+    with pytest.raises(ValueError, match="deconvolver='asp' cleans Taylor term zero"):
+        image_continuum_single_field(
+            ps_store=str(ps_store),
+            image_store=str(image_store),
+            image_params={"n_taylor_terms": 2, "image_size": [8, 8]},
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params={"max_iter": 1},
+            deconvolver="asp",
+        )
+    assert not image_store.exists()
+    assert list(ps_store.iterdir()) == []
 
 
 @pytest.mark.parametrize("n_taylor_terms", [2, np.int64(2)])

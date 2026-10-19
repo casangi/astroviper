@@ -2608,6 +2608,33 @@ def _load_continuum_clean_mask(clean_mask, image_size):
     return clean_mask_array
 
 
+def _warn_on_mvc_asp_significance_without_clean_mask(
+    continuum_mode, deconvolver, cycle_control_params, clean_mask
+):
+    """Warn when the significance test of MVC Asp has no noise to measure.
+
+    Asp measures the noise of its significance test (``asp_scale_significance``,
+    default ``True``) on the pixels outside its mask. Without a clean mask
+    these lie outside the primary-beam support, where MVC sets the residual to
+    0, so the test cleans nothing below ``threshold_per_cycle``.
+    """
+    import toolviper.utils.logger as logger
+
+    if (
+        continuum_mode == "mvc"
+        and deconvolver == "asp"
+        and cycle_control_params.get("asp_scale_significance", True)
+        and clean_mask is None
+    ):
+        logger.warning(
+            "continuum_mode='mvc' with deconvolver='asp' and "
+            "asp_scale_significance=True but no clean_mask: MVC sets the "
+            "residual to 0 outside the primary-beam support, where Asp then "
+            "measures the noise of its significance test, so that test cleans "
+            "nothing below threshold_per_cycle. Give a clean_mask to use it."
+        )
+
+
 def _resolve_continuum_deconvolver(deconvolver, image_params):
     """Resolve user-facing continuum deconvolver choices before graph creation.
 
@@ -2793,15 +2820,20 @@ def image_continuum_single_field(
     MFS reduces Taylor UV grids before the global inverse FFT. MVC performs
     channel FFTs and PB correction in map tasks, then reduces Taylor
     contributions. Native MT-MFS updates the complete Taylor model; Högbom
-    updates Taylor term zero. Both verify refreshed residuals before
-    finalization. With one Taylor term, an MT-MFS request emits a warning and
-    falls back to Högbom. Restoration is optional.
+    updates Taylor term zero. Asp (``"asp"``, aliases ``"aspclean"`` and
+    ``"asp_clean"``) updates Taylor term zero as Högbom does and requires
+    ``image_params["n_taylor_terms"] = 1``; with more Taylor terms it raises
+    ``ValueError`` before anything is written. In MVC the significance test
+    of Asp (``asp_scale_significance``) needs a ``clean_mask`` (see
+    ``deconvolver``). All verify refreshed residuals before finalization.
+    With one Taylor term, an MT-MFS request emits a warning and falls back to
+    Högbom. Restoration is optional.
 
     The imaging cycle loop (``cycle_control_params``) does not run separately
     for every frequency channel as in cube imaging. Continuum performs one
-    model update after reduction across frequency partitions: Högbom updates
-    Taylor term zero, while MT-MFS jointly updates all Taylor terms. Higher
-    terms never run independent imaging-cycle loops.
+    model update after reduction across frequency partitions: Högbom and Asp
+    update Taylor term zero, while MT-MFS jointly updates all Taylor terms.
+    Higher terms never run independent imaging-cycle loops.
 
     ``imaging_weights_params`` also accepts ``weighting_scope``, the uv
     weight density that uniform and Briggs weights are made from:
@@ -2925,11 +2957,19 @@ def image_continuum_single_field(
         parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
-        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
-        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
-        are refused before anything is written.
+        threaded across planes) cleans Taylor term zero only. ``"asp"``
+        (C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)
+        cleans Taylor term zero only and needs
+        ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
+        (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
+        measures the noise on the pixels outside its mask, which without a
+        clean mask lie outside the primary-beam support, where MVC sets the
+        residual to 0, so the test cleans nothing below ``threshold_per_cycle``
+        (a warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        synthesis) cleans the Taylor terms together and needs
+        ``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``
+        it falls back to ``"hogbom"`` with a warning. Other values are refused
+        before anything is written.
     primary_beam_limit : float
         Primary-beam cutoff in ``[0, 1]``. This single setting controls CLEAN
         support, MVC channel correction and spectral fitting, and final
@@ -3408,6 +3448,9 @@ def image_continuum_single_field(
     clean_mask_array = _load_continuum_clean_mask(
         clean_mask,
         image_params["image_size"],
+    )
+    _warn_on_mvc_asp_significance_without_clean_mask(
+        continuum_mode, deconvolver, cycle_control_params, clean_mask_array
     )
 
     # Validate once at the application boundary so every graph sees the same
