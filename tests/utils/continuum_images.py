@@ -62,3 +62,57 @@ def make_continuum_image(
         "data_groups": {"residual": residual, "model": {"sky": "SKY_MODEL"}},
     }
     return image
+
+
+def make_runaway_taylor_image(dtype=np.float64):
+    """Two-term Taylor residual on which every CLEAN component makes it grow.
+
+    The PSF and checkerboard of the MT-MFS divergence tests
+    (``_negative_transfer_problem`` in ``test_mtmfs_clean.py``): a component
+    adds 0.9 of itself to its four neighbours, which have the opposite sign.
+    The amplitudes are spread by up to 20 percent so that no rounding decides
+    a tie. Taylor term one of the residual is zero; PSF orders one and two
+    are 0 and 0.25 times order zero (a band symmetric about the reference
+    frequency). One time and one polarization, no mask or primary beam.
+    """
+    n = 32
+    psf = np.zeros((n, n))
+    psf[16, 16] = 1.0
+    psf[[15, 17, 16, 16], [16, 16, 15, 17]] = 0.9
+    yy, xx = np.indices((n, n))
+    box = (abs(yy - 16) < 6) & (abs(xx - 16) < 6)
+    amplitude = 1.0 + 0.2 * np.random.default_rng(7).uniform(-1.0, 1.0, (n, n))
+    residual = np.where((yy + xx) % 2 == 0, 1.0, -1.0) * box * amplitude
+    return xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.stack([residual, np.zeros((n, n))])[None, :, None].astype(dtype),
+            ),
+            "POINT_SPREAD_FUNCTION": (
+                ("time", "psf_taylor_order", "polarization", "l", "m"),
+                np.stack([psf, 0.0 * psf, 0.25 * psf])[None, :, None].astype(dtype),
+            ),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization"),
+                np.zeros((1, 1), dtype=dtype),
+            ),
+        },
+        coords={
+            "time": [0.0],
+            "taylor_term": [0, 1],
+            "psf_taylor_order": [0, 1, 2],
+            "polarization": ["I"],
+            "l": np.arange(n),
+            "m": np.arange(n),
+        },
+        attrs={
+            "reference_frequency": 100.0,
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                }
+            },
+        },
+    )

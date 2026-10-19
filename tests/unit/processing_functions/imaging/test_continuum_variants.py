@@ -15,7 +15,10 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     restore_image,
 )
 from astroviper.processing_functions.imaging.utils import ImagingDict
-from tests.utils.continuum_images import make_continuum_image
+from tests.utils.continuum_images import (
+    make_continuum_image,
+    make_runaway_taylor_image,
+)
 
 
 def _native_mtmfs_continuum_image(nterms, shape, dtype, support_kind):
@@ -372,6 +375,36 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
         np.testing.assert_array_equal(fields["scales"], [0.0])
         assert np.isfinite(fields["hessian_condition_number"]).all()
     assert timing.loc[0, "T_mtmfs"] >= 0.0
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "max_iter_divergence,iterations,stop_code",
+    [(1, 7, mtmfs.STOP_DIVERGED), (-1, 50, mtmfs.STOP_MAX_ITER)],
+)
+def test_native_mtmfs_divergence_test_stops_a_runaway(
+    dtype, max_iter_divergence, iterations, stop_code
+):
+    """The real adapter runs the divergence test, with both limits 1.1 at
+    gain 0.1 (the peak limit stops this runaway); -1 turns it off."""
+    image = make_runaway_taylor_image(dtype)
+
+    statistics, _ = model_update_mtmfs_single_field(
+        image,
+        "mtmfs",
+        {
+            "max_iter": 50,
+            "max_iter_per_cycle_updated": 50,
+            "gain": 0.1,
+            "scales": [0.0],
+            "max_iter_divergence": max_iter_divergence,
+        },
+    )
+
+    (fields,) = statistics.data.values()
+    assert fields["iter_done"] == [iterations]
+    assert fields["stop_code"].model_update == stop_code
+    assert fields["peakres"][0] > fields["start_peakres"][0]
 
 
 def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):

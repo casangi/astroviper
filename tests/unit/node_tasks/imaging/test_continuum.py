@@ -8,6 +8,7 @@ import xarray as xr
 import astroviper.node_tasks.imaging.image_continuum_single_field as continuum_node
 import astroviper.processing_functions.imaging.image_continuum_single_field as continuum_processing
 from astroviper.processing_functions.imaging.utils import ImagingDict
+from tests.utils.continuum_images import make_runaway_taylor_image
 
 
 def _model_dataset(value):
@@ -815,6 +816,66 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
     for fields in result["deconvolution"].data.values():
         assert fields["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
         assert np.isfinite(fields["hessian_condition_number"]).all()
+
+
+@pytest.mark.parametrize(
+    "max_iter_divergence,iterations,diverged_model_updates",
+    [(1, 7, 1), (-1, 50, 0)],
+)
+def test_native_mtmfs_node_books_a_diverged_model_update(
+    max_iter_divergence, iterations, diverged_model_updates
+):
+    """A plane the MT-MFS divergence test stops is booked as diverged."""
+    from astroviper.processing_functions.imaging.utils import (
+        CycleController,
+        StopCode,
+    )
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        IMAGING_CONTINUE,
+        MODEL_UPDATE_CONTINUE,
+        MODEL_UPDATE_DIVERGENCE,
+        MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+    )
+
+    params = {
+        "max_iter": 100,
+        "max_cycles": 3,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "max_iter_per_cycle": 50,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    controller = CycleController(**params)
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": make_runaway_taylor_image()},
+        {
+            "controller": controller,
+            "deconvolver": "mtmfs",
+            "cycle_control_params": {
+                **params,
+                "max_iter_divergence": max_iter_divergence,
+            },
+        },
+    )
+
+    stop_code = (
+        MODEL_UPDATE_DIVERGENCE
+        if diverged_model_updates
+        else MODEL_UPDATE_MAX_ITER_PER_CYCLE
+    )
+    (fields,) = result["deconvolution"].data.values()
+    assert fields["iter_done"] == [iterations]
+    assert fields["stop_code"].model_update == stop_code
+    assert result["stopcode"] == StopCode(
+        imaging=IMAGING_CONTINUE,
+        model_update=MODEL_UPDATE_CONTINUE,
+    )
+    assert not result["residual_converged"]
+    assert controller.total_iter_done == iterations
+    assert controller.stop_code_model_update[0, 0, 0] == stop_code
+    assert controller.diverged_model_updates[0, 0, 0] == diverged_model_updates
 
 
 def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch):
