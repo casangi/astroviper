@@ -1975,6 +1975,17 @@ def _model_update_native_mtmfs(
             )
         return values[tt, 0, pp]
 
+    # A call without the per-cycle limits (outside the imaging cycle loop) is
+    # one model update with all of max_iter left, as in deconvolve():
+    # min(max_iter_per_cycle, max_iter), a negative cap meaning no cap, and
+    # the absolute threshold.
+    max_iter_total = int(deconvolve_params.get("max_iter", 0))
+    cap = deconvolve_params.get("max_iter_per_cycle")
+    cap = max_iter_total if cap is None or int(cap) < 0 else int(cap)
+    default_max_iter = min(cap, max_iter_total)
+    default_threshold = deconvolve_params.get("threshold")
+    default_threshold = 0.0 if default_threshold is None else default_threshold
+
     model = np.zeros_like(residual)
     imaging_dict = ImagingDict()
     start = time.time()
@@ -1992,14 +2003,14 @@ def _model_update_native_mtmfs(
             start_peak = float(np.max(np.abs(residual_work[0][selected]), initial=0.0))
             start_peak_nomask = float(np.max(np.abs(residual_work[0]), initial=0.0))
             threshold_per_cycle = float(
-                plane_control("threshold_per_cycle", tt, pp, 0.0)
+                plane_control("threshold_per_cycle", tt, pp, default_threshold)
             )
             max_iter = int(
                 plane_control(
                     "max_iter_per_cycle_updated",
                     tt,
                     pp,
-                    deconvolve_params.get("max_iter", 0),
+                    default_max_iter,
                 )
             )
             result = mtmfs.clean(
@@ -2118,7 +2129,10 @@ def model_update_mtmfs_single_field(
         ``max_iter``, ``max_iter_per_cycle_updated``, ``threshold_per_cycle``,
         ``gain``, ``scales``, ``small_scale_bias``, and ``mask_threshold``.
         The per-cycle limits and thresholds accept scalars or per-plane arrays,
-        using the same keys as the cube deconvolver.
+        using the same keys as the cube deconvolver. Without them the limit is
+        ``min(max_iter_per_cycle, max_iter)`` (a negative
+        ``max_iter_per_cycle`` means no cap) and ``threshold_per_cycle`` is
+        ``threshold``, as in the cube deconvolver.
 
     is_n_iter_0 : bool, optional
         Indicates whether this is the first model update.
