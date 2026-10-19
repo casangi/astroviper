@@ -3,7 +3,11 @@ import toolviper.utils.logger as logger
 import xarray as xr
 
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
-from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbom
+from astroviper.processing_functions.imaging.deconvolvers import (
+    aspclean,
+    hogbom,
+    relaxed_hogbom,
+)
 from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
@@ -179,7 +183,52 @@ def _validate_deconvolve_params(deconvolve_params):
                     "max_iter_divergence must be a positive integer, or -1 to "
                     f"disable the divergence test; got {value!r}."
                 )
+    return deconvolve_params
 
+
+def _validate_relaxed_hogbom_params(deconvolve_params):
+    """Add and validate controls specific to RelaxedHogbom."""
+    defaults = {
+        "relax_constraint_radius": 0.5,
+        "relax_max_components": 100,
+        "relax_min_improvement": 0.001,
+        "relax_adaptive_start": True,
+        "relax_rapid_progress_ratio": 0.25,
+        "relax_stalled_progress_ratio": 0.78,
+        "relax_rms_normalization_iter": 100,
+        "relax_optimizer_max_iter": 100,
+    }
+    for key, default in defaults.items():
+        deconvolve_params.setdefault(key, default)
+
+    if deconvolve_params["relax_constraint_radius"] < 0:
+        raise ValueError("relax_constraint_radius must be non-negative.")
+    for key in (
+        "relax_max_components",
+        "relax_rms_normalization_iter",
+        "relax_optimizer_max_iter",
+    ):
+        value = deconvolve_params[key]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | np.integer)
+            or value < 1
+        ):
+            raise ValueError(f"{key} must be a positive integer.")
+    if not 0 <= deconvolve_params["relax_min_improvement"] < 1:
+        raise ValueError("relax_min_improvement must be in [0, 1).")
+    for key in ("relax_rapid_progress_ratio", "relax_stalled_progress_ratio"):
+        if not 0 <= deconvolve_params[key] <= 1:
+            raise ValueError(f"{key} must be between 0 and 1.")
+    if not isinstance(deconvolve_params["relax_adaptive_start"], bool):
+        raise ValueError("relax_adaptive_start must be boolean.")
+    if (
+        deconvolve_params["relax_rapid_progress_ratio"]
+        > deconvolve_params["relax_stalled_progress_ratio"]
+    ):
+        raise ValueError(
+            "relax_rapid_progress_ratio must not exceed relax_stalled_progress_ratio."
+        )
     return deconvolve_params
 
 
@@ -578,13 +627,20 @@ def deconvolve(
         ``(time, frequency, polarization, y, x)``. The residual and
         model variables are updated in place.
     algorithm : str, optional
-        Deconvolution algorithm to use. ``"hogbom"`` (default) for Hogbom
-        CLEAN or ``"asp"`` (aliases ``"aspclean"``, ``"asp_clean"``) for
-        Adaptive Scale Pixel CLEAN.
+        Deconvolution algorithm to use. ``"hogbom"`` (default) for Högbom
+        CLEAN, ``"relaxed_hogbom"`` for Högbom followed by local relaxation
+        of the point components added by the current model update, or ``"asp"``
+        (aliases ``"aspclean"``, ``"asp_clean"``) for Adaptive Scale Pixel
+        CLEAN.
     deconvolve_params : dict, optional
         Algorithm-specific parameters. See
         :func:`_validate_deconvolve_params` for the common keys and
-        defaults. The ``"asp"`` algorithm additionally honours
+        defaults. ``"relaxed_hogbom"`` additionally honours
+        ``relax_constraint_radius``, ``relax_max_components``,
+        ``relax_min_improvement``, ``relax_adaptive_start``,
+        ``relax_rapid_progress_ratio``, ``relax_stalled_progress_ratio``,
+        ``relax_rms_normalization_iter``, and ``relax_optimizer_max_iter``.
+        The ``"asp"`` algorithm additionally honours
         ``fusedthreshold``, ``psf_width``, ``largestscale``,
         ``stoppointmode``, and ``norm_method`` (see :func:`asp_clean`).
     processing_function_threads : int, optional
@@ -639,6 +695,8 @@ def deconvolve(
     if algorithm_l not in (
         "hogbom",
         "hogbom_many_threads",
+        "relaxed_hogbom",
+        "relaxedhogbom",
         "asp",
         "aspclean",
         "asp_clean",
@@ -790,6 +848,15 @@ def deconvolve(
             processing_function_threads=processing_function_threads,
             mask_cube=mask_arr,
         )
+    elif algorithm_l in ("relaxed_hogbom", "relaxedhogbom"):
+        results = relaxed_hogbom_clean(
+            residual_cube=residual_arr,
+            psf_cube=psf_arr,
+            model_cube=model_arr,
+            deconvolve_params=deconvolve_params,
+            processing_function_threads=processing_function_threads,
+            mask_cube=mask_arr,
+        )
     else:  # asp / aspclean / asp_clean
         results = asp_clean(
             residual_cube=residual_arr,
@@ -866,6 +933,7 @@ def _run_hogbom(
     threshold_per_cycle,
     deconvolve_params,
     processing_function_threads,
+    extra_kernel_kwargs=None,
 ):
     """Run a Hogbom kernel once over the cube; its stop tests run inside it.
 
@@ -889,10 +957,13 @@ def _run_hogbom(
         threshold=threshold_per_cycle,
         processing_function_threads=int(processing_function_threads),
         **_divergence_kwargs(deconvolve_params),
+        **(extra_kernel_kwargs or {}),
     )
     final_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
     result["final_peak"] = final_peak
     result["converged"] = final_peak <= threshold_per_cycle
+    if "total_flux_cleaned" not in result:
+        result["total_flux_cleaned"] = np.sum(np.abs(model_cube), axis=(-2, -1))
     return result
 
 
@@ -1064,6 +1135,92 @@ def hogbom_clean(
         threshold_per_cycle=threshold_per_cycle,
         deconvolve_params=deconvolve_params,
         processing_function_threads=processing_function_threads,
+    )
+
+
+def relaxed_hogbom_clean(
+    residual_cube: np.ndarray,
+    psf_cube: np.ndarray,
+    model_cube: np.ndarray,
+    deconvolve_params: dict | None = None,
+    processing_function_threads: int = 1,
+    mask_cube: np.ndarray | None = None,
+):
+    """Run Högbom CLEAN followed by local relaxation of new components.
+
+    Only positive point components added by this model update participate in
+    the joint fit. Their amplitudes and bilinearly rendered sub-pixel positions
+    are optimized against the residual L2 norm, with each position confined to
+    ``relax_constraint_radius`` synthesized beams around its Högbom location.
+    The trial is committed atomically only when it improves the true residual
+    norm by at least ``relax_min_improvement``.
+
+    This is a C++ implementation of CASA's
+    ``ComponentRelaxationMatrixCleaner`` / ``PointComponentOptimizer`` design.
+    The C++ kernel owns the full five-dimensional plane loop and updates the
+    caller's residual and model arrays in place.
+    """
+    deconvolve_params = _validate_relaxed_hogbom_params(
+        _validate_deconvolve_params(deconvolve_params)
+    )
+    for name, array in (
+        ("residual_cube", residual_cube),
+        ("psf_cube", psf_cube),
+        ("model_cube", model_cube),
+    ):
+        if not isinstance(array, np.ndarray) or array.ndim != 5:
+            raise ValueError(
+                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
+            )
+    if residual_cube.shape != model_cube.shape:
+        raise ValueError("residual_cube and model_cube must have the same shape")
+    nt, nf, npol_img, ny, nx = residual_cube.shape
+    nt_psf, nf_psf, npol_psf, ny_psf, nx_psf = psf_cube.shape
+    if (nt_psf, nf_psf, ny_psf, nx_psf) != (nt, nf, ny, nx):
+        raise ValueError("psf_cube must match residual_cube on (time, frequency, y, x)")
+    if npol_psf not in (1, npol_img):
+        raise ValueError(
+            "psf_cube polarization axis must equal residual_cube polarization "
+            "axis or be 1 (Stokes I broadcast)"
+        )
+    if mask_cube is not None and mask_cube.shape != residual_cube.shape:
+        raise ValueError("mask_cube must have the same shape as residual_cube")
+
+    clean_box = deconvolve_params["clean_box"]
+    if clean_box is None:
+        clean_box = (-1, -1, -1, -1)
+    mask_arg = (
+        mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
+    )
+    max_iter_per_cycle, threshold_per_cycle = _per_plane_iteration_controls(
+        deconvolve_params, nt, nf, npol_img, residual_cube.dtype
+    )
+    return _run_hogbom(
+        relaxed_hogbom.clean_cube,
+        residual_cube=residual_cube,
+        psf_cube=psf_cube,
+        model_cube=model_cube,
+        peak_mask_cube=mask_cube,
+        mask_arg=mask_arg,
+        clean_box=clean_box,
+        max_iter_per_cycle=max_iter_per_cycle,
+        threshold_per_cycle=threshold_per_cycle,
+        deconvolve_params=deconvolve_params,
+        processing_function_threads=processing_function_threads,
+        extra_kernel_kwargs={
+            "constraint_radius_beams": deconvolve_params["relax_constraint_radius"],
+            "max_active_components": deconvolve_params["relax_max_components"],
+            "minimum_improvement": deconvolve_params["relax_min_improvement"],
+            "adaptive_start": deconvolve_params["relax_adaptive_start"],
+            "rapid_progress_rms_ratio": deconvolve_params["relax_rapid_progress_ratio"],
+            "stalled_progress_rms_ratio": deconvolve_params[
+                "relax_stalled_progress_ratio"
+            ],
+            "rms_normalization_iterations": deconvolve_params[
+                "relax_rms_normalization_iter"
+            ],
+            "optimizer_max_iterations": deconvolve_params["relax_optimizer_max_iter"],
+        },
     )
 
 

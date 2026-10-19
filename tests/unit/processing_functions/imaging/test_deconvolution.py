@@ -1193,6 +1193,32 @@ class TestAspClean:
 
 
 # ---------------------------------------------------------------------------
+# deconvolve end-to-end with algorithm="relaxed_hogbom"
+# ---------------------------------------------------------------------------
+
+
+@requires_hogbom
+class TestDeconvolveRelaxedHogbom:
+    @pytest.mark.parametrize("alias", ["relaxed_hogbom", "relaxedhogbom"])
+    def test_algorithm_aliases(self, alias):
+        xds = _make_img_xds()
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            algorithm=alias,
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 1,
+                "threshold": 0.01,
+                "relax_adaptive_start": False,
+            },
+        )
+
+        assert isinstance(imaging_dict, ImagingDict)
+        assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0)
+        assert np.max(np.abs(xds["RESIDUAL"].values)) == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
 # deconvolve end-to-end with algorithm="asp"
 # ---------------------------------------------------------------------------
 

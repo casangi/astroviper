@@ -12,6 +12,7 @@ include(AstroviperPybind)
 # astroviper_add_pybind_module(), then add one add_subdirectory() line here.
 set(_av_imaging src/astroviper/processing_functions/imaging)
 add_subdirectory(${_av_imaging}/deconvolvers/hogbom)
+add_subdirectory(${_av_imaging}/deconvolvers/relaxed_hogbom)
 add_subdirectory(${_av_imaging}/deconvolvers/aspclean)
 add_subdirectory(${_av_imaging}/deconvolvers/mtmfs)
 add_subdirectory(${_av_imaging}/gridders/prolate_spheroidal_grid_cpp)
