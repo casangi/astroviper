@@ -1880,6 +1880,9 @@ def _model_update_native_mtmfs(
     import numpy as np
     import pandas as pd
 
+    from astroviper.processing_functions.imaging.deconvolution import (
+        _divergence_factors,
+    )
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
     from astroviper.processing_functions.imaging.utils import ImagingDict, StopCode
     from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -1985,6 +1988,24 @@ def _model_update_native_mtmfs(
     default_max_iter = min(cap, max_iter_total)
     default_threshold = deconvolve_params.get("threshold")
     default_threshold = 0.0 if default_threshold is None else default_threshold
+    # The divergence test of the model update, made by the kernel on the
+    # Taylor-zero residual: a plane is stopped as diverged when the RMS of
+    # that residual has been above (1 + gain) times the lowest RMS of the
+    # model update for max_iter_divergence consecutive iterations, or at once
+    # when its peak exceeds (1 + gain) times its peak at the start of the
+    # model update. max_iter_divergence defaults to 1 as in deconvolve(), and
+    # -1 turns the test off. The RMS limit is that of Asp, not Hogbom's
+    # (1 + gain / 10): in healthy MT-MFS model updates the Taylor-zero RMS
+    # can rise by more than gain / 10 above its lowest value (a component
+    # subtracted where that residual is not shaped like the PSF raises it),
+    # and the tighter limit stopped such updates after a few components.
+    # The peak limit is Hogbom's; it stops a runaway.
+    _, limit = _divergence_factors(deconvolve_params.get("gain", 0.1))
+    divergence = {
+        "max_iter_divergence": int(deconvolve_params.get("max_iter_divergence", 1)),
+        "divergence_rms_factor": limit,
+        "divergence_peak_factor": limit,
+    }
 
     model = np.zeros_like(residual)
     imaging_dict = ImagingDict()
@@ -2024,6 +2045,7 @@ def _model_update_native_mtmfs(
                 gain=deconvolve_params.get("gain", 0.1),
                 threshold_per_cycle=threshold_per_cycle,
                 mask_threshold=deconvolve_params.get("mask_threshold", 0.9),
+                **divergence,
             )
             model[tt, :, pp, :, :] = model_work
             final_selected = support[tt, pp] & np.isfinite(residual_work[0])
@@ -2132,7 +2154,13 @@ def model_update_mtmfs_single_field(
         using the same keys as the cube deconvolver. Without them the limit is
         ``min(max_iter_per_cycle, max_iter)`` (a negative
         ``max_iter_per_cycle`` means no cap) and ``threshold_per_cycle`` is
-        ``threshold``, as in the cube deconvolver.
+        ``threshold``, as in the cube deconvolver. ``max_iter_divergence``
+        (default 1, ``-1`` turns the test off) sets the divergence test of
+        the model update, made on the Taylor-zero residual: a plane stops
+        when its RMS has been above ``(1 + gain)`` times the lowest RMS of
+        the model update for that many iterations in a row (the limit of
+        Asp), or at once when its peak exceeds ``(1 + gain)`` times the
+        peak at the start of the model update.
 
     is_n_iter_0 : bool, optional
         Indicates whether this is the first model update.

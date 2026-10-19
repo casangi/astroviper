@@ -2671,6 +2671,14 @@ def image_continuum_single_field(
     ``scales``, ``small_scale_bias``, and ``mask_threshold``. These names are
     passed unchanged through the Python and native layers.
 
+    With ``deconvolver="mtmfs"`` the divergence test of a model update
+    (``max_iter_divergence``) is made on the Taylor-zero residual with the
+    RMS limit of Asp and the peak limit of Hogbom: a plane is stopped as
+    diverged when its RMS has been above ``(1 + gain)`` times the lowest RMS
+    of the model update for ``max_iter_divergence`` consecutive iterations,
+    or at once when its peak exceeds ``(1 + gain)`` times its peak at the
+    start of the model update.
+
     Parameters
     ----------
     ps_store : str

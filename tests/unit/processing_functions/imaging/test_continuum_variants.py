@@ -199,6 +199,10 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     assert calls[0][3]["max_iter_per_cycle_updated"] == 3
     assert calls[0][3]["threshold_per_cycle"] == pytest.approx(0.01)
     assert "psf_fraction" not in calls[0][3]
+    # the divergence test: Asp's RMS limit and the peak limit, 1 + gain each
+    assert calls[0][3]["max_iter_divergence"] == 1
+    assert calls[0][3]["divergence_rms_factor"] == pytest.approx(1.2)
+    assert calls[0][3]["divergence_peak_factor"] == pytest.approx(1.2)
     np.testing.assert_array_equal(image.SKY_RESIDUAL, residual_snapshot * dtype(0.5))
     np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=0), 1.0)
     np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=1), 2.0)
