@@ -2662,6 +2662,11 @@ def image_continuum_single_field(
     finalization. With one Taylor term, an MT-MFS request emits a warning and
     falls back to Högbom. Restoration is optional.
 
+    The imaging cycle loop (``cycle_control_params``) does not run separately
+    for every frequency channel as in cube imaging: continuum updates
+    Taylor-zero planes after reduction across frequency partitions; higher
+    Taylor terms have no independent CLEAN loop.
+
     When ``deconvolver="mtmfs"``, ``cycle_control_params`` also accepts
     ``scales``, ``small_scale_bias``, and ``mask_threshold``. These names are
     passed unchanged through the Python and native layers.
@@ -2776,9 +2781,7 @@ def image_continuum_single_field(
         every frequency channel in cube imaging (one channel per node task),
         so a channel's cycles continue until all of its (time, polarization)
         planes have stopped, and a channel that has stopped does no further
-        residual updates while the others carry on. Continuum instead updates
-        Taylor-zero planes after reduction across frequency partitions; higher
-        Taylor terms have no independent CLEAN loop. **Cycle control** is the
+        residual updates while the others carry on. **Cycle control** is the
         stop test between the residual update and the model update, which
         decides whether a plane gets another cycle and sets the limits of its
         next model update. It is made after every residual update, the first

@@ -214,9 +214,7 @@ def image_cube_single_field(
         every frequency channel in cube imaging (one channel per node task),
         so a channel's cycles continue until all of its (time, polarization)
         planes have stopped, and a channel that has stopped does no further
-        residual updates while the others carry on. Continuum instead updates
-        Taylor-zero planes after reduction across frequency partitions; higher
-        Taylor terms have no independent CLEAN loop. **Cycle control** is the
+        residual updates while the others carry on. **Cycle control** is the
         stop test between the residual update and the model update, which
         decides whether a plane gets another cycle and sets the limits of its
         next model update. It is made after every residual update, the first
