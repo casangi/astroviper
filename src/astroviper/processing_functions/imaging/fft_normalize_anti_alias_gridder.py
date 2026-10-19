@@ -261,6 +261,18 @@ def ifft_norm_img_xds(
         # (≈ 1.5 GB per plane at 13 500² complex64).
         grid_discarded = data_variable_out not in image_data_variables_keep
 
+        # Only the unpadded centre of each plane is kept, so the kernel
+        # correction and the flux scale are applied there alone, and for a
+        # real sky to the real part alone, written straight into the output:
+        # the same values, bit for bit, for a fraction of the work on the
+        # padded complex plane. NumPy divides a complex number by a real one
+        # k as a multiplication by 1 / k, so the real part is multiplied by
+        # the reciprocals.
+        crop_l, crop_m = _centre_slices(padded_image_shape, image_size)
+        kernel_crop_l = kernel_image_1D_l[crop_l, None]
+        kernel_crop_m = kernel_image_1D_m[None, crop_m]
+        inverse_kernel_crop_l = 1.0 / kernel_crop_l
+        inverse_kernel_crop_m = 1.0 / kernel_crop_m
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
@@ -270,15 +282,18 @@ def ifft_norm_img_xds(
                         fft_backend=fft_backend,
                         overwrite_input=grid_discarded,
                     )
-                    # In-place ops below preserve `plane`'s precision (the float64
-                    # kernel / normalization are broadcast without upcasting).
-                    plane /= kernel_image_1D_l[:, None]
-                    plane /= kernel_image_1D_m[None, :]
-                    plane *= flux_scale / normalization[t, f, p]
-
-                    out_arr[t, f, p] = remove_padding(
-                        plane if keep_complex else plane.real, image_size
-                    )
+                    centre = remove_padding(plane, image_size)
+                    out_plane = out_arr[t, f, p]
+                    # In-place ops below keep the output's precision (the
+                    # float64 kernel / normalization are broadcast without
+                    # upcasting it).
+                    if keep_complex:
+                        np.divide(centre, kernel_crop_l, out=out_plane)
+                        out_plane /= kernel_crop_m
+                    else:
+                        np.multiply(centre.real, inverse_kernel_crop_l, out=out_plane)
+                        out_plane *= inverse_kernel_crop_m
+                    out_plane *= flux_scale / normalization[t, f, p]
 
         if data_variable_out not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -405,13 +420,18 @@ def fft_norm_img_xds(
         # -- the 2026-08-16 multi-cycle OOM. In-place division by the float64
         # kernels keeps the plane's dtype and allocates nothing (same pattern,
         # same reason, as ifft_norm_img_xds above). The padded borders are
-        # zero, so dividing the full padded plane is harmless.
+        # zero, so only the image (the centre the model is placed in) is
+        # divided by the kernel correction.
+        crop_l, crop_m = _centre_slices(n_uv, raw_grid.shape[-2:])
+        kernel_crop_l = kernel_image_1D_l[crop_l, None]
+        kernel_crop_m = kernel_image_1D_m[None, crop_m]
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
                     add_padding(raw_grid[t, f, p], out_arr[t, f, p])
-                    out_arr[t, f, p] /= kernel_image_1D_l[:, None]
-                    out_arr[t, f, p] /= kernel_image_1D_m[None, :]
+                    centre = out_arr[t, f, p, crop_l, crop_m]
+                    centre /= kernel_crop_l
+                    centre /= kernel_crop_m
 
                     # The plane is the output buffer being overwritten anyway,
                     # so the FFT may destroy it (skips the defensive copy).
@@ -632,6 +652,16 @@ def fft_lm_to_uv(
             workers=processing_function_threads,
         ),
         axes=fft_plane_dims,
+    )
+
+
+def _centre_slices(padded_size, image_size):
+    """The slices of the last two axes that :func:`remove_padding` keeps (and
+    :func:`add_padding` fills) for an image of ``image_size`` in a padded
+    plane of ``padded_size``."""
+    return tuple(
+        slice(n_pad // 2 - n // 2, n_pad // 2 - n // 2 + n)
+        for n_pad, n in zip(padded_size, image_size, strict=True)
     )
 
 

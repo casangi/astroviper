@@ -398,7 +398,13 @@ def _select_chunk_writer(
     processing_function_threads,
 ):
     """The write path for this task's finished chunks, as a callable
-    ``write(chunk_xds, chunk_task_coords)``."""
+    ``write(chunk_xds, chunk_task_coords)``.
+
+    A variable of ``image_data_variables_keep`` that the run does not make
+    (``sky_model`` or ``mask`` of a run without deconvolution, for example)
+    is skipped: only the kept variables a chunk holds are written, and the
+    others keep the fill value of the image store.
+    """
     if graph_mode and output_image_format == "fits":
         # FITS performance path: pwrite the chunk's contiguous channel block
         # (and its BEAMS-table rows) directly into the pre-created
@@ -425,7 +431,10 @@ def _select_chunk_writer(
 
         def write(chunk_xds, chunk_task_coords):
             write_result_chunk_to_disk_using_zarr(
-                image_store, image_data_variables_keep, chunk_task_coords, chunk_xds
+                image_store,
+                _variables_made(image_data_variables_keep, chunk_xds),
+                chunk_task_coords,
+                chunk_xds,
             )
 
         return write
@@ -439,13 +448,20 @@ def _select_chunk_writer(
     def write(chunk_xds, chunk_task_coords):
         writer(
             image_store,
-            image_data_variables_keep,
+            _variables_made(image_data_variables_keep, chunk_xds),
             chunk_task_coords,
             chunk_xds,
             processing_function_threads=processing_function_threads,
         )
 
     return write
+
+
+def _variables_made(image_data_variables_keep, chunk_xds):
+    """The keys of ``image_data_variables_keep`` whose variable the chunk holds."""
+    return [
+        key for key in image_data_variables_keep if key.upper() in chunk_xds.data_vars
+    ]
 
 
 def _concat_image_statistics(statistics_chunks):
@@ -783,6 +799,30 @@ def image_cube_single_field(
           subtraction over the whole image at every iteration. Hogbom
           deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
           Default ``False``. No CASA equivalent.
+        - ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends
+          after each of its Hogbom runs (51 or 510 point components) unless
+          the RMS of the residual has fallen, by less than a factor 1.5, since
+          the model update started, as in CASA and LibRA. Their residual drifts
+          from the true one during a model update; the Asp residual of
+          AstroVIPER is the exact one, so with ``False`` the model update goes
+          on to its ``threshold_per_cycle``, its iteration limit or the
+          divergence test, which takes fewer imaging cycles. Asp only.
+          Default ``False``.
+        - ``asp_residual_components`` : If ``True``, each Asp model update
+          starts with components shaped by the residual (Ma, Zhang & Zhang
+          2026, A&A 713, A164) down to ``threshold_per_cycle``, and the Asp
+          iterations go on from there. They remove the ring residuals Asp
+          leaves on resolved emission in far fewer iterations, and take no
+          residual below ``threshold_per_cycle``. Further keys
+          (``asp_rc_*``) are described in
+          :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
+          Asp only. Default ``True``. No CASA equivalent.
+        - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
+          the residual smoothed with each of its initial scales and, once the
+          peak is below ``threshold_per_cycle``, goes on cleaning the most
+          significant smoothed residual while it is as significant as the
+          threshold is at the smallest scale. Asp only. Default ``True``. No
+          CASA equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code at the next stop test, so

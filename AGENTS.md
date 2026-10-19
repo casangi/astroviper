@@ -202,12 +202,23 @@ zero beyond `max_rad_1GHz` when the model has one. The Adaptive Scale Pixel
 deconvolver (`processing_functions/imaging/deconvolvers/aspclean/`, a port of
 CASA's `AspMatrixCleaner`) does its FFTs with the vendored
 `include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
-kept verbatim with its licence block); its per-Aspen L-BFGS follows ALGLIB's
-scaled-variable conventions and is exposed for tests as
-`aspclean.lbfgs_minimize`. Documented departures from CASA live in
-`src/asp_clean.cpp`: separable Aspen spectra with paired inverse transforms
-(same numbers, ~8x fewer FFTs), a residual update over the whole image, and
-no "diverging" guard (`AspMatrixCleaner` "5. Diverging" of CASA and LibRA).
+kept verbatim with its licence block); its per-Aspen L-BFGS
+(`include/asp_lbfgs.hpp`) reproduces ALGLIB's `minlbfgs` as CASA and LibRA
+call it (unpreconditioned, the scale only in the stopping tests, More-Thuente
+line search; written independently, as ALGLIB is GPL) and is exposed for
+tests as `aspclean.lbfgs_minimize`. Documented departures from CASA live in
+`src/asp_clean.cpp`: exact linear convolutions in the residual update and the
+Aspen fit (CASA's circular ones wrap the response of a component near an edge
+around to the opposite edge), separable spectra with real (half spectrum)
+transforms, no transform for point components, no end of the model
+update after a Hogbom run (CASA's, kept as
+`cycle_control_params["asp_stop_after_hogbom_run"]`), and no "diverging" guard
+(`AspMatrixCleaner` "5. Diverging" of CASA and LibRA). Beyond CASA, the
+imager's Asp starts each model update with components shaped by the residual
+(Ma, Zhang & Zhang 2026) and cleans smoothed residual that is significant at
+its scale below the threshold (`asp_residual_components`,
+`asp_scale_significance`, on by default; the kernel options are `AspOptions`
+in `include/asp_clean.hpp`, off by default there).
 Like Hogbom and MTMFS it takes the divergence test shared by the
 deconvolvers (`deconvolvers/include/plane_stop_test.hpp`); `asp_clean()`
 gives it the RMS limit at `(1 + gain)` times the lowest RMS and no peak

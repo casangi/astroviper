@@ -199,6 +199,9 @@ class TestValidateDeconvolveParams:
             "max_iter_divergence": 1,
             "record_iteration_history": False,
             "exact_psf_subtraction": False,
+            "asp_stop_after_hogbom_run": False,
+            "asp_residual_components": True,
+            "asp_scale_significance": True,
         }
 
     def test_empty_dict_returns_defaults(self):
@@ -213,6 +216,9 @@ class TestValidateDeconvolveParams:
             "max_iter_divergence": 1,
             "record_iteration_history": False,
             "exact_psf_subtraction": False,
+            "asp_stop_after_hogbom_run": False,
+            "asp_residual_components": True,
+            "asp_scale_significance": True,
         }
 
     def test_partial_params_filled(self):
@@ -968,6 +974,11 @@ class TestDeconvolve:
 # ---------------------------------------------------------------------------
 
 
+# Asp as CASA and LibRA run it: without the residual-shaped components and the
+# test of significance per scale that asp_clean turns on by default.
+PLAIN_ASP = {"asp_residual_components": False, "asp_scale_significance": False}
+
+
 @requires_asp
 class TestAspClean:
     @staticmethod
@@ -1037,6 +1048,92 @@ class TestAspClean:
         recon = aspclean.convolve_centered(model[0, 0, 0], psf[0, 0, 0])
         err = np.max(np.abs(resid[0, 0, 0] + recon - dirty))
         assert err / np.max(np.abs(dirty)) < 1e-5
+
+    def test_stop_after_hogbom_run_reaches_the_kernel(self):
+        """``asp_stop_after_hogbom_run`` is handed to the kernel: off by
+        default, the model update of a resolved disk goes on to its iteration
+        limit; on, it ends after its Hogbom run, as in CASA."""
+        nt, nf, npol, ny, nx = 1, 1, 1, 64, 64
+        psf, aspclean = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        sky = 3.0 * (np.hypot(xx - 32, yy - 32) < 10.0)
+        dirty = aspclean.convolve_centered(sky, psf[0, 0, 0])
+        results = {}
+        for stop in (None, False, True):
+            resid = dirty[None, None, None].copy()
+            model = np.zeros_like(resid)
+            # the Hogbom runs of the Asp iterations, without the ring cleaning
+            params = {"gain": 0.1, "max_iter": 400, "threshold": 1e-4, **PLAIN_ASP}
+            if stop is not None:
+                params["asp_stop_after_hogbom_run"] = stop
+            results[stop] = asp_clean(resid, psf, model, params)
+        assert results[None]["stop_code"][0, 0, 0] == 1  # the iteration limit
+        assert results[None]["iterations_performed"][0, 0, 0] == 400
+        assert results[False]["iterations_performed"][0, 0, 0] == 400
+        assert results[True]["stop_code"][0, 0, 0] == 5  # a test of Asp
+        assert results[True]["iterations_performed"][0, 0, 0] < 400
+
+    def test_stop_after_hogbom_run_must_be_a_bool(self):
+        from astroviper.processing_functions.imaging.deconvolution import (
+            _validate_deconvolve_params,
+        )
+
+        with pytest.raises(
+            ValueError, match="asp_stop_after_hogbom_run must be a bool"
+        ):
+            _validate_deconvolve_params({"asp_stop_after_hogbom_run": 1})
+        assert _validate_deconvolve_params({})["asp_stop_after_hogbom_run"] is False
+
+    @pytest.mark.parametrize(
+        "key", ["asp_residual_components", "asp_scale_significance"]
+    )
+    def test_ring_cleaning_switches_are_bools_and_on(self, key):
+        from astroviper.processing_functions.imaging.deconvolution import (
+            _validate_deconvolve_params,
+        )
+
+        with pytest.raises(ValueError, match=f"{key} must be a bool"):
+            _validate_deconvolve_params({key: 1})
+        assert _validate_deconvolve_params({})[key] is True
+
+    def test_ring_cleaning_options_reach_the_kernel(self, monkeypatch):
+        """The ``asp_*`` ring-cleaning keys of ``deconvolve_params`` are
+        handed to the kernel; residual-shaped components and the test of
+        significance per scale are on by default (off in the kernel)."""
+        nt, nf, npol, ny, nx = 1, 1, 1, 32, 32
+        psf, aspclean = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
+        calls = []
+        clean_cube = aspclean.clean_cube
+
+        def spy(*args, **kwargs):
+            calls.append(kwargs)
+            return clean_cube(*args, **kwargs)
+
+        monkeypatch.setattr(aspclean, "clean_cube", spy)
+        options = {
+            "asp_residual_components": False,
+            "asp_scale_significance": False,
+            "asp_significance": 2.5,
+            "asp_rc_noise_floor": 3.0,
+            "asp_rc_frac_min": 0.4,
+            "asp_rc_eps_max": 5.0,
+            "asp_rc_switch_factor": 2.0,
+            "asp_rc_floor_at_threshold": False,
+            "asp_significance_gain": 0.5,
+        }
+        for extra in ({}, options):
+            resid = np.zeros((nt, nf, npol, ny, nx))
+            resid[0, 0, 0, 16, 16] = 1.0
+            params = {"gain": 0.1, "max_iter": 20, "threshold": 0.01, **extra}
+            asp_clean(resid, psf, np.zeros_like(resid), params)
+        default, given = calls
+        assert default["residual_components"] is True
+        assert default["scale_significance"] is True
+        assert default["rc_switch_factor"] == 1.0
+        assert default["rc_floor_at_threshold"] is True
+        assert default["significance_gain"] == 0.3
+        for key, value in options.items():
+            assert given[key.removeprefix("asp_")] == value
 
     def test_threaded_matches_serial(self):
         nt, nf, npol, ny, nx = 1, 2, 2, 32, 32
@@ -1175,11 +1272,32 @@ class TestAspClean:
                 "psf_width": 1.0,
                 "largestscale": 0,
                 "max_iter_divergence": max_iter_divergence,
+                **PLAIN_ASP,
             },
         )
         assert result["iterations_performed"].item() == iterations
         assert result["diverged"].item() == diverged
         assert (result["retval"].item() == -3) == diverged
+
+    def test_divergence_test_stops_the_runaway_with_ring_cleaning(self):
+        """With the residual-shaped components and the test of significance
+        per scale (the defaults) the same runaway stops as diverged too."""
+        residual, psf = _spreading_problem()
+        result = asp_clean(
+            residual,
+            psf,
+            np.zeros_like(residual),
+            {
+                "gain": 0.9,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "psf_width": 1.0,
+                "largestscale": 0,
+            },
+        )
+        assert result["iterations_performed"].item() < 10
+        assert result["diverged"].item()
+        assert result["retval"].item() == -3
 
     def test_plane_with_nan_in_the_search_region_gets_no_iterations(self):
         residual, psf = _spreading_problem()
@@ -1305,6 +1423,7 @@ class TestDeconvolveAsp:
                 "threshold": 0.0,
                 "psf_width": 1.0,
                 "largestscale": 0,
+                **PLAIN_ASP,
             },
         )
         (entry,) = imaging_dict.data.values()

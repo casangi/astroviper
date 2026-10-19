@@ -386,6 +386,30 @@ def image_cube_single_field(
           subtraction over the whole image at every iteration. Hogbom
           deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
           Default ``False``. No CASA equivalent.
+        - ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends
+          after each of its Hogbom runs (51 or 510 point components) unless
+          the RMS of the residual has fallen, by less than a factor 1.5, since
+          the model update started, as in CASA and LibRA. Their residual drifts
+          from the true one during a model update; the Asp residual of
+          AstroVIPER is the exact one, so with ``False`` the model update goes
+          on to its ``threshold_per_cycle``, its iteration limit or the
+          divergence test, which takes fewer imaging cycles. Asp only.
+          Default ``False``.
+        - ``asp_residual_components`` : If ``True``, each Asp model update
+          starts with components shaped by the residual (Ma, Zhang & Zhang
+          2026, A&A 713, A164) down to ``threshold_per_cycle``, and the Asp
+          iterations go on from there. They remove the ring residuals Asp
+          leaves on resolved emission in far fewer iterations, and take no
+          residual below ``threshold_per_cycle``. Further keys
+          (``asp_rc_*``) are described in
+          :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
+          Asp only. Default ``True``. No CASA equivalent.
+        - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
+          the residual smoothed with each of its initial scales and, once the
+          peak is below ``threshold_per_cycle``, goes on cleaning the most
+          significant smoothed residual while it is as significant as the
+          threshold is at the smallest scale. Asp only. Default ``True``. No
+          CASA equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code at the next stop test, so

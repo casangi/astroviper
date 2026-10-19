@@ -144,6 +144,15 @@ def _validate_deconvolve_params(deconvolve_params):
           subtracts, as
           :func:`~astroviper.processing_functions.imaging.make_point_spread_function.make_subtraction_point_spread_function_single_field`
           makes it. Read by :func:`deconvolve` only.
+        - ``asp_stop_after_hogbom_run`` : bool, end an Asp model update after
+          a Hogbom run as CASA and LibRA do (see :func:`asp_clean`). Default
+          ``False``.
+        - ``asp_residual_components`` : bool, start each Asp model update with
+          components shaped by the residual (see :func:`asp_clean`). Default
+          ``True``.
+        - ``asp_scale_significance`` : bool, let Asp clean a smoothed residual
+          that is significant at its scale below the threshold (see
+          :func:`asp_clean`). Default ``True``.
 
     Returns
     -------
@@ -172,6 +181,9 @@ def _validate_deconvolve_params(deconvolve_params):
         "max_iter_divergence": 1,
         "record_iteration_history": False,
         "exact_psf_subtraction": False,
+        "asp_stop_after_hogbom_run": False,
+        "asp_residual_components": True,
+        "asp_scale_significance": True,
     }
 
     for key, default_value in default_params.items():
@@ -212,7 +224,13 @@ def _validate_deconvolve_params(deconvolve_params):
                     "max_iter_divergence must be a positive integer, or -1 to "
                     f"disable the divergence test; got {value!r}."
                 )
-        elif key in ("record_iteration_history", "exact_psf_subtraction"):
+        elif key in (
+            "record_iteration_history",
+            "exact_psf_subtraction",
+            "asp_stop_after_hogbom_run",
+            "asp_residual_components",
+            "asp_scale_significance",
+        ):
             if not isinstance(value, bool | np.bool_):
                 raise ValueError(f"{key} must be a bool; got {value!r}.")
 
@@ -724,7 +742,8 @@ def deconvolve(
         :func:`_validate_deconvolve_params` for the common keys and
         defaults. The ``"asp"`` algorithm additionally honours
         ``fusedthreshold``, ``psf_width``, ``largestscale``,
-        ``stoppointmode``, and ``norm_method`` (see :func:`asp_clean`).
+        ``stoppointmode``, ``norm_method`` and
+        ``asp_stop_after_hogbom_run`` (see :func:`asp_clean`).
     processing_function_threads : int, optional
         Number of ``std::thread`` workers to use for per-plane CLEAN
         execution. Values ``<= 1`` disable threading and run in the
@@ -1434,19 +1453,70 @@ def asp_clean(
           seed the initial scales. ``<= 0`` estimates it internally.
           Default 0.0.
         - ``largestscale`` : int, largest initial scale in pixels.
-          ``-1`` uses the default (0, w, 2w, 4w, 8w). Default -1.
+          ``-1`` uses the default (0, w, 2w, 4w, 8w); a value between 0 and
+          the PSF width ``w`` gives the scales 0, ``largestscale`` and ``w``
+          (as LibRA), and 0 the point scale only. Default -1.
         - ``stoppointmode`` : int, stop after this many consecutive
           smallest-scale (point) components. ``-1`` disables. Default -1.
         - ``norm_method`` : int, scale-normalization method (1 is the
           preferred CASA default). Default 1.
+        - ``asp_stop_after_hogbom_run`` : bool, end the model update after a
+          Hogbom run of Asp (51 or 510 point components) unless the RMS of
+          the residual has fallen, by less than a factor 1.5, since the model
+          update started, as CASA and LibRA do. Their residual drifts from
+          the true one during a model update; here the residual is the exact
+          one, so by default (``False``) the model update goes on to its
+          ``threshold_per_cycle``, its iteration limit or the divergence
+          test, which takes fewer imaging cycles.
+        - ``asp_residual_components`` : bool, start each model update with
+          components shaped by the residual (Ma, Zhang & Zhang 2026, A&A 713,
+          A164): ``C = R tanh((s R - T) / eps)`` on the mask pixels with
+          ``s R >= T``, where ``R`` is the residual, ``s`` the sign of its
+          peak ``R_p``, ``T = max(frac |R_p|, threshold_per_cycle)`` and
+          ``eps = eps_frac |R_p|``, with ``(frac, eps_frac)`` fitted by least
+          squares of the masked residual. They take the residual down to
+          ``threshold_per_cycle``, and the Asp iterations go on from there.
+          They remove the ring residuals Asp leaves on resolved emission in
+          far fewer iterations; on a plane of noise they take up no more
+          noise than Asp. Default ``True``.
+        - ``asp_scale_significance`` : bool, measure the noise of the
+          residual smoothed with each initial scale and, once the peak is
+          below ``threshold_per_cycle``, go on cleaning the most significant
+          smoothed residual while it is as significant as the threshold is
+          at scale 0. Default ``True``.
+        - ``asp_significance`` : float, the significance the smoothed
+          residual must reach instead, when ``> 0``. Default 0.0.
+        - ``asp_significance_gain`` : float, the gain of the components cleaned
+          below ``threshold_per_cycle`` for their significance. Each is a
+          least-squares fit, so any gain up to 1 lowers the misfit; 0.3 needs
+          about half the iterations of the gain 0.1 for the same deconvolution
+          error (within 3 % on four test skies), 0.5 is worse on
+          crescent-like emission.
+          ``<= 0`` uses ``gain``. Default 0.3.
+        - ``asp_rc_frac_min``, ``asp_rc_eps_max`` : float, lower bound of
+          ``frac`` (upper 0.99) and upper bound of ``eps_frac`` (lower 1e-3)
+          in the fit of the residual-shaped components. Defaults 0.3 and
+          10.0; a lower ``frac`` or a larger ``eps_frac`` makes broad weak
+          components that fail on crescent-like emission.
+        - ``asp_rc_noise_floor`` : float, ``T`` is also at least this many
+          times the robust noise of the residual outside the mask. Default
+          2.0.
+        - ``asp_rc_switch_factor`` : float, hand over to the Asp iterations at
+          this multiple of ``threshold_per_cycle``. Default 1.0 (handing over
+          earlier brings the rings back).
+        - ``asp_rc_floor_at_threshold`` : bool, keep ``T`` at least
+          ``threshold_per_cycle``; without it a component takes residual
+          below the threshold (down to ``asp_rc_noise_floor``), which takes
+          up noise. Default ``True``.
 
         Note: ``clean_box`` is ignored by the Asp algorithm (use a mask
         instead).
     processing_function_threads : int, optional
         Number of ``std::thread`` workers used to run per-plane CLEAN in
-        parallel. ``processing_function_threads <= 1`` disables threading; values larger
-        than the number of planes are clamped to the plane count.
-        Default 1.
+        parallel. ``processing_function_threads <= 1`` disables threading.
+        Threads beyond the number of planes go to the FFTs of each plane
+        (``processing_function_threads // n_planes`` per plane), so a
+        single-channel model update uses them too. Default 1.
     mask_cube : numpy.ndarray, optional
         5-D mask array with the same shape as ``residual_cube``. Unlike
         the Hogbom binding (which takes a ``bool`` mask), the Asp binding
@@ -1573,5 +1643,22 @@ def asp_clean(
         stoppointmode=deconvolve_params.get("stoppointmode", -1),
         norm_method=deconvolve_params.get("norm_method", 1),
         processing_function_threads=int(processing_function_threads),
+        stop_after_hogbom_run=bool(
+            deconvolve_params.get("asp_stop_after_hogbom_run", False)
+        ),
+        # Options beyond CASA and LibRA (off by default in the kernel).
+        scale_significance=bool(deconvolve_params.get("asp_scale_significance", True)),
+        significance=float(deconvolve_params.get("asp_significance", 0.0)),
+        residual_components=bool(
+            deconvolve_params.get("asp_residual_components", True)
+        ),
+        rc_noise_floor=float(deconvolve_params.get("asp_rc_noise_floor", 2.0)),
+        rc_frac_min=float(deconvolve_params.get("asp_rc_frac_min", 0.3)),
+        rc_eps_max=float(deconvolve_params.get("asp_rc_eps_max", 10.0)),
+        rc_switch_factor=float(deconvolve_params.get("asp_rc_switch_factor", 1.0)),
+        rc_floor_at_threshold=bool(
+            deconvolve_params.get("asp_rc_floor_at_threshold", True)
+        ),
+        significance_gain=float(deconvolve_params.get("asp_significance_gain", 0.3)),
         **_divergence_kwargs(deconvolve_params, asp=True),
     )

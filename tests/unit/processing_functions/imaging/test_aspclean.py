@@ -555,7 +555,11 @@ class TestDivergence:
     def test_peak_above_1500_is_cleaned(self):
         # The "5. Diverging" guard of CASA 6.7.5.18 and LibRA (fc54ee25)
         # started its lowest peak at 1000, so it stopped any plane with a peak
-        # above 1500 at once (casa master has dropped that test).
+        # above 1500 at once (casa master has dropped that test). The model
+        # update ends after its first Hogbom run (stop_after_hogbom_run) in
+        # both: going on, Asp's "no change" test (a change of the peak below
+        # 1e-4 in the units of the image, CASA's constant) tells the two
+        # scalings apart.
         psf, _, dirty = TestClean()._make_scene()
         results = []
         for scale in (1.0, 1e4):
@@ -568,6 +572,7 @@ class TestDivergence:
                 gain=0.1,
                 threshold_per_cycle=0.05 * scale,
                 max_iter_per_cycle_updated=100,
+                stop_after_hogbom_run=True,
             )
             results.append((result, model.sum() / scale))
         (unit, unit_flux), (scaled, scaled_flux) = results
@@ -773,41 +778,76 @@ class TestStopCode:
 
 
 class TestLbfgs:
-    """The scaled L-BFGS behind the Aspen (amplitude, scale) fit.
-
-    The optimizer works in the scaled variables ``z = x / scale`` and takes a
-    unit-length first step there (ALGLIB's convention), so a badly scaled
-    problem is solved in a couple of steps and the first trial point never moves
-    a variable by more than its own scale. An earlier version preconditioned
-    with ``diag(scale^2)`` instead, which on the deconvolver's objective sent
-    the first trial step hundreds of scale lengths away, cost tens of
-    evaluations per Aspen and could accept garbage minima.
+    """The L-BFGS behind the Aspen (amplitude, scale) fit follows ALGLIB's
+    ``minlbfgs`` as CASA and LibRA call it (one correction pair,
+    ``minlbfgssetscale`` and no preconditioner): the search runs in the
+    variables themselves, the first trial point is a step of length
+    ``min(1, |g|)`` along the steepest descent, the More-Thuente line search
+    can lengthen a step as well as shorten it, and the scale enters only the
+    stopping tests. An earlier version stepped in the scaled variables
+    ``x / scale``; on the Asp objective it moved an Aspen's scale by tens of
+    pixels where ALGLIB moves it by one or two (checked against ALGLIB 3.17 on
+    the same objective, evaluation by evaluation), and the model updates
+    diverged.
     """
 
-    def test_badly_scaled_quadratic_converges_in_few_evaluations(self):
-        centre = np.array([2e-3, 3e3])
-        scale = [1e-3, 1e3]
-        calls = []
+    @staticmethod
+    def _quadratic(centre, weights, calls):
+        centre = np.asarray(centre, float)
+        weights = np.asarray(weights, float)
 
         def fg(x):
-            x = np.asarray(x)
-            z = (x - centre) / scale
-            calls.append(np.array(x))
-            return float(z @ z), list(2 * z / scale)
+            x = np.asarray(x, float)
+            calls.append(x.copy())
+            d = x - centre
+            return float(np.sum(weights * d * d)), list(2.0 * weights * d)
 
+        return fg
+
+    def test_first_trial_point_is_a_unit_step_along_the_steepest_descent(self):
+        calls = []
+        fg = self._quadratic([10.0, -4.0], [1.0, 3.0], calls)
+        aspclean.lbfgs_minimize(fg, [0.0, 0.0], [1.0, 1.0], max_iters=5)
+        g0 = np.array([2.0 * -10.0, 2.0 * 3.0 * 4.0])
+        step = calls[1] - calls[0]
+        np.testing.assert_allclose(step, -g0 / np.linalg.norm(g0), rtol=1e-12)
+
+    def test_line_search_lengthens_a_short_first_step(self):
+        # 1-D: the minimum is 10 units away, the first trial point one unit:
+        # the decrease is sufficient but the slope is still steep, so the
+        # More-Thuente search extrapolates instead of accepting it.
+        calls = []
+        fg = self._quadratic([10.0], [1.0], calls)
         x, f, iterations, evaluations = aspclean.lbfgs_minimize(
-            fg, [0.0, 0.0], scale, max_iters=20, epsg=1e-8, epsf=1e-12, epsx=1e-10
+            fg, [0.0], [1.0], max_iters=5, epsg=1e-10, epsf=1e-14, epsx=1e-12
         )
-        np.testing.assert_allclose(x, centre, rtol=1e-6)
-        assert f < 1e-10
-        assert evaluations <= 8
-        # the first trial point moved each variable by at most its own scale
-        first_step = np.abs(calls[1] - calls[0]) / scale
-        assert np.all(first_step <= 1.0 + 1e-12)
+        assert calls[1][0] == pytest.approx(1.0)
+        assert max(c[0] for c in calls[2:]) > 1.0
+        np.testing.assert_allclose(x, [10.0], rtol=1e-6)
 
-    def test_never_increases_and_backtracks_on_overshoot(self):
-        # A narrow valley: a unit step in the scaled variable overshoots, so
-        # the line search must backtrack; the accepted sequence is monotone.
+    def test_scale_enters_only_the_stopping_tests(self):
+        # Two runs that differ only in the scale vector visit the same points
+        # until the first of them stops.
+        calls_a, calls_b = [], []
+        fg_a = self._quadratic([3.0, -2.0], [1.0, 5.0], calls_a)
+        fg_b = self._quadratic([3.0, -2.0], [1.0, 5.0], calls_b)
+        aspclean.lbfgs_minimize(fg_a, [0.0, 0.0], [1.0, 1.0], max_iters=3)
+        aspclean.lbfgs_minimize(fg_b, [0.0, 0.0], [1e-3, 1e3], max_iters=3)
+        n = min(len(calls_a), len(calls_b))
+        np.testing.assert_allclose(
+            np.array(calls_a[:n]), np.array(calls_b[:n]), rtol=1e-12
+        )
+
+    def test_converges_on_a_quadratic(self):
+        calls = []
+        fg = self._quadratic([2.0, 3.0], [1.0, 4.0], calls)
+        x, f, iterations, evaluations = aspclean.lbfgs_minimize(
+            fg, [0.0, 0.0], [1.0, 1.0], max_iters=50, epsg=1e-10, epsf=1e-14, epsx=1e-12
+        )
+        np.testing.assert_allclose(x, [2.0, 3.0], rtol=1e-6)
+        assert f < 1e-10
+
+    def test_never_ends_above_its_start_and_stays_within_its_budget(self):
         history = []
 
         def fg(x):
@@ -820,18 +860,22 @@ class TestLbfgs:
         )
         assert iterations >= 1
         assert f <= history[0]
-        # accepted objective values (a prefix scan of the history) decrease
-        accepted = [history[0]]
-        for v in history[1:]:
-            if v < accepted[-1]:
-                accepted.append(v)
-        assert accepted[-1] == f
-        assert evaluations <= 5 * 21  # never more than max_iters line searches
+        assert evaluations <= 1 + 5 * 20  # 20 evaluations per line search
 
 
 # ---------------------------------------------------------------------------
 # Resolved sources: the case Asp exists for
 # ---------------------------------------------------------------------------
+
+
+def _linear_convolution(image, psf):
+    """model (*) psf with the PSF centred on (n // 2, n // 2) of its own image and
+    zero beyond it: the response the residual update subtracts."""
+    from scipy.signal import fftconvolve
+
+    nx, ny = image.shape
+    full = fftconvolve(image, psf, mode="full")
+    return full[nx // 2 : nx // 2 + nx, ny // 2 : ny // 2 + ny]
 
 
 class TestResolvedSource:
@@ -894,9 +938,390 @@ class TestResolvedSource:
         assert out["iterations_performed"] >= 30  # the minor cycle actually ran
         assert out["peak_residual"] < 0.2 * np.abs(dirty).max()
         np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.15)
-        # the exact reconstruction invariant holds throughout
-        recon = aspclean.convolve_centered(model, psf)
-        assert np.max(np.abs(resid + recon - dirty)) < 1e-9 * np.abs(dirty).max()
+        # the residual update subtracts the exact linear convolution
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
         # and the components are extended (hundreds of pixels above a tenth of
         # the model peak), not a handful of delta spikes
         assert np.count_nonzero(model > 0.1 * model.max()) > 100
+
+    def _clean_disk(self, **kwargs):
+        psf, sky, _ = self._scene()
+        dirty = np.ascontiguousarray(_linear_convolution(sky, psf))
+        resid = dirty.copy()
+        model = np.zeros_like(dirty)
+        out = aspclean.clean(
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold_per_cycle=1e-3 * np.abs(dirty).max(),
+            max_iter_per_cycle_updated=300,
+            max_iter_divergence=-1,
+            **kwargs,
+        )
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+        return out, resid, model, dirty, sky
+
+    def test_model_update_goes_on_after_a_hogbom_run(self):
+        """By default the model update goes on past the end of a Hogbom run
+        (here to its iteration limit): the residual is the exact one, so the
+        model update does not need to stop for a residual update."""
+        default, resid, model, dirty, sky = self._clean_disk()
+        off, resid_off, model_off, _, _ = self._clean_disk(stop_after_hogbom_run=False)
+        assert default["stop_code"] == 1  # spent max_iter_per_cycle_updated
+        assert default["iterations_performed"] == 300
+        np.testing.assert_array_equal(resid, resid_off)
+        np.testing.assert_array_equal(model, model_off)
+        on, resid_on, model_on, _, _ = self._clean_disk(stop_after_hogbom_run=True)
+        assert np.abs(resid).max() < np.abs(resid_on).max()
+        assert abs(model.sum() - sky.sum()) < abs(model_on.sum() - sky.sum())
+
+    def test_stop_after_hogbom_run_ends_the_model_update_like_casa(self):
+        """With stop_after_hogbom_run the model update ends after the Hogbom
+        run once the RMS of the residual has fallen by a factor 1.5 (CASA and
+        LibRA): a test of Asp itself, well before the iteration limit."""
+        on, *_ = self._clean_disk(stop_after_hogbom_run=True)
+        assert on["stop_code"] == 5  # a test of Asp itself
+        assert on["converged"]
+        assert 51 < on["iterations_performed"] < 300
+
+    def test_disk_near_the_edge_does_not_run_away(self):
+        """A disk next to the image edge: its wide Aspens' responses reach
+        beyond the edge. Subtracting a circular convolution folded them back in
+        from the opposite edge, and the Aspen fit then chased that structure
+        with ever larger components (the model flux ran away to many times the
+        sky's on CASA's test_onefield_asp data). The residual update is now the
+        exact linear convolution and the fit stops like ALGLIB's."""
+        psf, _, _ = self._scene()
+        from astroviper.processing_functions.simulation import (
+            limb_darkened_disk_image,
+        )
+
+        n = psf.shape[0]
+        yy, xx = np.mgrid[0:n, 0:n]
+        sky = 5.0 * limb_darkened_disk_image(
+            (xx - 18).astype(float), (yy - n // 2).astype(float), 30.0, 22.0, 0.8, 1.5
+        )
+        dirty = np.ascontiguousarray(_linear_convolution(sky, psf))
+        resid = dirty.copy()
+        model = np.zeros_like(dirty)
+        out = aspclean.clean(
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold_per_cycle=1e-4,
+            max_iter_per_cycle_updated=300,
+            max_iter_divergence=-1,
+        )
+        assert out["iterations_performed"] >= 30
+        assert np.abs(resid).max() < 0.5 * np.abs(dirty).max()
+        np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.3)
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+
+
+# ---------------------------------------------------------------------------
+# Ring cleaning: options beyond CASA and LibRA (AspOptions)
+# ---------------------------------------------------------------------------
+
+
+class TestRingCleaning:
+    """The options of the kernel that clean Asp's ring residuals:
+    components shaped by the residual (Ma, Zhang & Zhang 2026, A&A 713, A164)
+    before the Asp iterations of a model update, the switch to Asp at a
+    multiple of the threshold, the noise floor of their threshold, and Asp's
+    test of significance per scale. The kernel leaves them off by default
+    (``asp_clean`` turns them on)."""
+
+    @staticmethod
+    def _scene(faint=False):
+        """A disk with a gap and a core (or, ``faint``, a broad Gaussian whose
+        dirty peak is twice the noise), observed with a PSF of 80 % filled uv
+        coverage, plus noise convolved with the PSF; mask of radius 40."""
+        n = 128
+        rng = np.random.default_rng(2)
+        ku, kv = np.meshgrid(np.fft.fftfreq(n), np.fft.fftfreq(n), indexing="ij")
+        sampling = ((np.hypot(ku, kv) < 0.15) & (rng.random((n, n)) < 0.8)).astype(
+            float
+        )
+        sampling += sampling[::-1, ::-1]  # Hermitian uv coverage
+        psf = np.fft.fftshift(np.real(np.fft.ifft2(sampling)))
+        psf = np.ascontiguousarray(psf / psf.max())
+        yy, xx = np.mgrid[0:n, 0:n]
+        r = np.hypot(xx - n // 2, yy - n // 2)
+        noise = _linear_convolution(rng.standard_normal((n, n)), psf)
+        if faint:
+            noise /= noise.std()
+            sky = np.exp(-0.5 * (r / 12.0) ** 2)
+            sky *= 2.0 / _linear_convolution(sky, psf).max()
+        else:
+            sky = np.exp(-0.5 * (r / 14.0) ** 2) * (
+                1 - 0.7 * np.exp(-0.5 * ((r - 10) / 2.0) ** 2)
+            ) + 0.3 * np.exp(-0.5 * (r / 2.0) ** 2)
+            noise *= 0.002 * np.abs(_linear_convolution(sky, psf)).max() / noise.std()
+        dirty = np.ascontiguousarray(_linear_convolution(sky, psf) + noise)
+        mask = (r < 40).astype(float)
+        return psf, sky, dirty, mask, 5.0 * noise.std()
+
+    @staticmethod
+    def _clean(psf, dirty, mask, threshold, **kwargs):
+        resid = dirty.copy()
+        model = np.zeros_like(dirty)
+        out = aspclean.clean(
+            resid,
+            psf,
+            model,
+            mask,
+            gain=0.1,
+            threshold_per_cycle=threshold,
+            max_iter_per_cycle_updated=3000,
+            max_iter_divergence=-1,
+            **kwargs,
+        )
+        return out, resid, model
+
+    def test_off_by_default(self):
+        psf, _, dirty, mask, threshold = self._scene()
+        default, resid, model = self._clean(psf, dirty, mask, threshold)
+        off, resid_off, model_off = self._clean(
+            psf,
+            dirty,
+            mask,
+            threshold,
+            residual_components=False,
+            scale_significance=False,
+            record_components=False,
+            rc_switch_factor=1.0,
+        )
+        np.testing.assert_array_equal(resid, resid_off)
+        np.testing.assert_array_equal(model, model_off)
+        assert default["timing"]["n_residual_components"] == 0
+        assert not {"components", "residual_fits", "scale_noise"} & set(default)
+
+    def test_residual_components_clean_the_disk_in_fewer_iterations(self):
+        psf, sky, dirty, mask, threshold = self._scene()
+        asp, *_ = self._clean(psf, dirty, mask, threshold)
+        out, resid, model = self._clean(
+            psf, dirty, mask, threshold, residual_components=True
+        )
+        assert out["timing"]["n_residual_components"] > 10
+        assert out["stop_code"] == 2  # the threshold
+        assert out["peak_residual"] <= threshold
+        assert out["iterations_performed"] < 0.7 * asp["iterations_performed"]
+        np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.05)
+        # the residual update stays the exact linear convolution
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+
+    def test_switch_factor_hands_over_to_asp_earlier(self):
+        psf, _, dirty, mask, threshold = self._scene()
+        counts = {}
+        for factor in (1.0, 10.0):
+            out, *_ = self._clean(
+                psf,
+                dirty,
+                mask,
+                threshold,
+                residual_components=True,
+                rc_switch_factor=factor,
+                record_components=True,
+            )
+            fits = out["residual_fits"]
+            # every fit starts from a peak above the switch level
+            assert np.all(fits[:, 0] > factor * threshold)
+            counts[factor] = out["timing"]["n_residual_components"]
+            assert out["peak_residual"] <= threshold
+        assert 0 < counts[10.0] < counts[1.0]
+
+    @pytest.mark.parametrize(
+        "kwargs", [{"rc_switch_factor": 1e3}, {"rc_noise_floor": 1e9}]
+    )
+    def test_no_residual_component_leaves_asp_as_it_is(self, kwargs):
+        """A switch level above the peak, or a noise floor above it, makes no
+        residual-shaped component (the phase ends without one) and Asp runs as
+        without the option."""
+        psf, _, dirty, mask, threshold = self._scene()
+        _, resid, model = self._clean(psf, dirty, mask, threshold)
+        out, resid_rc, model_rc = self._clean(
+            psf, dirty, mask, threshold, residual_components=True, **kwargs
+        )
+        assert out["timing"]["n_residual_components"] == 0
+        np.testing.assert_array_equal(resid, resid_rc)
+        np.testing.assert_array_equal(model, model_rc)
+
+    @pytest.mark.parametrize("at_threshold", [False, True])
+    def test_floor_at_threshold(self, at_threshold):
+        """With ``rc_floor_at_threshold`` a residual-shaped component takes no
+        pixel below the threshold of the model update; without it, it reaches
+        down to ``rc_frac_min`` of the peak. One iteration: one component."""
+        psf, _, dirty, mask, _ = self._scene()
+        peak = np.abs(dirty[mask > 0]).max()
+        resid = dirty.copy()
+        model = np.zeros_like(dirty)
+        out = aspclean.clean(
+            resid,
+            psf,
+            model,
+            mask,
+            gain=0.1,
+            threshold_per_cycle=0.6 * peak,
+            max_iter_per_cycle_updated=1,
+            max_iter_divergence=-1,
+            residual_components=True,
+            rc_floor_at_threshold=at_threshold,
+        )
+        assert out["timing"]["n_residual_components"] == 1
+        lowest = dirty[model != 0].min() / peak
+        if at_threshold:
+            assert lowest >= 0.6
+        else:
+            assert lowest < 0.35  # rc_frac_min is 0.3
+
+    def test_record_components(self):
+        psf, _, dirty, mask, threshold = self._scene()
+        out, *_ = self._clean(
+            psf,
+            dirty,
+            mask,
+            threshold,
+            residual_components=True,
+            record_components=True,
+        )
+        timing = out["timing"]
+        # one row (x, y, scale, amplitude) per Asp component
+        assert out["components"].shape == (
+            timing["n_scale_components"] + timing["n_point_components"],
+            4,
+        )
+        # one row per fit: the last one, which finds no better component than
+        # none, is not taken
+        fits = out["residual_fits"]
+        assert fits.shape == (timing["n_residual_components"] + 1, 6)
+        assert np.all((fits[:, 1] >= 0.3) & (fits[:, 1] <= 0.99))  # frac
+        assert np.all((fits[:, 2] >= 1e-3) & (fits[:, 2] <= 10.0))  # eps_frac
+
+    def test_scale_significance_cleans_a_faint_broad_source(self):
+        """A broad source whose dirty peak is below the threshold: Asp alone
+        takes nothing; with the test of significance per scale it takes the
+        source at the scales where it stands out of their noise."""
+        psf, sky, dirty, mask, threshold = self._scene(faint=True)
+        assert np.abs(dirty[mask > 0]).max() < threshold
+        _, _, model = self._clean(psf, dirty, mask, threshold)
+        assert not model.any()
+        out, resid, model = self._clean(
+            psf, dirty, mask, threshold, scale_significance=True
+        )
+        noise = np.asarray(out["scale_noise"])
+        np.testing.assert_allclose(noise[0], 1.0, rtol=0.1)  # the dirty noise
+        assert out["timing"]["n_scale_components"] > 0
+        assert model.sum() > 0.1 * sky.sum()
+        # centred on the source (the wings of scale components reach past the mask)
+        peak = np.unravel_index(np.argmax(model), model.shape)
+        assert np.hypot(peak[0] - 64, peak[1] - 64) < 10
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+
+    def test_significance_gain(self):
+        """The components cleaned below the threshold for their significance
+        take ``significance_gain`` (``<= 0``: the gain): a larger one takes
+        the faint source in fewer of them."""
+        psf, sky, dirty, mask, threshold = self._scene(faint=True)
+        runs = {}
+        for gain in (0.0, 0.1, 0.3):
+            runs[gain] = self._clean(
+                psf,
+                dirty,
+                mask,
+                threshold,
+                scale_significance=True,
+                significance_gain=gain,
+            )
+        np.testing.assert_array_equal(runs[0.0][1], runs[0.1][1])
+        np.testing.assert_array_equal(runs[0.0][2], runs[0.1][2])
+        slow, fast = runs[0.1][0]["timing"], runs[0.3][0]["timing"]
+        assert 0 < fast["n_significance_components"] < slow["n_significance_components"]
+        assert runs[0.3][2].sum() >= runs[0.1][2].sum() > 0.1 * sky.sum()
+        resid, model = runs[0.3][1], runs[0.3][2]
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+
+    def test_cube_matches_per_plane(self):
+        psf, _, dirty, mask, threshold = self._scene()
+        kwargs = dict(
+            residual_components=True,
+            scale_significance=True,
+            rc_switch_factor=3.0,
+            significance_gain=0.3,
+        )
+        planes = np.stack([dirty, 0.5 * dirty])
+        resid = planes[None, :, None].copy()  # planes stays the reference
+        model = np.zeros_like(resid)
+        aspclean.clean_cube(
+            resid,
+            np.ascontiguousarray(np.broadcast_to(psf, resid.shape)),
+            model,
+            np.ascontiguousarray(np.broadcast_to(mask, resid.shape)),
+            gain=0.1,
+            threshold_per_cycle=np.full((1, 2, 1), threshold),
+            max_iter_per_cycle_updated=np.full((1, 2, 1), 3000, dtype=np.int32),
+            max_iter_divergence=-1,
+            processing_function_threads=2,
+            **kwargs,
+        )
+        for f in range(2):
+            _, r1, m1 = self._clean(
+                psf, np.ascontiguousarray(planes[f]), mask, threshold, **kwargs
+            )
+            np.testing.assert_array_equal(resid[0, f, 0], r1)
+            np.testing.assert_array_equal(model[0, f, 0], m1)
+
+
+class TestInitialScales:
+    """A ``largestscale`` below the PSF width gives the initial scales 0,
+    ``largestscale`` and the PSF width, as LibRA does (issue #327), instead
+    of the point scale only (CASA 6.7.5.18); 0 asks for the point scale
+    only."""
+
+    def test_largest_scale_below_the_psf_width_keeps_scale_components(self):
+        psf, sky, dirty, mask, threshold = TestRingCleaning._scene()
+        width = aspclean.psf_gaussian_width(psf)
+        largest = int(width // 2)
+        assert 0 < largest < width
+        point_only, *_ = TestRingCleaning._clean(
+            psf, dirty, mask, threshold, largestscale=0
+        )
+        assert point_only["timing"]["n_scale_components"] == 0
+        assert point_only["stop_code"] == 1  # the iteration limit
+        out, resid, model = TestRingCleaning._clean(
+            psf, dirty, mask, threshold, largestscale=largest
+        )
+        assert out["timing"]["n_scale_components"] > 0
+        assert out["stop_code"] == 2  # the threshold
+        assert out["iterations_performed"] < point_only["iterations_performed"]
+        np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.1)
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+
+    def test_significance_per_scale_with_a_small_largest_scale(self):
+        """The test of significance per scale has scales to search."""
+        psf, sky, dirty, mask, threshold = TestRingCleaning._scene(faint=True)
+        largest = int(aspclean.psf_gaussian_width(psf) // 2)
+        _, _, model = TestRingCleaning._clean(
+            psf, dirty, mask, threshold, largestscale=0, scale_significance=True
+        )
+        assert not model.any()
+        out, _, model = TestRingCleaning._clean(
+            psf, dirty, mask, threshold, largestscale=largest, scale_significance=True
+        )
+        assert out["timing"]["n_significance_components"] > 0
+        assert model.sum() > 0.1 * sky.sum()
