@@ -1397,35 +1397,6 @@ def test_adaptive_gain_reports_divergence():
     assert result["iterations_performed"] == 4
 
 
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_psf_fraction_caps_adaptive_gain(dtype):
-    """After three components the gain rises to min(0.75, 1 - psf_fraction, 0.6)."""
-    psf = np.zeros((1, 32, 32), dtype=dtype)
-    psf[0, 16, 16] = 1.0
-    residual = np.zeros_like(psf)
-    residual[0, 4, 4:28:4] = [1.0, 0.95, 0.9, 0.85, 0.8, 0.75]
-    model = np.zeros_like(residual)
-    mtmfs.clean(
-        residual, psf, model, gain=0.0, psf_fraction=0.45, max_iter_per_cycle_updated=4
-    )
-    np.testing.assert_allclose(
-        model[0, 4, 4:28:4], [0.5, 0.475, 0.45, 0.55 * 0.85, 0.0, 0.0], rtol=1e-6
-    )
-    # A cap below 0.01 is reported as divergence at the first adaptive update.
-    residual[...] = 0
-    residual[0, 4, 4:20:4] = [1.0, 0.999, 0.998, 0.997]
-    result = mtmfs.clean(
-        residual,
-        psf,
-        np.zeros_like(residual),
-        gain=0.0,
-        psf_fraction=0.995,
-        max_iter_per_cycle_updated=10,
-    )
-    assert result["stop_code"] == mtmfs.STOP_DIVERGED
-    assert result["iterations_performed"] == 3
-
-
 def _negative_transfer_problem(dtype=np.float32):
     """The PSF and checkerboard of test_adaptive_gain_reports_divergence, with
     amplitudes spread by 20 percent so that no rounding decides a tie: every
@@ -1601,22 +1572,6 @@ def test_divergence_test_does_not_stop_a_multiscale_clean():
             divergence_peak_factor=1.1,
         )
         assert result["stop_code"] == mtmfs.STOP_MAX_ITER
-
-
-def test_psf_fraction_stops_at_fraction_of_initial_peak():
-    psf = np.zeros((1, 32, 32), dtype=np.float32)
-    psf[0, 16, 16] = 1.0
-    residual = psf.copy()
-    result = mtmfs.clean(
-        residual,
-        psf,
-        np.zeros_like(residual),
-        gain=0.1,
-        psf_fraction=0.5,
-        max_iter_per_cycle_updated=50,
-    )
-    assert result["stop_code"] == mtmfs.STOP_THRESHOLD
-    assert result["iterations_performed"] == 7  # 0.9**7 < 0.5 <= 0.9**6
 
 
 def test_large_scale_component_is_not_truncated():

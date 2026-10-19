@@ -108,7 +108,7 @@ py::array_t<double> vector_array(const std::vector<double>& values) {
 template <typename T>
 py::dict clean_impl(py::array residual, py::array psf, py::array model, py::object mask_obj,
                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, double gain,
-                    double threshold_per_cycle, double psf_fraction, double mask_threshold, int max_iter_divergence,
+                    double threshold_per_cycle, double mask_threshold, int max_iter_divergence,
                     double divergence_rms_factor, double divergence_peak_factor) {
     int nterms, ny, nx;
     stack_dims(residual, "residual", nterms, ny, nx);
@@ -156,7 +156,7 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
         py::gil_scoped_release release;
         result = mtmfs::clean<T>(res, mod, psf_ptr, mask_ptr, nterms, nx, ny, scales, small_scale_bias,
                                  max_iter_per_cycle_updated, static_cast<T>(gain), static_cast<T>(threshold_per_cycle),
-                                 static_cast<T>(psf_fraction), static_cast<T>(mask_threshold), divergence,
+                                 static_cast<T>(mask_threshold), divergence,
                                  ri.strides[0] / static_cast<py::ssize_t>(sizeof(T)));
     }
 
@@ -179,16 +179,16 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
 
 static py::dict clean_dispatch(py::array residual, py::array psf, py::array model, py::object mask,
                                const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated,
-                               double gain, double threshold_per_cycle, double psf_fraction, double mask_threshold,
+                               double gain, double threshold_per_cycle, double mask_threshold,
                                int max_iter_divergence, double divergence_rms_factor,
                                double divergence_peak_factor) {
     if (py::isinstance<py::array_t<float>>(residual))
         return clean_impl<float>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
-                                 threshold_per_cycle, psf_fraction, mask_threshold, max_iter_divergence,
+                                 threshold_per_cycle, mask_threshold, max_iter_divergence,
                                  divergence_rms_factor, divergence_peak_factor);
     if (py::isinstance<py::array_t<double>>(residual))
         return clean_impl<double>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
-                                  threshold_per_cycle, psf_fraction, mask_threshold, max_iter_divergence,
+                                  threshold_per_cycle, mask_threshold, max_iter_divergence,
                                   divergence_rms_factor, divergence_peak_factor);
     throw std::runtime_error("residual must be float32 or float64");
 }
@@ -269,9 +269,8 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "[-1, 1]. gain <= 0 selects casacore adaptive gain. max_iter_per_cycle_updated [CASA cycleniter] caps "
           "the components added in this call. The call stops when max |residual[0] convolved with the smallest "
           "scale| over that scale's mask, divided by hessian[0, 0, 0] (the PSF peak when the smallest scale "
-          "is 0), falls below max(threshold_per_cycle, psf_fraction times its initial value); that estimate is "
-          "updated only inside the psf_support patch, so the returned residual can still exceed "
-          "threshold_per_cycle. "
+          "is 0), falls below threshold_per_cycle; that estimate is updated only inside the psf_support "
+          "patch, so the returned residual can still exceed threshold_per_cycle. "
           "mask_threshold > 0 binarises each scale-convolved mask at 0.1 (its value is otherwise unused). The "
           "call also stops as diverged (stop_code 4) on the divergence test shared with the other "
           "deconvolvers, applied to that estimate and to the sum of the squares of the same masked image: "
@@ -288,7 +287,7 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           py::arg("residual"), py::arg("psf"), py::arg("model"), py::arg("mask") = py::none(),
           py::arg("scales") = std::vector<float>{}, py::arg("small_scale_bias") = 0.0f,
           py::arg("max_iter_per_cycle_updated") = 100, py::arg("gain") = 0.1, py::arg("threshold_per_cycle") = 0.0,
-          py::arg("psf_fraction") = 0.0, py::arg("mask_threshold") = 0.9,
+          py::arg("mask_threshold") = 0.9,
           py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
           py::arg("divergence_peak_factor") = 1.0);
 

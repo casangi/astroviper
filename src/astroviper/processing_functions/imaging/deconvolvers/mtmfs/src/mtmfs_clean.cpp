@@ -374,13 +374,13 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
                      const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
-                     T threshold_per_cycle, T psf_fraction, T mask_threshold,
+                     T threshold_per_cycle, T mask_threshold,
                      const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride) {
     if (max_iter_per_cycle_updated < 0) throw std::invalid_argument("max_iter_per_cycle_updated must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) ||
         !std::isfinite(static_cast<double>(threshold_per_cycle)) ||
-        !std::isfinite(static_cast<double>(psf_fraction)) || !std::isfinite(static_cast<double>(mask_threshold)))
-        throw std::invalid_argument("gain, threshold_per_cycle, psf_fraction and mask_threshold must be finite");
+        !std::isfinite(static_cast<double>(mask_threshold)))
+        throw std::invalid_argument("gain, threshold_per_cycle and mask_threshold must be finite");
     if (threshold_per_cycle < static_cast<T>(0))
         throw std::invalid_argument("threshold_per_cycle must be >= 0");
     if (gain > static_cast<T>(1))
@@ -465,7 +465,6 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     std::vector<std::vector<T>> vec_work(ns, std::vector<T>(nimg, static_cast<T>(0)));
 
     T loopgain = (gain > static_cast<T>(0)) ? gain : static_cast<T>(0.5);
-    T fluxlimit = static_cast<T>(-1);
     T prev_max = static_cast<T>(0);
     T min_max = static_cast<T>(0);
     T global_max_val = static_cast<T>(0);
@@ -491,7 +490,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         const T norma = static_cast<T>(1.0 / w.mat_a[0][0]);
         const T rmaxval = std::abs(pr.value * norma);
         int flag = 0;
-        if (std::abs(rmaxval) < std::max(threshold_per_cycle, fluxlimit))
+        if (std::abs(rmaxval) < threshold_per_cycle)
             flag = kStopThreshold;
         // Divergence test shared with the other deconvolvers, on the image and
         // pixels of the threshold test.
@@ -499,7 +498,6 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             flag = kStopDiverged;
         if (component_selected && itercount > 1 && gain <= static_cast<T>(0)) {
             loopgain = (global_max_val < prev_max) ? loopgain * static_cast<T>(1.5) : loopgain / static_cast<T>(1.5);
-            loopgain = std::min(static_cast<T>(1) - psf_fraction, loopgain);
             loopgain = std::min(static_cast<T>(0.6), loopgain);
             if (loopgain < static_cast<T>(0.01)) flag = kStopDiverged;
             // Selected scores are positive. A >200% increase means current >3*minimum;
@@ -512,7 +510,6 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             prev_max = global_max_val;
             min_max = (itercount == 0) ? global_max_val : std::min(min_max, global_max_val);
         }
-        if (flag == 0 && fluxlimit == static_cast<T>(-1)) fluxlimit = rmaxval * psf_fraction;
         return flag;
     };
 
@@ -670,10 +667,10 @@ template int taylor_hessian<float>(const float*, int, int, int, std::vector<floa
 template int taylor_hessian<double>(const double*, int, int, int, std::vector<float>&, float, std::vector<double>&,
                                     std::vector<double>&, std::vector<double>&, int&);
 template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
-                                         const std::vector<float>&, float, int, float, float, float, float,
+                                         const std::vector<float>&, float, int, float, float, float,
                                          const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t);
 template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
-                                           const std::vector<float>&, float, int, double, double, double, double,
+                                           const std::vector<float>&, float, int, double, double, double,
                                            const deconvolvers::DivergenceControl<double>&, std::ptrdiff_t);
 template void principal_solution<float>(float*, const double*, int, int, int);
 template void principal_solution<double>(double*, const double*, int, int, int);
