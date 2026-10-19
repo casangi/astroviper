@@ -710,10 +710,7 @@ def image_cube_single_field(
     deconvolver : str, optional
         Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
-        few planes, e.g. single-channel imaging) or ``"asp"``. Long Högbom
-        cycles are checked in CASA-sized batches and stop a plane if its peak
-        becomes non-finite or rises more than 10% above the smallest measured
-        peak.
+        few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str, optional
         Correlation (instrument) polarization basis the gridding is performed in:
         ``"linear"`` or ``"circular"``. The residual update grids and degrids the

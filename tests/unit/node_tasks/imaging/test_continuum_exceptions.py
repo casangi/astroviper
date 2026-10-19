@@ -84,7 +84,7 @@ def test_finalization_rejects_missing_accumulated_state(missing, message):
         ([{}, {}], {}, ValueError, "exactly one"),
         (None, {}, TypeError, "dictionary"),
         ({}, {}, KeyError, "image"),
-        ({"image": xr.Dataset()}, {}, KeyError, "iteration_control_params"),
+        ({"image": xr.Dataset()}, {}, KeyError, "cycle_control_params"),
     ],
 )
 def test_model_update_node_rejects_invalid_inputs(data, params, error, message):

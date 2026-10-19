@@ -5,7 +5,7 @@ import pytest
 import xarray as xr
 import xradio.image.image_xds  # noqa: F401
 
-from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
     ifft_norm_img_xds,
 )
 
@@ -98,7 +98,7 @@ def _sky_image(axis):
 
 
 def _forward(image, axis, dtype, **kwargs):
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_continuum_img_xds,
         fft_norm_img_xds,
     )
@@ -211,7 +211,7 @@ def test_forward_uses_output_as_workspace_and_drops_unkept_sky(axis, monkeypatch
     import importlib
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder"
+        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder"
     )
     original_fft = module.fft_lm_to_uv
     image = _sky_image(axis)

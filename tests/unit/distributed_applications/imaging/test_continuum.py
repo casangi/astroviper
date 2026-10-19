@@ -627,7 +627,7 @@ def _run_tw_hydra_continuum(
     weighting,
     *,
     deconvolver="hogbom",
-    iteration_control_params=None,
+    cycle_control_params=None,
     image_param_overrides=None,
     restore=False,
     pbcor=False,
@@ -649,8 +649,8 @@ def _run_tw_hydra_continuum(
     scheduler="synchronous",
 ):
     """Run one public distributed continuum configuration on TW Hydra."""
-    if iteration_control_params is None:
-        iteration_control_params = {
+    if cycle_control_params is None:
+        cycle_control_params = {
             "max_iter": 1,
             "max_cycles": 0,
             "threshold": 1.0e30,
@@ -666,8 +666,8 @@ def _run_tw_hydra_continuum(
             image_store=str(output_store),
             image_params=_tw_hydra_image_params(processing_set, image_param_overrides),
             imaging_weights_params=weighting,
-            iteration_control_params=iteration_control_params,
-            gridder="prolate_spheroidal",
+            cycle_control_params=cycle_control_params,
+            gridder="anti_alias",
             deconvolver=deconvolver,
             restore=restore,
             pbcor=pbcor,
@@ -1001,7 +1001,7 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
         2,
         specmode,
         {"weighting": "natural", "weighting_scope": "local"},
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 20,
             "max_cycles": 2,
             "threshold": 0.001,
@@ -1028,7 +1028,7 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
 ):
     """Native MT-MFS survives later cycles across distributed execution modes."""
     processing_set = open_processing_set(str(tw_hydra_store))
-    iteration_control_params = {
+    cycle_control_params = {
         "max_iter": 2,
         "max_cycles": 2,
         "threshold": 0.0,
@@ -1043,7 +1043,7 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
     }
     common = {
         "deconvolver": "mtmfs",
-        "iteration_control_params": iteration_control_params,
+        "cycle_control_params": cycle_control_params,
     }
     reference_result, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
@@ -1125,7 +1125,7 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
 ):
     """Cached GWVobs reproduces visibility-domain subtraction through CLEAN."""
     processing_set = open_processing_set(str(tw_hydra_store))
-    iteration_control_params = {
+    cycle_control_params = {
         "max_iter": 20,
         "max_cycles": 2,
         "threshold": 0.001,
@@ -1142,7 +1142,7 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
         2,
         specmode,
         weighting,
-        iteration_control_params=iteration_control_params,
+        cycle_control_params=cycle_control_params,
         visibility_memory_mode="recompute",
     )
     for cache_mode in ("in_memory", "in_place"):
@@ -1157,7 +1157,7 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
             2,
             specmode,
             weighting,
-            iteration_control_params=iteration_control_params,
+            cycle_control_params=cycle_control_params,
             visibility_memory_mode=cache_mode,
         )
 
@@ -1190,7 +1190,7 @@ def test_tw_hydra_widebandpb_modes_preserve_later_mvc_major_cycles(
 ):
     """Both low-memory PB policies reproduce MVC prediction after real CLEAN."""
     processing_set = open_processing_set(str(tw_hydra_store))
-    iteration_control_params = {
+    cycle_control_params = {
         "max_iter": 20,
         "max_cycles": 2,
         "threshold": 0.001,
@@ -1207,7 +1207,7 @@ def test_tw_hydra_widebandpb_modes_preserve_later_mvc_major_cycles(
         2,
         "mvc",
         {"weighting": "natural", "weighting_scope": "local"},
-        iteration_control_params=iteration_control_params,
+        cycle_control_params=cycle_control_params,
     )
     _, actual = _run_tw_hydra_continuum(
         tw_hydra_store,
@@ -1216,7 +1216,7 @@ def test_tw_hydra_widebandpb_modes_preserve_later_mvc_major_cycles(
         2,
         "mvc",
         {"weighting": "natural", "weighting_scope": "local"},
-        iteration_control_params=iteration_control_params,
+        cycle_control_params=cycle_control_params,
         widebandpb_memory_mode=widebandpb_memory_mode,
     )
 
@@ -1341,7 +1341,7 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
             "weighting_scope": "global",
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 20,
             "max_cycles": 2,
             "threshold": 0.001,
@@ -1432,7 +1432,7 @@ def test_tw_hydra_direct_max_iter_zero_dirty_image(tmp_path, tw_hydra_store):
         2,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 0,
             "max_cycles": 0,
             "threshold": 0.0,
@@ -1578,7 +1578,7 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
         "max_psf_fraction": 0.8,
     }
     kwargs = dict(
-        iteration_control_params=params,
+        cycle_control_params=params,
         visibility_memory_mode="in_memory",
         widebandpb_memory_mode="in_memory",
     )
@@ -1673,7 +1673,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
 ):
     """An optimistic minor-cycle peak cannot terminate the distributed driver."""
     import astroviper.processing_functions.imaging.image_continuum_single_field as processing
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_MAX_CYCLES,
         IMAGING_MAX_ITER,
     )
@@ -1713,7 +1713,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         visibility_memory_mode=visibility_memory_mode,
         restore=True,
         image_param_overrides={"polarization_coords": ["I"], "nterms": 1},
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": max_iter,
             "max_cycles": 3,
             "threshold": 1e-8,

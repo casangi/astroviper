@@ -324,10 +324,7 @@ IMAGING_PARAM_DOCS = {
         "Deconvolution algorithm for the model update. One of ``"
         '"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``\n'
         "(C++, threaded across *and* within planes -- faster when there are\n"
-        'few planes, e.g. single-channel imaging) or ``"asp"``. Long Högbom\n'
-        "cycles are checked in CASA-sized batches and stop a plane if its peak\n"
-        "becomes non-finite or rises more than 10% above the smallest measured\n"
-        "peak."
+        'few planes, e.g. single-channel imaging) or ``"asp"``.'
     ),
     "instrument_polarization_basis": (
         "Correlation (instrument) polarization basis the gridding is performed in:\n"

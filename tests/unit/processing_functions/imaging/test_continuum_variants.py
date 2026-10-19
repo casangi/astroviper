@@ -170,11 +170,11 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         model[0] = dtype(1.0)
         model[1] = dtype(2.0)
         return {
-            "iter_done": 3,
-            "peakres": 0.125,
+            "iterations_performed": 3,
+            "peak_residual": 0.125,
             "model_flux": float(model[0].sum()),
             "converged": False,
-            "stop_code": mtmfs.MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+            "stop_code": mtmfs.STOP_MAX_ITER,
             "scales": np.asarray([0.0]),
             "hessian_condition_number": np.asarray([2.0]),
         }
@@ -188,7 +188,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         "mtmfs",
         {
             "max_iter": 20,
-            "max_iter_per_cycle": np.asarray([[[3]]]),
+            "max_iter_per_cycle_updated": np.asarray([[[3]]]),
             "threshold_per_cycle": np.asarray([[[0.01]]], dtype=dtype),
             "gain": 0.2,
             "scales": [0.0],
@@ -196,7 +196,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     )
 
     assert len(calls) == 1
-    assert calls[0][3]["max_iter_per_cycle"] == 3
+    assert calls[0][3]["max_iter_per_cycle_updated"] == 3
     assert calls[0][3]["threshold_per_cycle"] == pytest.approx(0.01)
     assert "psf_fraction" not in calls[0][3]
     np.testing.assert_array_equal(image.SKY_RESIDUAL, residual_snapshot * dtype(0.5))
@@ -214,8 +214,8 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     )
     fields = next(iter(statistics.data.values()))
     assert fields["iter_done"] == [3]
-    assert fields["stop_code"].model_update == mtmfs.MODEL_UPDATE_MAX_ITER_PER_CYCLE
-    assert fields["stop_description"] == "Reached max_iter_per_cycle"
+    assert fields["stop_code"].model_update == mtmfs.STOP_MAX_ITER
+    assert fields["stop_description"] == "Reached max_iter_per_cycle_updated"
     assert fields["peakres"] == [pytest.approx(0.125)]
     assert fields["model_flux"] == [pytest.approx(64.0)]
     assert fields["masksum"] == [64]
@@ -248,7 +248,7 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
         "mtmfs",
         {
             "max_iter": 1,
-            "max_iter_per_cycle": iterations,
+            "max_iter_per_cycle_updated": iterations,
             "threshold_per_cycle": thresholds,
             "gain": 1.0,
             "scales": [0.0],
@@ -270,8 +270,8 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
         assert fields["iter_done"] == [1]
         assert fields["masksum"] == [1]
         assert fields["stop_code"].model_update in {
-            mtmfs.MODEL_UPDATE_MAX_ITER_PER_CYCLE,
-            mtmfs.MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+            mtmfs.STOP_MAX_ITER,
+            mtmfs.STOP_THRESHOLD,
         }
         assert fields["model_flux"] == [
             pytest.approx(expected_model[key.time, 0, key.pol].sum(), rel=2e-4)
@@ -311,7 +311,7 @@ def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):
         model_update_mtmfs_single_field(
             image,
             "mtmfs",
-            {"max_iter": 1, "max_iter_per_cycle": 1, "gain": 0.1},
+            {"max_iter": 1, "max_iter_per_cycle_updated": 1, "gain": 0.1},
         )
 
     assert called == []

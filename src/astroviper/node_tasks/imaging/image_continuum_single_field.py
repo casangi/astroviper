@@ -2097,7 +2097,7 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         ifft_norm_img_xds,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
@@ -2431,7 +2431,7 @@ def _prepare_continuum_image(
     )
 
     # transform_polarization_basis may place polarization after the spatial
-    # dimensions. Restore the canonical layouts required by iteration control,
+    # dimensions. Restore the canonical layouts required by cycle control,
     # masking, deconvolution, and restoration.
     canonical_dimension_orders = {
         "SKY_RESIDUAL": (
@@ -2941,7 +2941,7 @@ def model_update_continuum_single_field(
             ▼
     model_update_continuum_single_field
             │
-            ├── updates the iteration controller
+            ├── updates the cycle controller
             ├── determines the model-update parameters
             ├── calls model_update_mtmfs_single_field
             ├── updates the continuum sky model
@@ -2967,8 +2967,8 @@ def model_update_continuum_single_field(
     input_params : dict
         Append-node configuration. Expected entries are
 
-        ``iteration_control_params``
-            Global CLEAN iteration-control parameters.
+        ``cycle_control_params``
+            Global CLEAN cycle control parameters.
 
         Optional entries are
 
@@ -2982,8 +2982,8 @@ def model_update_continuum_single_field(
             Whether this is the first imaging cycle. Defaults to ``True``.
 
         ``controller``
-            Existing :class:`IterationController`. If omitted, a new controller is
-            constructed from ``iteration_control_params``.
+            Existing :class:`CycleController`. If omitted, a new controller is
+            constructed from ``cycle_control_params``.
 
         ``image_data_group_in_name``
             Residual image data-group name. Defaults to ``"residual"``.
@@ -3003,7 +3003,7 @@ def model_update_continuum_single_field(
             Timing dataframe including the model-update stage.
 
         ``"controller"``
-            Updated iteration controller.
+            Updated cycle controller.
 
         ``"residual_converged"``
             True only when refreshed residual statistics confirm a stop,
@@ -3021,7 +3021,7 @@ def model_update_continuum_single_field(
     from astroviper.processing_functions.imaging.utils import (
         ImagingDict,
         copy_residual_entropy,
-        get_calculate_cycle_controls,
+        get_per_cycle_limits,
         merge_imaging_dicts,
     )
 
@@ -3050,12 +3050,12 @@ def model_update_continuum_single_field(
             "The continuum reduce result does not contain the required 'image' entry."
         )
 
-    if "iteration_control_params" not in input_params:
-        raise KeyError("input_params must contain 'iteration_control_params'.")
+    if "cycle_control_params" not in input_params:
+        raise KeyError("input_params must contain 'cycle_control_params'.")
 
     # Prepare control parameters
     img_xds = input_data["image"]
-    iteration_control_params = input_params["iteration_control_params"]
+    cycle_control_params = input_params["cycle_control_params"]
     deconvolver = input_params.get("deconvolver", "hogbom")
     processing_function_threads = input_params.get(
         "processing_function_threads",
@@ -3073,7 +3073,7 @@ def model_update_continuum_single_field(
     )
 
     # -------------------------------------------------------------
-    # Obtain the iteration controller.
+    # Obtain the cycle controller.
     # -------------------------------------------------------------
     controller = input_params.get("controller")
 
@@ -3089,7 +3089,7 @@ def model_update_continuum_single_field(
         combined_deconvolve_dict = ImagingDict()
 
     timing = {
-        "T_iteration_control": 0.0,
+        "T_cycle_control": 0.0,
         "T_model_update": 0.0,
         "T_convergence": 0.0,
     }
@@ -3100,7 +3100,7 @@ def model_update_continuum_single_field(
     start = time.time()
     controller.ensure_planes(img_xds.sizes["time"], 1, img_xds.sizes["polarization"])
     residual_imaging_dict = build_continuum_residual_imaging_dict(
-        img_xds, image_data_group_in_name, iteration_control_params
+        img_xds, image_data_group_in_name, cycle_control_params
     )
     stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
     if stopcode.imaging != 0:
@@ -3136,20 +3136,15 @@ def model_update_continuum_single_field(
 
     # Reuse the shared controls with fresh statistics on every cycle, rather
     # than using the preceding approximate minor-cycle residual history.
-    max_iter_per_cycle, threshold_per_cycle = get_calculate_cycle_controls(
-        controller,
-        combined_deconvolve_dict,
-        img_xds,
-        model_exists=False,
-        iteration_control_params=iteration_control_params,
-        residual_imaging_dict=residual_imaging_dict,
+    max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
+        controller, residual_imaging_dict
     )
 
-    timing["T_iteration_control"] = time.time() - start
+    timing["T_cycle_control"] = time.time() - start
 
     deconvolve_params = {
-        **iteration_control_params,
-        "max_iter_per_cycle": max_iter_per_cycle,
+        **cycle_control_params,
+        "max_iter_per_cycle_updated": max_iter_per_cycle_updated,
         "threshold_per_cycle": threshold_per_cycle,
     }
 

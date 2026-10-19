@@ -1264,8 +1264,8 @@ def test_explicit_budget_matches_casa_capped_point_updates(casa_cap, cycles, dty
             psf=psf,
             model=model,
             gain=0.1,
-            threshold=0.0,
-            max_iter_remaining=budget,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=budget,
         )
         assert result["iterations_performed"] == budget
     expected_residual = 0.9 ** (cycles * budget)

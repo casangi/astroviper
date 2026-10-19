@@ -121,9 +121,9 @@ def mvc_grid_inputs(monkeypatch):
         normalization += 3
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp"
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
     )
-    monkeypatch.setattr(module, "prolate_spheroidal_grid", kernel)
+    monkeypatch.setattr(module, "anti_alias_grid", kernel)
     return ms, image
 
 

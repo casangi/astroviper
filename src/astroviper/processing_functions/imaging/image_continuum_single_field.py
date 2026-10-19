@@ -463,7 +463,7 @@ def prepare_model_uv_continuum_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_continuum_img_xds,
     )
 
@@ -709,7 +709,7 @@ def prepare_model_uv_mvc_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_img_xds,
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
@@ -1647,7 +1647,7 @@ def residual_update_continuum_single_field(
         mvc_observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
 
     if str(specmode).lower() == "mvc":
-        from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
             ifft_norm_img_xds,
         )
 
@@ -1757,7 +1757,7 @@ def residual_update_continuum_single_field(
 
 
 def build_continuum_residual_imaging_dict(
-    img_xds, image_data_group_in_name, iteration_control_params
+    img_xds, image_data_group_in_name, cycle_control_params
 ):
     """Present Taylor-zero residual statistics as one plane to the controller.
 
@@ -1783,7 +1783,7 @@ def build_continuum_residual_imaging_dict(
     )
 
     entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
-        validate_entropy_params(iteration_control_params)
+        validate_entropy_params(cycle_control_params)
     )
 
     group = img_xds.attrs["data_groups"][image_data_group_in_name]
@@ -1806,8 +1806,7 @@ def build_continuum_residual_imaging_dict(
         pb = plane_zero(img_xds[group["primary_beam"]])
         support = (
             pb
-            >= iteration_control_params.get("primary_beam_limit", 0.0)
-            * pb.max(skipna=True)
+            >= cycle_control_params.get("primary_beam_limit", 0.0) * pb.max(skipna=True)
         ).broadcast_like(residual) & (pb != 0).broadcast_like(residual)
     else:
         support = xr.ones_like(residual, dtype=bool)
@@ -1852,7 +1851,7 @@ def build_continuum_residual_imaging_dict(
                 "masksum": int(np.count_nonzero(selected)),
                 "iter_done": 0,
                 "max_psf_sidelobe": float(sidelobe[tt, pp]),
-                "gain": iteration_control_params.get("gain", 0.1),
+                "gain": cycle_control_params.get("gain", 0.1),
             }
             if entropy_stop:
                 fields["entropy"] = float(entropy[tt, 0, pp])
@@ -1883,7 +1882,7 @@ def _model_update_native_mtmfs(
 
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
     from astroviper.processing_functions.imaging.utils import ImagingDict, StopCode
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
         MODEL_UPDATE_STOP_DESCRIPTIONS,
     )
@@ -1997,7 +1996,7 @@ def _model_update_native_mtmfs(
             )
             max_iter = int(
                 plane_control(
-                    "max_iter_per_cycle",
+                    "max_iter_per_cycle_updated",
                     tt,
                     pp,
                     deconvolve_params.get("max_iter", 0),
@@ -2010,7 +2009,7 @@ def _model_update_native_mtmfs(
                 mask=mask_work,
                 scales=deconvolve_params.get("scales", []),
                 small_scale_bias=deconvolve_params.get("small_scale_bias", 0.0),
-                max_iter_per_cycle=max_iter,
+                max_iter_per_cycle_updated=max_iter,
                 gain=deconvolve_params.get("gain", 0.1),
                 threshold_per_cycle=threshold_per_cycle,
                 mask_threshold=deconvolve_params.get("mask_threshold", 0.9),
@@ -2021,7 +2020,7 @@ def _model_update_native_mtmfs(
             fields = {
                 "max_iter": deconvolve_params.get("max_iter"),
                 "threshold_per_cycle": threshold_per_cycle,
-                "iter_done": int(result["iter_done"]),
+                "iter_done": int(result["iterations_performed"]),
                 "gain": deconvolve_params.get("gain", 0.1),
                 "max_psf_sidelobe": float(max_sidelobe[tt, pp]),
                 "stop_code": StopCode(
@@ -2038,7 +2037,7 @@ def _model_update_native_mtmfs(
                 "model_flux": float(result["model_flux"]),
                 "start_peakres": start_peak,
                 "start_peakres_nomask": start_peak_nomask,
-                "peakres": float(result["peakres"]),
+                "peakres": float(result["peak_residual"]),
                 "peakres_nomask": float(np.max(np.abs(residual_work[0]), initial=0.0)),
                 "masksum": int(np.count_nonzero(final_selected)),
                 "scales": result["scales"],
@@ -2116,8 +2115,8 @@ def model_update_mtmfs_single_field(
 
     deconvolve_params : dict
         Minor-cycle control parameters. These typically include entries such as
-        ``max_iter``, ``max_iter_per_cycle``, ``threshold_per_cycle``, ``gain``,
-        ``scales``, ``small_scale_bias``, and ``mask_threshold``.
+        ``max_iter``, ``max_iter_per_cycle_updated``, ``threshold_per_cycle``,
+        ``gain``, ``scales``, ``small_scale_bias``, and ``mask_threshold``.
         The per-cycle limits and thresholds accept scalars or per-plane arrays,
         using the same keys as the cube deconvolver.
 
@@ -2205,7 +2204,7 @@ def model_update_mtmfs_single_field(
     cube_deconvolve_params = copy.deepcopy(deconvolve_params)
 
     for parameter_name in (
-        "max_iter_per_cycle",
+        "max_iter_per_cycle_updated",
         "threshold_per_cycle",
     ):
         parameter_value = cube_deconvolve_params.get(parameter_name)

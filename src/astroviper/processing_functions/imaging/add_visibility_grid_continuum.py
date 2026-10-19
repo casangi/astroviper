@@ -79,8 +79,8 @@ def add_visibility_grid_continuum_single_field(
         ``img_xds`` is modified in place.
     """
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -274,7 +274,7 @@ def add_visibility_grid_continuum_single_field(
         )
 
         # gridding functionality
-        prolate_spheroidal_grid(
+        anti_alias_grid(
             grid_view,
             temporary_normalization,
             vis_data,

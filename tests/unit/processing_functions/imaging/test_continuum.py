@@ -353,11 +353,9 @@ def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(
         grid[:, observed_frequency_map, ...] = 1.0
         normalization[:, observed_frequency_map, ...] = 1.0
 
-    module_name = (
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp"
-    )
+    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
     extension_module = ModuleType(module_name)
-    extension_module.prolate_spheroidal_grid = fake_grid
+    extension_module.anti_alias_grid = fake_grid
     monkeypatch.setitem(sys.modules, module_name, extension_module)
 
     add_visibility_grid_mvc_single_field(ms_xds, np.ones(8), image)
@@ -417,11 +415,9 @@ def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypat
         grid += weight_sum[..., None, None]
         normalization += weight_sum
 
-    module_name = (
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp"
-    )
+    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
     extension_module = ModuleType(module_name)
-    extension_module.prolate_spheroidal_grid = fake_grid
+    extension_module.anti_alias_grid = fake_grid
     monkeypatch.setitem(sys.modules, module_name, extension_module)
 
     for child_weight in (2.0, 3.0):
@@ -673,7 +669,7 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder."
+        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
         "fft_norm_continuum_img_xds",
         fake_fft,
     )
@@ -721,7 +717,7 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         lambda dataset, **kwargs: dataset,
     )
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder."
+        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
         "fft_norm_img_xds",
         lambda dataset, **kwargs: dataset,
     )
@@ -784,7 +780,7 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(monkeypatch, specm
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder."
+        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
         "ifft_norm_img_xds",
         fake_ifft,
     )
@@ -834,13 +830,13 @@ def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
         vis[...] = 3.0
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp."
-        "prolate_spheroidal_degrid",
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "anti_alias_degrid",
         fake_kernel,
     )
     degrid_visibility_grid_single_field(
         ms,
-        np.ones(351),
+        np.ones(400),  # support-7 half kernel table, oversampling 100
         geometry,
         np.ones((1, 2, 1, 2, 2), dtype=np.complex64),
         [0, 1],
@@ -879,14 +875,14 @@ def test_shared_degridder_allocates_model_from_weights_without_observed_data(
     )
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp."
-        "prolate_spheroidal_degrid",
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "anti_alias_degrid",
         lambda grid, vis, *args, **kwargs: vis.fill(2.0),
     )
 
     degrid_visibility_grid_single_field(
         ms,
-        np.ones(351),
+        np.ones(400),  # support-7 half kernel table, oversampling 100
         geometry,
         np.ones((1, 2, 1, 2, 2), dtype=np.complex64),
         [0, 1],
@@ -904,9 +900,8 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
         build_continuum_residual_imaging_dict,
     )
     from astroviper.processing_functions.imaging.utils import (
-        ImagingDict,
-        IterationController,
-        get_calculate_cycle_controls,
+        CycleController,
+        get_per_cycle_limits,
     )
 
     residual = np.full((2, 3, 2, 3, 4), 1000.0)
@@ -935,15 +930,8 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
         assert values["peakres"] == [peaks[key.time, key.pol]]
         assert values["masksum"] == [8 if with_mask else 12]
         assert values["max_psf_sidelobe"] == 0.2
-    controller = IterationController(max_iter=10, max_iter_per_cycle=3)
-    limits, thresholds = get_calculate_cycle_controls(
-        controller,
-        ImagingDict(),
-        image,
-        model_exists=False,
-        iteration_control_params=params,
-        residual_imaging_dict=stats,
-    )
+    controller = CycleController(max_iter=10, max_iter_per_cycle=3)
+    limits, thresholds = get_per_cycle_limits(controller, stats)
     assert limits.shape == (2, 1, 2)
     np.testing.assert_array_equal(limits, 3)
     np.testing.assert_allclose(thresholds[:, 0], 0.2 * peaks)
