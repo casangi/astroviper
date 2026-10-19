@@ -1240,10 +1240,6 @@ def test_odd_sizes_subtract_every_psf_sample_in_every_kernel(dtype, shape):
     assert np.array_equal(model, m1[0, 0, 0])
 
 
-if __name__ == "__main__":  # pragma: no cover
-    pytest.main([__file__, "-v"])
-
-
 @pytest.mark.parametrize("casa_cap", [0, 1, 5])
 @pytest.mark.parametrize("cycles", [1, 2])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -1271,3 +1267,7 @@ def test_explicit_budget_matches_casa_capped_point_updates(casa_cap, cycles, dty
     expected_residual = 0.9 ** (cycles * budget)
     assert dirty[8, 8] == pytest.approx(expected_residual, abs=2e-7)
     assert model.sum() == pytest.approx(1 - expected_residual, abs=2e-7)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__, "-v"])
