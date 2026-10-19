@@ -64,18 +64,57 @@ def test_public_api_rejects_msv2_before_creating_output(monkeypatch, tmp_path):
     assert not output.exists()
 
 
-@pytest.mark.parametrize(
-    "deconvolver", ["hogbom_many_threads", "asp", "aspclean", "asp_clean"]
-)
+@pytest.mark.parametrize("deconvolver", ["hogbom_many_threads", "clark", ""])
 def test_public_api_rejects_deconvolvers_the_continuum_model_update_lacks(
     deconvolver,
 ):
-    with pytest.raises(ValueError, match="must be 'hogbom' or 'mtmfs'"):
-        _resolve_continuum_deconvolver(deconvolver, {"n_taylor_terms": 2})
+    with pytest.raises(
+        ValueError, match=r"must be 'hogbom', 'asp' \(aliases .*\) or 'mtmfs'"
+    ):
+        _resolve_continuum_deconvolver(deconvolver, {"n_taylor_terms": 1})
 
 
 def test_non_mtmfs_deconvolver_does_not_require_nterms():
     assert _resolve_continuum_deconvolver("hogbom", {}) == "hogbom"
+
+
+@pytest.mark.parametrize("deconvolver", ["asp", "ASP", "aspclean", "asp_clean"])
+def test_public_api_resolves_asp_and_its_aliases_with_one_taylor_term(deconvolver):
+    assert _resolve_continuum_deconvolver(deconvolver, {"n_taylor_terms": 1}) == "asp"
+
+
+@pytest.mark.parametrize(
+    "params,error,message",
+    [
+        ({}, KeyError, "must contain 'n_taylor_terms' when deconvolver='asp'"),
+        (
+            {"n_taylor_terms": 1.0},
+            TypeError,
+            "must be an integer when deconvolver='asp'",
+        ),
+        (
+            {"n_taylor_terms": 0},
+            ValueError,
+            r"requires image_params\['n_taylor_terms'\] = 1",
+        ),
+        (
+            {"n_taylor_terms": 2},
+            ValueError,
+            r"requires image_params\['n_taylor_terms'\] = 1",
+        ),
+        (
+            {"n_taylor_terms": 4},
+            ValueError,
+            r"requires image_params\['n_taylor_terms'\] = 1",
+        ),
+    ],
+)
+@pytest.mark.parametrize("deconvolver", ["asp", "aspclean"])
+def test_public_api_refuses_asp_without_exactly_one_taylor_term(
+    deconvolver, params, error, message
+):
+    with pytest.raises(error, match=message):
+        _resolve_continuum_deconvolver(deconvolver, params)
 
 
 @pytest.mark.parametrize("n_taylor_terms", [2, np.int64(2)])

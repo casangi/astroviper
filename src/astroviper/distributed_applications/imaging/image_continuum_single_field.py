@@ -2609,29 +2609,47 @@ def _load_continuum_clean_mask(clean_mask, image_size):
 
 
 def _resolve_continuum_deconvolver(deconvolver, image_params):
-    """Resolve user-facing continuum deconvolver choices before graph creation."""
+    """Resolve user-facing continuum deconvolver choices before graph creation.
+
+    ``"aspclean"`` and ``"asp_clean"`` resolve to ``"asp"``. Asp cleans Taylor
+    term zero, so it needs ``image_params["n_taylor_terms"] == 1``.
+    """
     import operator
     import warnings
 
     deconvolver = str(deconvolver).lower()
-    if deconvolver not in ("hogbom", "mtmfs"):
+    if deconvolver in ("aspclean", "asp_clean"):
+        deconvolver = "asp"
+    if deconvolver not in ("hogbom", "asp", "mtmfs"):
         raise ValueError(
-            "deconvolver must be 'hogbom' or 'mtmfs' for continuum imaging; "
+            "deconvolver must be 'hogbom', 'asp' (aliases 'aspclean' and "
+            "'asp_clean') or 'mtmfs' for continuum imaging; "
             f"received {deconvolver!r}."
         )
-    if deconvolver != "mtmfs":
+    if deconvolver == "hogbom":
         return deconvolver
 
     if "n_taylor_terms" not in image_params:
         raise KeyError(
-            "image_params must contain 'n_taylor_terms' when deconvolver='mtmfs'."
+            "image_params must contain 'n_taylor_terms' when "
+            f"deconvolver='{deconvolver}'."
         )
     try:
         n_taylor_terms = operator.index(image_params["n_taylor_terms"])
     except TypeError as exc:
         raise TypeError(
-            "image_params['n_taylor_terms'] must be an integer when deconvolver='mtmfs'."
+            "image_params['n_taylor_terms'] must be an integer when "
+            f"deconvolver='{deconvolver}'."
         ) from exc
+
+    if deconvolver == "asp":
+        if n_taylor_terms != 1:
+            raise ValueError(
+                "deconvolver='asp' cleans Taylor term zero only and requires "
+                f"image_params['n_taylor_terms'] = 1; received {n_taylor_terms}. "
+                "Use deconvolver='mtmfs' for 2 to 4 Taylor terms."
+            )
+        return deconvolver
 
     if n_taylor_terms == 1:
         warnings.warn(
