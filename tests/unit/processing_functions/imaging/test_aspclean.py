@@ -1283,3 +1283,45 @@ class TestRingCleaning:
             )
             np.testing.assert_array_equal(resid[0, f, 0], r1)
             np.testing.assert_array_equal(model[0, f, 0], m1)
+
+
+class TestInitialScales:
+    """A ``largestscale`` below the PSF width gives the initial scales 0,
+    ``largestscale`` and the PSF width, as LibRA does (issue #327), instead
+    of the point scale only (CASA 6.7.5.18); 0 asks for the point scale
+    only."""
+
+    def test_largest_scale_below_the_psf_width_keeps_scale_components(self):
+        psf, sky, dirty, mask, threshold = TestRingCleaning._scene()
+        width = aspclean.psf_gaussian_width(psf)
+        largest = int(width // 2)
+        assert 0 < largest < width
+        point_only, *_ = TestRingCleaning._clean(
+            psf, dirty, mask, threshold, largestscale=0
+        )
+        assert point_only["timing"]["n_scale_components"] == 0
+        assert point_only["stop_code"] == 1  # the iteration limit
+        out, resid, model = TestRingCleaning._clean(
+            psf, dirty, mask, threshold, largestscale=largest
+        )
+        assert out["timing"]["n_scale_components"] > 0
+        assert out["stop_code"] == 2  # the threshold
+        assert out["iterations_performed"] < point_only["iterations_performed"]
+        np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.1)
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+
+    def test_significance_per_scale_with_a_small_largest_scale(self):
+        """The test of significance per scale has scales to search."""
+        psf, sky, dirty, mask, threshold = TestRingCleaning._scene(faint=True)
+        largest = int(aspclean.psf_gaussian_width(psf) // 2)
+        _, _, model = TestRingCleaning._clean(
+            psf, dirty, mask, threshold, largestscale=0, scale_significance=True
+        )
+        assert not model.any()
+        out, _, model = TestRingCleaning._clean(
+            psf, dirty, mask, threshold, largestscale=largest, scale_significance=True
+        )
+        assert out["timing"]["n_significance_components"] > 0
+        assert model.sum() > 0.1 * sky.sum()

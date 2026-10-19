@@ -28,7 +28,9 @@
 //    the other deconvolvers (../../include/plane_stop_test.hpp), whose two
 //    limits are off unless the caller enables them; an infinite peak always
 //    stops the model update. astroviper's Python layer gives Asp the RMS
-//    limit with the factor (1 + gain) and no peak limit.
+//    limit with the factor (1 + gain) and no peak limit;
+//  * a largestscale below the PSF width gives the initial scales 0,
+//    largestscale and the PSF width, as in LibRA, not the point scale only.
 // A residual pixel outside the search region (mask not above 0.99) that is
 // not finite is zero during the model update and gets its value back
 // afterwards.

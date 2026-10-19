@@ -823,8 +823,17 @@ private:
             uls = std::ceil(std::min(nx_ / 10, ny_ / 10));
         const int numscale = static_cast<int>(std::floor(uls / psfWidth_));
         if (numscale == 0) {
-            nInitScales_ = 1;
-            initScaleSizes_ = {0.0};
+            // A largest scale below the PSF width keeps scale components, as
+            // in LibRA (AspMatrixCleaner at fc54ee25): the initial scales are
+            // 0, largestscale and the PSF width. CASA 6.7.5.18 keeps the
+            // point scale only, which makes Asp a Hogbom clean and leaves the
+            // significance per scale nothing to search. A largestscale of 0
+            // still asks for the point scale only (LibRA would repeat it).
+            if (uls > 0.0)
+                initScaleSizes_ = {0.0, uls, psfWidth_};
+            else
+                initScaleSizes_ = {0.0};
+            nInitScales_ = static_cast<int>(initScaleSizes_.size());
         } else {
             initScaleSizes_ = {0.0};
             int scale = 1;

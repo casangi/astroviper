@@ -1453,7 +1453,9 @@ def asp_clean(
           seed the initial scales. ``<= 0`` estimates it internally.
           Default 0.0.
         - ``largestscale`` : int, largest initial scale in pixels.
-          ``-1`` uses the default (0, w, 2w, 4w, 8w). Default -1.
+          ``-1`` uses the default (0, w, 2w, 4w, 8w); a value between 0 and
+          the PSF width ``w`` gives the scales 0, ``largestscale`` and ``w``
+          (as LibRA), and 0 the point scale only. Default -1.
         - ``stoppointmode`` : int, stop after this many consecutive
           smallest-scale (point) components. ``-1`` disables. Default -1.
         - ``norm_method`` : int, scale-normalization method (1 is the
