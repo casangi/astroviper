@@ -1190,10 +1190,15 @@ def residual_update_continuum_single_field(
         )
 
     # Build the empty image in the correlation basis expected by the gridder.
-    correlation_pol_coords = {
-        "linear": ["XX", "YY"],
-        "circular": ["RR", "LL"],
-    }[instrument_polarization_basis]
+    # The requested Stokes planes fix the correlations (the ones the driver
+    # selected for this task's data).
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
+    )
+
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
 
     start = time.time()
 
@@ -1606,6 +1611,9 @@ def grid_imaging_weight_density_continuum_node(
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
         grid_imaging_weight_density_continuum,
     )
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
+    )
 
     task_id = int(task_id)
     task_start = time.time()
@@ -1660,17 +1668,9 @@ def grid_imaging_weight_density_continuum_node(
             "coordinate under the key 'data'."
         )
 
-    correlation_pol_coords = {
-        "linear": ["XX", "YY"],
-        "circular": ["RR", "LL"],
-    }
-
-    if instrument_polarization_basis not in correlation_pol_coords:
-        raise ValueError(
-            "instrument_polarization_basis must be 'linear' or "
-            f"'circular'; received "
-            f"{instrument_polarization_basis!r}."
-        )
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
 
     start = time.time()
 
@@ -1679,7 +1679,7 @@ def grid_imaging_weight_density_continuum_node(
         image_size=image_params["image_size"],
         cell_size=image_params["cell_size"],
         frequency_coords=task_coords["frequency"]["data"],
-        pol_coords=correlation_pol_coords[instrument_polarization_basis],
+        pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
@@ -1821,6 +1821,9 @@ def degrid_imaging_weights_continuum_node(
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
         degrid_imaging_weights_continuum,
     )
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
+    )
 
     task_id = int(task_id)
     task_start = time.time()
@@ -1884,16 +1887,9 @@ def degrid_imaging_weights_continuum_node(
             "coordinate under 'data'."
         )
 
-    correlation_pol_coords = {
-        "linear": ["XX", "YY"],
-        "circular": ["RR", "LL"],
-    }
-
-    if instrument_polarization_basis not in correlation_pol_coords:
-        raise ValueError(
-            "instrument_polarization_basis must be 'linear' or "
-            f"'circular'; received {instrument_polarization_basis!r}."
-        )
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
 
     start = time.time()
 
@@ -1902,7 +1898,7 @@ def degrid_imaging_weights_continuum_node(
         image_size=image_params["image_size"],
         cell_size=image_params["cell_size"],
         frequency_coords=task_coords["frequency"]["data"],
-        pol_coords=correlation_pol_coords[instrument_polarization_basis],
+        pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )

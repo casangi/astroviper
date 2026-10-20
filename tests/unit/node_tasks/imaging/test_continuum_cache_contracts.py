@@ -40,7 +40,7 @@ def test_primary_beam_cache_roundtrip_preserves_disjoint_reordered_channels(
     )
     image = xr.Dataset({"PRIMARY_BEAM": beam})
     _create_wideband_primary_beam_cache_store(
-        store, image, image.frequency.values, "linear", single_precision, None
+        store, image, image.frequency.values, ["XX", "YY"], single_precision, None
     )
     first = image.isel(frequency=[2, 0])
     _write_wideband_primary_beam_in_place(first, store)

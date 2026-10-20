@@ -84,7 +84,7 @@ def _create_wideband_primary_beam_cache_store(
     image_store,
     img_xds,
     frequency_values,
-    instrument_polarization_basis,
+    correlations,
     single_precision_image,
     compressor,
 ):
@@ -97,10 +97,7 @@ def _create_wideband_primary_beam_cache_store(
     cache = root.create_group(_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP)
 
     frequencies = np.asarray(frequency_values, dtype=np.float64)
-    polarizations = {
-        "linear": ("XX", "YY"),
-        "circular": ("RR", "LL"),
-    }[instrument_polarization_basis]
+    polarizations = tuple(correlations)
     dimensions = ("time", "frequency", "polarization", "l", "m")
     shape = (
         int(img_xds.sizes["time"]),
@@ -170,7 +167,7 @@ def _create_mvc_visibility_grid_cache_store(
     img_xds,
     image_params,
     frequency_values,
-    instrument_polarization_basis,
+    correlations,
     single_precision_image,
     compressor,
 ):
@@ -187,10 +184,7 @@ def _create_mvc_visibility_grid_cache_store(
     cache = root.create_group(_MVC_VISIBILITY_GRID_CACHE_GROUP)
 
     frequencies = np.asarray(frequency_values, dtype=np.float64)
-    polarizations = {
-        "linear": ("XX", "YY"),
-        "circular": ("RR", "LL"),
-    }[instrument_polarization_basis]
+    polarizations = tuple(correlations)
     n_u, n_v = padded_grid_size(
         (img_xds.sizes["l"], img_xds.sizes["m"]),
         image_params["fft_padding"],
@@ -2731,7 +2725,9 @@ def image_continuum_single_field(
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     specmode : {"mfs", "mvc"}
-        Taylor UV gridding or channel-image Taylor construction.
+        Taylor UV gridding or channel-image Taylor construction. ``"mvc"``
+        images the two parallel hands only; ``["I", "Q", "U", "V"]`` is
+        refused.
     deconvolver : str
         Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
@@ -3090,6 +3086,11 @@ def image_continuum_single_field(
         IMAGING_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
     )
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlation_selection,
+        correlations_for_stokes,
+        is_four_correlation_basis,
+    )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
@@ -3173,6 +3174,41 @@ def image_continuum_single_field(
     # summary logged just before returning.
     timing_distributed_application = {}
     application_start = time.time()
+
+    # The residual update grids in the instrument basis and the model update
+    # deconvolves in Stokes, so the requested Stokes planes fix the correlations
+    # that are loaded and gridded. Checked here, before anything is created.
+    correlation_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
+    # MVC makes its Taylor terms real, which drops the imaginary part of the
+    # cross-hand images (V for linear feeds, U for circular feeds).
+    if specmode == "mvc" and is_four_correlation_basis(correlation_coords):
+        raise ValueError(
+            f"specmode='mvc' does not image polarization_coords "
+            f"{list(image_params['polarization_coords'])}: request the two "
+            "parallel hands or use specmode='mfs'."
+        )
+
+    start = time.time()
+    ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
+    timing_distributed_application["T_open_processing_set"] = time.time() - start
+
+    if len(ps_xdt) == 0:
+        raise ValueError(
+            "The Processing Set is empty after applying scan_intents="
+            f"{scan_intents!r}. Check the available scan intents before imaging."
+        )
+
+    # Every measurement set must hold the needed correlations; checked here,
+    # before anything is written. The index positions of the needed
+    # correlations are added to the data selection of every task below.
+    correlation_selections = {
+        ms_name: correlation_selection(
+            ms_xdt.polarization.values, correlation_coords, ms_name
+        )
+        for ms_name, ms_xdt in ps_xdt.items()
+    }
 
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()
@@ -3289,16 +3325,6 @@ def image_continuum_single_field(
 
     controller = _make_continuum_cycle_controller(cycle_control_params)
 
-    start = time.time()
-    ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
-    timing_distributed_application["T_open_processing_set"] = time.time() - start
-
-    if len(ps_xdt) == 0:
-        raise ValueError(
-            "The Processing Set is empty after applying scan_intents="
-            f"{scan_intents!r}. Check the available scan intents before imaging."
-        )
-
     from astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam import (
         resolve_continuum_primary_beam,
     )
@@ -3328,13 +3354,25 @@ def image_continuum_single_field(
     )
     timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
 
+    # Load only the correlations that are needed: their index positions are
+    # added to the selection of every measurement set that holds more (or
+    # differently ordered) correlations, for the weight and the imaging
+    # graphs alike. A set that holds exactly the needed ones keeps its
+    # selection unchanged.
+    for ms_name, selection in correlation_selections.items():
+        if selection is None:
+            continue
+        for task in node_task_data_mapping.values():
+            if task["data_selection"].get(ms_name) is not None:
+                task["data_selection"][ms_name]["polarization"] = selection
+
     if specmode == "mvc" and widebandpb_memory_mode == "in_place":
         start = time.time()
         _create_wideband_primary_beam_cache_store(
             image_store,
             img_xds,
             image_params["frequency_coords"],
-            instrument_polarization_basis,
+            correlation_coords,
             single_precision_image,
             compressor,
         )
@@ -3349,7 +3387,7 @@ def image_continuum_single_field(
             img_xds,
             image_params,
             image_params["frequency_coords"],
-            instrument_polarization_basis,
+            correlation_coords,
             single_precision_image,
             compressor,
         )

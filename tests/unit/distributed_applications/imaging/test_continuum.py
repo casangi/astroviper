@@ -1712,7 +1712,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         {"weighting": "natural", "weighting_scope": "local"},
         visibility_memory_mode=visibility_memory_mode,
         restore=True,
-        image_param_overrides={"polarization_coords": ["I"], "nterms": 1},
+        image_param_overrides={"polarization_coords": ["I", "Q"], "nterms": 1},
         cycle_control_params={
             "max_iter": max_iter,
             "max_cycles": 3,

@@ -466,6 +466,7 @@ def _weight_node_params():
             "image_size": [2, 2],
             "cell_size": [1.0, 1.0],
             "time_coords": [0.0],
+            "polarization_coords": ["I", "Q"],
         },
         "imaging_weights_params": {"weighting": "briggs", "robust": 0.5},
         "task_coords": {"frequency": {"data": np.array([1.0e9, 1.1e9])}},

@@ -133,7 +133,7 @@ def test_image_cache_replacement_and_repeated_cleanup(
                 image,
                 {"fft_padding": 1.0},
                 image.frequency.values,
-                "linear",
+                ["XX", "YY"],
                 single_precision,
                 None,
             )
@@ -155,7 +155,12 @@ def test_image_cache_replacement_and_repeated_cleanup(
     else:
         for value in (1.0, 7.0):
             driver._create_wideband_primary_beam_cache_store(
-                store, image, image.frequency.values, "linear", single_precision, None
+                store,
+                image,
+                image.frequency.values,
+                ["XX", "YY"],
+                single_precision,
+                None,
             )
             blank = node._load_wideband_primary_beam_in_place(image, store)
             assert np.isnan(blank.PRIMARY_BEAM).all()
