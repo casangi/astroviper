@@ -5,6 +5,7 @@ These tests ensure the disk output uses those finalized dimensions and values,
 rather than retaining the frequency-cube NaN placeholders created at startup.
 """
 
+import json
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -23,6 +24,7 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _accumulate_graph_timings,
     _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
+    _create_continuum_weight_cache_store,
     _graph_timing_record,
     _load_continuum_clean_mask,
     _mapping_with_task_primary_beams,
@@ -798,6 +800,26 @@ def test_tw_hydra_mfs_ignores_widebandpb_memory_mode(tmp_path, tw_hydra_store):
     assert "_WIDEBAND_PRIMARY_BEAM_CACHE" not in zarr.open_group(output_store)
 
 
+def _store_snapshot(store, parse_metadata=False):
+    """Return every file of a Zarr v2 store, keyed by its relative path.
+
+    With ``parse_metadata`` the metadata files are parsed, and consolidated
+    metadata is reduced to the entries it lists: consolidating rewrites them
+    in zarr's own JSON layout.
+    """
+    snapshot = {}
+    for path in sorted(Path(store).rglob("*")):
+        if not path.is_file():
+            continue
+        content = path.read_bytes()
+        if parse_metadata and path.name in (".zattrs", ".zarray", ".zgroup"):
+            content = json.loads(content)
+        elif parse_metadata and path.name == ".zmetadata":
+            content = sorted(json.loads(content)["metadata"])
+        snapshot[str(path.relative_to(store))] = content
+    return snapshot
+
+
 @pytest.mark.parametrize(
     ("specmode", "weighting"),
     [
@@ -836,16 +858,36 @@ def test_tw_hydra_mfs_ignores_widebandpb_memory_mode(tmp_path, tw_hydra_store):
 def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
     tmp_path, tw_hydra_store, specmode, weighting
 ):
-    """Task-local disk weights reproduce memory mode and are temporary by default."""
-    reference_processing_set = open_processing_set(str(tw_hydra_store))
+    """Task-local disk weights reproduce the default and are temporary.
+
+    The default keeps the weights in memory and leaves the input Processing Set
+    byte for byte unchanged.
+    """
+    cycle_control_params = {
+        "max_iter": 20,
+        "max_cycles": 2,
+        "threshold": 0.001,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": 5,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    reference_store = tmp_path / "reference.ps.zarr"
+    shutil.copytree(tw_hydra_store, reference_store)
+    reference_files = _store_snapshot(reference_store)
+    reference_processing_set = open_processing_set(str(reference_store))
     _, reference = _run_tw_hydra_continuum(
-        tw_hydra_store,
+        reference_store,
         tmp_path / "reference.img.zarr",
         reference_processing_set,
         2,
         specmode,
         weighting,
+        cycle_control_params=cycle_control_params,
+        weight_memory_mode=None,
     )
+    assert _store_snapshot(reference_store) == reference_files
 
     in_place_store = tmp_path / "in_place.ps.zarr"
     shutil.copytree(tw_hydra_store, in_place_store)
@@ -857,17 +899,18 @@ def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
         2,
         specmode,
         weighting,
-        weight_memory_mode=None,
+        cycle_control_params=cycle_control_params,
+        weight_memory_mode="in_place",
     )
 
-    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
-        np.testing.assert_allclose(
-            actual[variable],
-            reference[variable],
-            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
-            atol=0.0,
-            equal_nan=True,
-        )
+    assert np.nanmax(np.abs(reference.SKY_MODEL.values)) > 0.0
+    for variable in (
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        np.testing.assert_array_equal(actual[variable], reference[variable])
 
     reopened = open_processing_set(str(in_place_store))
     for _, ms_xdt in reopened.items():
@@ -915,6 +958,107 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
     for _, ms_xdt in cleaned.items():
         assert "WEIGHT_IMAGING_CONTINUUM_CACHE" not in ms_xdt.ds
         assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
+
+
+@pytest.mark.parametrize(
+    ("weighting", "options", "message"),
+    [
+        pytest.param(
+            {
+                "weighting": "briggs_abs",
+                "robust": 0.5,
+                "briggs_abs_noise": 1.0,
+                "weighting_scope": "global",
+            },
+            {"weight_memory_mode": "in_place"},
+            "Global weighting scope",
+            id="briggs_abs-global",
+        ),
+        pytest.param(
+            {"weighting": "natural", "weighting_scope": "local"},
+            {"weight_memory_mode": None, "write_imaging_weights_to_ps": True},
+            "requires weight_memory_mode='in_place'",
+            id="keep-weights-in-memory",
+        ),
+    ],
+)
+def test_tw_hydra_refused_weight_requests_write_nothing(
+    tmp_path, tw_hydra_store, weighting, options, message
+):
+    """A refused request leaves the input Processing Set byte for byte unchanged."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    files = _store_snapshot(store)
+    output_store = tmp_path / "refused.img.zarr"
+    with pytest.raises(ValueError, match=message):
+        _run_tw_hydra_continuum(
+            store,
+            output_store,
+            open_processing_set(str(store)),
+            2,
+            "mfs",
+            weighting,
+            **options,
+        )
+    assert _store_snapshot(store) == files
+    assert not output_store.exists()
+
+
+@pytest.mark.parametrize(
+    "weighting",
+    [
+        pytest.param({"weighting": "natural", "weighting_scope": "local"}, id="local"),
+        pytest.param(
+            {"weighting": "briggs", "robust": 0.5, "weighting_scope": "global"},
+            id="global",
+        ),
+    ],
+)
+def test_tw_hydra_failed_in_place_run_removes_its_weights(
+    tmp_path, tw_hydra_store, monkeypatch, weighting
+):
+    """An error after the in-place weights are registered removes them again."""
+    import importlib
+
+    module = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    contents = _store_snapshot(store, parse_metadata=True)
+    activate = module._activate_continuum_weight_cache
+
+    def activate_then_fail(ps_xdt, ps_store, processing_set_data_group_name):
+        activate(ps_xdt, ps_store, processing_set_data_group_name)
+        for _, ms_xdt in open_processing_set(ps_store).items():
+            data_group = ms_xdt.ds.attrs["data_groups"]["base"]
+            assert data_group["weight_imaging"] == "WEIGHT_IMAGING_CONTINUUM_CACHE"
+        raise RuntimeError("injected failure")
+
+    monkeypatch.setattr(module, "_activate_continuum_weight_cache", activate_then_fail)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        _run_tw_hydra_continuum(
+            store,
+            tmp_path / "failed.img.zarr",
+            open_processing_set(str(store)),
+            2,
+            "mfs",
+            weighting,
+            weight_memory_mode="in_place",
+        )
+    assert _store_snapshot(store, parse_metadata=True) == contents
+
+
+def test_weight_cache_store_checks_every_child_before_writing(tmp_path, tw_hydra_store):
+    """A child without the data group is refused before any cache array exists."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    files = _store_snapshot(store)
+    processing_set = dict(open_processing_set(str(store)).items())
+    processing_set["without_base"] = xr.DataTree(xr.Dataset(attrs={"data_groups": {}}))
+    with pytest.raises(KeyError, match="does not contain data group"):
+        _create_continuum_weight_cache_store(processing_set, str(store), "base")
+    assert _store_snapshot(store) == files
 
 
 @pytest.mark.parametrize(

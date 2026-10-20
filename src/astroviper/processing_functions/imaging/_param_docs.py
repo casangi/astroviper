@@ -341,14 +341,18 @@ IMAGING_PARAM_DOCS = {
         "precision. If ``False`` the image-domain arrays are double precision."
     ),
     "weight_memory_mode": (
-        'Storage policy for calculated continuum imaging weights (default: ``"in_place"``).\n'
+        "Storage policy for calculated continuum imaging weights.\n"
         '``"in_memory"``\n'
         "returns task-local weights to the driver and embeds them in subsequent\n"
         'graphs. ``"in_place"`` writes each task\'s weights into the input\n'
         "Processing Set and reloads only the required partition during each major\n"
         "cycle, reducing scheduler and worker memory at the cost of additional\n"
         "disk I/O. This option is intentionally separate from ``memory_mode`` in\n"
-        "the initial implementation; the two policies may be unified later."
+        "the initial implementation; the two policies may be unified later.\n"
+        "The in-place weights are removed when the run ends, also after an error;\n"
+        "a run that completes keeps them when ``write_imaging_weights_to_ps=True``.\n"
+        'While an ``"in_place"`` run is in progress, no other run may use the same\n'
+        "Processing Set."
     ),
     "visibility_memory_mode": (
         "Continuum residual-update storage policy for observed visibility grids.\n"

@@ -1066,7 +1066,7 @@ def residual_update_continuum_single_field(
         Currently only ``"in_memory"`` is supported.
 
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights (default: ``"in_place"``).
+        Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
         graphs. ``"in_place"`` writes each task's weights into the input
@@ -1074,6 +1074,10 @@ def residual_update_continuum_single_field(
         cycle, reducing scheduler and worker memory at the cost of additional
         disk I/O. This option is intentionally separate from ``memory_mode`` in
         the initial implementation; the two policies may be unified later.
+        The in-place weights are removed when the run ends, also after an error;
+        a run that completes keeps them when ``write_imaging_weights_to_ps=True``.
+        While an ``"in_place"`` run is in progress, no other run may use the same
+        Processing Set.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         Continuum residual-update storage policy for observed visibility grids.
@@ -1803,14 +1807,18 @@ def degrid_imaging_weights_continuum_node(
     Parameters
     ----------
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights (default: ``"in_place"``).
+        Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
         graphs. ``"in_place"`` writes each task's weights into the input
         Processing Set and reloads only the required partition during each major
         cycle, reducing scheduler and worker memory at the cost of additional
         disk I/O. This option is intentionally separate from ``memory_mode`` in
-        the initial implementation; the two policies may be unified later."""
+        the initial implementation; the two policies may be unified later.
+        The in-place weights are removed when the run ends, also after an error;
+        a run that completes keeps them when ``write_imaging_weights_to_ps=True``.
+        While an ``"in_place"`` run is in progress, no other run may use the same
+        Processing Set."""
     import time
 
     import pandas as pd
