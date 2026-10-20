@@ -16,6 +16,8 @@
 namespace relaxed_hogbom {
 namespace {
 
+using Complex = std::complex<double>;
+
 struct Component {
     double flux;
     double x;
@@ -77,6 +79,11 @@ void render(const std::vector<Component>& components,
     }
 }
 
+std::size_t occupied_pixel_count(const std::vector<double>& model) {
+    return static_cast<std::size_t>(std::count_if(
+        model.begin(), model.end(), [](double value) { return value != 0.0; }));
+}
+
 void convolve_sparse(const std::vector<double>& model,
                      const std::vector<double>& psf,
                      std::vector<double>& output, int nx, int ny) {
@@ -87,14 +94,12 @@ void convolve_sparse(const std::vector<double>& model,
         for (int sx = 0; sx < nx; ++sx) {
             const double amplitude = model[static_cast<std::size_t>(sy) * nx + sx];
             if (amplitude == 0.0) continue;
-            const int x1 = std::max(0, sx - cx);
-            const int y1 = std::max(0, sy - cy);
-            const int x2 = std::min(nx - 1, sx + cx - 1);
-            const int y2 = std::min(ny - 1, sy + cy - 1);
-            for (int y = y1; y <= y2; ++y) {
-                const int py = cy + y - sy;
-                for (int x = x1; x <= x2; ++x) {
-                    const int px = cx + x - sx;
+            const int shift_x = sx - cx;
+            const int shift_y = sy - cy;
+            for (int py = 0; py < ny; ++py) {
+                const int y = wrap(py + shift_y, ny);
+                for (int px = 0; px < nx; ++px) {
+                    const int x = wrap(px + shift_x, nx);
                     output[static_cast<std::size_t>(y) * nx + x] +=
                         amplitude * psf[static_cast<std::size_t>(py) * nx + px];
                 }
@@ -102,6 +107,51 @@ void convolve_sparse(const std::vector<double>& model,
         }
     }
 }
+
+void recenter_convolution(std::vector<double>& image, int nx, int ny) {
+    const int cx = nx / 2;
+    const int cy = ny / 2;
+    std::vector<double> centered(image.size());
+    for (int y = 0; y < ny; ++y) {
+        const int source_y = (y + cy) % ny;
+        for (int x = 0; x < nx; ++x) {
+            const int source_x = (x + cx) % nx;
+            centered[static_cast<std::size_t>(y) * nx + x] =
+                image[static_cast<std::size_t>(source_y) * nx + source_x];
+        }
+    }
+    image.swap(centered);
+}
+
+class AdaptiveConvolver {
+public:
+    AdaptiveConvolver(const std::vector<double>& psf, int nx, int ny)
+        : psf_(psf), nx_(nx), ny_(ny) {}
+
+    void convolve(const std::vector<double>& model,
+                  std::vector<double>& output) {
+        const std::size_t occupied_pixels = occupied_pixel_count(model);
+        if (prefer_sparse_convolution(model.size(), occupied_pixels)) {
+            convolve_sparse(model, psf_, output, nx_, ny_);
+            return;
+        }
+        if (psf_spectrum_.empty())
+            psf_spectrum_ = aspfft::rfft2_forward(psf_.data(), nx_, ny_);
+        auto model_spectrum = aspfft::rfft2_forward(model.data(), nx_, ny_);
+        for (std::size_t i = 0; i < model_spectrum.size(); ++i)
+            model_spectrum[i] *= psf_spectrum_[i];
+        output.resize(model.size());
+        aspfft::irfft2_inverse(
+            std::move(model_spectrum), nx_, ny_, output.data());
+        recenter_convolution(output, nx_, ny_);
+    }
+
+private:
+    const std::vector<double>& psf_;
+    int nx_;
+    int ny_;
+    std::vector<Complex> psf_spectrum_;
+};
 
 double psf_width(const std::vector<double>& psf, int nx, int ny) {
     const int cx = nx / 2;
@@ -258,8 +308,9 @@ bool relax_plane(T* residual, T* model, const T* model_start, const T* psf_data,
         psf[i] = static_cast<double>(psf_data[i]);
         current_residual[i] = static_cast<double>(residual[i]);
     }
+    AdaptiveConvolver convolver(psf, nx, ny);
     render(components, selected, nx, ny);
-    convolve_sparse(selected, psf, selected_response, nx, ny);
+    convolver.convolve(selected, selected_response);
     for (std::size_t i = 0; i < size; ++i) base[i] = current_residual[i] + selected_response[i];
 
     const double trust = controls.constraint_radius_beams * psf_width(psf, nx, ny);
@@ -298,7 +349,7 @@ bool relax_plane(T* residual, T* model, const T* model_start, const T* psf_data,
     const auto fitted_components = parameterization.decode(parameters);
     std::vector<double> fitted(size), fitted_response(size), trial_residual(size);
     render(fitted_components, fitted, nx, ny);
-    convolve_sparse(fitted, psf, fitted_response, nx, ny);
+    convolver.convolve(fitted, fitted_response);
     for (std::size_t i = 0; i < size; ++i) trial_residual[i] = base[i] - fitted_response[i];
     final_norm = squared_norm(trial_residual);
     const double improvement = (initial_norm - final_norm) /
@@ -350,6 +401,28 @@ void clean_one_plane(T* residual, T* model, const T* psf, const bool* mask,
 }
 
 }  // namespace
+
+bool prefer_sparse_convolution(std::size_t image_pixels,
+                               std::size_t occupied_pixels) {
+    if (occupied_pixels == 0) return true;
+    // CASA FFTServer benchmarks put the crossover at about 20 occupied taps
+    // through 256^2 and about 10 taps for larger images.  Stay conservative
+    // near a tie, and count rendered pixels rather than logical components.
+    const std::size_t maximum_sparse_pixels =
+        image_pixels <= 256u * 256u ? 20u : 10u;
+    return occupied_pixels <= maximum_sparse_pixels;
+}
+
+void convolve_components(const double* model, const double* psf, double* output,
+                         int nx, int ny) {
+    const std::size_t size = static_cast<std::size_t>(nx) * ny;
+    std::vector<double> model_vector(model, model + size);
+    std::vector<double> psf_vector(psf, psf + size);
+    std::vector<double> result(size);
+    AdaptiveConvolver convolver(psf_vector, nx, ny);
+    convolver.convolve(model_vector, result);
+    std::copy(result.begin(), result.end(), output);
+}
 
 template<typename T>
 void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,

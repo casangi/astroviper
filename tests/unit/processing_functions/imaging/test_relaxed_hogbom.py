@@ -7,6 +7,9 @@ from astroviper.processing_functions.imaging.deconvolution import (
     hogbom_clean,
     relaxed_hogbom_clean,
 )
+from astroviper.processing_functions.imaging.deconvolvers.relaxed_hogbom import (
+    _relaxed_hogbom_ext,
+)
 
 
 def _gaussian_psf(size=32, sigma=2.0):
@@ -47,6 +50,31 @@ def _params(**overrides):
     }
     params.update(overrides)
     return params
+
+
+def test_convolution_method_crossover_matches_casa_benchmarks():
+    choose_sparse = _relaxed_hogbom_ext._prefer_sparse_convolution
+
+    assert choose_sparse(256 * 256, 20)
+    assert not choose_sparse(256 * 256, 21)
+    assert choose_sparse(512 * 512, 10)
+    assert not choose_sparse(512 * 512, 11)
+
+
+@pytest.mark.parametrize("occupied_pixels", [2, 21])
+def test_adaptive_convolution_matches_centered_fft(occupied_pixels):
+    size = 32
+    psf = _gaussian_psf(size)[0, 0, 0]
+    psf[0, 0] = 0.2
+    psf[-1, -1] = -0.1
+    model = np.zeros((size, size), dtype=np.float64)
+    coordinates = [(1 + 7 * i) % size for i in range(occupied_pixels)]
+    for i, coordinate in enumerate(coordinates):
+        model[(3 + 11 * i) % size, coordinate] += 1.0 / (i + 1)
+
+    actual = _relaxed_hogbom_ext._convolve_components(model, psf)
+
+    np.testing.assert_allclose(actual, _convolve_centered(model, psf), atol=1e-12)
 
 
 def test_subpixel_relaxation_reduces_residual_and_preserves_flux():

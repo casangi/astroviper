@@ -180,6 +180,26 @@ py::dict clean_cube_dispatch(py::array residual_cube, py::array psf_cube,
     throw std::runtime_error("residual_cube must be float32 or float64");
 }
 
+py::array_t<double> convolve_components_helper(py::array_t<double> model,
+                                                py::array_t<double> psf) {
+    auto model_info = model.request(false);
+    auto psf_info = psf.request(false);
+    if (model_info.ndim != 2 || psf_info.ndim != 2 ||
+        model_info.shape[0] != psf_info.shape[0] ||
+        model_info.shape[1] != psf_info.shape[1])
+        throw std::runtime_error("model and psf must have the same 2D shape");
+    if (!(model.flags() & py::array::c_style) ||
+        !(psf.flags() & py::array::c_style))
+        throw std::runtime_error("model and psf must be C-contiguous");
+    const int ny = static_cast<int>(model_info.shape[0]);
+    const int nx = static_cast<int>(model_info.shape[1]);
+    py::array_t<double> output({ny, nx});
+    relaxed_hogbom::convolve_components(
+        static_cast<const double*>(model_info.ptr),
+        static_cast<const double*>(psf_info.ptr), output.mutable_data(), nx, ny);
+    return output;
+}
+
 PYBIND11_MODULE(_relaxed_hogbom_ext, module) {
     module.doc() = "Hogbom CLEAN followed by local point-component relaxation";
     module.def("clean_cube", &clean_cube_dispatch,
@@ -199,4 +219,9 @@ PYBIND11_MODULE(_relaxed_hogbom_ext, module) {
         py::arg("stalled_progress_rms_ratio") = 0.78,
         py::arg("rms_normalization_iterations") = 100,
         py::arg("optimizer_max_iterations") = 100);
+    module.def("_prefer_sparse_convolution",
+               &relaxed_hogbom::prefer_sparse_convolution,
+               py::arg("image_pixels"), py::arg("occupied_pixels"));
+    module.def("_convolve_components", &convolve_components_helper,
+               py::arg("model"), py::arg("psf"));
 }
