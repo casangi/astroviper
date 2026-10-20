@@ -37,6 +37,10 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     image_continuum_single_field,
     prepare_continuum_imaging_weights_global,
 )
+from astroviper.utils.data_group_tools import (
+    create_ps_xdt_data_groups_in_and_out,
+    modify_data_groups_ps_xdt,
+)
 
 TW_HYDRA_STORE_NAME = "twhya_selfcal_lsrk_5chans.ps.zarr"
 TW_HYDRA_RELATIVE_TOLERANCE = 1.0e-6
@@ -158,6 +162,30 @@ def tw_hydra_store(tmp_path_factory, tw_hydra_archive):
         with ZipFile(tw_hydra_archive) as archive:
             archive.extractall(fixture_directory)
         yield fixture_directory / TW_HYDRA_STORE_NAME
+
+
+@pytest.fixture(scope="module")
+def tw_hydra_corrected_store(tmp_path_factory, tw_hydra_store):
+    """TW Hydra with a ``corrected`` group whose visibilities copy ``base``."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    _, corrected = create_ps_xdt_data_groups_in_and_out(
+        processing_set,
+        data_group_in_name="base",
+        data_group_out_name="corrected",
+        data_group_out_modified={"correlated_data": "VISIBILITY_CORRECTED"},
+        overwrite=False,
+    )
+    for ms_xdt in processing_set.values():
+        ms_xdt["VISIBILITY_CORRECTED"] = ms_xdt["VISIBILITY"]
+    modify_data_groups_ps_xdt(
+        processing_set,
+        data_group_out_name="corrected",
+        data_group_out=corrected,
+        description="Copy of the base visibilities.",
+    )
+    store = tmp_path_factory.mktemp("tw_hydra_corrected") / TW_HYDRA_STORE_NAME
+    processing_set.to_zarr(store, zarr_format=2)
+    return store
 
 
 def _final_continuum_image():
@@ -650,6 +678,7 @@ def _run_tw_hydra_continuum(
     write_imaging_weights_to_ps=False,
     clear_cache=True,
     scheduler="synchronous",
+    processing_set_data_group_name="base",
 ):
     """Run one public distributed continuum configuration on TW Hydra."""
     if cycle_control_params is None:
@@ -684,7 +713,7 @@ def _run_tw_hydra_continuum(
                 "primary_beam",
                 "beam_fit_params_point_spread_function",
             ],
-            processing_set_data_group_name="base",
+            processing_set_data_group_name=processing_set_data_group_name,
             single_precision_image=single_precision_image,
             processing_function_threads=1,
             n_chunks=n_chunks,
@@ -1511,6 +1540,56 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
             else "_MVC_VISIBILITY_GRID_CACHE"
         )
         assert cache_group not in zarr.open_group(output_store)
+
+
+@pytest.mark.parametrize("visibility_memory_mode", ["recompute", "in_memory"])
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+def test_tw_hydra_corrected_data_group_matches_base(
+    tmp_path, tw_hydra_corrected_store, specmode, visibility_memory_mode
+):
+    """Imaging a copy of ``base`` as ``corrected`` gives bitwise equal products.
+
+    Regression: model prediction degridded against the ``base`` group, which
+    the loader drops when another group is imaged, so the first residual
+    update after a model update failed with ``Data group base not found``.
+    """
+    processing_set = open_processing_set(str(tw_hydra_corrected_store))
+    images = {}
+    for data_group_name in ("base", "corrected"):
+        result, images[data_group_name] = _run_tw_hydra_continuum(
+            tw_hydra_corrected_store,
+            tmp_path / f"{data_group_name}.img.zarr",
+            processing_set,
+            2,
+            specmode,
+            {"weighting": "natural", "weighting_scope": "local"},
+            cycle_control_params={
+                "max_iter": 20,
+                "max_cycles": 2,
+                "threshold": 0.001,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 5,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            visibility_memory_mode=visibility_memory_mode,
+            processing_set_data_group_name=data_group_name,
+        )
+        assert result["n_major_cycles"] == 2
+        assert np.nanmax(np.abs(images[data_group_name].SKY_MODEL.values)) > 0.0
+
+    for variable in (
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        expected = images["base"][variable].values
+        actual = images["corrected"][variable].values
+        np.testing.assert_array_equal(actual, expected)
+        assert actual.dtype == expected.dtype
+        assert actual.tobytes() == expected.tobytes()
 
 
 @pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])

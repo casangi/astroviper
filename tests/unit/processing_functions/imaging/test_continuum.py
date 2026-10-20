@@ -227,6 +227,7 @@ def test_continuum_prediction_calls_shared_degridder_with_frequency_grid(monkeyp
         np.ones(351),
         nterms=2,
         reference_frequency=1.0e9,
+        ms_data_group_in_name="corrected",
     )
     expected = np.broadcast_to(
         np.array([1.7, 2.3])[:, np.newaxis, np.newaxis], (2, 2, 2)
@@ -235,6 +236,7 @@ def test_continuum_prediction_calls_shared_degridder_with_frequency_grid(monkeyp
     np.testing.assert_array_equal(captured["frequency_map"], [0, 1])
     assert captured["ms_xds"] is ms_xds
     assert captured["geometry"] is model_xds
+    assert captured["kwargs"]["ms_data_group_in_name"] == "corrected"
 
 
 def test_primary_beam_correction_returns_restored_taylor_zero_only():
