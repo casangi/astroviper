@@ -167,6 +167,7 @@ entry point is exposed at all three layers as `image_cube_single_field`, the
 simulation entry point as `simulate_processing_set`:
 ```python
 import astroviper.distributed_applications as distributed_applications
+
 distributed_applications.imaging.image_cube_single_field(...)
 distributed_applications.simulation.simulate_processing_set(...)
 ```
@@ -333,22 +334,46 @@ overwriting. It is a dict stored at `xds.attrs["data_groups"]` and here is an MS
 
 ```python
 ms_xds.attrs["data_groups"] = {
-  "base":    {"correlated_data": "VISIBILITY",           "flag": "FLAG", "weight": "WEIGHT",         "uvw": "UVW"},
-  "imaging": {"correlated_data": "VISIBILITY_CORRECTED", "flag": "FLAG", "weight": "WEIGHT_IMAGING", "uvw": "UVW"},
-  "model": {"correlated_data": "VISIBILITY_MODEL", "uvw": "UVW"},
-  "calibrated": {"correlated_data": "VISIBILITY_CORRECTED", "flag": "FLAG_CORRECTED", "weight": "WEIGHT_CORRECTED", "uvw": "UVW"}
+    "base": {
+        "correlated_data": "VISIBILITY",
+        "flag": "FLAG",
+        "weight": "WEIGHT",
+        "uvw": "UVW",
+    },
+    "imaging": {
+        "correlated_data": "VISIBILITY_CORRECTED",
+        "flag": "FLAG",
+        "weight": "WEIGHT_IMAGING",
+        "uvw": "UVW",
+    },
+    "model": {"correlated_data": "VISIBILITY_MODEL", "uvw": "UVW"},
+    "calibrated": {
+        "correlated_data": "VISIBILITY_CORRECTED",
+        "flag": "FLAG_CORRECTED",
+        "weight": "WEIGHT_CORRECTED",
+        "uvw": "UVW",
+    },
 }
 ```
 
 Here is an image example (image-side roles):
 ```python
 img_xds.attrs["data_groups"] = {
-  "residual": {"sky": "SKY_RESIDUAL", "point_spread_function": "POINT_SPREAD_FUNCTION",
-               "primary_beam": "PRIMARY_BEAM", "mask": "MASK", "beam_fit_params_point_spread_function":"BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"},
-  "model":    {"sky": "SKY_MODEL", "mask": "MASK"},
-  "restored": {"sky": "SKY_RESTORED","point_spread_function": "POINT_SPREAD_FUNCTION",
-               "primary_beam": "PRIMARY_BEAM", "mask": "MASK",
-               "beam_fit_params_point_spread_function":"BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"},
+    "residual": {
+        "sky": "SKY_RESIDUAL",
+        "point_spread_function": "POINT_SPREAD_FUNCTION",
+        "primary_beam": "PRIMARY_BEAM",
+        "mask": "MASK",
+        "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    },
+    "model": {"sky": "SKY_MODEL", "mask": "MASK"},
+    "restored": {
+        "sky": "SKY_RESTORED",
+        "point_spread_function": "POINT_SPREAD_FUNCTION",
+        "primary_beam": "PRIMARY_BEAM",
+        "mask": "MASK",
+        "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    },
 }
 ```
 
@@ -370,7 +395,8 @@ used everywhere in imaging:
 
 ```python
 from astroviper.utils.data_group_tools import (
-    create_data_groups_in_and_out, modify_data_groups_xds,
+    create_data_groups_in_and_out,
+    modify_data_groups_xds,
 )
 
 # 1) Resolve in/out groups (validates input exists; guards against accidental
@@ -575,7 +601,9 @@ per-variable nodes.
 - **Logging**: use the **toolviper** logger, not `print`:
   ```python
   import toolviper.utils.logger as logger
-  logger.info(...); logger.debug(...)
+
+  logger.info(...)
+  logger.debug(...)
   ```
   The log level in node_tasks and processing_functions should always be debug or higher because there will be many instances of these functions.
 - **Performance**: vectorize with NumPy; if not feasible, use C++; verify with timing.
