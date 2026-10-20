@@ -411,6 +411,12 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             "start_model_flux",
             "entropy",
             "residual_snr",
+            "relaxation_attempted",
+            "relaxation_accepted",
+            "relaxed_component_count",
+            "initial_residual_norm",
+            "final_residual_norm",
+            "hogbom_rms_ratio",
         }
         self.assertEqual(FIELD_ACCUM, expected_fields)
 
@@ -441,6 +447,12 @@ class TestImagingDictFieldClassification(unittest.TestCase):
                 "start_model_flux": 0.0,
                 "entropy": 7.5,
                 "residual_snr": 3.0,
+                "relaxation_attempted": True,
+                "relaxation_accepted": True,
+                "relaxed_component_count": 10,
+                "initial_residual_norm": 4.0,
+                "final_residual_norm": 2.0,
+                "hogbom_rms_ratio": 0.7,
             },
             time=0,
             pol=0,

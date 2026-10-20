@@ -432,7 +432,8 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 const int* max_iter_remaining, T gain, const T* threshold,
                 int processing_function_threads,
                 const hclean::DivergenceControl<T>& divergence,
-                const Controls& controls, int* iter_out, int* stop_out,
+                const Controls& controls, const bool* relaxation_active,
+                int* iter_out, int* stop_out,
                 bool* attempted_out, bool* accepted_out,
                 int* component_count_out, double* initial_norm_out,
                 double* final_norm_out, double* rms_ratio_out) {
@@ -451,9 +452,12 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
             T* model = model_cube + static_cast<std::size_t>(plane) * plane_size;
             const T* psf = psf_cube + static_cast<std::size_t>(psf_plane) * plane_size;
             const bool* mask = domask ? mask_cube + static_cast<std::size_t>(plane) * plane_size : nullptr;
+            Controls plane_controls = controls;
+            if (relaxation_active != nullptr && relaxation_active[plane])
+                plane_controls.adaptive_start = false;
             clean_one_plane(residual, model, psf, mask, nx, ny,
                             xbeg, xend, ybeg, yend, max_iter_remaining[plane],
-                            gain, threshold[plane], divergence, controls,
+                            gain, threshold[plane], divergence, plane_controls,
                             iter_out[plane], stop_out[plane], attempted_out[plane],
                             accepted_out[plane], component_count_out[plane],
                             initial_norm_out[plane], final_norm_out[plane],
@@ -473,10 +477,12 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
 template void clean_cube<float>(float*, float*, const float*, int, const bool*,
     int, int, int, int, int, int, int, int, int, int, const int*, float,
     const float*, int, const hclean::DivergenceControl<float>&, const Controls&,
+    const bool*,
     int*, int*, bool*, bool*, int*, double*, double*, double*);
 template void clean_cube<double>(double*, double*, const double*, int, const bool*,
     int, int, int, int, int, int, int, int, int, int, const int*, double,
     const double*, int, const hclean::DivergenceControl<double>&, const Controls&,
+    const bool*,
     int*, int*, bool*, bool*, int*, double*, double*, double*);
 
 }  // namespace relaxed_hogbom

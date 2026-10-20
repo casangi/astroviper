@@ -533,6 +533,18 @@ def create_imaging_dict(
     max_psf_sidelobe = selected_calculations["max_psf_sidelobe"]
     masksum = selected_calculations["masksum"]
     diverged = selected_calculations.get("diverged", None)
+    relaxation_diagnostics = {
+        name: selected_calculations[name]
+        for name in (
+            "relaxation_attempted",
+            "relaxation_accepted",
+            "relaxed_component_count",
+            "initial_residual_norm",
+            "final_residual_norm",
+            "hogbom_rms_ratio",
+        )
+        if name in selected_calculations
+    }
     if diverged is not None:
         from astroviper.processing_functions.imaging.utils.iteration_control import (
             IMAGING_CONTINUE,
@@ -591,6 +603,12 @@ def create_imaging_dict(
                     "peakres_nomask": peakres_nomask,
                     "masksum": int(masksum[tt, nn, pp]),
                 }
+                returnvals.update(
+                    {
+                        name: values[tt, nn, pp].item()
+                        for name, values in relaxation_diagnostics.items()
+                    }
+                )
 
                 imaging_dict.add(returnvals, time=tt, pol=pp, chan=nn)
 
@@ -878,6 +896,18 @@ def deconvolve(
                 f"{deconvolve_params['max_iter_divergence']})."
             )
 
+    relaxation_diagnostics = {
+        name: results[name]
+        for name in (
+            "relaxation_attempted",
+            "relaxation_accepted",
+            "relaxed_component_count",
+            "initial_residual_norm",
+            "final_residual_norm",
+            "hogbom_rms_ratio",
+        )
+        if name in results
+    }
     imaging_dict = create_imaging_dict(
         img_xds=img_xds,
         image_data_group_in_name=image_data_group_in_name,
@@ -891,6 +921,7 @@ def deconvolve(
             "max_psf_sidelobe": max_psf_sidelobe,
             "masksum": masksum,
             "diverged": diverged,
+            **relaxation_diagnostics,
         },
     )
     return imaging_dict
@@ -1195,6 +1226,17 @@ def relaxed_hogbom_clean(
     max_iter_per_cycle, threshold_per_cycle = _per_plane_iteration_controls(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
+    relaxation_active = np.ascontiguousarray(
+        deconvolve_params.get(
+            "_relaxation_active", np.zeros((nt, nf, npol_img), dtype=bool)
+        ),
+        dtype=bool,
+    )
+    if relaxation_active.shape != (nt, nf, npol_img):
+        raise ValueError(
+            "_relaxation_active must have shape "
+            f"{(nt, nf, npol_img)}, got {relaxation_active.shape}"
+        )
     return _run_hogbom(
         relaxed_hogbom.clean_cube,
         residual_cube=residual_cube,
@@ -1208,6 +1250,7 @@ def relaxed_hogbom_clean(
         deconvolve_params=deconvolve_params,
         processing_function_threads=processing_function_threads,
         extra_kernel_kwargs={
+            "relaxation_active": relaxation_active,
             "constraint_radius_beams": deconvolve_params["relax_constraint_radius"],
             "max_active_components": deconvolve_params["relax_max_components"],
             "minimum_improvement": deconvolve_params["relax_min_improvement"],

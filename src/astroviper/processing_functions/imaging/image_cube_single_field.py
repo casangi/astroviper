@@ -459,6 +459,7 @@ def image_cube_single_field(
     """
     import time
 
+    import numpy as np
     import pandas as pd
     import toolviper.utils.logger as logger
 
@@ -522,6 +523,14 @@ def image_cube_single_field(
     timing["T_convergence"] = 0.0
 
     model_exists = False
+    relaxation_active = np.zeros(
+        (
+            img_xds.sizes["time"],
+            img_xds.sizes["frequency"],
+            img_xds.sizes["polarization"],
+        ),
+        dtype=bool,
+    )
     n_cycles = 0
     while controller.stopcode.imaging == 0:
         n_cycles += 1
@@ -588,6 +597,8 @@ def image_cube_single_field(
                 "max_iter_per_cycle": max_iter_per_cycle,
                 "threshold_per_cycle": threshold_per_cycle,
             }
+            if deconvolver.lower() in ("relaxed_hogbom", "relaxedhogbom"):
+                deconvolve_params["_relaxation_active"] = relaxation_active
 
             (
                 imaging_dict,
@@ -602,6 +613,13 @@ def image_cube_single_field(
                 image_data_group_out_name="model",
             )
             accumulate_timing(timing, model_update_return_df)
+            if deconvolver.lower() in ("relaxed_hogbom", "relaxedhogbom"):
+                for key, values in imaging_dict.data.items():
+                    attempted = values.get("relaxation_attempted", False)
+                    if isinstance(attempted, list):
+                        attempted = attempted[-1]
+                    if attempted:
+                        relaxation_active[key.time, key.chan, key.pol] = True
             # The entropy belongs to the residual this model update started
             # from (a no-op unless the entropy stop is on).
             copy_residual_entropy(imaging_dict, residual_imaging_dict)

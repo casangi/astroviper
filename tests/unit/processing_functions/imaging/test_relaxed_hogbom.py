@@ -175,6 +175,59 @@ def test_adaptive_start_skips_mid_progress_model_update():
     assert model[0, 0, 0, 7, 8] == pytest.approx(0.5)
 
 
+def test_active_plane_keeps_relaxation_enabled_across_model_updates():
+    size = 16
+    psf = np.zeros((1, 1, 1, size, size), dtype=np.float64)
+    psf[0, 0, 0, size // 2, size // 2] = 1.0
+    residual = np.zeros_like(psf)
+    residual[0, 0, 0, 7, 8] = 1.0
+    model = np.zeros_like(residual)
+
+    gain = 1.0 - 0.5 ** (1.0 / 100.0)
+    result = relaxed_hogbom_clean(
+        residual,
+        psf,
+        model,
+        _params(
+            gain=gain,
+            max_iter=100,
+            relax_adaptive_start=True,
+            _relaxation_active=np.ones((1, 1, 1), dtype=bool),
+        ),
+    )
+
+    assert result["hogbom_rms_ratio"][0, 0, 0] == pytest.approx(0.5)
+    assert result["relaxation_attempted"][0, 0, 0]
+
+
+def test_persistent_relaxation_state_is_independent_per_plane():
+    size = 16
+    psf = np.zeros((1, 1, 1, size, size), dtype=np.float64)
+    psf[0, 0, 0, size // 2, size // 2] = 1.0
+    residual = np.zeros((1, 1, 2, size, size), dtype=np.float64)
+    residual[0, 0, :, 7, 8] = 1.0
+    model = np.zeros_like(residual)
+    active = np.zeros((1, 1, 2), dtype=bool)
+    active[0, 0, 0] = True
+
+    gain = 1.0 - 0.5 ** (1.0 / 100.0)
+    result = relaxed_hogbom_clean(
+        residual,
+        psf,
+        model,
+        _params(
+            gain=gain,
+            max_iter=100,
+            relax_adaptive_start=True,
+            _relaxation_active=active,
+        ),
+    )
+
+    np.testing.assert_array_equal(
+        result["relaxation_attempted"], [[[True, False]]]
+    )
+
+
 @pytest.mark.parametrize(
     "key,value,match",
     [

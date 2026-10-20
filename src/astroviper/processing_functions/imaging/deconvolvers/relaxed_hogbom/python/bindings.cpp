@@ -49,7 +49,8 @@ template<typename T>
 py::dict clean_cube_impl(
     py::array residual_cube, py::array psf_cube, py::array model_cube,
     py::array mask_cube, py::tuple clean_box, py::array max_iter_remaining,
-    double gain, py::array threshold, int processing_function_threads,
+    double gain, py::array threshold, py::array relaxation_active,
+    int processing_function_threads,
     int max_iter_divergence, double divergence_rms_factor,
     double divergence_peak_factor, double constraint_radius_beams,
     int max_active_components, double minimum_improvement, bool adaptive_start,
@@ -79,6 +80,8 @@ py::dict clean_cube_impl(
     }
     auto iter_info = validate_planes<int>(max_iter_remaining, "max_iter_remaining", nt, nf, np_img);
     auto threshold_info = validate_planes<T>(threshold, "threshold", nt, nf, np_img);
+    auto active_info = validate_planes<bool>(
+        relaxation_active, "relaxation_active", nt, nf, np_img);
 
     int xbeg = 0, xend = nx, ybeg = 0, yend = ny;
     if (clean_box.size() == 4) {
@@ -116,7 +119,8 @@ py::dict clean_cube_impl(
             nt, nf, np_img, np_psf, ny, nx, xbeg, xend, ybeg, yend,
             static_cast<const int*>(iter_info.ptr), static_cast<T>(gain),
             static_cast<const T*>(threshold_info.ptr), processing_function_threads,
-            divergence, controls, iterations.data(), stop_reason.data(),
+            divergence, controls, static_cast<const bool*>(active_info.ptr),
+            iterations.data(), stop_reason.data(),
             attempted.get(), accepted.get(), component_count.data(),
             initial_norm.data(), final_norm.data(), rms_ratio.data());
     }
@@ -157,7 +161,8 @@ py::dict clean_cube_impl(
 py::dict clean_cube_dispatch(py::array residual_cube, py::array psf_cube,
     py::array model_cube, py::array mask_cube, py::tuple clean_box,
     py::array max_iter_remaining, double gain, py::array threshold,
-    int processing_function_threads, int max_iter_divergence,
+    py::array relaxation_active, int processing_function_threads,
+    int max_iter_divergence,
     double divergence_rms_factor, double divergence_peak_factor,
     double constraint_radius_beams, int max_active_components,
     double minimum_improvement, bool adaptive_start,
@@ -165,14 +170,16 @@ py::dict clean_cube_dispatch(py::array residual_cube, py::array psf_cube,
     int rms_normalization_iterations, int optimizer_max_iterations) {
     if (residual_cube.dtype().is(py::dtype::of<float>()))
         return clean_cube_impl<float>(residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter_remaining, gain, threshold, processing_function_threads,
+            clean_box, max_iter_remaining, gain, threshold, relaxation_active,
+            processing_function_threads,
             max_iter_divergence, divergence_rms_factor, divergence_peak_factor,
             constraint_radius_beams, max_active_components, minimum_improvement,
             adaptive_start, rapid_progress_rms_ratio, stalled_progress_rms_ratio,
             rms_normalization_iterations, optimizer_max_iterations);
     if (residual_cube.dtype().is(py::dtype::of<double>()))
         return clean_cube_impl<double>(residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter_remaining, gain, threshold, processing_function_threads,
+            clean_box, max_iter_remaining, gain, threshold, relaxation_active,
+            processing_function_threads,
             max_iter_divergence, divergence_rms_factor, divergence_peak_factor,
             constraint_radius_beams, max_active_components, minimum_improvement,
             adaptive_start, rapid_progress_rms_ratio, stalled_progress_rms_ratio,
@@ -207,7 +214,9 @@ PYBIND11_MODULE(_relaxed_hogbom_ext, module) {
         py::arg("mask_cube") = py::array(),
         py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
         py::arg("max_iter_remaining") = py::array(), py::arg("gain") = 0.1,
-        py::arg("threshold") = py::array(), py::arg("processing_function_threads") = 1,
+        py::arg("threshold") = py::array(),
+        py::arg("relaxation_active") = py::array(),
+        py::arg("processing_function_threads") = 1,
         py::arg("max_iter_divergence") = -1,
         py::arg("divergence_rms_factor") = 1.0,
         py::arg("divergence_peak_factor") = 1.0,

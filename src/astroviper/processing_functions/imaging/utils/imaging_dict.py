@@ -31,6 +31,12 @@ FIELD_ACCUM = {
     "start_model_flux",  # Model flux at start of each cycle (Jy)
     "entropy",  # Entropy of the residual at the start of each cycle
     "residual_snr",  # Peak / RMS of the residual at the start of each cycle
+    "relaxation_attempted",
+    "relaxation_accepted",
+    "relaxed_component_count",
+    "initial_residual_norm",
+    "final_residual_norm",
+    "hogbom_rms_ratio",
 }
 
 # Fields that remain single values (constant parameters)
