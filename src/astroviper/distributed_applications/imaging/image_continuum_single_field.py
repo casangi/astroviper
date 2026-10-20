@@ -304,7 +304,9 @@ def _create_continuum_weight_cache_store(
     The cache variable is deliberately not registered in the processing-set
     data group here.  Registration happens only after every weight-producing
     map task has completed, so an interrupted preparation cannot make a
-    partially populated cache appear valid to later imaging tasks.
+    partially populated cache appear valid to later imaging tasks.  A
+    registration of the cache that an earlier run kept or left behind is
+    removed together with its array.
 
     Returns
     -------
@@ -314,6 +316,8 @@ def _create_continuum_weight_cache_store(
         in-place weights are removed after imaging.
     """
     import numpy as np
+
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
 
     original_data_groups = {}
     weight_sources = []
@@ -327,13 +331,6 @@ def _create_continuum_weight_cache_store(
                 f"{processing_set_data_group_name!r}."
             )
 
-        original_data_groups[ms_name] = copy.deepcopy(data_groups)
-        # A previously interrupted in-place run may have left this private cache
-        # registered.  Treat that registration as transient so a successful
-        # rerun restores the Processing Set to its true pre-cache state.
-        for group in original_data_groups[ms_name].values():
-            if group.get("weight_imaging") == _CONTINUUM_WEIGHT_CACHE_VARIABLE:
-                group.pop("weight_imaging")
         data_group = data_groups[processing_set_data_group_name]
         source_weight_name = data_group.get("weight")
         if source_weight_name is None:
@@ -352,11 +349,37 @@ def _create_continuum_weight_cache_store(
                 f"Registered input weight {source_weight_name!r} is absent "
                 f"from processing-set child {ms_name!r}."
             )
-        weight_sources.append((ms_group, source_weight_name))
+        weight_sources.append((ms_name, ms_xdt, ms_group, source_weight_name))
 
     # Every child is checked above before the first array is created, so a
     # refused Processing Set is left unchanged.
-    for ms_group, source_weight_name in weight_sources:
+    for ms_name, ms_xdt, ms_group, source_weight_name in weight_sources:
+        # A cache registration kept or left behind by an earlier run is
+        # removed with the array it names.
+        data_groups = ms_xdt.ds.attrs["data_groups"]
+        stale_group_names = [
+            group_name
+            for group_name, group in data_groups.items()
+            if group.get("weight_imaging") == _CONTINUUM_WEIGHT_CACHE_VARIABLE
+        ]
+        for group_name in stale_group_names:
+            modify_data_groups_xds(
+                ms_xdt.ds,
+                data_group_out_name=group_name,
+                data_group_out={
+                    role: name
+                    for role, name in data_groups[group_name].items()
+                    if role != "weight_imaging"
+                },
+                description=(
+                    "AstroVIPER continuum imaging-weight cache of an earlier "
+                    "run removed."
+                ),
+            )
+        if stale_group_names:
+            ms_group.attrs["data_groups"] = copy.deepcopy(data_groups)
+        original_data_groups[ms_name] = copy.deepcopy(data_groups)
+
         if _CONTINUUM_WEIGHT_CACHE_VARIABLE in ms_group:
             del ms_group[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
 
@@ -2707,7 +2730,8 @@ def image_continuum_single_field(
         Request persistence of predicted visibilities and imaging weights.
     write_imaging_weights_to_ps : bool
         Keep the in-place imaging weights in the input Processing Set; requires
-        ``weight_memory_mode="in_place"``.
+        ``weight_memory_mode="in_place"``. Later runs do not use them: every run
+        calculates its own imaging weights.
     compute_backend : object
         Reserved interface options; this continuum driver executes with Dask.
     mpi_cluster_setup : object
@@ -3419,6 +3443,22 @@ def image_continuum_single_field(
             time.time() - start
         )
 
+    # Imaging weights already registered in the data group (kept or left
+    # behind by an earlier run, or written by another tool) are not used.
+    registered_weight_names = set()
+    for ms_xdt in ps_xdt.values():
+        data_group = ms_xdt.ds.attrs["data_groups"].get(
+            processing_set_data_group_name, {}
+        )
+        if "weight_imaging" in data_group:
+            registered_weight_names.add(data_group["weight_imaging"])
+    if registered_weight_names:
+        logger.warning(
+            f"Data group {processing_set_data_group_name!r} registers the imaging "
+            f"weights {sorted(registered_weight_names)}. They are not used: this "
+            "run calculates its own imaging weights from imaging_weights_params."
+        )
+
     original_weight_data_groups = None
     weight_cache_is_active = False
     if weight_memory_mode == "in_place":
@@ -3581,6 +3621,7 @@ def image_continuum_single_field(
 
             # Prepared once before the imaging-cycle loop.
             cycle_input_params["weight_cache_mapping"] = weight_cache_mapping
+            cycle_input_params["weight_cache_is_active"] = weight_cache_is_active
 
             if not is_n_iter_0:
                 if model_xds is None:

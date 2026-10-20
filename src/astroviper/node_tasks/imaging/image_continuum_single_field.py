@@ -788,6 +788,57 @@ def _attach_imaging_weights_continuum(
     return ps_xdt
 
 
+def _unregister_imaging_weights_continuum(
+    ps_xdt,
+    processing_set_data_group_name="corrected",
+):
+    """Remove the imaging-weight registration from a loaded processing-set chunk.
+
+    Imaging weights that an earlier run kept or left registered in the
+    Processing Set, or that another tool wrote, were not made with this run's
+    ``imaging_weights_params``. Without their registration the setup of the
+    first imaging cycle calculates the imaging weights.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Freshly loaded processing-set chunk.
+
+    processing_set_data_group_name : str, optional
+        Processing-set data group whose ``"weight_imaging"`` registration is
+        removed.
+
+    Returns
+    -------
+    xarray.DataTree
+        Processing-set chunk whose data group registers no imaging weights.
+    """
+    import toolviper.utils.logger as logger
+
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        data_group = ms_xdt.attrs["data_groups"][processing_set_data_group_name]
+
+        if "weight_imaging" in data_group:
+            logger.debug(
+                f"Not using the imaging weights {data_group['weight_imaging']!r} "
+                f"registered in {ms_name!r}; they are calculated."
+            )
+            modify_data_groups_xds(
+                ms_xdt.ds,
+                data_group_out_name=processing_set_data_group_name,
+                data_group_out={
+                    role: name
+                    for role, name in data_group.items()
+                    if role != "weight_imaging"
+                },
+                description="Imaging weights not prepared by this run unregistered.",
+            )
+
+    return ps_xdt
+
+
 def _finalize_reference_primary_beam(
     img_xds,
     *,
@@ -963,6 +1014,7 @@ def residual_update_continuum_single_field(
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
+    weight_cache_is_active=False,
     primary_beam_xds=None,
     observed_visibility_grid_xds=None,
 ):
@@ -998,6 +1050,13 @@ def residual_update_continuum_single_field(
         Accumulated image-domain Taylor model used for MVC prediction.
     weight_cache_mapping : dict, optional
         Task-indexed prepared imaging weights.
+    weight_cache_is_active : bool, optional
+        ``True`` when this run's in-place imaging weights are already
+        registered in the Processing Set (global weighting with
+        ``weight_memory_mode="in_place"``); the first imaging cycle then uses
+        them. Otherwise it uses ``weight_cache_mapping`` or calculates the
+        imaging weights: weights that an earlier run or another tool
+        registered are not used.
     primary_beam_xds : xarray.Dataset, optional
         Cached primary beam for this MVC partition.
     observed_visibility_grid_xds : xarray.Dataset, optional
@@ -1282,6 +1341,13 @@ def residual_update_continuum_single_field(
             weight_cache_mapping[task_id],
             processing_set_data_group_name=(processing_set_data_group_name),
             weight_imaging_name="WEIGHT_IMAGING",
+        )
+
+    elif is_n_iter_0 and not weight_cache_is_active:
+        # This run has not prepared imaging weights, so setup calculates them.
+        ps_xdt = _unregister_imaging_weights_continuum(
+            ps_xdt,
+            processing_set_data_group_name=(processing_set_data_group_name),
         )
 
     # =============================================================

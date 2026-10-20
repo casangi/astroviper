@@ -22,6 +22,7 @@ from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _accumulate_graph_timings,
+    _activate_continuum_weight_cache,
     _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
     _create_continuum_weight_cache_store,
@@ -1059,6 +1060,190 @@ def test_weight_cache_store_checks_every_child_before_writing(tmp_path, tw_hydra
     with pytest.raises(KeyError, match="does not contain data group"):
         _create_continuum_weight_cache_store(processing_set, str(store), "base")
     assert _store_snapshot(store) == files
+
+
+def test_weight_cache_store_removes_an_earlier_registration(tmp_path, tw_hydra_store):
+    """A cache that an earlier run left registered is unregistered on disk."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    processing_set = open_processing_set(str(store))
+    _create_continuum_weight_cache_store(processing_set, str(store), "base")
+    _activate_continuum_weight_cache(processing_set, str(store), "base")
+
+    original_data_groups = _create_continuum_weight_cache_store(
+        open_processing_set(str(store)), str(store), "base"
+    )
+
+    for ms_name, ms_xdt in open_processing_set(str(store)).items():
+        assert "WEIGHT_IMAGING_CONTINUUM_CACHE" in ms_xdt.ds
+        assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
+        assert "weight_imaging" not in original_data_groups[ms_name]["base"]
+
+
+def _flag_one_hand(store):
+    """Flag the first correlation of every fourth time in a Processing Set."""
+    root = zarr.open_group(str(store), mode="r+", use_consolidated=False)
+    for ms_name in list(root.group_keys()):
+        flag = root[ms_name]["FLAG"]
+        flag_values = np.asarray(flag[:])
+        flag_values[::4, :, :, 0] = True
+        flag[:] = flag_values
+
+
+@pytest.mark.parametrize("weight_memory_mode", ["in_memory", "in_place"])
+@pytest.mark.parametrize("earlier_run", ["retained", "interrupted", "foreign"])
+def test_tw_hydra_rerun_calculates_its_own_weights(
+    tmp_path, tw_hydra_store, monkeypatch, earlier_run, weight_memory_mode
+):
+    """Imaging weights registered by an earlier run or another tool are not used.
+
+    The earlier run uses Briggs weighting and keeps its in-place weights
+    (``write_imaging_weights_to_ps=True``), or stops after it registered them
+    without its cleanup, as a killed process does. Or, with one hand flagged
+    on some rows, another tool registers the input weights, NaN only on the
+    flagged samples, as imaging weights: the two hands then get different
+    weights. A natural-weighting rerun over two imaging cycles equals the same
+    run on a clean copy with the same flags.
+    """
+    import importlib
+
+    import toolviper.utils.logger
+
+    module = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+    cycle_control_params = {
+        "max_iter": 20,
+        "max_cycles": 2,
+        "threshold": 0.001,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": 5,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    natural = {"weighting": "natural", "weighting_scope": "local"}
+    briggs = {"weighting": "briggs", "robust": -2.0, "weighting_scope": "local"}
+    registered_name = (
+        "WEIGHT_IMAGING_FOREIGN"
+        if earlier_run == "foreign"
+        else "WEIGHT_IMAGING_CONTINUUM_CACHE"
+    )
+
+    reference_store = tmp_path / "reference.ps.zarr"
+    shutil.copytree(tw_hydra_store, reference_store)
+    if earlier_run == "foreign":
+        _flag_one_hand(reference_store)
+    _, reference = _run_tw_hydra_continuum(
+        reference_store,
+        tmp_path / "reference.img.zarr",
+        open_processing_set(str(reference_store)),
+        2,
+        "mfs",
+        natural,
+        cycle_control_params=cycle_control_params,
+        weight_memory_mode=weight_memory_mode,
+    )
+
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    if earlier_run == "retained":
+        _, earlier = _run_tw_hydra_continuum(
+            store,
+            tmp_path / "earlier.img.zarr",
+            open_processing_set(str(store)),
+            2,
+            "mfs",
+            briggs,
+            weight_memory_mode="in_place",
+            write_imaging_weights_to_ps=True,
+        )
+        assert not np.array_equal(
+            earlier.POINT_SPREAD_FUNCTION.values,
+            reference.POINT_SPREAD_FUNCTION.values,
+            equal_nan=True,
+        )
+    elif earlier_run == "interrupted":
+        activate = module._activate_continuum_weight_cache
+
+        def activate_then_stop(ps_xdt, ps_store, processing_set_data_group_name):
+            activate(ps_xdt, ps_store, processing_set_data_group_name)
+            raise RuntimeError("process stopped")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                module, "_activate_continuum_weight_cache", activate_then_stop
+            )
+            patch.setattr(module, "_remove_continuum_weight_cache", lambda *args: None)
+            with pytest.raises(RuntimeError, match="process stopped"):
+                _run_tw_hydra_continuum(
+                    store,
+                    tmp_path / "earlier.img.zarr",
+                    open_processing_set(str(store)),
+                    2,
+                    "mfs",
+                    briggs,
+                    weight_memory_mode="in_place",
+                )
+    else:
+        _flag_one_hand(store)
+        root = zarr.open_group(str(store), mode="r+", use_consolidated=False)
+        for ms_name in list(root.group_keys()):
+            ms_group = zarr.open_group(
+                root.store, path=ms_name, mode="r+", use_consolidated=False
+            )
+            ms_group.create_array(
+                registered_name,
+                data=np.where(ms_group["FLAG"][:], np.nan, ms_group["WEIGHT"][:]),
+                attributes=dict(ms_group["WEIGHT"].attrs),
+            )
+            data_groups = ms_group.attrs["data_groups"]
+            ms_group.attrs["data_groups"] = {
+                **data_groups,
+                "base": {**data_groups["base"], "weight_imaging": registered_name},
+            }
+            zarr.consolidate_metadata(str(store), path=ms_name)
+        zarr.consolidate_metadata(str(store))
+    for _, ms_xdt in open_processing_set(str(store)).items():
+        data_group = ms_xdt.ds.attrs["data_groups"]["base"]
+        assert data_group["weight_imaging"] == registered_name
+    files = _store_snapshot(store, parse_metadata=weight_memory_mode == "in_place")
+
+    warnings = []
+    monkeypatch.setattr(
+        toolviper.utils.logger,
+        "warning",
+        lambda message, *args, **kwargs: warnings.append(message),
+    )
+    _, actual = _run_tw_hydra_continuum(
+        store,
+        tmp_path / "rerun.img.zarr",
+        open_processing_set(str(store)),
+        2,
+        "mfs",
+        natural,
+        cycle_control_params=cycle_control_params,
+        weight_memory_mode=weight_memory_mode,
+    )
+
+    assert np.nanmax(np.abs(reference.SKY_MODEL.values)) > 0.0
+    for variable in (
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        np.testing.assert_array_equal(actual[variable], reference[variable])
+    assert any(registered_name in message for message in warnings)
+    if weight_memory_mode == "in_memory":
+        assert _store_snapshot(store) == files
+    elif earlier_run == "foreign":
+        # The foreign array is untouched and its registration is restored.
+        assert _store_snapshot(store, parse_metadata=True) == files
+    else:
+        for _, ms_xdt in open_processing_set(str(store)).items():
+            assert "WEIGHT_IMAGING_CONTINUUM_CACHE" not in ms_xdt.ds
+            assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
 
 
 @pytest.mark.parametrize(
