@@ -20,6 +20,7 @@ from tests.utils.continuum_images import (
     make_continuum_image,
     make_runaway_taylor_image,
     make_single_term_continuum_image,
+    make_single_term_faint_source_image,
     make_single_term_runaway_image,
 )
 
@@ -891,6 +892,73 @@ def test_asp_divergence_test_stops_a_runaway(
     assert fields["iter_done"] == [iterations]
     assert fields["stop_code"].model_update == stop_code
     assert abs(fields["peakres"][0]) > abs(fields["start_peakres"][0])
+
+
+def _clean_faint_source(image, residual_components, scale_significance):
+    """One model update of the real Asp kernel through the continuum adapter
+    with threshold_per_cycle 5 (5 times the noise); return the Taylor term
+    zero model and the plane's record."""
+    statistics, _ = model_update_mtmfs_single_field(
+        image,
+        "asp",
+        {
+            "max_iter": 3000,
+            "max_iter_per_cycle_updated": 3000,
+            "threshold_per_cycle": 5.0,
+            "gain": 0.1,
+            "asp_residual_components": residual_components,
+            "asp_scale_significance": scale_significance,
+        },
+    )
+    (fields,) = statistics.data.values()
+    return image.SKY_MODEL.values[0, 0, 0], fields
+
+
+def test_coral_cleans_a_faint_source_by_its_significance_with_a_clean_mask():
+    """Coral (Asp with asp_residual_components and asp_scale_significance) on
+    the real kernel, with an explicit clean mask and noise outside it. The
+    dirty peak of the broad source (2) is below threshold_per_cycle (5), so
+    Asp alone cleans nothing and the residual-shaped components take nothing.
+    The test of significance per scale measures the robust noise of the
+    residual smoothed with each initial scale on the pixels outside the mask,
+    and cleans the source at the scales where it stands out of that noise
+    (measured: 34 % of its flux, the model peak 1 pixel from its centre).
+    Replacing the noise outside the mask by white noise of the same standard
+    deviation, with every pixel in the mask unchanged, lowers the noise of the
+    smoothed residual, and more is cleaned (measured: 116 % of the flux)."""
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+    )
+
+    image, sky, mask = make_single_term_faint_source_image()
+    dirty = image.SKY_RESIDUAL.values[0, 0, 0].copy()
+    assert (~mask).any()
+    assert np.abs(dirty[mask]).max() < 5.0
+
+    coral, fields = _clean_faint_source(image, True, True)
+    assert fields["stop_code"].model_update == MODEL_UPDATE_THRESHOLD_PER_CYCLE
+    assert fields["iter_done"][0] > 1
+    assert 0.2 * sky.sum() < coral.sum() < 0.5 * sky.sum()
+    peak = np.unravel_index(np.argmax(coral), coral.shape)
+    assert np.hypot(peak[0] - 64, peak[1] - 64) <= 3
+
+    # The residual-shaped components take nothing below the threshold.
+    image, _, _ = make_single_term_faint_source_image()
+    significance_only, _ = _clean_faint_source(image, False, True)
+    np.testing.assert_array_equal(significance_only, coral)
+
+    # Without the test of significance nothing is cleaned.
+    image, _, _ = make_single_term_faint_source_image()
+    no_significance, fields = _clean_faint_source(image, True, False)
+    assert fields["stop_code"].model_update == MODEL_UPDATE_THRESHOLD_PER_CYCLE
+    assert not no_significance.any()
+
+    # The noise is that of the pixels outside the mask.
+    image, _, _ = make_single_term_faint_source_image(white_noise_outside_mask=True)
+    np.testing.assert_array_equal(image.SKY_RESIDUAL.values[0, 0, 0][mask], dirty[mask])
+    white, fields = _clean_faint_source(image, True, True)
+    assert fields["stop_code"].model_update == MODEL_UPDATE_THRESHOLD_PER_CYCLE
+    assert white.sum() > 2 * coral.sum()
 
 
 def test_restoration_reports_incomplete_backend_result(monkeypatch):
