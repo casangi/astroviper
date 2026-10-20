@@ -104,7 +104,7 @@ MAX_ENTROPY_CELLS = 1 << 24
 
 
 def image_residual_entropy(
-    image_xds, data_group_name, spatial_bins=7, flux_bins=10, max_snr=6.0
+    image_xds, data_group_name, spatial_bins=7, flux_bins=10, max_snr=6.0, mask=None
 ):
     """
     Entropy of the residual image, per plane.
@@ -139,6 +139,10 @@ def image_residual_entropy(
     max_snr : float, optional
         Largest ratio of peak to RMS for which the entropy is worked out.
         Default 6.
+    mask : numpy.ndarray, optional
+        Clean mask of the shape of the residual, used instead of the mask of
+        the data group (for example the mask the first model update will
+        make, before it exists). Default: the mask of the data group.
 
     Returns
     -------
@@ -164,10 +168,10 @@ def image_residual_entropy(
     """
     data_group = image_xds.attrs["data_groups"][data_group_name]
     residual = image_xds[data_group["sky"]].values
-    mask_name = data_group.get("mask", None)
-    mask = None
-    if mask_name is not None and mask_name in image_xds:
-        mask = image_xds[mask_name].values
+    if mask is None:
+        mask_name = data_group.get("mask", None)
+        if mask_name is not None and mask_name in image_xds:
+            mask = image_xds[mask_name].values
     plane_shape = residual.shape[:-2]
     n_l, n_m = residual.shape[-2:]
     entropy = np.full(plane_shape, np.nan, dtype=float)

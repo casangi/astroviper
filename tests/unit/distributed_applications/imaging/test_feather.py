@@ -145,7 +145,12 @@ class FeatherShared:
                 sdfactor=1,
             )
         finally:
+            # local_client hands the client a LocalCluster of its own, which
+            # Client.close() leaves running (its event loop thread and worker
+            # processes outlive the test and make garbage in later tests).
+            cluster = viper_client.cluster
             viper_client.close()
+            cluster.close()
 
     @classmethod
     def _ensure_feather_output(

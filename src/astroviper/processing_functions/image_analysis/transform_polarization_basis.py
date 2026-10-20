@@ -243,7 +243,7 @@ def transform_polarization_basis(
         # variables in place without mutating the caller's dataset. A deep copy
         # (rather than an empty Dataset) guarantees every data variable is
         # present in the output -- including the pass-through variables (PSF,
-        # airy-disk primary beam, uv-domain grids) that the loop skips.
+        # primary beam, uv-domain grids) that the loop skips.
         img_transformed_xds = img_xds.copy(deep=True)
 
     # Determine the output polarization labels via the single source of truth.
@@ -286,7 +286,11 @@ def transform_polarization_basis(
             "type" in img_xds[var_name].attrs
             and img_xds[var_name].attrs["type"] == "primary_beam"
         ):
-            if img_xds["PRIMARY_BEAM"].attrs["method"] == "airy_disk":
+            if img_xds["PRIMARY_BEAM"].attrs["method"] in (
+                "airy_disk",
+                "beam_polynomial",
+                "uniform",
+            ):
                 continue
 
         # Skip uv-domain grids (e.g. VISIBILITY_MODEL). The residual update grids

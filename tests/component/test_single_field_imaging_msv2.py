@@ -19,7 +19,7 @@ thread each (the deployment the driver documents for a Measurement Set v2: the
 reads hold the GIL), so every task's lazy input is pickled to another process.
 
 The tests need XRADIO's ``xradio_msv2`` engine (an XRADIO release that carries
-it, with python-casacore or casatools) and skip without it. The data are
+it, with its arcae backend) and skip without it. The data are
 downloaded with ``toolviper.utils.data.download``.
 
 Run with pytest::
@@ -152,7 +152,7 @@ def _image_cube(ps_store, image_store, image_params, **overrides):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 50,
             "max_cycles": 2,
             "threshold": 0.0,

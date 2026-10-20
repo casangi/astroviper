@@ -23,7 +23,7 @@ task. It also reports
 
 * the graph payload: the pickled size of a task's ``lazy_input_data``;
 * the storage tile shapes of the Measurement Set's data columns (with
-  python-casacore): a task reads whole tiles, so when a tile spans every
+  arcae): a task reads whole tiles, so when a tile spans every
   channel of a spectral window every task reads whole rows, and converting
   the Measurement Set first is faster for an at-scale run;
 * ``channel_sliced_reads``: whether the installed XRADIO reads only the tiles
@@ -35,7 +35,7 @@ task. It also reports
   same after the benchmark (the engine is opened with
   ``partition_cache="read"`` unless ``XRADIO_MSV2_PARTITION_CACHE`` is set).
 
-Requirements: XRADIO with the ``xradio_msv2`` engine and python-casacore.
+Requirements: XRADIO with the ``xradio_msv2`` engine and arcae.
 Data: a Measurement Set v2 path, or the name of a ToolVIPER test dataset
 (downloaded into ``--work-dir`` with ``toolviper.utils.data.download``). The
 benchmark never writes into the Measurement Set, unless
@@ -120,16 +120,14 @@ def column_tile_shapes(ms_path):
     """Storage tile shapes of the Measurement Set's data columns.
 
     Returns ``{column: [tile shape, ...]}`` (casacore order: polarization,
-    channel, rows), or ``None`` without python-casacore.
+    channel, rows), or ``None`` without arcae.
     """
     try:
-        from casacore import tables
+        from arcae.lib.arrow_tables import Table
     except ImportError:
         return None
     shapes = {}
-    with tables.table(
-        ms_path, ack=False, readonly=True, lockoptions="usernoread"
-    ) as main:
+    with Table.from_filename(ms_path, readonly=True, lockoptions="usernoread") as main:
         for manager in main.getdminfo().values():
             for column in manager["COLUMNS"]:
                 if column not in _DATA_COLUMNS:

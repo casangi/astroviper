@@ -7,14 +7,17 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
 
 from astroviper.utils.resource_plots import (
+    _with_imaging_task_columns,
     plot_application_task_stream,
     plot_cluster_resource_usage,
     plot_task_resource_usage,
+    plot_task_stream,
 )
 
 
@@ -93,6 +96,41 @@ def test_cluster_plots_skip_unmonitored(capsys):
 def test_rejects_wrong_source_type():
     with pytest.raises(TypeError, match="timing_node_tasks"):
         plot_task_resource_usage([1, 2, 3])
+
+
+def test_task_stream_of_other_task_columns():
+    """The task stream of a node task with its own timing columns (the
+    simulator's): the total, a summed load segment and a write segment."""
+    df = pd.DataFrame(
+        {
+            "task_id": [0, 1],
+            "T_simulate_task": [4.0, 5.0],
+            "T_uvw": [1.0, 1.5],
+            "T_beams": [0.5, 0.5],
+            "T_write": [0.5, 1.0],
+            "start_unixtime": [1.75e9, 1.75e9 + 1.0],
+            "hostname": ["node", "node"],
+        }
+    )
+    columns = {
+        "task": "T_simulate_task",
+        "load": ["T_uvw", "T_beams"],
+        "write": "T_write",
+    }
+    mapped = _with_imaging_task_columns(df, columns)
+    np.testing.assert_allclose(mapped["T_image_cube_task"], [4.0, 5.0])
+    np.testing.assert_allclose(mapped["T_load"], [1.5, 2.0])
+    np.testing.assert_allclose(mapped["T_make_empty_image"], 0.0)
+    np.testing.assert_allclose(mapped["T_write"], [0.5, 1.0])
+    assert "T_image_cube_task" not in df  # the caller's frame is not changed
+    no_write = _with_imaging_task_columns(df, {**columns, "load": (), "write": None})
+    np.testing.assert_allclose(no_write[["T_load", "T_write"]], 0.0)
+
+    figure = plot_task_stream(df, task_columns=columns)
+    assert figure is not None
+    plt.close(figure)
+    with pytest.raises(KeyError):  # the imager's columns by default
+        plot_task_stream(df)
 
 
 def test_application_task_stream_plots_every_graph(tmp_path):

@@ -156,7 +156,7 @@ STOKES = ["I", "Q"]
 MIN_PLANE_BYTES = 200 * MB
 MIN_VISIBILITY_BYTES = 100 * MB
 
-ITERATION_CONTROL_PARAMS = {
+CYCLE_CONTROL_PARAMS = {
     "max_iter": 50,
     "max_cycles": 2,
     "threshold": 0.0,
@@ -1015,9 +1015,9 @@ def image(work_dir, ps_store, image_params):
                 "robust": 0.5,
                 "casa_weighting_implementation": True,
             },
-            iteration_control_params=ITERATION_CONTROL_PARAMS,
+            cycle_control_params=CYCLE_CONTROL_PARAMS,
             instrument_polarization_basis="linear",
-            gridder="prolate_spheroidal",
+            gridder="anti_alias",
             deconvolver="hogbom",
             scan_intents="OBSERVE_TARGET#ON_SOURCE",
             image_data_variables_keep=[

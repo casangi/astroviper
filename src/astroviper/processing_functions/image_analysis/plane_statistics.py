@@ -121,7 +121,7 @@ def calculate_plane_statistics(
         ``mask_source`` attr.
     primary_beam_limit : float, optional
         Cutoff (fraction of the peak primary beam) for the primary-beam
-        fallback mask, matching the iteration control's ``primary_beam_limit``.
+        fallback mask, matching the cycle control's ``primary_beam_limit``.
         Default 0.2. ``None`` disables the fallback.
 
     Returns

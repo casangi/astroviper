@@ -101,6 +101,9 @@ def _target_files():
     root = pathlib.Path(__file__).resolve().parents[1]  # src/astroviper
     rel = [
         "distributed_applications/imaging/image_cube_single_field.py",
+        "distributed_applications/imaging/image_cube_single_field_delphi.py",
+        "distributed_applications/imaging/point_spread_function_cube_single_field.py",
+        "node_tasks/imaging/point_spread_function_cube_single_field.py",
         "distributed_applications/imaging/image_continuum_single_field.py",
         "node_tasks/imaging/image_cube_single_field.py",
         "node_tasks/imaging/image_continuum_single_field.py",

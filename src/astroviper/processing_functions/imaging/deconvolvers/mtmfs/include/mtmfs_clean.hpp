@@ -26,14 +26,17 @@
 #include <cstddef>
 #include <vector>
 
+#include "../../include/plane_stop_test.hpp"
+
 namespace mtmfs {
 
+// The stop codes shared by the deconvolvers (plane_stop_test.hpp). Nothing
+// left to clean in the search region counts as kStopThreshold.
 enum StopCode : int {
-    kContinue = 0,
-    kStopMaxIter = 1,
-    kStopThreshold = 2,
-    kStopNothingToClean = 3,
-    kStopDiverged = 4,
+    kStopNone = deconvolvers::STOP_NONE,
+    kStopMaxIter = deconvolvers::STOP_MAX_ITER,
+    kStopThreshold = deconvolvers::STOP_THRESHOLD,
+    kStopDiverged = deconvolvers::STOP_DIVERGED,
 };
 
 constexpr int kSingularHessian = -2;
@@ -41,9 +44,9 @@ constexpr int kMaxTaylorTerms = 4;
 
 template <typename T>
 struct CleanResult {
-    int iter_done = 0;
-    int stop_code = kStopMaxIter;
-    T peakres = 0;
+    int iterations = 0;
+    int stop_code = kStopNone;
+    T peak_residual = 0;
     T model_flux = 0;
     int psf_support = 0;
     float small_scale_bias = 0.0f;
@@ -77,10 +80,13 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 //   mask     : (ny, nx) read-only, or nullptr
 //   gain <= 0 selects casacore adaptive gain
 //   mask_threshold > 0 binarises the scale-convolved mask at 0.1 (CASA)
+//   divergence: the divergence test shared with the other deconvolvers
+//   (plane_stop_test.hpp); stops with kStopDiverged
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
-                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle, T gain,
-                     T threshold_per_cycle, T mask_threshold, std::ptrdiff_t residual_term_stride = 0);
+                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
+                     T threshold_per_cycle, T psf_fraction, T mask_threshold,
+                     const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride = 0);
 
 // residual[t1] = sum_t2 inverse_hessian[t1, t2] * residual[t2] in place
 // (MultiTermMatrixCleaner::computeprincipalsolution). inverse_hessian is
@@ -95,10 +101,11 @@ extern template int taylor_hessian<double>(const double*, int, int, int, std::ve
                                            std::vector<double>&, std::vector<double>&,
                                            std::vector<double>&, int&);
 extern template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
-                                                const std::vector<float>&, float, int, float, float, float,
-                                                std::ptrdiff_t);
+                                                const std::vector<float>&, float, int, float, float, float, float,
+                                                const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t);
 extern template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
                                                   const std::vector<float>&, float, int, double, double, double,
+                                                  double, const deconvolvers::DivergenceControl<double>&,
                                                   std::ptrdiff_t);
 extern template void principal_solution<float>(float*, const double*, int, int, int);
 extern template void principal_solution<double>(double*, const double*, int, int, int);
