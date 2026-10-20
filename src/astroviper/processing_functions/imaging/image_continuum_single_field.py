@@ -1756,6 +1756,69 @@ def residual_update_continuum_single_field(
 ###############################################################################
 
 
+def _continuum_clean_support(
+    img_xds, image_data_group_in_name, residual_plane, control_params
+):
+    """The pixels of Taylor term zero that may be cleaned, or ``None``.
+
+    One support for the stop test (:func:`build_continuum_residual_imaging_dict`)
+    and the native MT-MFS model update, so that a plane is never kept going
+    for a peak its model update may not clean. It is the clean mask of the
+    data group (values above 0.5) or, without one, the pixels where the
+    primary beam is at least ``primary_beam_limit`` times its peak and not 0.
+    ``primary_beam_limit`` defaults to 0, every pixel where the primary beam
+    is above 0, as for the continuum Högbom model update and cube imaging,
+    which make the same mask with the same default
+    (:func:`~astroviper.processing_functions.image_analysis.make_mask.make_mask`):
+    the residual holds the sky seen through the primary beam wherever that
+    is above 0, and a source there that is not cleaned leaves its sidelobes
+    across the image.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Continuum image dataset holding the residual data group.
+    image_data_group_in_name : str
+        Residual data group whose ``mask`` or ``primary_beam`` role gives the
+        support.
+    residual_plane : xarray.DataArray
+        Taylor term zero of the residual, dimensions
+        ``(time, polarization, l, m)``; the support is broadcast to it.
+    control_params : dict
+        Cycle control or model update parameters; ``primary_beam_limit``
+        (default 0) is read from it.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Boolean support, shape ``(time, polarization, l, m)``; ``None`` when
+        the data group has neither a mask nor a primary beam.
+    """
+    group = img_xds.attrs["data_groups"][image_data_group_in_name]
+
+    def plane_zero(array):
+        selection = {
+            dim: 0
+            for dim in ("taylor_term", "psf_taylor_order", "frequency")
+            if dim in array.dims
+        }
+        return array.isel(selection, drop=True)
+
+    mask_name = group.get("mask")
+    if mask_name is not None:
+        support = plane_zero(img_xds[mask_name]).broadcast_like(residual_plane) > 0.5
+    elif group.get("primary_beam") is not None:
+        primary_beam = plane_zero(img_xds[group["primary_beam"]])
+        primary_beam_limit = float(control_params.get("primary_beam_limit", 0.0))
+        support = (
+            (primary_beam >= primary_beam_limit * primary_beam.max(skipna=True))
+            & (primary_beam != 0)
+        ).broadcast_like(residual_plane)
+    else:
+        return None
+    return support.transpose("time", "polarization", "l", "m").values
+
+
 def build_continuum_residual_imaging_dict(
     img_xds, image_data_group_in_name, cycle_control_params
 ):
@@ -1799,18 +1862,11 @@ def build_continuum_residual_imaging_dict(
     residual = plane_zero(img_xds[group["sky"]]).transpose(
         "time", "polarization", "l", "m"
     )
-    mask_name = group.get("mask")
-    if mask_name is not None:
-        support = plane_zero(img_xds[mask_name]).broadcast_like(residual) > 0.5
-    elif group.get("primary_beam") is not None:
-        pb = plane_zero(img_xds[group["primary_beam"]])
-        support = (
-            pb
-            >= cycle_control_params.get("primary_beam_limit", 0.0) * pb.max(skipna=True)
-        ).broadcast_like(residual) & (pb != 0).broadcast_like(residual)
-    else:
-        support = xr.ones_like(residual, dtype=bool)
-    support = support.transpose(*residual.dims).values
+    support = _continuum_clean_support(
+        img_xds, image_data_group_in_name, residual, cycle_control_params
+    )
+    if support is None:
+        support = np.ones(residual.shape, dtype=bool)
     absolute = np.abs(residual.values)
     sidelobe = plane_zero(
         img_xds[
@@ -1923,33 +1979,12 @@ def _model_update_native_mtmfs(
             f"received {residual.dtype} and {psf.dtype}."
         )
 
-    residual_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     reference_plane = residual_da.isel(taylor_term=0, drop=True)
-    mask_name = residual_group.get("mask")
-    if mask_name is not None:
-        mask_da = img_xds[mask_name]
-        selection = {
-            dim: 0
-            for dim in ("taylor_term", "frequency", "psf_taylor_order")
-            if dim in mask_da.dims
-        }
-        support_da = mask_da.isel(selection, drop=True).broadcast_like(reference_plane)
-        support_da = support_da > 0.5
-    elif residual_group.get("primary_beam") is not None:
-        primary_beam = img_xds[residual_group["primary_beam"]]
-        selection = {
-            dim: 0
-            for dim in ("taylor_term", "frequency", "psf_taylor_order")
-            if dim in primary_beam.dims
-        }
-        primary_beam = primary_beam.isel(selection, drop=True)
-        primary_beam_limit = float(deconvolve_params.get("primary_beam_limit", 0.2))
-        support_da = (
-            primary_beam >= primary_beam_limit * primary_beam.max(skipna=True)
-        ).broadcast_like(reference_plane)
-    else:
-        support_da = reference_plane.notnull()
-    support = support_da.transpose("time", "polarization", "l", "m").values
+    support = _continuum_clean_support(
+        img_xds, image_data_group_in_name, reference_plane, deconvolve_params
+    )
+    if support is None:
+        support = reference_plane.notnull().values
 
     max_sidelobe = img_xds[max_sidelobe_name]
     selection = {
@@ -2178,7 +2213,10 @@ def model_update_mtmfs_single_field(
         Asp), or at once when its peak exceeds ``(1 + gain)`` times the
         peak at the start of the model update. ``gain``
         (``0 < gain <= 1``) and ``max_iter_divergence`` are checked as in
-        the cube deconvolver.
+        the cube deconvolver. Without a clean mask, both deconvolvers clean
+        the pixels where the primary beam is at least
+        ``primary_beam_limit`` (default 0) times its peak and not 0, the
+        pixels the stop test measures.
 
     is_n_iter_0 : bool, optional
         Indicates whether this is the first model update.

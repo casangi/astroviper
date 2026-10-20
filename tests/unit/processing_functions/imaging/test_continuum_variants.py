@@ -10,6 +10,7 @@ import xarray as xr
 from astroviper.processing_functions.imaging.deconvolvers import mtmfs
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     accumulate_continuum_model,
+    build_continuum_residual_imaging_dict,
     convert_mvc_cubes_to_taylor_normal_equations,
     model_update_mtmfs_single_field,
     restore_image,
@@ -375,6 +376,57 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
         np.testing.assert_array_equal(fields["scales"], [0.0])
         assert np.isfinite(fields["hessian_condition_number"]).all()
     assert timing.loc[0, "T_mtmfs"] >= 0.0
+
+
+@pytest.mark.parametrize(
+    "params,limit",
+    [
+        ({}, 0.0),
+        ({"primary_beam_limit": 0.0}, 0.0),
+        ({"primary_beam_limit": 0.2}, 0.2),
+        ({"primary_beam_limit": 0.5}, 0.5),
+    ],
+)
+def test_native_mtmfs_cleans_the_support_the_stop_test_measures(
+    monkeypatch, params, limit
+):
+    """Without a mask, MT-MFS cleans the pixels where the primary beam is at
+    least primary_beam_limit (default 0) times its peak and not 0, exactly
+    those the stop test measures."""
+    image, _ = _native_mtmfs_continuum_image(2, (8, 8), np.float64, "primary_beam")
+    primary_beam = np.linspace(1.0, 0.0, 64).reshape(8, 8)  # ends on 0
+    primary_beam[7, 6] = np.nan
+    image["PRIMARY_BEAM"] = (("l", "m"), primary_beam)
+    with np.errstate(invalid="ignore"):
+        expected = (primary_beam >= limit) & (primary_beam != 0)
+    masks = []
+
+    def native_clean(residual, psf, model, **kwargs):
+        masks.append(kwargs["mask"].astype(bool))
+        return {
+            "iterations_performed": 0,
+            "peak_residual": 0.0,
+            "model_flux": 0.0,
+            "stop_code": mtmfs.STOP_THRESHOLD,
+            "scales": np.asarray([0.0]),
+            "hessian_condition_number": np.asarray([1.0]),
+        }
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        native_clean,
+    )
+    stop_test = build_continuum_residual_imaging_dict(image, "residual", params)
+    model_update, _ = model_update_mtmfs_single_field(
+        image, "mtmfs", {"max_iter": 5, "gain": 0.1, "scales": [0.0], **params}
+    )
+
+    assert expected.sum() == {0.0: 62, 0.2: 51, 0.5: 32}[limit]
+    assert len(masks) == 4
+    for mask in masks:
+        np.testing.assert_array_equal(mask, expected)
+    for fields in (*stop_test.data.values(), *model_update.data.values()):
+        assert fields["masksum"] == [expected.sum()]
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])

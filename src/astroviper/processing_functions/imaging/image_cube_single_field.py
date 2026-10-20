@@ -139,6 +139,8 @@ def imaging_preparation_single_field(
           mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
           Pixels where the primary beam is below this fraction are excluded
           from cleaning. A masking cutoff, distinct from ``threshold``.
+          Default 0: without a clean mask, the model update cleans and the
+          stop test measures every pixel where the primary beam is above 0.
         - ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the
           selected peak flux subtracted from the residual image at each
           deconvolution iteration (``0 < gain <= 1``).
@@ -569,6 +571,8 @@ def image_cube_single_field(
           mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
           Pixels where the primary beam is below this fraction are excluded
           from cleaning. A masking cutoff, distinct from ``threshold``.
+          Default 0: without a clean mask, the model update cleans and the
+          stop test measures every pixel where the primary beam is above 0.
         - ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the
           selected peak flux subtracted from the residual image at each
           deconvolution iteration (``0 < gain <= 1``).

@@ -879,6 +879,133 @@ def test_native_mtmfs_node_books_a_diverged_model_update(
     assert controller.diverged_model_updates[0, 0, 0] == diverged_model_updates
 
 
+@pytest.mark.parametrize("primary_beam_limit", [None, 0.2])
+def test_native_mtmfs_imaging_cycles_clean_what_the_stop_test_measures(
+    primary_beam_limit,
+):
+    """A source where the primary beam is 0.15 is cleaned by default, and the
+    imaging cycles end on the threshold; with primary_beam_limit 0.2 neither
+    the stop test nor the model update sees it.
+
+    Real node task, adapter and kernel. The residual update is made in the
+    image domain, residual_k = dirty_k - sum_j psf_(k+j) * model_j (linear
+    convolutions), so a model update without iterations leaves the residual
+    as it was. max_cycles is -1; the test stops after 30 imaging cycles,
+    where the distributed application would go on.
+    """
+    from scipy.signal import fftconvolve
+
+    from astroviper.processing_functions.imaging.utils import CycleController
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        IMAGING_THRESHOLD,
+    )
+
+    n, centre, outer = 64, 32, (32, 57)
+
+    def gaussian(size, middle, fwhm):
+        yy, xx = np.indices((size, size))
+        r2 = (yy - middle) ** 2 + (xx - middle) ** 2
+        return np.exp(-4 * np.log(2) * r2 / fwhm**2)
+
+    primary_beam = gaussian(n, centre, 30.0)
+    psf_orders = (1.0, 0.1, 0.5)
+    psf_big = gaussian(2 * n, n, 3.0)
+
+    def convolve(image, order):
+        full = fftconvolve(image, psf_orders[order] * psf_big, mode="full")
+        return full[n : 2 * n, n : 2 * n]
+
+    sky = np.zeros((n, n))
+    sky[centre, centre] = 1.0
+    sky[outer] = 0.5  # apparent flux, flat spectrum
+    dirty = np.stack([convolve(sky, 0), convolve(sky, 1)])
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    psf = np.stack([order * gaussian(n, centre, 3.0) for order in psf_orders])
+
+    def image(residual):
+        return xr.Dataset(
+            {
+                "SKY_RESIDUAL": (dims, residual[None, :, None].copy()),
+                "POINT_SPREAD_FUNCTION": (
+                    ("time", "psf_taylor_order", "polarization", "l", "m"),
+                    psf[None, :, None],
+                ),
+                "PRIMARY_BEAM": (("l", "m"), primary_beam),
+                "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                    ("time", "polarization"),
+                    [[0.2]],
+                ),
+            },
+            coords={
+                "time": [0.0],
+                "taylor_term": [0, 1],
+                "psf_taylor_order": [0, 1, 2],
+                "polarization": ["I"],
+                "l": np.arange(n),
+                "m": np.arange(n),
+            },
+            attrs={
+                "data_groups": {
+                    "residual": {
+                        "sky": "SKY_RESIDUAL",
+                        "point_spread_function": "POINT_SPREAD_FUNCTION",
+                        "primary_beam": "PRIMARY_BEAM",
+                    }
+                }
+            },
+        )
+
+    params = {
+        "max_iter": 1000,
+        "max_cycles": -1,
+        "threshold": 0.05,
+        "gain": 0.1,
+        "max_iter_per_cycle": -1,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    controller = CycleController(**params)
+    cycle_control_params = {**params, "scales": [0.0]}
+    if primary_beam_limit is not None:
+        cycle_control_params["primary_beam_limit"] = primary_beam_limit
+    model = np.zeros((2, n, n))
+    residual = dirty
+    deconvolution = None
+    for _ in range(30):
+        result = continuum_node.model_update_continuum_single_field(
+            {"image": image(residual)},
+            {
+                "controller": controller,
+                "deconvolver": "mtmfs",
+                "cycle_control_params": cycle_control_params,
+                "deconvolution": deconvolution,
+            },
+        )
+        if result["residual_converged"]:
+            break
+        deconvolution = result["deconvolution"]
+        model += result["image"].SKY_MODEL.transpose(*dims).values[0, :, 0]
+        residual = dirty - np.stack(
+            [sum(convolve(model[j], k + j) for j in range(2)) for k in range(2)]
+        )
+    else:
+        pytest.fail("The imaging cycles did not end within 30.")
+
+    assert result["stopcode"].imaging == IMAGING_THRESHOLD
+    level = params["threshold"] * (1 + controller.threshold_tolerance)
+    near_outer = (slice(outer[0] - 2, outer[0] + 3), slice(outer[1] - 2, outer[1] + 3))
+    if primary_beam_limit is None:
+        assert primary_beam[outer] == pytest.approx(0.146, abs=1e-3)
+        assert np.abs(residual[0]).max() <= level
+        assert model[0][near_outer].sum() == pytest.approx(0.5, abs=level)
+    else:
+        assert np.abs(residual[0][primary_beam >= 0.2]).max() <= level
+        assert residual[0][outer] == pytest.approx(0.5, abs=0.01)
+        np.testing.assert_array_equal(model[:, primary_beam < 0.2], 0.0)
+    assert model[0][centre, centre] == pytest.approx(1.0, abs=level)
+
+
 def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch):
     """Every Taylor increment reaches later-cycle MFS prediction unchanged."""
     previous = _model_dataset(0.0)
