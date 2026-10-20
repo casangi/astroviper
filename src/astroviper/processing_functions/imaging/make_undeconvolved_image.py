@@ -21,7 +21,7 @@ def make_undeconvolved_image_single_field(
 
     Drops auto-correlations and grids the visibilities (``VISIBILITY`` /
     ``VISIBILITY_NORMALIZATION``).  Together with the inverse FFT
-    (:func:`~astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder.ifft_norm_img_xds`)
+    (:func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.ifft_norm_img_xds`)
     this produces the undeconvolved (dirty/residual) image.  In the single-field
     imager the UV-sampling grid that becomes the PSF is built once, separately,
     by
@@ -40,8 +40,10 @@ def make_undeconvolved_image_single_field(
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
-    cgk_1D : numpy.ndarray
-        1-D prolate-spheroidal gridding convolution kernel.
+    cgk_1D : GriddingKernel or numpy.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
+        or the bare table of the default prolate spheroidal kernel of support 7.
     model_exists : bool
         Accepted for call-site compatibility with the imaging cycle loop;
         currently unused (the UV-sampling/PSF grid is built once in

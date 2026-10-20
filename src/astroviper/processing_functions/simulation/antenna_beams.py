@@ -17,7 +17,9 @@ turns them into what the visibility kernel needs:
 * :func:`pack_beam_models` / :func:`sample_jones` — the flat representation and
   the per-direction Jones sampler (analytic / polynomial / bilinear on images)
   used by the NumPy visibility kernel, and :func:`apply_mueller` which scales
-  the 4-correlation flux by the Mueller matrix of two sampled Jones vectors.
+  the 4-correlation flux by the Mueller matrix of two sampled Jones vectors;
+* :func:`symmetric_beam_response` — the analytic and polynomial responses
+  :func:`sample_jones` samples, which the imaging primary beam evaluates too.
 
 Jones vectors are the row-major flattened 2x2 matrix ``[J_pp, J_pq, J_qp, J_qq]``
 with ``(p, q) = (R, L)`` or ``(X, Y)``; the 16 Mueller elements are numbered
@@ -31,6 +33,7 @@ from collections.abc import Sequence
 
 import numpy as np
 import xarray as xr
+from scipy.special import jn_zeros
 
 from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
     CASA_AIRY_N_SAMPLE,
@@ -47,6 +50,7 @@ from astroviper.processing_functions.simulation.zernike_polynomials import (
     zernike_surface,
 )
 from astroviper.utils.beam_models import (
+    beam_polynomial_coefficient_index,
     normalize_beam_model_dict,
     normalize_beam_model_xds,
 )
@@ -113,7 +117,8 @@ def polynomial_beam_response(
     ----------
     l, m : np.ndarray (broadcastable), radians
     frequency : np.ndarray (broadcastable), Hz
-    coefficients : np.ndarray, [n_coefficients]
+    coefficients : np.ndarray, [..., n_coefficients]
+        Leading axes broadcast with ``l``, ``m`` and ``frequency``.
     max_rad_1GHz : float, radians
     ipower : int
     n_sample : int or None
@@ -131,7 +136,9 @@ def polynomial_beam_response(
         rho = np.trunc(rho / r_inc) * r_inc
     r = rho * (frequency / 1e9) / ARCMIN_TO_RAD
     beam = np.zeros(np.broadcast(r, frequency).shape, dtype=np.float64)
-    for i, c in enumerate(np.asarray(coefficients, dtype=np.float64)):
+    for i, c in enumerate(
+        np.moveaxis(np.asarray(coefficients, dtype=np.float64), -1, 0)
+    ):
         beam = beam + c * r ** (2 * i)
     beam = np.where(beam < 0, 0.0, beam)
     return beam ** (0.5 * ipower)
@@ -198,10 +205,18 @@ def make_airy_jones_beam(
 ) -> xr.Dataset:
     """Jones beam image of an analytic (Airy) model, for inspection/plotting.
 
+    The diagonal is the voltage pattern of :func:`symmetric_beam_response`,
+    the beam the simulator samples, zero beyond the model's cut.
+
     Parameters
     ----------
     model : dict
-        Analytic beam model (see :mod:`astroviper.utils.beam_models`).
+        Analytic beam model (see :mod:`astroviper.utils.beam_models`); without
+        a cut, the image is sized on the first null of the unblocked Airy disk
+        of its dish instead, and its ``max_rad_1GHz`` attr is the circle
+        inscribed in it at the lowest frequency, the cut samplers apply when
+        the image is a beam model, as they clamp to the edge of the image
+        beyond; ``JONES`` itself is not zeroed there.
     frequency : np.ndarray, [n_frequency], Hz
     beam_params : dict, optional
     polarization : sequence of str
@@ -215,14 +230,28 @@ def make_airy_jones_beam(
     model = normalize_beam_model_dict(model)
     params = resolve_beam_params(beam_params)
     frequency = np.atleast_1d(np.asarray(frequency, dtype=np.float64))
-    cell_size = beam_image_cell_size(model["max_rad_1GHz"], frequency, params)
+    max_rad = model["max_rad_1GHz"]
+    if max_rad is None:
+        max_rad = (
+            jn_zeros(1, 1)[0] * SPEED_OF_LIGHT / (np.pi * 1e9 * model["dish_diameter"])
+        )
+    cell_size = beam_image_cell_size(max_rad, frequency, params)
     l, m = beam_image_coordinates(params["image_size"], cell_size)  # noqa: E741
-    resp = _analytic_response(
-        model, l[None, :, None], m[None, None, :], frequency[:, None, None]
+    resp = symmetric_beam_response(
+        pack_beam_models([model])[0],
+        l[None, :, None],
+        m[None, None, :],
+        frequency[:, None, None],
     )  # [n_freq, n_l, n_m]
     jones = np.repeat(resp[None, :, None, :, :], len(polarization), axis=2).astype(
         np.complex128
     )
+    if model["max_rad_1GHz"] is None:
+        model["max_rad_1GHz"] = (
+            min(np.abs(l[[0, -1]]).min(), np.abs(m[[0, -1]]).min())
+            * frequency.min()
+            / 1e9
+        )
     return _jones_image_xds(jones, [0.0], frequency, polarization, l, m, model)
 
 
@@ -232,7 +261,7 @@ def make_polynomial_jones_beam(
     beam_params: dict | None = None,
     polarization: Sequence[str] = ("RR", "LL"),
 ) -> xr.Dataset:
-    """Jones beam image of a beam-polynomial model (nearest tabulated frequency)."""
+    """Jones beam image of a beam-polynomial model (the rows CASA picks)."""
     bpc_xds = normalize_beam_model_xds(bpc_xds)
     params = resolve_beam_params(beam_params)
     frequency = np.atleast_1d(np.asarray(frequency, dtype=np.float64))
@@ -240,13 +269,13 @@ def make_polynomial_jones_beam(
     cell_size = beam_image_cell_size(max_rad, frequency, params)
     l, m = beam_image_coordinates(params["image_size"], cell_size)  # noqa: E741
     resp = np.empty((len(frequency), len(l), len(m)))
+    packed_model = pack_beam_models(
+        evaluate_beam_models(
+            [bpc_xds], np.zeros(1), frequency, np.zeros((1, 2)), np.zeros(3)
+        )[0]
+    )[0]
     for i, f in enumerate(frequency):
-        i_chan = int(np.argmin(np.abs(bpc_xds.frequency.values - f)))
-        coef = bpc_xds.BPC.values[i_chan, 0, :]
-        resp[i] = polynomial_beam_response(
-            l[:, None], m[None, :], f, coef, max_rad, 1, n_sample=None
-        )
-        resp[i][np.hypot(l[:, None], m[None, :]) >= max_rad / (f / 1e9)] = 0.0
+        resp[i] = symmetric_beam_response(packed_model, l[:, None], m[None, :], f)
     jones = np.repeat(resp[None, :, None, :, :], len(polarization), axis=2).astype(
         np.complex128
     )
@@ -482,7 +511,13 @@ def evaluate_beam_models(
     model is present; otherwise they are zero.  Zernike models are evaluated on
     the representative subset of parallactic angles returned by
     :func:`~astroviper.processing_functions.simulation.calculate_parallactic_angles.find_representative_angles`
-    with ``beam_params["pa_radius"]``.
+    with ``beam_params["pa_radius"]``.  Beam-polynomial models are reduced to
+    one row per channel, the row of
+    :func:`~astroviper.utils.beam_models.beam_polynomial_coefficient_index`,
+    with the channel frequencies as coordinate, so the samplers pick it exactly
+    (the C++ kernel searches the row of every channel once per call, in
+    O(n_channel**2); the NumPy sampler, given these frequencies, takes the first
+    row of each without a search).
 
     Parameters
     ----------
@@ -499,7 +534,8 @@ def evaluate_beam_models(
     Returns
     -------
     evaluated_beam_models : list
-        Same order as ``beam_models``; Zernike models replaced by Jones images.
+        Same order as ``beam_models``; Zernike models replaced by Jones images
+        and beam polynomials resolved to ``frequency``.
     parallactic_angle : np.ndarray, [n_time], radians
     """
     params = resolve_beam_params(beam_params)
@@ -522,6 +558,12 @@ def evaluate_beam_models(
             evaluated.append(
                 make_zernike_jones_beam(model, pa_subset, frequency, params)
             )
+        elif kind == "beam_polynomial_coefficients":
+            evaluated.append(
+                model.isel(
+                    frequency=beam_polynomial_coefficient_index(model, frequency)
+                ).assign_coords(frequency=frequency)
+            )
         else:
             evaluated.append(model)
     return evaluated, parallactic_angle
@@ -534,8 +576,9 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
     -------
     list of dict
         Each with ``kind`` plus, depending on the kind: ``func``,
-        ``dish_diameter``, ``blockage_diameter``, ``max_rad_1GHz`` (analytic);
-        ``frequency``, ``coefficients[n_frequency, n_coefficients]`` (polynomial);
+        ``dish_diameter``, ``blockage_diameter``, ``max_rad_1GHz`` (analytic;
+        ``inf`` for no cut); ``frequency``,
+        ``coefficients[n_frequency, n_coefficients]``, ``n_sample`` (polynomial);
         ``jones[n_pa, n_frequency, n_pol, n_l, n_m]``, ``parallactic_angle``,
         ``frequency``, ``polarization_index``, ``cell_size_l``, ``cell_size_m``
         (Jones image).
@@ -551,10 +594,15 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
                     "func": model["func"],
                     "dish_diameter": float(model["dish_diameter"]),
                     "blockage_diameter": float(model["blockage_diameter"]),
-                    "max_rad_1GHz": float(model["max_rad_1GHz"]),
+                    "max_rad_1GHz": _packed_max_rad(model["max_rad_1GHz"]),
                 }
             )
         elif kind == "beam_polynomial_coefficients":
+            n_sample = model.attrs.get("n_sample")
+            if n_sample is not None and int(n_sample) < 2:
+                raise ValueError(
+                    f"n_sample must be None (exact radius) or at least 2; got {n_sample!r}"
+                )
             packed.append(
                 {
                     "kind": "polynomial",
@@ -564,6 +612,7 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
                     ),
                     "dish_diameter": float(model.attrs["dish_diameter"]),
                     "max_rad_1GHz": float(model.attrs["max_rad_1GHz"]),
+                    "n_sample": n_sample,
                 }
             )
         elif kind == "jones_image":
@@ -583,7 +632,7 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
                     "cell_size_l": float(l[1] - l[0]),
                     "cell_size_m": float(m[1] - m[0]),
                     "dish_diameter": float(model.attrs["dish_diameter"]),
-                    "max_rad_1GHz": float(model.attrs["max_rad_1GHz"]),
+                    "max_rad_1GHz": _packed_max_rad(model.attrs["max_rad_1GHz"]),
                 }
             )
         else:
@@ -594,10 +643,14 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
     return packed
 
 
+def _packed_max_rad(max_rad_1GHz):
+    return np.inf if max_rad_1GHz is None else float(max_rad_1GHz)
+
+
 # ----------------------------------------------------------------------------
 # Sampling
 # ----------------------------------------------------------------------------
-def _analytic_response(model: dict, l, m, frequency):  # noqa: E741
+def _analytic_response(model: dict, l, m, frequency, ipower=1):  # noqa: E741
     func = model["func"]
     if func == "casa_airy":
         return casa_airy_disk_response(
@@ -607,11 +660,11 @@ def _analytic_response(model: dict, l, m, frequency):  # noqa: E741
             model["dish_diameter"],
             model["blockage_diameter"],
             model["max_rad_1GHz"],
-            1,
+            ipower,
         )
     if func == "airy":
         return airy_disk_response(
-            l, m, frequency, model["dish_diameter"], model["blockage_diameter"], 1
+            l, m, frequency, model["dish_diameter"], model["blockage_diameter"], ipower
         )
     if func == "none":
         return np.ones(
@@ -620,6 +673,85 @@ def _analytic_response(model: dict, l, m, frequency):  # noqa: E741
     raise ValueError(
         f"Unknown analytic beam function {func!r} (use 'casa_airy', 'airy' or 'none')."
     )
+
+
+def _nearest_frequency_index(frequency, model_frequency):
+    # np.argmin(np.abs(frequency[..., None] - model_frequency), axis=-1); for a
+    # model resolved to these frequencies the first row of each frequency,
+    # without the (..., n_frequency, n_model_frequency) temporary.
+    if frequency.shape[-1:] == model_frequency.shape and np.array_equal(
+        frequency, np.broadcast_to(model_frequency, frequency.shape)
+    ):
+        _, first, inverse = np.unique(
+            model_frequency, return_index=True, return_inverse=True
+        )
+        return np.broadcast_to(first[inverse], frequency.shape)
+    return np.argmin(np.abs(frequency[..., None] - model_frequency), axis=-1)
+
+
+def _outside_beam_cut(packed_model: dict, l, m, frequency):  # noqa: E741
+    # the radius as the C++ kernel computes it, not np.hypot
+    rho = np.sqrt(
+        np.asarray(l, dtype=np.float64) ** 2 + np.asarray(m, dtype=np.float64) ** 2
+    )
+    return rho >= packed_model["max_rad_1GHz"] / (frequency / 1e9)
+
+
+def symmetric_beam_response(
+    packed_model: dict,
+    l: np.ndarray,  # noqa: E741
+    m: np.ndarray,
+    frequency: np.ndarray,
+    ipower: int = 1,
+) -> np.ndarray:
+    """Response of an analytic or beam-polynomial model, zero beyond its cut.
+
+    :func:`sample_jones` takes its voltage pattern (``ipower=1``) and the
+    imaging primary beam
+    (:func:`~astroviper.processing_functions.imaging.primary_beam.make_primary_beam.make_primary_beam_single_field`)
+    its power pattern (``ipower=2``), so the simulator and the imager share
+    the beam.  A beam polynomial takes the row of the nearest of its
+    frequencies.
+
+    Parameters
+    ----------
+    packed_model : dict
+        An ``"analytic"`` or ``"polynomial"`` element of :func:`pack_beam_models`.
+    l, m : np.ndarray (broadcastable), radians
+    frequency : np.ndarray (broadcastable), Hz
+    ipower : int
+
+    Returns
+    -------
+    np.ndarray
+        Broadcast shape of ``l``, ``m`` and ``frequency``; zero where
+        ``sqrt(l**2 + m**2) >= max_rad_1GHz / (frequency / 1 GHz)``.
+
+    Raises
+    ------
+    ValueError
+        For another kind of model or an unknown analytic function.
+    """
+    frequency = np.asarray(frequency, dtype=np.float64)
+    kind = packed_model["kind"]
+    if kind == "analytic":
+        response = _analytic_response(packed_model, l, m, frequency, ipower)
+    elif kind == "polynomial":
+        i_chan = _nearest_frequency_index(frequency, packed_model["frequency"])
+        response = polynomial_beam_response(
+            l,
+            m,
+            frequency,
+            packed_model["coefficients"][i_chan],
+            packed_model["max_rad_1GHz"],
+            ipower,
+            packed_model["n_sample"],
+        )
+    else:
+        raise ValueError(
+            f"Packed beam model kind {kind!r} is not azimuthally symmetric."
+        )
+    return np.where(_outside_beam_cut(packed_model, l, m, frequency), 0.0, response)
 
 
 def bilinear_interpolate(image: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -662,6 +794,9 @@ def sample_jones(
 ) -> np.ndarray:
     """Jones vector of a packed beam model at directions ``lm`` for each frequency.
 
+    Analytic and polynomial models put the voltage pattern of
+    :func:`symmetric_beam_response` on the diagonal.
+
     Parameters
     ----------
     packed_model : dict
@@ -684,26 +819,10 @@ def sample_jones(
     m = lm[:, 1][:, None]
     freq = frequency[None, :]
     kind = packed_model["kind"]
-    if kind == "analytic":
-        resp = _analytic_response(packed_model, l, m, freq)
+    if kind in ("analytic", "polynomial"):
+        resp = symmetric_beam_response(packed_model, l, m, freq)
         jones[:, :, 0] = resp
         jones[:, :, 3] = resp
-    elif kind == "polynomial":
-        i_chan = np.argmin(
-            np.abs(frequency[:, None] - packed_model["frequency"][None, :]), axis=1
-        )
-        coef = packed_model["coefficients"][i_chan]  # [n_chan, n_coef]
-        rho = np.hypot(l, m)  # [n, 1]
-        r_inc = (packed_model["max_rad_1GHz"] / (freq / 1e9)) / (CASA_AIRY_N_SAMPLE - 1)
-        r = (
-            (np.trunc(rho / r_inc) * r_inc) * (freq / 1e9) / ARCMIN_TO_RAD
-        )  # [n, n_chan]
-        beam = np.zeros((n, n_chan))
-        for i in range(coef.shape[1]):
-            beam = beam + coef[None, :, i] * r ** (2 * i)
-        beam = np.sqrt(np.where(beam < 0, 0.0, beam))
-        jones[:, :, 0] = beam
-        jones[:, :, 3] = beam
     elif kind == "jones_image":
         i_pa = int(
             np.argmin(
@@ -712,9 +831,7 @@ def sample_jones(
                 )
             )
         )
-        i_chan = np.argmin(
-            np.abs(frequency[:, None] - packed_model["frequency"][None, :]), axis=1
-        )
+        i_chan = _nearest_frequency_index(frequency, packed_model["frequency"])
         scale = frequency / packed_model["frequency"][i_chan]  # [n_chan]
         delta_pa = parallactic_angle - packed_model["parallactic_angle"][i_pa]
         l_rot, m_rot = rotate_coordinates(
@@ -731,13 +848,9 @@ def sample_jones(
             )  # [n_pol, n]
             for i_p, p in enumerate(pol_index):
                 jones[:, c, p] = sampled[i_p]
+        jones[_outside_beam_cut(packed_model, l, m, freq)] = 0.0  # [n, n_chan]
     else:
         raise ValueError(f"Unknown packed beam model kind {kind!r}.")
-
-    outside = np.hypot(l, m) >= packed_model["max_rad_1GHz"] / (
-        freq / 1e9
-    )  # [n, n_chan]
-    jones[outside] = 0.0
     return jones
 
 

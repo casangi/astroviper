@@ -27,11 +27,13 @@
 
 namespace mtmfs {
 
+// The stop codes shared by the deconvolvers (plane_stop_test.hpp). Nothing
+// left to clean in the search region counts as kStopThreshold.
 enum StopCode : int {
-    kStopMaxIter = 0,
-    kStopThreshold = 1,
-    kStopNothingToClean = 2,
-    kStopDiverged = -1,
+    kStopNone = deconvolvers::STOP_NONE,
+    kStopMaxIter = deconvolvers::STOP_MAX_ITER,
+    kStopThreshold = deconvolvers::STOP_THRESHOLD,
+    kStopDiverged = deconvolvers::STOP_DIVERGED,
 };
 
 constexpr int kSingularHessian = -2;
@@ -40,7 +42,7 @@ constexpr int kMaxTaylorTerms = 4;
 template <typename T>
 struct CleanResult {
     int iterations = 0;
-    int stop_code = kStopMaxIter;
+    int stop_code = kStopNone;
     T peak_residual = 0;
     T model_flux = 0;
     int psf_support = 0;
@@ -78,7 +80,7 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 //   (plane_stop_test.hpp); stops with kStopDiverged
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
-                     const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, T gain,
+                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
                      T threshold, T psf_fraction, T mask_threshold,
                      const deconvolvers::DivergenceControl<T>& divergence);
 

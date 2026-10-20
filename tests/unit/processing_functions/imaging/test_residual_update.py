@@ -202,6 +202,213 @@ def test_residual_update_with_model_uses_the_imaged_data_group(data_group_name):
     assert residual_peak < 1e-2 * dirty_peak
 
 
+def test_imaging_setup_uses_the_primary_beam_params():
+    """primary_beam_params reach the primary beam of the setup (the VLA beam here),
+    which the transform to Stokes leaves alone, also through image_cube_single_field."""
+    from astroviper.processing_functions.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+    from astroviper.processing_functions.simulation.antenna_beams import (
+        polynomial_beam_response,
+    )
+    from astroviper.utils.beam_models import (
+        EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ,
+        read_beam_polynomial_coefficients,
+    )
+
+    image_params = {
+        "image_size": IMAGE_SIZE,
+        "cell_size": CELL_SIZE,
+        "phase_direction": np.array([1.0, 0.5]),
+        "time_coords": [0],
+        "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
+    }
+    common = dict(
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        fft_backend="scipy",
+    )
+    beams = {}
+    for name, params in (("default", None), ("vla", {"telescope": "vla"})):
+        img_xds, _ = imaging_setup_single_field(
+            _point_source_processing_set("base"),
+            _empty_image(),
+            image_params,
+            {"weighting": "natural"},
+            primary_beam_params=params,
+            **common,
+        )
+        beams[name] = img_xds["PRIMARY_BEAM"].values[0, 0]
+    expected = polynomial_beam_response(
+        _empty_image().l.values[:, None],
+        _empty_image().m.values[None, :],
+        FREQUENCY,
+        read_beam_polynomial_coefficients("EVLA_").BPC.sel(frequency=1424e6).values[0],
+        EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ,
+        ipower=2,
+        n_sample=None,
+    )
+    for plane in beams["vla"]:  # I and Q
+        np.testing.assert_array_equal(plane, expected)
+    assert not np.allclose(beams["vla"], beams["default"])
+
+    img_xds, _, _ = image_cube_single_field(
+        _point_source_processing_set("base"),
+        _empty_image(),
+        image_params,
+        {"weighting": "natural"},
+        {
+            "max_iter": 0,
+            "max_cycles": 0,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+        },
+        primary_beam_params={"telescope": "vla"},
+        image_data_variables_keep=["primary_beam"],
+        **common,
+    )
+    for plane in img_xds["PRIMARY_BEAM"].values[0, 0]:
+        np.testing.assert_array_equal(plane, expected)
+
+
+def _offset_point_source_processing_set(l0, m0, n_uv, n_visibility=3000):
+    """A unit point source at ``(l0, m0)`` observed at random uv points (w = 0)."""
+    rng = np.random.default_rng(1)
+    u_max = (
+        0.45 / CELL_SIZE[1]
+    )  # wavelengths: 0.45 of the half width of the padded grid
+    uv = rng.uniform(-u_max, u_max, (1, n_visibility, 2))
+    uvw = np.concatenate(
+        [uv * 299792458.0 / FREQUENCY, np.zeros((1, n_visibility, 1))], axis=-1
+    )
+    fringe = np.exp(2j * np.pi * (uv[0, :, 0] * l0 + uv[0, :, 1] * m0))
+    vis = np.repeat(fringe[None, :, None, None], 2, axis=-1)
+    data_group = MS_DATA_GROUPS["base"]
+    vis_dims = ("time", "baseline_id", "frequency", "polarization")
+    ms_xds = xr.Dataset(
+        data_vars={
+            data_group["correlated_data"]: (vis_dims, vis),
+            data_group["flag"]: (vis_dims, np.zeros(vis.shape, dtype=bool)),
+            data_group["weight"]: (vis_dims, np.ones(vis.shape)),
+            data_group["uvw"]: (("time", "baseline_id", "uvw_label"), uvw),
+        },
+        coords={
+            "time": [0.0],
+            "baseline_id": np.arange(n_visibility),
+            "baseline_antenna1_name": (
+                "baseline_id",
+                [f"a{i}" for i in range(n_visibility)],
+            ),
+            "baseline_antenna2_name": (
+                "baseline_id",
+                [f"b{i}" for i in range(n_visibility)],
+            ),
+            "frequency": [FREQUENCY],
+            "polarization": ["XX", "YY"],
+            "uvw_label": ["u", "v", "w"],
+        },
+        attrs={"data_groups": {"base": dict(data_group)}},
+    )
+    return xr.DataTree.from_dict({"ms_0": ms_xds})
+
+
+def _degrid_error(kernel, x, y, n_offsets=4000):
+    """RMS over sub cell offsets of degridded / true - 1 for a source at (x, y).
+
+    Per axis the degridder returns the stencil response divided by its stencil
+    sum and by the correction; the two axes multiply.
+    """
+    offsets = -0.5 + (np.arange(n_offsets) + 0.5) / n_offsets
+    values = kernel.stencil_values(offsets)
+    rel = np.arange(kernel.support) - kernel.support // 2
+    moments = []
+    for pos in (x, y):
+        response = values @ np.exp(2j * np.pi * rel * pos)
+        ratio = response * np.exp(2j * np.pi * offsets * pos) / values.sum(axis=1)
+        ratio /= kernel.correction(np.array([pos]))[0]
+        moments.append((np.mean(np.abs(ratio) ** 2), np.mean(ratio)))
+    (sq_x, mean_x), (sq_y, mean_y) = moments
+    return np.sqrt(sq_x * sq_y - 2.0 * (mean_x * mean_y).real + 1.0)
+
+
+@pytest.mark.parametrize(
+    "gridding_kernel_params",
+    [
+        None,
+        {"type": "exponential_semicircle", "oversampling": 1000},
+        {
+            "type": "exponential_semicircle",
+            "oversampling": 100,
+            "interpolation": "linear",
+        },
+        {"type": "least_misfit", "oversampling": 1000, "interpolation": "linear"},
+    ],
+)
+@pytest.mark.parametrize("offset", [(30, 0), (40, 20)])
+def test_residual_of_the_true_model_is_the_degrid_error(gridding_kernel_params, offset):
+    """The residual visibilities of the true model are the map error of the kernel applied."""
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
+    )
+    from astroviper.processing_functions.imaging.utils.fft_sizing import (
+        padded_grid_size,
+    )
+
+    image_size = [128, 128]
+    img_xds = make_empty_sky_image(
+        phase_center=np.array([1.0, 0.5]),
+        image_size=image_size,
+        cell_size=CELL_SIZE,
+        frequency_coords=[FREQUENCY],
+        pol_coords=["XX", "YY"],
+        time_coords=[0],
+        do_sky_coords=False,
+    )
+    i, j = image_size[0] // 2 + offset[0], image_size[1] // 2 + offset[1]
+    n_uv = padded_grid_size(image_size, 1.2)[0]
+    ps_xdt = _offset_point_source_processing_set(
+        img_xds.l.values[i], img_xds.m.values[j], n_uv
+    )
+    image_params = {
+        "image_size": image_size,
+        "cell_size": CELL_SIZE,
+        "phase_direction": np.array([1.0, 0.5]),
+        "time_coords": [0],
+        "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
+    }
+    common = dict(
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        fft_backend="scipy",
+        gridding_kernel_params=gridding_kernel_params,
+    )
+    img_xds, _ = imaging_setup_single_field(
+        ps_xdt, img_xds, image_params, {"weighting": "natural"}, **common
+    )
+    img_xds, _ = residual_update_cube_single_field(
+        ps_xdt, img_xds, image_params, model_exists=False, **common
+    )
+    img_xds = _add_point_source_model(img_xds, flux=0.0)
+    img_xds["SKY_MODEL"].values[0, 0, 0, i, j] = 1.0
+    img_xds, _ = residual_update_cube_single_field(
+        ps_xdt, img_xds, image_params, model_exists=True, **common
+    )
+    residual = ps_xdt["ms_0"]["VISIBILITY_RESIDUAL"].values[0, :, 0, 0]
+    kernel = make_gridding_kernel(gridding_kernel_params, 1.2)
+    expected = _degrid_error(kernel, offset[0] / n_uv, offset[1] / n_uv)
+    np.testing.assert_allclose(
+        np.sqrt(np.mean(np.abs(residual) ** 2)), expected, rtol=0.05
+    )
+
+
 @pytest.mark.parametrize("data_group_name", ["base", "corrected"])
 def test_make_visibility_model_reads_the_input_data_group(data_group_name):
     """Every MS is degridded against ``ms_data_group_in_name``."""

@@ -105,7 +105,11 @@ SIMULATION_PARAM_DOCS = {
         "Antenna pointing directions; ``None`` points every antenna at the phase centre."
     ),
     "uvw_params": (
-        "``auto_correlations`` (bool, default False).  The uvw follow the\n"
+        "``auto_correlations`` (bool, default False) and ``w_term`` (bool,\n"
+        "default True; ``False`` zeroes the ``w`` coordinate before the\n"
+        "visibilities are computed, the two dimensional approximation without\n"
+        "the ``w (n - 1)`` phase, so that an imager without w projection can be\n"
+        "tested against an exactly consistent sky).  The uvw follow the\n"
         "archival / VLBI convention adopted by MSv4:\n"
         "``uvw = P(antenna1) - P(antenna2)`` (see\n"
         ":func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`)."
@@ -115,6 +119,13 @@ SIMULATION_PARAM_DOCS = {
         "model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,\n"
         "``spill_efficiency``, ``corr_efficiency``, ``quantization_efficiency``,\n"
         "``t_cmb`` and ``random_seed``; ``None`` disables noise (unit weights)."
+    ),
+    "antenna_dish_diameter": (
+        "Diameter of the main reflector of each antenna\n"
+        "(``antenna_xds.ANTENNA_DISH_DIAMETER``); it sets the effective area of the\n"
+        "noise model, ``ant_efficiency * pi * D1 * D2 / 4``.  Required when\n"
+        "``noise_params`` is given; the beam models keep their own (effective)\n"
+        "``dish_diameter``."
     ),
     "direction_frame": (
         'Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).'

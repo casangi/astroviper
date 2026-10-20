@@ -95,7 +95,7 @@ Notebooks must stay **output-stripped** (`nbstripout`) and
   widget only re-render it. When a cell is purely an interactive explorer, a
   static fallback (e.g. a small multi-panel montage) is the most robust choice for
   the executed copy — see
-  `processing_functions_tutorials/imaging/demo_prolate_spheroidal_grid.ipynb`.
+  `processing_functions_tutorials/imaging/demo_anti_alias_grid.ipynb`.
 - Always execute notebooks with a **per-cell timeout** so a genuinely stuck cell
   fails loudly instead of hanging the whole run.
 - **Heavy notebooks are slow, not hung.** Run the notebook suite **sequentially**
@@ -171,6 +171,17 @@ distributed_applications.imaging.image_cube_single_field(...)
 distributed_applications.simulation.simulate_processing_set(...)
 ```
 
+### Reports of the distributed applications
+A distributed application takes `report=None | "html" | "pdf" | "notebook"` and,
+once its output is written, makes a report through `utils.report.make_report`
+(a failing report is logged and never costs the run its results). Every report
+starts with the common processing section (`utils.report.add_processing_section`:
+timing, task stream, cluster resources); the application's results section lives
+next to it (`<application>_report.py`), built with `utils.report.Report` and the
+pyplot-free figures of `utils/report_plots.py`. For the task stream and the
+resource monitor, a node task records `start_unixtime` and its execution identity
+(`hostname`, `process_pid`, `thread_native_id`, `worker_name`) and returns a dict.
+
 ### The `simulation` subdomain (port of SIRIUS)
 `simulate_processing_set` is a **pure generator**: there is no input processing
 set; the node task is mapped over `parallel_coords = {"time", "frequency"}` and
@@ -181,19 +192,33 @@ documented in `SIRIUS_PORT_PLAN.md` at the repo root; keep that file current
 when the simulator changes.
 
 ### Imaging implementation notes
-The Airy voltage patterns in
-`processing_functions/imaging/primary_beam/airy_disk.py` are shared by the
-imaging primary beam (`ipower=2`, the CASA power-pattern definition) and the
-simulation antenna beams. The Adaptive Scale Pixel
+The imaging primary beam (`ipower=2`, the CASA power-pattern definition) and
+the simulator's analytic and beam-polynomial antenna beams are evaluated by one
+function, `processing_functions/simulation/antenna_beams.py::symmetric_beam_response`
+(the C++ visibility kernel reproduces it): the obscured Airy disks of
+`processing_functions/imaging/primary_beam/airy_disk.py` (textbook by default,
+CASA's `PBMath1DAiry` with `func="casa_airy"`) and the EVLA beam polynomial,
+zero beyond `max_rad_1GHz` when the model has one. The Adaptive Scale Pixel
 deconvolver (`processing_functions/imaging/deconvolvers/aspclean/`, a port of
 CASA's `AspMatrixCleaner`) does its FFTs with the vendored
 `include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
-kept verbatim with its licence block); its per-Aspen L-BFGS follows ALGLIB's
-scaled-variable conventions and is exposed for tests as
-`aspclean.lbfgs_minimize`. Documented departures from CASA live in
-`src/asp_clean.cpp`: separable Aspen spectra with paired inverse transforms
-(same numbers, ~8x fewer FFTs), a residual update over the whole image, and
-no "diverging" guard (`AspMatrixCleaner` "5. Diverging" of CASA and LibRA).
+kept verbatim with its licence block); its per-Aspen L-BFGS
+(`include/asp_lbfgs.hpp`) reproduces ALGLIB's `minlbfgs` as CASA and LibRA
+call it (unpreconditioned, the scale only in the stopping tests, More-Thuente
+line search; written independently, as ALGLIB is GPL) and is exposed for
+tests as `aspclean.lbfgs_minimize`. Documented departures from CASA live in
+`src/asp_clean.cpp`: exact linear convolutions in the residual update and the
+Aspen fit (CASA's circular ones wrap the response of a component near an edge
+around to the opposite edge), separable spectra with real (half spectrum)
+transforms, no transform for point components, no end of the model
+update after a Hogbom run (CASA's, kept as
+`cycle_control_params["asp_stop_after_hogbom_run"]`), and no "diverging" guard
+(`AspMatrixCleaner` "5. Diverging" of CASA and LibRA). Beyond CASA, the
+imager's Asp starts each model update with components shaped by the residual
+(Ma, Zhang & Zhang 2026) and cleans smoothed residual that is significant at
+its scale below the threshold (`asp_residual_components`,
+`asp_scale_significance`, on by default; the kernel options are `AspOptions`
+in `include/asp_clean.hpp`, off by default there).
 Like Hogbom and MTMFS it takes the divergence test shared by the
 deconvolvers (`deconvolvers/include/plane_stop_test.hpp`); `asp_clean()`
 gives it the RMS limit at `(1 + gain)` times the lowest RMS and no peak
@@ -206,6 +231,18 @@ PSF beam fit is switchable
 `StokesImageUtil::FitGaussianPSF` (CAS-13022,
 `processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces
 `tclean`'s restoring beam exactly on the same PSF.
+
+**PSF of twice the image size.** The PSF that `exact_psf_subtraction`
+subtracts (Hogbom only; Asp refuses the option) has twice the `l` and `m`
+extents of `img_xds`, so it cannot share its coordinates and is kept outside
+`img_xds` and its data groups, as a NumPy cube `(nt, nf, np, 2 n_l, 2 n_m)`.
+`make_subtraction_point_spread_function_single_field` makes it once per
+channel, in the correlation basis, from the `WEIGHT_IMAGING` of the setup (not
+recomputed: Briggs weights depend on the uv cell, which the larger grid
+halves), and it reaches `deconvolve` as
+`deconvolve_params["subtraction_psf_cube"]`. It is used only for the
+subtraction: the beam fit, `max_psf_sidelobe` and the restore keep the
+image-sized PSF.
 
 **Polarization.** The residual update grids and degrids in the instrument
 (correlation) basis and the model update deconvolves in the Stokes basis;
@@ -490,7 +527,7 @@ per-variable nodes.
     `SKY_MODEL`).
   - **Functions / variables**: `snake_case`, **descriptive** (`image_size`, not
     `imsize`).
-  - **Classes**: `CamelCase` (`IterationController`, `ReturnDict`).
+  - **Classes**: `CamelCase` (`CycleController`, `ReturnDict`).
   - **Consistency**: Parameter names should be consistent throughout the stack.
   - **CLEAN terminology**: an **imaging cycle** (or simply *cycle*) is one
     **residual update** followed by one **model update**; use exactly these
@@ -499,7 +536,11 @@ per-variable nodes.
     and the `max_cycles` / `max_iter_per_cycle` / `threshold_per_cycle`
     parameters. Never call anything a major or minor cycle (major/minor axis
     of a Gaussian beam is fine). CASA parameter names may be cited in brackets
-    for orientation, e.g. `max_cycles` [CASA `nmajor`].
+    for orientation, e.g. `max_cycles` [CASA `nmajor`]. **Cycle control** is
+    the stop test between the residual update and the model update
+    (`CycleController`); **iteration control** is the stop test inside the
+    model update (the deconvolver kernels). A quantity keeps one name from the
+    cycle controller down to the kernel arguments.
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
   astroviper.processing_functions.imaging.residual_update import ...`). Relative
