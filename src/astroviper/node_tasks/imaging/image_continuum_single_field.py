@@ -2552,6 +2552,56 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
     return model_xds, model_uv_xds
 
 
+def _accelerate_continuum_model_increment(
+    model_increment_xds, residual_before_model_update, controller, input_params
+):
+    """Replace the model increment by the accelerated model step.
+
+    The conjugate gradient takes the plain increment on planes whose model
+    update reached the global threshold; Nesterov momentum on every plane
+    the controller expects to stop. Both take it on planes whose residual
+    entropy the entropy stop follows. Returns the image dataset with the step
+    as ``SKY_MODEL`` and the acceleration state for the next imaging cycle.
+    """
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.cycle_acceleration import (
+        conjugate_gradient_model_step,
+        nesterov_momentum_model_step,
+    )
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        IMAGING_CONTINUE,
+        IMAGING_THRESHOLD,
+    )
+
+    stop_codes = xr.DataArray(
+        controller.stop_code_imaging[:, 0, :], dims=("time", "polarization")
+    )
+    entropy_followed = np.isfinite(controller.max_entropy[:, 0, :])
+    state_xds = input_params.get("cycle_acceleration_state_xds")
+    if input_params["cycle_acceleration"] == "conjugate_gradient":
+        residual_name = model_increment_xds.attrs["data_groups"][
+            input_params.get("image_data_group_in_name", "residual")
+        ]["sky"]
+        model_step, state_xds = conjugate_gradient_model_step(
+            residual_before_model_update,
+            model_increment_xds[residual_name],
+            model_increment_xds["SKY_MODEL"],
+            plain_step_planes=(stop_codes == IMAGING_THRESHOLD) | entropy_followed,
+            cycle_acceleration_state_xds=state_xds,
+        )
+    else:
+        model_step, state_xds = nesterov_momentum_model_step(
+            residual_before_model_update,
+            model_increment_xds["SKY_MODEL"],
+            plain_step_planes=(stop_codes != IMAGING_CONTINUE) | entropy_followed,
+            cycle_acceleration_state_xds=state_xds,
+            momentum_coefficient=input_params["momentum_coefficient"],
+        )
+    return model_increment_xds.assign(SKY_MODEL=model_step), state_xds
+
+
 def _prepare_cached_mfs_residual_grid(input_data, input_params):
     """Cache the first MFS observed grid or form a later residual grid.
 
@@ -2684,6 +2734,12 @@ def continuum_minor_cycle_node(
     are returned to the distributed application as state objects. The application
     forwards them to the next graph without performing numerical model operations.
 
+    With ``input_params["cycle_acceleration"]`` set to ``"conjugate_gradient"`` or
+    ``"nesterov_momentum"``, the model increment is replaced by the accelerated
+    model step before accumulation. The state of that acceleration is read from
+    ``input_params["cycle_acceleration_state_xds"]`` and returned as
+    ``"cycle_acceleration_state_xds"`` in the same way.
+
     This node performs no distributed processing. It operates on the single,
     globally reduced continuum dataset produced by the GraphViper reduce stage.
     """
@@ -2755,11 +2811,36 @@ def continuum_minor_cycle_node(
             int(input_data["task_id"]): input_data["weight_datasets"]
         }
 
+    cycle_acceleration = input_params.get("cycle_acceleration", "none")
+    if cycle_acceleration != "none":
+        start = time.time()
+        residual_name = img_xds.attrs["data_groups"][
+            input_params.get("image_data_group_in_name", "residual")
+        ]["sky"]
+        # MT-MFS overwrites the residual in place.
+        residual_before_model_update = img_xds[residual_name].copy(deep=True)
+        T_cycle_acceleration = time.time() - start
+
     # Run the model update.
     return_dict = model_update_continuum_single_field(
         input_data,
         model_update_input_params,
     )
+
+    model_increment_xds = return_dict["image"]
+    if cycle_acceleration != "none":
+        start = time.time()
+        if not return_dict.get("residual_converged", False):
+            model_increment_xds, return_dict["cycle_acceleration_state_xds"] = (
+                _accelerate_continuum_model_increment(
+                    model_increment_xds,
+                    residual_before_model_update,
+                    return_dict["controller"],
+                    input_params,
+                )
+            )
+        del residual_before_model_update
+        T_cycle_acceleration += time.time() - start
 
     # The append stage owns all numerical state preparation needed by the next
     # residual-update graph. The distributed application only forwards these
@@ -2770,7 +2851,7 @@ def continuum_minor_cycle_node(
         model_uv_xds = input_params.get("model_uv_xds")
     else:
         model_xds, model_uv_xds = _prepare_post_update_continuum_model_state(
-            return_dict["image"],
+            model_increment_xds,
             input_params,
         )
     T_prepare_model_state = time.time() - start
@@ -2781,6 +2862,8 @@ def continuum_minor_cycle_node(
     timing_model_update = return_dict.get("timing_model_update")
     if timing_model_update is not None:
         timing_model_update["T_prepare_model_state"] = T_prepare_model_state
+        if cycle_acceleration != "none":
+            timing_model_update["T_cycle_acceleration"] = T_cycle_acceleration
 
     # model_update_continuum_single_field constructs its own return dictionary,
     # so explicitly carry the first-cycle imaging-weight cache through the
@@ -2991,6 +3074,10 @@ def model_update_continuum_single_field(
         ``image_data_group_out_name``
             Model image data-group name. Defaults to ``"model"``.
 
+        ``cycle_acceleration``
+            With ``"conjugate_gradient"``, Högbom writes its updated residual
+            back into the image. Defaults to ``"none"``.
+
     Returns
     -------
     dict
@@ -3172,6 +3259,9 @@ def model_update_continuum_single_field(
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
+        write_back_deconvolver_residual=(
+            input_params.get("cycle_acceleration", "none") == "conjugate_gradient"
+        ),
     )
     copy_residual_entropy(deconvolve_dict, residual_imaging_dict)
 
