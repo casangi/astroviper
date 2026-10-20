@@ -805,10 +805,32 @@ private:
         return status;
     }
 
+    // A noise the test of significance can divide by: finite and positive.
+    // estimateScaleNoise() leaves +inf where fewer than 100 pixels are sampled
+    // outside the clean mask and the border (no mask, or a mask of ones), and
+    // a MAD of 0 means the pixels there are mostly equal (zeros, say), not
+    // noiseless.
+    static bool measuredNoise(double noise) { return std::isfinite(noise) && noise > 0.0; }
+
     // The significance a smoothed residual must reach to be cleaned.
     double significanceLimit() const {
         if (options_.significance > 0.0) return options_.significance;
         return threshold_ / noiseScale_[0];
+    }
+
+    // Whether the most significant smoothed residual of the last search of
+    // every scale reaches the significance limit. Without a measured noise of
+    // the residual no smoothed residual is significant: with a noise of +inf
+    // the limit (threshold / noise) and every significance would be 0, and
+    // 0 >= 0 would go on cleaning below the threshold, noise included. This
+    // holds for a limit set by the user as well. With +inf at scale 0 every
+    // scale has +inf (a scale samples a subset of the pixels of scale 0); with
+    // a noise of 0 the residual outside the mask is mostly exactly 0, so the
+    // noises of the smoothed residuals there measure only how far the emission
+    // inside the mask spreads when smoothed, not a noise.
+    bool significanceReached() const {
+        if (!measuredNoise(noiseScale_[0])) return false;
+        return maxSignificance_ >= significanceLimit();
     }
 
     // setInitScales: choose 0, w, 2w, 4w, 8w (restricted by largestscale).
@@ -1035,11 +1057,12 @@ private:
             maxSignificance_ = 0.0;
             int sigScale = -1;
             for (int s = 1; s < nInitScales_; ++s) {
+                // A scale without a measured noise has no significance.
+                if (!measuredNoise(noiseScale_[s])) continue;
                 const double sig = std::abs(maxima[s]) / noiseScale_[s];
                 if (sig > maxSignificance_) { maxSignificance_ = sig; sigScale = s; }
             }
-            if (std::abs(maxima[0]) < threshold_ && sigScale > 0 &&
-                maxSignificance_ >= significanceLimit()) {
+            if (std::abs(maxima[0]) < threshold_ && sigScale > 0 && significanceReached()) {
                 optimumScale = sigScale;
                 strengthOptimum = maxima[sigScale];
                 posI = posMaxI[sigScale];
@@ -1250,7 +1273,7 @@ private:
                     numHogbomIter_ = 0;
                     getActiveSetAspen();
                 }
-                significantScale = optimumScale_ > 0 && maxSignificance_ >= significanceLimit();
+                significantScale = optimumScale_ > 0 && significanceReached();
                 if (significantScale) usedScale = optimumScaleSize_;
             }
             if (std::abs(peakResidual_) < computeThreshold() && !significantScale) {

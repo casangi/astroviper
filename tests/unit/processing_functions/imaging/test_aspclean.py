@@ -1254,6 +1254,134 @@ class TestRingCleaning:
             1e-9 * np.abs(dirty).max()
         )
 
+    def _assert_no_significance_cleaning(self, psf, dirty, mask, threshold, **kwargs):
+        """Clean with ``scale_significance`` on and off: with it on, no
+        component is cleaned for its significance, the model update stops at
+        the threshold, and the result is the one with it off. Returns the
+        output with it on."""
+        out, resid, model = self._clean(
+            psf, dirty, mask, threshold, scale_significance=True, **kwargs
+        )
+        off, resid_off, model_off = self._clean(
+            psf, dirty, mask, threshold, scale_significance=False, **kwargs
+        )
+        assert out["timing"]["n_significance_components"] == 0
+        assert out["stop_code"] == 2  # the threshold
+        np.testing.assert_array_equal(resid, resid_off)
+        np.testing.assert_array_equal(model, model_off)
+        for key in (
+            "iterations_performed",
+            "stop_code",
+            "peak_residual",
+            "model_flux",
+            "switched_to_hogbom",
+        ):
+            assert out[key] == off[key], key
+        for key in (
+            "n_scale_components",
+            "n_point_components",
+            "n_residual_components",
+        ):
+            assert out["timing"][key] == off["timing"][key], key
+        if np.abs(dirty).max() < threshold:  # nothing to clean above it
+            assert not model.any()
+        return out
+
+    @pytest.mark.parametrize("significance", [0.0, 3.0])
+    @pytest.mark.parametrize("residual_components", [True, False])
+    @pytest.mark.parametrize("mask_kind", ["ones", "none"])
+    @pytest.mark.parametrize("faint", [True, False])
+    def test_scale_significance_needs_noise_outside_the_mask(
+        self, faint, mask_kind, residual_components, significance
+    ):
+        """With no pixel outside the clean mask (a mask of ones, or no mask)
+        the noise of the smoothed residuals cannot be measured (it stays
+        ``inf``), so no smoothed residual is significant and the model update
+        stops at the threshold as with ``scale_significance`` off. With the
+        default limit (``significance`` 0), the limit and every significance
+        used to be ``threshold / inf = 0``, and ``0 >= 0`` went on cleaning
+        below the threshold: on the faint scene it took all of the flux, the
+        model peaking 48 pixels from the source. A limit set by the user (3)
+        was never reached by a significance of 0; those cases guard that its
+        result stays the one with ``scale_significance`` off."""
+        psf, _, dirty, _, threshold = self._scene(faint=faint)
+        if mask_kind == "ones":
+            mask = np.ones_like(dirty)
+        else:
+            mask = np.array([], dtype=dirty.dtype)
+        out = self._assert_no_significance_cleaning(
+            psf,
+            dirty,
+            mask,
+            threshold,
+            residual_components=residual_components,
+            significance=significance,
+            significance_gain=0.3,
+        )
+        assert np.all(np.isinf(out["scale_noise"]))
+
+    @pytest.mark.parametrize("significance", [0.0, 3.0])
+    @pytest.mark.parametrize(
+        "faint, residual_components", [(True, True), (True, False), (False, False)]
+    )
+    def test_scale_significance_needs_a_nonzero_noise_of_the_residual(
+        self, faint, residual_components, significance
+    ):
+        """With the residual exactly 0 outside the mask of radius 40, its
+        noise there is 0, while the smoothed residuals have a positive noise
+        there: the emission inside the mask spreads out when smoothed. No
+        smoothed residual is significant, with the default limit and with a
+        limit set by the user, and the model update stops at the threshold as
+        with ``scale_significance`` off. With the limit 3 the model update
+        used to go on below the threshold against those noises: on the faint
+        scene to the iteration limit (3000 components), on the disk for 182
+        components. (The disk with residual-shaped components is not such a
+        case: they leave sidelobes outside the mask, which have a noise.)"""
+        psf, _, dirty, mask, threshold = self._scene(faint=faint)
+        dirty = np.ascontiguousarray(dirty * mask)
+        out = self._assert_no_significance_cleaning(
+            psf,
+            dirty,
+            mask,
+            threshold,
+            residual_components=residual_components,
+            significance=significance,
+            significance_gain=0.3,
+        )
+        noise = out["scale_noise"]
+        assert noise[0] == 0.0
+        assert np.isfinite(noise[1]) and noise[1] > 0.0
+
+    def test_cube_plane_without_noise_outside_the_mask(self):
+        """Per plane: the plane whose mask leaves no pixel outside cleans
+        nothing below the threshold; the plane next to it, with the mask of
+        radius 40, still cleans the faint source for its significance."""
+        psf, sky, dirty, mask, threshold = self._scene(faint=True)
+        kwargs = dict(
+            residual_components=True, scale_significance=True, significance_gain=0.3
+        )
+        masks = np.stack([np.ones_like(mask), mask])[None, :, None]
+        resid = np.broadcast_to(dirty, masks.shape).copy()
+        model = np.zeros_like(resid)
+        aspclean.clean_cube(
+            resid,
+            np.ascontiguousarray(np.broadcast_to(psf, resid.shape)),
+            model,
+            masks,
+            gain=0.1,
+            threshold_per_cycle=np.full((1, 2, 1), threshold),
+            max_iter_per_cycle_updated=np.full((1, 2, 1), 3000, dtype=np.int32),
+            max_iter_divergence=-1,
+            **kwargs,
+        )
+        assert not model[0, 0, 0].any()
+        np.testing.assert_array_equal(resid[0, 0, 0], dirty)
+        out, r1, m1 = self._clean(psf, dirty, mask, threshold, **kwargs)
+        assert out["timing"]["n_significance_components"] > 0
+        assert m1.sum() > 0.1 * sky.sum()
+        np.testing.assert_array_equal(resid[0, 1, 0], r1)
+        np.testing.assert_array_equal(model[0, 1, 0], m1)
+
     def test_cube_matches_per_plane(self):
         psf, _, dirty, mask, threshold = self._scene()
         kwargs = dict(

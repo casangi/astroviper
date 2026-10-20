@@ -105,6 +105,14 @@ struct AspResult {
 //     while it is as significant as the threshold is at scale 0 (or as
 //     `significance` times its noise when that is > 0), subtracting
 //     significance_gain (when > 0, else the gain) of each such component.
+//     Each noise is sampled outside the mask and a border of 3 * scale size
+//     + 1 pixels (the outermost row and column at scale 0), one pixel in every
+//     max(1, nx * ny / 400000); with fewer than 100 samples it is +inf in
+//     AspResult::scale_noise. A noise is used only when finite and positive:
+//     a scale without one is never significant, and without one at scale 0
+//     (no mask, a mask that leaves too few pixels outside, or a residual
+//     mostly 0 outside it) no smoothed residual is, with `significance` > 0
+//     as well.
 //   record_components: return the components in AspResult::components.
 //   residual_components: before the Asp iterations of a model update, clean
 //     with components shaped by the residual (Ma, Zhang & Zhang 2026, A&A
