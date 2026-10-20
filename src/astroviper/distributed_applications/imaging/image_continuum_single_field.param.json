@@ -66,6 +66,11 @@
         "image_sharding": { "type": ["dict"], "nullable": true },
         "image_chunking": { "type": ["dict"], "nullable": true },
         "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
-        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 }
+        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
+        "cycle_acceleration": {
+            "type": ["str"],
+            "allowed": ["none", "conjugate_gradient", "nesterov_momentum"]
+        },
+        "momentum_coefficient": { "type": ["int", "float"], "min": 0, "max": 1 }
     }
 }

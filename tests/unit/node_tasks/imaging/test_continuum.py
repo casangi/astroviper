@@ -1074,3 +1074,296 @@ def test_finalization_reuses_prepared_residual_without_another_transform(monkeyp
     assert result["image"].SKY_RESIDUAL.data is original_residual
     np.testing.assert_array_equal(result["image"].SKY_MODEL, model.SKY_MODEL)
     assert result["residual_converged"]
+
+
+def _acceleration_image(seed, scale=1.0):
+    """Residual Taylor stacks in ``[scale / 2, scale)`` on two polarization planes."""
+    rng = np.random.default_rng(seed)
+    return xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                scale * rng.uniform(0.5, 1.0, (1, 2, 2, 4, 4)),
+            ),
+            "PRIMARY_BEAM": (
+                ("time", "frequency", "polarization", "l", "m"),
+                np.ones((1, 1, 2, 4, 4)),
+            ),
+        },
+        attrs={"data_groups": {"residual": {"sky": "SKY_RESIDUAL"}}},
+    )
+
+
+def _run_accelerated_append(
+    monkeypatch, input_params, seed=0, converged=False, scale=1.0
+):
+    """Run an MVC append whose model update gives ``z = r / 4`` and ``B z = z / 2``."""
+    from astroviper.processing_functions.imaging.utils import IterationController
+
+    image = _acceleration_image(seed, scale)
+    residual = image.SKY_RESIDUAL.copy(deep=True)
+    controller = IterationController(max_iter=100)
+    controller.ensure_planes(1, 1, 2)
+
+    def fake_model_update(input_data, input_params):
+        image = input_data["image"]
+        image["SKY_MODEL"] = (0.0 if converged else 0.25) * image.SKY_RESIDUAL
+        image.SKY_RESIDUAL.values -= 0.5 * image.SKY_MODEL.values
+        return {
+            "image": image,
+            "controller": controller,
+            "residual_converged": converged,
+            "timing_model_update": pd.DataFrame({"T_model_update": [0.0]}),
+        }
+
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_continuum_image",
+        lambda image, input_params, **kwargs: (image, xr.Dataset(), None),
+    )
+    monkeypatch.setattr(
+        continuum_node, "model_update_continuum_single_field", fake_model_update
+    )
+    result = continuum_node.continuum_minor_cycle_node(
+        {"image": image}, {"specmode": "mvc", **input_params}
+    )
+    return result, residual
+
+
+@pytest.mark.parametrize("params", [{}, {"cycle_acceleration": "none"}])
+def test_default_append_does_not_enter_cycle_acceleration(monkeypatch, params):
+    """Without acceleration the next helper receives the model update's own image."""
+    import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("The default imaging cycle must not run an acceleration")
+
+    monkeypatch.setattr(
+        continuum_node, "_accelerate_continuum_model_increment", unexpected
+    )
+    monkeypatch.setattr(acceleration, "conjugate_gradient_model_step", unexpected)
+    monkeypatch.setattr(acceleration, "nesterov_momentum_model_step", unexpected)
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_continuum_image",
+        lambda image, input_params, **kwargs: (image, xr.Dataset(), None),
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "model_update_continuum_single_field",
+        lambda input_data, input_params: {
+            "image": input_data["image"],
+            "timing_model_update": pd.DataFrame({"T_model_update": [0.0]}),
+        },
+    )
+    captured = {}
+
+    def prepare(model_increment_xds, input_params):
+        captured["increment"] = model_increment_xds
+        return xr.Dataset(), None
+
+    monkeypatch.setattr(
+        continuum_node, "_prepare_post_update_continuum_model_state", prepare
+    )
+    image = xr.Dataset()
+    result = continuum_node.continuum_minor_cycle_node(
+        {"image": image}, {"is_n_iter_0": False, "model_xds": xr.Dataset(), **params}
+    )
+
+    assert captured["increment"] is image
+    assert "cycle_acceleration_state_xds" not in result
+    assert list(result["timing_model_update"]) == [
+        "T_model_update",
+        "T_prepare_model_state",
+    ]
+
+
+def test_conjugate_gradient_append_accumulates_the_accelerated_step(monkeypatch):
+    result, residual = _run_accelerated_append(
+        monkeypatch, {"cycle_acceleration": "conjugate_gradient"}
+    )
+
+    # alpha = <r, z> / <z, B z> = 8, so the step is 8 z = 2 r.
+    np.testing.assert_allclose(result["model_xds"].SKY_MODEL, 2.0 * residual)
+    np.testing.assert_array_equal(result["model_xds"].PRIMARY_BEAM, 1.0)
+    state = result["cycle_acceleration_state_xds"]
+    assert state.attrs["cycle_acceleration"] == "conjugate_gradient"
+    np.testing.assert_allclose(state.SKY_MODEL_DIRECTION, 0.25 * residual)
+    np.testing.assert_allclose(state.SKY_MODEL_DIRECTION_CONVOLVED, 0.125 * residual)
+    np.testing.assert_array_equal(state.SKY_RESIDUAL_PREVIOUS, residual)
+    assert result["timing_model_update"].loc[0, "T_cycle_acceleration"] >= 0.0
+
+
+def test_momentum_append_forwards_its_state_to_the_next_cycle(monkeypatch):
+    """The first step is ``z``; the second uses ``min(0.2, 1 / 4) = 0.2``, so a
+    dropped coefficient (default 0.5, ramp value 1 / 4) changes it."""
+    params = {"cycle_acceleration": "nesterov_momentum", "momentum_coefficient": 0.2}
+    first, residual = _run_accelerated_append(monkeypatch, params)
+    np.testing.assert_allclose(first["model_xds"].SKY_MODEL, 0.25 * residual)
+
+    second, residual_next = _run_accelerated_append(
+        monkeypatch,
+        {
+            **params,
+            "is_n_iter_0": False,
+            "model_xds": first["model_xds"],
+            "cycle_acceleration_state_xds": first["cycle_acceleration_state_xds"],
+        },
+        seed=1,
+        scale=0.5,
+    )
+    increment = 0.25 * residual_next
+    momentum = 0.2 * 0.25 * residual + increment
+    np.testing.assert_allclose(
+        second["cycle_acceleration_state_xds"].SKY_MODEL_MOMENTUM, momentum
+    )
+    np.testing.assert_array_equal(
+        second["cycle_acceleration_state_xds"].MOMENTUM_CYCLES, 2
+    )
+    np.testing.assert_allclose(
+        second["model_xds"].SKY_MODEL,
+        first["model_xds"].SKY_MODEL + increment + 0.2 * momentum,
+    )
+    # The momentum tests see the residual before the model update.
+    for result, before in ((first, residual), (second, residual_next)):
+        np.testing.assert_allclose(
+            result["cycle_acceleration_state_xds"].SKY_RESIDUAL_PREVIOUS_NORM,
+            np.sqrt((before**2).sum(("taylor_term", "l", "m"))),
+            rtol=1e-12,
+        )
+
+
+def test_converged_appends_take_no_accelerated_step(monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("A converged imaging cycle must not take an accelerated step")
+
+    monkeypatch.setattr(
+        continuum_node, "_accelerate_continuum_model_increment", unexpected
+    )
+    previous = _acceleration_image(9).rename(SKY_RESIDUAL="SKY_MODEL")
+    later, _ = _run_accelerated_append(
+        monkeypatch,
+        {
+            "cycle_acceleration": "conjugate_gradient",
+            "is_n_iter_0": False,
+            "model_xds": previous,
+            "cycle_acceleration_state_xds": xr.Dataset(),
+        },
+        converged=True,
+    )
+    assert later["model_xds"] is previous
+    assert "cycle_acceleration_state_xds" not in later
+
+    first, _ = _run_accelerated_append(
+        monkeypatch,
+        {"cycle_acceleration": "nesterov_momentum", "momentum_coefficient": 0.5},
+        converged=True,
+    )
+    np.testing.assert_array_equal(first["model_xds"].SKY_MODEL, 0.0)
+    assert "cycle_acceleration_state_xds" not in first
+
+
+@pytest.mark.parametrize(
+    "params,write_back",
+    [
+        ({}, False),
+        ({"cycle_acceleration": "none"}, False),
+        ({"cycle_acceleration": "conjugate_gradient"}, True),
+        ({"cycle_acceleration": "nesterov_momentum"}, False),
+    ],
+)
+def test_only_conjugate_gradient_writes_back_the_hogbom_residual(
+    monkeypatch, params, write_back
+):
+    from astroviper.processing_functions.imaging.utils import IterationController
+
+    image = _acceleration_image(0)
+    image["POINT_SPREAD_FUNCTION"] = (
+        ("time", "psf_taylor_order", "polarization", "l", "m"),
+        np.ones((1, 3, 2, 4, 4)),
+    )
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+        ("time", "polarization"),
+        [[0.1, 0.1]],
+    )
+    image.attrs["data_groups"]["residual"]["primary_beam"] = "PRIMARY_BEAM"
+    controls = {
+        "max_iter": 10,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "max_iter_per_cycle": 2,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    captured = {}
+
+    class ReachedBackend(Exception):
+        pass
+
+    def backend(image_arg, deconvolver, controls, **kwargs):
+        captured.update(kwargs)
+        raise ReachedBackend
+
+    monkeypatch.setattr(
+        continuum_processing, "model_update_mtmfs_single_field", backend
+    )
+    with pytest.raises(ReachedBackend):
+        continuum_node.model_update_continuum_single_field(
+            {"image": image},
+            {
+                "controller": IterationController(**controls),
+                "iteration_control_params": {**controls, "primary_beam_limit": 0.2},
+                **params,
+            },
+        )
+    assert captured["write_back_deconvolver_residual"] is write_back
+
+
+@pytest.mark.parametrize(
+    "cycle_acceleration,expected",
+    [
+        ("conjugate_gradient", [True, False, False, True]),
+        ("nesterov_momentum", [True, True, False, True]),
+    ],
+)
+def test_plain_step_planes_follow_the_provisional_stop_codes(
+    monkeypatch, cycle_acceleration, expected
+):
+    """Threshold, budget and continuing planes map onto the plain-step rule;
+    a continuing plane whose residual entropy is followed takes plain steps."""
+    import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        IMAGING_CONTINUE,
+        IMAGING_MAX_ITER,
+        IMAGING_THRESHOLD,
+        IterationController,
+    )
+
+    controller = IterationController(max_iter=100)
+    controller.ensure_planes(1, 1, 4)
+    controller.stop_code_imaging[0, 0] = [
+        IMAGING_THRESHOLD,
+        IMAGING_MAX_ITER,
+        IMAGING_CONTINUE,
+        IMAGING_CONTINUE,
+    ]
+    controller.max_entropy[0, 0, 3] = 1.0
+    captured = {}
+
+    def step(*args, plain_step_planes, cycle_acceleration_state_xds, **kwargs):
+        captured["planes"] = plain_step_planes
+        return args[-1], xr.Dataset()
+
+    monkeypatch.setattr(acceleration, "conjugate_gradient_model_step", step)
+    monkeypatch.setattr(acceleration, "nesterov_momentum_model_step", step)
+    image = _acceleration_image(0).isel(polarization=[0, 1, 1, 0])
+    image["SKY_MODEL"] = image.SKY_RESIDUAL
+    continuum_node._accelerate_continuum_model_increment(
+        image,
+        image.SKY_RESIDUAL,
+        controller,
+        {"cycle_acceleration": cycle_acceleration, "momentum_coefficient": 0.5},
+    )
+    assert captured["planes"].dims == ("time", "polarization")
+    np.testing.assert_array_equal(captured["planes"], [expected])

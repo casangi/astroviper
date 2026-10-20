@@ -281,6 +281,84 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
     assert timing.loc[0, "T_mtmfs"] >= 0.0
 
 
+def _hogbom_continuum_image():
+    """Two Taylor terms with a point source and a Gaussian PSF on 16 x 16 pixels."""
+    image = make_continuum_image(image_shape=(16, 16)).drop_vars("SKY_MODEL")
+    l, m = np.meshgrid(np.arange(16) - 8, np.arange(16) - 8, indexing="ij")
+    psf = np.exp(-(l**2 + m**2) / 4.0)
+    image["POINT_SPREAD_FUNCTION"] = image.POINT_SPREAD_FUNCTION.copy(
+        data=np.broadcast_to(psf, image.POINT_SPREAD_FUNCTION.shape).copy()
+    )
+    residual = np.stack([np.roll(psf, (2, -3), axis=(0, 1)), 0.5 * psf])
+    image["SKY_RESIDUAL"] = image.SKY_RESIDUAL.copy(data=residual[None, :, None])
+    image["PRIMARY_BEAM"] = image.PRIMARY_BEAM.expand_dims(frequency=[100.0], axis=1)
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (("time", "polarization"), [[0.2]])
+    return image
+
+
+@pytest.mark.parametrize(
+    "keywords", [{}, {"write_back_deconvolver_residual": True}], ids=["default", "on"]
+)
+def test_hogbom_writes_back_its_residual_only_on_request(monkeypatch, keywords):
+    from astroviper.processing_functions.imaging import model_update
+
+    image = _hogbom_continuum_image()
+    snapshot = image.SKY_RESIDUAL.copy(deep=True)
+    backend = model_update.model_update_cube_single_field
+    captured = {}
+
+    def capturing_backend(image_arg, *args, **kwargs):
+        result = backend(image_arg, *args, **kwargs)
+        captured["residual"] = image_arg.SKY_RESIDUAL.isel(frequency=0, drop=True)
+        return result
+
+    monkeypatch.setattr(
+        model_update, "model_update_cube_single_field", capturing_backend
+    )
+    model_update_mtmfs_single_field(
+        image,
+        "hogbom",
+        {
+            "max_iter": 20,
+            "max_iter_per_cycle": 20,
+            "threshold_per_cycle": 0.0,
+            "gain": 0.1,
+            "primary_beam_limit": 0.2,
+        },
+        **keywords,
+    )
+
+    cleaned = captured["residual"].astype(snapshot.dtype)
+    assert not np.array_equal(cleaned, snapshot.isel(taylor_term=0))
+    np.testing.assert_array_equal(
+        image.SKY_RESIDUAL.isel(taylor_term=0),
+        cleaned if keywords else snapshot.isel(taylor_term=0),
+    )
+    np.testing.assert_array_equal(
+        image.SKY_RESIDUAL.isel(taylor_term=1), snapshot.isel(taylor_term=1)
+    )
+
+
+def test_native_mtmfs_ignores_the_residual_write_back_flag():
+    images = []
+    for write_back in (False, True):
+        image, _ = _native_mtmfs_continuum_image(2, (8, 8), np.float64, "mask")
+        model_update_mtmfs_single_field(
+            image,
+            "mtmfs",
+            {
+                "max_iter": 1,
+                "max_iter_per_cycle": np.ones((2, 1, 2), dtype=np.int64),
+                "threshold_per_cycle": np.zeros((2, 1, 2)),
+                "gain": 1.0,
+                "scales": [0.0],
+            },
+            write_back_deconvolver_residual=write_back,
+        )
+        images.append(image)
+    xr.testing.assert_identical(*images)
+
+
 def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):
     image = make_continuum_image().isel(
         taylor_term=slice(0, 1), psf_taylor_order=slice(0, 1)
