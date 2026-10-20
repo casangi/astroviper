@@ -38,10 +38,13 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     image_continuum_single_field,
     prepare_continuum_imaging_weights_global,
 )
+from astroviper.distributed_applications.simulation import simulate_processing_set
+from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.data_group_tools import (
     create_ps_xdt_data_groups_in_and_out,
     modify_data_groups_ps_xdt,
 )
+from astroviper.utils.telescope_layout import read_telescope_layout
 
 TW_HYDRA_STORE_NAME = "twhya_selfcal_lsrk_5chans.ps.zarr"
 TW_HYDRA_RELATIVE_TOLERANCE = 1.0e-6
@@ -2051,6 +2054,130 @@ def test_tw_hydra_remaining_weighting_schemes(
 
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
+
+
+@pytest.fixture(scope="module")
+def wideband_store(tmp_path_factory):
+    """A point source at the phase centre, without noise, seen by the VLA in
+    D configuration at six times 30 minutes apart and at four channels from 1
+    to 2 GHz. Over this octave the uv tracks of the channels overlap only in
+    part."""
+    store = tmp_path_factory.mktemp("wideband") / "wideband.ps.zarr"
+    antenna_xds = read_telescope_layout("vla.d")
+    phase_center = np.array([5.233686, 0.71094])
+    with dask.config.set(scheduler="synchronous"):
+        simulate_processing_set(
+            ps_store=str(store),
+            antenna_xds=antenna_xds,
+            time_params={
+                "time_start": "2019-10-03T19:00:00.000",
+                "time_delta": 1800.0,
+                "n_samples": 6,
+            },
+            frequency_params={
+                "freq_start": 1.0e9,
+                "freq_delta": 1.0e9 / 3.0,
+                "n_channels": 4,
+                "channel_width": 0.01e9,
+            },
+            polarization=["XX", "YY"],
+            sky_components=[
+                {
+                    "kind": "point",
+                    "flux": np.array([1.0, 0.0, 0.0, 1.0]),
+                    "ra_dec": phase_center,
+                }
+            ],
+            phase_center_ra_dec=phase_center[None, :],
+            beam_models=[airy_disk_model("vla_nvss")],
+            beam_model_map=np.zeros(antenna_xds.sizes["antenna_name"], int),
+            n_time_chunks=1,
+            n_frequency_chunks=1,
+            overwrite=True,
+        )
+    return store
+
+
+def _run_wideband_scopes(tmp_path, store, specmode, weighting, scopes):
+    """Image ``store`` with ``weighting`` and each ``weighting_scope`` of
+    ``scopes``; ``"default"`` leaves the scope out."""
+    processing_set = open_processing_set(str(store))
+    images = {}
+    for scope in scopes:
+        scoped = dict(weighting)
+        if scope != "default":
+            scoped["weighting_scope"] = scope
+        _, images[scope] = _run_tw_hydra_continuum(
+            store,
+            tmp_path / f"wideband_{specmode}_{scope}.img.zarr",
+            processing_set,
+            2,
+            specmode,
+            scoped,
+            image_param_overrides={
+                "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600)
+            },
+        )
+    return images
+
+
+@pytest.mark.parametrize(
+    ("specmode", "weighting", "widening"),
+    [
+        pytest.param("mfs", {"weighting": "uniform"}, 1.2, id="mfs-uniform"),
+        pytest.param("mvc", {"weighting": "uniform"}, 1.2, id="mvc-uniform"),
+        pytest.param(
+            "mfs", {"weighting": "briggs", "robust": 0.5}, 1.02, id="mfs-briggs"
+        ),
+    ],
+)
+def test_wideband_uniform_and_briggs_weights_default_to_the_global_density(
+    tmp_path, wideband_store, specmode, weighting, widening
+):
+    """Uniform and Briggs weights of a continuum image default to the weight
+    density of all channels (``weighting_scope="global"``); the density of each
+    channel (``"local"``) can still be requested. With the local density the
+    weights of a uv cell add up over the channels that sample it, which favours
+    the inner uv plane, where the tracks of most channels overlap, so the PSF
+    is wider (measured: major axis 1.29 times for uniform, 1.03 times for
+    Briggs 0.5)."""
+    images = _run_wideband_scopes(
+        tmp_path, wideband_store, specmode, weighting, ("default", "global", "local")
+    )
+
+    xr.testing.assert_equal(images["default"], images["global"])
+    major = {
+        scope: float(
+            images[scope].BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.isel(
+                time=0, polarization=0, beam_params=0
+            )
+        )
+        for scope in ("global", "local")
+    }
+    assert major["local"] > widening * major["global"]
+
+
+@pytest.mark.parametrize(
+    "weighting",
+    [
+        pytest.param({"weighting": "natural"}, id="natural"),
+        pytest.param(
+            {"weighting": "briggs_abs", "robust": 0.5, "briggs_abs_noise": 0.1},
+            id="briggs_abs",
+        ),
+    ],
+)
+def test_wideband_natural_and_absolute_briggs_weights_default_to_the_local_density(
+    tmp_path, wideband_store, weighting
+):
+    """Natural weights use no density and keep the local scope. Absolute Briggs
+    weights keep the density of each channel, the only scope that computes
+    them: the global scope refuses them."""
+    images = _run_wideband_scopes(
+        tmp_path, wideband_store, "mfs", weighting, ("default", "local")
+    )
+
+    xr.testing.assert_equal(images["default"], images["local"])
 
 
 def test_tw_hydra_direct_max_iter_zero_dirty_image(tmp_path, tw_hydra_store):

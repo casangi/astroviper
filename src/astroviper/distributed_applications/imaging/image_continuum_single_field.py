@@ -2757,6 +2757,15 @@ def image_continuum_single_field(
     Taylor-zero planes after reduction across frequency partitions; higher
     Taylor terms have no independent CLEAN loop.
 
+    ``imaging_weights_params`` also accepts ``weighting_scope``, the uv
+    weight density that uniform and Briggs weights are made from:
+    ``"global"`` grids one density from all channels, the density of the
+    continuum image, and is the default for ``"uniform"`` and ``"briggs"``;
+    ``"local"`` grids the density of each channel on its own, as cube
+    imaging does, and is the default for ``"briggs_abs"``, which only the
+    local scope computes (``"global"`` refuses it). Natural weights use no
+    density, so the scope does not change them.
+
     When ``deconvolver="mtmfs"``, ``cycle_control_params`` also accepts
     ``scales``, ``small_scale_bias``, and ``mask_threshold``. These names are
     passed unchanged through the Python and native layers.
@@ -3275,9 +3284,14 @@ def image_continuum_single_field(
     )
 
     # Validate once at the application boundary so every graph sees the same
-    # normalized scope. The checker defaults the scope to local and maps a
-    # requested global natural-weight calculation to its equivalent local path.
+    # normalized scope. A continuum image grids all channels onto one uv grid,
+    # so Briggs and uniform weights default to the density of all channels
+    # (global). The checker defaults the remaining schemes to the density of
+    # each channel (local), the only scope that computes "briggs_abs", and maps
+    # a requested global natural-weight calculation to its equivalent local path.
     imaging_weights_params = dict(imaging_weights_params)
+    if imaging_weights_params.get("weighting") in ("briggs", "uniform"):
+        imaging_weights_params.setdefault("weighting_scope", "global")
     if not check_imaging_weights_params(imaging_weights_params):
         raise ValueError("Invalid imaging_weights_params.")
     weighting = imaging_weights_params["weighting"].lower()
