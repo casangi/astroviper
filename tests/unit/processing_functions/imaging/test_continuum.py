@@ -483,19 +483,19 @@ def test_mvc_conversion_forms_weighted_taylor_normal_equations():
     )
     expected_pb = np.sum(weight * pb) / np.sum(weight)
     np.testing.assert_allclose(effective_pb.squeeze(), expected_pb)
-    np.testing.assert_allclose(
-        residual_taylor.squeeze(),
-        [
-            np.sum(weight * residual) / np.sum(weight),
-            np.sum(weight * x * residual) / np.sum(weight),
-        ],
+    # Fit of the PB-corrected channel residuals with weights w * pb**2,
+    # returned to the plain PSF moments and the common beam: the pair whose
+    # Hessian is the residual's response to the model.
+    basis = x[:, None] ** np.arange(2)
+    hessian = basis.T @ (weight[:, None] * basis) / np.sum(weight)
+    fit = np.linalg.solve(
+        basis.T @ ((weight * pb**2)[:, None] * basis),
+        basis.T @ (weight * pb * residual),
     )
+    np.testing.assert_allclose(residual_taylor.squeeze(), expected_pb * hessian @ fit)
     np.testing.assert_allclose(
         psf_taylor.squeeze(),
-        [
-            np.sum(weight * x**order * pb * psf) / (np.sum(weight) * expected_pb)
-            for order in range(3)
-        ],
+        [np.sum(weight * x**order * psf) / np.sum(weight) for order in range(3)],
     )
 
 
@@ -524,7 +524,7 @@ def test_mvc_conversion_uses_psf_weights_for_common_response():
     )
     np.testing.assert_allclose(
         psf_taylor.squeeze(),
-        np.sum(psf_weight * pb * psf) / (np.sum(psf_weight) * effective_pb.squeeze()),
+        np.sum(psf_weight * psf) / np.sum(psf_weight),
     )
 
 
@@ -602,6 +602,251 @@ def test_mvc_prediction_applies_channel_over_effective_primary_beam():
     )
     actual = apply_mvc_primary_beam_convention(model, channel_pb, effective_pb)
     np.testing.assert_allclose(actual.squeeze(), [5.0, 30.0])
+
+
+@pytest.mark.parametrize(
+    "channel_pb",
+    [
+        [1.0, 1.0, 1.0, 1.0],
+        [0.61, 0.54, 0.47, 0.40],
+        [0.55, 0.42, 0.31, 0.19],
+    ],
+    ids=["centre", "off_centre", "channel_below_pblimit"],
+)
+def test_mvc_residual_responds_to_model_through_psf_moments(channel_pb):
+    """The Taylor residual responds to a model change through the Hessian.
+
+    MT-MFS inverts the PSF Taylor planes read at their peak, the pointing
+    centre (pixel 0).  A model change ``dM`` at pixel 1 changes the predicted
+    channel images there by ``A_nu * dM_nu / Abar``.  With a delta-function
+    PSF the Taylor residual at pixel 1 must then change by
+    ``-sum_k B_(t+k)(0) * dM_k``, whatever the channel beams at pixel 1 are.
+    """
+    frequency = np.array([0.85e9, 0.95e9, 1.05e9, 1.15e9])
+    x = (frequency - 1.0e9) / 1.0e9
+    weight = _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency)
+    model_change = np.array([0.3, -0.2])
+    options = dict(nterms=2, reference_frequency=1.0e9, pblimit=0.2)
+
+    def two_pixel_cube(centre, source):
+        values = np.stack(
+            [np.broadcast_to(centre, 4), np.broadcast_to(source, 4)], axis=-1
+        )
+        return xr.DataArray(
+            values[None, :, None, :, None],
+            dims=("time", "frequency", "polarization", "l", "m"),
+            coords={
+                "time": [0],
+                "frequency": frequency,
+                "polarization": ["I"],
+                "l": [0.0, 1.0],
+                "m": [0.0],
+            },
+        )
+
+    channel_beam = two_pixel_cube(1.0, channel_pb)
+    _, psf, effective_beam = convert_mvc_cubes_to_taylor_normal_equations(
+        two_pixel_cube(0.0, 0.0),
+        two_pixel_cube(1.0, 0.0),
+        channel_beam,
+        weight,
+        weight,
+        **options,
+    )
+    prediction = apply_mvc_primary_beam_convention(
+        two_pixel_cube(0.0, model_change[0] + model_change[1] * x),
+        channel_beam,
+        effective_beam,
+    )
+    residual, _, _ = finalize_mvc_taylor_normal_equations(
+        make_mvc_taylor_normal_equation_contributions(
+            -prediction, None, channel_beam, weight, None, **options
+        ),
+        effective_primary_beam=effective_beam,
+    )
+
+    planes = psf.isel(l=0, m=0).squeeze().values
+    hessian = planes[np.add.outer(np.arange(2), np.arange(2))]
+    np.testing.assert_allclose(
+        residual.isel(l=1, m=0).squeeze(), -hessian @ model_change
+    )
+
+
+@pytest.mark.parametrize(
+    "channel_pb",
+    [[0.9, 0.7, 0.5, 1.0e-6], [0.9, 1.0e-6]],
+    ids=["three_channels_above_pblimit", "one_channel_above_pblimit"],
+)
+def test_mvc_channel_near_beam_null_adds_bounded_residual(channel_pb):
+    """A channel near a null of its beam does not amplify its residual.
+
+    The effective beam is above pblimit, but one channel beam is 1e-6.  A unit
+    image in any channel must change every Taylor residual by less than one;
+    dividing the channel residual by its beam changes them by up to
+    ``Abar * 1e6 / nchan``.  With one channel beam above pblimit, two Taylor
+    terms are not determined and only Taylor term zero is fitted.
+    """
+    nchan = len(channel_pb)
+    frequency = np.linspace(0.85e9, 1.15e9, nchan)
+    weight = _frequency_normalization(np.ones(nchan), frequency)
+    for channel in range(nchan):
+        residual, _, effective_beam = convert_mvc_cubes_to_taylor_normal_equations(
+            _frequency_cube(np.eye(nchan)[channel], frequency),
+            _frequency_cube(np.ones(nchan), frequency),
+            _frequency_cube(channel_pb, frequency),
+            weight,
+            weight,
+            nterms=2,
+            reference_frequency=1.0e9,
+            pblimit=0.2,
+        )
+        assert float(effective_beam.squeeze()) > 0.2
+        assert np.all(np.isfinite(residual.values))
+        assert np.max(np.abs(residual.values)) < 1.0
+
+
+def _mvc_image_point_sources(sources, threshold):
+    """Image point sources with the MVC Taylor products and native MT-MFS.
+
+    Channel residuals are formed in the image domain, without noise or
+    gridding error, as ``B_nu (*) (A_nu * I_nu - A_nu * M_nu / Abar)``.  The
+    power beam ``A_nu`` is a Gaussian of 40 pixels FWHM and the PSF ``B_nu``
+    a Gaussian of 1.5 pixels sigma at the reference frequency, both
+    narrowing as ``1 / nu``; 8 channels cover +-12.5 %.  Each model update
+    cleans to ``max(0.05 * peak, threshold)``, the controller's per-cycle
+    threshold for a PSF without sidelobes, and imaging stops when the
+    refreshed Taylor-zero peak in the beam support is below ``threshold``.
+    Returns the Taylor model and the effective beam.
+    """
+    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+
+    size, centre, nterms = 64, 32, 2
+    x = (np.arange(8) - 3.5) / 32.0
+    frequency = 1.0e11 * (1.0 + x)
+    offsets = np.arange(size) - centre
+    radius = np.hypot(*np.meshgrid(offsets, offsets, indexing="ij"))
+    channel_beam = np.exp(
+        -4.0 * np.log(2.0) * (radius * (1.0 + x)[:, None, None] / 40.0) ** 2
+    )
+    # Channel PSFs on a doubled grid, for convolutions without wrap-around.
+    doubled = np.arange(2 * size) - size
+    doubled_radius = np.hypot(*np.meshgrid(doubled, doubled, indexing="ij"))
+    sigma = 1.5 / (1.0 + x)[:, None, None]
+    doubled_psf = np.exp(-0.5 * (doubled_radius / sigma) ** 2)
+    psf_ft = np.fft.rfft2(np.fft.ifftshift(doubled_psf, axes=(1, 2)))
+    window = slice(size - centre, 2 * size - centre)
+    psf = doubled_psf[:, window, window]
+
+    sky = np.zeros((8, size, size))
+    for pixel, spectrum in sources:
+        sky[(slice(None), *pixel)] += channel_beam[(slice(None), *pixel)] * spectrum
+
+    coords = {
+        "time": [0.0],
+        "frequency": frequency,
+        "polarization": ["I"],
+        "l": offsets * 1.0e-5,
+        "m": offsets * 1.0e-5,
+    }
+
+    def cube(values):
+        return xr.DataArray(
+            values[None, :, None],
+            dims=("time", "frequency", "polarization", "l", "m"),
+            coords=coords,
+        )
+
+    weight = xr.DataArray(
+        np.ones((1, 8, 1)),
+        dims=("time", "frequency", "polarization"),
+        coords={name: coords[name] for name in ("time", "frequency", "polarization")},
+    )
+    basis = x[:, None] ** np.arange(nterms)
+    model = np.zeros((nterms, size, size))
+    effective_beam = None
+    for _ in range(20):
+        apparent = sky.copy()
+        if effective_beam is not None:
+            apparent -= apply_mvc_primary_beam_convention(
+                cube(np.einsum("ct,tij->cij", basis, model)),
+                cube(channel_beam),
+                effective_beam,
+            ).values[0, :, 0]
+        padded = np.zeros((8, 2 * size, 2 * size))
+        padded[:, :size, :size] = apparent
+        residual_cube = np.fft.irfft2(np.fft.rfft2(padded) * psf_ft)[:, :size, :size]
+        first = effective_beam is None
+        residual, psf_taylor, beam = finalize_mvc_taylor_normal_equations(
+            make_mvc_taylor_normal_equation_contributions(
+                cube(residual_cube),
+                cube(psf) if first else None,
+                cube(channel_beam),
+                weight,
+                weight if first else None,
+                nterms=nterms,
+                reference_frequency=1.0e11,
+                pblimit=0.2,
+            ),
+            effective_primary_beam=effective_beam,
+        )
+        if first:
+            effective_beam = beam
+            support = (beam.values[0, 0] > 0.2).astype(np.float64)
+            hessian_planes = np.ascontiguousarray(
+                psf_taylor.transpose(
+                    "time", "psf_taylor_order", "polarization", "l", "m"
+                ).values[0, :, 0],
+                dtype=np.float64,
+            )
+        residual = np.ascontiguousarray(
+            residual.transpose("time", "taylor_term", "polarization", "l", "m").values[
+                0, :, 0
+            ],
+            dtype=np.float64,
+        )
+        peak = float(np.max(np.abs(residual[0]) * support))
+        if peak < threshold:
+            return model, effective_beam.values[0, 0]
+        increment = np.zeros_like(residual)
+        mtmfs.clean(
+            residual,
+            hessian_planes,
+            increment,
+            mask=support,
+            max_iter_per_cycle_updated=50000,
+            gain=0.1,
+            threshold_per_cycle=max(0.05 * peak, threshold),
+        )
+        model += increment
+    pytest.fail("MVC imaging did not reach the threshold in 20 imaging cycles.")
+
+
+@pytest.mark.parametrize("off_centre_index", [0.0, -0.7])
+def test_mvc_recovers_spectral_index_away_from_pointing_centre(off_centre_index):
+    """An off-centre spectral index is not biased when imaging stops early.
+
+    One source sits at the pointing centre and one where the beam is 0.5 at
+    the reference frequency. Imaging stops at 5 mJy, 2 % of the apparent
+    flux of the off-centre source.  With a Hessian that differs from the
+    residual's response away from the centre, the off-centre ``tt1 / tt0``
+    stopped at -0.27 (index 0) and -1.00 (index -0.7) in this setup.
+    """
+    x = (np.arange(8) - 3.5) / 32.0
+    sources = {
+        "centre": ((32, 32), 1.0 * (1.0 + x) ** -0.7),
+        "off_centre": ((52, 32), 0.5 * (1.0 + x) ** off_centre_index),
+    }
+    model, effective_beam = _mvc_image_point_sources(sources.values(), 5.0e-3)
+
+    basis = x[:, None] ** np.arange(2)
+    for (row, column), spectrum in sources.values():
+        expected = (
+            effective_beam[row, column]
+            * np.linalg.lstsq(basis, spectrum, rcond=None)[0]
+        )
+        tt0, tt1 = model[:, row - 2 : row + 3, column - 2 : column + 3].sum(axis=(1, 2))
+        np.testing.assert_allclose(tt0, expected[0], rtol=0.03)
+        assert abs(tt1 / tt0 - expected[1] / expected[0]) < 0.01
 
 
 def test_mfs_primary_beam_is_evaluated_at_reference_frequency():
@@ -1032,8 +1277,12 @@ def test_refreshed_statistics_respect_clean_support(explicit_mask):
 
 
 @pytest.mark.parametrize("clipped_pb", [0.1, 0.2, np.nan, np.inf])
-def test_mvc_clips_channel_beams_before_effective_beam_and_psf_sum(clipped_pb):
-    """Clipped channels contribute no PB/PSF signal but retain their weights."""
+def test_mvc_clips_channel_beams_only_in_effective_beam(clipped_pb):
+    """Clipped channels add no PB signal but retain their weights.
+
+    The PSF keeps every channel, and the residual fits every channel whose
+    beam is finite, with weight ``w * pb**2``.
+    """
     frequency = np.array([0.9e9, 1.1e9])
     residual, psf, pb = convert_mvc_cubes_to_taylor_normal_equations(
         _frequency_cube([5.0, 100.0], frequency),
@@ -1046,5 +1295,11 @@ def test_mvc_clips_channel_beams_before_effective_beam_and_psf_sum(clipped_pb):
         pblimit=0.2,
     )
     np.testing.assert_allclose(pb.squeeze(), 0.25)
-    np.testing.assert_allclose(psf.squeeze(), 2.0)
-    np.testing.assert_allclose(residual.squeeze(), 1.25)
+    np.testing.assert_allclose(psf.squeeze(), (1.0 * 2.0 + 3.0 * 10.0) / 4.0)
+    channel_pb = np.array([1.0, clipped_pb if np.isfinite(clipped_pb) else 0.0])
+    np.testing.assert_allclose(
+        residual.squeeze(),
+        0.25
+        * np.sum([1.0, 3.0] * channel_pb * [5.0, 100.0])
+        / np.sum([1.0, 3.0] * channel_pb**2),
+    )

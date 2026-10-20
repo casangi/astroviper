@@ -620,6 +620,15 @@ def test_mvc_channel_cutoff_excludes_exact_boundary_without_renormalizing(dtype)
         reference_frequency=100.0,
         pblimit=float(limit),
     )
-    np.testing.assert_allclose(actual, (7.0 + 11.0) / 4.0)
-    np.testing.assert_allclose(beam, (float(pb.values.ravel()[2]) + 1.0) / 4.0)
+    expected_beam = (float(pb.values.ravel()[2]) + 1.0) / 4.0
+    # The cutoff applies to the effective beam only: the residual fits every
+    # channel with weight pb**2, as the PSF sums every channel.
+    channel_pb = pb.values.ravel().astype(float)
+    expected = (
+        expected_beam
+        * np.sum(channel_pb * np.array([3.0, 5.0, 7.0, 11.0]))
+        / np.sum(channel_pb**2)
+    )
+    np.testing.assert_allclose(actual, expected, rtol=1e-6)
+    np.testing.assert_allclose(beam, expected_beam)
     np.testing.assert_allclose(psf, 1.0)

@@ -1033,9 +1033,12 @@ def residual_update_continuum_single_field(
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
 
-    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and
-    ``MVC_RESIDUAL_WEIGHT_SUM``. During the first imaging cycle it also returns
-    the additive Taylor PSF numerator, PSF weight sum, and weighted PB sum.
+    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
+    ``MVC_RESIDUAL_WEIGHT_SUM`` and the additive moments of the per-pixel
+    spectral fit (``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``,
+    ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``, ``MVC_RESIDUAL_BEAM_CHANNEL_COUNT``).
+    During the first imaging cycle it also returns the additive Taylor PSF
+    numerator, PSF weight sum, and weighted PB sum.
 
     Parameters
     ----------

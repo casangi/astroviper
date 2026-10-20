@@ -1167,7 +1167,9 @@ def combine_continuum_chunks(input_data, input_params):
         ``(time, psf_taylor_order, polarization)``.
 
     MVC supplies a mode-specific additive list. Every imaging cycle reduces
-    ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and ``MVC_RESIDUAL_WEIGHT_SUM``; the
+    ``MVC_RESIDUAL_TAYLOR_NUMERATOR``, ``MVC_RESIDUAL_WEIGHT_SUM``,
+    ``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``, ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``,
+    and ``MVC_RESIDUAL_BEAM_CHANNEL_COUNT``; the
     first cycle additionally reduces ``MVC_PSF_TAYLOR_NUMERATOR``,
     ``MVC_PSF_WEIGHT_SUM``, and ``MVC_PRIMARY_BEAM_WEIGHTED_SUM``. None of
     these products has a frequency dimension.
@@ -2843,8 +2845,9 @@ def image_continuum_single_field(
         ``nterms=1`` it falls back to ``"hogbom"`` with a warning. Other values
         are refused before anything is written.
     pblimit : float
-        PB cutoff for MVC channel correction and final model-first PB-corrected
-        restoration. Pixels below this limit are blanked with NaN.
+        PB cutoff for the MVC channel beams in the effective beam and the
+        spectral fit of the Taylor residuals, and for final model-first
+        PB-corrected restoration. Pixels below this limit are blanked with NaN.
     instrument_polarization_basis : str
         Correlation (instrument) polarization basis the gridding is performed in:
         ``"linear"`` or ``"circular"``. The residual update grids and degrids the
@@ -3766,6 +3769,9 @@ def image_continuum_single_field(
                         "additive_variables": (
                             "MVC_RESIDUAL_TAYLOR_NUMERATOR",
                             "MVC_RESIDUAL_WEIGHT_SUM",
+                            "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM",
+                            "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM",
+                            "MVC_RESIDUAL_BEAM_CHANNEL_COUNT",
                             "MVC_PSF_TAYLOR_NUMERATOR",
                             "MVC_PSF_WEIGHT_SUM",
                             "MVC_PRIMARY_BEAM_WEIGHTED_SUM",
@@ -3777,6 +3783,9 @@ def image_continuum_single_field(
                         "additive_variables": (
                             "MVC_RESIDUAL_TAYLOR_NUMERATOR",
                             "MVC_RESIDUAL_WEIGHT_SUM",
+                            "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM",
+                            "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM",
+                            "MVC_RESIDUAL_BEAM_CHANNEL_COUNT",
                         ),
                     }
 

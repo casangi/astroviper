@@ -890,15 +890,15 @@ def make_mvc_taylor_normal_equation_contributions(
 
     The returned dataset has no frequency dimension and can therefore be
     combined by element-wise addition in the distributed reduce stage.  The
-    primary-beam division and Taylor moment construction happen here; only the
-    normalization by globally accumulated weights and the construction of the
-    effective beam remain for the append node.
+    primary-beam weighting and Taylor moment construction happen here; only the
+    normalization by globally accumulated weights, the per-pixel spectral fit
+    and the construction of the effective beam remain for the append node.
 
-    Channel residuals are divided by their frequency-dependent primary beam,
-    then multiplied by that beam while forming the weighted Taylor moments.
-    This explicitly applies the PB convention in the map stage while retaining
-    the algebraically equivalent residual numerator.  The PSF cube is converted
-    with the same spectral basis into ``2 * nterms - 1`` Hessian numerators.
+    Channel residuals are multiplied by their frequency-dependent primary beam
+    before the weighted Taylor moments are formed, and the squared beam is
+    summed into the ``2 * nterms - 1`` moments of the per-pixel spectral fit.
+    The PSF cube is converted with the same spectral basis, without a
+    primary-beam factor, into ``2 * nterms - 1`` Hessian numerators.
 
     Parameters
     ----------
@@ -921,34 +921,53 @@ def make_mvc_taylor_normal_equation_contributions(
     reference_frequency : float
         Taylor reference frequency in Hz.
     pblimit : float, default 0.2
-        Primary-beam validity cutoff.
+        Primary-beam cutoff. Channel beams at or below it do not contribute to
+        the effective beam, and the residual is zero where the effective beam
+        is at or below it. Where fewer than ``nterms`` channel beams exceed it,
+        only Taylor term zero of the spectrum is fitted.
 
     Returns
     -------
     xarray.Dataset
-        Additive residual Taylor numerators and residual-weight sum.  When a
-        PSF cube is supplied, also contains PSF Taylor numerators, the PSF
-        weight sum, and the PSF-weighted primary-beam sum.
+        Additive residual Taylor numerators, squared-beam moments,
+        residual-weight moments, residual-weight sum, and the number of
+        channels whose beam exceeds ``pblimit``.  When a PSF cube is supplied,
+        also contains PSF Taylor numerators, the PSF weight sum, and the
+        PSF-weighted primary-beam sum.
 
     Notes
     -----
-    With ``x_nu = (nu - nu0) / nu0`` and common beam ``Abar``, this implements
+    With ``x_nu = (nu - nu0) / nu0``, channel beams ``A_nu`` and the common
+    beam ``Abar = sum(w_nu * A_nu) / sum(w_nu)`` (channel beams at or below
+    ``pblimit`` count as zero), the PSF planes are the plain weighted moments
+    of the channel PSFs,
 
-    ``R'_nu = Abar * R_nu / A_nu``
+    ``B_k = sum(w_nu * x_nu**k * B_nu) / sum(w_nu)``,
 
-    followed by chunk-local Taylor accumulation.  The factor ``Abar`` is not
-    known until all chunks have been reduced.  In the residual equation it
-    cancels algebraically; for the PSF and effective beam it is applied by
-    :func:`finalize_mvc_taylor_normal_equations` in the append node.
+    and the Taylor residuals are
 
-    ``b_t = sum(w_nu * x_nu**t * A_nu * R'_nu) / (sum(w_nu) * Abar)``
+    ``b = Abar * H @ inv(G) @ u``,
 
-    and
+    with ``u_k = sum(w_nu * x_nu**k * A_nu * R_nu)``,
+    ``G_tk = sum(w_nu * x_nu**(t+k) * A_nu**2)`` at each pixel, and
+    ``H_tk = sum(w_nu * x_nu**(t+k)) / sum(w_nu)``, the PSF planes at their
+    peak.  ``inv(G) @ u`` is the least-squares fit of a Taylor polynomial to
+    the primary-beam corrected channel residuals ``R_nu / A_nu`` with weights
+    ``w_nu * A_nu**2``, so a channel enters with a factor ``A_nu`` and a
+    channel whose beam goes to zero drops out.  The model is predicted as
+    ``M_nu * A_nu / Abar`` (:func:`apply_mvc_primary_beam_convention`), so a
+    model change ``dM_nu = sum_k x_nu**k dm_k`` at a pixel changes ``u`` there
+    by ``-G @ dm / Abar`` and ``b`` by ``-H @ dm``: the Hessian the
+    deconvolver inverts, ``B_(t+k)`` at the PSF peak, is the response of the
+    residual at every position, not only at the pointing centre.  Away from
+    the peak the response follows the channel PSFs weighted by
+    ``w_nu * A_nu**2`` instead of ``w_nu``.  Where fewer than ``nterms``
+    channel beams exceed ``pblimit``, the fit is not determined by them;
+    there only Taylor term zero is fitted, ``u_0 / G_00``.
 
-    ``B_k = sum(w_nu * x_nu**k * A_nu * B_nu) / (sum(w_nu) * Abar)``.
-
-    The first expression reduces algebraically to the weighted residual moment,
-    while retaining CASA's primary-beam mask and common-beam convention.
+    The sums over all chunks and ``Abar`` are known only after the reduce
+    stage; :func:`finalize_mvc_taylor_normal_equations` solves for ``b`` in
+    the append node.
     """
     import numpy as np
     import xarray as xr
@@ -1046,23 +1065,22 @@ def make_mvc_taylor_normal_equation_contributions(
     residual_weight_sum = residual_weight.sum(dim="frequency")
 
     valid_channel_pb = np.isfinite(primary_beam_cube) & (primary_beam_cube > pblimit)
-    # CASA clips each channel PB before forming the effective PB and PSF Taylor
-    # terms. Keep all channel weights in the denominator, including clipped ones.
+    # CASA clips each channel PB before forming the effective PB. Keep all
+    # channel weights in the denominator, including clipped ones.
     finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
-    residual_over_primary_beam = xr.where(
-        valid_channel_pb,
-        residual_cube / primary_beam_cube,
-        0.0,
+    # The spectral fit weights each channel by its beam as the prediction
+    # applies it, without the clip.
+    channel_primary_beam = xr.where(
+        np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
     )
+    beam_weighted_residual = channel_primary_beam * residual_cube
+    channel_primary_beam_squared = channel_primary_beam**2
 
     residual_terms = []
     for order in range(nterms):
-        numerator = (
-            residual_weight
-            * x_frequency**order
-            * finite_primary_beam
-            * residual_over_primary_beam
-        ).sum(dim="frequency")
+        numerator = (residual_weight * x_frequency**order * beam_weighted_residual).sum(
+            dim="frequency"
+        )
         residual_terms.append(numerator)
 
     residual_numerator = xr.concat(
@@ -1076,10 +1094,46 @@ def make_mvc_taylor_normal_equation_contributions(
         "nterms": nterms,
         "pblimit": pblimit,
     }
+
+    n_psf_taylor_terms = 2 * nterms - 1
+    psf_taylor_order = xr.IndexVariable(
+        "psf_taylor_order", np.arange(n_psf_taylor_terms, dtype=np.int64)
+    )
+    beam_squared_numerator = xr.concat(
+        [
+            (residual_weight * x_frequency**order * channel_primary_beam_squared).sum(
+                dim="frequency"
+            )
+            for order in range(n_psf_taylor_terms)
+        ],
+        dim=psf_taylor_order,
+    ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
+    beam_squared_numerator.attrs = {
+        "description": "Additive MVC squared-beam moments of the spectral fit.",
+        "specmode": "mvc",
+        "reference_frequency": reference_frequency,
+        "nterms": nterms,
+        "pblimit": pblimit,
+    }
+    residual_weight_moments = xr.concat(
+        [
+            (residual_weight * x_frequency**order).sum(dim="frequency")
+            for order in range(n_psf_taylor_terms)
+        ],
+        dim=psf_taylor_order,
+    ).transpose("time", "psf_taylor_order", "polarization")
+
     contributions = xr.Dataset(
         {
             "MVC_RESIDUAL_TAYLOR_NUMERATOR": residual_numerator,
             "MVC_RESIDUAL_WEIGHT_SUM": residual_weight_sum,
+            "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM": beam_squared_numerator,
+            "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM": residual_weight_moments,
+            "MVC_RESIDUAL_BEAM_CHANNEL_COUNT": (
+                (valid_channel_pb & (residual_weight > 0.0))
+                .sum(dim="frequency")
+                .transpose("time", "polarization", "l", "m")
+            ),
         },
         attrs={
             "specmode": "mvc",
@@ -1094,12 +1148,9 @@ def make_mvc_taylor_normal_equation_contributions(
         psf_weight = _clean_weights(psf_normalization)
         psf_weight_sum = psf_weight.sum(dim="frequency")
 
-        n_psf_taylor_terms = 2 * nterms - 1
         finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
         psf_terms = [
-            (psf_weight * x_frequency**order * finite_primary_beam * finite_psf).sum(
-                dim="frequency"
-            )
+            (psf_weight * x_frequency**order * finite_psf).sum(dim="frequency")
             for order in range(n_psf_taylor_terms)
         ]
         psf_numerator = xr.concat(
@@ -1156,21 +1207,51 @@ def finalize_mvc_taylor_normal_equations(
     valid_effective_pb = np.isfinite(effective_primary_beam) & (
         effective_primary_beam > pblimit
     )
+
+    # Fit the Taylor coefficients at each pixel, inv(G) @ u, and return them
+    # to the PSF moments and the common beam, Abar * H @ inv(G) @ u. Where
+    # fewer than nterms channel beams exceed pblimit, fit Taylor term zero only.
+    pixel_dims = ("time", "polarization", "l", "m")
+    numerator = contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].transpose(
+        *pixel_dims, "taylor_term"
+    )
+    nterms = numerator.sizes["taylor_term"]
+    hankel = np.add.outer(np.arange(nterms), np.arange(nterms))
+    beam_squared = (
+        contributions["MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM"]
+        .transpose(*pixel_dims, "psf_taylor_order")
+        .values
+    )
+    supported = valid_effective_pb.transpose(*pixel_dims).values
+    determined = supported & (
+        contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"].transpose(*pixel_dims).values
+        >= nterms
+    )
+    gram = beam_squared[..., hankel]
+    gram[~determined] = np.eye(nterms)
+    coefficients = np.linalg.solve(
+        gram, np.where(determined[..., None], numerator.values, 0.0)[..., None]
+    )[..., 0]
+    flat = supported & ~determined & (beam_squared[..., 0] > 0.0)
+    coefficients[flat, 0] = numerator.values[flat, 0] / beam_squared[flat, 0]
+    hessian = (
+        (contributions["MVC_RESIDUAL_WEIGHT_TAYLOR_SUM"] / residual_sum)
+        .transpose("time", "polarization", "psf_taylor_order")
+        .values[..., hankel]
+    )
     residual_taylor = xr.where(
         valid_effective_pb,
-        contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"] / residual_sum,
+        effective_primary_beam
+        * contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].copy(
+            data=np.einsum("tpij,tplmj->tiplm", hessian, coefficients)
+        ),
         0.0,
     )
 
     psf_taylor = None
     if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
         psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
-        psf_taylor = xr.where(
-            valid_effective_pb,
-            contributions["MVC_PSF_TAYLOR_NUMERATOR"]
-            / (psf_sum * effective_primary_beam),
-            0.0,
-        )
+        psf_taylor = contributions["MVC_PSF_TAYLOR_NUMERATOR"] / psf_sum
 
     output_dtype = np.dtype(contributions.attrs.get("mvc_output_dtype", "float64"))
     residual_taylor = residual_taylor.astype(output_dtype, copy=False)
