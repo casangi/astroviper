@@ -1488,9 +1488,18 @@ def asp_clean(
           residual smoothed with each initial scale and, once the peak is
           below ``threshold_per_cycle``, go on cleaning the most significant
           smoothed residual while it is as significant as the threshold is
-          at scale 0. Default ``True``.
+          at scale 0. The noise is measured on the pixels outside the clean
+          mask, without the outermost row and column of the image, sampling
+          one in every ``max(1, npix // 400000)`` of the ``npix`` pixels of
+          the image (one in 2 at 1024 x 1024, one in 10 at 2048 x 2048).
+          With fewer than 100 sampled pixels (no mask, or one that covers
+          the image, for example), or a noise of 0 there (a residual that is
+          mostly 0 outside the mask), nothing is cleaned below
+          ``threshold_per_cycle``. Default ``True``.
         - ``asp_significance`` : float, the significance the smoothed
-          residual must reach instead, when ``> 0``. Default 0.0.
+          residual must reach instead, when ``> 0``. It also needs the noise
+          of the residual measured as for ``asp_scale_significance``: without
+          it nothing is cleaned below ``threshold_per_cycle``. Default 0.0.
         - ``asp_significance_gain`` : float, the gain of the components cleaned
           below ``threshold_per_cycle`` for their significance. Each is a
           least-squares fit, so any gain up to 1 lowers the misfit; 0.3 needs
