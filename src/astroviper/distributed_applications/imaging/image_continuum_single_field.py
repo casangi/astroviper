@@ -2590,6 +2590,11 @@ def _resolve_continuum_deconvolver(deconvolver, image_params):
     import warnings
 
     deconvolver = str(deconvolver).lower()
+    if deconvolver not in ("hogbom", "mtmfs"):
+        raise ValueError(
+            "deconvolver must be 'hogbom' or 'mtmfs' for continuum imaging; "
+            f"received {deconvolver!r}."
+        )
     if deconvolver != "mtmfs":
         return deconvolver
 
@@ -2822,9 +2827,12 @@ def image_continuum_single_field(
         images the two parallel hands only; ``["I", "Q", "U", "V"]`` is
         refused.
     deconvolver : str
-        Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
-        (C++, threaded across *and* within planes -- faster when there are
-        few planes, e.g. single-channel imaging) or ``"asp"``.
+        Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
+        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
+        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
+        together and needs ``image_params["nterms"]`` from 2 to 4; with
+        ``nterms=1`` it falls back to ``"hogbom"`` with a warning. Other values
+        are refused before anything is written.
     pblimit : float
         PB cutoff for MVC channel correction and final model-first PB-corrected
         restoration. Pixels below this limit are blanked with NaN.

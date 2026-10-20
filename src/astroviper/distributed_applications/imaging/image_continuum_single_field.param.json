@@ -17,7 +17,7 @@
         "gridder": { "type": ["str"], "allowed": ["anti_alias"] },
         "deconvolver": {
             "type": ["str"],
-            "allowed": ["hogbom", "hogbom_many_threads", "asp", "aspclean", "asp_clean", "mtmfs"]
+            "allowed": ["hogbom", "mtmfs"]
         },
         "pbcor": { "type": "boolean" },
         "pblimit": {"type": "float"},

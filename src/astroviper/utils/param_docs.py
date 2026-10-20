@@ -269,7 +269,14 @@ def sync_param_docs(check=False):
                 return node
             if not isinstance(current, str):
                 return node
-            new_doc = _rewrite_docstring(current, registry)
+            # A "<function name>.<parameter name>" key gives the functions of
+            # that name their own description of the parameter.
+            function_prefix = node.name.value + "."
+            function_registry = dict(registry)
+            for key, description in registry.items():
+                if key.startswith(function_prefix):
+                    function_registry[key[len(function_prefix) :]] = description
+            new_doc = _rewrite_docstring(current, function_registry)
             if new_doc is None:
                 return node
             self.changed = True

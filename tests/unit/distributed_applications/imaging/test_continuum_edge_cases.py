@@ -38,6 +38,16 @@ def test_public_api_rejects_invalid_mtmfs_taylor_orders(params, error, message):
         _resolve_continuum_deconvolver("mtmfs", params)
 
 
+@pytest.mark.parametrize(
+    "deconvolver", ["hogbom_many_threads", "asp", "aspclean", "asp_clean"]
+)
+def test_public_api_rejects_deconvolvers_the_continuum_model_update_lacks(
+    deconvolver,
+):
+    with pytest.raises(ValueError, match="must be 'hogbom' or 'mtmfs'"):
+        _resolve_continuum_deconvolver(deconvolver, {"nterms": 2})
+
+
 def test_non_mtmfs_deconvolver_does_not_require_nterms():
     assert _resolve_continuum_deconvolver("hogbom", {}) == "hogbom"
 

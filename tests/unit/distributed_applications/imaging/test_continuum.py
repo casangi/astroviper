@@ -996,6 +996,33 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
 
 
 @pytest.mark.parametrize(
+    "deconvolver", ["hogbom_many_threads", "asp", "aspclean", "asp_clean"]
+)
+def test_tw_hydra_refused_deconvolvers_write_nothing(
+    tmp_path, tw_hydra_store, deconvolver
+):
+    """A deconvolver the continuum model update does not support is refused
+    before the in-place imaging weights or the image store are written."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    files = _store_snapshot(store)
+    output_store = tmp_path / "refused.img.zarr"
+    with pytest.raises(AssertionError):
+        _run_tw_hydra_continuum(
+            store,
+            output_store,
+            open_processing_set(str(store)),
+            2,
+            "mfs",
+            {"weighting": "briggs", "robust": 0.5, "weighting_scope": "global"},
+            deconvolver=deconvolver,
+            weight_memory_mode="in_place",
+        )
+    assert _store_snapshot(store) == files
+    assert not output_store.exists()
+
+
+@pytest.mark.parametrize(
     ("weighting", "options", "message"),
     [
         pytest.param(

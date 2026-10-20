@@ -12,6 +12,9 @@ Each value is the NumPy-style *description* body only (no ``name : type`` line):
 the per-function ``name : type`` line -- which encodes the type and whether the
 parameter is optional -- is preserved by the codegen, so the same description
 can be shared by functions that give the parameter different defaults.
+
+A key ``"<function name>.<parameter name>"`` gives the decorated functions of
+that name their own description of the parameter, in place of the shared one.
 """
 
 IMAGING_PARAM_DOCS = {
@@ -325,6 +328,14 @@ IMAGING_PARAM_DOCS = {
         '"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``\n'
         "(C++, threaded across *and* within planes -- faster when there are\n"
         'few planes, e.g. single-channel imaging) or ``"asp"``.'
+    ),
+    "image_continuum_single_field.deconvolver": (
+        'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
+        'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
+        "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
+        'together and needs ``image_params["nterms"]`` from 2 to 4; with\n'
+        '``nterms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
+        "are refused before anything is written."
     ),
     "instrument_polarization_basis": (
         "Correlation (instrument) polarization basis the gridding is performed in:\n"
