@@ -574,15 +574,10 @@ def _resolve_continuum_append_configuration(input_params):
     if nterms < 1:
         raise ValueError(f"image_params['nterms'] must be positive; received {nterms}.")
 
-    if "reference_frequency" in image_params:
-        reference_frequency = float(image_params["reference_frequency"])
-    elif "reference_frequency_hz" in image_params:
-        reference_frequency = float(image_params["reference_frequency_hz"])
-    else:
-        raise KeyError(
-            "image_params must contain 'reference_frequency' or "
-            "'reference_frequency_hz'."
-        )
+    if "reference_frequency" not in image_params:
+        raise KeyError("image_params must contain 'reference_frequency'.")
+
+    reference_frequency = float(image_params["reference_frequency"])
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(

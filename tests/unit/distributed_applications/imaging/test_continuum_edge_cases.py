@@ -6,6 +6,7 @@ import xarray as xr
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _resolve_continuum_deconvolver,
+    _resolve_continuum_taylor_expansion,
     combine_continuum_imaging_weight_chunks,
     combine_continuum_weight_density_chunks,
 )
@@ -39,6 +40,66 @@ def test_public_api_rejects_invalid_mtmfs_taylor_orders(params, error, message):
 
 def test_non_mtmfs_deconvolver_does_not_require_nterms():
     assert _resolve_continuum_deconvolver("hogbom", {}) == "hogbom"
+
+
+@pytest.mark.parametrize("nterms", [2, np.int64(2)])
+@pytest.mark.parametrize(
+    "keys",
+    [
+        {"reference_frequency": 100},
+        {"reference_frequency": np.float32(100.0)},
+        {"reference_frequency": xr.DataArray(100.0)},
+        {"reference_frequency": np.array([100.0])},
+        {"reference_frequency_hz": 100.0},
+        {"reference_frequency": 100.0, "reference_frequency_hz": np.float32(100.0)},
+    ],
+)
+def test_taylor_expansion_is_resolved_to_python_scalars(nterms, keys):
+    """NumPy and xarray scalars are accepted; ``nterms`` becomes an int and the
+    deprecated alias is replaced by ``reference_frequency``, a float in Hz."""
+    params = {"nterms": nterms, **keys}
+    if "reference_frequency_hz" in params:
+        with pytest.warns(FutureWarning, match="reference_frequency_hz"):
+            _resolve_continuum_taylor_expansion(params)
+    else:
+        _resolve_continuum_taylor_expansion(params)
+    assert params == {"nterms": 2, "reference_frequency": 100.0}
+    assert type(params["nterms"]) is int
+    assert type(params["reference_frequency"]) is float
+
+
+@pytest.mark.filterwarnings("ignore::FutureWarning")
+@pytest.mark.parametrize(
+    "params,error,message",
+    [
+        ({"nterms": 2.0, "reference_frequency": 100.0}, TypeError, "an integer"),
+        ({"nterms": 2}, KeyError, "must contain 'reference_frequency'"),
+        (
+            {
+                "nterms": 2,
+                "reference_frequency": 100.0,
+                "reference_frequency_hz": 101.0,
+            },
+            ValueError,
+            "two different reference frequencies",
+        ),
+        ({"nterms": 2, "reference_frequency": 0.0}, ValueError, "finite and positive"),
+        (
+            {"nterms": 2, "reference_frequency": np.nan},
+            ValueError,
+            "finite and positive",
+        ),
+        (
+            {"nterms": 2, "reference_frequency_hz": -1.0},
+            ValueError,
+            "finite and positive",
+        ),
+        ({"nterms": 2, "reference_frequency": [100.0, 200.0]}, ValueError, "scalar"),
+    ],
+)
+def test_taylor_expansion_rejects_invalid_values(params, error, message):
+    with pytest.raises(error, match=message):
+        _resolve_continuum_taylor_expansion(params)
 
 
 @pytest.mark.parametrize(

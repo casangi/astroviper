@@ -79,7 +79,7 @@ image_params = {
     "time_coords": [0],
     "fft_padding": 1.2,
     "cpp_gridder": True,
-    "reference_frequency_hz": 372763801257.61084,
+    "reference_frequency": 372763801257.61084,
 }
 
 imaging_weights_params = {

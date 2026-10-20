@@ -23,38 +23,24 @@ from astroviper.processing_functions.imaging.imaging_setup_continuum_single_fiel
 @pytest.mark.parametrize("value", [0.0, -1.0, np.nan, np.inf, [1.0, 2.0], []])
 def test_reference_frequency_rejects_invalid_scalars(value):
     with pytest.raises(ValueError, match="scalar|finite and positive"):
-        _get_reference_frequency_hz({"reference_frequency": value}, xr.Dataset())
+        _get_reference_frequency_hz({"reference_frequency": value})
 
 
-@pytest.mark.parametrize(
-    "params, expected",
-    [
-        ({}, 100.0),
-        ({"reference_frequency_hz": 120.0}, 120.0),
-        (
-            {"reference_frequency": np.array([130.0]), "reference_frequency_hz": 120.0},
-            130.0,
-        ),
-    ],
-)
-def test_reference_frequency_fallback_and_precedence(params, expected):
-    assert (
-        _get_reference_frequency_hz(
-            params, xr.Dataset(coords={"frequency": [80.0, 120.0]})
-        )
-        == expected
-    )
+def test_reference_frequency_accepts_a_one_element_array():
+    params = {"reference_frequency": np.array([130.0])}
+    assert _get_reference_frequency_hz(params) == 130.0
 
 
-@pytest.mark.parametrize("image", [xr.Dataset(), xr.Dataset(coords={"frequency": []})])
-def test_reference_frequency_cannot_be_inferred_without_channels(image):
-    with pytest.raises(ValueError, match="frequency"):
-        _get_reference_frequency_hz({}, image)
+@pytest.mark.parametrize("params", [{}, {"reference_frequency_hz": 120.0}])
+def test_reference_frequency_is_read_from_one_key_without_fallback(params):
+    """Only ``reference_frequency`` is read; the driver resolves the alias."""
+    with pytest.raises(KeyError, match="'reference_frequency'"):
+        _get_reference_frequency_hz(params)
 
 
 def test_invalid_taylor_order_is_rejected_before_setup():
     with pytest.raises(ValueError, match="nterms"):
-        _validate_continuum_parameters({"nterms": 0}, xr.Dataset())
+        _validate_continuum_parameters({"nterms": 0})
 
 
 @pytest.mark.parametrize("fault", ["empty", "group", "role", "variable", "none"])

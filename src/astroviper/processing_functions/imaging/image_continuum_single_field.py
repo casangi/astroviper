@@ -719,12 +719,7 @@ def prepare_model_uv_mvc_single_field(
         dtype=np.float64,
     )
 
-    reference_frequency = float(
-        image_params.get(
-            "reference_frequency",
-            image_params["reference_frequency_hz"],
-        )
-    )
+    reference_frequency = float(image_params["reference_frequency"])
     nterms = int(image_params["nterms"])
 
     model_name = model_xds.attrs["data_groups"][image_data_group_name]["sky"]
@@ -1716,13 +1711,7 @@ def residual_update_continuum_single_field(
             img_xds["VISIBILITY_NORMALIZATION"],
             img_xds["UV_SAMPLING_NORMALIZATION"] if is_n_iter_0 else None,
             nterms=image_params.get("nterms", 2),
-            reference_frequency=image_params.get(
-                "reference_frequency",
-                image_params.get(
-                    "reference_frequency_hz",
-                    float(np.mean(img_xds.coords["frequency"].values)),
-                ),
-            ),
+            reference_frequency=image_params["reference_frequency"],
             pblimit=pblimit,
         )
         for variable_name, data_array in contributions.data_vars.items():

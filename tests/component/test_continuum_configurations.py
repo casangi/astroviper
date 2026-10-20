@@ -41,7 +41,6 @@ def continuum_input(tmp_path, tw_hydra_archive):
             cpp_gridder=True,
             nterms=2,
             reference_frequency=float(np.mean(frequency)),
-            reference_frequency_hz=float(np.mean(frequency)),
         )
         mask = np.zeros((64, 64), dtype=bool)
         mask[20:44, 20:44] = True

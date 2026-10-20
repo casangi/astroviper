@@ -117,7 +117,7 @@ def residual_cycle_continuum_single_field(
         )
 
     nterms = int(image_params.get("nterms", 2))
-    reference_frequency = float(image_params["reference_frequency_hz"])
+    reference_frequency = float(image_params["reference_frequency"])
 
     if nterms < 1:
         raise ValueError("image_params['nterms'] must be at least 1.")

@@ -727,7 +727,7 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         model,
         channel_pb,
         [0.9e9, 1.1e9],
-        {"nterms": 2, "reference_frequency_hz": 1.0e9},
+        {"nterms": 2, "reference_frequency": 1.0e9},
     )
     assert result.SKY_MODEL_MVC.dims == (
         "time",
@@ -797,7 +797,12 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(monkeypatch, specm
         ),
     )
     result, timing = residual_update_continuum_single_field(
-        {}, image, {"nterms": 2}, {}, specmode=specmode, is_n_iter_0=True
+        {},
+        image,
+        {"nterms": 2, "reference_frequency": 1.0e9},
+        {},
+        specmode=specmode,
+        is_n_iter_0=True,
     )
     assert timing.iloc[0].nterms == 2
     if specmode == "mvc":

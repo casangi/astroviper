@@ -2618,6 +2618,69 @@ def _resolve_continuum_deconvolver(deconvolver, image_params):
     return deconvolver
 
 
+def _resolve_continuum_taylor_expansion(image_params):
+    """Resolve the Taylor expansion of the sky model before graph creation.
+
+    The node tasks and processing functions read only
+    ``image_params["nterms"]`` and ``image_params["reference_frequency"]``.
+    The deprecated alias ``image_params["reference_frequency_hz"]`` is
+    resolved here, once, so that every stage uses the same frequency.
+
+    Parameters
+    ----------
+    image_params : dict
+        Application-local copy of the image parameters, with ``nterms``
+        present and at least 1 (checked by the schema). ``nterms`` may be any
+        integer type, and the reference frequency any real scalar (Python,
+        NumPy or xarray). Modified in place: on return ``nterms`` is an int,
+        ``reference_frequency`` holds the reference frequency in Hz as a float,
+        and ``reference_frequency_hz`` is removed.
+
+    Raises
+    ------
+    TypeError
+        If ``nterms`` is not an integer.
+    KeyError
+        If neither ``reference_frequency`` nor ``reference_frequency_hz`` is
+        given.
+    ValueError
+        If both are given with different values, or the reference frequency is
+        not a finite and positive scalar.
+    """
+    import operator
+    import warnings
+
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _get_reference_frequency_hz,
+    )
+
+    try:
+        image_params["nterms"] = operator.index(image_params["nterms"])
+    except TypeError as exc:
+        raise TypeError("image_params['nterms'] must be an integer.") from exc
+
+    if "reference_frequency_hz" in image_params:
+        warnings.warn(
+            "image_params['reference_frequency_hz'] is deprecated; use "
+            "image_params['reference_frequency'] (in Hz) instead.",
+            FutureWarning,
+            stacklevel=3,
+        )
+        alias = image_params.pop("reference_frequency_hz")
+        if "reference_frequency" not in image_params:
+            image_params["reference_frequency"] = alias
+        elif _get_reference_frequency_hz(image_params) != _get_reference_frequency_hz(
+            {"reference_frequency": alias}
+        ):
+            raise ValueError(
+                "image_params gives two different reference frequencies: "
+                f"reference_frequency={image_params['reference_frequency']} and "
+                f"reference_frequency_hz={alias}. Give only reference_frequency."
+            )
+
+    image_params["reference_frequency"] = _get_reference_frequency_hz(image_params)
+
+
 ###############################################################################
 # Main distributed layer level function call
 ###############################################################################
@@ -3081,6 +3144,16 @@ def image_continuum_single_field(
 
     Notes
     -----
+    The sky model is a Taylor expansion in frequency with
+    ``image_params["nterms"]`` terms (an integer of at least 1) about
+    ``image_params["reference_frequency"]``, one frequency in Hz shared by all
+    frequency chunks. Both are required.
+    ``image_params["reference_frequency_hz"]`` is a deprecated alias of
+    ``reference_frequency``: it is accepted with a ``FutureWarning``, and two
+    different values are refused. ``image_params["frequency_coords"]`` must
+    hold exactly the channels of the selected Processing Set. These parameters
+    are checked before anything is written.
+
     The continuum Högbom adapter uses float32 for its temporary model-update
     arrays, independently of the gridding/image precision setting.
 
@@ -3186,6 +3259,7 @@ def image_continuum_single_field(
     # image parameters with metadata derived from the Processing Set.
     image_params = dict(image_params)
     deconvolver = _resolve_continuum_deconvolver(deconvolver, image_params)
+    _resolve_continuum_taylor_expansion(image_params)
 
     clean_mask_array = _load_continuum_clean_mask(
         clean_mask,
@@ -3290,10 +3364,6 @@ def image_continuum_single_field(
             "populated by its node tasks.",
         )
 
-    start = time.time()
-    image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
-    timing_distributed_application["T_write_empty_image"] = time.time() - start
-
     # Determine number of chunks
     start = time.time()
     n_chunks = int(
@@ -3314,6 +3384,22 @@ def image_continuum_single_field(
     timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
         time.time() - start
     )
+
+    # The image channels (frequency_coords) must be exactly the Processing Set
+    # channels; checked here, before the image store is written.
+    start = time.time()
+    node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
+        parallel_coords, ps_xdt
+    )
+    node_task_data_mapping = _apply_exact_frequency_selection_to_continuum_mapping(
+        node_task_data_mapping,
+        ps_xdt,
+    )
+    timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
+
+    start = time.time()
+    image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
+    timing_distributed_application["T_write_empty_image"] = time.time() - start
 
     # Add nan images (these will be overwritten with the actual image data but this ensures the coordinates and dtypes are correct and allows for lazy writing of the data)
     # create_empty_data_varable_on_disk(zarr_store, dv_names, dims, shape, chunk, variable_dtype, compressor)
@@ -3393,16 +3479,6 @@ def image_continuum_single_field(
     input_params["data_group"] = first_ms.ds.attrs["data_groups"][
         processing_set_data_group_name
     ]
-
-    start = time.time()
-    node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
-        parallel_coords, ps_xdt
-    )
-    node_task_data_mapping = _apply_exact_frequency_selection_to_continuum_mapping(
-        node_task_data_mapping,
-        ps_xdt,
-    )
-    timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
 
     # Load only the correlations that are needed: their index positions are
     # added to the selection of every measurement set that holds more (or

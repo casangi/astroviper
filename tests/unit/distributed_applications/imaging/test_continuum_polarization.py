@@ -140,7 +140,6 @@ def _image(
                 "fft_padding": 1.2,
                 "nterms": 1,
                 "reference_frequency": float(np.mean(frequency)),
-                "reference_frequency_hz": float(np.mean(frequency)),
             },
             imaging_weights_params=weighting
             or {"weighting": "natural", "weighting_scope": "local"},

@@ -7,6 +7,7 @@ rather than retaining the frequency-cube NaN placeholders created at startup.
 
 import json
 import shutil
+import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
@@ -643,7 +644,6 @@ def _tw_hydra_image_params(processing_set, overrides=None):
         "cpp_gridder": True,
         "nterms": 2,
         "reference_frequency": reference_frequency,
-        "reference_frequency_hz": reference_frequency,
     }
     image_params.update(overrides or {})
     return image_params
@@ -660,6 +660,7 @@ def _run_tw_hydra_continuum(
     deconvolver="hogbom",
     cycle_control_params=None,
     image_param_overrides=None,
+    image_params=None,
     restore=False,
     pbcor=False,
     pblimit=0.2,
@@ -696,7 +697,11 @@ def _run_tw_hydra_continuum(
         result = image_continuum_single_field(
             ps_store=str(store),
             image_store=str(output_store),
-            image_params=_tw_hydra_image_params(processing_set, image_param_overrides),
+            image_params=(
+                _tw_hydra_image_params(processing_set, image_param_overrides)
+                if image_params is None
+                else image_params
+            ),
             imaging_weights_params=weighting,
             cycle_control_params=cycle_control_params,
             gridder="anti_alias",
@@ -1032,6 +1037,197 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
         )
     assert _store_snapshot(store) == files
     assert not output_store.exists()
+
+
+@pytest.mark.filterwarnings("ignore::FutureWarning")
+@pytest.mark.parametrize(
+    "change,error,message",
+    [
+        pytest.param(
+            lambda params: params.update(
+                reference_frequency_hz=1.001 * params["reference_frequency"]
+            ),
+            ValueError,
+            "two different reference frequencies",
+            id="differing-reference-frequencies",
+        ),
+        pytest.param(
+            lambda params: params.pop("reference_frequency"),
+            KeyError,
+            "'reference_frequency'",
+            id="no-reference-frequency",
+        ),
+        pytest.param(
+            lambda params: params.update(reference_frequency=0.0),
+            ValueError,
+            "finite and positive",
+            id="zero-reference-frequency",
+        ),
+        pytest.param(
+            lambda params: params.pop("nterms"),
+            AssertionError,
+            None,
+            id="no-nterms",
+        ),
+        pytest.param(
+            lambda params: params.update(nterms=0),
+            AssertionError,
+            None,
+            id="zero-nterms",
+        ),
+        pytest.param(
+            lambda params: params.update(nterms=2.0),
+            TypeError,
+            "must be an integer",
+            id="non-integer-nterms",
+        ),
+        pytest.param(
+            lambda params: params.update(
+                frequency_coords=params["frequency_coords"][:2]
+            ),
+            ValueError,
+            "not assigned exactly once",
+            id="channel-subset",
+        ),
+    ],
+)
+def test_tw_hydra_refused_image_params_write_nothing(
+    tmp_path, tw_hydra_store, change, error, message
+):
+    """Invalid image parameters are refused before anything is written."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    files = _store_snapshot(store)
+    output_store = tmp_path / "refused.img.zarr"
+    processing_set = open_processing_set(str(store))
+    image_params = _tw_hydra_image_params(processing_set)
+    change(image_params)
+    with pytest.raises(error, match=message):
+        _run_tw_hydra_continuum(
+            store,
+            output_store,
+            processing_set,
+            2,
+            "mfs",
+            {"weighting": "natural", "weighting_scope": "local"},
+            image_params=image_params,
+            weight_memory_mode="in_place",
+        )
+    assert _store_snapshot(store) == files
+    assert not output_store.exists()
+
+
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+def test_tw_hydra_reference_frequency_alias_gives_the_same_images(
+    tmp_path, tw_hydra_store, specmode
+):
+    """``reference_frequency`` alone, both keys equal and the deprecated
+    ``reference_frequency_hz`` alone give the same images."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    reference_frequency = _tw_hydra_image_params(processing_set)["reference_frequency"]
+    images = {}
+    for name, keys in (
+        ("reference_frequency", {"reference_frequency": reference_frequency}),
+        (
+            "both",
+            {
+                "reference_frequency": reference_frequency,
+                "reference_frequency_hz": reference_frequency,
+            },
+        ),
+        ("alias", {"reference_frequency_hz": reference_frequency}),
+    ):
+        image_params = _tw_hydra_image_params(processing_set)
+        del image_params["reference_frequency"]
+        image_params.update(keys)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result, images[name] = _run_tw_hydra_continuum(
+                tw_hydra_store,
+                tmp_path / f"reference_frequency_{specmode}_{name}.img.zarr",
+                processing_set,
+                2,
+                specmode,
+                {"weighting": "natural", "weighting_scope": "local"},
+                image_params=image_params,
+                cycle_control_params={
+                    "max_iter": 20,
+                    "max_cycles": 2,
+                    "threshold": 0.001,
+                    "gain": 0.1,
+                    "psf_sidelobe_factor": 1.5,
+                    "max_iter_per_cycle": 5,
+                    "min_psf_fraction": 0.05,
+                    "max_psf_fraction": 0.8,
+                },
+            )
+        deprecations = [
+            warning
+            for warning in caught
+            if issubclass(warning.category, FutureWarning)
+            and "reference_frequency_hz" in str(warning.message)
+        ]
+        assert len(deprecations) == ("reference_frequency_hz" in keys)
+        assert result["n_major_cycles"] >= 2
+        assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
+
+    for name in ("both", "alias"):
+        xr.testing.assert_equal(images[name], images["reference_frequency"])
+
+
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+def test_tw_hydra_numpy_and_xarray_scalars_give_the_same_images(
+    tmp_path, tw_hydra_store, specmode
+):
+    """A NumPy integer ``nterms`` and a NumPy or xarray scalar reference
+    frequency are accepted and give the same images as Python numbers."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    # Rounded to float32 so that every variant holds the same value.
+    reference_frequency = float(
+        np.float32(_tw_hydra_image_params(processing_set)["reference_frequency"])
+    )
+    images = {}
+    for name, keys in (
+        ("python", {"nterms": 2, "reference_frequency": reference_frequency}),
+        (
+            "numpy",
+            {
+                "nterms": np.int64(2),
+                "reference_frequency": np.float32(reference_frequency),
+            },
+        ),
+        (
+            "xarray",
+            {
+                "nterms": np.int64(2),
+                "reference_frequency": xr.DataArray(reference_frequency),
+            },
+        ),
+    ):
+        result, images[name] = _run_tw_hydra_continuum(
+            tw_hydra_store,
+            tmp_path / f"scalars_{specmode}_{name}.img.zarr",
+            processing_set,
+            2,
+            specmode,
+            {"weighting": "natural", "weighting_scope": "local"},
+            image_param_overrides=keys,
+            cycle_control_params={
+                "max_iter": 20,
+                "max_cycles": 2,
+                "threshold": 0.001,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 5,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+        )
+        assert result["n_major_cycles"] >= 2
+        assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
+
+    for name in ("numpy", "xarray"):
+        xr.testing.assert_equal(images[name], images["python"])
 
 
 @pytest.mark.parametrize(
