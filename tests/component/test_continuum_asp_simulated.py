@@ -24,6 +24,8 @@ imaging is the sky seen through that beam, in MFS and MVC alike) within
 5 percent (measured: within 2.2 percent), the Stokes I residual must stay
 below 3 percent of the point source's apparent flux (measured: at most
 1.3 percent), and the cycle controller must have booked every model update.
+A second test gives the application an explicit ``clean_mask`` around the
+point source only.
 """
 
 import shutil
@@ -117,8 +119,9 @@ def simulated(tmp_path_factory):
     return simulate_input(tmp_path_factory.mktemp("continuum_asp"))
 
 
-def run_continuum_asp(simulated, directory, continuum_mode, options):
-    """Image a copy of the simulated processing set with continuum Asp."""
+def run_continuum_asp(simulated, directory, continuum_mode, options, clean_mask=None):
+    """Image a copy of the simulated processing set with continuum Asp
+    (``clean_mask``: the path of an explicit clean mask, or ``None``)."""
     source_store, _ = simulated
     ps_store = str(directory / "input.ps.zarr")
     shutil.copytree(source_store, ps_store)
@@ -163,6 +166,7 @@ def run_continuum_asp(simulated, directory, continuum_mode, options):
             },
             gridder="anti_alias",
             deconvolver="asp",
+            clean_mask=clean_mask,
             continuum_mode=continuum_mode,
             instrument_polarization_basis="circular",
             restore=True,
@@ -271,3 +275,60 @@ def test_continuum_asp_recovers_simulated_sources(
         np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED),
         np.isfinite(beam) & (beam >= 0.2),
     )
+
+
+@pytest.mark.parametrize("options", list(OPTIONS), ids=list(OPTIONS))
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_continuum_asp_with_an_explicit_clean_mask(
+    tmp_path, simulated, monkeypatch, continuum_mode, options
+):
+    """An explicit ``clean_mask`` (a ``.npy`` file) of 17 x 17 pixels around
+    the point source only: Asp cleans the point source and leaves the Gaussian
+    in the residual. The model of the point source holds its apparent flux
+    within 8 percent (measured: within 5.2 percent), the model of the Gaussian
+    less than 3 percent of its own (measured: at most 1.3 percent; the wings
+    of Asp components reach past the mask), the residual in the mask stays
+    below 3 percent of the point source's apparent flux (measured: at most
+    1.9 percent) and the Gaussian's residual peak is more than 10 times the
+    largest residual in the mask (measured: at least 13 times). With the Asp
+    options on, the noise of the significance test per scale is measured on
+    the pixels outside the mask (in MVC these include the pixels outside the
+    primary-beam support, where the residual is 0), and the application logs
+    no warning about it."""
+    warnings = significance_warnings(monkeypatch)
+    point_box = source_boxes()["point"]
+    i, j = (box.start + 4 for box in point_box)  # the point source's pixel
+    mask = np.zeros(IMAGE_SIZE, dtype=bool)
+    mask[i - 8 : i + 9, j - 8 : j + 9] = True
+    mask_file = tmp_path / "point_source_mask.npy"
+    np.save(mask_file, mask)
+
+    result, image = run_continuum_asp(
+        simulated,
+        tmp_path,
+        continuum_mode,
+        OPTIONS[options],
+        clean_mask=str(mask_file),
+    )
+    _, truth = simulated
+    controller = result["controller"]
+
+    assert warnings == []
+    assert controller.cycles_done >= 2
+    planes = result["deconvolution"].data.values()
+    assert sum(int(np.sum(fields["iter_done"])) for fields in planes) == (
+        controller.total_iter_done
+    )
+    model = image.SKY_MODEL.values[0, 0, 0]  # Stokes I, Taylor term 0
+    residual = image.SKY_RESIDUAL.values[0, 0, 0]
+    primary_beam = image.PRIMARY_BEAM.isel(frequency=0).values[0, 0]
+    apparent = {
+        name: float(np.sum(truth[box] * primary_beam[box]))
+        for name, box in source_boxes().items()
+    }
+    gaussian_box = source_boxes()["gaussian"]
+    assert mask[np.unravel_index(np.argmax(model), model.shape)]
+    np.testing.assert_allclose(model[point_box].sum(), apparent["point"], rtol=0.08)
+    assert abs(model[gaussian_box].sum()) < 0.03 * apparent["gaussian"]
+    assert np.abs(residual[mask]).max() < 0.03 * apparent["point"]
+    assert residual[gaussian_box].max() > 10 * np.abs(residual[mask]).max()
