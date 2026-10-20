@@ -3094,8 +3094,15 @@ def image_continuum_single_field(
           the residual smoothed with each of its initial scales and, once the
           peak is below ``threshold_per_cycle``, goes on cleaning the most
           significant smoothed residual while it is as significant as the
-          threshold is at the smallest scale. Asp only. Default ``True``. No
-          CASA equivalent.
+          threshold is at the smallest scale. The noise is measured on the
+          pixels outside the clean mask, without the outermost row and column
+          of the image, sampling one in every ``max(1, npix // 400000)`` of
+          the ``npix`` pixels of the image (one in 2 at 1024 x 1024, one in 10
+          at 2048 x 2048). With fewer than 100 sampled pixels (a clean mask
+          that covers the image, for example), or a noise of 0 there (a
+          residual that is mostly 0 outside the mask), nothing is cleaned
+          below ``threshold_per_cycle``. Asp only. Default ``True``. No CASA
+          equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code at the next stop test, so
