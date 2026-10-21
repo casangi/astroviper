@@ -1,9 +1,22 @@
 # .github/workflows/python-publish.yml
+# Pull requests and merges to main build the wheels (CPython 3.12-3.14,
+# Linux x86_64/aarch64, macOS arm64) and sdist as a check; only a published
+# GitHub release uploads them to PyPI.
 name: Publish Python 🐍 distribution 📦 to PyPI and TestPyPI
 
 on:
   release:
     types: [published]
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
 
 jobs:
   # check-codecov-token:

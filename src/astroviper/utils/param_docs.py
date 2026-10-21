@@ -101,6 +101,9 @@ def _target_files():
     root = pathlib.Path(__file__).resolve().parents[1]  # src/astroviper
     rel = [
         "distributed_applications/imaging/image_cube_single_field.py",
+        "distributed_applications/imaging/image_cube_single_field_delphi.py",
+        "distributed_applications/imaging/point_spread_function_cube_single_field.py",
+        "node_tasks/imaging/point_spread_function_cube_single_field.py",
         "distributed_applications/imaging/image_continuum_single_field.py",
         "node_tasks/imaging/image_cube_single_field.py",
         "node_tasks/imaging/image_continuum_single_field.py",
@@ -266,7 +269,14 @@ def sync_param_docs(check=False):
                 return node
             if not isinstance(current, str):
                 return node
-            new_doc = _rewrite_docstring(current, registry)
+            # A "<function name>.<parameter name>" key gives the functions of
+            # that name their own description of the parameter.
+            function_prefix = node.name.value + "."
+            function_registry = dict(registry)
+            for key, description in registry.items():
+                if key.startswith(function_prefix):
+                    function_registry[key[len(function_prefix) :]] = description
+            new_doc = _rewrite_docstring(current, function_registry)
             if new_doc is None:
                 return node
             self.changed = True

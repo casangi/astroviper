@@ -39,6 +39,8 @@
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
         "thread_info": { "type": ["dict"], "nullable": true },
-        "check_schema": { "type": "boolean" }
+        "check_schema": { "type": "boolean" },
+        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
+        "report": { "type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"] }
     }
 }

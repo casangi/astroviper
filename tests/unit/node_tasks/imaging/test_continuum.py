@@ -8,6 +8,7 @@ import xarray as xr
 import astroviper.node_tasks.imaging.image_continuum_single_field as continuum_node
 import astroviper.processing_functions.imaging.image_continuum_single_field as continuum_processing
 from astroviper.processing_functions.imaging.utils import ImagingDict
+from tests.utils.continuum_images import make_runaway_taylor_image
 
 
 def _model_dataset(value):
@@ -465,6 +466,7 @@ def _weight_node_params():
             "image_size": [2, 2],
             "cell_size": [1.0, 1.0],
             "time_coords": [0.0],
+            "polarization_coords": ["I", "Q"],
         },
         "imaging_weights_params": {"weighting": "briggs", "robust": 0.5},
         "task_coords": {"frequency": {"data": np.array([1.0e9, 1.1e9])}},
@@ -646,22 +648,14 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
-    controller = imaging_utils.IterationController(**params)
+    controller = imaging_utils.CycleController(**params)
     iterations = np.array([[[4]]], dtype=np.int64)
     thresholds = np.array([[[0.125]]])
 
-    def controls(
-        controller_arg,
-        history,
-        image_arg,
-        model_exists,
-        iteration_control_params,
-        residual_imaging_dict,
-    ):
+    def controls(controller_arg, residual_imaging_dict):
         assert controller_arg is controller
-        assert model_exists is False  # controls use the refreshed residual
+        # controls use the refreshed residual
         assert residual_imaging_dict is not None
-        assert iteration_control_params is params
         return iterations, thresholds
 
     class ReachedBackend(Exception):
@@ -672,7 +666,7 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
         assert deconvolve_params["max_iter"] == 17
         assert deconvolve_params["max_cycles"] == 3
         np.testing.assert_array_equal(
-            deconvolve_params["max_iter_per_cycle"], iterations
+            deconvolve_params["max_iter_per_cycle_updated"], iterations
         )
         np.testing.assert_array_equal(
             deconvolve_params["threshold_per_cycle"], thresholds
@@ -687,13 +681,13 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
         assert image_arg.sizes["frequency"] == 1
         raise ReachedBackend
 
-    monkeypatch.setattr(imaging_utils, "get_calculate_cycle_controls", controls)
+    monkeypatch.setattr(imaging_utils, "get_per_cycle_limits", controls)
     monkeypatch.setattr(cube_update, "model_update_cube_single_field", backend)
     with pytest.raises(ReachedBackend):
         continuum_node.model_update_continuum_single_field(
             {"image": image},
             {
-                "iteration_control_params": params,
+                "cycle_control_params": params,
                 "controller": controller,
                 "is_n_iter_0": initial,
             },
@@ -704,11 +698,12 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
 def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch):
     """The append node preserves native MT-MFS accounting and diagnostics."""
     from astroviper.processing_functions.imaging.utils import (
-        IterationController,
+        CycleController,
         StopCode,
     )
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
+        MODEL_UPDATE_CONTINUE,
         MODEL_UPDATE_MAX_ITER_PER_CYCLE,
     )
 
@@ -755,13 +750,13 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
         "max_psf_fraction": 0.8,
         "primary_beam_limit": 0.2,
     }
-    controller = IterationController(
+    controller = CycleController(
         **{key: value for key, value in params.items() if key != "primary_beam_limit"}
     )
 
     def native_backend(image_arg, deconvolver, controls, **kwargs):
         assert deconvolver == "mtmfs"
-        assert controls["max_iter_per_cycle"].shape == (1, 1, 2)
+        assert controls["max_iter_per_cycle_updated"].shape == (1, 1, 2)
         assert controls["threshold_per_cycle"].shape == (1, 1, 2)
         image_arg["SKY_MODEL"] = xr.zeros_like(image_arg.SKY_RESIDUAL)
         image_arg.SKY_MODEL.loc[{"taylor_term": 0}] = 1.0
@@ -797,16 +792,18 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
         {
             "controller": controller,
             "deconvolver": "mtmfs",
-            "iteration_control_params": params,
+            "cycle_control_params": params,
         },
     )
 
     assert not result["residual_converged"]
+    # The model update is booked, not tested: the stop code is that of the
+    # check on the refreshed residual, the model update codes are per plane.
     assert result["stopcode"] == StopCode(
         imaging=IMAGING_CONTINUE,
-        model_update=MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+        model_update=MODEL_UPDATE_CONTINUE,
     )
-    assert result["stopdesc"] == "Reached max_iter_per_cycle"
+    assert result["stopdesc"] == "Continue imaging cycles"
     assert controller.total_iter_done == 3
     assert controller.cycles_done == 1
     assert controller.max_cycles == 2
@@ -820,6 +817,193 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
     for fields in result["deconvolution"].data.values():
         assert fields["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
         assert np.isfinite(fields["hessian_condition_number"]).all()
+
+
+@pytest.mark.parametrize(
+    "max_iter_divergence,iterations,diverged_model_updates",
+    [(1, 7, 1), (-1, 50, 0)],
+)
+def test_native_mtmfs_node_books_a_diverged_model_update(
+    max_iter_divergence, iterations, diverged_model_updates
+):
+    """A plane the MT-MFS divergence test stops is booked as diverged."""
+    from astroviper.processing_functions.imaging.utils import (
+        CycleController,
+        StopCode,
+    )
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        IMAGING_CONTINUE,
+        MODEL_UPDATE_CONTINUE,
+        MODEL_UPDATE_DIVERGENCE,
+        MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+    )
+
+    params = {
+        "max_iter": 100,
+        "max_cycles": 3,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "max_iter_per_cycle": 50,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    controller = CycleController(**params)
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": make_runaway_taylor_image()},
+        {
+            "controller": controller,
+            "deconvolver": "mtmfs",
+            "cycle_control_params": {
+                **params,
+                "max_iter_divergence": max_iter_divergence,
+            },
+        },
+    )
+
+    stop_code = (
+        MODEL_UPDATE_DIVERGENCE
+        if diverged_model_updates
+        else MODEL_UPDATE_MAX_ITER_PER_CYCLE
+    )
+    (fields,) = result["deconvolution"].data.values()
+    assert fields["iter_done"] == [iterations]
+    assert fields["stop_code"].model_update == stop_code
+    assert result["stopcode"] == StopCode(
+        imaging=IMAGING_CONTINUE,
+        model_update=MODEL_UPDATE_CONTINUE,
+    )
+    assert not result["residual_converged"]
+    assert controller.total_iter_done == iterations
+    assert controller.stop_code_model_update[0, 0, 0] == stop_code
+    assert controller.diverged_model_updates[0, 0, 0] == diverged_model_updates
+
+
+@pytest.mark.parametrize("primary_beam_limit", [None, 0.2])
+def test_native_mtmfs_imaging_cycles_clean_what_the_stop_test_measures(
+    primary_beam_limit,
+):
+    """A source where the primary beam is 0.15 is cleaned by default, and the
+    imaging cycles end on the threshold; with primary_beam_limit 0.2 neither
+    the stop test nor the model update sees it.
+
+    Real node task, adapter and kernel. The residual update is made in the
+    image domain, residual_k = dirty_k - sum_j psf_(k+j) * model_j (linear
+    convolutions), so a model update without iterations leaves the residual
+    as it was. max_cycles is -1; the test stops after 30 imaging cycles,
+    where the distributed application would go on.
+    """
+    from scipy.signal import fftconvolve
+
+    from astroviper.processing_functions.imaging.utils import CycleController
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        IMAGING_THRESHOLD,
+    )
+
+    n, centre, outer = 64, 32, (32, 57)
+
+    def gaussian(size, middle, fwhm):
+        yy, xx = np.indices((size, size))
+        r2 = (yy - middle) ** 2 + (xx - middle) ** 2
+        return np.exp(-4 * np.log(2) * r2 / fwhm**2)
+
+    primary_beam = gaussian(n, centre, 30.0)
+    psf_orders = (1.0, 0.1, 0.5)
+    psf_big = gaussian(2 * n, n, 3.0)
+
+    def convolve(image, order):
+        full = fftconvolve(image, psf_orders[order] * psf_big, mode="full")
+        return full[n : 2 * n, n : 2 * n]
+
+    sky = np.zeros((n, n))
+    sky[centre, centre] = 1.0
+    sky[outer] = 0.5  # apparent flux, flat spectrum
+    dirty = np.stack([convolve(sky, 0), convolve(sky, 1)])
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    psf = np.stack([order * gaussian(n, centre, 3.0) for order in psf_orders])
+
+    def image(residual):
+        return xr.Dataset(
+            {
+                "SKY_RESIDUAL": (dims, residual[None, :, None].copy()),
+                "POINT_SPREAD_FUNCTION": (
+                    ("time", "psf_taylor_order", "polarization", "l", "m"),
+                    psf[None, :, None],
+                ),
+                "PRIMARY_BEAM": (("l", "m"), primary_beam),
+                "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                    ("time", "polarization"),
+                    [[0.2]],
+                ),
+            },
+            coords={
+                "time": [0.0],
+                "taylor_term": [0, 1],
+                "psf_taylor_order": [0, 1, 2],
+                "polarization": ["I"],
+                "l": np.arange(n),
+                "m": np.arange(n),
+            },
+            attrs={
+                "data_groups": {
+                    "residual": {
+                        "sky": "SKY_RESIDUAL",
+                        "point_spread_function": "POINT_SPREAD_FUNCTION",
+                        "primary_beam": "PRIMARY_BEAM",
+                    }
+                }
+            },
+        )
+
+    params = {
+        "max_iter": 1000,
+        "max_cycles": -1,
+        "threshold": 0.05,
+        "gain": 0.1,
+        "max_iter_per_cycle": -1,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    controller = CycleController(**params)
+    cycle_control_params = {**params, "scales": [0.0]}
+    if primary_beam_limit is not None:
+        cycle_control_params["primary_beam_limit"] = primary_beam_limit
+    model = np.zeros((2, n, n))
+    residual = dirty
+    deconvolution = None
+    for _ in range(30):
+        result = continuum_node.model_update_continuum_single_field(
+            {"image": image(residual)},
+            {
+                "controller": controller,
+                "deconvolver": "mtmfs",
+                "cycle_control_params": cycle_control_params,
+                "deconvolution": deconvolution,
+            },
+        )
+        if result["residual_converged"]:
+            break
+        deconvolution = result["deconvolution"]
+        model += result["image"].SKY_MODEL.transpose(*dims).values[0, :, 0]
+        residual = dirty - np.stack(
+            [sum(convolve(model[j], k + j) for j in range(2)) for k in range(2)]
+        )
+    else:
+        pytest.fail("The imaging cycles did not end within 30.")
+
+    assert result["stopcode"].imaging == IMAGING_THRESHOLD
+    level = params["threshold"] * (1 + controller.threshold_tolerance)
+    near_outer = (slice(outer[0] - 2, outer[0] + 3), slice(outer[1] - 2, outer[1] + 3))
+    if primary_beam_limit is None:
+        assert primary_beam[outer] == pytest.approx(0.146, abs=1e-3)
+        assert np.abs(residual[0]).max() <= level
+        assert model[0][near_outer].sum() == pytest.approx(0.5, abs=level)
+    else:
+        assert np.abs(residual[0][primary_beam >= 0.2]).max() <= level
+        assert residual[0][outer] == pytest.approx(0.5, abs=0.01)
+        np.testing.assert_array_equal(model[:, primary_beam < 0.2], 0.0)
+    assert model[0][centre, centre] == pytest.approx(1.0, abs=level)
 
 
 def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch):
@@ -858,15 +1042,15 @@ def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch)
 
 
 def test_zero_max_iter_uses_current_controller_fields():
-    from astroviper.processing_functions.imaging.utils import IterationController
+    from astroviper.processing_functions.imaging.utils import CycleController
 
     image = _model_dataset(0.0).rename({"SKY_MODEL": "SKY_RESIDUAL"})
     image.attrs["data_groups"]["residual"] = {"sky": "SKY_RESIDUAL"}
     image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (("time", "polarization"), [[0.1]])
-    controller = IterationController(max_iter=0)
+    controller = CycleController(max_iter=0)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
-        {"iteration_control_params": {"max_iter": 0}, "controller": controller},
+        {"cycle_control_params": {"max_iter": 0}, "controller": controller},
     )
     assert result["stopcode"].imaging == 1
     assert result["stopcode"].model_update == 0
@@ -874,9 +1058,9 @@ def test_zero_max_iter_uses_current_controller_fields():
 
 
 def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_ENTROPY,
-        IterationController,
+        CycleController,
     )
 
     rng = np.random.default_rng(20261013)
@@ -905,7 +1089,7 @@ def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
             }
         },
     )
-    controller = IterationController(max_iter=100, entropy_stop=True)
+    controller = CycleController(max_iter=100, entropy_stop=True)
     controller.ensure_planes(1, 1, 1)
     controller.max_entropy[0, 0, 0] = 1.0e6
 
@@ -919,7 +1103,7 @@ def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
         {"image": image},
         {
             "controller": controller,
-            "iteration_control_params": {
+            "cycle_control_params": {
                 "max_iter": 100,
                 "gain": 0.1,
                 "primary_beam_limit": 0.2,
@@ -988,15 +1172,15 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
     monkeypatch, peak, max_iter, max_cycles, masked, reason
 ):
     """Verified stopping never runs CLEAN or charges a verification as an update."""
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_MAX_CYCLES,
         IMAGING_MAX_ITER,
         IMAGING_THRESHOLD,
         IMAGING_ZERO_MASK,
-        IterationController,
+        CycleController,
     )
 
-    controller = IterationController(
+    controller = CycleController(
         max_iter=max_iter, max_cycles=max_cycles, threshold=0.1
     )
     image = xr.Dataset(
@@ -1028,7 +1212,7 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
         {"image": image},
         {
             "controller": controller,
-            "iteration_control_params": {
+            "cycle_control_params": {
                 "max_iter": max_iter,
                 "primary_beam_limit": 0.2,
             },

@@ -41,7 +41,6 @@ def continuum_input(tmp_path, tw_hydra_archive):
             cpp_gridder=True,
             nterms=2,
             reference_frequency=float(np.mean(frequency)),
-            reference_frequency_hz=float(np.mean(frequency)),
         )
         mask = np.zeros((64, 64), dtype=bool)
         mask[20:44, 20:44] = True
@@ -73,7 +72,7 @@ def _run(
                 weighting_scope=scope,
                 casa_weighting_implementation=casa,
             ),
-            iteration_control_params=dict(
+            cycle_control_params=dict(
                 max_iter=8,
                 max_cycles=2,
                 max_iter_per_cycle=4,
@@ -83,7 +82,7 @@ def _run(
                 min_psf_fraction=0.05,
                 max_psf_fraction=0.8,
             ),
-            gridder="prolate_spheroidal",
+            gridder="anti_alias",
             deconvolver="hogbom",
             specmode=specmode,
             restore=True,

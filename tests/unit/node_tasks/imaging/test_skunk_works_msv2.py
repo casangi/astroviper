@@ -6,7 +6,7 @@ Two kinds of tests:
   arrays record their reads (xarray's lazy backend-array API), and the engine
   checks with XRADIO's ``open_msv2`` monkeypatched in or away.
 * Gated by ``requires_msv2_engine`` (XRADIO's ``xradio_msv2`` engine, with
-  python-casacore for the fixture): on the generated ``imageable_msv2``
+  arcae for the fixture): on the generated ``imageable_msv2``
   Measurement Set (``tests/unit/conftest.py``), the loader equals XRADIO's
   production loader on the converted processing set for every selection, the
   graph mapping equals the converted one, a spawned process reads a pickled
@@ -580,7 +580,7 @@ def test_require_msv2_engine_message(monkeypatch):
     message = str(error.value)
     for text in (
         "xradio_msv2",
-        "python_casacore",
+        "astroviper[casacore]",
         "convert_msv2_to_processing_set",
         "open_msv2",
     ):
@@ -900,10 +900,10 @@ def test_open_scan_intents(imageable_msv2):
 
 
 def _casacore_objects(value):
-    """The casacore objects (or classes) that pickling ``value`` meets.
+    """The casacore table objects (or classes) that pickling ``value`` meets.
 
-    python-casacore's tables cannot be pickled, so pickling may then fail; the
-    objects met before the failure are returned.
+    arcae's (and python-casacore's) tables cannot be pickled, so pickling may
+    then fail; the objects met before the failure are returned.
     """
     found = []
 
@@ -911,7 +911,7 @@ def _casacore_objects(value):
         def reducer_override(self, obj):
             module = getattr(obj, "__module__", None) if isinstance(obj, type) else None
             module = module or type(obj).__module__
-            if str(module).split(".")[0] == "casacore":
+            if str(module).split(".")[0] in ("arcae", "casacore"):
                 found.append(obj)
             return NotImplemented
 
@@ -929,9 +929,9 @@ def test_spawned_process_reads_a_pickled_task(opened_msv2, imageable_msv2):
     it), stays small (the baseline names travel as codes), and a spawned
     process (no state shared with this one) reads the same values and
     rebuilds the same names."""
-    from casacore import tables
+    from arcae.lib.arrow_tables import Table
 
-    with tables.table(imageable_msv2, ack=False) as table:  # the check sees one
+    with Table.from_filename(imageable_msv2) as table:  # the check sees one
         assert _casacore_objects({"table": table})
     mapping = _graph_mapping(opened_msv2, n_chunks=3)
     for task in mapping.values():

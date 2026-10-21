@@ -136,7 +136,7 @@ def test_evla_is_not_legacy_vla():
 
 def test_frequency_fallbacks_and_overrides():
     for frequency in (
-        {"reference_frequency_hz": 1.5e9},
+        {"reference_frequency": 1.5e9},
         {"frequency_coords": [1e9, 2e9]},
     ):
         assert (

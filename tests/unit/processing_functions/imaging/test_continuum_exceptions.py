@@ -132,7 +132,7 @@ def test_model_update_rejects_incomplete_images_and_controls(fault, error, messa
             }
         )
     elif fault == "control_dimensions":
-        controls["max_iter_per_cycle"] = np.ones((1, 2))
+        controls["max_iter_per_cycle_updated"] = np.ones((1, 2))
     elif fault == "empty_controls":
         controls["threshold_per_cycle"] = np.ones((1, 0, 1))
     snapshot = image.copy(deep=True)

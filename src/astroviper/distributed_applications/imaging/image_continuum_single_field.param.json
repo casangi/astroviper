@@ -2,13 +2,22 @@
     "image_continuum_single_field": {
         "ps_store": { "required": true, "type": ["str"] },
         "image_store": { "required": true, "type": ["str"] },
-        "image_params": { "required": true, "type": ["dict"] },
+        "image_params": {
+            "required": true,
+            "type": ["dict"],
+            "allow_unknown": true,
+            "schema": {
+                "nterms": { "required": true, "min": 1 },
+                "reference_frequency": {},
+                "reference_frequency_hz": {}
+            }
+        },
         "imaging_weights_params": { "required": true, "type": ["dict"] },
-        "iteration_control_params": { "required": true, "type": ["dict"] },
-        "gridder": { "type": ["str"], "allowed": ["prolate_spheroidal"] },
+        "cycle_control_params": { "required": true, "type": ["dict"] },
+        "gridder": { "type": ["str"], "allowed": ["anti_alias"] },
         "deconvolver": {
             "type": ["str"],
-            "allowed": ["hogbom", "hogbom_many_threads", "asp", "aspclean", "asp_clean", "mtmfs"]
+            "allowed": ["hogbom", "mtmfs"]
         },
         "pbcor": { "type": "boolean" },
         "pblimit": {"type": "float"},

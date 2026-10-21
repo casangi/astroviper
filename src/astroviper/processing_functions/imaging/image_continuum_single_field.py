@@ -463,7 +463,7 @@ def prepare_model_uv_continuum_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_continuum_img_xds,
     )
 
@@ -709,7 +709,7 @@ def prepare_model_uv_mvc_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_img_xds,
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
@@ -719,12 +719,7 @@ def prepare_model_uv_mvc_single_field(
         dtype=np.float64,
     )
 
-    reference_frequency = float(
-        image_params.get(
-            "reference_frequency",
-            image_params["reference_frequency_hz"],
-        )
-    )
+    reference_frequency = float(image_params["reference_frequency"])
     nterms = int(image_params["nterms"])
 
     model_name = model_xds.attrs["data_groups"][image_data_group_name]["sky"]
@@ -895,15 +890,15 @@ def make_mvc_taylor_normal_equation_contributions(
 
     The returned dataset has no frequency dimension and can therefore be
     combined by element-wise addition in the distributed reduce stage.  The
-    primary-beam division and Taylor moment construction happen here; only the
-    normalization by globally accumulated weights and the construction of the
-    effective beam remain for the append node.
+    primary-beam weighting and Taylor moment construction happen here; only the
+    normalization by globally accumulated weights, the per-pixel spectral fit
+    and the construction of the effective beam remain for the append node.
 
-    Channel residuals are divided by their frequency-dependent primary beam,
-    then multiplied by that beam while forming the weighted Taylor moments.
-    This explicitly applies the PB convention in the map stage while retaining
-    the algebraically equivalent residual numerator.  The PSF cube is converted
-    with the same spectral basis into ``2 * nterms - 1`` Hessian numerators.
+    Channel residuals are multiplied by their frequency-dependent primary beam
+    before the weighted Taylor moments are formed, and the squared beam is
+    summed into the ``2 * nterms - 1`` moments of the per-pixel spectral fit.
+    The PSF cube is converted with the same spectral basis, without a
+    primary-beam factor, into ``2 * nterms - 1`` Hessian numerators.
 
     Parameters
     ----------
@@ -926,34 +921,53 @@ def make_mvc_taylor_normal_equation_contributions(
     reference_frequency : float
         Taylor reference frequency in Hz.
     pblimit : float, default 0.2
-        Primary-beam validity cutoff.
+        Primary-beam cutoff. Channel beams at or below it do not contribute to
+        the effective beam, and the residual is zero where the effective beam
+        is at or below it. Where fewer than ``nterms`` channel beams exceed it,
+        only Taylor term zero of the spectrum is fitted.
 
     Returns
     -------
     xarray.Dataset
-        Additive residual Taylor numerators and residual-weight sum.  When a
-        PSF cube is supplied, also contains PSF Taylor numerators, the PSF
-        weight sum, and the PSF-weighted primary-beam sum.
+        Additive residual Taylor numerators, squared-beam moments,
+        residual-weight moments, residual-weight sum, and the number of
+        channels whose beam exceeds ``pblimit``.  When a PSF cube is supplied,
+        also contains PSF Taylor numerators, the PSF weight sum, and the
+        PSF-weighted primary-beam sum.
 
     Notes
     -----
-    With ``x_nu = (nu - nu0) / nu0`` and common beam ``Abar``, this implements
+    With ``x_nu = (nu - nu0) / nu0``, channel beams ``A_nu`` and the common
+    beam ``Abar = sum(w_nu * A_nu) / sum(w_nu)`` (channel beams at or below
+    ``pblimit`` count as zero), the PSF planes are the plain weighted moments
+    of the channel PSFs,
 
-    ``R'_nu = Abar * R_nu / A_nu``
+    ``B_k = sum(w_nu * x_nu**k * B_nu) / sum(w_nu)``,
 
-    followed by chunk-local Taylor accumulation.  The factor ``Abar`` is not
-    known until all chunks have been reduced.  In the residual equation it
-    cancels algebraically; for the PSF and effective beam it is applied by
-    :func:`finalize_mvc_taylor_normal_equations` in the append node.
+    and the Taylor residuals are
 
-    ``b_t = sum(w_nu * x_nu**t * A_nu * R'_nu) / (sum(w_nu) * Abar)``
+    ``b = Abar * H @ inv(G) @ u``,
 
-    and
+    with ``u_k = sum(w_nu * x_nu**k * A_nu * R_nu)``,
+    ``G_tk = sum(w_nu * x_nu**(t+k) * A_nu**2)`` at each pixel, and
+    ``H_tk = sum(w_nu * x_nu**(t+k)) / sum(w_nu)``, the PSF planes at their
+    peak.  ``inv(G) @ u`` is the least-squares fit of a Taylor polynomial to
+    the primary-beam corrected channel residuals ``R_nu / A_nu`` with weights
+    ``w_nu * A_nu**2``, so a channel enters with a factor ``A_nu`` and a
+    channel whose beam goes to zero drops out.  The model is predicted as
+    ``M_nu * A_nu / Abar`` (:func:`apply_mvc_primary_beam_convention`), so a
+    model change ``dM_nu = sum_k x_nu**k dm_k`` at a pixel changes ``u`` there
+    by ``-G @ dm / Abar`` and ``b`` by ``-H @ dm``: the Hessian the
+    deconvolver inverts, ``B_(t+k)`` at the PSF peak, is the response of the
+    residual at every position, not only at the pointing centre.  Away from
+    the peak the response follows the channel PSFs weighted by
+    ``w_nu * A_nu**2`` instead of ``w_nu``.  Where fewer than ``nterms``
+    channel beams exceed ``pblimit``, the fit is not determined by them;
+    there only Taylor term zero is fitted, ``u_0 / G_00``.
 
-    ``B_k = sum(w_nu * x_nu**k * A_nu * B_nu) / (sum(w_nu) * Abar)``.
-
-    The first expression reduces algebraically to the weighted residual moment,
-    while retaining CASA's primary-beam mask and common-beam convention.
+    The sums over all chunks and ``Abar`` are known only after the reduce
+    stage; :func:`finalize_mvc_taylor_normal_equations` solves for ``b`` in
+    the append node.
     """
     import numpy as np
     import xarray as xr
@@ -1051,23 +1065,22 @@ def make_mvc_taylor_normal_equation_contributions(
     residual_weight_sum = residual_weight.sum(dim="frequency")
 
     valid_channel_pb = np.isfinite(primary_beam_cube) & (primary_beam_cube > pblimit)
-    # CASA clips each channel PB before forming the effective PB and PSF Taylor
-    # terms. Keep all channel weights in the denominator, including clipped ones.
+    # CASA clips each channel PB before forming the effective PB. Keep all
+    # channel weights in the denominator, including clipped ones.
     finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
-    residual_over_primary_beam = xr.where(
-        valid_channel_pb,
-        residual_cube / primary_beam_cube,
-        0.0,
+    # The spectral fit weights each channel by its beam as the prediction
+    # applies it, without the clip.
+    channel_primary_beam = xr.where(
+        np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
     )
+    beam_weighted_residual = channel_primary_beam * residual_cube
+    channel_primary_beam_squared = channel_primary_beam**2
 
     residual_terms = []
     for order in range(nterms):
-        numerator = (
-            residual_weight
-            * x_frequency**order
-            * finite_primary_beam
-            * residual_over_primary_beam
-        ).sum(dim="frequency")
+        numerator = (residual_weight * x_frequency**order * beam_weighted_residual).sum(
+            dim="frequency"
+        )
         residual_terms.append(numerator)
 
     residual_numerator = xr.concat(
@@ -1081,10 +1094,46 @@ def make_mvc_taylor_normal_equation_contributions(
         "nterms": nterms,
         "pblimit": pblimit,
     }
+
+    n_psf_taylor_terms = 2 * nterms - 1
+    psf_taylor_order = xr.IndexVariable(
+        "psf_taylor_order", np.arange(n_psf_taylor_terms, dtype=np.int64)
+    )
+    beam_squared_numerator = xr.concat(
+        [
+            (residual_weight * x_frequency**order * channel_primary_beam_squared).sum(
+                dim="frequency"
+            )
+            for order in range(n_psf_taylor_terms)
+        ],
+        dim=psf_taylor_order,
+    ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
+    beam_squared_numerator.attrs = {
+        "description": "Additive MVC squared-beam moments of the spectral fit.",
+        "specmode": "mvc",
+        "reference_frequency": reference_frequency,
+        "nterms": nterms,
+        "pblimit": pblimit,
+    }
+    residual_weight_moments = xr.concat(
+        [
+            (residual_weight * x_frequency**order).sum(dim="frequency")
+            for order in range(n_psf_taylor_terms)
+        ],
+        dim=psf_taylor_order,
+    ).transpose("time", "psf_taylor_order", "polarization")
+
     contributions = xr.Dataset(
         {
             "MVC_RESIDUAL_TAYLOR_NUMERATOR": residual_numerator,
             "MVC_RESIDUAL_WEIGHT_SUM": residual_weight_sum,
+            "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM": beam_squared_numerator,
+            "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM": residual_weight_moments,
+            "MVC_RESIDUAL_BEAM_CHANNEL_COUNT": (
+                (valid_channel_pb & (residual_weight > 0.0))
+                .sum(dim="frequency")
+                .transpose("time", "polarization", "l", "m")
+            ),
         },
         attrs={
             "specmode": "mvc",
@@ -1099,12 +1148,9 @@ def make_mvc_taylor_normal_equation_contributions(
         psf_weight = _clean_weights(psf_normalization)
         psf_weight_sum = psf_weight.sum(dim="frequency")
 
-        n_psf_taylor_terms = 2 * nterms - 1
         finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
         psf_terms = [
-            (psf_weight * x_frequency**order * finite_primary_beam * finite_psf).sum(
-                dim="frequency"
-            )
+            (psf_weight * x_frequency**order * finite_psf).sum(dim="frequency")
             for order in range(n_psf_taylor_terms)
         ]
         psf_numerator = xr.concat(
@@ -1161,21 +1207,51 @@ def finalize_mvc_taylor_normal_equations(
     valid_effective_pb = np.isfinite(effective_primary_beam) & (
         effective_primary_beam > pblimit
     )
+
+    # Fit the Taylor coefficients at each pixel, inv(G) @ u, and return them
+    # to the PSF moments and the common beam, Abar * H @ inv(G) @ u. Where
+    # fewer than nterms channel beams exceed pblimit, fit Taylor term zero only.
+    pixel_dims = ("time", "polarization", "l", "m")
+    numerator = contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].transpose(
+        *pixel_dims, "taylor_term"
+    )
+    nterms = numerator.sizes["taylor_term"]
+    hankel = np.add.outer(np.arange(nterms), np.arange(nterms))
+    beam_squared = (
+        contributions["MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM"]
+        .transpose(*pixel_dims, "psf_taylor_order")
+        .values
+    )
+    supported = valid_effective_pb.transpose(*pixel_dims).values
+    determined = supported & (
+        contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"].transpose(*pixel_dims).values
+        >= nterms
+    )
+    gram = beam_squared[..., hankel]
+    gram[~determined] = np.eye(nterms)
+    coefficients = np.linalg.solve(
+        gram, np.where(determined[..., None], numerator.values, 0.0)[..., None]
+    )[..., 0]
+    flat = supported & ~determined & (beam_squared[..., 0] > 0.0)
+    coefficients[flat, 0] = numerator.values[flat, 0] / beam_squared[flat, 0]
+    hessian = (
+        (contributions["MVC_RESIDUAL_WEIGHT_TAYLOR_SUM"] / residual_sum)
+        .transpose("time", "polarization", "psf_taylor_order")
+        .values[..., hankel]
+    )
     residual_taylor = xr.where(
         valid_effective_pb,
-        contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"] / residual_sum,
+        effective_primary_beam
+        * contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].copy(
+            data=np.einsum("tpij,tplmj->tiplm", hessian, coefficients)
+        ),
         0.0,
     )
 
     psf_taylor = None
     if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
         psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
-        psf_taylor = xr.where(
-            valid_effective_pb,
-            contributions["MVC_PSF_TAYLOR_NUMERATOR"]
-            / (psf_sum * effective_primary_beam),
-            0.0,
-        )
+        psf_taylor = contributions["MVC_PSF_TAYLOR_NUMERATOR"] / psf_sum
 
     output_dtype = np.dtype(contributions.attrs.get("mvc_output_dtype", "float64"))
     residual_taylor = residual_taylor.astype(output_dtype, copy=False)
@@ -1647,7 +1723,7 @@ def residual_update_continuum_single_field(
         mvc_observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
 
     if str(specmode).lower() == "mvc":
-        from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
             ifft_norm_img_xds,
         )
 
@@ -1716,13 +1792,7 @@ def residual_update_continuum_single_field(
             img_xds["VISIBILITY_NORMALIZATION"],
             img_xds["UV_SAMPLING_NORMALIZATION"] if is_n_iter_0 else None,
             nterms=image_params.get("nterms", 2),
-            reference_frequency=image_params.get(
-                "reference_frequency",
-                image_params.get(
-                    "reference_frequency_hz",
-                    float(np.mean(img_xds.coords["frequency"].values)),
-                ),
-            ),
+            reference_frequency=image_params["reference_frequency"],
             pblimit=pblimit,
         )
         for variable_name, data_array in contributions.data_vars.items():
@@ -1756,8 +1826,71 @@ def residual_update_continuum_single_field(
 ###############################################################################
 
 
+def _continuum_clean_support(
+    img_xds, image_data_group_in_name, residual_plane, control_params
+):
+    """The pixels of Taylor term zero that may be cleaned, or ``None``.
+
+    One support for the stop test (:func:`build_continuum_residual_imaging_dict`)
+    and the native MT-MFS model update, so that a plane is never kept going
+    for a peak its model update may not clean. It is the clean mask of the
+    data group (values above 0.5) or, without one, the pixels where the
+    primary beam is at least ``primary_beam_limit`` times its peak and not 0.
+    ``primary_beam_limit`` defaults to 0, every pixel where the primary beam
+    is above 0, as for the continuum Högbom model update and cube imaging,
+    which make the same mask with the same default
+    (:func:`~astroviper.processing_functions.image_analysis.make_mask.make_mask`):
+    the residual holds the sky seen through the primary beam wherever that
+    is above 0, and a source there that is not cleaned leaves its sidelobes
+    across the image.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Continuum image dataset holding the residual data group.
+    image_data_group_in_name : str
+        Residual data group whose ``mask`` or ``primary_beam`` role gives the
+        support.
+    residual_plane : xarray.DataArray
+        Taylor term zero of the residual, dimensions
+        ``(time, polarization, l, m)``; the support is broadcast to it.
+    control_params : dict
+        Cycle control or model update parameters; ``primary_beam_limit``
+        (default 0) is read from it.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Boolean support, shape ``(time, polarization, l, m)``; ``None`` when
+        the data group has neither a mask nor a primary beam.
+    """
+    group = img_xds.attrs["data_groups"][image_data_group_in_name]
+
+    def plane_zero(array):
+        selection = {
+            dim: 0
+            for dim in ("taylor_term", "psf_taylor_order", "frequency")
+            if dim in array.dims
+        }
+        return array.isel(selection, drop=True)
+
+    mask_name = group.get("mask")
+    if mask_name is not None:
+        support = plane_zero(img_xds[mask_name]).broadcast_like(residual_plane) > 0.5
+    elif group.get("primary_beam") is not None:
+        primary_beam = plane_zero(img_xds[group["primary_beam"]])
+        primary_beam_limit = float(control_params.get("primary_beam_limit", 0.0))
+        support = (
+            (primary_beam >= primary_beam_limit * primary_beam.max(skipna=True))
+            & (primary_beam != 0)
+        ).broadcast_like(residual_plane)
+    else:
+        return None
+    return support.transpose("time", "polarization", "l", "m").values
+
+
 def build_continuum_residual_imaging_dict(
-    img_xds, image_data_group_in_name, iteration_control_params
+    img_xds, image_data_group_in_name, cycle_control_params
 ):
     """Present Taylor-zero residual statistics as one plane to the controller.
 
@@ -1783,7 +1916,7 @@ def build_continuum_residual_imaging_dict(
     )
 
     entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
-        validate_entropy_params(iteration_control_params)
+        validate_entropy_params(cycle_control_params)
     )
 
     group = img_xds.attrs["data_groups"][image_data_group_in_name]
@@ -1799,19 +1932,11 @@ def build_continuum_residual_imaging_dict(
     residual = plane_zero(img_xds[group["sky"]]).transpose(
         "time", "polarization", "l", "m"
     )
-    mask_name = group.get("mask")
-    if mask_name is not None:
-        support = plane_zero(img_xds[mask_name]).broadcast_like(residual) > 0.5
-    elif group.get("primary_beam") is not None:
-        pb = plane_zero(img_xds[group["primary_beam"]])
-        support = (
-            pb
-            >= iteration_control_params.get("primary_beam_limit", 0.0)
-            * pb.max(skipna=True)
-        ).broadcast_like(residual) & (pb != 0).broadcast_like(residual)
-    else:
-        support = xr.ones_like(residual, dtype=bool)
-    support = support.transpose(*residual.dims).values
+    support = _continuum_clean_support(
+        img_xds, image_data_group_in_name, residual, cycle_control_params
+    )
+    if support is None:
+        support = np.ones(residual.shape, dtype=bool)
     absolute = np.abs(residual.values)
     sidelobe = plane_zero(
         img_xds[
@@ -1852,7 +1977,7 @@ def build_continuum_residual_imaging_dict(
                 "masksum": int(np.count_nonzero(selected)),
                 "iter_done": 0,
                 "max_psf_sidelobe": float(sidelobe[tt, pp]),
-                "gain": iteration_control_params.get("gain", 0.1),
+                "gain": cycle_control_params.get("gain", 0.1),
             }
             if entropy_stop:
                 fields["entropy"] = float(entropy[tt, 0, pp])
@@ -1881,9 +2006,12 @@ def _model_update_native_mtmfs(
     import numpy as np
     import pandas as pd
 
+    from astroviper.processing_functions.imaging.deconvolution import (
+        _divergence_factors,
+    )
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
     from astroviper.processing_functions.imaging.utils import ImagingDict, StopCode
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
         MODEL_UPDATE_STOP_DESCRIPTIONS,
     )
@@ -1921,33 +2049,12 @@ def _model_update_native_mtmfs(
             f"received {residual.dtype} and {psf.dtype}."
         )
 
-    residual_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     reference_plane = residual_da.isel(taylor_term=0, drop=True)
-    mask_name = residual_group.get("mask")
-    if mask_name is not None:
-        mask_da = img_xds[mask_name]
-        selection = {
-            dim: 0
-            for dim in ("taylor_term", "frequency", "psf_taylor_order")
-            if dim in mask_da.dims
-        }
-        support_da = mask_da.isel(selection, drop=True).broadcast_like(reference_plane)
-        support_da = support_da > 0.5
-    elif residual_group.get("primary_beam") is not None:
-        primary_beam = img_xds[residual_group["primary_beam"]]
-        selection = {
-            dim: 0
-            for dim in ("taylor_term", "frequency", "psf_taylor_order")
-            if dim in primary_beam.dims
-        }
-        primary_beam = primary_beam.isel(selection, drop=True)
-        primary_beam_limit = float(deconvolve_params.get("primary_beam_limit", 0.2))
-        support_da = (
-            primary_beam >= primary_beam_limit * primary_beam.max(skipna=True)
-        ).broadcast_like(reference_plane)
-    else:
-        support_da = reference_plane.notnull()
-    support = support_da.transpose("time", "polarization", "l", "m").values
+    support = _continuum_clean_support(
+        img_xds, image_data_group_in_name, reference_plane, deconvolve_params
+    )
+    if support is None:
+        support = reference_plane.notnull().values
 
     max_sidelobe = img_xds[max_sidelobe_name]
     selection = {
@@ -1976,6 +2083,51 @@ def _model_update_native_mtmfs(
             )
         return values[tt, 0, pp]
 
+    # A call without the per-cycle limits (outside the imaging cycle loop) is
+    # one model update with all of max_iter left, as in deconvolve():
+    # min(max_iter_per_cycle, max_iter), a negative cap meaning no cap, and
+    # the absolute threshold.
+    max_iter_total = int(deconvolve_params.get("max_iter", 0))
+    cap = deconvolve_params.get("max_iter_per_cycle")
+    cap = max_iter_total if cap is None or int(cap) < 0 else int(cap)
+    default_max_iter = min(cap, max_iter_total)
+    default_threshold = deconvolve_params.get("threshold")
+    default_threshold = 0.0 if default_threshold is None else default_threshold
+    # The divergence test of the model update, made by the kernel on the
+    # Taylor-zero residual: a plane is stopped as diverged when the RMS of
+    # that residual has been above (1 + gain) times the lowest RMS of the
+    # model update for max_iter_divergence consecutive iterations, or at once
+    # when its peak exceeds (1 + gain) times its peak at the start of the
+    # model update. max_iter_divergence defaults to 1 as in deconvolve(), and
+    # -1 turns the test off. The RMS limit is that of Asp, not Hogbom's
+    # (1 + gain / 10): in healthy MT-MFS model updates the Taylor-zero RMS
+    # can rise by more than gain / 10 above its lowest value (a component
+    # subtracted where that residual is not shaped like the PSF raises it),
+    # and the tighter limit stopped such updates after a few components.
+    # The peak limit is Hogbom's; it stops a runaway. gain and
+    # max_iter_divergence are checked as deconvolve() checks them: the
+    # limits need 0 < gain <= 1, so the kernel's adaptive gain (gain <= 0)
+    # is refused as on the Hogbom path.
+    gain = deconvolve_params.get("gain", 0.1)
+    max_iter_divergence = deconvolve_params.get("max_iter_divergence", 1)
+    if not 0 < gain <= 1:
+        raise ValueError("CLEAN gain must be between 0 and 1.")
+    if (
+        isinstance(max_iter_divergence, bool)
+        or not isinstance(max_iter_divergence, int | np.integer)
+        or not (max_iter_divergence == -1 or max_iter_divergence >= 1)
+    ):
+        raise ValueError(
+            "max_iter_divergence must be a positive integer, or -1 to "
+            f"disable the divergence test; got {max_iter_divergence!r}."
+        )
+    _, limit = _divergence_factors(gain)
+    divergence = {
+        "max_iter_divergence": int(max_iter_divergence),
+        "divergence_rms_factor": limit,
+        "divergence_peak_factor": limit,
+    }
+
     model = np.zeros_like(residual)
     imaging_dict = ImagingDict()
     start = time.time()
@@ -1993,14 +2145,14 @@ def _model_update_native_mtmfs(
             start_peak = float(np.max(np.abs(residual_work[0][selected]), initial=0.0))
             start_peak_nomask = float(np.max(np.abs(residual_work[0]), initial=0.0))
             threshold_per_cycle = float(
-                plane_control("threshold_per_cycle", tt, pp, 0.0)
+                plane_control("threshold_per_cycle", tt, pp, default_threshold)
             )
             max_iter = int(
                 plane_control(
-                    "max_iter_per_cycle",
+                    "max_iter_per_cycle_updated",
                     tt,
                     pp,
-                    deconvolve_params.get("max_iter", 0),
+                    default_max_iter,
                 )
             )
             result = mtmfs.clean(
@@ -2010,10 +2162,11 @@ def _model_update_native_mtmfs(
                 mask=mask_work,
                 scales=deconvolve_params.get("scales", []),
                 small_scale_bias=deconvolve_params.get("small_scale_bias", 0.0),
-                max_iter_per_cycle=max_iter,
+                max_iter_per_cycle_updated=max_iter,
                 gain=deconvolve_params.get("gain", 0.1),
                 threshold_per_cycle=threshold_per_cycle,
                 mask_threshold=deconvolve_params.get("mask_threshold", 0.9),
+                **divergence,
             )
             model[tt, :, pp, :, :] = model_work
             final_selected = support[tt, pp] & np.isfinite(residual_work[0])
@@ -2021,7 +2174,7 @@ def _model_update_native_mtmfs(
             fields = {
                 "max_iter": deconvolve_params.get("max_iter"),
                 "threshold_per_cycle": threshold_per_cycle,
-                "iter_done": int(result["iter_done"]),
+                "iter_done": int(result["iterations_performed"]),
                 "gain": deconvolve_params.get("gain", 0.1),
                 "max_psf_sidelobe": float(max_sidelobe[tt, pp]),
                 "stop_code": StopCode(
@@ -2038,7 +2191,7 @@ def _model_update_native_mtmfs(
                 "model_flux": float(result["model_flux"]),
                 "start_peakres": start_peak,
                 "start_peakres_nomask": start_peak_nomask,
-                "peakres": float(result["peakres"]),
+                "peakres": float(result["peak_residual"]),
                 "peakres_nomask": float(np.max(np.abs(residual_work[0]), initial=0.0)),
                 "masksum": int(np.count_nonzero(final_selected)),
                 "scales": result["scales"],
@@ -2116,10 +2269,24 @@ def model_update_mtmfs_single_field(
 
     deconvolve_params : dict
         Minor-cycle control parameters. These typically include entries such as
-        ``max_iter``, ``max_iter_per_cycle``, ``threshold_per_cycle``, ``gain``,
-        ``scales``, ``small_scale_bias``, and ``mask_threshold``.
+        ``max_iter``, ``max_iter_per_cycle_updated``, ``threshold_per_cycle``,
+        ``gain``, ``scales``, ``small_scale_bias``, and ``mask_threshold``.
         The per-cycle limits and thresholds accept scalars or per-plane arrays,
-        using the same keys as the cube deconvolver.
+        using the same keys as the cube deconvolver. Without them the limit is
+        ``min(max_iter_per_cycle, max_iter)`` (a negative
+        ``max_iter_per_cycle`` means no cap) and ``threshold_per_cycle`` is
+        ``threshold``, as in the cube deconvolver. ``max_iter_divergence``
+        (default 1, ``-1`` turns the test off) sets the divergence test of
+        the model update, made on the Taylor-zero residual: a plane stops
+        when its RMS has been above ``(1 + gain)`` times the lowest RMS of
+        the model update for that many iterations in a row (the limit of
+        Asp), or at once when its peak exceeds ``(1 + gain)`` times the
+        peak at the start of the model update. ``gain``
+        (``0 < gain <= 1``) and ``max_iter_divergence`` are checked as in
+        the cube deconvolver. Without a clean mask, both deconvolvers clean
+        the pixels where the primary beam is at least
+        ``primary_beam_limit`` (default 0) times its peak and not 0, the
+        pixels the stop test measures.
 
     is_n_iter_0 : bool, optional
         Indicates whether this is the first model update.
@@ -2205,7 +2372,7 @@ def model_update_mtmfs_single_field(
     cube_deconvolve_params = copy.deepcopy(deconvolve_params)
 
     for parameter_name in (
-        "max_iter_per_cycle",
+        "max_iter_per_cycle_updated",
         "threshold_per_cycle",
     ):
         parameter_value = cube_deconvolve_params.get(parameter_name)

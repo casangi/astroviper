@@ -79,7 +79,7 @@ image_params = {
     "time_coords": [0],
     "fft_padding": 1.2,
     "cpp_gridder": True,
-    "reference_frequency_hz": 372763801257.61084,
+    "reference_frequency": 372763801257.61084,
 }
 
 imaging_weights_params = {
@@ -90,7 +90,7 @@ imaging_weights_params = {
 
 DIRTY_IMAGE_STORE = "twhya_dirty.img.zarr"
 
-dirty_iteration_control = {
+dirty_cycle_control = {
     "niter": 100,
     "nmajor": 0,
     "threshold": 0.0,
@@ -105,8 +105,8 @@ ps_store = PS_STORE
 image_store = DIRTY_IMAGE_STORE
 image_params = image_params
 imaging_weights_params = imaging_weights_params
-iteration_control_params = dirty_iteration_control
-gridder = "prolate_spheroidal"
+cycle_control_params = dirty_cycle_control
+gridder = "anti_alias"
 deconvolver = "hogbom"
 scan_intents = "OBSERVE_TARGET#ON_SOURCE"
 image_data_variables_keep = [
@@ -265,7 +265,7 @@ def combine_return_data_frames(input_data, input_params):
     """
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         merge_imaging_dicts,
     )
 
@@ -378,7 +378,7 @@ def combine_continuum_chunks(input_data, input_params):
     import numpy as np
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         merge_imaging_dicts,
     )
 
@@ -868,7 +868,7 @@ input_params["write_visibility_model_to_ps"] = write_visibility_model_to_ps
 input_params["write_imaging_weights_to_ps"] = write_imaging_weights_to_ps
 input_params["clear_cache"] = clear_cache
 input_params["processing_function_threads"] = processing_function_threads
-input_params["iteration_control_params"] = iteration_control_params
+input_params["cycle_control_params"] = cycle_control_params
 input_params["gridder"] = gridder
 input_params["deconvolver"] = deconvolver
 input_params["instrument_polarization_basis"] = instrument_polarization_basis
@@ -964,7 +964,7 @@ viper_graph = reduce(
 timing_distributed_application["T_create_map_reduce_graph"] = time.time() - start
 
 append_input_params = {
-    "iteration_control_params": iteration_control_params,
+    "cycle_control_params": cycle_control_params,
     "deconvolver": deconvolver,
     "processing_function_threads": processing_function_threads,
     "is_n_iter_0": True,

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import xarray as xr
 
-from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
     fft_lm_to_uv,
     fft_norm_img_xds,
     ifft_uv_to_lm,
@@ -155,7 +155,7 @@ class FourCorrelationSkyTest(unittest.TestCase):
         return img_xds
 
     def _transform(self, labels):
-        from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
             ifft_norm_img_xds,
         )
 

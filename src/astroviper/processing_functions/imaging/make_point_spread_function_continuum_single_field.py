@@ -240,8 +240,8 @@ def add_uv_sampling_grid_continuum_single_field(
 
     x_frequency = (frequency_coord - reference_frequency) / reference_frequency
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid_uv_sampling,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid_uv_sampling,
     )
 
     # Reuse the existing continuum channel map.  A contiguous one-plane work
@@ -264,7 +264,7 @@ def add_uv_sampling_grid_continuum_single_field(
             dtype=np.float64,
         )
 
-        prolate_spheroidal_grid_uv_sampling(
+        anti_alias_grid_uv_sampling(
             temporary_grid,
             temporary_normalization,
             uvw,

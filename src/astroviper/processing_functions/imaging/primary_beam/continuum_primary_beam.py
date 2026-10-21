@@ -139,9 +139,7 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, specmode="mfs")
     # PBMath1DAiry(25 m, 2.36 m, 0.8564 deg at 1 GHz); EVLA instead uses
     # frequency-dependent polynomial beams. In band gaps CASA selects VLA_NVSS,
     # which instead uses a 24.5-m unobstructed aperture with the same support.
-    reference_frequency = params.get(
-        "reference_frequency", params.get("reference_frequency_hz")
-    )
+    reference_frequency = params.get("reference_frequency")
     frequencies = np.asarray(params.get("frequency_coords", []), dtype=float)
     if specmode == "mvc":
         reference_frequency = frequencies.flat[0] if frequencies.size else np.nan

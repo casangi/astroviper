@@ -10,12 +10,16 @@ import xarray as xr
 from astroviper.processing_functions.imaging.deconvolvers import mtmfs
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     accumulate_continuum_model,
+    build_continuum_residual_imaging_dict,
     convert_mvc_cubes_to_taylor_normal_equations,
     model_update_mtmfs_single_field,
     restore_image,
 )
 from astroviper.processing_functions.imaging.utils import ImagingDict
-from tests.utils.continuum_images import make_continuum_image
+from tests.utils.continuum_images import (
+    make_continuum_image,
+    make_runaway_taylor_image,
+)
 
 
 def _native_mtmfs_continuum_image(nterms, shape, dtype, support_kind):
@@ -170,11 +174,11 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         model[0] = dtype(1.0)
         model[1] = dtype(2.0)
         return {
-            "iter_done": 3,
-            "peakres": 0.125,
+            "iterations_performed": 3,
+            "peak_residual": 0.125,
             "model_flux": float(model[0].sum()),
             "converged": False,
-            "stop_code": mtmfs.MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+            "stop_code": mtmfs.STOP_MAX_ITER,
             "scales": np.asarray([0.0]),
             "hessian_condition_number": np.asarray([2.0]),
         }
@@ -188,7 +192,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         "mtmfs",
         {
             "max_iter": 20,
-            "max_iter_per_cycle": np.asarray([[[3]]]),
+            "max_iter_per_cycle_updated": np.asarray([[[3]]]),
             "threshold_per_cycle": np.asarray([[[0.01]]], dtype=dtype),
             "gain": 0.2,
             "scales": [0.0],
@@ -196,9 +200,13 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     )
 
     assert len(calls) == 1
-    assert calls[0][3]["max_iter_per_cycle"] == 3
+    assert calls[0][3]["max_iter_per_cycle_updated"] == 3
     assert calls[0][3]["threshold_per_cycle"] == pytest.approx(0.01)
     assert "psf_fraction" not in calls[0][3]
+    # the divergence test: Asp's RMS limit and the peak limit, 1 + gain each
+    assert calls[0][3]["max_iter_divergence"] == 1
+    assert calls[0][3]["divergence_rms_factor"] == pytest.approx(1.2)
+    assert calls[0][3]["divergence_peak_factor"] == pytest.approx(1.2)
     np.testing.assert_array_equal(image.SKY_RESIDUAL, residual_snapshot * dtype(0.5))
     np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=0), 1.0)
     np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=1), 2.0)
@@ -214,8 +222,8 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     )
     fields = next(iter(statistics.data.values()))
     assert fields["iter_done"] == [3]
-    assert fields["stop_code"].model_update == mtmfs.MODEL_UPDATE_MAX_ITER_PER_CYCLE
-    assert fields["stop_description"] == "Reached max_iter_per_cycle"
+    assert fields["stop_code"].model_update == mtmfs.STOP_MAX_ITER
+    assert fields["stop_description"] == "Reached max_iter_per_cycle_updated"
     assert fields["peakres"] == [pytest.approx(0.125)]
     assert fields["model_flux"] == [pytest.approx(64.0)]
     assert fields["masksum"] == [64]
@@ -223,6 +231,95 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     np.testing.assert_array_equal(fields["scales"], [0.0])
     np.testing.assert_array_equal(fields["hessian_condition_number"], [2.0])
     assert "T_mtmfs" in timing
+
+
+@pytest.mark.parametrize(
+    "params,max_iter,threshold",
+    [
+        ({"max_iter_per_cycle": 2, "threshold": 0.05}, 2, 0.05),
+        ({"max_iter_per_cycle": 10, "threshold": 0.05}, 5, 0.05),
+        ({"max_iter_per_cycle": -1}, 5, 0.0),
+        ({}, 5, 0.0),
+        ({"max_iter_per_cycle": 2, "threshold": None}, 2, 0.0),
+        (
+            {
+                "max_iter_per_cycle": 2,
+                "threshold": 0.2,
+                "max_iter_per_cycle_updated": None,
+                "threshold_per_cycle": None,
+            },
+            2,
+            0.2,
+        ),
+    ],
+)
+def test_native_mtmfs_default_per_cycle_limits_follow_deconvolve(
+    monkeypatch, params, max_iter, threshold
+):
+    """Without the per-cycle limits: min(max_iter_per_cycle, max_iter), a
+    negative cap meaning no cap, and threshold_per_cycle = threshold."""
+    image, _ = _native_mtmfs_continuum_image(2, (8, 8), np.float64, "mask")
+    calls = []
+
+    def native_clean(residual, psf, model, **kwargs):
+        calls.append(kwargs)
+        return {
+            "iterations_performed": 0,
+            "peak_residual": 0.0,
+            "model_flux": 0.0,
+            "stop_code": mtmfs.STOP_THRESHOLD,
+            "scales": np.asarray([0.0]),
+            "hessian_condition_number": np.asarray([1.0]),
+        }
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        native_clean,
+    )
+    model_update_mtmfs_single_field(
+        image,
+        "mtmfs",
+        {"max_iter": 5, "gain": 0.1, "scales": [0.0], **params},
+    )
+
+    assert len(calls) == 4
+    for kwargs in calls:
+        assert kwargs["max_iter_per_cycle_updated"] == max_iter
+        assert kwargs["threshold_per_cycle"] == pytest.approx(threshold)
+
+
+@pytest.mark.parametrize(
+    "params,match",
+    [
+        ({"gain": 0.0}, "gain must be between 0 and 1"),
+        ({"gain": -0.5}, "gain must be between 0 and 1"),
+        ({"gain": 1.5}, "gain must be between 0 and 1"),
+        ({"max_iter_divergence": 0}, "max_iter_divergence must be"),
+        ({"max_iter_divergence": True}, "max_iter_divergence must be"),
+        ({"max_iter_divergence": 1.0}, "max_iter_divergence must be"),
+    ],
+)
+def test_native_mtmfs_refuses_gain_and_divergence_values_deconvolve_refuses(
+    monkeypatch, params, match
+):
+    """The divergence limits come from the gain, so no adaptive gain."""
+    image, _ = _native_mtmfs_continuum_image(2, (8, 8), np.float64, "mask")
+    residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
+    calls = []
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        lambda *args, **kwargs: calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match=match):
+        model_update_mtmfs_single_field(
+            image,
+            "mtmfs",
+            {"max_iter": 5, "gain": 0.1, "scales": [0.0], **params},
+        )
+
+    assert calls == []
+    xr.testing.assert_identical(image.SKY_RESIDUAL, residual_snapshot)
 
 
 @pytest.mark.parametrize(
@@ -248,7 +345,7 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
         "mtmfs",
         {
             "max_iter": 1,
-            "max_iter_per_cycle": iterations,
+            "max_iter_per_cycle_updated": iterations,
             "threshold_per_cycle": thresholds,
             "gain": 1.0,
             "scales": [0.0],
@@ -270,8 +367,8 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
         assert fields["iter_done"] == [1]
         assert fields["masksum"] == [1]
         assert fields["stop_code"].model_update in {
-            mtmfs.MODEL_UPDATE_MAX_ITER_PER_CYCLE,
-            mtmfs.MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+            mtmfs.STOP_MAX_ITER,
+            mtmfs.STOP_THRESHOLD,
         }
         assert fields["model_flux"] == [
             pytest.approx(expected_model[key.time, 0, key.pol].sum(), rel=2e-4)
@@ -279,6 +376,87 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
         np.testing.assert_array_equal(fields["scales"], [0.0])
         assert np.isfinite(fields["hessian_condition_number"]).all()
     assert timing.loc[0, "T_mtmfs"] >= 0.0
+
+
+@pytest.mark.parametrize(
+    "params,limit",
+    [
+        ({}, 0.0),
+        ({"primary_beam_limit": 0.0}, 0.0),
+        ({"primary_beam_limit": 0.2}, 0.2),
+        ({"primary_beam_limit": 0.5}, 0.5),
+    ],
+)
+def test_native_mtmfs_cleans_the_support_the_stop_test_measures(
+    monkeypatch, params, limit
+):
+    """Without a mask, MT-MFS cleans the pixels where the primary beam is at
+    least primary_beam_limit (default 0) times its peak and not 0, exactly
+    those the stop test measures."""
+    image, _ = _native_mtmfs_continuum_image(2, (8, 8), np.float64, "primary_beam")
+    primary_beam = np.linspace(1.0, 0.0, 64).reshape(8, 8)  # ends on 0
+    primary_beam[7, 6] = np.nan
+    image["PRIMARY_BEAM"] = (("l", "m"), primary_beam)
+    with np.errstate(invalid="ignore"):
+        expected = (primary_beam >= limit) & (primary_beam != 0)
+    masks = []
+
+    def native_clean(residual, psf, model, **kwargs):
+        masks.append(kwargs["mask"].astype(bool))
+        return {
+            "iterations_performed": 0,
+            "peak_residual": 0.0,
+            "model_flux": 0.0,
+            "stop_code": mtmfs.STOP_THRESHOLD,
+            "scales": np.asarray([0.0]),
+            "hessian_condition_number": np.asarray([1.0]),
+        }
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        native_clean,
+    )
+    stop_test = build_continuum_residual_imaging_dict(image, "residual", params)
+    model_update, _ = model_update_mtmfs_single_field(
+        image, "mtmfs", {"max_iter": 5, "gain": 0.1, "scales": [0.0], **params}
+    )
+
+    assert expected.sum() == {0.0: 62, 0.2: 51, 0.5: 32}[limit]
+    assert len(masks) == 4
+    for mask in masks:
+        np.testing.assert_array_equal(mask, expected)
+    for fields in (*stop_test.data.values(), *model_update.data.values()):
+        assert fields["masksum"] == [expected.sum()]
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "max_iter_divergence,iterations,stop_code",
+    [(1, 7, mtmfs.STOP_DIVERGED), (-1, 50, mtmfs.STOP_MAX_ITER)],
+)
+def test_native_mtmfs_divergence_test_stops_a_runaway(
+    dtype, max_iter_divergence, iterations, stop_code
+):
+    """The real adapter runs the divergence test, with both limits 1.1 at
+    gain 0.1 (the peak limit stops this runaway); -1 turns it off."""
+    image = make_runaway_taylor_image(dtype)
+
+    statistics, _ = model_update_mtmfs_single_field(
+        image,
+        "mtmfs",
+        {
+            "max_iter": 50,
+            "max_iter_per_cycle_updated": 50,
+            "gain": 0.1,
+            "scales": [0.0],
+            "max_iter_divergence": max_iter_divergence,
+        },
+    )
+
+    (fields,) = statistics.data.values()
+    assert fields["iter_done"] == [iterations]
+    assert fields["stop_code"].model_update == stop_code
+    assert fields["peakres"][0] > fields["start_peakres"][0]
 
 
 def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):
@@ -311,7 +489,7 @@ def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):
         model_update_mtmfs_single_field(
             image,
             "mtmfs",
-            {"max_iter": 1, "max_iter_per_cycle": 1, "gain": 0.1},
+            {"max_iter": 1, "max_iter_per_cycle_updated": 1, "gain": 0.1},
         )
 
     assert called == []
@@ -442,6 +620,15 @@ def test_mvc_channel_cutoff_excludes_exact_boundary_without_renormalizing(dtype)
         reference_frequency=100.0,
         pblimit=float(limit),
     )
-    np.testing.assert_allclose(actual, (7.0 + 11.0) / 4.0)
-    np.testing.assert_allclose(beam, (float(pb.values.ravel()[2]) + 1.0) / 4.0)
+    expected_beam = (float(pb.values.ravel()[2]) + 1.0) / 4.0
+    # The cutoff applies to the effective beam only: the residual fits every
+    # channel with weight pb**2, as the PSF sums every channel.
+    channel_pb = pb.values.ravel().astype(float)
+    expected = (
+        expected_beam
+        * np.sum(channel_pb * np.array([3.0, 5.0, 7.0, 11.0]))
+        / np.sum(channel_pb**2)
+    )
+    np.testing.assert_allclose(actual, expected, rtol=1e-6)
+    np.testing.assert_allclose(beam, expected_beam)
     np.testing.assert_allclose(psf, 1.0)

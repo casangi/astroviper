@@ -6,6 +6,7 @@ from xradio.measurement_set.schema import AntennaXds
 from xradio.schema.check import check_dataset
 
 from astroviper.utils.telescope_layout import (
+    itrf_to_local_tangent_plane,
     list_telescope_layouts,
     local_tangent_plane_to_itrf,
     make_antenna_xds,
@@ -71,6 +72,20 @@ def test_local_tangent_plane_origin_maps_to_reference():
     # moving "up" by 1 m increases the distance from the geocentre by ~1 m
     up = local_tangent_plane_to_itrf(np.array([[0.0, 0.0, 1.0]]), ref)
     assert np.isclose(np.linalg.norm(up[0]) - np.linalg.norm(ref), 1.0, atol=1e-2)
+
+
+@pytest.mark.parametrize("telescope", ["ALMA", "VLA"])
+def test_itrf_to_local_tangent_plane_inverts_the_forward_transform(telescope):
+    ref = observatory_position(telescope)
+    local = np.random.default_rng(3).uniform(-2e4, 2e4, size=(50, 3))
+    local[:, 2] /= 100.0  # heights of tens of metres
+    itrf = local_tangent_plane_to_itrf(local, ref)
+    np.testing.assert_allclose(itrf_to_local_tangent_plane(itrf, ref), local, atol=1e-6)
+    # The ellipsoid of the CASA port and astropy's WGS84 geodetic position of
+    # the reference agree to some 1e-5 m.
+    np.testing.assert_allclose(
+        itrf_to_local_tangent_plane(ref, ref), np.zeros((1, 3)), atol=1e-4
+    )
 
 
 def test_antenna_selection_and_overrides():

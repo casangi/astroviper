@@ -1,10 +1,11 @@
 """Azimuthally symmetric (1-D) primary-beam voltage/power patterns.
 
-This module collects the analytic primary-beam models used by the imaging
-pipeline.  The work-horse used by the single-field imager is
-:func:`airy_disk_rorder_v2`; the remaining variants are kept for reference and
+This module collects analytic primary-beam models kept for reference and
 cross-validation (e.g. the stakeholder test asserts that
-:func:`airy_disk_rorder` and :func:`airy_disk_rorder_v2` agree).
+:func:`airy_disk_rorder` and :func:`airy_disk_rorder_v2` agree).  The
+single-field imager does not use them: its primary beam is the simulator's
+antenna beam model, evaluated by
+:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`.
 
 Notes
 -----

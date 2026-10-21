@@ -373,9 +373,10 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
-                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle, T gain,
-                     T threshold_per_cycle, T mask_threshold, std::ptrdiff_t residual_term_stride) {
-    if (max_iter_per_cycle < 0) throw std::invalid_argument("max_iter_per_cycle must be >= 0");
+                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
+                     T threshold_per_cycle, T mask_threshold,
+                     const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride) {
+    if (max_iter_per_cycle_updated < 0) throw std::invalid_argument("max_iter_per_cycle_updated must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) ||
         !std::isfinite(static_cast<double>(threshold_per_cycle)) ||
         !std::isfinite(static_cast<double>(mask_threshold)))
@@ -473,6 +474,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     std::vector<T> max_scale_val(ns, static_cast<T>(0));
     std::vector<std::array<int, 2>> max_scale_pos(ns, {0, 0});
     std::vector<std::vector<T>> delta_model(nt, std::vector<T>(nimg, static_cast<T>(0)));
+    deconvolvers::PlaneStopTest<T> stop_test;
     auto coeff_at = [&](int scale, int t1, std::size_t k) -> T {
         T c = static_cast<T>(0);
         for (int t2 = 0; t2 < nt; ++t2)
@@ -482,12 +484,18 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     };
 
     auto check_convergence = [&](int itercount, bool component_selected) -> int {
-        const PeakResult<T> pr =
-            find_max_abs_mask<T>(mat_r[static_cast<std::size_t>(w.ind2(0, 0))].data(), vec_scale_masks[0].data(), nx, ny);
+        double sum_squares = 0.0;
+        const PeakResult<T> pr = find_max_abs_mask<T>(mat_r[static_cast<std::size_t>(w.ind2(0, 0))].data(),
+                                                      vec_scale_masks[0].data(), nx, ny, sum_squares);
         const T norma = static_cast<T>(1.0 / w.mat_a[0][0]);
         const T rmaxval = std::abs(pr.value * norma);
         int flag = 0;
-        if (std::abs(rmaxval) < threshold_per_cycle) flag = kStopThreshold;
+        if (std::abs(rmaxval) < threshold_per_cycle)
+            flag = kStopThreshold;
+        // Divergence test shared with the other deconvolvers, on the image and
+        // pixels of the threshold test.
+        else if (stop_test.check_divergence(rmaxval, sum_squares, divergence) != deconvolvers::STOP_NONE)
+            flag = kStopDiverged;
         if (component_selected && itercount > 1 && gain <= static_cast<T>(0)) {
             loopgain = (global_max_val < prev_max) ? loopgain * static_cast<T>(1.5) : loopgain / static_cast<T>(1.5);
             loopgain = std::min(static_cast<T>(0.6), loopgain);
@@ -507,11 +515,11 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
 
     int stop = check_convergence(0, false);
     int iterdone = 0;
-    if (stop == kStopThreshold) {
-        out.iter_done = 0;
-        out.stop_code = kStopThreshold;
+    if (stop != 0) {
+        out.iterations = 0;
+        out.stop_code = stop;
     } else {
-        for (int itercount = 0; itercount < max_iter_per_cycle; ++itercount) {
+        for (int itercount = 0; itercount < max_iter_per_cycle_updated; ++itercount) {
             global_max_val = static_cast<T>(-1e10);
             if (itercount == 0) {
                 blc = {0, 0};
@@ -546,7 +554,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 static_cast<std::size_t>(global_max_pos[1]) * nx + static_cast<std::size_t>(global_max_pos[0]);
             const T mask_at_peak = vec_scale_masks[static_cast<std::size_t>(max_scale_index)][gpk];
             if (mask_at_peak == static_cast<T>(0) || global_max_val <= static_cast<T>(0)) {
-                stop = kStopNothingToClean;
+                stop = kStopThreshold;  // nothing left to clean
                 break;
             }
 
@@ -602,8 +610,8 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             stop = check_convergence(itercount, true);
             if (stop) break;
         }
-        if (stop == 0) stop = kStopMaxIter;
-        out.iter_done = iterdone;
+        if (stop == kStopNone && max_iter_per_cycle_updated > 0) stop = kStopMaxIter;
+        out.iterations = iterdone;
         out.stop_code = stop;
 
         // Free the search state before allocating the residual-update buffers.
@@ -627,9 +635,9 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     }
 
     if (mask != nullptr)
-        out.peakres = peak_abs_masked<T>(residual, mask, nimg);
+        out.peak_residual = peak_abs_masked<T>(residual, mask, nimg);
     else
-        out.peakres = peak_abs<T>(residual, nimg);
+        out.peak_residual = peak_abs<T>(residual, nimg);
     out.model_flux = sum_array<T>(model, nimg);
     return out;
 }
@@ -660,10 +668,10 @@ template int taylor_hessian<double>(const double*, int, int, int, std::vector<fl
                                     std::vector<double>&, std::vector<double>&, int&);
 template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
                                          const std::vector<float>&, float, int, float, float, float,
-                                         std::ptrdiff_t);
+                                         const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t);
 template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
                                            const std::vector<float>&, float, int, double, double, double,
-                                           std::ptrdiff_t);
+                                           const deconvolvers::DivergenceControl<double>&, std::ptrdiff_t);
 template void principal_solution<float>(float*, const double*, int, int, int);
 template void principal_solution<double>(double*, const double*, int, int, int);
 

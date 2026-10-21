@@ -1,8 +1,111 @@
 #pragma once
 
+#include <cmath>
+#include <cstddef>
 #include <functional>
+#include <vector>
+
+#include "../../include/plane_stop_test.hpp"
 
 namespace hclean {
+
+// The stop tests shared with the other deconvolvers.
+using deconvolvers::DivergenceControl;
+using deconvolvers::PlaneStopTest;
+using deconvolvers::StopReason;
+using enum deconvolvers::StopReason;
+
+/**
+ * Sum of the squares of one image row over [xbeg, xend) inside the mask,
+ * accumulated in double precision together with the search for the largest
+ * |value| of the row. Every Hogbom kernel scans its rows with this function and
+ * adds the row sums in row order, so that all of them, with any number of
+ * threads, hand the stop test the same number to the last bit.
+ *
+ * @param row pointer to the first pixel of the row
+ * @param mask_row pointer to the mask of the row, or nullptr for no mask
+ * @param xbeg,xend column range of the clean box
+ * @param row_max output: largest |value| of the row, 0 if no pixel is searched
+ * @param row_ix output: column of that value (xbeg if no pixel is searched)
+ * @return sum of the squares of the searched pixels of the row
+ */
+template<typename T>
+inline double scan_row(const T* row, const bool* mask_row, int xbeg, int xend,
+                       T& row_max, int& row_ix) {
+    T m = static_cast<T>(0);
+    int mi = xbeg;
+    double sum_squares = 0.0;
+    for (int ix = xbeg; ix < xend; ++ix) {
+        if (mask_row == nullptr || mask_row[ix]) {
+            const T value = row[ix];
+            sum_squares += static_cast<double>(value) * static_cast<double>(value);
+            const T v = std::abs(value);
+            if (v > m) { m = v; mi = ix; }
+        }
+    }
+    row_max = m;
+    row_ix = mi;
+    return sum_squares;
+}
+
+/**
+ * Per-iteration record of one plane's model update, kept only when the caller
+ * asks for it (record_iteration_history; a null pointer otherwise). Entry k
+ * describes iteration k: peak[k] is the signed residual value at the peak of
+ * |residual| that the iteration cleaned (it subtracted gain x peak[k] x PSF),
+ * rms[k] the RMS (about zero) of the residual after that subtraction, over
+ * the pixels the peak search covers (the clean box inside the mask).
+ *
+ * The RMS costs no pass of its own: the peak search of every iteration
+ * already sums the squares of the residual for the divergence test
+ * (scan_row), so the RMS after iteration k is the sum the search of
+ * iteration k + 1 finds, exact and the same to the bit in every kernel. Only
+ * a plane that spends its whole iteration budget is scanned once more at the
+ * end of the model update, for the RMS after its last iteration.
+ */
+struct IterationHistory {
+    std::vector<double> peak;
+    std::vector<double> rms;
+};
+
+/**
+ * Number of pixels the peak search covers: the clean box inside the mask
+ * (mask == nullptr: the whole clean box).
+ */
+inline long searched_pixels(const bool* mask, int nx,
+                            int xbeg, int xend, int ybeg, int yend) {
+    if (mask == nullptr) {
+        return static_cast<long>(xend - xbeg) * static_cast<long>(yend - ybeg);
+    }
+    long n = 0;
+    for (int iy = ybeg; iy < yend; ++iy) {
+        const bool* mask_row = mask + static_cast<std::size_t>(iy) * nx;
+        for (int ix = xbeg; ix < xend; ++ix) {
+            n += mask_row[ix] ? 1 : 0;
+        }
+    }
+    return n;
+}
+
+/**
+ * Sum of the squares of a plane over the pixels the peak search covers, row
+ * by row in row order as the peak search adds them (scan_row), so that it
+ * equals the sum a peak search of the same residual would find.
+ */
+template<typename T>
+inline double searched_sum_squares(const T* image, const bool* mask, int nx,
+                                   int xbeg, int xend, int ybeg, int yend) {
+    double sum_squares = 0.0;
+    for (int iy = ybeg; iy < yend; ++iy) {
+        const std::size_t row_offset = static_cast<std::size_t>(iy) * nx;
+        T row_max;
+        int row_ix;
+        sum_squares += scan_row<T>(
+            image + row_offset, (mask == nullptr) ? nullptr : mask + row_offset,
+            xbeg, xend, row_max, row_ix);
+    }
+    return sum_squares;
+}
 
 /**
  * Templated function to find minimum and maximum values in a 2D image array.
@@ -15,16 +118,22 @@ void maximg(const T* limagestep, int domask, const bool* lmask,
 /**
  * Templated Hogbom CLEAN algorithm implementation on a single 2D plane.
  * The mask is a bool array; pixels with mask == true are considered in the
- * peak search.
+ * peak search and in the RMS of the divergence test. The plane stops when it
+ * has spent max_iter_per_cycle_updated, when its peak is at or below thres, or
+ * when the divergence test fires (see DivergenceControl); stop_reason reports which
+ * (a StopReason). A history that is not null receives the record of every
+ * iteration (IterationHistory); a null history records nothing.
  */
 template<typename T>
 void clean(T* limage, T* limagestep, const T* lpsf,
-           int domask, const bool* lmask, int nx, int ny,
+           int domask, const bool* lmask, int nx, int ny, int psf_nx, int psf_ny,
            int xbeg, int xend, int ybeg, int yend,
-           int max_iter_remaining, int siter, int& iter, T gain, T thres,
+           int max_iter_per_cycle_updated, int siter, int& iter, T gain, T thres,
            T cspeedup,
            std::function<void(int, int, int, T)> msgput,
-           std::function<void(int&)> stopnow);
+           std::function<void(int&)> stopnow,
+           const DivergenceControl<T>& divergence,
+           int& stop_reason, IterationHistory* history);
 
 /**
  * Templated Hogbom CLEAN over a full (nt, nf, np_img, ny, nx) image cube,
@@ -48,7 +157,8 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  *
  * @param residual_cube 5D in-place residual buffer [nt, nf, np_img, ny, nx]
  * @param model_cube 5D in-place model buffer [nt, nf, np_img, ny, nx]
- * @param psf_cube 5D PSF buffer [nt, nf, np_psf, ny, nx], read-only
+ * @param psf_cube 5D PSF buffer [nt, nf, np_psf, psf_ny, psf_nx], read-only,
+ *                 peak at (psf_ny/2, psf_nx/2)
  * @param domask 0 if mask_cube is absent, 1 if present
  * @param mask_cube 5D mask buffer [nt, nf, np_img, ny, nx] or nullptr
  * @param nt number of time planes
@@ -57,9 +167,12 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  * @param np_psf number of PSF polarization planes (must be np_img or 1)
  * @param ny image height
  * @param nx image width
+ * @param psf_ny,psf_nx PSF height and width: (ny, nx), which subtracts a
+ *              component over the offsets -n/2 .. (n - 1)/2 of each axis, or
+ *              (2 ny, 2 nx), which subtracts it over the whole image
  * @param xbeg,xend,ybeg,yend per-plane clean box (0-based, exclusive upper)
- * @param max_iter_remaining per-plane maximum iterations; flat array of length
- *              nt*nf*np_img in (t, f, p) C-order (iteration control is
+ * @param max_iter_per_cycle_updated per-plane maximum iterations; flat array of
+ *              length nt*nf*np_img in (t, f, p) C-order (iteration control is
  *              independent for every time/frequency/polarization plane)
  * @param gain clean loop gain
  * @param thres per-plane flux cleaning threshold; flat array of length
@@ -68,15 +181,23 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  * @param processing_function_threads number of worker threads; clamped to [1, nplanes]
  * @param iter_out output iterations performed per plane, flat
  *                 array of length nt*nf*np_img in (t, f, p) C-order
+ * @param divergence divergence test applied to every plane (DivergenceControl)
+ * @param stop_out output StopReason per plane, flat array of length
+ *                 nt*nf*np_img in (t, f, p) C-order
+ * @param history per-plane iteration records (IterationHistory), flat array
+ *                of length nt*nf*np_img in (t, f, p) C-order, or nullptr to
+ *                record nothing
  */
 template<typename T>
 void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 int domask, const bool* mask_cube,
                 int nt, int nf, int np_img, int np_psf,
-                int ny, int nx,
+                int ny, int nx, int psf_ny, int psf_nx,
                 int xbeg, int xend, int ybeg, int yend,
-                const int* max_iter_remaining, T gain, const T* thres, T cspeedup,
-                int processing_function_threads, int* iter_out);
+                const int* max_iter_per_cycle_updated, T gain, const T* thres, T cspeedup,
+                int processing_function_threads, int* iter_out,
+                const DivergenceControl<T>& divergence, int* stop_out,
+                IterationHistory* history);
 
 /**
  * Many-threads Hogbom CLEAN over a (nt, nf, np_img, ny, nx) image cube whose
@@ -96,10 +217,12 @@ template<typename T>
 void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 int domask, const bool* mask_cube,
                 int nt, int nf, int np_img, int np_psf,
-                int ny, int nx,
+                int ny, int nx, int psf_ny, int psf_nx,
                 int xbeg, int xend, int ybeg, int yend,
-                const int* max_iter_remaining, T gain, const T* thres, T cspeedup,
-                int processing_function_threads, int* iter_out);
+                const int* max_iter_per_cycle_updated, T gain, const T* thres, T cspeedup,
+                int processing_function_threads, int* iter_out,
+                const DivergenceControl<T>& divergence, int* stop_out,
+                IterationHistory* history);
 
 // Explicit template instantiation declarations
 extern template void maximg<float>(const float* limagestep, int domask, const bool* lmask,
@@ -109,55 +232,67 @@ extern template void maximg<double>(const double* limagestep, int domask, const 
                                    int nx, int ny, double& fmin, double& fmax);
 
 extern template void clean<float>(float* limage, float* limagestep, const float* lpsf,
-                                 int domask, const bool* lmask, int nx, int ny,
+                                 int domask, const bool* lmask, int nx, int ny, int psf_nx, int psf_ny,
                                  int xbeg, int xend, int ybeg, int yend,
-                                 int max_iter_remaining, int siter, int& iter, float gain, float thres,
+                                 int max_iter_per_cycle_updated, int siter, int& iter, float gain, float thres,
                                  float cspeedup,
                                  std::function<void(int, int, int, float)> msgput,
-                                 std::function<void(int&)> stopnow);
+                                 std::function<void(int&)> stopnow,
+                                 const DivergenceControl<float>& divergence,
+                                 int& stop_reason, IterationHistory* history);
 
 extern template void clean<double>(double* limage, double* limagestep, const double* lpsf,
-                                  int domask, const bool* lmask, int nx, int ny,
+                                  int domask, const bool* lmask, int nx, int ny, int psf_nx, int psf_ny,
                                   int xbeg, int xend, int ybeg, int yend,
-                                  int max_iter_remaining, int siter, int& iter, double gain, double thres,
+                                  int max_iter_per_cycle_updated, int siter, int& iter, double gain, double thres,
                                   double cspeedup,
                                   std::function<void(int, int, int, double)> msgput,
-                                  std::function<void(int&)> stopnow);
+                                  std::function<void(int&)> stopnow,
+                                 const DivergenceControl<double>& divergence,
+                                 int& stop_reason, IterationHistory* history);
 
 extern template void clean_cube<float>(float* residual_cube, float* model_cube,
                                        const float* psf_cube, int domask,
                                        const bool* mask_cube,
                                        int nt, int nf, int np_img, int np_psf,
-                                       int ny, int nx,
+                                       int ny, int nx, int psf_ny, int psf_nx,
                                        int xbeg, int xend, int ybeg, int yend,
-                                       const int* max_iter_remaining, float gain, const float* thres, float cspeedup,
-                                       int processing_function_threads, int* iter_out);
+                                       const int* max_iter_per_cycle_updated, float gain, const float* thres, float cspeedup,
+                                       int processing_function_threads, int* iter_out,
+                const DivergenceControl<float>& divergence, int* stop_out,
+                IterationHistory* history);
 
 extern template void clean_cube<double>(double* residual_cube, double* model_cube,
                                         const double* psf_cube, int domask,
                                         const bool* mask_cube,
                                         int nt, int nf, int np_img, int np_psf,
-                                        int ny, int nx,
+                                        int ny, int nx, int psf_ny, int psf_nx,
                                         int xbeg, int xend, int ybeg, int yend,
-                                        const int* max_iter_remaining, double gain, const double* thres, double cspeedup,
-                                        int processing_function_threads, int* iter_out);
+                                        const int* max_iter_per_cycle_updated, double gain, const double* thres, double cspeedup,
+                                        int processing_function_threads, int* iter_out,
+                const DivergenceControl<double>& divergence, int* stop_out,
+                IterationHistory* history);
 
 extern template void clean_cube_many_threads<float>(float* residual_cube, float* model_cube,
                                        const float* psf_cube, int domask,
                                        const bool* mask_cube,
                                        int nt, int nf, int np_img, int np_psf,
-                                       int ny, int nx,
+                                       int ny, int nx, int psf_ny, int psf_nx,
                                        int xbeg, int xend, int ybeg, int yend,
-                                       const int* max_iter_remaining, float gain, const float* thres, float cspeedup,
-                                       int processing_function_threads, int* iter_out);
+                                       const int* max_iter_per_cycle_updated, float gain, const float* thres, float cspeedup,
+                                       int processing_function_threads, int* iter_out,
+                const DivergenceControl<float>& divergence, int* stop_out,
+                IterationHistory* history);
 
 extern template void clean_cube_many_threads<double>(double* residual_cube, double* model_cube,
                                         const double* psf_cube, int domask,
                                         const bool* mask_cube,
                                         int nt, int nf, int np_img, int np_psf,
-                                        int ny, int nx,
+                                        int ny, int nx, int psf_ny, int psf_nx,
                                         int xbeg, int xend, int ybeg, int yend,
-                                        const int* max_iter_remaining, double gain, const double* thres, double cspeedup,
-                                        int processing_function_threads, int* iter_out);
+                                        const int* max_iter_per_cycle_updated, double gain, const double* thres, double cspeedup,
+                                        int processing_function_threads, int* iter_out,
+                const DivergenceControl<double>& divergence, int* stop_out,
+                IterationHistory* history);
 
 } // namespace hclean

@@ -117,7 +117,7 @@ def residual_cycle_continuum_single_field(
         )
 
     nterms = int(image_params.get("nterms", 2))
-    reference_frequency = float(image_params["reference_frequency_hz"])
+    reference_frequency = float(image_params["reference_frequency"])
 
     if nterms < 1:
         raise ValueError("image_params['nterms'] must be at least 1.")
@@ -166,6 +166,7 @@ def residual_cycle_continuum_single_field(
                 cgk_1D,
                 nterms=nterms,
                 reference_frequency=reference_frequency,
+                ms_data_group_in_name=ps_data_group_name,
                 ms_data_group_out_name="model",
                 ms_data_group_out_modified={
                     "correlated_data": "VISIBILITY_MODEL",
@@ -227,6 +228,7 @@ def residual_cycle_continuum_single_field(
                 ps_xdt,
                 local_model_uv_xds,
                 cgk_1D,
+                ms_data_group_in_name=ps_data_group_name,
                 ms_data_group_out_name="model",
                 ms_data_group_out_modified={
                     "correlated_data": "VISIBILITY_MODEL",
@@ -350,6 +352,7 @@ def make_visibility_model_continuum_single_field(
     cgk_1D,
     nterms,
     reference_frequency,
+    ms_data_group_in_name="base",
     ms_data_group_out_name="model",
     ms_data_group_out_modified=None,
     image_data_group_in_name="model",
@@ -394,6 +397,12 @@ def make_visibility_model_continuum_single_field(
         Number of Taylor terms to reconstruct.
     reference_frequency : float
         Common MT-MFS reference frequency in Hz.
+    ms_data_group_in_name : str, optional
+        Processing-set data group being imaged (the caller's
+        ``processing_set_data_group_name``). The degridder reads its ``uvw``
+        and the shape of its ``correlated_data`` (or of its ``weight_imaging``
+        when the observed visibilities are not loaded), and the output group
+        inherits its remaining roles.
     ms_data_group_out_name : str, optional
         Processing-set data group receiving the predicted model visibilities.
     ms_data_group_out_modified : dict, optional
@@ -588,6 +597,7 @@ def make_visibility_model_continuum_single_field(
             model_xds,
             frequency_model_grid.values,
             np.arange(frequency_values.size, dtype=np.int64),
+            ms_data_group_in_name=ms_data_group_in_name,
             ms_data_group_out_name=ms_data_group_out_name,
             ms_data_group_out_modified=ms_data_group_out_modified,
             overwrite=True,

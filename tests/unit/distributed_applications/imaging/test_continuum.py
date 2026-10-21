@@ -5,7 +5,9 @@ These tests ensure the disk output uses those finalized dimensions and values,
 rather than retaining the frequency-cube NaN placeholders created at startup.
 """
 
+import json
 import shutil
+import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
@@ -21,8 +23,10 @@ from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _accumulate_graph_timings,
+    _activate_continuum_weight_cache,
     _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
+    _create_continuum_weight_cache_store,
     _graph_timing_record,
     _load_continuum_clean_mask,
     _mapping_with_task_primary_beams,
@@ -34,6 +38,13 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     image_continuum_single_field,
     prepare_continuum_imaging_weights_global,
 )
+from astroviper.distributed_applications.simulation import simulate_processing_set
+from astroviper.utils.beam_models import airy_disk_model
+from astroviper.utils.data_group_tools import (
+    create_ps_xdt_data_groups_in_and_out,
+    modify_data_groups_ps_xdt,
+)
+from astroviper.utils.telescope_layout import read_telescope_layout
 
 TW_HYDRA_STORE_NAME = "twhya_selfcal_lsrk_5chans.ps.zarr"
 TW_HYDRA_RELATIVE_TOLERANCE = 1.0e-6
@@ -155,6 +166,30 @@ def tw_hydra_store(tmp_path_factory, tw_hydra_archive):
         with ZipFile(tw_hydra_archive) as archive:
             archive.extractall(fixture_directory)
         yield fixture_directory / TW_HYDRA_STORE_NAME
+
+
+@pytest.fixture(scope="module")
+def tw_hydra_corrected_store(tmp_path_factory, tw_hydra_store):
+    """TW Hydra with a ``corrected`` group whose visibilities copy ``base``."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    _, corrected = create_ps_xdt_data_groups_in_and_out(
+        processing_set,
+        data_group_in_name="base",
+        data_group_out_name="corrected",
+        data_group_out_modified={"correlated_data": "VISIBILITY_CORRECTED"},
+        overwrite=False,
+    )
+    for ms_xdt in processing_set.values():
+        ms_xdt["VISIBILITY_CORRECTED"] = ms_xdt["VISIBILITY"]
+    modify_data_groups_ps_xdt(
+        processing_set,
+        data_group_out_name="corrected",
+        data_group_out=corrected,
+        description="Copy of the base visibilities.",
+    )
+    store = tmp_path_factory.mktemp("tw_hydra_corrected") / TW_HYDRA_STORE_NAME
+    processing_set.to_zarr(store, zarr_format=2)
+    return store
 
 
 def _final_continuum_image():
@@ -612,7 +647,6 @@ def _tw_hydra_image_params(processing_set, overrides=None):
         "cpp_gridder": True,
         "nterms": 2,
         "reference_frequency": reference_frequency,
-        "reference_frequency_hz": reference_frequency,
     }
     image_params.update(overrides or {})
     return image_params
@@ -627,8 +661,9 @@ def _run_tw_hydra_continuum(
     weighting,
     *,
     deconvolver="hogbom",
-    iteration_control_params=None,
+    cycle_control_params=None,
     image_param_overrides=None,
+    image_params=None,
     restore=False,
     pbcor=False,
     pblimit=0.2,
@@ -647,10 +682,11 @@ def _run_tw_hydra_continuum(
     write_imaging_weights_to_ps=False,
     clear_cache=True,
     scheduler="synchronous",
+    processing_set_data_group_name="base",
 ):
     """Run one public distributed continuum configuration on TW Hydra."""
-    if iteration_control_params is None:
-        iteration_control_params = {
+    if cycle_control_params is None:
+        cycle_control_params = {
             "max_iter": 1,
             "max_cycles": 0,
             "threshold": 1.0e30,
@@ -664,10 +700,14 @@ def _run_tw_hydra_continuum(
         result = image_continuum_single_field(
             ps_store=str(store),
             image_store=str(output_store),
-            image_params=_tw_hydra_image_params(processing_set, image_param_overrides),
+            image_params=(
+                _tw_hydra_image_params(processing_set, image_param_overrides)
+                if image_params is None
+                else image_params
+            ),
             imaging_weights_params=weighting,
-            iteration_control_params=iteration_control_params,
-            gridder="prolate_spheroidal",
+            cycle_control_params=cycle_control_params,
+            gridder="anti_alias",
             deconvolver=deconvolver,
             restore=restore,
             pbcor=pbcor,
@@ -681,7 +721,7 @@ def _run_tw_hydra_continuum(
                 "primary_beam",
                 "beam_fit_params_point_spread_function",
             ],
-            processing_set_data_group_name="base",
+            processing_set_data_group_name=processing_set_data_group_name,
             single_precision_image=single_precision_image,
             processing_function_threads=1,
             n_chunks=n_chunks,
@@ -798,6 +838,26 @@ def test_tw_hydra_mfs_ignores_widebandpb_memory_mode(tmp_path, tw_hydra_store):
     assert "_WIDEBAND_PRIMARY_BEAM_CACHE" not in zarr.open_group(output_store)
 
 
+def _store_snapshot(store, parse_metadata=False):
+    """Return every file of a Zarr v2 store, keyed by its relative path.
+
+    With ``parse_metadata`` the metadata files are parsed, and consolidated
+    metadata is reduced to the entries it lists: consolidating rewrites them
+    in zarr's own JSON layout.
+    """
+    snapshot = {}
+    for path in sorted(Path(store).rglob("*")):
+        if not path.is_file():
+            continue
+        content = path.read_bytes()
+        if parse_metadata and path.name in (".zattrs", ".zarray", ".zgroup"):
+            content = json.loads(content)
+        elif parse_metadata and path.name == ".zmetadata":
+            content = sorted(json.loads(content)["metadata"])
+        snapshot[str(path.relative_to(store))] = content
+    return snapshot
+
+
 @pytest.mark.parametrize(
     ("specmode", "weighting"),
     [
@@ -836,16 +896,36 @@ def test_tw_hydra_mfs_ignores_widebandpb_memory_mode(tmp_path, tw_hydra_store):
 def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
     tmp_path, tw_hydra_store, specmode, weighting
 ):
-    """Task-local disk weights reproduce memory mode and are temporary by default."""
-    reference_processing_set = open_processing_set(str(tw_hydra_store))
+    """Task-local disk weights reproduce the default and are temporary.
+
+    The default keeps the weights in memory and leaves the input Processing Set
+    byte for byte unchanged.
+    """
+    cycle_control_params = {
+        "max_iter": 20,
+        "max_cycles": 2,
+        "threshold": 0.001,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": 5,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    reference_store = tmp_path / "reference.ps.zarr"
+    shutil.copytree(tw_hydra_store, reference_store)
+    reference_files = _store_snapshot(reference_store)
+    reference_processing_set = open_processing_set(str(reference_store))
     _, reference = _run_tw_hydra_continuum(
-        tw_hydra_store,
+        reference_store,
         tmp_path / "reference.img.zarr",
         reference_processing_set,
         2,
         specmode,
         weighting,
+        cycle_control_params=cycle_control_params,
+        weight_memory_mode=None,
     )
+    assert _store_snapshot(reference_store) == reference_files
 
     in_place_store = tmp_path / "in_place.ps.zarr"
     shutil.copytree(tw_hydra_store, in_place_store)
@@ -857,17 +937,18 @@ def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
         2,
         specmode,
         weighting,
-        weight_memory_mode=None,
+        cycle_control_params=cycle_control_params,
+        weight_memory_mode="in_place",
     )
 
-    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
-        np.testing.assert_allclose(
-            actual[variable],
-            reference[variable],
-            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
-            atol=0.0,
-            equal_nan=True,
-        )
+    assert np.nanmax(np.abs(reference.SKY_MODEL.values)) > 0.0
+    for variable in (
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        np.testing.assert_array_equal(actual[variable], reference[variable])
 
     reopened = open_processing_set(str(in_place_store))
     for _, ms_xdt in reopened.items():
@@ -915,6 +996,509 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
     for _, ms_xdt in cleaned.items():
         assert "WEIGHT_IMAGING_CONTINUUM_CACHE" not in ms_xdt.ds
         assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
+
+
+@pytest.mark.parametrize(
+    "deconvolver", ["hogbom_many_threads", "asp", "aspclean", "asp_clean"]
+)
+def test_tw_hydra_refused_deconvolvers_write_nothing(
+    tmp_path, tw_hydra_store, deconvolver
+):
+    """A deconvolver the continuum model update does not support is refused
+    before the in-place imaging weights or the image store are written."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    files = _store_snapshot(store)
+    output_store = tmp_path / "refused.img.zarr"
+    with pytest.raises(AssertionError):
+        _run_tw_hydra_continuum(
+            store,
+            output_store,
+            open_processing_set(str(store)),
+            2,
+            "mfs",
+            {"weighting": "briggs", "robust": 0.5, "weighting_scope": "global"},
+            deconvolver=deconvolver,
+            weight_memory_mode="in_place",
+        )
+    assert _store_snapshot(store) == files
+    assert not output_store.exists()
+
+
+@pytest.mark.parametrize(
+    ("weighting", "options", "message"),
+    [
+        pytest.param(
+            {
+                "weighting": "briggs_abs",
+                "robust": 0.5,
+                "briggs_abs_noise": 1.0,
+                "weighting_scope": "global",
+            },
+            {"weight_memory_mode": "in_place"},
+            "Global weighting scope",
+            id="briggs_abs-global",
+        ),
+        pytest.param(
+            {"weighting": "natural", "weighting_scope": "local"},
+            {"weight_memory_mode": None, "write_imaging_weights_to_ps": True},
+            "requires weight_memory_mode='in_place'",
+            id="keep-weights-in-memory",
+        ),
+    ],
+)
+def test_tw_hydra_refused_weight_requests_write_nothing(
+    tmp_path, tw_hydra_store, weighting, options, message
+):
+    """A refused request leaves the input Processing Set byte for byte unchanged."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    files = _store_snapshot(store)
+    output_store = tmp_path / "refused.img.zarr"
+    with pytest.raises(ValueError, match=message):
+        _run_tw_hydra_continuum(
+            store,
+            output_store,
+            open_processing_set(str(store)),
+            2,
+            "mfs",
+            weighting,
+            **options,
+        )
+    assert _store_snapshot(store) == files
+    assert not output_store.exists()
+
+
+@pytest.mark.filterwarnings("ignore::FutureWarning")
+@pytest.mark.parametrize(
+    "change,error,message",
+    [
+        pytest.param(
+            lambda params: params.update(
+                reference_frequency_hz=1.001 * params["reference_frequency"]
+            ),
+            ValueError,
+            "two different reference frequencies",
+            id="differing-reference-frequencies",
+        ),
+        pytest.param(
+            lambda params: params.pop("reference_frequency"),
+            KeyError,
+            "'reference_frequency'",
+            id="no-reference-frequency",
+        ),
+        pytest.param(
+            lambda params: params.update(reference_frequency=0.0),
+            ValueError,
+            "finite and positive",
+            id="zero-reference-frequency",
+        ),
+        pytest.param(
+            lambda params: params.pop("nterms"),
+            AssertionError,
+            None,
+            id="no-nterms",
+        ),
+        pytest.param(
+            lambda params: params.update(nterms=0),
+            AssertionError,
+            None,
+            id="zero-nterms",
+        ),
+        pytest.param(
+            lambda params: params.update(nterms=2.0),
+            TypeError,
+            "must be an integer",
+            id="non-integer-nterms",
+        ),
+        pytest.param(
+            lambda params: params.update(
+                frequency_coords=params["frequency_coords"][:2]
+            ),
+            ValueError,
+            "not assigned exactly once",
+            id="channel-subset",
+        ),
+    ],
+)
+def test_tw_hydra_refused_image_params_write_nothing(
+    tmp_path, tw_hydra_store, change, error, message
+):
+    """Invalid image parameters are refused before anything is written."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    files = _store_snapshot(store)
+    output_store = tmp_path / "refused.img.zarr"
+    processing_set = open_processing_set(str(store))
+    image_params = _tw_hydra_image_params(processing_set)
+    change(image_params)
+    with pytest.raises(error, match=message):
+        _run_tw_hydra_continuum(
+            store,
+            output_store,
+            processing_set,
+            2,
+            "mfs",
+            {"weighting": "natural", "weighting_scope": "local"},
+            image_params=image_params,
+            weight_memory_mode="in_place",
+        )
+    assert _store_snapshot(store) == files
+    assert not output_store.exists()
+
+
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+def test_tw_hydra_reference_frequency_alias_gives_the_same_images(
+    tmp_path, tw_hydra_store, specmode
+):
+    """``reference_frequency`` alone, both keys equal and the deprecated
+    ``reference_frequency_hz`` alone give the same images."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    reference_frequency = _tw_hydra_image_params(processing_set)["reference_frequency"]
+    images = {}
+    for name, keys in (
+        ("reference_frequency", {"reference_frequency": reference_frequency}),
+        (
+            "both",
+            {
+                "reference_frequency": reference_frequency,
+                "reference_frequency_hz": reference_frequency,
+            },
+        ),
+        ("alias", {"reference_frequency_hz": reference_frequency}),
+    ):
+        image_params = _tw_hydra_image_params(processing_set)
+        del image_params["reference_frequency"]
+        image_params.update(keys)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result, images[name] = _run_tw_hydra_continuum(
+                tw_hydra_store,
+                tmp_path / f"reference_frequency_{specmode}_{name}.img.zarr",
+                processing_set,
+                2,
+                specmode,
+                {"weighting": "natural", "weighting_scope": "local"},
+                image_params=image_params,
+                cycle_control_params={
+                    "max_iter": 20,
+                    "max_cycles": 2,
+                    "threshold": 0.001,
+                    "gain": 0.1,
+                    "psf_sidelobe_factor": 1.5,
+                    "max_iter_per_cycle": 5,
+                    "min_psf_fraction": 0.05,
+                    "max_psf_fraction": 0.8,
+                },
+            )
+        deprecations = [
+            warning
+            for warning in caught
+            if issubclass(warning.category, FutureWarning)
+            and "reference_frequency_hz" in str(warning.message)
+        ]
+        assert len(deprecations) == ("reference_frequency_hz" in keys)
+        assert result["n_major_cycles"] >= 2
+        assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
+
+    for name in ("both", "alias"):
+        xr.testing.assert_equal(images[name], images["reference_frequency"])
+
+
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+def test_tw_hydra_numpy_and_xarray_scalars_give_the_same_images(
+    tmp_path, tw_hydra_store, specmode
+):
+    """A NumPy integer ``nterms`` and a NumPy or xarray scalar reference
+    frequency are accepted and give the same images as Python numbers."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    # Rounded to float32 so that every variant holds the same value.
+    reference_frequency = float(
+        np.float32(_tw_hydra_image_params(processing_set)["reference_frequency"])
+    )
+    images = {}
+    for name, keys in (
+        ("python", {"nterms": 2, "reference_frequency": reference_frequency}),
+        (
+            "numpy",
+            {
+                "nterms": np.int64(2),
+                "reference_frequency": np.float32(reference_frequency),
+            },
+        ),
+        (
+            "xarray",
+            {
+                "nterms": np.int64(2),
+                "reference_frequency": xr.DataArray(reference_frequency),
+            },
+        ),
+    ):
+        result, images[name] = _run_tw_hydra_continuum(
+            tw_hydra_store,
+            tmp_path / f"scalars_{specmode}_{name}.img.zarr",
+            processing_set,
+            2,
+            specmode,
+            {"weighting": "natural", "weighting_scope": "local"},
+            image_param_overrides=keys,
+            cycle_control_params={
+                "max_iter": 20,
+                "max_cycles": 2,
+                "threshold": 0.001,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 5,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+        )
+        assert result["n_major_cycles"] >= 2
+        assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
+
+    for name in ("numpy", "xarray"):
+        xr.testing.assert_equal(images[name], images["python"])
+
+
+@pytest.mark.parametrize(
+    "weighting",
+    [
+        pytest.param({"weighting": "natural", "weighting_scope": "local"}, id="local"),
+        pytest.param(
+            {"weighting": "briggs", "robust": 0.5, "weighting_scope": "global"},
+            id="global",
+        ),
+    ],
+)
+def test_tw_hydra_failed_in_place_run_removes_its_weights(
+    tmp_path, tw_hydra_store, monkeypatch, weighting
+):
+    """An error after the in-place weights are registered removes them again."""
+    import importlib
+
+    module = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    contents = _store_snapshot(store, parse_metadata=True)
+    activate = module._activate_continuum_weight_cache
+
+    def activate_then_fail(ps_xdt, ps_store, processing_set_data_group_name):
+        activate(ps_xdt, ps_store, processing_set_data_group_name)
+        for _, ms_xdt in open_processing_set(ps_store).items():
+            data_group = ms_xdt.ds.attrs["data_groups"]["base"]
+            assert data_group["weight_imaging"] == "WEIGHT_IMAGING_CONTINUUM_CACHE"
+        raise RuntimeError("injected failure")
+
+    monkeypatch.setattr(module, "_activate_continuum_weight_cache", activate_then_fail)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        _run_tw_hydra_continuum(
+            store,
+            tmp_path / "failed.img.zarr",
+            open_processing_set(str(store)),
+            2,
+            "mfs",
+            weighting,
+            weight_memory_mode="in_place",
+        )
+    assert _store_snapshot(store, parse_metadata=True) == contents
+
+
+def test_weight_cache_store_checks_every_child_before_writing(tmp_path, tw_hydra_store):
+    """A child without the data group is refused before any cache array exists."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    files = _store_snapshot(store)
+    processing_set = dict(open_processing_set(str(store)).items())
+    processing_set["without_base"] = xr.DataTree(xr.Dataset(attrs={"data_groups": {}}))
+    with pytest.raises(KeyError, match="does not contain data group"):
+        _create_continuum_weight_cache_store(processing_set, str(store), "base")
+    assert _store_snapshot(store) == files
+
+
+def test_weight_cache_store_removes_an_earlier_registration(tmp_path, tw_hydra_store):
+    """A cache that an earlier run left registered is unregistered on disk."""
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    processing_set = open_processing_set(str(store))
+    _create_continuum_weight_cache_store(processing_set, str(store), "base")
+    _activate_continuum_weight_cache(processing_set, str(store), "base")
+
+    original_data_groups = _create_continuum_weight_cache_store(
+        open_processing_set(str(store)), str(store), "base"
+    )
+
+    for ms_name, ms_xdt in open_processing_set(str(store)).items():
+        assert "WEIGHT_IMAGING_CONTINUUM_CACHE" in ms_xdt.ds
+        assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
+        assert "weight_imaging" not in original_data_groups[ms_name]["base"]
+
+
+def _flag_one_hand(store):
+    """Flag the first correlation of every fourth time in a Processing Set."""
+    root = zarr.open_group(str(store), mode="r+", use_consolidated=False)
+    for ms_name in list(root.group_keys()):
+        flag = root[ms_name]["FLAG"]
+        flag_values = np.asarray(flag[:])
+        flag_values[::4, :, :, 0] = True
+        flag[:] = flag_values
+
+
+@pytest.mark.parametrize("weight_memory_mode", ["in_memory", "in_place"])
+@pytest.mark.parametrize("earlier_run", ["retained", "interrupted", "foreign"])
+def test_tw_hydra_rerun_calculates_its_own_weights(
+    tmp_path, tw_hydra_store, monkeypatch, earlier_run, weight_memory_mode
+):
+    """Imaging weights registered by an earlier run or another tool are not used.
+
+    The earlier run uses Briggs weighting and keeps its in-place weights
+    (``write_imaging_weights_to_ps=True``), or stops after it registered them
+    without its cleanup, as a killed process does. Or, with one hand flagged
+    on some rows, another tool registers the input weights, NaN only on the
+    flagged samples, as imaging weights: the two hands then get different
+    weights. A natural-weighting rerun over two imaging cycles equals the same
+    run on a clean copy with the same flags.
+    """
+    import importlib
+
+    import toolviper.utils.logger
+
+    module = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+    cycle_control_params = {
+        "max_iter": 20,
+        "max_cycles": 2,
+        "threshold": 0.001,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": 5,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    natural = {"weighting": "natural", "weighting_scope": "local"}
+    briggs = {"weighting": "briggs", "robust": -2.0, "weighting_scope": "local"}
+    registered_name = (
+        "WEIGHT_IMAGING_FOREIGN"
+        if earlier_run == "foreign"
+        else "WEIGHT_IMAGING_CONTINUUM_CACHE"
+    )
+
+    reference_store = tmp_path / "reference.ps.zarr"
+    shutil.copytree(tw_hydra_store, reference_store)
+    if earlier_run == "foreign":
+        _flag_one_hand(reference_store)
+    _, reference = _run_tw_hydra_continuum(
+        reference_store,
+        tmp_path / "reference.img.zarr",
+        open_processing_set(str(reference_store)),
+        2,
+        "mfs",
+        natural,
+        cycle_control_params=cycle_control_params,
+        weight_memory_mode=weight_memory_mode,
+    )
+
+    store = tmp_path / "input.ps.zarr"
+    shutil.copytree(tw_hydra_store, store)
+    if earlier_run == "retained":
+        _, earlier = _run_tw_hydra_continuum(
+            store,
+            tmp_path / "earlier.img.zarr",
+            open_processing_set(str(store)),
+            2,
+            "mfs",
+            briggs,
+            weight_memory_mode="in_place",
+            write_imaging_weights_to_ps=True,
+        )
+        assert not np.array_equal(
+            earlier.POINT_SPREAD_FUNCTION.values,
+            reference.POINT_SPREAD_FUNCTION.values,
+            equal_nan=True,
+        )
+    elif earlier_run == "interrupted":
+        activate = module._activate_continuum_weight_cache
+
+        def activate_then_stop(ps_xdt, ps_store, processing_set_data_group_name):
+            activate(ps_xdt, ps_store, processing_set_data_group_name)
+            raise RuntimeError("process stopped")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                module, "_activate_continuum_weight_cache", activate_then_stop
+            )
+            patch.setattr(module, "_remove_continuum_weight_cache", lambda *args: None)
+            with pytest.raises(RuntimeError, match="process stopped"):
+                _run_tw_hydra_continuum(
+                    store,
+                    tmp_path / "earlier.img.zarr",
+                    open_processing_set(str(store)),
+                    2,
+                    "mfs",
+                    briggs,
+                    weight_memory_mode="in_place",
+                )
+    else:
+        _flag_one_hand(store)
+        root = zarr.open_group(str(store), mode="r+", use_consolidated=False)
+        for ms_name in list(root.group_keys()):
+            ms_group = zarr.open_group(
+                root.store, path=ms_name, mode="r+", use_consolidated=False
+            )
+            ms_group.create_array(
+                registered_name,
+                data=np.where(ms_group["FLAG"][:], np.nan, ms_group["WEIGHT"][:]),
+                attributes=dict(ms_group["WEIGHT"].attrs),
+            )
+            data_groups = ms_group.attrs["data_groups"]
+            ms_group.attrs["data_groups"] = {
+                **data_groups,
+                "base": {**data_groups["base"], "weight_imaging": registered_name},
+            }
+            zarr.consolidate_metadata(str(store), path=ms_name)
+        zarr.consolidate_metadata(str(store))
+    for _, ms_xdt in open_processing_set(str(store)).items():
+        data_group = ms_xdt.ds.attrs["data_groups"]["base"]
+        assert data_group["weight_imaging"] == registered_name
+    files = _store_snapshot(store, parse_metadata=weight_memory_mode == "in_place")
+
+    warnings = []
+    monkeypatch.setattr(
+        toolviper.utils.logger,
+        "warning",
+        lambda message, *args, **kwargs: warnings.append(message),
+    )
+    _, actual = _run_tw_hydra_continuum(
+        store,
+        tmp_path / "rerun.img.zarr",
+        open_processing_set(str(store)),
+        2,
+        "mfs",
+        natural,
+        cycle_control_params=cycle_control_params,
+        weight_memory_mode=weight_memory_mode,
+    )
+
+    assert np.nanmax(np.abs(reference.SKY_MODEL.values)) > 0.0
+    for variable in (
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        np.testing.assert_array_equal(actual[variable], reference[variable])
+    assert any(registered_name in message for message in warnings)
+    if weight_memory_mode == "in_memory":
+        assert _store_snapshot(store) == files
+    elif earlier_run == "foreign":
+        # The foreign array is untouched and its registration is restored.
+        assert _store_snapshot(store, parse_metadata=True) == files
+    else:
+        for _, ms_xdt in open_processing_set(str(store)).items():
+            assert "WEIGHT_IMAGING_CONTINUUM_CACHE" not in ms_xdt.ds
+            assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
 
 
 @pytest.mark.parametrize(
@@ -1001,7 +1585,7 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
         2,
         specmode,
         {"weighting": "natural", "weighting_scope": "local"},
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 20,
             "max_cycles": 2,
             "threshold": 0.001,
@@ -1028,7 +1612,7 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
 ):
     """Native MT-MFS survives later cycles across distributed execution modes."""
     processing_set = open_processing_set(str(tw_hydra_store))
-    iteration_control_params = {
+    cycle_control_params = {
         "max_iter": 2,
         "max_cycles": 2,
         "threshold": 0.0,
@@ -1043,7 +1627,7 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
     }
     common = {
         "deconvolver": "mtmfs",
-        "iteration_control_params": iteration_control_params,
+        "cycle_control_params": cycle_control_params,
     }
     reference_result, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
@@ -1125,7 +1709,7 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
 ):
     """Cached GWVobs reproduces visibility-domain subtraction through CLEAN."""
     processing_set = open_processing_set(str(tw_hydra_store))
-    iteration_control_params = {
+    cycle_control_params = {
         "max_iter": 20,
         "max_cycles": 2,
         "threshold": 0.001,
@@ -1142,7 +1726,7 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
         2,
         specmode,
         weighting,
-        iteration_control_params=iteration_control_params,
+        cycle_control_params=cycle_control_params,
         visibility_memory_mode="recompute",
     )
     for cache_mode in ("in_memory", "in_place"):
@@ -1157,7 +1741,7 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
             2,
             specmode,
             weighting,
-            iteration_control_params=iteration_control_params,
+            cycle_control_params=cycle_control_params,
             visibility_memory_mode=cache_mode,
         )
 
@@ -1184,13 +1768,63 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
         assert cache_group not in zarr.open_group(output_store)
 
 
+@pytest.mark.parametrize("visibility_memory_mode", ["recompute", "in_memory"])
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+def test_tw_hydra_corrected_data_group_matches_base(
+    tmp_path, tw_hydra_corrected_store, specmode, visibility_memory_mode
+):
+    """Imaging a copy of ``base`` as ``corrected`` gives bitwise equal products.
+
+    Regression: model prediction degridded against the ``base`` group, which
+    the loader drops when another group is imaged, so the first residual
+    update after a model update failed with ``Data group base not found``.
+    """
+    processing_set = open_processing_set(str(tw_hydra_corrected_store))
+    images = {}
+    for data_group_name in ("base", "corrected"):
+        result, images[data_group_name] = _run_tw_hydra_continuum(
+            tw_hydra_corrected_store,
+            tmp_path / f"{data_group_name}.img.zarr",
+            processing_set,
+            2,
+            specmode,
+            {"weighting": "natural", "weighting_scope": "local"},
+            cycle_control_params={
+                "max_iter": 20,
+                "max_cycles": 2,
+                "threshold": 0.001,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 5,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            visibility_memory_mode=visibility_memory_mode,
+            processing_set_data_group_name=data_group_name,
+        )
+        assert result["n_major_cycles"] == 2
+        assert np.nanmax(np.abs(images[data_group_name].SKY_MODEL.values)) > 0.0
+
+    for variable in (
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        expected = images["base"][variable].values
+        actual = images["corrected"][variable].values
+        np.testing.assert_array_equal(actual, expected)
+        assert actual.dtype == expected.dtype
+        assert actual.tobytes() == expected.tobytes()
+
+
 @pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])
 def test_tw_hydra_widebandpb_modes_preserve_later_mvc_major_cycles(
     tmp_path, tw_hydra_store, widebandpb_memory_mode
 ):
     """Both low-memory PB policies reproduce MVC prediction after real CLEAN."""
     processing_set = open_processing_set(str(tw_hydra_store))
-    iteration_control_params = {
+    cycle_control_params = {
         "max_iter": 20,
         "max_cycles": 2,
         "threshold": 0.001,
@@ -1207,7 +1841,7 @@ def test_tw_hydra_widebandpb_modes_preserve_later_mvc_major_cycles(
         2,
         "mvc",
         {"weighting": "natural", "weighting_scope": "local"},
-        iteration_control_params=iteration_control_params,
+        cycle_control_params=cycle_control_params,
     )
     _, actual = _run_tw_hydra_continuum(
         tw_hydra_store,
@@ -1216,7 +1850,7 @@ def test_tw_hydra_widebandpb_modes_preserve_later_mvc_major_cycles(
         2,
         "mvc",
         {"weighting": "natural", "weighting_scope": "local"},
-        iteration_control_params=iteration_control_params,
+        cycle_control_params=cycle_control_params,
         widebandpb_memory_mode=widebandpb_memory_mode,
     )
 
@@ -1341,7 +1975,7 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
             "weighting_scope": "global",
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 20,
             "max_cycles": 2,
             "threshold": 0.001,
@@ -1422,6 +2056,130 @@ def test_tw_hydra_remaining_weighting_schemes(
     assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
 
 
+@pytest.fixture(scope="module")
+def wideband_store(tmp_path_factory):
+    """A point source at the phase centre, without noise, seen by the VLA in
+    D configuration at six times 30 minutes apart and at four channels from 1
+    to 2 GHz. Over this octave the uv tracks of the channels overlap only in
+    part."""
+    store = tmp_path_factory.mktemp("wideband") / "wideband.ps.zarr"
+    antenna_xds = read_telescope_layout("vla.d")
+    phase_center = np.array([5.233686, 0.71094])
+    with dask.config.set(scheduler="synchronous"):
+        simulate_processing_set(
+            ps_store=str(store),
+            antenna_xds=antenna_xds,
+            time_params={
+                "time_start": "2019-10-03T19:00:00.000",
+                "time_delta": 1800.0,
+                "n_samples": 6,
+            },
+            frequency_params={
+                "freq_start": 1.0e9,
+                "freq_delta": 1.0e9 / 3.0,
+                "n_channels": 4,
+                "channel_width": 0.01e9,
+            },
+            polarization=["XX", "YY"],
+            sky_components=[
+                {
+                    "kind": "point",
+                    "flux": np.array([1.0, 0.0, 0.0, 1.0]),
+                    "ra_dec": phase_center,
+                }
+            ],
+            phase_center_ra_dec=phase_center[None, :],
+            beam_models=[airy_disk_model("vla_nvss")],
+            beam_model_map=np.zeros(antenna_xds.sizes["antenna_name"], int),
+            n_time_chunks=1,
+            n_frequency_chunks=1,
+            overwrite=True,
+        )
+    return store
+
+
+def _run_wideband_scopes(tmp_path, store, specmode, weighting, scopes):
+    """Image ``store`` with ``weighting`` and each ``weighting_scope`` of
+    ``scopes``; ``"default"`` leaves the scope out."""
+    processing_set = open_processing_set(str(store))
+    images = {}
+    for scope in scopes:
+        scoped = dict(weighting)
+        if scope != "default":
+            scoped["weighting_scope"] = scope
+        _, images[scope] = _run_tw_hydra_continuum(
+            store,
+            tmp_path / f"wideband_{specmode}_{scope}.img.zarr",
+            processing_set,
+            2,
+            specmode,
+            scoped,
+            image_param_overrides={
+                "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600)
+            },
+        )
+    return images
+
+
+@pytest.mark.parametrize(
+    ("specmode", "weighting", "widening"),
+    [
+        pytest.param("mfs", {"weighting": "uniform"}, 1.2, id="mfs-uniform"),
+        pytest.param("mvc", {"weighting": "uniform"}, 1.2, id="mvc-uniform"),
+        pytest.param(
+            "mfs", {"weighting": "briggs", "robust": 0.5}, 1.02, id="mfs-briggs"
+        ),
+    ],
+)
+def test_wideband_uniform_and_briggs_weights_default_to_the_global_density(
+    tmp_path, wideband_store, specmode, weighting, widening
+):
+    """Uniform and Briggs weights of a continuum image default to the weight
+    density of all channels (``weighting_scope="global"``); the density of each
+    channel (``"local"``) can still be requested. With the local density the
+    weights of a uv cell add up over the channels that sample it, which favours
+    the inner uv plane, where the tracks of most channels overlap, so the PSF
+    is wider (measured: major axis 1.29 times for uniform, 1.03 times for
+    Briggs 0.5)."""
+    images = _run_wideband_scopes(
+        tmp_path, wideband_store, specmode, weighting, ("default", "global", "local")
+    )
+
+    xr.testing.assert_equal(images["default"], images["global"])
+    major = {
+        scope: float(
+            images[scope].BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.isel(
+                time=0, polarization=0, beam_params=0
+            )
+        )
+        for scope in ("global", "local")
+    }
+    assert major["local"] > widening * major["global"]
+
+
+@pytest.mark.parametrize(
+    "weighting",
+    [
+        pytest.param({"weighting": "natural"}, id="natural"),
+        pytest.param(
+            {"weighting": "briggs_abs", "robust": 0.5, "briggs_abs_noise": 0.1},
+            id="briggs_abs",
+        ),
+    ],
+)
+def test_wideband_natural_and_absolute_briggs_weights_default_to_the_local_density(
+    tmp_path, wideband_store, weighting
+):
+    """Natural weights use no density and keep the local scope. Absolute Briggs
+    weights keep the density of each channel, the only scope that computes
+    them: the global scope refuses them."""
+    images = _run_wideband_scopes(
+        tmp_path, wideband_store, "mfs", weighting, ("default", "local")
+    )
+
+    xr.testing.assert_equal(images["default"], images["local"])
+
+
 def test_tw_hydra_direct_max_iter_zero_dirty_image(tmp_path, tw_hydra_store):
     """The public continuum application accepts a genuine zero-iteration run."""
     processing_set = open_processing_set(str(tw_hydra_store))
@@ -1432,7 +2190,7 @@ def test_tw_hydra_direct_max_iter_zero_dirty_image(tmp_path, tw_hydra_store):
         2,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 0,
             "max_cycles": 0,
             "threshold": 0.0,
@@ -1578,7 +2336,7 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
         "max_psf_fraction": 0.8,
     }
     kwargs = dict(
-        iteration_control_params=params,
+        cycle_control_params=params,
         visibility_memory_mode="in_memory",
         widebandpb_memory_mode="in_memory",
     )
@@ -1673,7 +2431,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
 ):
     """An optimistic minor-cycle peak cannot terminate the distributed driver."""
     import astroviper.processing_functions.imaging.image_continuum_single_field as processing
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_MAX_CYCLES,
         IMAGING_MAX_ITER,
     )
@@ -1712,8 +2470,8 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         {"weighting": "natural", "weighting_scope": "local"},
         visibility_memory_mode=visibility_memory_mode,
         restore=True,
-        image_param_overrides={"polarization_coords": ["I"], "nterms": 1},
-        iteration_control_params={
+        image_param_overrides={"polarization_coords": ["I", "Q"], "nterms": 1},
+        cycle_control_params={
             "max_iter": max_iter,
             "max_cycles": 3,
             "threshold": 1e-8,

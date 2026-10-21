@@ -122,7 +122,7 @@ def node_task_inputs(tmp_path_factory):
                 image_store=str(work_dir / "driver.img.zarr"),
                 image_params=image_params,
                 imaging_weights_params={"weighting": "natural"},
-                iteration_control_params={
+                cycle_control_params={
                     "max_iter": 40,
                     "max_cycles": 2,
                     "threshold": 0.0,
@@ -134,7 +134,7 @@ def node_task_inputs(tmp_path_factory):
                     "max_psf_fraction": 0.8,
                 },
                 instrument_polarization_basis="linear",
-                gridder="prolate_spheroidal",
+                gridder="anti_alias",
                 deconvolver="hogbom",
                 scan_intents="OBSERVE_TARGET#ON_SOURCE",
                 image_data_variables_keep=KEEP,
@@ -246,8 +246,26 @@ def test_node_task_releases_everything_by_reference_counting(node_task_inputs):
     lazy zarr and xarray object die by reference counting alone (the lazy
     tree xarray's ``open_datatree`` drops is the one exception, see
     :func:`cyclic_garbage`)."""
+    from distributed.core import Status
+    from distributed.deploy.spec import SpecCluster
+
     from astroviper.node_tasks.imaging.image_cube_single_field import (
         image_cube_single_field,
+    )
+
+    # A Dask cluster still running in this process (one an earlier test did
+    # not close) makes cyclic garbage on its own event loop thread while the
+    # collector is off (distributed's BatchedSend times out every few
+    # milliseconds), which this test would count as the node task's.
+    running = [
+        cluster
+        for cluster in list(getattr(SpecCluster, "_instances", ()))
+        if getattr(cluster, "status", Status.closed) != Status.closed
+    ]
+    assert not running, (
+        f"Dask clusters left running by earlier tests: {running}; close the "
+        "cluster as well as the client (Client.close() leaves a cluster it "
+        "was handed running)"
     )
 
     # first use (imports, caches) outside the measured call

@@ -1,0 +1,25 @@
+{
+    "point_spread_function_cube_single_field": {
+        "ps_store": { "required": true, "type": ["str"] },
+        "image_params": { "required": true, "type": ["dict"] },
+        "imaging_weights_params": { "required": true, "type": ["dict"] },
+        "image_store": { "type": ["str"], "nullable": true },
+        "instrument_polarization_basis": {
+            "type": ["str"],
+            "allowed": ["linear", "circular"]
+        },
+        "scan_intents": { "type": ["list", "str"], "nullable": true },
+        "field_name": { "type": ["str"], "nullable": true },
+        "processing_set_data_group_name": { "type": ["str"] },
+        "single_precision_image": { "type": "boolean" },
+        "gridding_kernel_params": { "type": ["dict"], "nullable": true },
+        "primary_beam_params": { "type": ["dict"], "nullable": true },
+        "psf_fitting_method": { "type": "string", "allowed": ["astroviper", "casa"] },
+        "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
+        "thread_info": { "type": ["dict"], "nullable": true },
+        "processing_function_threads": { "type": ["int"], "min": 1 },
+        "overwrite": { "type": "boolean" },
+        "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
+        "mpi_cluster_setup": { "type": ["dict"], "nullable": true }
+    }
+}

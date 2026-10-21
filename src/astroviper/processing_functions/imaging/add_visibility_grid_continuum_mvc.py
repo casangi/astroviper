@@ -95,8 +95,8 @@ def add_visibility_grid_mvc_single_field(
     3. reduce those contributions and normalize the global Taylor products.
 
     """
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -450,7 +450,7 @@ def add_visibility_grid_mvc_single_field(
     grid = img_xds[visibility_name].values
     normalization = img_xds[normalization_name].values
 
-    prolate_spheroidal_grid(
+    anti_alias_grid(
         grid,
         normalization,
         visibility_data,

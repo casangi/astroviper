@@ -5,34 +5,18 @@ import numpy as np
 from astroviper.utils.param_docs import shares_param_docs
 
 
-def _get_reference_frequency_hz(image_params, img_xds):
-    """Resolve reference_frequency, then reference_frequency_hz, then the
-    arithmetic mean of the image frequencies. Distributed callers must supply
-    one common reference frequency before partitioning.
+def _get_reference_frequency_hz(image_params):
+    """Return ``image_params["reference_frequency"]`` in Hz. Distributed
+    callers must supply one common reference frequency before partitioning.
     """
-    if "reference_frequency" in image_params:
-        reference_frequency = image_params["reference_frequency"]
-    elif "reference_frequency_hz" in image_params:
-        reference_frequency = image_params["reference_frequency_hz"]
-    else:
-        if "frequency" not in img_xds.coords:
-            raise ValueError(
-                "Continuum imaging requires an explicit reference frequency "
-                "or an image frequency coordinate."
-            )
-
-        frequency = np.asarray(img_xds.coords["frequency"].data, dtype=np.float64)
-
-        if frequency.size == 0:
-            raise ValueError(
-                "Cannot infer a continuum reference frequency from an empty "
-                "frequency coordinate."
-            )
-
-        reference_frequency = float(np.mean(frequency))
+    if "reference_frequency" not in image_params:
+        raise KeyError(
+            "image_params must contain 'reference_frequency', the reference "
+            "frequency of the Taylor expansion in Hz."
+        )
 
     # Permit a scalar xarray/numpy object while rejecting a vector.
-    reference_frequency = np.asarray(reference_frequency)
+    reference_frequency = np.asarray(image_params["reference_frequency"])
 
     if reference_frequency.size != 1:
         raise ValueError(
@@ -50,17 +34,14 @@ def _get_reference_frequency_hz(image_params, img_xds):
     return reference_frequency_hz
 
 
-def _validate_continuum_parameters(image_params, img_xds):
+def _validate_continuum_parameters(image_params):
     """Validate and return ``(nterms, reference_frequency_hz)``."""
     nterms = int(image_params.get("nterms", 2))
 
     if nterms < 1:
         raise ValueError("image_params['nterms'] must be at least 1.")
 
-    reference_frequency_hz = _get_reference_frequency_hz(
-        image_params,
-        img_xds,
-    )
+    reference_frequency_hz = _get_reference_frequency_hz(image_params)
 
     return nterms, reference_frequency_hz
 
@@ -238,9 +219,9 @@ def imaging_setup_continuum_single_field(
         ``nterms``
             Number of MT-MFS sky Taylor terms.
 
-        ``reference_frequency`` or ``reference_frequency_hz``
-            Common Taylor-expansion reference frequency shared by all visibility
-            partitions.
+        ``reference_frequency``
+            Common Taylor-expansion reference frequency in Hz, shared by all
+            visibility partitions.
 
         Standard imaging parameters such as image size, cell size, phase center,
         and FFT padding are forwarded to the lower-level processing functions.
@@ -292,10 +273,7 @@ def imaging_setup_continuum_single_field(
 
     ps_data_group_name = processing_set_data_group_name
 
-    nterms, reference_frequency_hz = _validate_continuum_parameters(
-        image_params,
-        img_xds,
-    )
+    nterms, reference_frequency_hz = _validate_continuum_parameters(image_params)
 
     img_xds = _attach_continuum_metadata(
         img_xds,

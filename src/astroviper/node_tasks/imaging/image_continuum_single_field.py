@@ -574,15 +574,10 @@ def _resolve_continuum_append_configuration(input_params):
     if nterms < 1:
         raise ValueError(f"image_params['nterms'] must be positive; received {nterms}.")
 
-    if "reference_frequency" in image_params:
-        reference_frequency = float(image_params["reference_frequency"])
-    elif "reference_frequency_hz" in image_params:
-        reference_frequency = float(image_params["reference_frequency_hz"])
-    else:
-        raise KeyError(
-            "image_params must contain 'reference_frequency' or "
-            "'reference_frequency_hz'."
-        )
+    if "reference_frequency" not in image_params:
+        raise KeyError("image_params must contain 'reference_frequency'.")
+
+    reference_frequency = float(image_params["reference_frequency"])
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
@@ -788,6 +783,57 @@ def _attach_imaging_weights_continuum(
     return ps_xdt
 
 
+def _unregister_imaging_weights_continuum(
+    ps_xdt,
+    processing_set_data_group_name="corrected",
+):
+    """Remove the imaging-weight registration from a loaded processing-set chunk.
+
+    Imaging weights that an earlier run kept or left registered in the
+    Processing Set, or that another tool wrote, were not made with this run's
+    ``imaging_weights_params``. Without their registration the setup of the
+    first imaging cycle calculates the imaging weights.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Freshly loaded processing-set chunk.
+
+    processing_set_data_group_name : str, optional
+        Processing-set data group whose ``"weight_imaging"`` registration is
+        removed.
+
+    Returns
+    -------
+    xarray.DataTree
+        Processing-set chunk whose data group registers no imaging weights.
+    """
+    import toolviper.utils.logger as logger
+
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        data_group = ms_xdt.attrs["data_groups"][processing_set_data_group_name]
+
+        if "weight_imaging" in data_group:
+            logger.debug(
+                f"Not using the imaging weights {data_group['weight_imaging']!r} "
+                f"registered in {ms_name!r}; they are calculated."
+            )
+            modify_data_groups_xds(
+                ms_xdt.ds,
+                data_group_out_name=processing_set_data_group_name,
+                data_group_out={
+                    role: name
+                    for role, name in data_group.items()
+                    if role != "weight_imaging"
+                },
+                description="Imaging weights not prepared by this run unregistered.",
+            )
+
+    return ps_xdt
+
+
 def _finalize_reference_primary_beam(
     img_xds,
     *,
@@ -963,6 +1009,7 @@ def residual_update_continuum_single_field(
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
+    weight_cache_is_active=False,
     primary_beam_xds=None,
     observed_visibility_grid_xds=None,
 ):
@@ -986,9 +1033,12 @@ def residual_update_continuum_single_field(
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
 
-    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and
-    ``MVC_RESIDUAL_WEIGHT_SUM``. During the first imaging cycle it also returns
-    the additive Taylor PSF numerator, PSF weight sum, and weighted PB sum.
+    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
+    ``MVC_RESIDUAL_WEIGHT_SUM`` and the additive moments of the per-pixel
+    spectral fit (``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``,
+    ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``, ``MVC_RESIDUAL_BEAM_CHANNEL_COUNT``).
+    During the first imaging cycle it also returns the additive Taylor PSF
+    numerator, PSF weight sum, and weighted PB sum.
 
     Parameters
     ----------
@@ -998,6 +1048,13 @@ def residual_update_continuum_single_field(
         Accumulated image-domain Taylor model used for MVC prediction.
     weight_cache_mapping : dict, optional
         Task-indexed prepared imaging weights.
+    weight_cache_is_active : bool, optional
+        ``True`` when this run's in-place imaging weights are already
+        registered in the Processing Set (global weighting with
+        ``weight_memory_mode="in_place"``); the first imaging cycle then uses
+        them. Otherwise it uses ``weight_cache_mapping`` or calculates the
+        imaging weights: weights that an earlier run or another tool
+        registered are not used.
     primary_beam_xds : xarray.Dataset, optional
         Cached primary beam for this MVC partition.
     observed_visibility_grid_xds : xarray.Dataset, optional
@@ -1066,7 +1123,7 @@ def residual_update_continuum_single_field(
         Currently only ``"in_memory"`` is supported.
 
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights (default: ``"in_place"``).
+        Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
         graphs. ``"in_place"`` writes each task's weights into the input
@@ -1074,6 +1131,10 @@ def residual_update_continuum_single_field(
         cycle, reducing scheduler and worker memory at the cost of additional
         disk I/O. This option is intentionally separate from ``memory_mode`` in
         the initial implementation; the two policies may be unified later.
+        The in-place weights are removed when the run ends, also after an error;
+        a run that completes keeps them when ``write_imaging_weights_to_ps=True``.
+        While an ``"in_place"`` run is in progress, no other run may use the same
+        Processing Set.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         Continuum residual-update storage policy for observed visibility grids.
@@ -1190,10 +1251,15 @@ def residual_update_continuum_single_field(
         )
 
     # Build the empty image in the correlation basis expected by the gridder.
-    correlation_pol_coords = {
-        "linear": ["XX", "YY"],
-        "circular": ["RR", "LL"],
-    }[instrument_polarization_basis]
+    # The requested Stokes planes fix the correlations (the ones the driver
+    # selected for this task's data).
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
+    )
+
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
 
     start = time.time()
 
@@ -1273,6 +1339,13 @@ def residual_update_continuum_single_field(
             weight_cache_mapping[task_id],
             processing_set_data_group_name=(processing_set_data_group_name),
             weight_imaging_name="WEIGHT_IMAGING",
+        )
+
+    elif is_n_iter_0 and not weight_cache_is_active:
+        # This run has not prepared imaging weights, so setup calculates them.
+        ps_xdt = _unregister_imaging_weights_continuum(
+            ps_xdt,
+            processing_set_data_group_name=(processing_set_data_group_name),
         )
 
     # =============================================================
@@ -1606,6 +1679,9 @@ def grid_imaging_weight_density_continuum_node(
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
         grid_imaging_weight_density_continuum,
     )
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
+    )
 
     task_id = int(task_id)
     task_start = time.time()
@@ -1660,17 +1736,9 @@ def grid_imaging_weight_density_continuum_node(
             "coordinate under the key 'data'."
         )
 
-    correlation_pol_coords = {
-        "linear": ["XX", "YY"],
-        "circular": ["RR", "LL"],
-    }
-
-    if instrument_polarization_basis not in correlation_pol_coords:
-        raise ValueError(
-            "instrument_polarization_basis must be 'linear' or "
-            f"'circular'; received "
-            f"{instrument_polarization_basis!r}."
-        )
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
 
     start = time.time()
 
@@ -1679,7 +1747,7 @@ def grid_imaging_weight_density_continuum_node(
         image_size=image_params["image_size"],
         cell_size=image_params["cell_size"],
         frequency_coords=task_coords["frequency"]["data"],
-        pol_coords=correlation_pol_coords[instrument_polarization_basis],
+        pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
@@ -1803,14 +1871,18 @@ def degrid_imaging_weights_continuum_node(
     Parameters
     ----------
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights (default: ``"in_place"``).
+        Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
         graphs. ``"in_place"`` writes each task's weights into the input
         Processing Set and reloads only the required partition during each major
         cycle, reducing scheduler and worker memory at the cost of additional
         disk I/O. This option is intentionally separate from ``memory_mode`` in
-        the initial implementation; the two policies may be unified later."""
+        the initial implementation; the two policies may be unified later.
+        The in-place weights are removed when the run ends, also after an error;
+        a run that completes keeps them when ``write_imaging_weights_to_ps=True``.
+        While an ``"in_place"`` run is in progress, no other run may use the same
+        Processing Set."""
     import time
 
     import pandas as pd
@@ -1820,6 +1892,9 @@ def degrid_imaging_weights_continuum_node(
 
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
         degrid_imaging_weights_continuum,
+    )
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
     )
 
     task_id = int(task_id)
@@ -1884,16 +1959,9 @@ def degrid_imaging_weights_continuum_node(
             "coordinate under 'data'."
         )
 
-    correlation_pol_coords = {
-        "linear": ["XX", "YY"],
-        "circular": ["RR", "LL"],
-    }
-
-    if instrument_polarization_basis not in correlation_pol_coords:
-        raise ValueError(
-            "instrument_polarization_basis must be 'linear' or "
-            f"'circular'; received {instrument_polarization_basis!r}."
-        )
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
 
     start = time.time()
 
@@ -1902,7 +1970,7 @@ def degrid_imaging_weights_continuum_node(
         image_size=image_params["image_size"],
         cell_size=image_params["cell_size"],
         frequency_coords=task_coords["frequency"]["data"],
-        pol_coords=correlation_pol_coords[instrument_polarization_basis],
+        pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
@@ -2097,7 +2165,7 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         ifft_norm_img_xds,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
@@ -2431,7 +2499,7 @@ def _prepare_continuum_image(
     )
 
     # transform_polarization_basis may place polarization after the spatial
-    # dimensions. Restore the canonical layouts required by iteration control,
+    # dimensions. Restore the canonical layouts required by cycle control,
     # masking, deconvolution, and restoration.
     canonical_dimension_orders = {
         "SKY_RESIDUAL": (
@@ -2941,7 +3009,7 @@ def model_update_continuum_single_field(
             ▼
     model_update_continuum_single_field
             │
-            ├── updates the iteration controller
+            ├── updates the cycle controller
             ├── determines the model-update parameters
             ├── calls model_update_mtmfs_single_field
             ├── updates the continuum sky model
@@ -2967,8 +3035,8 @@ def model_update_continuum_single_field(
     input_params : dict
         Append-node configuration. Expected entries are
 
-        ``iteration_control_params``
-            Global CLEAN iteration-control parameters.
+        ``cycle_control_params``
+            Global CLEAN cycle control parameters.
 
         Optional entries are
 
@@ -2982,8 +3050,8 @@ def model_update_continuum_single_field(
             Whether this is the first imaging cycle. Defaults to ``True``.
 
         ``controller``
-            Existing :class:`IterationController`. If omitted, a new controller is
-            constructed from ``iteration_control_params``.
+            Existing :class:`CycleController`. If omitted, a new controller is
+            constructed from ``cycle_control_params``.
 
         ``image_data_group_in_name``
             Residual image data-group name. Defaults to ``"residual"``.
@@ -3003,7 +3071,7 @@ def model_update_continuum_single_field(
             Timing dataframe including the model-update stage.
 
         ``"controller"``
-            Updated iteration controller.
+            Updated cycle controller.
 
         ``"residual_converged"``
             True only when refreshed residual statistics confirm a stop,
@@ -3021,7 +3089,7 @@ def model_update_continuum_single_field(
     from astroviper.processing_functions.imaging.utils import (
         ImagingDict,
         copy_residual_entropy,
-        get_calculate_cycle_controls,
+        get_per_cycle_limits,
         merge_imaging_dicts,
     )
 
@@ -3050,12 +3118,12 @@ def model_update_continuum_single_field(
             "The continuum reduce result does not contain the required 'image' entry."
         )
 
-    if "iteration_control_params" not in input_params:
-        raise KeyError("input_params must contain 'iteration_control_params'.")
+    if "cycle_control_params" not in input_params:
+        raise KeyError("input_params must contain 'cycle_control_params'.")
 
     # Prepare control parameters
     img_xds = input_data["image"]
-    iteration_control_params = input_params["iteration_control_params"]
+    cycle_control_params = input_params["cycle_control_params"]
     deconvolver = input_params.get("deconvolver", "hogbom")
     processing_function_threads = input_params.get(
         "processing_function_threads",
@@ -3073,7 +3141,7 @@ def model_update_continuum_single_field(
     )
 
     # -------------------------------------------------------------
-    # Obtain the iteration controller.
+    # Obtain the cycle controller.
     # -------------------------------------------------------------
     controller = input_params.get("controller")
 
@@ -3089,7 +3157,7 @@ def model_update_continuum_single_field(
         combined_deconvolve_dict = ImagingDict()
 
     timing = {
-        "T_iteration_control": 0.0,
+        "T_cycle_control": 0.0,
         "T_model_update": 0.0,
         "T_convergence": 0.0,
     }
@@ -3100,7 +3168,7 @@ def model_update_continuum_single_field(
     start = time.time()
     controller.ensure_planes(img_xds.sizes["time"], 1, img_xds.sizes["polarization"])
     residual_imaging_dict = build_continuum_residual_imaging_dict(
-        img_xds, image_data_group_in_name, iteration_control_params
+        img_xds, image_data_group_in_name, cycle_control_params
     )
     stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
     if stopcode.imaging != 0:
@@ -3136,20 +3204,15 @@ def model_update_continuum_single_field(
 
     # Reuse the shared controls with fresh statistics on every cycle, rather
     # than using the preceding approximate minor-cycle residual history.
-    max_iter_per_cycle, threshold_per_cycle = get_calculate_cycle_controls(
-        controller,
-        combined_deconvolve_dict,
-        img_xds,
-        model_exists=False,
-        iteration_control_params=iteration_control_params,
-        residual_imaging_dict=residual_imaging_dict,
+    max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
+        controller, residual_imaging_dict
     )
 
-    timing["T_iteration_control"] = time.time() - start
+    timing["T_cycle_control"] = time.time() - start
 
     deconvolve_params = {
-        **iteration_control_params,
-        "max_iter_per_cycle": max_iter_per_cycle,
+        **cycle_control_params,
+        "max_iter_per_cycle_updated": max_iter_per_cycle_updated,
         "threshold_per_cycle": threshold_per_cycle,
     }
 
@@ -3182,11 +3245,11 @@ def model_update_continuum_single_field(
     # -------------------------------------------------------------
     start = time.time()
 
+    # The model update decides nothing: its iterations, its stop code and the
+    # no progress and divergence runs are booked for the stop test on the next
+    # refreshed residual. stopcode and stopdesc stay those of the check above.
     controller.update_counts(deconvolve_dict)
-
-    stopcode, stopdesc = controller.check_convergence(
-        deconvolve_dict, model_update_ran=True
-    )
+    controller.record_model_update(deconvolve_dict)
 
     combined_deconvolve_dict = merge_imaging_dicts(
         [
