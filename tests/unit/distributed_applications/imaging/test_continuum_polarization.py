@@ -91,6 +91,23 @@ def processing_sets(tmp_path_factory):
     flag[:] = flag_values
     zarr.consolidate_metadata(stores["four_cross_hand_flagged"], path=ms_name)
     zarr.consolidate_metadata(stores["four_cross_hand_flagged"])
+
+    # Derive the parallel-hand flag cases from the same simulated visibilities.
+    # A sample with either loaded hand flagged must be omitted from both hands.
+    for name, correlation_selection in (
+        ("one_parallel_hand_flagged", [0]),
+        ("both_parallel_hands_flagged", [0, 1]),
+    ):
+        stores[name] = str(work_dir / f"{name}.ps.zarr")
+        shutil.copytree(stores["two_hands"], stores[name])
+        root = zarr.open_group(stores[name], mode="r+", use_consolidated=False)
+        (ms_name,) = list(root.group_keys())
+        flag = root[ms_name]["FLAG"]
+        flag_values = np.asarray(flag[:])
+        flag_values[0, :, :, correlation_selection] = True
+        flag[:] = flag_values
+        zarr.consolidate_metadata(stores[name], path=ms_name)
+        zarr.consolidate_metadata(stores[name])
     return stores
 
 
@@ -120,6 +137,7 @@ def _image(
     every run gets its own copy; afterwards the copy must hold exactly what it
     held before.
     """
+    tmp_path.mkdir(parents=True, exist_ok=True)
     ps_store = str(tmp_path / "input.ps.zarr")
     shutil.rmtree(ps_store, ignore_errors=True)
     shutil.copytree(pristine_store, ps_store)
@@ -300,6 +318,76 @@ def test_parallel_hands_are_loaded_alone(
         assert np.isfinite(img[variable].values).all(), variable
         np.testing.assert_array_equal(
             img[variable].values, reference[variable].values, err_msg=variable
+        )
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_single_task_visibility_cache_modes_match_driver_default(
+    tmp_path, processing_sets, continuum_mode
+):
+    """One-leaf in-memory and on-disk caches reproduce default recomputation."""
+    images = {}
+    stores = {}
+    for mode in ("recompute", "in_memory", "in_place"):
+        options = {} if mode == "recompute" else {"visibility_memory_mode": mode}
+        stores[mode] = _image(
+            tmp_path / mode,
+            processing_sets["two_hands"],
+            ["I", "Q"],
+            continuum_mode=continuum_mode,
+            max_iter=2,
+            **options,
+        )
+        images[mode] = load_image(stores[mode])
+
+    for mode in ("in_memory", "in_place"):
+        for variable in ("SKY_RESIDUAL", "SKY_MODEL", "POINT_SPREAD_FUNCTION"):
+            np.testing.assert_allclose(
+                images[mode][variable],
+                images["recompute"][variable],
+                rtol=1e-5,
+                atol=5e-6,
+            )
+        cache_name = (
+            "_MFS_VISIBILITY_GRID_CACHE"
+            if continuum_mode == "mfs"
+            else "_MVC_VISIBILITY_GRID_CACHE"
+        )
+        assert cache_name not in zarr.open_group(stores[mode])
+
+
+def test_primary_beam_correction_requires_restoration(tmp_path, processing_sets):
+    """The public driver rejects PB correction without a restored image."""
+    with pytest.raises(ValueError, match="requires restore=True"):
+        _image(
+            tmp_path,
+            processing_sets["two_hands"],
+            ["I", "Q"],
+            primary_beam_correction=True,
+        )
+    assert [path.name for path in tmp_path.iterdir()] == ["input.ps.zarr"]
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_one_flagged_parallel_hand_drops_the_whole_sample(
+    tmp_path, processing_sets, continuum_mode
+):
+    """Flagging one loaded hand is equivalent to flagging both loaded hands."""
+    images = {}
+    for layout in ("one_parallel_hand_flagged", "both_parallel_hands_flagged"):
+        images[layout] = load_image(
+            _image(
+                tmp_path / layout,
+                processing_sets[layout],
+                ["I", "Q"],
+                continuum_mode=continuum_mode,
+            )
+        )
+
+    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+        np.testing.assert_array_equal(
+            images["one_parallel_hand_flagged"][variable],
+            images["both_parallel_hands_flagged"][variable],
         )
 
 
