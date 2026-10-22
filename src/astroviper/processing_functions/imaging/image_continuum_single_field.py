@@ -2642,10 +2642,15 @@ def model_update_mtmfs_single_field(
 
     T_make_hogbom_view = time.time() - start
 
-    # Convert to real numbers
-    hogbom_xds[residual_name] = hogbom_xds[residual_name].real.astype(np.float32)
-    hogbom_xds[psf_name] = hogbom_xds[psf_name].real.astype(np.float32)
-    hogbom_xds[model_name] = hogbom_xds[model_name].real.astype(np.float32)
+    # Högbom operates on real arrays but supports both image precisions. Match
+    # the residual precision throughout and avoid copying arrays already in the
+    # required real dtype.
+    float_dtype = hogbom_xds[residual_name].real.dtype
+    hogbom_xds[residual_name] = hogbom_xds[residual_name].real.astype(
+        float_dtype, copy=False
+    )
+    hogbom_xds[psf_name] = hogbom_xds[psf_name].real.astype(float_dtype, copy=False)
+    hogbom_xds[model_name] = hogbom_xds[model_name].real.astype(float_dtype, copy=False)
 
     # ------------------------------------------------------------------
     # Run the existing single-frequency Högbom model-update backend.

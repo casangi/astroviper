@@ -544,6 +544,43 @@ def test_hogbom_model_update_does_not_leak_temporary_mask_metadata(monkeypatch):
     assert "SKY_MODEL" in image
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_hogbom_model_update_preserves_image_precision(monkeypatch, dtype):
+    """Högbom receives and returns the configured image precision unchanged."""
+    image = make_continuum_image()
+    for name in ("SKY_MODEL", "SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+        image[name] = image[name].astype(dtype)
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+        ("time", "polarization"),
+        np.asarray([[0.2]], dtype=dtype),
+    )
+    value = dtype(0.12345678901234568)
+    received_dtypes = []
+
+    def hogbom_backend(hogbom_image, *args, **kwargs):
+        received_dtypes.append(
+            (
+                hogbom_image.SKY_RESIDUAL.dtype,
+                hogbom_image.POINT_SPREAD_FUNCTION.dtype,
+                hogbom_image.SKY_MODEL.dtype,
+            )
+        )
+        hogbom_image.SKY_MODEL.data[...] = value
+        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.model_update."
+        "model_update_cube_single_field",
+        hogbom_backend,
+    )
+
+    model_update_mtmfs_single_field(image, "hogbom", {"max_iter": 1})
+
+    assert received_dtypes == [(dtype, dtype, dtype)]
+    assert image.SKY_MODEL.dtype == dtype
+    np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=0), value)
+
+
 def test_restoration_reports_incomplete_backend_result(monkeypatch):
     module = importlib.import_module("astroviper.processing_functions.imaging.restore")
 
