@@ -6,8 +6,8 @@ preserve its products. Different algorithm configurations need not agree.
 """
 
 from pathlib import Path
+from shutil import copytree
 from tempfile import TemporaryDirectory
-from zipfile import ZipFile
 
 import dask
 import numpy as np
@@ -19,12 +19,11 @@ from astroviper.distributed_applications.imaging import image_continuum_single_f
 
 
 @pytest.fixture
-def continuum_input(tmp_path, tw_hydra_archive):
+def continuum_input(tmp_path, tw_hydra_source_store):
     with TemporaryDirectory(prefix="continuum_input_", dir=tmp_path) as directory:
         input_directory = Path(directory)
-        with ZipFile(tw_hydra_archive) as archive:
-            archive.extractall(input_directory)
         store = input_directory / "twhya_selfcal_lsrk_5chans.ps.zarr"
+        copytree(tw_hydra_source_store, store)
         processing_set = open_processing_set(str(store))
         fields = processing_set.xr_ps.get_combined_field_and_source_xds()
         frequency = processing_set.xr_ps.get_freq_axis().values

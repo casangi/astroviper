@@ -223,11 +223,12 @@ remeasured for this storage patch.
 
 ## External input and primary-beam references
 
-TW Hydra is downloaded once per session by `tw_hydra_archive` from Google
-Drive file `1BRe3cD6YAWkn-jSPbClGGM9VlbxHP_yn`, shared with the cube notebook
-and cube component tests. Tests extract separate writable copies. The archive
-is deleted at session teardown, and extracted fixture inputs are deleted at
-their test/module teardown, including on failures. Generated test outputs
+TW Hydra is downloaded once per session by `tw_hydra_source_store` through
+ToolVIPER's managed data manifest and Cloudflare-backed data service. Continuum
+tests create separate writable directory copies of the unpacked processing set.
+The shared download is deleted at session teardown, and copied fixture inputs
+are deleted at their test/module teardown, including on failures. The cube
+component tests use the same ToolVIPER download path. Generated test outputs
 remain subject to pytest's normal temporary-directory retention.
 
 Primary-beam tests embed small tables of independent CASA output values;

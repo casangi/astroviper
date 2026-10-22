@@ -11,7 +11,6 @@ import shutil
 import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from zipfile import ZipFile
 
 import dask
 import numpy as np
@@ -184,15 +183,15 @@ def test_exact_frequency_selection_rejects_unassigned_child_channels():
 
 
 @pytest.fixture(scope="module")
-def tw_hydra_store(tmp_path_factory, tw_hydra_archive):
-    """Extract a writable copy of the downloaded TW Hydra processing set."""
+def tw_hydra_store(tmp_path_factory, tw_hydra_source_store):
+    """Create a writable copy of the downloaded TW Hydra processing set."""
     with TemporaryDirectory(
         prefix="tw_hydra_continuum_", dir=tmp_path_factory.getbasetemp()
     ) as directory:
         fixture_directory = Path(directory)
-        with ZipFile(tw_hydra_archive) as archive:
-            archive.extractall(fixture_directory)
-        yield fixture_directory / TW_HYDRA_STORE_NAME
+        store = fixture_directory / TW_HYDRA_STORE_NAME
+        shutil.copytree(tw_hydra_source_store, store)
+        yield store
 
 
 @pytest.fixture(scope="module")
