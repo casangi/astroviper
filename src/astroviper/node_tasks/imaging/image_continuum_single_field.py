@@ -1,13 +1,31 @@
+from astroviper.utils.continuum_cache import (
+    CONTINUUM_WEIGHT_CACHE_GROUP as _CONTINUUM_WEIGHT_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    CONTINUUM_WEIGHT_CACHE_VARIABLE as _CONTINUUM_WEIGHT_CACHE_VARIABLE,
+)
+from astroviper.utils.continuum_cache import (
+    MFS_VISIBILITY_GRID_CACHE_GROUP as _MFS_VISIBILITY_GRID_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    MVC_OBSERVED_NORMALIZATION_CACHE as _MVC_OBSERVED_NORMALIZATION_CACHE,
+)
+from astroviper.utils.continuum_cache import (
+    MVC_OBSERVED_VISIBILITY_CACHE as _MVC_OBSERVED_VISIBILITY_CACHE,
+)
+from astroviper.utils.continuum_cache import (
+    MVC_VISIBILITY_GRID_CACHE_GROUP as _MVC_VISIBILITY_GRID_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    WIDEBAND_PRIMARY_BEAM_CACHE_GROUP as _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE as _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+)
 from astroviper.utils.param_docs import shares_param_docs
-
-_CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
-_CONTINUUM_WEIGHT_CACHE_GROUP = "_CONTINUUM_WEIGHT_CACHE"
-_MFS_VISIBILITY_GRID_CACHE_GROUP = "_MFS_VISIBILITY_GRID_CACHE"
-_MVC_VISIBILITY_GRID_CACHE_GROUP = "_MVC_VISIBILITY_GRID_CACHE"
-_MVC_OBSERVED_VISIBILITY_CACHE = "_MVC_OBSERVED_VISIBILITY_CACHE"
-_MVC_OBSERVED_NORMALIZATION_CACHE = "_MVC_OBSERVED_NORMALIZATION_CACHE"
-_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
-_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
+from astroviper.utils.task_logging import (
+    write_task_kill_switch_log as _write_task_kill_switch_log,
+)
 
 ###############################################################################
 # Generic helper functions
@@ -65,46 +83,6 @@ def _add_task_execution_metadata(timing_df, task_start):
         timing_df["worker_name"] = str(get_worker().name)
     except Exception:
         timing_df["worker_name"] = None
-
-
-def _write_task_kill_switch_log(
-    timing_df, task_total_time, threshold, image_store, task_id, hostname
-):
-    """Dump an overrunning node task's full timing breakdown to an error log file.
-
-    Written next to the image store (its parent directory), best-effort. Returns
-    the path written (or a placeholder string if writing failed). Used by the
-    ``task_time_kill_switch_seconds`` watchdog before it raises to abort the run.
-
-    ``image_store`` determines the log directory.
-    """
-    import os
-    import time as _time
-
-    try:
-        parent = os.path.dirname(os.path.abspath(image_store)) or "."
-        stamp = _time.strftime("%Y%m%d_%H%M%S")
-        pid = os.getpid()
-        path = os.path.join(
-            parent, f"KILL_SWITCH_task_{task_id}_{hostname}_{pid}_{stamp}.log"
-        )
-        lines = [
-            "TASK TIME KILL SWITCH TRIPPED",
-            f"task_id: {task_id}",
-            f"hostname: {hostname}",
-            f"pid: {pid}",
-            f"task wall time: {task_total_time:.2f} s   (threshold: {threshold} s)",
-            f"image_store: {image_store}",
-            "",
-            "per-task timing breakdown:",
-            timing_df.to_string(index=False),
-        ]
-        with open(path, "w") as fh:
-            fh.write("\n".join(str(line) for line in lines) + "\n")
-        return path
-    except Exception as exc:
-        # Never allow logging failure to mask the kill-switch exception.
-        return f"(failed to write kill-switch log: {exc!r})"
 
 
 def _stored_coordinate_indexer(stored_values, selected_values, dimension):
@@ -3049,10 +3027,10 @@ def continuum_finalize_node(
     # restore
     if input_params.get("restore", False):
         from astroviper.processing_functions.imaging.image_continuum_single_field import (
-            restore_image,
+            restore_continuum_image,
         )
 
-        img_xds, restore_timing_df = restore_image(
+        img_xds, restore_timing_df = restore_continuum_image(
             img_xds,
             image_data_group_in_residual_name=(
                 input_params.get(

@@ -2267,7 +2267,7 @@ def test_tw_hydra_alternate_reduction_and_direct_io(
 
 
 def test_chunk_count_respects_override_and_calculates_when_absent(monkeypatch):
-    """Explicit chunking is retained; automatic chunking uses image memory."""
+    """Automatic chunking separates channel scratch from Taylor-grid memory."""
     image = xr.Dataset(
         coords={
             "time": [0],
@@ -2278,16 +2278,36 @@ def test_chunk_count_respects_override_and_calculates_when_absent(monkeypatch):
         }
     )
     assert calculate_number_of_chunks_for_continuum_imaging(image, True, 7, {}) == 7
+    call = {}
+
+    def chunking(memory_per_frequency, sizes, thread_info, **kwargs):
+        call.update(
+            memory_per_frequency=memory_per_frequency,
+            sizes=sizes,
+            thread_info=thread_info,
+            **kwargs,
+        )
+        return {"frequency": 2}
+
     monkeypatch.setattr(
-        "astroviper.utils.data_partitioning.calculate_data_chunking",
-        lambda *args, **kwargs: {"frequency": 2},
+        "astroviper.utils.data_partitioning.calculate_data_chunking", chunking
     )
     assert (
         calculate_number_of_chunks_for_continuum_imaging(
-            image, False, None, {"n_threads": 1}
+            image,
+            False,
+            None,
+            {"n_threads": 1, "memory_per_thread": 8.0},
+            nterms=3,
+            n_correlations=4,
+            fft_padding=1.2,
         )
         == 2
     )
+    assert call["sizes"] == {"frequency": 2}
+    assert call["memory_per_frequency"] > 0
+    assert call["constant_memory"] > 0
+    assert call["tasks_per_thread"] == 4
 
 
 @pytest.mark.parametrize(
@@ -2465,7 +2485,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     )
 
     original_update = processing.model_update_mtmfs_single_field
-    original_restore = processing.restore_image
+    original_restore = processing.restore_continuum_image
     events = []
 
     def optimistic_update(*args, **kwargs):
@@ -2487,7 +2507,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     monkeypatch.setattr(
         processing, "model_update_mtmfs_single_field", optimistic_update
     )
-    monkeypatch.setattr(processing, "restore_image", counted_restore)
+    monkeypatch.setattr(processing, "restore_continuum_image", counted_restore)
     processing_set = open_processing_set(str(tw_hydra_store))
     result, image = _run_tw_hydra_continuum(
         tw_hydra_store,

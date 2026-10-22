@@ -1,7 +1,40 @@
+from astroviper.utils.continuum_cache import (
+    MVC_OBSERVED_NORMALIZATION_CACHE as _MVC_OBSERVED_NORMALIZATION_CACHE,
+)
+from astroviper.utils.continuum_cache import (
+    MVC_OBSERVED_VISIBILITY_CACHE as _MVC_OBSERVED_VISIBILITY_CACHE,
+)
 from astroviper.utils.param_docs import shares_param_docs
 
-_MVC_OBSERVED_VISIBILITY_CACHE = "_MVC_OBSERVED_VISIBILITY_CACHE"
-_MVC_OBSERVED_NORMALIZATION_CACHE = "_MVC_OBSERVED_NORMALIZATION_CACHE"
+
+def _continuum_frequency_coord(img_xds):
+    """Return the canonical singleton frequency coordinate for Taylor products."""
+    import numpy as np
+
+    continuum_metadata = img_xds.attrs.get("continuum_imaging", {})
+    reference_frequency = continuum_metadata.get("reference_frequency_hz")
+    if reference_frequency is None:
+        reference_frequency = img_xds.attrs.get("reference_frequency_hz")
+    if reference_frequency is None:
+        reference_frequency = img_xds.attrs.get("reference_frequency")
+    if reference_frequency is None and img_xds.sizes.get("frequency", 0) > 0:
+        reference_frequency = np.asarray(img_xds.frequency.values).reshape(-1)[0]
+    if reference_frequency is None:
+        reference_frequency = 0.0
+    return np.asarray([float(reference_frequency)], dtype=np.float64)
+
+
+def _continuum_plane_to_frequency(img_xds, data_array, plane_dimension):
+    """Project plane zero of a Taylor axis onto one canonical frequency plane."""
+    frequency_coord = _continuum_frequency_coord(img_xds)
+    plane = data_array.isel({plane_dimension: 0}, drop=True)
+    if "frequency" in plane.dims:
+        if plane.sizes["frequency"] != 1:
+            plane = plane.isel(frequency=0, drop=False)
+        return plane.assign_coords(frequency=frequency_coord)
+    axis = plane.dims.index("time") + 1 if "time" in plane.dims else 0
+    return plane.expand_dims(frequency=frequency_coord, axis=axis)
+
 
 ###############################################################################
 # Imaging setup and PSF beam fitting
@@ -182,7 +215,6 @@ def point_spread_function_gaussian_fit_continuum(
     import time
     from copy import deepcopy
 
-    import numpy as np
     import pandas as pd
     import xarray as xr
 
@@ -240,39 +272,7 @@ def point_spread_function_gaussian_fit_continuum(
             f"{sorted(missing_psf_dims)}. Found dimensions {psf_da.dims}."
         )
 
-    # ------------------------------------------------------------------
-    # Select the globally reduced zeroth-order PSF.
-    # ------------------------------------------------------------------
-    psf0_da = psf_da.isel(psf_taylor_order=0, drop=True)
-
-    # The numerical frequency value is not used by the fit itself, but the
-    # cube routine requires a one-element frequency coordinate.
-    continuum_metadata = img_xds.attrs.get("continuum_imaging", {})
-
-    if "reference_frequency_hz" in continuum_metadata:
-        reference_frequency_hz = float(continuum_metadata["reference_frequency_hz"])
-    elif "frequency" in img_xds.coords and img_xds.frequency.size > 0:
-        reference_frequency_hz = float(
-            np.asarray(img_xds.frequency.values).reshape(-1)[0]
-        )
-    else:
-        # This is only a coordinate label for the temporary cube.
-        reference_frequency_hz = 0.0
-
-    frequency_coord = np.asarray(
-        [reference_frequency_hz],
-        dtype=np.float64,
-    )
-
-    cube_psf_da = psf0_da.expand_dims(
-        frequency=frequency_coord,
-    ).transpose(
-        "time",
-        "frequency",
-        "polarization",
-        "l",
-        "m",
-    )
+    cube_psf_da = _continuum_plane_to_frequency(img_xds, psf_da, "psf_taylor_order")
 
     # ------------------------------------------------------------------
     # Build a minimal, one-frequency cube dataset.
@@ -2449,14 +2449,7 @@ def model_update_mtmfs_single_field(
     # whereas the continuum products use Taylor dimensions.
     # ------------------------------------------------------------------
 
-    if "frequency" in img_xds.coords and img_xds.sizes.get("frequency", 0) > 0:
-        frequency_coord = np.atleast_1d(img_xds.coords["frequency"].values)[:1]
-    elif "reference_frequency" in img_xds.attrs:
-        frequency_coord = np.atleast_1d(img_xds.attrs["reference_frequency"])
-    else:
-        # The numerical value is irrelevant to Högbom CLEAN. The singleton
-        # dimension exists only to satisfy the cube image interface.
-        frequency_coord = np.asarray([0.0], dtype=np.float64)
+    frequency_coord = _continuum_frequency_coord(img_xds)
 
     hogbom_xds = xr.Dataset(attrs=dict(img_xds.attrs))
 
@@ -2470,28 +2463,6 @@ def model_update_mtmfs_single_field(
             hogbom_xds = hogbom_xds.assign_coords({coord_name: coord.copy(deep=False)})
 
     hogbom_xds = hogbom_xds.assign_coords(frequency=("frequency", frequency_coord))
-
-    def _to_single_frequency(data_array, plane_dimension):
-        """Select plane zero and insert a singleton frequency dimension."""
-        plane = data_array.isel({plane_dimension: 0}, drop=True)
-
-        if "frequency" in plane.dims:
-            if plane.sizes["frequency"] != 1:
-                plane = plane.isel(frequency=0, drop=False)
-
-            return plane.assign_coords(frequency=frequency_coord)
-
-        # Insert frequency immediately after time to preserve the conventional
-        # image dimension ordering.
-        if "time" in plane.dims:
-            axis = plane.dims.index("time") + 1
-        else:
-            axis = 0
-
-        return plane.expand_dims(
-            frequency=frequency_coord,
-            axis=axis,
-        )
 
     # Copy Taylor-dependent variables into the temporary cube layout.
     max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
@@ -2515,9 +2486,8 @@ def model_update_mtmfs_single_field(
                 )
 
             elif "psf_taylor_order" in data_array.dims:
-                hogbom_xds[variable_name] = _to_single_frequency(
-                    data_array,
-                    "psf_taylor_order",
+                hogbom_xds[variable_name] = _continuum_plane_to_frequency(
+                    img_xds, data_array, "psf_taylor_order"
                 )
 
             elif "frequency" in data_array.dims:
@@ -2531,15 +2501,13 @@ def model_update_mtmfs_single_field(
                 )
 
         elif "taylor_term" in data_array.dims:
-            hogbom_xds[variable_name] = _to_single_frequency(
-                data_array,
-                "taylor_term",
+            hogbom_xds[variable_name] = _continuum_plane_to_frequency(
+                img_xds, data_array, "taylor_term"
             )
 
         elif "psf_taylor_order" in data_array.dims:
-            hogbom_xds[variable_name] = _to_single_frequency(
-                data_array,
-                "psf_taylor_order",
+            hogbom_xds[variable_name] = _continuum_plane_to_frequency(
+                img_xds, data_array, "psf_taylor_order"
             )
 
         elif "frequency" in data_array.dims:
@@ -2757,7 +2725,7 @@ def accumulate_continuum_model(
 ###############################################################################
 
 
-def restore_image(
+def restore_continuum_image(
     img_xds,
     image_data_group_in_residual_name="residual",
     image_data_group_in_model_name="model",
@@ -2851,7 +2819,6 @@ def restore_image(
 
     import copy
 
-    import numpy as np
     import xarray as xr
 
     # Alias the existing cube routine to avoid colliding with this wrapper.
@@ -2987,48 +2954,27 @@ def restore_image(
 
         cube_xds = cube_xds.assign_coords({coord_name: coord.copy(deep=False)})
 
-    # The numerical frequency value is not used by restoration, but use the
-    # reference frequency when it is available to preserve meaningful metadata.
-    reference_frequency = img_xds.attrs.get("reference_frequency") or img_xds.attrs.get(
-        "reference_frequency_hz"
-    )
-
-    if reference_frequency is None:
-        frequency_value = np.asarray([0.0], dtype=np.float64)
-    else:
-        frequency_value = np.asarray(
-            [float(reference_frequency)],
-            dtype=np.float64,
-        )
-
+    frequency_value = _continuum_frequency_coord(img_xds)
     cube_xds = cube_xds.assign_coords(frequency=("frequency", frequency_value))
 
-    def _taylor_zero_to_frequency(data_array):
-        """Convert Taylor term zero into a singleton frequency plane."""
-        return (
-            data_array.isel(taylor_term=slice(0, 1))
-            .rename({"taylor_term": "frequency"})
-            .assign_coords(frequency=cube_xds.coords["frequency"])
-        )
-
-    cube_xds[residual_name] = _taylor_zero_to_frequency(residual_da)
-    cube_xds[model_name] = _taylor_zero_to_frequency(model_da)
+    cube_xds[residual_name] = _continuum_plane_to_frequency(
+        img_xds, residual_da, "taylor_term"
+    )
+    cube_xds[model_name] = _continuum_plane_to_frequency(
+        img_xds, model_da, "taylor_term"
+    )
 
     if "psf_taylor_order" in psf_da.dims:
         if psf_da.sizes["psf_taylor_order"] < 1:
             raise ValueError(f"PSF variable {psf_name!r} contains no Taylor orders.")
 
-        cube_xds[psf_name] = (
-            psf_da.isel(psf_taylor_order=slice(0, 1))
-            .rename({"psf_taylor_order": "frequency"})
-            .assign_coords(frequency=cube_xds.coords["frequency"])
+        cube_xds[psf_name] = _continuum_plane_to_frequency(
+            img_xds, psf_da, "psf_taylor_order"
         )
 
     elif "taylor_term" in psf_da.dims:
-        cube_xds[psf_name] = (
-            psf_da.isel(taylor_term=slice(0, 1))
-            .rename({"taylor_term": "frequency"})
-            .assign_coords(frequency=cube_xds.coords["frequency"])
+        cube_xds[psf_name] = _continuum_plane_to_frequency(
+            img_xds, psf_da, "taylor_term"
         )
 
     elif "frequency" in psf_da.dims:

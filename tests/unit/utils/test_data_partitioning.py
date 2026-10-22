@@ -8,7 +8,10 @@ import pytest
 import xarray as xr
 from graphviper.graph_tools.coordinate_utils import make_parallel_coord
 
-from astroviper.utils.data_partitioning import calculate_data_chunking
+from astroviper.utils.data_partitioning import (
+    calculate_data_chunking,
+    calculate_frequency_chunking,
+)
 
 # The simulated observation of tests/component/test_point_source_flux_recovery.py
 FLUX_RECOVERY_DIMS_SIZES = {"time": 48, "frequency": 5}
@@ -84,3 +87,47 @@ def test_every_target_on_small_axes():
         for n_chunks_target in range(1, math.prod(sizes) + 1):
             n_chunks_dict = graph_chunking(chunking_dims_sizes, n_chunks_target, 1)
             check_chunking(chunking_dims_sizes, n_chunks_dict, n_chunks_target)
+
+
+def test_calculate_frequency_chunking_accounts_for_constant_memory(monkeypatch):
+    """The shared frequency helper forwards fixed and per-channel allocations."""
+    call = {}
+
+    def chunking(memory_per_frequency, sizes, thread_info, **kwargs):
+        call.update(
+            memory_per_frequency=memory_per_frequency,
+            sizes=sizes,
+            thread_info=thread_info,
+            **kwargs,
+        )
+        return {"frequency": 3}
+
+    monkeypatch.setattr(
+        "astroviper.utils.data_partitioning.calculate_data_chunking", chunking
+    )
+    assert (
+        calculate_frequency_chunking(
+            12,
+            0.25,
+            1.5,
+            None,
+            {"n_threads": 2, "memory_per_thread": 4.0},
+        )
+        == 3
+    )
+    assert call == {
+        "memory_per_frequency": 0.25,
+        "sizes": {"frequency": 12},
+        "thread_info": {"n_threads": 2, "memory_per_thread": 4.0},
+        "constant_memory": 1.5,
+        "tasks_per_thread": 4,
+    }
+
+
+def test_calculate_frequency_chunking_keeps_explicit_override(monkeypatch):
+    """An explicit task count does not query cluster state or memory."""
+    monkeypatch.setattr(
+        "astroviper.utils.data_partitioning.get_thread_info",
+        lambda: pytest.fail("explicit chunking must not inspect the cluster"),
+    )
+    assert calculate_frequency_chunking(12, 0.25, 1.5, 7) == 7

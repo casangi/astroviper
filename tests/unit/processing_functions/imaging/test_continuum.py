@@ -27,7 +27,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     prepare_model_uv_continuum_single_field,
     prepare_model_uv_mvc_single_field,
     residual_update_continuum_single_field,
-    restore_image,
+    restore_continuum_image,
 )
 from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
     _convert_primary_beam_to_reference_frequency,
@@ -261,7 +261,7 @@ def test_primary_beam_correction_returns_restored_taylor_zero_only():
     residual = image.SKY_RESIDUAL.isel(taylor_term=0).values.copy()
     beam = image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
 
-    result, _ = restore_image(
+    result, _ = restore_continuum_image(
         image,
         primary_beam_correction=True,
         primary_beam_limit=0.2,

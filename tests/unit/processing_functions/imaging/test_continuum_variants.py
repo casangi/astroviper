@@ -13,7 +13,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     build_continuum_residual_imaging_dict,
     convert_mvc_cubes_to_taylor_normal_equations,
     model_update_mtmfs_single_field,
-    restore_image,
+    restore_continuum_image,
 )
 from astroviper.processing_functions.imaging.utils import ImagingDict
 from tests.utils.continuum_images import (
@@ -104,8 +104,8 @@ def _native_mtmfs_continuum_image(nterms, shape, dtype, support_kind):
 def test_restoration_layouts_match_actual_cube_backend(psf_axis, beam_axis, legacy):
     image = make_continuum_image(psf_axis, beam_axis, legacy)
     snapshot = image.copy(deep=True)
-    reference, _ = restore_image(make_continuum_image())
-    result, _ = restore_image(image)
+    reference, _ = restore_continuum_image(make_continuum_image())
+    result, _ = restore_continuum_image(image)
     xr.testing.assert_allclose(result.SKY_RESTORED, reference.SKY_RESTORED)
     xr.testing.assert_identical(result.SKY_MODEL, snapshot.SKY_MODEL)
     xr.testing.assert_identical(result.SKY_RESIDUAL, snapshot.SKY_RESIDUAL)
@@ -121,7 +121,7 @@ def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype
         image[name] = image[name].astype(dtype)
     snapshot = image.copy(deep=True)
 
-    result, timing = restore_image(image, primary_beam_correction=True)
+    result, timing = restore_continuum_image(image, primary_beam_correction=True)
 
     assert result.SKY_RESTORED.sizes["l"] == image_shape[0]
     assert result.SKY_RESTORED.sizes["m"] == image_shape[1]
@@ -504,7 +504,7 @@ def test_restoration_reports_incomplete_backend_result(monkeypatch):
 
     monkeypatch.setattr(module, "restore_image", broken_restore)
     with pytest.raises(RuntimeError, match="did not create"):
-        restore_image(make_continuum_image())
+        restore_continuum_image(make_continuum_image())
 
 
 @pytest.mark.parametrize(
@@ -520,7 +520,7 @@ def test_restoration_rejects_remaining_invalid_layouts(fault, message):
             image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.isel(polarization=0, drop=True)
         )
     with pytest.raises(ValueError, match=message):
-        restore_image(image)
+        restore_continuum_image(image)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -540,7 +540,7 @@ def test_pb_correction_cutoff_includes_exact_boundary(dtype):
         coords={key: image.coords[key] for key in ("time", "polarization", "l", "m")},
     )
 
-    result, _ = restore_image(
+    result, _ = restore_continuum_image(
         image,
         primary_beam_correction=True,
         primary_beam_limit=float(limit),

@@ -1,41 +1,7 @@
 from astroviper.utils.param_docs import shares_param_docs
-
-
-def _write_task_kill_switch_log(
-    timing_df, task_total_time, threshold, image_store, task_id, hostname
-):
-    """Dump an overrunning node task's full timing breakdown to an error log file.
-
-    Written next to the image store (its parent directory), best-effort. Returns
-    the path written (or a placeholder string if writing failed). Used by the
-    ``task_time_kill_switch_seconds`` watchdog before it raises to abort the run.
-    """
-    import os
-    import time as _time
-
-    try:
-        parent = os.path.dirname(os.path.abspath(image_store)) or "."
-        stamp = _time.strftime("%Y%m%d_%H%M%S")
-        pid = os.getpid()
-        path = os.path.join(
-            parent, f"KILL_SWITCH_task_{task_id}_{hostname}_{pid}_{stamp}.log"
-        )
-        lines = [
-            "TASK TIME KILL SWITCH TRIPPED",
-            f"task_id: {task_id}",
-            f"hostname: {hostname}",
-            f"pid: {pid}",
-            f"task wall time: {task_total_time:.2f} s   (threshold: {threshold} s)",
-            f"image_store: {image_store}",
-            "",
-            "per-task timing breakdown:",
-            timing_df.to_string(index=False),
-        ]
-        with open(path, "w") as fh:
-            fh.write("\n".join(str(ln) for ln in lines) + "\n")
-        return path
-    except Exception as exc:  # never let logging failure mask the kill-switch raise
-        return f"(failed to write kill-switch log: {exc!r})"
+from astroviper.utils.task_logging import (
+    write_task_kill_switch_log as _write_task_kill_switch_log,
+)
 
 
 def _log_task_io_failure(phase, exc, task_id, image_store, data_selection, task_coords):

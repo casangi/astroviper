@@ -10,7 +10,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     make_mvc_taylor_normal_equation_contributions,
     model_update_mtmfs_single_field,
     point_spread_function_gaussian_fit_continuum,
-    restore_image,
+    restore_continuum_image,
 )
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
@@ -70,7 +70,7 @@ def test_restore_rejects_invalid_model_or_residual(group, fault, message):
     with pytest.raises(
         ValueError if fault in ("dimension", "empty") else KeyError, match=message
     ):
-        restore_image(image)
+        restore_continuum_image(image)
     xr.testing.assert_identical(image, snapshot)
 
 
@@ -89,7 +89,7 @@ def test_restore_rejects_missing_registered_or_fallback_products(
     if not registered:
         del image.attrs["data_groups"]["residual"][role]
     with pytest.raises(KeyError, match="absent|missing"):
-        restore_image(image)
+        restore_continuum_image(image)
 
 
 @pytest.mark.parametrize(

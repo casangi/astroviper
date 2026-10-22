@@ -1645,21 +1645,16 @@ def calculate_mapping_parallelism_for_cube_imaging(
         chunking_dims_sizes = {
             "frequency": img_xds.sizes["frequency"]
         }  # Need to know how many frequency channels there are.
-        from astroviper.utils.data_partitioning import (
-            calculate_data_chunking,
-            get_thread_info,
-        )
+        from astroviper.utils.data_partitioning import calculate_frequency_chunking
 
-        if thread_info is None:
-            thread_info = get_thread_info()
-            logger.info("Thread info " + str(thread_info))
-        n_frequency_chunks = calculate_data_chunking(
+        n_frequency_chunks = calculate_frequency_chunking(
+            img_xds.sizes["frequency"],
             memory_singleton_chunk,
-            chunking_dims_sizes,
-            thread_info,
             constant_memory=0,
+            n_chunks=None,
+            thread_info=thread_info,
             tasks_per_thread=4,
-        )["frequency"]
+        )
         logger.info(
             "Auto-determined mapping parallelism (number of frequency "
             "chunks): "

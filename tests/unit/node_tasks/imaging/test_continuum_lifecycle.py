@@ -38,14 +38,14 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
         assert kwargs["initialize_static_products"] is False
         return data, xr.Dataset(), None
 
-    original_restore = processing.restore_image
+    original_restore = processing.restore_continuum_image
 
     def restore_once(data, **kwargs):
         calls.append("restore")
         return original_restore(data, **kwargs)
 
     monkeypatch.setattr(node, "_prepare_continuum_image", prepare)
-    monkeypatch.setattr(processing, "restore_image", restore_once)
+    monkeypatch.setattr(processing, "restore_continuum_image", restore_once)
     result = node.continuum_finalize_node(
         {"image": image},
         {

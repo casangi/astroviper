@@ -10,7 +10,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     finalize_mvc_taylor_normal_equations,
     form_residual_grid_from_cache,
     make_mvc_taylor_normal_equation_contributions,
-    restore_image,
+    restore_continuum_image,
 )
 from tests.utils.continuum_images import make_continuum_image
 
@@ -257,7 +257,7 @@ def test_pb_correction_rejects_invalid_final_products(fault):
     elif fault == "unit_limit":
         pblimit = 1.0
     with pytest.raises(KeyError if fault.startswith("missing") else ValueError):
-        restore_image(
+        restore_continuum_image(
             image,
             primary_beam_correction=True,
             primary_beam_limit=pblimit,

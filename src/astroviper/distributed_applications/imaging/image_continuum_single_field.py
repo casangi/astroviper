@@ -16,6 +16,24 @@ import astroviper.node_tasks as node_tasks
 from astroviper.node_tasks.imaging.image_continuum_single_field import (
     _prepare_continuum_result_for_transfer,
 )
+from astroviper.utils.continuum_cache import (
+    CONTINUUM_WEIGHT_CACHE_GROUP as _CONTINUUM_WEIGHT_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    CONTINUUM_WEIGHT_CACHE_VARIABLE as _CONTINUUM_WEIGHT_CACHE_VARIABLE,
+)
+from astroviper.utils.continuum_cache import (
+    MFS_VISIBILITY_GRID_CACHE_GROUP as _MFS_VISIBILITY_GRID_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    MVC_VISIBILITY_GRID_CACHE_GROUP as _MVC_VISIBILITY_GRID_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    WIDEBAND_PRIMARY_BEAM_CACHE_GROUP as _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE as _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+)
 from astroviper.utils.param_docs import shares_param_docs
 
 _PARAM_CONFIG_DIR = os.path.dirname(__file__)
@@ -44,21 +62,20 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
-_CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
-_CONTINUUM_WEIGHT_CACHE_GROUP = "_CONTINUUM_WEIGHT_CACHE"
-_MFS_VISIBILITY_GRID_CACHE_GROUP = "_MFS_VISIBILITY_GRID_CACHE"
-_MVC_VISIBILITY_GRID_CACHE_GROUP = "_MVC_VISIBILITY_GRID_CACHE"
-_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
-_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
-
 
 def _make_continuum_cycle_controller(cycle_control_params):
     """Build the shared controller with every continuum cycle control option."""
-    from astroviper.processing_functions.imaging.utils import CycleController
+    from astroviper.processing_functions.imaging.utils import (
+        CycleController,
+        validate_entropy_params,
+    )
     from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
         THRESHOLD_TOLERANCE,
     )
 
+    entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
+        validate_entropy_params(cycle_control_params)
+    )
     return CycleController(
         max_iter=cycle_control_params["max_iter"],
         max_cycles=cycle_control_params["max_cycles"],
@@ -69,10 +86,10 @@ def _make_continuum_cycle_controller(cycle_control_params):
         min_psf_fraction=cycle_control_params["min_psf_fraction"],
         max_psf_fraction=cycle_control_params["max_psf_fraction"],
         max_iter_per_cycle=cycle_control_params["max_iter_per_cycle"],
-        entropy_stop=cycle_control_params.get("entropy_stop", False),
-        entropy_max_snr=cycle_control_params.get("entropy_max_snr", 6.0),
-        entropy_spatial_bins=cycle_control_params.get("entropy_spatial_bins", 7),
-        entropy_flux_bins=cycle_control_params.get("entropy_flux_bins", 10),
+        entropy_stop=entropy_stop,
+        entropy_max_snr=entropy_max_snr,
+        entropy_spatial_bins=entropy_spatial_bins,
+        entropy_flux_bins=entropy_flux_bins,
         max_cycles_divergence=cycle_control_params.get("max_cycles_divergence", -1),
         threshold_tolerance=cycle_control_params.get(
             "threshold_tolerance", THRESHOLD_TOLERANCE
@@ -2502,7 +2519,13 @@ def _apply_exact_frequency_selection_to_continuum_mapping(
 
 
 def calculate_number_of_chunks_for_continuum_imaging(
-    img_xds, single_precision_image, n_chunks, thread_info
+    img_xds,
+    single_precision_image,
+    n_chunks,
+    thread_info,
+    nterms=1,
+    n_correlations=2,
+    fft_padding=1.2,
 ):
     """Determine the number of frequency chunks for continuum imaging.
 
@@ -2524,6 +2547,12 @@ def calculate_number_of_chunks_for_continuum_imaging(
     thread_info : dict or None
         Thread information as returned by :func:`get_thread_info`.
         If ``None``, thread information is queried automatically.
+    nterms : int, optional
+        Number of continuum Taylor terms held by every map task.
+    n_correlations : int, optional
+        Number of instrument-basis correlation planes gridded by each task.
+    fft_padding : float, optional
+        FFT padding used to size the task-local UV grids.
 
     Returns
     -------
@@ -2533,59 +2562,68 @@ def calculate_number_of_chunks_for_continuum_imaging(
     import toolviper.utils.logger as logger
 
     if n_chunks is None:
-        # Calculate n_chunks
+        from astroviper.processing_functions.imaging.utils.fft_sizing import (
+            padded_grid_size,
+        )
         from astroviper.utils.data_partitioning import bytes_in_dtype
 
-        ## Determine the amount of memory required by the node task if all dimensions that chunking will occur on are singleton.
-        ## For example cube_imaging does chunking only only frequency, so memory_singleton_chunk should be the amount of memory requered by _feather when there is a single frequency channel.
-
-        n_pixels_single_frequency = (
-            img_xds.sizes["l"]
-            * img_xds.sizes["m"]
-            * img_xds.sizes["polarization"]
-            * img_xds.sizes["time"]
+        float_bytes, complex_bytes = (
+            (bytes_in_dtype["float32"], bytes_in_dtype["complex64"])
+            if single_precision_image
+            else (bytes_in_dtype["float64"], bytes_in_dtype["complex128"])
         )
+        n_image_pixels = img_xds.sizes["l"] * img_xds.sizes["m"] * img_xds.sizes["time"]
+        n_u, n_v = padded_grid_size(
+            (img_xds.sizes["l"], img_xds.sizes["m"]), fft_padding
+        )
+        n_uv_pixels = int(n_u) * int(n_v) * img_xds.sizes["time"]
         fudge_factor = 1.2
-        if single_precision_image:
-            memory_singleton_chunk = fudge_factor * (
-                3 * n_pixels_single_frequency * bytes_in_dtype["complex64"] / (1024**3)
-                + 3 * n_pixels_single_frequency * bytes_in_dtype["float32"] / (1024**3)
+        # Selected-channel scratch grows with the number of channels in a task.
+        memory_per_frequency = fudge_factor * (
+            n_image_pixels
+            * n_correlations
+            * (3 * complex_bytes + 3 * float_bytes)
+            / (1024**3)
+        )
+        # Taylor grids are allocated once per task, not once per input channel.
+        # The residual has nterms UV grids and the PSF has 2*nterms-1, all in
+        # the correlation basis. Taylor residual/model work arrays are in the
+        # requested Stokes basis and are constant per task as well.
+        n_taylor_uv_grids = nterms + (2 * nterms - 1)
+        constant_memory = (
+            fudge_factor
+            * (
+                n_uv_pixels * n_correlations * n_taylor_uv_grids * complex_bytes
+                + n_image_pixels
+                * img_xds.sizes["polarization"]
+                * 3
+                * nterms
+                * float_bytes
             )
-        else:
-            memory_singleton_chunk = fudge_factor * (
-                3 * n_pixels_single_frequency * bytes_in_dtype["complex128"] / (1024**3)
-                + 3 * n_pixels_single_frequency * bytes_in_dtype["float64"] / (1024**3)
-            )
+            / (1024**3)
+        )
 
         logger.info(
-            "Memory required for a single frequency channel: "
-            + str(memory_singleton_chunk)
-            + " GiB"
+            "Continuum task memory model: "
+            f"{memory_per_frequency} GiB per frequency channel + "
+            f"{constant_memory} GiB task-local Taylor grids"
         )
 
-        chunking_dims_sizes = {
-            "frequency": img_xds.sizes["frequency"]
-        }  # Need to know how many frequency channels there are.
-        from astroviper.utils.data_partitioning import (
-            calculate_data_chunking,
-            get_thread_info,
-        )
+        from astroviper.utils.data_partitioning import calculate_frequency_chunking
 
-        if thread_info is None:
-            thread_info = get_thread_info()
-            logger.info("Thread info " + str(thread_info))
-        n_chunks = calculate_data_chunking(
-            memory_singleton_chunk,
-            chunking_dims_sizes,
-            thread_info,
-            constant_memory=0,
+        n_chunks = calculate_frequency_chunking(
+            img_xds.sizes["frequency"],
+            memory_per_frequency,
+            constant_memory,
+            n_chunks=None,
+            thread_info=thread_info,
             tasks_per_thread=4,
-        )["frequency"]
+        )
         logger.info(
             "Number of frequency chunks: "
             + str(n_chunks)
             + " frequency channels: "
-            + str(chunking_dims_sizes)
+            + str(img_xds.sizes["frequency"])
         )
     return n_chunks
 
@@ -3420,7 +3458,13 @@ def image_continuum_single_field(
     start = time.time()
     n_chunks = int(
         calculate_number_of_chunks_for_continuum_imaging(
-            img_xds, single_precision_image, n_chunks, thread_info
+            img_xds,
+            single_precision_image,
+            n_chunks,
+            thread_info,
+            nterms=image_params["nterms"],
+            n_correlations=len(correlation_coords),
+            fft_padding=image_params["fft_padding"],
         )
     )
 
