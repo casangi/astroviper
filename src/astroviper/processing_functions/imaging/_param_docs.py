@@ -12,21 +12,203 @@ Each value is the NumPy-style *description* body only (no ``name : type`` line):
 the per-function ``name : type`` line -- which encodes the type and whether the
 parameter is optional -- is preserved by the codegen, so the same description
 can be shared by functions that give the parameter different defaults.
+
+A key ``"<function name>.<parameter name>"`` gives the decorated functions of
+that name their own description of the parameter, in place of the shared one.
 """
 
+_IMAGE_PARAMS_DOC = (
+    "Image geometry and output coordinates: ``image_size``, ``cell_size``,\n"
+    "``phase_direction``, ``time_coords``, ``polarization_coords`` and the\n"
+    "``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is\n"
+    '``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image\n'
+    'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
+    "correlations (see ``instrument_polarization_basis``)."
+)
+
+_CONTINUUM_IMAGE_PARAMS_DOC = (
+    _IMAGE_PARAMS_DOC + "\nContinuum imaging also requires ``frequency_coords``,\n"
+    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;\n"
+    "``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``\n"
+    'sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``\n'
+    "selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and\n"
+    "``list_blockage_diameters`` are arrays in metres,\n"
+    "``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and\n"
+    "``primary_beam_ipower`` is the exponent applied to the voltage pattern\n"
+    "(default 2, the power beam). These primary-beam keys override the inferred\n"
+    "beam prescription."
+)
+
+_PRIMARY_BEAM_IMAGE_PARAMS_DOC = (
+    'Image geometry. Must contain ``"image_size"`` (``(nx, ny)``) and\n'
+    '``"cell_size"`` (l, m cell sizes in radians). The image centre is derived\n'
+    "internally as ``image_size // 2``; the supplied dictionary is not mutated."
+)
+
+_CONTINUUM_PRIMARY_BEAM_IMAGE_PARAMS_DOC = (
+    _PRIMARY_BEAM_IMAGE_PARAMS_DOC
+    + '\n``primary_beam_model`` selects ``"airy"`` (the default for direct\n'
+    'calls) or ``"casa_airy"``; the continuum driver resolves ``"auto"`` from\n'
+    "telescope metadata first. ``primary_beam_max_radius_1ghz`` is the support\n"
+    "radius in radians at 1 GHz and scales inversely with frequency."
+)
+
+_CONTINUUM_PRIMARY_BEAM_RESOLUTION_PARAMS_DOC = (
+    'Primary-beam configuration. ``primary_beam_model`` accepts ``"auto"``\n'
+    '(default), ``"airy"`` (physical annular aperture), or ``"casa_airy"``.\n'
+    "``list_dish_diameters`` and ``list_blockage_diameters`` contain metres;\n"
+    "``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz; and\n"
+    "``primary_beam_ipower`` is the voltage-pattern exponent (default 2, the\n"
+    "power beam). Explicit values take precedence over telescope inference."
+)
+
+_CONTINUUM_PRIMARY_BEAM_MODE_DOC = (
+    "Continuum mode used for beam selection. Both modes select a VLA band at\n"
+    "the Taylor reference frequency so channel order cannot change the\n"
+    "prescription; CASA ``makePBImage`` instead selects the MVC beam from the\n"
+    "first image channel. Resolve once before partitioning so every task uses\n"
+    "the same prescription."
+)
+
+_PRIMARY_BEAM_IMAGE_DATASET_DOC = (
+    "Image dataset with ``time``, ``frequency``, ``polarization``, ``l`` and\n"
+    "``m`` coordinates. Modified in place."
+)
+
+_PRIMARY_BEAM_DATA_GROUP_IN_DOC = (
+    "Image data group whose existing entries are carried into the output\n"
+    'group. Default ``"residual"``.'
+)
+
+_PRIMARY_BEAM_DATA_GROUP_OUT_DOC = (
+    "Name of the data group under which ``PRIMARY_BEAM`` is registered.\n"
+    'Default ``"residual"``.'
+)
+
+_PRIMARY_BEAM_DISH_DIAMETERS_DOC = (
+    "Antenna dish diameters in metres. Defaults to ``numpy.array([10.7])``,\n"
+    "the effective ALMA 12 m diameter used by the reference imaging tests."
+)
+
+_PRIMARY_BEAM_BLOCKAGE_DIAMETERS_DOC = (
+    "Sub-reflector blockage diameters in metres. Defaults to\n``numpy.array([0.75])``."
+)
+
+_PRIMARY_BEAM_IPOWER_DOC = (
+    "Voltage-pattern exponent: ``1`` returns voltage and ``2`` returns the\n"
+    "power primary beam. Defaults to ``2``."
+)
+
+_PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
+    "Floating-point precision for the primary beam. Defaults to\n``numpy.float64``."
+)
+
+_CONTINUUM_DECONVOLVER_DOC = (
+    'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
+    'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
+    "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
+    'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
+    '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
+    "are refused before anything is written."
+)
+
+_CONTINUUM_MODE_DOC = (
+    'Continuum construction mode. ``"mfs"`` grids Taylor-weighted\n'
+    "visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe\n"
+    "the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains\n"
+    "both the intrinsic source spectral index and the primary-beam spectral\n"
+    "index. Its reference-frequency primary beam corrects the Taylor-zero\n"
+    'restored product, but not the higher Taylor coefficients. ``"mvc"`` forms\n'
+    "channel images and common-beam Taylor equations, and predicts\n"
+    "``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe\n"
+    "the intrinsic spectrum under the common-beam convention, so\n"
+    "``tt1 / tt0`` excludes the primary-beam spectral index. These conventions\n"
+    "match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two\n"
+    'parallel hands only; ``["I", "Q", "U", "V"]`` is refused.'
+)
+
 IMAGING_PARAM_DOCS = {
-    "image_params": (
-        "Image geometry and output coordinates: ``image_size``, ``cell_size``,\n"
-        "``phase_direction``, ``time_coords``, ``polarization_coords`` and the\n"
-        "``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is\n"
-        '``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image\n'
-        'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
-        "correlations (see ``instrument_polarization_basis``)."
+    "image_params": _IMAGE_PARAMS_DOC,
+    "make_primary_beam_single_field.image_params": _PRIMARY_BEAM_IMAGE_PARAMS_DOC,
+    "make_continuum_primary_beam_single_field.image_params": (
+        _CONTINUUM_PRIMARY_BEAM_IMAGE_PARAMS_DOC
     ),
+    "resolve_continuum_primary_beam.image_params": (
+        _CONTINUUM_PRIMARY_BEAM_RESOLUTION_PARAMS_DOC
+    ),
+    "make_primary_beam_single_field.img_xds": _PRIMARY_BEAM_IMAGE_DATASET_DOC,
+    "make_continuum_primary_beam_single_field.img_xds": (
+        _PRIMARY_BEAM_IMAGE_DATASET_DOC
+    ),
+    "make_primary_beam_single_field.image_data_group_in_name": (
+        _PRIMARY_BEAM_DATA_GROUP_IN_DOC
+    ),
+    "make_continuum_primary_beam_single_field.image_data_group_in_name": (
+        _PRIMARY_BEAM_DATA_GROUP_IN_DOC
+    ),
+    "make_primary_beam_single_field.image_data_group_out_name": (
+        _PRIMARY_BEAM_DATA_GROUP_OUT_DOC
+    ),
+    "make_continuum_primary_beam_single_field.image_data_group_out_name": (
+        _PRIMARY_BEAM_DATA_GROUP_OUT_DOC
+    ),
+    "make_primary_beam_single_field.list_dish_diameters": (
+        _PRIMARY_BEAM_DISH_DIAMETERS_DOC
+    ),
+    "make_continuum_primary_beam_single_field.list_dish_diameters": (
+        _PRIMARY_BEAM_DISH_DIAMETERS_DOC
+    ),
+    "make_primary_beam_single_field.list_blockage_diameters": (
+        _PRIMARY_BEAM_BLOCKAGE_DIAMETERS_DOC
+    ),
+    "make_continuum_primary_beam_single_field.list_blockage_diameters": (
+        _PRIMARY_BEAM_BLOCKAGE_DIAMETERS_DOC
+    ),
+    "make_primary_beam_single_field.ipower": _PRIMARY_BEAM_IPOWER_DOC,
+    "make_continuum_primary_beam_single_field.ipower": _PRIMARY_BEAM_IPOWER_DOC,
+    "make_primary_beam_single_field.float_dtype": _PRIMARY_BEAM_FLOAT_DTYPE_DOC,
+    "make_continuum_primary_beam_single_field.float_dtype": (
+        _PRIMARY_BEAM_FLOAT_DTYPE_DOC
+    ),
+    "image_continuum_single_field.image_params": _CONTINUUM_IMAGE_PARAMS_DOC,
+    "residual_update_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "grid_imaging_weight_density_continuum_node.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "degrid_imaging_weights_continuum_node.image_params": (_CONTINUUM_IMAGE_PARAMS_DOC),
+    "imaging_preparation_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "prepare_model_uv_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "prepare_model_uv_mvc_single_field.image_params": _CONTINUUM_IMAGE_PARAMS_DOC,
+    "imaging_setup_continuum_single_field.image_params": (_CONTINUUM_IMAGE_PARAMS_DOC),
+    "make_point_spread_function_mvc_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "make_point_spread_function_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "make_undeconvolved_image_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "make_undeconvolved_image_mvc_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "residual_cycle_continuum_single_field.image_params": (_CONTINUUM_IMAGE_PARAMS_DOC),
     "imaging_weights_params": (
-        'Weighting scheme configuration: ``weighting`` (``"natural"`` or\n'
-        '``"briggs"``) and the Briggs ``robust`` parameter.'
+        'Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,\n'
+        '``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs\n'
+        'trade-off. ``weighting_scope`` is ``"local"`` for a density per\n'
+        'frequency channel or ``"global"`` for one density across all selected\n'
+        "channels in distributed continuum imaging. Natural weighting is\n"
+        "independent of this scope."
     ),
+    "continuum_mode": _CONTINUUM_MODE_DOC,
+    "resolve_continuum_primary_beam.continuum_mode": (_CONTINUUM_PRIMARY_BEAM_MODE_DOC),
     "gridding_kernel_params": (
         "The gridding convolution kernel the gridder and degridder use:\n"
         '``type`` (``"prolate_spheroidal_casa"``, Schwab\'s rational\n'
@@ -95,13 +277,12 @@ IMAGING_PARAM_DOCS = {
         "visibilities, grid and inverse FFT them into the residual image)\n"
         "followed by one **model update** (deconvolve the residual image into\n"
         "the sky model). Every limit and threshold is applied independently to\n"
-        "each ``(time, frequency, polarization)`` plane: a plane stops when it\n"
-        "meets its own criterion. The imaging cycle loop runs separately for\n"
-        "every frequency channel (the node task images one channel at a time),\n"
-        "so a channel's cycles continue until all of its (time, polarization)\n"
-        "planes have stopped, and a channel that has stopped does no further\n"
-        "residual updates while the others carry on. **Cycle control** is the\n"
-        "stop test between the residual update and the model update, which\n"
+        "each image plane: a plane stops when it meets its own criterion. Cube\n"
+        "imaging runs the cycle loop separately for every frequency channel\n"
+        "(one channel per node task); continuum imaging has one controller for\n"
+        "the Taylor stack after reduction across frequency partitions. **Cycle\n"
+        "control** is the stop test between the residual update and the model\n"
+        "update, which\n"
         "decides whether a plane gets another cycle and sets the limits of its\n"
         "next model update. It is made after every residual update, the first\n"
         "included, on the residual that update has just made, never on the\n"
@@ -124,10 +305,10 @@ IMAGING_PARAM_DOCS = {
         "  every model update is followed by a residual update, whose residual\n"
         "  the stop test checks; the last one's residual is written.\n"
         "  ``max_cycles = 0`` makes only the dirty image; ``max_cycles = -1``\n"
-        "  removes the limit. Counted per\n"
-        "  frequency channel: a channel that converges early stops cycling while\n"
-        '  the others continue. ``max_cycles = "auto"`` predicts the limit of a\n'
-        "  channel from its dirty image: every plane takes ``P0``, its peak\n"
+        "  removes the limit. Cube imaging counts this per frequency channel;\n"
+        "  continuum imaging counts it once for the reduced Taylor stack.\n"
+        '  ``max_cycles = "auto"`` predicts the limit of an imaging unit from\n'
+        "  its dirty image: every plane takes ``P0``, its peak\n"
         "  residual at the start of the first cycle (the ``peak_residual``\n"
         "  below), ``f``, its PSF fraction (below), and ``L``, its threshold or,\n"
         "  when that is 0, its theoretical point source sensitivity, worked out\n"
@@ -144,7 +325,7 @@ IMAGING_PARAM_DOCS = {
         "  about 1 over the square root of the number of visibilities (natural\n"
         "  weighting; 1e-3 for a million) in the units of the data; the limit\n"
         "  grows only with ``ln(P0 / L)``, and on the same prediction ``3 * n``\n"
-        "  cycles bring the peak down to ``P0 * (L / P0)**3``. The channel's\n"
+        "  cycles bring the peak down to ``P0 * (L / P0)**3``. The imaging unit's\n"
         "  ``max_cycles`` is the largest limit of its planes (at least 1; a\n"
         "  plane without a pixel in the clean mask, with a peak of 0 or without\n"
         "  data is left out) and then counts down like a number. Every plane\n"
@@ -181,7 +362,10 @@ IMAGING_PARAM_DOCS = {
         "- ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary beam\n"
         "  mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.\n"
         "  Pixels where the primary beam is below this fraction are excluded\n"
-        "  from cleaning. A masking cutoff, distinct from ``threshold``.\n"
+        "  from cleaning. A masking cutoff, distinct from ``threshold``. Cube\n"
+        "  imaging reads this key (default 0). Continuum imaging instead takes\n"
+        "  the top-level ``primary_beam_limit`` (default 0.2) and injects it into\n"
+        "  cycle control so cleaning and PB correction use one cutoff.\n"
         "- ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the\n"
         "  selected peak flux subtracted from the residual image at each\n"
         "  deconvolution iteration (``0 < gain <= 1``).\n"
@@ -331,6 +515,9 @@ IMAGING_PARAM_DOCS = {
         "(C++, threaded across *and* within planes -- faster when there are\n"
         'few planes, e.g. single-channel imaging) or ``"asp"``.'
     ),
+    "image_continuum_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
+    "residual_update_continuum_single_field.deconvolver": (_CONTINUUM_DECONVOLVER_DOC),
+    "model_update_mtmfs_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
     "instrument_polarization_basis": (
         "Correlation (instrument) polarization basis the gridding is performed in:\n"
         '``"linear"`` or ``"circular"``. The residual update grids and degrids the\n'
@@ -346,6 +533,42 @@ IMAGING_PARAM_DOCS = {
         "images) are single precision (``complex64`` / ``float32``) and the model\n"
         "update runs in single precision; the visibilities always stay double\n"
         "precision. If ``False`` the image-domain arrays are double precision."
+    ),
+    "weight_memory_mode": (
+        "Storage policy for calculated continuum imaging weights.\n"
+        '``"in_memory"``\n'
+        "returns task-local weights to the driver and embeds them in subsequent\n"
+        'graphs. ``"in_place"`` writes each task\'s weights into a temporary group\n'
+        "in the output image store and reloads only the required partition during\n"
+        "each imaging cycle. It is the default because it bounds scheduler and\n"
+        "worker memory without modifying the input Processing Set. The temporary\n"
+        "group is removed when the run ends, also after an error. A completed cache\n"
+        "is copied into the input only when ``write_imaging_weights_to_ps=True``.\n"
+        "This option remains separate from ``memory_mode`` for now; the policies\n"
+        "may be unified later."
+    ),
+    "visibility_memory_mode": (
+        "Continuum residual-update storage policy for observed visibility grids.\n"
+        '``"in_memory"`` retains the first-cycle grid in driver memory, while\n'
+        '``"in_place"`` stores it temporarily in the image Zarr store. Later\n'
+        "cycles grid only the predicted-model contribution and subtract it from\n"
+        'the cached observed grid. ``"recompute"`` instead reloads the original\n'
+        "observed visibilities and grids their visibility-domain residual every\n"
+        "cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each\n"
+        "map task's exclusively owned frequency-resolved UV planes."
+    ),
+    "observed_visibility_grid_xds": (
+        "Task-local cached observed visibility grid used by later residual-update\n"
+        "cycles. The distributed application supplies this only for in-memory MVC\n"
+        "caching; other modes and first cycles leave it unset."
+    ),
+    "wideband_primary_beam_memory_mode": (
+        "MVC-only storage policy for the frequency-dependent primary beam.\n"
+        '``"in_place"`` stores it temporarily in the image Zarr store and reads\n'
+        'only task-local channels. The default ``"recompute"`` regenerates the\n'
+        'analytic beam inside every later map, and ``"in_memory"`` retains it at\n'
+        "the driver but passes each map only its local beam. The setting is ignored\n"
+        "for MFS."
     ),
     "processing_function_threads": (
         "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."

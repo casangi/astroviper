@@ -135,6 +135,17 @@ def _make_inputs(seed=0, n_time=4, n_baseline=32, n_chan=3, n_pol=2, m_u=64, m_v
     )
 
 
+def _logical_oversized_empty_grid():
+    """Create a contiguous zero-element grid with an oversized channel axis."""
+    base = np.empty(0, dtype=np.float32)
+    return np.lib.stride_tricks.as_strided(
+        base,
+        shape=(np.iinfo(np.int32).max + 1, 1, 0, 1),
+        strides=(0, 0, base.itemsize, base.itemsize),
+        writeable=True,
+    )
+
+
 def _run_grid_cpp(inp, dtype=np.float64):
     grid = np.zeros((inp["n_chan"], 1, inp["m_u"], inp["m_v"]), dtype=dtype)
     sum_weight = np.zeros((inp["n_chan"], 1), dtype=np.float64)
@@ -246,6 +257,73 @@ class TestGridImagingWeightsCpp(unittest.TestCase):
         self.assertEqual(np.count_nonzero(grid), 0)
         self.assertEqual(np.count_nonzero(sum_weight), 0)
 
+    def test_truncate_uv_cells_uses_casa_continuum_assignment(self):
+        """Truncation selects the lower shifted cell without changing default."""
+        n_uv = np.array([8, 8], dtype=np.int64)
+        frequency = np.array([299792458.0])
+        delta_lm = np.array([-1.0 / 8.0, -1.0 / 8.0])
+        uvw = np.array([[[0.6, 0.6, 0.0]]])
+        chan_map = np.array([0], dtype=np.int64)
+        weights = np.array([[[[2.0]]]])
+
+        nearest = np.zeros((1, 1, 8, 8))
+        nearest_sum = np.zeros((1, 1))
+        grid_imaging_weights(
+            nearest,
+            nearest_sum,
+            uvw,
+            frequency,
+            chan_map,
+            weights,
+            n_uv,
+            delta_lm,
+        )
+
+        truncated = np.zeros_like(nearest)
+        truncated_sum = np.zeros_like(nearest_sum)
+        grid_imaging_weights(
+            truncated,
+            truncated_sum,
+            uvw,
+            frequency,
+            chan_map,
+            weights,
+            n_uv,
+            delta_lm,
+            truncate_uv_cells=True,
+        )
+
+        self.assertEqual(nearest[0, 0, 5, 5], 2.0)
+        self.assertEqual(truncated[0, 0, 4, 4], 2.0)
+        self.assertEqual(nearest[0, 0, 4, 4], 0.0)
+        np.testing.assert_array_equal(nearest_sum, [[4.0]])
+        np.testing.assert_array_equal(truncated_sum, [[4.0]])
+
+    def test_truncate_uv_cells_accumulates_valid_conjugates_independently(self):
+        """CASA truncation retains a valid direct cell at the opposite edge."""
+        n_uv = np.array([8, 8], dtype=np.int64)
+        frequency = np.array([299792458.0])
+        delta_lm = np.array([-1.0 / 8.0, -1.0 / 8.0])
+        uvw = np.array([[[3.6, 0.0, 0.0]]])
+        grid = np.zeros((1, 1, 8, 8))
+        sum_weight = np.zeros((1, 1))
+
+        grid_imaging_weights(
+            grid,
+            sum_weight,
+            uvw,
+            frequency,
+            np.array([0], dtype=np.int64),
+            np.array([[[[2.0]]]]),
+            n_uv,
+            delta_lm,
+            truncate_uv_cells=True,
+        )
+
+        self.assertEqual(grid[0, 0, 7, 4], 2.0)
+        self.assertEqual(np.count_nonzero(grid), 1)
+        np.testing.assert_array_equal(sum_weight, [[2.0]])
+
     def test_wrong_ndim_raises(self):
         inp = _make_inputs(seed=7)
         bad_grid = np.zeros((inp["n_chan"], inp["m_u"], inp["m_v"]))  # 3-D
@@ -274,6 +352,46 @@ class TestGridImagingWeightsCpp(unittest.TestCase):
                 inp["data_weight"],
                 inp["n_uv"],
                 inp["delta_lm"],
+            )
+
+    def test_sum_weight_rejects_implicit_output_conversions(self):
+        """Writable accumulators must never be replaced by pybind temporaries."""
+        inp = _make_inputs(seed=9)
+        grid = np.zeros((inp["n_chan"], 1, inp["m_u"], inp["m_v"]), dtype=np.float64)
+        bad_outputs = [
+            np.zeros((inp["n_chan"], 1), dtype=np.float32),
+            np.zeros((inp["n_chan"], 2), dtype=np.float64)[:, ::2],
+            np.zeros((inp["n_chan"], 1), dtype=">f8"),
+        ]
+        readonly = np.zeros((inp["n_chan"], 1), dtype=np.float64)
+        readonly.flags.writeable = False
+        bad_outputs.append(readonly)
+        for sum_weight in bad_outputs:
+            with self.subTest(dtype=sum_weight.dtype, strides=sum_weight.strides):
+                with self.assertRaises(RuntimeError):
+                    grid_imaging_weights(
+                        grid,
+                        sum_weight,
+                        inp["uvw"],
+                        inp["freq_chan"],
+                        inp["chan_map"],
+                        inp["data_weight"],
+                        inp["n_uv"],
+                        inp["delta_lm"],
+                    )
+
+    def test_oversized_grid_dimension_raises(self):
+        """The binding rejects dimensions that the kernel loop type cannot hold."""
+        with self.assertRaisesRegex(OverflowError, "grid channel dimension"):
+            grid_imaging_weights(
+                _logical_oversized_empty_grid(),
+                np.empty((1, 1), dtype=np.float64),
+                np.empty((1, 1, 3), dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.int64),
+                np.empty((1, 1, 0, 1), dtype=np.float64),
+                np.array([0, 1], dtype=np.int64),
+                np.array([1.0, 1.0]),
             )
 
 
@@ -356,6 +474,79 @@ class TestDegridImagingWeightsCpp(unittest.TestCase):
             inp["delta_lm"],
         )
         self.assertEqual(np.count_nonzero(out), 0)
+
+    def test_imaging_weight_rejects_implicit_output_conversions(self):
+        """Degridding rejects converted, strided, and read-only outputs."""
+        inp = _make_inputs(seed=14)
+        grid, _ = _run_grid_cpp(inp)
+        shape = inp["data_weight"].shape
+        bad_outputs = [
+            np.zeros(shape, dtype=np.float32),
+            np.zeros((*shape[:-1], 2), dtype=np.float64)[..., ::2],
+            np.zeros(shape, dtype=">f8"),
+        ]
+        readonly = np.zeros(shape, dtype=np.float64)
+        readonly.flags.writeable = False
+        bad_outputs.append(readonly)
+        for output in bad_outputs:
+            with self.subTest(dtype=output.dtype, strides=output.strides):
+                with self.assertRaises(RuntimeError):
+                    degrid_imaging_weights(
+                        output,
+                        grid,
+                        self._briggs(inp, 14),
+                        inp["uvw"],
+                        inp["freq_chan"],
+                        inp["chan_map"],
+                        inp["pol_map"],
+                        inp["data_weight"],
+                        inp["n_uv"],
+                        inp["delta_lm"],
+                    )
+
+    def test_truncate_uv_cells_samples_casa_continuum_cell(self):
+        """Degridding uses the same selected cell convention as gridding."""
+        grid = np.zeros((1, 1, 8, 8))
+        grid[0, 0, 5, 5] = 10.0
+        grid[0, 0, 4, 4] = 20.0
+        frequency = np.array([299792458.0])
+        uvw = np.array([[[0.6, 0.6, 0.0]]])
+        data_weight = np.array([[[[2.0]]]])
+        common = (
+            grid,
+            np.array([[[1.0]], [[0.0]]]),
+            uvw,
+            frequency,
+            np.array([0], dtype=np.int64),
+            np.array([0], dtype=np.int64),
+            data_weight,
+            np.array([8, 8], dtype=np.int64),
+            np.array([-1.0 / 8.0, -1.0 / 8.0]),
+        )
+
+        nearest = np.zeros_like(data_weight)
+        degrid_imaging_weights(nearest, *common)
+        truncated = np.zeros_like(data_weight)
+        degrid_imaging_weights(truncated, *common, truncate_uv_cells=True)
+
+        np.testing.assert_array_equal(nearest, [[[[0.2]]]])
+        np.testing.assert_array_equal(truncated, [[[[0.1]]]])
+
+    def test_oversized_grid_dimension_raises(self):
+        """The degrid binding rejects dimensions that cannot be represented."""
+        with self.assertRaisesRegex(OverflowError, "grid channel dimension"):
+            degrid_imaging_weights(
+                np.empty((1, 1, 0, 1), dtype=np.float64),
+                _logical_oversized_empty_grid(),
+                np.empty((2, 1, 1), dtype=np.float64),
+                np.empty((1, 1, 3), dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.int64),
+                np.array([0], dtype=np.int64),
+                np.empty((1, 1, 0, 1), dtype=np.float64),
+                np.array([0, 1], dtype=np.int64),
+                np.array([1.0, 1.0]),
+            )
 
 
 if __name__ == "__main__":

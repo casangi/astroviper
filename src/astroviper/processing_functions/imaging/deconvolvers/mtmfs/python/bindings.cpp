@@ -37,6 +37,45 @@ py::buffer_info check_array(py::array& arr, const char* name, const std::vector<
     return info;
 }
 
+template <typename T>
+py::buffer_info check_strided_residual(py::array& arr, const std::vector<py::ssize_t>& shape) {
+    if (!py::isinstance<py::array_t<T>>(arr))
+        throw std::runtime_error("residual has wrong dtype; expected " +
+                                 py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
+                                 py::cast<std::string>(arr.dtype().attr("name")));
+    if (!arr.writeable()) throw std::runtime_error("residual must be writeable (modified in place)");
+    py::buffer_info info = arr.request(true);
+    if (info.ndim != 3) throw std::runtime_error("residual must be a 3-D array");
+    for (int d = 0; d < 3; ++d)
+        if (info.shape[d] != shape[d])
+            throw std::runtime_error("residual has wrong shape; expected (" + std::to_string(shape[0]) + ", " +
+                                     std::to_string(shape[1]) + ", " + std::to_string(shape[2]) + ")");
+
+    const py::ssize_t itemsize = static_cast<py::ssize_t>(sizeof(T));
+    const py::ssize_t plane_bytes = shape[1] * shape[2] * itemsize;
+    if (info.strides[2] != itemsize || info.strides[1] != shape[2] * itemsize ||
+        info.strides[0] < plane_bytes || info.strides[0] % itemsize != 0)
+        throw std::runtime_error(
+            "residual spatial planes must be C-contiguous with a positive Taylor-term stride (no copy is made)");
+    return info;
+}
+
+struct MemoryInterval {
+    std::uintptr_t begin;
+    std::uintptr_t end;
+};
+
+MemoryInterval memory_interval(const py::buffer_info& info) {
+    std::uintptr_t extent = static_cast<std::uintptr_t>(info.itemsize);
+    for (py::ssize_t d = 0; d < info.ndim; ++d) {
+        if (info.strides[d] < 0) throw std::runtime_error("negative array strides are not supported");
+        if (info.shape[d] > 0)
+            extent += static_cast<std::uintptr_t>((info.shape[d] - 1) * info.strides[d]);
+    }
+    const auto begin = reinterpret_cast<std::uintptr_t>(info.ptr);
+    return {begin, begin + extent};
+}
+
 void stack_dims(const py::array& stack, const char* name, int& n, int& ny, int& nx, bool psf_stack = false) {
     if (stack.ndim() != 3) throw std::runtime_error(std::string(name) + " must be a 3-D array (nterms, ny, nx)");
     const py::ssize_t nplanes = stack.shape(0);
@@ -69,20 +108,25 @@ py::array_t<double> vector_array(const std::vector<double>& values) {
 template <typename T>
 py::dict clean_impl(py::array residual, py::array psf, py::array model, py::object mask_obj,
                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, double gain,
-                    double threshold, double psf_fraction, double mask_threshold, int max_iter_divergence,
+                    double threshold_per_cycle, double mask_threshold, int max_iter_divergence,
                     double divergence_rms_factor, double divergence_peak_factor) {
     int nterms, ny, nx;
     stack_dims(residual, "residual", nterms, ny, nx);
     const std::vector<py::ssize_t> stack = {nterms, ny, nx};
     const std::vector<py::ssize_t> psf_shape = {2 * nterms - 1, ny, nx};
 
-    py::buffer_info ri = check_array<T>(residual, "residual", stack, true);
+    py::buffer_info ri = check_strided_residual<T>(residual, stack);
     py::buffer_info mi = check_array<T>(model, "model", stack, true);
     py::buffer_info pi = check_array<T>(psf, "psf", psf_shape, false);
-    const auto r0 = reinterpret_cast<std::uintptr_t>(ri.ptr), m0 = reinterpret_cast<std::uintptr_t>(mi.ptr);
-    const auto nbytes = static_cast<std::uintptr_t>(ri.size * ri.itemsize);
-    if (r0 < m0 + nbytes && m0 < r0 + nbytes)
+    auto overlaps = [](const py::buffer_info& a, const py::buffer_info& b) {
+        const MemoryInterval ai = memory_interval(a);
+        const MemoryInterval bi = memory_interval(b);
+        return ai.begin < bi.end && bi.begin < ai.end;
+    };
+    if (overlaps(ri, mi))
         throw std::runtime_error("residual and model must be distinct, non-overlapping arrays");
+    if (overlaps(ri, pi) || overlaps(mi, pi))
+        throw std::runtime_error("writable residual and model arrays must not overlap psf");
 
     const T* mask_ptr = nullptr;
     py::array mask_arr;
@@ -96,6 +140,8 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
             mask_ptr = static_cast<const T*>(ki.ptr);
         }
     }
+    if (mask_ptr != nullptr && (overlaps(ri, ki) || overlaps(mi, ki)))
+        throw std::runtime_error("writable residual and model arrays must not overlap mask");
 
     T* res = static_cast<T*>(ri.ptr);
     T* mod = static_cast<T*>(mi.ptr);
@@ -109,8 +155,9 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     {
         py::gil_scoped_release release;
         result = mtmfs::clean<T>(res, mod, psf_ptr, mask_ptr, nterms, nx, ny, scales, small_scale_bias,
-                                 max_iter_per_cycle_updated, static_cast<T>(gain), static_cast<T>(threshold),
-                                 static_cast<T>(psf_fraction), static_cast<T>(mask_threshold), divergence);
+                                 max_iter_per_cycle_updated, static_cast<T>(gain), static_cast<T>(threshold_per_cycle),
+                                 static_cast<T>(mask_threshold), divergence,
+                                 ri.strides[0] / static_cast<py::ssize_t>(sizeof(T)));
     }
 
     const int nscales = static_cast<int>(result.scales.size());
@@ -132,16 +179,16 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
 
 static py::dict clean_dispatch(py::array residual, py::array psf, py::array model, py::object mask,
                                const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated,
-                               double gain, double threshold, double psf_fraction, double mask_threshold,
+                               double gain, double threshold_per_cycle, double mask_threshold,
                                int max_iter_divergence, double divergence_rms_factor,
                                double divergence_peak_factor) {
     if (py::isinstance<py::array_t<float>>(residual))
         return clean_impl<float>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
-                                 threshold, psf_fraction, mask_threshold, max_iter_divergence,
+                                 threshold_per_cycle, mask_threshold, max_iter_divergence,
                                  divergence_rms_factor, divergence_peak_factor);
     if (py::isinstance<py::array_t<double>>(residual))
         return clean_impl<double>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
-                                  threshold, psf_fraction, mask_threshold, max_iter_divergence,
+                                  threshold_per_cycle, mask_threshold, max_iter_divergence,
                                   divergence_rms_factor, divergence_peak_factor);
     throw std::runtime_error("residual must be float32 or float64");
 }
@@ -213,15 +260,17 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
 
     m.def("clean", &clean_dispatch,
           "One MTMFS model update in place, with 1 <= nterms <= 4. residual and model are (nterms, ny, nx) "
-          "C-contiguous writeable arrays of the same dtype (float32 or float64). psf is "
+          "writeable arrays of the same dtype (float32 or float64). Each residual spatial plane must be "
+          "C-contiguous; the Taylor-term axis may be strided so views into a larger image are updated without "
+          "a copy. model must be fully C-contiguous. psf is "
           "(2*nterms-1, ny, nx), read-only. mask is an optional (ny, nx) array of the same "
-          "dtype, or None. scales are pixel sizes (empty -> [0]; sorted and de-duplicated; "
+          "dtype, or None. scales are pixel sizes (empty -> [0]; otherwise 0 is required; sorted and de-duplicated; "
           "sizes larger than half the image are dropped). small_scale_bias is clamped to "
           "[-1, 1]. gain <= 0 selects casacore adaptive gain. max_iter_per_cycle_updated [CASA cycleniter] caps "
           "the components added in this call. The call stops when max |residual[0] convolved with the smallest "
           "scale| over that scale's mask, divided by hessian[0, 0, 0] (the PSF peak when the smallest scale "
-          "is 0), falls below max(threshold, psf_fraction times its initial value); that estimate is "
-          "updated only inside the psf_support patch, so the returned residual can still exceed threshold. "
+          "is 0), falls below threshold_per_cycle; that estimate is updated only inside the psf_support "
+          "patch, so the returned residual can still exceed threshold_per_cycle. "
           "mask_threshold > 0 binarises each scale-convolved mask at 0.1 (its value is otherwise unused). The "
           "call also stops as diverged (stop_code 4) on the divergence test shared with the other "
           "deconvolvers, applied to that estimate and to the sum of the squares of the same masked image: "
@@ -231,14 +280,14 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "residual is updated at the end of the call by a circular FFT convolution of the new components "
           "with the PSF. Returns a dict with "
           "iterations_performed, peak_residual (max |residual[0]*mask|, not divided by the PSF peak), model_flux "
-          "(sum of model[0]), converged (engine stop on threshold or empty search), diverged, "
-          "stop_code (0 did not run, 1 spent max_iter_per_cycle_updated, 2 reached the threshold or "
+          "(sum of model[0]), converged (engine stop on threshold_per_cycle or empty search), diverged, "
+          "stop_code (0 did not run, 1 spent max_iter_per_cycle_updated, 2 reached threshold_per_cycle or "
           "nothing left to clean, 4 diverged), scales, small_scale_bias, psf_support, hessian, inverse_hessian and the per-scale "
           "infinity-norm hessian_condition_number.",
           py::arg("residual"), py::arg("psf"), py::arg("model"), py::arg("mask") = py::none(),
           py::arg("scales") = std::vector<float>{}, py::arg("small_scale_bias") = 0.0f,
-          py::arg("max_iter_per_cycle_updated") = 100, py::arg("gain") = 0.1, py::arg("threshold") = 0.0,
-          py::arg("psf_fraction") = 0.0, py::arg("mask_threshold") = 0.9,
+          py::arg("max_iter_per_cycle_updated") = 100, py::arg("gain") = 0.1, py::arg("threshold_per_cycle") = 0.0,
+          py::arg("mask_threshold") = 0.9,
           py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
           py::arg("divergence_peak_factor") = 1.0);
 

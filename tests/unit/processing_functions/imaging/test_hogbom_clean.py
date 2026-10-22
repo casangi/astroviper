@@ -1240,5 +1240,30 @@ def test_odd_sizes_subtract_every_psf_sample_in_every_kernel(dtype, shape):
     assert np.array_equal(model, m1[0, 0, 0])
 
 
+@pytest.mark.parametrize("iteration_budget", [0, 2, 6])
+@pytest.mark.parametrize("cycles", [1, 2])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_explicit_iteration_budget_controls_point_updates(
+    iteration_budget, cycles, dtype
+):
+    """Each call performs exactly the requested number of point updates."""
+    dirty = _point_source_residual(16, 16, [(8, 8, 1.0)], dtype=dtype)
+    model = _zeros(16, 16, dtype=dtype)
+    psf = _delta_psf(16, 16, dtype=dtype)
+    for _ in range(cycles):
+        result = hogbom.clean(
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=0.1,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=iteration_budget,
+        )
+        assert result["iterations_performed"] == iteration_budget
+    expected_residual = 0.9 ** (cycles * iteration_budget)
+    assert dirty[8, 8] == pytest.approx(expected_residual, abs=2e-7)
+    assert model.sum() == pytest.approx(1 - expected_residual, abs=2e-7)
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

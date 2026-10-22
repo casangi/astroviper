@@ -26,7 +26,7 @@
 #include <vector>
 
 #ifndef POCKETFFT_CACHE_SIZE
-// Cache the last few transform plans: every minor-cycle iteration transforms
+// Cache the last few transform plans: every model-update iteration transforms
 // the same (nx, ny) shape many times over.
 #define POCKETFFT_CACHE_SIZE 16
 #endif

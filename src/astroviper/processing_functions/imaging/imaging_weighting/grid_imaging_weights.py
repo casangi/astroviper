@@ -39,6 +39,8 @@ def grid_imaging_weights(
     # are bit-reproducible; accepted for API consistency across the stack.
     processing_function_threads: int = 1,
     frequency_map: np.ndarray | None = None,
+    *,
+    truncate_uv_cells: bool = False,
 ):
     """
     Grid per-visibility *data weights* onto a UV grid.
@@ -51,12 +53,17 @@ def grid_imaging_weights(
     ----------
     grid : np.ndarray (float64/32), shape (n_chan, n_pol, n_u, n_v)
         Output UV-plane grid of *accumulated data weights*. Updated in-place.
-        For each (channel, polarization), the kernel adds the per-visibility
-        data weight at the nearest (u, v) pixel and its conjugate location.
+        For each (channel, polarization), nearest-cell mode adds the
+        per-visibility data weight at the rounded (u, v) pixel and its
+        conjugate location. CASA continuum mode truncates the shifted
+        coordinates, skips cell index 0 on either axis, and accepts the direct
+        and conjugate cells independently.
     sum_weight : np.ndarray (float64), shape (n_chan, n_pol)
         Per-(channel, polarization) sum of gridded data weights. Updated in-place.
-        The kernel adds ``2 * weight`` for each successfully gridded visibility
-        (accounting for the conjugate update).
+        Nearest-cell mode adds ``2 * weight`` when both Hermitian cells are in
+        bounds. CASA continuum mode adds ``weight`` for each independently
+        accepted direct or conjugate cell, hence either ``weight`` or
+        ``2 * weight``.
     uvw : np.ndarray (float64), shape (n_time, n_baseline, 3)
         UVW coordinates in meters for each time and baseline. Only the
         u and v components ([..., 0] and [..., 1]) are used here.
@@ -72,13 +79,17 @@ def grid_imaging_weights(
         per visibility channel. Pass the map returned by
         :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`
         when the visibility channels are a subset of, or offset from, the
-        image frequency axis.
+        image frequency axis. An all-zero map accumulates all visibility
+        channels into one continuum plane.
 
     n_uv : tuple(int, int)
             Target padded image size in pixels along (u, v). This is also
             the UV grid size.
     cell_size : tuple(float, float)
             Pixel scale (Δl, Δm) in radians along the two image axes.
+    truncate_uv_cells : bool, default ``False``
+        If True, use CASA continuum integer truncation after shifting UV
+        coordinates into the grid domain. If False, use nearest-cell assignment.
 
     Returns
     -------
@@ -91,8 +102,9 @@ def grid_imaging_weights(
       ``assert weight.shape[3] < 3`` and the kernel currently grids only
       polarization 0. If you intend to combine polarizations (e.g., average PP
       and QQ), adjust the polarization logic in the C++ kernel accordingly.
-    * Rounding: to match historical Fortran/CASA behavior, UV pixel indices are
-      computed by rounding to the nearest pixel (``floor(x + 0.5)``).
+    * Cell assignment defaults to nearest-cell ``floor(x + 0.5)``. CASA's
+      continuum path instead truncates the shifted coordinate toward zero;
+      select that behavior with ``truncate_uv_cells=True``.
     """
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp import (
         grid_imaging_weights as grid_imaging_weights_cpp,
@@ -114,6 +126,7 @@ def grid_imaging_weights(
         np.asarray(n_uv, dtype=np.int64),
         np.asarray(delta_lm, dtype=np.float64),
         processing_function_threads=processing_function_threads,
+        truncate_uv_cells=truncate_uv_cells,
     )
 
 
@@ -129,6 +142,8 @@ def degrid_imaging_weights(
     # sums are bit-reproducible; accepted for API consistency across the stack.
     processing_function_threads: int = 1,
     frequency_map: np.ndarray | None = None,
+    *,
+    truncate_uv_cells: bool = False,
 ):
     """
     Sample a UV *imaging weight grid* at each visibility's (u, v) to form
@@ -145,19 +160,23 @@ def degrid_imaging_weights(
         UVW coordinates in meters.
     data_weight : np.ndarray (float64), shape (n_time, n_baseline, n_vis_chan, n_pol)
         Used as the starting point before applying the UV-grid-based reweighting.
-    briggs_factors : np.ndarray (float64), shape (2, n_chan, n_pol)
+    briggs_factors : np.ndarray (float64), shape (2, n_grid_chan, n_pol)
         Pre-computed Briggs/robust factors. The per-sample denominator is:
-        ``briggs_factors[0, chan, pol] * grid_imaging_weight + briggs_factors[1, chan, pol]``.
+        ``briggs_factors[0, grid_chan, pol] * grid_imaging_weight + briggs_factors[1, grid_chan, pol]``.
     freq_chan : np.ndarray (float64), shape (n_chan,)
         Frequencies (Hz) of visibility channels.
     frequency_map : np.ndarray (int64), shape (n_vis_chan,), optional
-        Grid plane (image channel) each visibility channel samples; must be the
-        same map used to grid the weights. ``None`` (default) uses the
-        identity map.
+        Grid plane (image channel) each visibility channel samples for both the
+        density grid and Briggs factors; must be the same map used to grid the
+        weights. ``None`` (default) uses the identity map. An all-zero map lets
+        every visibility channel sample one collapsed continuum plane.
     grid_parms : dict
         Dictionary with required keys:
         - ``"image_size"`` : tuple(int, int), UV grid size.
         - ``"cell_size"`` : tuple(float, float), image pixel scale (Δl, Δm) in radians.
+    truncate_uv_cells : bool, default ``False``
+        If True, sample the CASA continuum truncated UV cell. If False, sample
+        the nearest UV cell used by cube weighting.
 
     Returns
     -------
@@ -169,12 +188,25 @@ def degrid_imaging_weights(
     -----
     * The polarization map is currently single-pol. If you have more
       polarizations, extend ``pol_map`` accordingly.
-    * The kernel checks bounds and NaNs and leaves samples unchanged if the UV
-      location falls outside the grid or if the corresponding grid value is 0/NaN.
+    * The output is initialized to zero. Out-of-grid samples therefore remain
+      zero; in CASA continuum mode, samples landing on cell index 0 on either
+      axis are also skipped. In-grid samples retain their natural weight when
+      the corresponding density-grid value is zero or NaN.
     """
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp import (
         degrid_imaging_weights as degrid_imaging_weights_cpp,
     )
+
+    # Keep the Python-to-C++ boundary zero-copy: producers must supply the
+    # native, contiguous density grid expected by the kernel.
+    grid_imaging_weight = np.asarray(grid_imaging_weight)
+    if grid_imaging_weight.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        raise TypeError(
+            "grid_imaging_weight must have native float32 or float64 dtype; received "
+            f"{grid_imaging_weight.dtype}."
+        )
+    if not grid_imaging_weight.flags.c_contiguous:
+        raise ValueError("grid_imaging_weight must be C-contiguous.")
 
     chan_map = _resolve_frequency_map(
         frequency_map, data_weight.shape[2], grid_imaging_weight
@@ -199,6 +231,7 @@ def degrid_imaging_weights(
         np.asarray(n_uv, dtype=np.int64),
         np.asarray(delta_lm, dtype=np.float64),
         processing_function_threads=processing_function_threads,
+        truncate_uv_cells=truncate_uv_cells,
     )
 
     return imaging_weight

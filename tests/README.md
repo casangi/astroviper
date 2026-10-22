@@ -1,3 +1,5 @@
+For continuum software coverage and regression commands, see [CONTINUUM_TESTING.md](CONTINUUM_TESTING.md).
+
 # AstroVIPER Tests
 
 # Test Framework

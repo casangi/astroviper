@@ -104,10 +104,20 @@ def _target_files():
         "distributed_applications/imaging/image_cube_single_field_delphi.py",
         "distributed_applications/imaging/point_spread_function_cube_single_field.py",
         "node_tasks/imaging/point_spread_function_cube_single_field.py",
+        "distributed_applications/imaging/image_continuum_single_field.py",
         "node_tasks/imaging/image_cube_single_field.py",
+        "node_tasks/imaging/image_continuum_single_field.py",
         "node_tasks/imaging/utils/skunk_works_msv2.py",
         "processing_functions/imaging/image_cube_single_field.py",
         "processing_functions/imaging/calculate_imaging_weights.py",
+        "processing_functions/imaging/image_continuum_single_field.py",
+        "processing_functions/imaging/imaging_setup_continuum_single_field.py",
+        "processing_functions/imaging/make_point_spread_function_continuum_single_field.py",
+        "processing_functions/imaging/primary_beam/continuum_primary_beam.py",
+        "processing_functions/imaging/primary_beam/make_primary_beam.py",
+        "processing_functions/imaging/make_undeconvolved_image_continuum.py",
+        "processing_functions/imaging/make_undeconvolved_image_continuum_mvc.py",
+        "processing_functions/imaging/residual_cycle_continuum_single_field.py",
         "processing_functions/imaging/residual_update.py",
         "processing_functions/imaging/model_update.py",
         "processing_functions/imaging/make_point_spread_function.py",
@@ -267,7 +277,14 @@ def sync_param_docs(check=False):
                 return node
             if not isinstance(current, str):
                 return node
-            new_doc = _rewrite_docstring(current, registry)
+            # A "<function name>.<parameter name>" key gives the functions of
+            # that name their own description of the parameter.
+            function_prefix = node.name.value + "."
+            function_registry = dict(registry)
+            for key, description in registry.items():
+                if key.startswith(function_prefix):
+                    function_registry[key[len(function_prefix) :]] = description
+            new_doc = _rewrite_docstring(current, function_registry)
             if new_doc is None:
                 return node
             self.changed = True

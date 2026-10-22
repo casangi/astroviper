@@ -2,7 +2,10 @@
 
 import functools
 
+from astroviper.utils.param_docs import shares_param_docs
 
+
+@shares_param_docs
 def make_primary_beam_single_field(
     img_xds,
     image_params,
@@ -46,32 +49,31 @@ def make_primary_beam_single_field(
     ----------
     img_xds : xarray.Dataset
         Image dataset with ``time``, ``frequency``, ``polarization``, ``l`` and
-        ``m`` coordinates.  Modified in place.
+        ``m`` coordinates. Modified in place.
     image_params : dict
-        Image geometry.  Must contain ``"image_size"`` (``(nx, ny)``) and
-        ``"cell_size"`` (l, m cell size in radians).  The image centre is
-        derived internally as ``image_size // 2``; the supplied dictionary is
-        not mutated.
+        Image geometry. Must contain ``"image_size"`` (``(nx, ny)``) and
+        ``"cell_size"`` (l, m cell sizes in radians). The image centre is derived
+        internally as ``image_size // 2``; the supplied dictionary is not mutated.
     image_data_group_in_name : str, optional
         Image data group whose existing entries are carried into the output
-        group.  Default ``"residual"``.
+        group. Default ``"residual"``.
     image_data_group_out_name : str, optional
-        Name of the data group that the ``PRIMARY_BEAM`` variable is registered
-        under.  Default ``"residual"``.
+        Name of the data group under which ``PRIMARY_BEAM`` is registered.
+        Default ``"residual"``.
     list_dish_diameters : array-like of float, optional
-        Antenna dish diameters in metres.  Default ``numpy.array([10.7])``
-        (ALMA 12 m array effective value used by the reference imaging tests).
+        Antenna dish diameters in metres. Defaults to ``numpy.array([10.7])``,
+        the effective ALMA 12 m diameter used by the reference imaging tests.
     list_blockage_diameters : array-like of float, optional
-        Sub-reflector blockage diameters in metres.  Default
+        Sub-reflector blockage diameters in metres. Defaults to
         ``numpy.array([0.75])``.
     max_rad_1GHz : float, optional
         Radius at 1 GHz in radians (scaled to the observing frequency) beyond
         which the beam is zero.  Default ``None``, no cut.
     ipower : int, optional
-        ``2`` returns the (power) primary beam -- the CASA definition;
-        ``1`` returns the voltage pattern.  Default ``2``.
+        Voltage-pattern exponent: ``1`` returns voltage and ``2`` returns the
+        power primary beam. Defaults to ``2``.
     float_dtype : numpy.dtype, optional
-        Floating-point precision for the primary beam.  Defaults to
+        Floating-point precision for the primary beam. Defaults to
         ``numpy.float64``.
     beam_model : dict or xarray.Dataset, optional
         Analytic (dict) or beam-polynomial (dataset) antenna beam model, as

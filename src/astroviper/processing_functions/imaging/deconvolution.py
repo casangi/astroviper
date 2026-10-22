@@ -751,7 +751,9 @@ def deconvolve(
         clamped to the plane count. Default 1.
     image_data_group_in_name : str, optional
         Name of the input data group in ``img_xds`` that provides the
-        residual sky image and PSF. Default is ``"residual"``.
+        residual sky image and PSF. For Högbom, a registered mask must already
+        be a materialized, C-contiguous boolean array; it is passed to the C++
+        binding without conversion. Default is ``"residual"``.
     image_data_group_out_name : str, optional
         Name of the output data group to create or update for the model
         image. Default is ``"model"``.
@@ -918,12 +920,11 @@ def deconvolve(
         max_sidelobe_point_spread_function_name
     ].values  # time, frequency, polarization
 
-    # Optional mask cube, matching the residual's shape. The C++ binding
-    # accepts a bool mask directly; Python keeps ownership of the buffer.
+    # Pass the optional mask buffer through unchanged. In particular, do not
+    # silently copy or reinterpret a user-supplied numeric mask before the
+    # Högbom binding checks its bool dtype and C-contiguous layout.
     mask_name = img_xds.attrs["data_groups"][image_data_group_in_name].get("mask", None)
-    mask_arr = None
-    if mask_name in img_xds:
-        mask_arr = img_xds[mask_name].values
+    mask_arr = img_xds[mask_name].values if mask_name in img_xds else None
 
     # Collect per-plane starting statistics in-place (no copies, just
     # reads). The actual CLEAN iteration is driven in C++.
