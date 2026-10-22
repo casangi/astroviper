@@ -111,8 +111,9 @@ def test_restoration_layouts_match_actual_cube_backend(psf_axis, beam_axis, lega
     xr.testing.assert_allclose(result.SKY_RESTORED, reference.SKY_RESTORED)
     xr.testing.assert_identical(result.SKY_MODEL, snapshot.SKY_MODEL)
     xr.testing.assert_identical(result.SKY_RESIDUAL, snapshot.SKY_RESIDUAL)
-    assert np.isfinite(result.SKY_RESTORED.isel(taylor_term=0)).all()
-    assert float(result.SKY_RESTORED.isel(taylor_term=0).max()) == pytest.approx(2.25)
+    assert result.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
+    assert np.isfinite(result.SKY_RESTORED).all()
+    assert float(result.SKY_RESTORED.max()) == pytest.approx(2.25)
 
 
 @pytest.mark.parametrize("image_shape", [(8, 8), (7, 7), (7, 10), (10, 7), (8, 11)])
@@ -131,11 +132,16 @@ def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype
     assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.sizes["m"] == image_shape[1]
     assert result.SKY_RESTORED.dtype == dtype
     assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.dtype == dtype
-    restored_taylor_zero = result.SKY_RESTORED.isel(taylor_term=0)
-    assert np.isfinite(restored_taylor_zero).all()
-    assert result.SKY_RESTORED.isel(taylor_term=slice(1, None)).isnull().all()
+    assert result.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
+    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.dims == (
+        "time",
+        "polarization",
+        "l",
+        "m",
+    )
+    assert np.isfinite(result.SKY_RESTORED).all()
     assert np.isfinite(result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED).all()
-    assert float(restored_taylor_zero.max()) == pytest.approx(2.25, rel=1e-6)
+    assert float(result.SKY_RESTORED.max()) == pytest.approx(2.25, rel=1e-6)
     assert float(result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.max()) == pytest.approx(
         4.5, rel=1e-6
     )

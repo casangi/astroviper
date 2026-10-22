@@ -186,6 +186,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
     # Channel caches must not leak into the final public image store.
     assert not any("CACHE" in name or "MVC_" in name for name in actual.data_vars)
     beam = actual.PRIMARY_BEAM.isel(frequency=0, drop=True)
+    assert actual.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
     corrected = actual.SKY_RESTORED_PRIMARY_BEAM_CORRECTED
     assert corrected.dims == ("time", "polarization", "l", "m")
     np.testing.assert_array_equal(

@@ -278,9 +278,7 @@ def test_primary_beam_correction_returns_restored_taylor_zero_only():
         kernel_ft=kernel_ft,
     )
     np.testing.assert_allclose(corrected.values[0, 0], expected)
-    old_post_restore_division = (
-        result.SKY_RESTORED.isel(taylor_term=0).values[0, 0] / primary_beam[0, 0]
-    )
+    old_post_restore_division = result.SKY_RESTORED.values[0, 0] / primary_beam[0, 0]
     assert not np.allclose(corrected.values[0, 0], old_post_restore_division)
 
 

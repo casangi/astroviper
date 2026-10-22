@@ -2067,7 +2067,8 @@ def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(
 
     assert "SKY_RESTORED" in image
     assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in image
-    assert np.isfinite(image.SKY_RESTORED.isel(taylor_term=0).values).all()
+    assert image.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
+    assert np.isfinite(image.SKY_RESTORED.values).all()
     pbcor_finite = np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values)
     assert np.any(pbcor_finite)
     assert np.any(~pbcor_finite)
@@ -2183,7 +2184,8 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     ]
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert image.SKY_RESIDUAL.dtype == np.dtype(np.float32)
-    assert np.isfinite(image.SKY_RESTORED.isel(taylor_term=0).values).all()
+    assert image.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
+    assert np.isfinite(image.SKY_RESTORED.values).all()
     assert np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).any()
     assert not np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).all()
 

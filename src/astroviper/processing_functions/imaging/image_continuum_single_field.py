@@ -3233,15 +3233,11 @@ def restore_continuum_image(
         )
 
     # ------------------------------------------------------------------
-    # Copy the restored reference-frequency plane back to Taylor layout.
+    # Store the restored reference-frequency plane without a spectral/Taylor
+    # axis. There is only one restored continuum plane; aligning it to the
+    # multi-term coordinate would otherwise create NaN-padded fake products.
     # ------------------------------------------------------------------
-    restored_da = (
-        cube_xds[restored_name]
-        .rename({"frequency": "taylor_term"})
-        .assign_coords(
-            taylor_term=img_xds.coords["taylor_term"].isel(taylor_term=slice(0, 1))
-        )
-    )
+    restored_da = cube_xds[restored_name].isel(frequency=0, drop=True)
 
     img_xds[restored_name] = restored_da
 
