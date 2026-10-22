@@ -279,6 +279,52 @@ def test_channel_and_reference_paths_share_the_casa_prescription(diameter, dtype
     assert reference.PRIMARY_BEAM_REFERENCE.dtype == np.dtype(dtype)
 
 
+def test_channel_beam_broadcasts_time_and_evaluates_only_selected_dish(monkeypatch):
+    """Channel beams cover every time plane without evaluating unused dishes."""
+    import astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam as continuum_beam
+
+    captured = {}
+
+    def evaluate(frequency, polarization, pb_params, image_params, dtype=None):
+        captured.update(pb_params)
+        return np.ones(
+            (
+                len(pb_params["list_dish_diameters"]),
+                len(frequency),
+                len(polarization),
+                *image_params["image_size"],
+            ),
+            dtype=dtype,
+        )
+
+    monkeypatch.setattr(continuum_beam, "evaluate_primary_beam", evaluate)
+    image = xr.Dataset(
+        coords={
+            "time": [0, 1],
+            "frequency": [90e9, 100e9],
+            "polarization": ["I"],
+            "l": np.arange(8),
+            "m": np.arange(8),
+        },
+        attrs={"data_groups": {"residual": {}}},
+    )
+    actual, _ = make_continuum_primary_beam_single_field(
+        image,
+        {"image_size": [8, 8], "cell_size": [-1e-5, 1e-5]},
+        list_dish_diameters=[12.0, 7.0],
+        list_blockage_diameters=[0.75, 0.5],
+    )
+
+    assert actual.PRIMARY_BEAM.shape == (2, 2, 1, 8, 8)
+    np.testing.assert_array_equal(
+        actual.PRIMARY_BEAM.isel(time=0), actual.PRIMARY_BEAM.isel(time=1)
+    )
+    np.testing.assert_array_equal(captured["list_dish_diameters"], [12.0])
+    np.testing.assert_array_equal(captured["list_blockage_diameters"], [0.75])
+    assert actual.PRIMARY_BEAM.attrs["dish_diameters_m"] == [12.0]
+    assert actual.PRIMARY_BEAM.attrs["blockage_diameters_m"] == [0.75]
+
+
 def test_vla_airy_evaluation_unchanged():
     grid = resolve_continuum_primary_beam(
         {"image_size": [32, 32], "image_center": [16, 16], "cell_size": [-1e-4, 1e-4]},

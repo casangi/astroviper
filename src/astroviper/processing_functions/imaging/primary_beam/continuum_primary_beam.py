@@ -364,9 +364,13 @@ def make_continuum_primary_beam_single_field(
 
     start = time.time()
 
+    # A single-field image uses one common antenna response. Select the first
+    # prescription before evaluation so unused dish beams are never computed.
+    selected_dish_diameters = np.asarray(list_dish_diameters).reshape(-1)[:1]
+    selected_blockage_diameters = np.asarray(list_blockage_diameters).reshape(-1)[:1]
     pb_params = {
-        "list_dish_diameters": np.asarray(list_dish_diameters),
-        "list_blockage_diameters": np.asarray(list_blockage_diameters),
+        "list_dish_diameters": selected_dish_diameters,
+        "list_blockage_diameters": selected_blockage_diameters,
         "ipower": ipower,
     }
 
@@ -389,23 +393,26 @@ def make_continuum_primary_beam_single_field(
         overwrite=False,
     )
 
+    primary_beam = evaluate_primary_beam(
+        img_xds.frequency.values,
+        img_xds.polarization.values,
+        pb_params,
+        pb_image_params,
+        dtype=float_dtype,
+    )[0, ...]
+    primary_beam = np.broadcast_to(
+        primary_beam, (img_xds.sizes["time"], *primary_beam.shape)
+    )
     img_xds["PRIMARY_BEAM"] = xr.DataArray(
-        # Select the first (only) dish diameter and add a leading time axis.
-        evaluate_primary_beam(
-            img_xds.frequency.values,
-            img_xds.polarization.values,
-            pb_params,
-            pb_image_params,
-            dtype=float_dtype,
-        )[0, ...][None, ...],
+        primary_beam,
         dims=("time", "frequency", "polarization", "l", "m"),
     )
     img_xds["PRIMARY_BEAM"].attrs["type"] = "primary_beam"
     img_xds["PRIMARY_BEAM"].attrs["method"] = "airy_disk"
     img_xds["PRIMARY_BEAM"].attrs.update(
         beam_model=image_params.get("primary_beam_model", "airy"),
-        dish_diameters_m=np.asarray(list_dish_diameters).tolist(),
-        blockage_diameters_m=np.asarray(list_blockage_diameters).tolist(),
+        dish_diameters_m=selected_dish_diameters.tolist(),
+        blockage_diameters_m=selected_blockage_diameters.tolist(),
     )
 
     modify_data_groups_xds(
