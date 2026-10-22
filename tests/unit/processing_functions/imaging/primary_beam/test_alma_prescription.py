@@ -179,18 +179,18 @@ def antennas(telescope, diameter):
 
 
 @pytest.mark.parametrize(
-    ("telescope", "diameter", "effective", "model"),
+    ("telescope", "diameter", "effective", "model", "support_degrees"),
     [
-        ("ALMA", 12, 10.7, "casa_airy"),
-        ("ALMA", 7, 6.25, "casa_airy"),
-        ("ACA", 7, 6.25, "casa_airy"),
-        ("VLA", 25, 25, "airy"),
-        ("EVLA", 25, 25, "airy"),
-        ("OTHER", 12, 12, "airy"),
+        ("ALMA", 12, 10.7, "casa_airy", 1.784),
+        ("ALMA", 7, 6.25, "casa_airy", 3.568),
+        ("ACA", 7, 6.25, "casa_airy", 3.568),
+        ("VLA", 25, 25, "airy", None),
+        ("EVLA", 25, 25, "airy", None),
+        ("OTHER", 12, 12, "airy", None),
     ],
 )
 def test_auto_prescription_requires_telescope_identity(
-    telescope, diameter, effective, model
+    telescope, diameter, effective, model, support_degrees
 ):
     source = antennas(telescope, diameter)
     original = source.copy(deep=True)
@@ -199,6 +199,8 @@ def test_auto_prescription_requires_telescope_identity(
     assert actual["primary_beam_model"] == model
     assert actual["list_dish_diameters"] == [effective]
     assert actual["list_blockage_diameters"] == [0.75]
+    if support_degrees is not None:
+        assert actual["primary_beam_max_radius_1ghz"] == np.deg2rad(support_degrees)
     assert params == {}
     xr.testing.assert_identical(source, original)
 
@@ -234,6 +236,51 @@ def test_mixed_apertures_require_explicit_selection():
     source.ANTENNA_DISH_DIAMETER.values[1] = 7
     with pytest.raises(NotImplementedError, match="one common"):
         resolve_continuum_primary_beam({}, source)
+
+
+@pytest.mark.parametrize(
+    ("params", "source", "error", "message", "kwargs"),
+    [
+        (
+            {"primary_beam_model": "invalid"},
+            antennas("ALMA", 12),
+            ValueError,
+            "primary_beam_model",
+            {},
+        ),
+        (
+            {},
+            antennas("ALMA", 12),
+            ValueError,
+            "continuum_mode",
+            {"continuum_mode": "cube"},
+        ),
+        ({}, xr.Dataset(), KeyError, "ANTENNA_DISH_DIAMETER", {}),
+        ({}, antennas("ALMA", 10), ValueError, "12-m or 7-m", {}),
+    ],
+)
+def test_invalid_primary_beam_prescriptions_raise(
+    params, source, error, message, kwargs
+):
+    """Reject invalid models, modes, and missing or unsupported apertures."""
+    with pytest.raises(error, match=message):
+        resolve_continuum_primary_beam(params, source, **kwargs)
+
+
+def test_evaluation_requires_a_resolved_model():
+    """Reject an unresolved primary-beam model before evaluating its image."""
+    with pytest.raises(ValueError, match="Resolve primary_beam_model"):
+        evaluate_primary_beam(
+            [100e9],
+            ["I"],
+            {"list_dish_diameters": [10.7], "list_blockage_diameters": [0.75]},
+            {
+                "primary_beam_model": "auto",
+                "image_size": [8, 8],
+                "image_center": [4, 4],
+                "cell_size": [-1e-5, 1e-5],
+            },
+        )
 
 
 def test_casa_reference_samples():

@@ -5,6 +5,7 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam import (
+    casa_airy_disk_response,
     evaluate_primary_beam,
     resolve_continuum_primary_beam,
 )
@@ -20,6 +21,67 @@ CASA_VLA_MFS_SAMPLES = np.array(
         [0, 0, 0.11041608452796936],
         [25, 150, 0.4628506600856781],
         [175, 25, 0.33019864559173584],
+    ]
+)
+
+# Unclipped CASA MVC samples: l, m [rad], frequency [Hz], power.
+CASA_VLA_MVC_SAMPLES = np.array(
+    [
+        [
+            -0.00019392547244381441,
+            0.00019392547244381441,
+            999988830.2104049,
+            0.9987678527832031,
+        ],
+        [
+            -0.003975472185098195,
+            -0.00484813681109536,
+            999988830.2104049,
+            0.5032012462615967,
+        ],
+        [
+            0.00484813681109536,
+            -0.00484813681109536,
+            999988830.2104049,
+            0.4352755546569824,
+        ],
+        [
+            -0.00019392547244381441,
+            0.00019392547244381441,
+            1499984801.867004,
+            0.9972193241119385,
+        ],
+        [
+            0.0029573634547681695,
+            -0.0029573634547681695,
+            1499984801.867004,
+            0.502850353717804,
+        ],
+        [
+            0.00484813681109536,
+            -0.00484813681109536,
+            1499984801.867004,
+            0.12125224620103836,
+        ],
+        [
+            -0.00019392547244381441,
+            0.00019392547244381441,
+            1949981176.357943,
+            0.9953176975250244,
+        ],
+        [
+            -0.0027149566142134016,
+            -0.001696847883883376,
+            1949981176.357943,
+            0.5063600540161133,
+        ],
+        [
+            -0.0033452143996557985,
+            -0.004217879025652963,
+            1949981176.357943,
+            0.10825737565755844,
+        ],
+        [0.00484813681109536, -0.00484813681109536, 1949981176.357943, 0.009361635],
     ]
 )
 
@@ -102,6 +164,22 @@ def test_casa_vla_image():
         rtol=0,
         atol=2e-7,
     )
+
+
+def test_casa_vla_mvc_unclipped_samples():
+    """Compare directly with CASA values, including a response below its PB clip."""
+    l, m, frequency, expected = CASA_VLA_MVC_SAMPLES.T
+    actual = casa_airy_disk_response(
+        l,
+        m,
+        frequency,
+        24.5,
+        0.0,
+        np.deg2rad(0.8564),
+        ipower=2,
+    )
+    assert np.isfinite(actual).all()
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-7)
 
 
 def test_mvc_selects_reference_frequency_independent_of_channel_order():
