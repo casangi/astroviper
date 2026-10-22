@@ -16,6 +16,9 @@ import xarray as xr
 from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging import image_continuum_single_field
+from astroviper.processing_functions.imaging.restore import (
+    _elliptical_gaussian_kernel,
+)
 
 
 @pytest.fixture
@@ -114,6 +117,69 @@ def _run(
     return result, image
 
 
+def _circular_clean_beam_convolution(plane, beam_parameters, cell_size):
+    """Independently apply the fitted unit-peak beam on the periodic image grid."""
+    major, minor, position_angle = np.asarray(beam_parameters, dtype=float)
+    kernel = _elliptical_gaussian_kernel(
+        *plane.shape,
+        major / cell_size,
+        minor / cell_size,
+        position_angle,
+        plane.dtype,
+    )
+    return np.fft.irfft2(
+        np.fft.rfft2(plane) * np.fft.rfft2(np.fft.ifftshift(kernel)),
+        s=plane.shape,
+    )
+
+
+def _assert_restoration_values(image, primary_beam_limit=0.2):
+    """Check ``M * B + R`` and model-first PB correction plane by plane."""
+    model = image.SKY_MODEL.isel(taylor_term=0, drop=True)
+    residual = image.SKY_RESIDUAL.isel(taylor_term=0, drop=True)
+    primary_beam = image.PRIMARY_BEAM.isel(frequency=0, drop=True)
+    fitted_beam = image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION
+    for dimension in ("frequency", "taylor_term", "psf_taylor_order"):
+        if dimension in fitted_beam.dims:
+            fitted_beam = fitted_beam.isel({dimension: 0}, drop=True)
+    cell_size = abs(float(image.l.values[1] - image.l.values[0]))
+
+    for time in range(image.sizes["time"]):
+        for polarization in range(image.sizes["polarization"]):
+            index = {"time": time, "polarization": polarization}
+            model_plane = model.isel(index).values
+            residual_plane = residual.isel(index).values
+            beam_plane = primary_beam.isel(index).values
+            beam_parameters = fitted_beam.isel(index).values
+
+            convolved_model = _circular_clean_beam_convolution(
+                model_plane, beam_parameters, cell_size
+            )
+            expected_restored = convolved_model + residual_plane
+            np.testing.assert_allclose(
+                image.SKY_RESTORED.isel(index),
+                expected_restored,
+                rtol=1e-6,
+                atol=max(float(np.max(np.abs(expected_restored))) * 1e-8, 1e-14),
+            )
+
+            inside = beam_plane >= primary_beam_limit
+            divided_model = np.zeros_like(model_plane)
+            np.divide(model_plane, beam_plane, out=divided_model, where=inside)
+            expected_corrected = np.full_like(residual_plane, np.nan)
+            expected_corrected[inside] = residual_plane[inside] / beam_plane[inside]
+            expected_corrected[inside] += _circular_clean_beam_convolution(
+                divided_model, beam_parameters, cell_size
+            )[inside]
+            np.testing.assert_allclose(
+                image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(index),
+                expected_corrected,
+                rtol=1e-6,
+                atol=max(float(np.nanmax(np.abs(expected_corrected))) * 1e-8, 1e-14),
+                equal_nan=True,
+            )
+
+
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 @pytest.mark.parametrize("scope", ["local", "global"])
 @pytest.mark.parametrize(
@@ -193,6 +259,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
         np.isfinite(corrected),
         np.isfinite(beam) & (beam >= 0.2),
     )
+    _assert_restoration_values(actual)
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])

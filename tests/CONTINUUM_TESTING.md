@@ -47,8 +47,12 @@ thread and two imaging cycles. The controller's iteration total sums the two
 polarization planes; `max_iter` is a per-plane budget. Product comparisons use
 `rtol=1e-6` with a peak-scaled `1e-8` absolute floor (minimum `1e-14`) to allow
 floating-point reduction order changes near zero. Reopened products must also
-match the in-memory return, and PB-corrected intensity must equal restored
-Taylor zero divided by the valid reference/effective PB.
+match the in-memory return. The restored reference-frequency image is a single
+`(time, polarization, l, m)` product without a Taylor axis: higher Taylor terms
+describe spectral coefficients, not additional restored images. Its values are
+checked against the Taylor-zero model convolved with the fitted clean beam plus
+the Taylor-zero residual. PB-corrected values use the model-first convention
+`(model / PB) * clean_beam + residual / PB` and are NaN below the PB cutoff.
 
 ## Additional boundary coverage
 
