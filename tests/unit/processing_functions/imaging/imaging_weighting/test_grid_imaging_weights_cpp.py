@@ -354,6 +354,32 @@ class TestGridImagingWeightsCpp(unittest.TestCase):
                 inp["delta_lm"],
             )
 
+    def test_sum_weight_rejects_implicit_output_conversions(self):
+        """Writable accumulators must never be replaced by pybind temporaries."""
+        inp = _make_inputs(seed=9)
+        grid = np.zeros((inp["n_chan"], 1, inp["m_u"], inp["m_v"]), dtype=np.float64)
+        bad_outputs = [
+            np.zeros((inp["n_chan"], 1), dtype=np.float32),
+            np.zeros((inp["n_chan"], 2), dtype=np.float64)[:, ::2],
+            np.zeros((inp["n_chan"], 1), dtype=">f8"),
+        ]
+        readonly = np.zeros((inp["n_chan"], 1), dtype=np.float64)
+        readonly.flags.writeable = False
+        bad_outputs.append(readonly)
+        for sum_weight in bad_outputs:
+            with self.subTest(dtype=sum_weight.dtype, strides=sum_weight.strides):
+                with self.assertRaises(RuntimeError):
+                    grid_imaging_weights(
+                        grid,
+                        sum_weight,
+                        inp["uvw"],
+                        inp["freq_chan"],
+                        inp["chan_map"],
+                        inp["data_weight"],
+                        inp["n_uv"],
+                        inp["delta_lm"],
+                    )
+
     def test_oversized_grid_dimension_raises(self):
         """The binding rejects dimensions that the kernel loop type cannot hold."""
         with self.assertRaisesRegex(OverflowError, "grid channel dimension"):
@@ -448,6 +474,35 @@ class TestDegridImagingWeightsCpp(unittest.TestCase):
             inp["delta_lm"],
         )
         self.assertEqual(np.count_nonzero(out), 0)
+
+    def test_imaging_weight_rejects_implicit_output_conversions(self):
+        """Degridding rejects converted, strided, and read-only outputs."""
+        inp = _make_inputs(seed=14)
+        grid, _ = _run_grid_cpp(inp)
+        shape = inp["data_weight"].shape
+        bad_outputs = [
+            np.zeros(shape, dtype=np.float32),
+            np.zeros((*shape[:-1], 2), dtype=np.float64)[..., ::2],
+            np.zeros(shape, dtype=">f8"),
+        ]
+        readonly = np.zeros(shape, dtype=np.float64)
+        readonly.flags.writeable = False
+        bad_outputs.append(readonly)
+        for output in bad_outputs:
+            with self.subTest(dtype=output.dtype, strides=output.strides):
+                with self.assertRaises(RuntimeError):
+                    degrid_imaging_weights(
+                        output,
+                        grid,
+                        self._briggs(inp, 14),
+                        inp["uvw"],
+                        inp["freq_chan"],
+                        inp["chan_map"],
+                        inp["pol_map"],
+                        inp["data_weight"],
+                        inp["n_uv"],
+                        inp["delta_lm"],
+                    )
 
     def test_truncate_uv_cells_samples_casa_continuum_cell(self):
         """Degridding uses the same selected cell convention as gridding."""

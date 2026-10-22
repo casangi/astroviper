@@ -119,7 +119,6 @@ def mvc_grid_inputs(monkeypatch):
         ("complex_dtype", np.float64, "complex"),
         ("fft_padding", 0.9, "fft_padding"),
         ("fft_padding", np.nan, "fft_padding"),
-        ("processing_function_threads", 0, "threads"),
     ],
 )
 def test_mvc_grid_rejects_invalid_execution_parameters(
@@ -131,6 +130,27 @@ def test_mvc_grid_rejects_invalid_execution_parameters(
     ):
         add_visibility_grid_mvc_single_field(ms, np.ones(8), image, **{keyword: value})
     assert not image.data_vars
+
+
+@pytest.mark.parametrize("threads", [0, -1])
+def test_mvc_grid_passes_nonpositive_thread_count_to_kernel(
+    mvc_grid_inputs, monkeypatch, threads
+):
+    """The C++ kernel owns the documented nonpositive thread fallback."""
+    ms, image = mvc_grid_inputs
+    received = []
+
+    def kernel(grid, normalization, *args, **kwargs):
+        received.append(kwargs["processing_function_threads"])
+
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+    )
+    monkeypatch.setattr(module, "anti_alias_grid", kernel)
+    add_visibility_grid_mvc_single_field(
+        ms, np.ones(8), image, processing_function_threads=threads
+    )
+    assert received == [threads]
 
 
 @pytest.mark.parametrize(

@@ -8,9 +8,9 @@
 namespace py = pybind11;
 
 // ---------------------------------------------------------------------------
-// Helper: raise a clear error if an array is not C-contiguous.
-// pybind11 raises its own error for dtype mismatches when forcecast is absent,
-// but a contiguity message helps the caller fix the issue quickly.
+// Helpers for enforcing the zero-copy array contract. Large writable arrays
+// are accepted untyped so pybind11 cannot silently allocate a converted
+// temporary before these checks run.
 // ---------------------------------------------------------------------------
 static void require_c_contiguous(const py::buffer_info& info, const char* name) {
     py::ssize_t stride = info.itemsize;
@@ -57,7 +57,7 @@ static int checked_int_dimension(py::ssize_t dimension, const char* name) {
 // ---------------------------------------------------------------------------
 void grid_imaging_weights_bind(
     py::array                                                        grid,        // (n_chan_g, n_pol_g, m_u, m_v)  float32 or float64, writable
-    py::array_t<double,  py::array::c_style>                         sum_weight,  // (n_chan_g, n_pol_g)             float64, writable
+    py::array                                                        sum_weight,  // (n_chan_g, n_pol_g)             float64, writable
     py::array_t<double,  py::array::c_style>                         uvw,         // (n_time, n_baseline, 3)        float64
     py::array_t<double,  py::array::c_style>                         frequency_coord, // (n_vis_chan,)              float64
     py::array_t<int64_t, py::array::c_style>                         chan_map,    // (n_vis_chan,)                  int64
@@ -95,15 +95,23 @@ void grid_imaging_weights_bind(
 
     if (grid_info.readonly)
         throw std::runtime_error("grid must be a writable array (modified in place)");
+    if (sum_info.readonly)
+        throw std::runtime_error(
+            "sum_weight must be a writable array (modified in place)");
 
-    const py::dtype dt_f32 = py::dtype::of<float>();
-    const py::dtype dt_f64 = py::dtype::of<double>();
-    const py::dtype grid_dtype = grid.dtype();
-    const bool grid_is_f32 = grid_dtype.is(dt_f32);
-    const bool grid_is_f64 = grid_dtype.is(dt_f64);
+    // Compare native PEP 3118 formats rather than Python dtype identity: arrays
+    // deserialized in a distributed worker need not reuse NumPy's dtype singleton.
+    const bool grid_is_f32 =
+        grid_info.format == py::format_descriptor<float>::format();
+    const bool grid_is_f64 =
+        grid_info.format == py::format_descriptor<double>::format();
     if (!grid_is_f32 && !grid_is_f64)
         throw std::runtime_error(
             "grid must be float32 or float64 (no implicit conversion is "
+            "performed; the array is modified in place)");
+    if (sum_info.format != py::format_descriptor<double>::format())
+        throw std::runtime_error(
+            "sum_weight must be native float64 (no implicit conversion is "
             "performed; the array is modified in place)");
 
     const int n_chan_g = checked_int_dimension(grid_info.shape[0], "grid channel");
@@ -126,7 +134,7 @@ void grid_imaging_weights_bind(
     // Capture raw pointers before releasing the GIL; the underlying numpy
     // buffers remain valid for the duration of the call because Python owns
     // the arrays.
-    double*        sum_ptr      = sum_weight.mutable_data();
+    double*        sum_ptr      = static_cast<double*>(sum_info.ptr);
     const double*  uvw_ptr      = static_cast<const double*>(uvw_info.ptr);
     const double*  freq_ptr     = frequency_coord.data();
     const int64_t* chan_map_ptr = chan_map.data();
@@ -157,7 +165,7 @@ void grid_imaging_weights_bind(
 // degrid_imaging_weights
 // ---------------------------------------------------------------------------
 void degrid_imaging_weights_bind(
-    py::array_t<double,  py::array::c_style>                         imaging_weight, // (n_time, n_baseline, n_vis_chan, n_pol) float64, writable
+    py::array                                                        imaging_weight, // (n_time, n_baseline, n_vis_chan, n_pol) float64, writable
     py::array                                                        grid_imaging_weight, // (n_chan_g, n_pol_g, m_u, m_v) float32 or float64
     py::array_t<double,  py::array::c_style>                         briggs_factors, // (2, n_chan_g, n_pol_g)          float64
     py::array_t<double,  py::array::c_style>                         uvw,            // (n_time, n_baseline, 3)         float64
@@ -207,15 +215,19 @@ void degrid_imaging_weights_bind(
         throw std::runtime_error(
             "imaging_weight must be a writable array (modified in place)");
 
-    const py::dtype dt_f32 = py::dtype::of<float>();
-    const py::dtype dt_f64 = py::dtype::of<double>();
-    const py::dtype grid_dtype = grid_imaging_weight.dtype();
-    const bool grid_is_f32 = grid_dtype.is(dt_f32);
-    const bool grid_is_f64 = grid_dtype.is(dt_f64);
+    // Keep the check stable across process serialization (see the grid path).
+    const bool grid_is_f32 =
+        grid_info.format == py::format_descriptor<float>::format();
+    const bool grid_is_f64 =
+        grid_info.format == py::format_descriptor<double>::format();
     if (!grid_is_f32 && !grid_is_f64)
         throw std::runtime_error(
             "grid_imaging_weight must be float32 or float64 (no implicit "
             "conversion is performed)");
+    if (out_info.format != py::format_descriptor<double>::format())
+        throw std::runtime_error(
+            "imaging_weight must be native float64 (no implicit conversion is "
+            "performed; the array is modified in place)");
 
     const int n_chan_g = checked_int_dimension(grid_info.shape[0], "grid channel");
     const int n_pol_g = checked_int_dimension(grid_info.shape[1], "grid polarization");
@@ -236,7 +248,7 @@ void degrid_imaging_weights_bind(
 
     auto dlm = delta_lm.unchecked<1>();
 
-    double*        out_ptr      = imaging_weight.mutable_data();
+    double*        out_ptr      = static_cast<double*>(out_info.ptr);
     const double*  briggs_ptr   = static_cast<const double*>(briggs_info.ptr);
     const double*  uvw_ptr      = static_cast<const double*>(uvw_info.ptr);
     const double*  freq_ptr     = frequency_coord.data();
@@ -272,9 +284,11 @@ PYBIND11_MODULE(_grid_imaging_weights_ext, m) {
 
     m.def("grid_imaging_weights",
           &grid_imaging_weights_bind,
-          "Grid per-visibility data weights onto a UV plane at the nearest "
-          "pixel, with a Hermitian-conjugate update (in-place). The grid may "
-          "be float32 or float64. The kernel is serial so weight sums are "
+          "Grid per-visibility data weights onto a UV plane using rounded "
+          "nearest cells or CASA continuum truncation. Nearest mode requires "
+          "both Hermitian cells; truncation mode skips cell zero and accepts "
+          "the direct and conjugate cells independently. The grid may be "
+          "float32 or float64. The kernel is serial so weight sums are "
           "bit-reproducible; processing_function_threads is accepted for API "
           "consistency and ignored.",
           py::arg("grid"),
@@ -293,7 +307,9 @@ PYBIND11_MODULE(_grid_imaging_weights_ext, m) {
           "Sample a UV imaging-weight grid at each visibility's (u, v) and "
           "apply the Briggs/robust denominator, writing per-visibility "
           "imaging weights into imaging_weight in place. The grid may be "
-          "float32 or float64. The kernel is serial so results are "
+          "float32 or float64. Coordinates use rounded nearest cells by "
+          "default; CASA continuum mode truncates and skips cell zero. The "
+          "kernel is serial so results are "
           "bit-reproducible; processing_function_threads is accepted for API "
           "consistency and ignored.",
           py::arg("imaging_weight"),

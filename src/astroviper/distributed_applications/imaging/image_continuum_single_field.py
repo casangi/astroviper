@@ -13,6 +13,15 @@ import zarr
 from zarr.codecs import BloscCodec
 
 import astroviper.node_tasks as node_tasks
+from astroviper.distributed_applications.imaging.continuum_timing import (
+    accumulate_graph_timings as _accumulate_graph_timings,
+)
+from astroviper.distributed_applications.imaging.continuum_timing import (
+    combine_graph_timing_frames as _combine_graph_timing_frames,
+)
+from astroviper.distributed_applications.imaging.continuum_timing import (
+    graph_timing_record as _graph_timing_record,
+)
 from astroviper.node_tasks.imaging.image_continuum_single_field import (
     _prepare_continuum_result_for_transfer,
 )
@@ -688,88 +697,6 @@ def _continuum_image_for_disk(img_xds, image_data_variables_keep):
 ###############################################################################
 
 
-def _graph_timing_record(stage, graph_result, graph_timings):
-    """Package one graph's compact task stream without changing its result."""
-    timing_node_tasks = graph_result.get("timing_node_tasks")
-    if timing_node_tasks is None:
-        return None
-
-    timing_node_tasks = timing_node_tasks.copy(deep=True)
-    if "T_image_cube_task" not in timing_node_tasks:
-        for total_column in (
-            "T_weight_density_node",
-            "T_imaging_weight_degrid_node",
-        ):
-            if total_column in timing_node_tasks:
-                timing_node_tasks["T_image_cube_task"] = timing_node_tasks[total_column]
-                break
-    if "T_make_empty_image" not in timing_node_tasks:
-        timing_node_tasks["T_make_empty_image"] = 0.0
-    if "T_load" not in timing_node_tasks:
-        timing_node_tasks["T_load"] = 0.0
-    if "T_write" not in timing_node_tasks:
-        write_columns = [
-            column for column in timing_node_tasks if column.startswith("T_write_")
-        ]
-        timing_node_tasks["T_write"] = (
-            timing_node_tasks[write_columns].sum(axis=1) if write_columns else 0.0
-        )
-
-    # The application-wide stream needs only scalar timing and worker identity.
-    # Retain sampled CPU/memory/I/O series in the historical final-graph frame
-    # instead of multiplying their memory cost by every imaging cycle.
-    timing_node_tasks = timing_node_tasks.drop(
-        columns=[
-            "time_seconds",
-            "cpu_percent",
-            "memory_rss_bytes",
-            "read_chars",
-            "write_chars",
-        ],
-        errors="ignore",
-    )
-
-    compute_duration = graph_timings.get("T_compute_dask_graph")
-    if compute_duration is None:
-        for duration_key in (
-            "T_compute_imaging_weight_graph",
-            "T_compute_imaging_weight_degrid_graph",
-        ):
-            if duration_key in graph_timings:
-                compute_duration = graph_timings[duration_key]
-                break
-
-    record = {
-        "stage": stage,
-        "timing_node_tasks": timing_node_tasks,
-        "compute_start_unixtime": graph_timings.get("compute_start_unixtime"),
-        "compute_end_unixtime": graph_timings.get("compute_end_unixtime"),
-        "T_compute": compute_duration,
-    }
-    timing_model_update = graph_result.get("timing_model_update")
-    if timing_model_update is not None:
-        record["timing_model_update"] = timing_model_update.copy(deep=True)
-    return record
-
-
-def _combine_graph_timing_frames(timing_graphs, key):
-    """Concatenate one timing-frame kind from every recorded graph."""
-    import pandas as pd
-
-    frames = [record[key] for record in timing_graphs if record.get(key) is not None]
-    if not frames:
-        return None
-    return pd.concat(frames, ignore_index=True, sort=False)
-
-
-def _accumulate_graph_timings(destination, graph_timings):
-    """Add duration values while excluding absolute wall-clock anchors."""
-    for key, value in graph_timings.items():
-        if key in {"compute_start_unixtime", "compute_end_unixtime"}:
-            continue
-        destination[key] = destination.get(key, 0.0) + value
-
-
 def compute_continuum_graph(
     *,
     ps_xdt,
@@ -998,6 +925,7 @@ def prepare_continuum_imaging_weights_global(
         "global weight density",
         weight_density_result,
         weight_density_timings,
+        stage_kind="weighting",
     )
     if record is not None:
         graph_records.append(record)
@@ -1209,6 +1137,7 @@ def prepare_continuum_imaging_weights_global(
         "global weight degridding",
         weight_result,
         weight_degrid_timings,
+        stage_kind="weighting",
     )
     if record is not None:
         graph_records.append(record)
@@ -1516,7 +1445,7 @@ def combine_continuum_chunks(input_data, input_params):
     # Helper functions
     # ------------------------------------------------------------------
 
-    # Kept inline due ti their shortness
+    # Kept inline due to their shortness.
     # returns dictionary of metadata
     def _continuum_metadata(dataset):
         metadata = dataset.attrs.get("continuum_imaging", {})
@@ -3399,6 +3328,7 @@ def image_continuum_single_field(
         image_data_groups_for_kept_variables,
         write_zarr_image_store,
     )
+    from astroviper.utils.measurement_set_v2 import is_measurement_set_v2
     from astroviper.utils.timing import format_timing_summary
 
     if compressor is None:
@@ -3483,12 +3413,6 @@ def image_continuum_single_field(
             f"{imaging_weights_params['weighting']!r}."
         )
 
-    # not implemented by now
-    # if continuum_mode == "mvc" and deconvolver != "mtmfs":
-    #    raise ValueError(
-    #        "continuum_mode='mvc' requires deconvolver='mtmfs'."
-    #    )
-
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
     if restore and "sky_restored" not in image_data_variables_keep:
@@ -3511,6 +3435,13 @@ def image_continuum_single_field(
     # summary logged just before returning.
     timing_distributed_application = {}
     application_start = time.time()
+
+    if is_measurement_set_v2(ps_store):
+        raise ValueError(
+            "Continuum imaging requires an XRADIO Processing Set, not an MSv2 "
+            "directory. Convert it first with "
+            "xradio.measurement_set.convert_msv2_to_processing_set."
+        )
 
     # The residual update grids in the instrument basis and the model update
     # deconvolves in Stokes, so the requested Stokes planes fix the correlations
@@ -3830,8 +3761,6 @@ def image_continuum_single_field(
 
         if skunk_works:
             # The preparation node shown above currently uses the standard loader.
-            # Either leave skunk_works unsupported for this stage or extend the node
-            # with the same direct-Zarr loading branch as the residual node.
             logger.warning(
                 "Imaging-weight preparation currently uses the standard "
                 "processing-set loader even though skunk_works=True."
@@ -3924,7 +3853,8 @@ def image_continuum_single_field(
 
             # During the first imaging cycle the PSF and residual Taylor products
             # are reduced. Later cycles only produce new residual products; the
-            # static PSF/PB products are supplied by continuum_append_node.
+            # static PSF/PB products are supplied by
+            # continuum_cycle_append_node.
             if continuum_mode == "mfs":
                 if is_first_cycle:
                     reduce_input_params = {"continuum_mode": "mfs"}
@@ -4057,14 +3987,19 @@ def image_continuum_single_field(
                 timing_distributed_application,
                 graph_timings,
             )
+            is_final_graph = bool(cycle_return_dict["residual_converged"])
+            if is_final_graph:
+                graph_stage = (
+                    "final residual + restoration" if restore else "final residual"
+                )
+            else:
+                graph_stage = f"imaging cycle {n_cycles} (residual + model update)"
             record = _graph_timing_record(
-                (
-                    "final residual + restoration"
-                    if cycle_return_dict["residual_converged"]
-                    else f"imaging cycle {n_cycles} (residual + model update)"
-                ),
+                graph_stage,
                 cycle_return_dict,
                 graph_timings,
+                stage_kind="final" if is_final_graph else "imaging_cycle",
+                includes_restoration=is_final_graph and restore,
             )
             if record is not None:
                 timing_graphs.append(record)

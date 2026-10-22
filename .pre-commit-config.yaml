@@ -53,7 +53,7 @@ repos:
         entry: python src/astroviper/utils/param_docs.py check
         language: python
         additional_dependencies:
-          - libcst
+          - libcst==1.8.5
         pass_filenames: false
         files: >-
           ^src/astroviper/(distributed_applications|node_tasks|processing_functions)/imaging/.*\.py$|^src/astroviper/utils/param_docs\.py$

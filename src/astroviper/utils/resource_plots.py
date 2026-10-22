@@ -10,7 +10,7 @@ is normal), ``memory_rss_bytes``, the cumulative syscall-level I/O counters
 ``write_bytes`` these count network filesystems such as Lustre), the scalar
 ``sample_interval_seconds`` and the wall-clock anchor ``start_unixtime``.
 
-Three complementary views:
+Four complementary views:
 
 * :func:`plot_task_resource_usage` -- tasks aligned at their OWN start
   (t=0 = task start): a subsample of individual task curves plus the average
@@ -579,7 +579,8 @@ def plot_application_task_stream(source, title=None, save_path=None):
     ----------
     source : dict
         Continuum application result containing ``timing_graphs``. Each record
-        supplies ``stage``, ``timing_node_tasks`` and compute-window anchors.
+        supplies ``stage``, structured ``stage_kind``,
+        ``timing_node_tasks`` and compute-window anchors.
     title : str, optional
         Overall figure title.
     save_path : str, optional
@@ -675,10 +676,13 @@ def plot_application_task_stream(source, title=None, save_path=None):
                     )
 
         stage = str(record.get("stage", f"graph {graph_index}"))
-        if "imaging cycle" in stage:
+        stage_kind = record.get("stage_kind")
+        if stage_kind == "imaging_cycle":
             post_label = "reduce + model update"
-        elif "restoration" in stage:
+        elif stage_kind == "final" and record.get("includes_restoration", False):
             post_label = "reduce + restoration"
+        elif stage_kind == "final":
+            post_label = "reduce + finalization"
         else:
             post_label = "reduce / gather"
         if graph_duration - task_end > 0.04 * graph_duration:

@@ -45,7 +45,8 @@ def continuum_input(tmp_path, tw_hydra_source_store):
             reference_frequency=float(np.mean(frequency)),
         )
         mask = np.zeros((64, 64), dtype=bool)
-        mask[20:44, 20:44] = True
+        mask[18:43, 21:47] = True
+        mask[18:23, 21:29] = False
         mask_path = input_directory / "mask.npy"
         np.save(mask_path, mask)
         yield store, params, mask_path, mask

@@ -9,6 +9,7 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _resolve_continuum_taylor_expansion,
     combine_continuum_imaging_weight_chunks,
     combine_continuum_weight_density_chunks,
+    image_continuum_single_field,
 )
 
 
@@ -39,6 +40,28 @@ def test_public_api_preserves_supported_mtmfs_taylor_orders(n_taylor_terms):
 def test_public_api_rejects_invalid_mtmfs_taylor_orders(params, error, message):
     with pytest.raises(error, match=message):
         _resolve_continuum_deconvolver("mtmfs", params)
+
+
+def test_public_api_rejects_msv2_before_creating_output(monkeypatch, tmp_path):
+    """Continuum users get a conversion hint without an empty image store."""
+    monkeypatch.setattr(
+        "astroviper.utils.measurement_set_v2.is_measurement_set_v2",
+        lambda path: True,
+    )
+    output = tmp_path / "must_not_exist.zarr"
+    with pytest.raises(ValueError, match="convert_msv2_to_processing_set"):
+        image_continuum_single_field(
+            "input.ms",
+            str(output),
+            {
+                "n_taylor_terms": 1,
+                "reference_frequency": 1.0e9,
+                "image_size": [8, 8],
+            },
+            {"weighting": "natural"},
+            {},
+        )
+    assert not output.exists()
 
 
 @pytest.mark.parametrize(

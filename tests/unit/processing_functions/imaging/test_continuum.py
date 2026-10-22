@@ -1,6 +1,7 @@
 """Unit tests for continuum processing algorithms and validation."""
 
 import sys
+import warnings
 from types import ModuleType
 
 import numpy as np
@@ -697,6 +698,22 @@ def test_mvc_prediction_applies_channel_over_effective_primary_beam():
     np.testing.assert_allclose(actual.squeeze(), [5.0, 30.0])
 
 
+def test_mvc_prediction_masks_zero_effective_beam_without_warning():
+    """Invalid PB support is zeroed without evaluating a masked division."""
+    frequency = np.array([0.9e9, 1.1e9])
+    model = _frequency_cube([10.0, 20.0], frequency)
+    channel_pb = _frequency_cube([0.5, 1.5], frequency, polarization="XX")
+    effective_pb = xr.DataArray(
+        np.zeros((1, 1, 1, 1)),
+        dims=("time", "polarization", "l", "m"),
+        coords={"time": [0], "polarization": ["I"], "l": [0.0], "m": [0.0]},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        actual = apply_mvc_primary_beam_convention(model, channel_pb, effective_pb)
+    np.testing.assert_array_equal(actual, 0.0)
+
+
 @pytest.mark.parametrize(
     "channel_pb",
     [
@@ -1183,6 +1200,8 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
     if continuum_mode == "mvc":
         assert "SKY_RESIDUAL_MVC_CUBE" in result
         assert "POINT_SPREAD_FUNCTION_MVC_CUBE" in result
+        np.testing.assert_array_equal(result["MVC_RESIDUAL_TAYLOR_NUMERATOR"], [0.0])
+        np.testing.assert_array_equal(result["MVC_RESIDUAL_WEIGHT_SUM"], [1.0])
 
 
 @pytest.mark.parametrize("continuum_mode,degrid_time", [("mfs", 0.3), ("mvc", 0.5)])

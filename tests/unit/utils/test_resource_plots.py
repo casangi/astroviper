@@ -146,6 +146,7 @@ def test_application_task_stream_plots_every_graph(tmp_path):
         "timing_graphs": [
             {
                 "stage": "global weight density",
+                "stage_kind": "weighting",
                 "timing_node_tasks": graph_one,
                 "compute_start_unixtime": graph_one.start_unixtime.min() - 1,
                 "compute_end_unixtime": graph_one.start_unixtime.max() + 25,
@@ -153,6 +154,7 @@ def test_application_task_stream_plots_every_graph(tmp_path):
             },
             {
                 "stage": "imaging cycle 1 (residual + model update)",
+                "stage_kind": "imaging_cycle",
                 "timing_node_tasks": graph_two,
                 "compute_start_unixtime": graph_two.start_unixtime.min() - 2,
                 "compute_end_unixtime": graph_two.start_unixtime.max() + 20,
@@ -166,6 +168,8 @@ def test_application_task_stream_plots_every_graph(tmp_path):
     assert len(figure.axes) == 2
     assert "global weight density" in figure.axes[0].get_title(loc="left")
     assert "imaging cycle 1" in figure.axes[1].get_title(loc="left")
+    assert "reduce / gather" in {text.get_text() for text in figure.axes[0].texts}
+    assert "reduce + model update" in {text.get_text() for text in figure.axes[1].texts}
     assert output.exists()
 
 

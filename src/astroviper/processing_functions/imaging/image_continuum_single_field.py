@@ -804,15 +804,15 @@ def apply_mvc_primary_beam_convention(
 
     effective_pb_data = np.asarray(effective_primary_beam.data)[:, None, ...]
     valid_effective_pb = np.isfinite(effective_pb_data) & (effective_pb_data > 0.0)
-    result = model_cube.copy(
-        data=np.where(
-            valid_effective_pb,
-            np.asarray(model_cube.data)
-            * np.asarray(primary_beam_cube.data)
-            / effective_pb_data,
-            0.0,
-        )
+    numerator = np.asarray(model_cube.data) * np.asarray(primary_beam_cube.data)
+    corrected = np.zeros_like(numerator)
+    np.divide(
+        numerator,
+        effective_pb_data,
+        out=corrected,
+        where=valid_effective_pb,
     )
+    result = model_cube.copy(data=corrected)
     result.attrs = model_cube.attrs.copy()
     result.attrs["primary_beam_convention"] = "channel_pb_over_effective_pb"
     return result
@@ -1974,31 +1974,11 @@ def residual_update_continuum_single_field(
                 new_data_group_name=image_data_group_out_name,
                 new_data_group={
                     "description": "Continuum residual products.",
-                    "date": "2026",
                 },
             )
 
-        # Needs to be refactored at a later point when decided what to do with weights
-        # start = time.time()
-
-        # calculate_imaging_weights(
-        #    ps_xdt,
-        #    img_xds,
-        #    imaging_weights_params=imaging_weights_params,
-        #    return_weight_density_grid=False,
-        #    ms_data_group_in_name=processing_set_data_group_name,
-        #    ms_data_group_out_name=processing_set_data_group_name,
-        #    ms_data_group_out_modified={
-        #        "weight_imaging": "WEIGHT_IMAGING",
-        #    },
-        #    processing_function_threads=processing_function_threads,
-        # )
-
-        # T_weights = time.time() - start
-
         setup_return_df = pd.DataFrame({})
 
-        # timing["T_prep"] = T_weights
         accumulate_timing(
             timing,
             setup_return_df,
@@ -2520,8 +2500,17 @@ def _model_update_native_mtmfs(
                 if native_layout
                 else np.array(residual_view, copy=True, order="C")
             )
-            psf_work = np.ascontiguousarray(psf[tt, :, pp, :, :])
-            model_work = np.zeros_like(residual_work)
+            psf_view = psf[tt, :, pp, :, :]
+            psf_work = (
+                psf_view
+                if psf_view.flags.c_contiguous
+                else np.ascontiguousarray(psf_view)
+            )
+            model_view = model[tt, :, pp, :, :]
+            model_native_layout = model_view.flags.c_contiguous
+            model_work = (
+                model_view if model_native_layout else np.zeros_like(residual_work)
+            )
             mask_work = np.ascontiguousarray(support[tt, pp], dtype=residual_work.dtype)
             selected = support[tt, pp] & np.isfinite(residual_work[0])
             start_peak = float(np.max(np.abs(residual_work[0][selected]), initial=0.0))
@@ -2552,7 +2541,8 @@ def _model_update_native_mtmfs(
             )
             if not native_layout:
                 residual_view[...] = residual_work
-            model[tt, :, pp, :, :] = model_work
+            if not model_native_layout:
+                model_view[...] = model_work
             final_selected = support[tt, pp] & np.isfinite(residual_work[0])
             model_update_stop_code = int(result["stop_code"])
             fields = {
@@ -2569,7 +2559,7 @@ def _model_update_native_mtmfs(
                     model_update_stop_code
                 ],
                 "stokes": img_xds.coords["polarization"].values[pp],
-                "frequency": img_xds.attrs.get("reference_frequency", 0.0),
+                "frequency": float(_continuum_frequency_coord(img_xds)[0]),
                 "time": img_xds.coords["time"].values[tt],
                 "start_model_flux": 0.0,
                 "model_flux": float(result["model_flux"]),

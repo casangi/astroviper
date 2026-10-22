@@ -132,14 +132,6 @@ def add_visibility_grid_mvc_single_field(
             f"fft_padding must be finite and at least 1.0; received {fft_padding}."
         )
 
-    if int(processing_function_threads) < 1:
-        raise ValueError(
-            "processing_function_threads must be at least 1; "
-            f"received {processing_function_threads}."
-        )
-
-    processing_function_threads = int(processing_function_threads)
-
     # ------------------------------------------------------------------
     # Resolve input and output data groups.
     # ------------------------------------------------------------------

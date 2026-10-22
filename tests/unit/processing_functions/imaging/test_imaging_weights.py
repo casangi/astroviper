@@ -11,7 +11,7 @@ Coverage:
       - ``casa_weighting_implementation`` defaults to ``False`` via the
         parameter checker.
   * Briggs path with the gridder/Briggs internals mocked out so the tests
-    do not depend on Numba JIT or numerical gridding behaviour.
+    do not depend on the C++ kernels or numerical gridding behaviour.
 """
 
 import unittest
@@ -42,28 +42,27 @@ _BRIGGS_MOD_PATH = (
 )
 
 
-def test_degrid_imaging_weights_accepts_non_native_float_density_grid():
-    """Distributed density reductions normalize non-native floats for C++."""
+def test_degrid_imaging_weights_rejects_non_native_float_density_grid():
+    """The Python/C++ boundary rejects rather than converts non-native floats."""
     density = np.zeros((1, 1, 4, 4), dtype=">f8")
     density[0, 0, 2, 2] = 3.0
 
-    actual = degrid_imaging_weights(
-        density,
-        np.zeros((1, 1, 3), dtype=np.float64),
-        np.ones((1, 1, 1, 1), dtype=np.float64),
-        np.ones((2, 1, 1), dtype=np.float64),
-        np.asarray([1.0e9], dtype=np.float64),
-        np.asarray([4, 4], dtype=np.int64),
-        np.asarray([1.0e-5, 1.0e-5], dtype=np.float64),
-        processing_function_threads=1,
-    )
-
-    np.testing.assert_allclose(actual, 0.25, rtol=0.0, atol=0.0)
+    with pytest.raises(TypeError, match="native float32 or float64"):
+        degrid_imaging_weights(
+            density,
+            np.zeros((1, 1, 3), dtype=np.float64),
+            np.ones((1, 1, 1, 1), dtype=np.float64),
+            np.ones((2, 1, 1), dtype=np.float64),
+            np.asarray([1.0e9], dtype=np.float64),
+            np.asarray([4, 4], dtype=np.int64),
+            np.asarray([1.0e-5, 1.0e-5], dtype=np.float64),
+            processing_function_threads=1,
+        )
 
 
 def test_degrid_imaging_weights_rejects_non_float_density_grid():
     """Density grids with integer storage fail before reaching the C++ kernel."""
-    with pytest.raises(TypeError, match="floating-point dtype"):
+    with pytest.raises(TypeError, match="native float32 or float64"):
         degrid_imaging_weights(
             np.zeros((1, 1, 4, 4), dtype=np.int64),
             np.zeros((1, 1, 3), dtype=np.float64),

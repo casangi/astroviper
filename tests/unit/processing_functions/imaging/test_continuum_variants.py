@@ -185,6 +185,8 @@ def test_mtmfs_restoration_uses_principal_residual_copy(dtype):
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtype):
     image = make_continuum_image()
+    image.attrs.pop("reference_frequency", None)
+    image.attrs["continuum_imaging"] = {"reference_frequency_hz": 1.5e9}
     psf_zero = image.POINT_SPREAD_FUNCTION.isel(psf_taylor_order=0, drop=True)
     image = image.drop_dims("psf_taylor_order")
     image["POINT_SPREAD_FUNCTION"] = xr.concat(
@@ -201,7 +203,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     calls = []
 
     def native_clean(residual, psf, model, **kwargs):
-        calls.append((residual.shape, psf.shape, model.shape, kwargs))
+        calls.append((residual, psf, model, kwargs))
         assert residual.ndim == psf.ndim == model.ndim == 3
         assert residual.shape == model.shape == (2, 8, 8)
         assert psf.shape == (3, 8, 8)
@@ -209,6 +211,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         assert psf.flags.c_contiguous
         assert model.flags.c_contiguous
         assert np.shares_memory(residual, image.SKY_RESIDUAL.values)
+        assert np.shares_memory(psf, image.POINT_SPREAD_FUNCTION.values)
         assert residual.dtype == psf.dtype == model.dtype == dtype
         np.testing.assert_array_equal(model, 0.0)
         residual *= dtype(0.5)
@@ -241,6 +244,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     )
 
     assert len(calls) == 1
+    assert np.shares_memory(calls[0][2], image.SKY_MODEL.values)
     assert calls[0][3]["max_iter_per_cycle_updated"] == 3
     assert calls[0][3]["threshold_per_cycle"] == pytest.approx(0.01)
     assert "psf_fraction" not in calls[0][3]
@@ -262,6 +266,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         accumulated.SKY_MODEL.isel(taylor_term=1), dtype(22.0)
     )
     fields = next(iter(statistics.data.values()))
+    assert fields["frequency"] == 1.5e9
     assert fields["iter_done"] == [3]
     assert fields["stop_code"].model_update == mtmfs.STOP_MAX_ITER
     assert fields["stop_description"] == "Reached max_iter_per_cycle_updated"

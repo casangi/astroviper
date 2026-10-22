@@ -584,7 +584,6 @@ def _recompute_wideband_primary_beam(
         new_data_group_name="residual",
         new_data_group={
             "description": "Task-local recomputed MVC primary beam.",
-            "date": "2026",
         },
     )
     pb_img_xds, _ = make_continuum_primary_beam_single_field(
@@ -1311,7 +1310,7 @@ def residual_update_continuum_single_field(
     task_start = time.time()
 
     logger.debug(
-        "Memory usage at start of image_cube_single_field_node_task: "
+        "Memory usage at start of residual_update_continuum_single_field: "
         + str(get_rss_gb())
         + " GB"
     )
@@ -1677,7 +1676,7 @@ def residual_update_continuum_single_field(
     ps_xdt = None
 
     logger.debug(
-        "Memory usage after image_cube_single_field_node_task: "
+        "Memory usage after residual_update_continuum_single_field: "
         + str(get_rss_gb())
         + " GB"
     )
@@ -3557,7 +3556,6 @@ def model_update_continuum_single_field(
     # -------------------------------------------------------------
     start = time.time()
 
-    # placeholder for mtmfs
     (
         deconvolve_dict,
         model_update_return_df,

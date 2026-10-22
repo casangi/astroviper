@@ -1,4 +1,4 @@
-"""Weight-grid mapping and read-only density normalization regressions."""
+"""Weight-grid mapping and strict zero-copy density-grid regressions."""
 
 import numpy as np
 import pytest
@@ -10,8 +10,8 @@ from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weig
 
 
 @pytest.mark.parametrize("truncate", [False, True])
-@pytest.mark.parametrize("density_dtype", [np.float32, np.float64, ">f8"])
-def test_collapsed_frequency_grid_and_normalized_lookup(truncate, density_dtype):
+@pytest.mark.parametrize("density_dtype", [np.float32, np.float64])
+def test_collapsed_frequency_grid_and_native_lookup(truncate, density_dtype):
     grid = np.zeros((1, 1, 8, 8))
     sums = np.zeros((1, 1))
     uvw = np.zeros((1, 1, 3))
@@ -31,8 +31,7 @@ def test_collapsed_frequency_grid_and_normalized_lookup(truncate, density_dtype)
     )
     assert grid.sum() == 8.0
     assert sums[0, 0] == 8.0
-    # Swapping equal-sized spatial axes supplies a non-contiguous read-only input.
-    density = grid.astype(density_dtype).swapaxes(-1, -2)
+    density = np.ascontiguousarray(grid, dtype=density_dtype)
     density.flags.writeable = False
     result = degrid_imaging_weights(
         density,
@@ -46,6 +45,31 @@ def test_collapsed_frequency_grid_and_normalized_lookup(truncate, density_dtype)
         truncate_uv_cells=truncate,
     )
     np.testing.assert_array_equal(result, weights / 8.0)
+
+
+@pytest.mark.parametrize(
+    "density,error,message",
+    [
+        (np.zeros((1, 1, 8, 8), dtype=">f8"), TypeError, "native"),
+        (
+            np.zeros((1, 1, 8, 8), dtype=np.float64).swapaxes(-1, -2),
+            ValueError,
+            "C-contiguous",
+        ),
+    ],
+)
+def test_density_grid_conversion_is_rejected(density, error, message):
+    """Large density grids are never byte-swapped or copied implicitly."""
+    with pytest.raises(error, match=message):
+        degrid_imaging_weights(
+            density,
+            np.zeros((1, 1, 3)),
+            np.ones((1, 1, 1, 1)),
+            np.ones((2, 1, 1)),
+            np.array([1e9]),
+            [8, 8],
+            [1e-5, 1e-5],
+        )
 
 
 @pytest.mark.parametrize("mapping", [None, [0], [-1, 0], [0, 1]])

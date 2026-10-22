@@ -321,7 +321,6 @@ def imaging_setup_continuum_single_field(
                 "description": (
                     "Chunk-local continuum Taylor PSF and residual products."
                 ),
-                "date": "2026",
             },
         )
 

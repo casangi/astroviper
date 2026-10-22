@@ -547,8 +547,10 @@ def test_graph_timing_record_normalizes_weight_task_phases():
             "compute_end_unixtime": 104.0,
             "T_compute_dask_graph": 4.0,
         },
+        stage_kind="weighting",
     )
     assert record["stage"] == "global weight density"
+    assert record["stage_kind"] == "weighting"
     assert record["T_compute"] == 4.0
     timing = record["timing_node_tasks"].iloc[0]
     assert timing.T_image_cube_task == 3.0
@@ -567,6 +569,7 @@ def test_graph_timing_record_retains_model_update_timing():
             "timing_model_update": model_timing,
         },
         {"T_compute_dask_graph": 5.0},
+        stage_kind="imaging_cycle",
     )
 
     pd.testing.assert_frame_equal(record["timing_model_update"], model_timing)
@@ -662,10 +665,16 @@ def test_global_weight_preparation_builds_factors_and_returns_all_tasks(monkeypa
         "astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting.calculate_briggs_params",
         lambda density, weights, params: np.ones((2, 1, 1)),
     )
+    degrid_calls = []
+
+    def fake_degrid(**kwargs):
+        degrid_calls.append(kwargs)
+        return {"weight_cache_mapping": {0: {}, 1: {}}}, {"T_degrid": 1.0}
+
     monkeypatch.setattr(
         module,
         "compute_continuum_imaging_weight_degrid_graph",
-        lambda **kwargs: ({"weight_cache_mapping": {0: {}, 1: {}}}, {"T_degrid": 1.0}),
+        fake_degrid,
     )
     result, timings = prepare_continuum_imaging_weights_global(
         ps_xdt={},
@@ -678,6 +687,8 @@ def test_global_weight_preparation_builds_factors_and_returns_all_tasks(monkeypa
     )
     assert set(result["weight_cache_mapping"]) == {0, 1}
     assert timings["T_degrid"] == 1.0
+    factors = degrid_calls[0]["input_params"]["global_weighting_xds"]["BRIGGS_FACTORS"]
+    assert factors.shape == (2, 1, 1)
 
 
 def _tw_hydra_image_params(processing_set, overrides=None):
@@ -1330,7 +1341,7 @@ def test_tw_hydra_reference_frequency_alias_gives_the_same_images(
             and "reference_frequency_hz" in str(warning.message)
         ]
         assert len(deprecations) == ("reference_frequency_hz" in keys)
-        assert result["n_cycles"] >= 2
+        assert result["n_cycles"] == 2
         assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
 
     for name in ("both", "alias"):
@@ -1385,7 +1396,7 @@ def test_tw_hydra_numpy_and_xarray_scalars_give_the_same_images(
                 "max_psf_fraction": 0.8,
             },
         )
-        assert result["n_cycles"] >= 2
+        assert result["n_cycles"] == 2
         assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
 
     for name in ("numpy", "xarray"):
@@ -1713,10 +1724,12 @@ def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
         },
     )
 
-    assert result["n_cycles"] >= 2
+    assert result["n_cycles"] == 2
     assert len(result["timing_graphs"]) == result["n_cycles"] + 1
     assert result["timing_graphs"][0]["stage"].startswith("imaging cycle 1")
-    assert result["timing_graphs"][-1]["stage"] == "final residual + restoration"
+    assert result["timing_graphs"][-1]["stage"] == "final residual"
+    assert result["timing_graphs"][-1]["stage_kind"] == "final"
+    assert result["timing_graphs"][-1]["includes_restoration"] is False
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.SKY_MODEL.values).all()
@@ -2172,12 +2185,19 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
         single_precision_image=True,
     )
 
-    assert result["n_cycles"] >= 2
+    assert result["n_cycles"] == 2
     assert len(result["timing_graphs"]) == result["n_cycles"] + 3
     assert [record["stage"] for record in result["timing_graphs"][:2]] == [
         "global weight density",
         "global weight degridding",
     ]
+    assert [record["stage_kind"] for record in result["timing_graphs"][:2]] == [
+        "weighting",
+        "weighting",
+    ]
+    assert result["timing_graphs"][-1]["stage"] == "final residual + restoration"
+    assert result["timing_graphs"][-1]["stage_kind"] == "final"
+    assert result["timing_graphs"][-1]["includes_restoration"] is True
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert image.SKY_RESIDUAL.dtype == np.dtype(np.float32)
     assert image.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
