@@ -1799,10 +1799,18 @@ def combine_continuum_chunks(input_data, input_params):
                 )
             continue
 
-        # Ensure the accumulator owns a writable array. This is particularly
-        # relevant when copy_image_deep=False or when an input is backed by a
-        # read-only array.
-        combined_image[variable_name] = combined_image[variable_name].copy(deep=True)
+        # A deep Dataset copy already owns this array. For a shallow copy, or
+        # an unusual non-NumPy/read-only backend, materialize one writable
+        # accumulator now so later inputs can be added without temporaries.
+        accumulator_data = combined_image[variable_name].data
+        if (
+            not copy_image_deep
+            or not isinstance(accumulator_data, np.ndarray)
+            or not accumulator_data.flags.writeable
+        ):
+            combined_image[variable_name] = combined_image[variable_name].copy(
+                data=np.array(accumulator_data, copy=True)
+            )
 
     # Main loop: Loop over input data to combine
     for input_index, result in enumerate(input_data[1:], start=1):
@@ -1877,10 +1885,11 @@ def combine_continuum_chunks(input_data, input_params):
                 input_index,
             )
 
-            # xarray keeps dimension labels and coordinates while performing
-            # the numerical sum. Assignment avoids relying on in-place
-            # behavior for lazy, read-only, or non-NumPy-backed arrays.
-            combined_image[variable_name] = accumulator + candidate
+            np.add(
+                accumulator.data,
+                np.asarray(candidate.data),
+                out=accumulator.data,
+            )
 
     # Record how many original map-task rows contributed to this partial or
     # complete reduction. Because timing rows are concatenated at each tree

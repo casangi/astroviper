@@ -56,6 +56,22 @@ def test_reduction_is_associative_and_does_not_mutate_readonly_leaves(deep_copy)
         assert not np.shares_memory(leaf["image"].VISIBILITY, flat["image"].VISIBILITY)
 
 
+def test_reduction_accumulates_without_out_of_place_xarray_addition(monkeypatch):
+    """Reducer additions write into the single owned accumulator buffer."""
+    leaves = [_leaf(0), _leaf(1)]
+
+    def reject_out_of_place_addition(*args, **kwargs):
+        raise AssertionError("The reducer must not allocate through DataArray.__add__.")
+
+    def reject_redundant_copy(*args, **kwargs):
+        raise AssertionError("The deep Dataset copy already owns the accumulator.")
+
+    monkeypatch.setattr(xr.DataArray, "__add__", reject_out_of_place_addition)
+    monkeypatch.setattr(xr.DataArray, "copy", reject_redundant_copy)
+    result = combine_continuum_chunks(leaves, PARAMS)
+    np.testing.assert_array_equal(result["image"].VISIBILITY, 3.0)
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [
