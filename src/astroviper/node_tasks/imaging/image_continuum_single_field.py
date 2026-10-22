@@ -774,7 +774,8 @@ def _attach_imaging_weights_continuum(
         ``"weight_imaging"`` registration.
 
     weight_imaging_name : str, optional
-        Name of the cached imaging-weight variable.
+        Fallback name of the cached imaging-weight variable. Each cached
+        dataset's ``weight_imaging_name`` attribute takes precedence.
 
     Returns
     -------
@@ -792,14 +793,18 @@ def _attach_imaging_weights_continuum(
             )
 
         weight_xds = weight_datasets[ms_name]
+        cached_weight_name = weight_xds.attrs.get(
+            "weight_imaging_name",
+            weight_imaging_name,
+        )
 
-        if weight_imaging_name not in weight_xds:
+        if cached_weight_name not in weight_xds:
             raise KeyError(
                 f"Cached dataset for {ms_name!r} does not contain "
-                f"{weight_imaging_name!r}."
+                f"{cached_weight_name!r}."
             )
 
-        weight_da = weight_xds[weight_imaging_name]
+        weight_da = weight_xds[cached_weight_name]
 
         if (
             weight_da.dims
@@ -828,7 +833,7 @@ def _attach_imaging_weights_continuum(
                 )
 
         # Use a direct Variable assignment to avoid coordinate alignment.
-        ms_xdt[weight_imaging_name] = weight_da.variable.copy(deep=False)
+        ms_xdt[cached_weight_name] = weight_da.variable.copy(deep=False)
 
         data_groups = ms_xdt.attrs.setdefault("data_groups", {})
 
@@ -839,7 +844,7 @@ def _attach_imaging_weights_continuum(
             )
 
         data_groups[processing_set_data_group_name]["weight_imaging"] = (
-            weight_imaging_name
+            cached_weight_name
         )
 
         attached += 1

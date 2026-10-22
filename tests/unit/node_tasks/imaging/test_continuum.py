@@ -180,6 +180,35 @@ def test_in_place_mfs_append_persists_and_reloads_observed_grid(tmp_path):
     )
 
 
+def test_attach_imaging_weights_uses_each_cached_dataset_variable_name():
+    """A retained nonstandard weight name is reattached in later cycles."""
+    dimensions = ("time", "baseline", "frequency", "polarization")
+    shape = (1, 1, 2, 2)
+    loaded = {
+        "ms": xr.Dataset(
+            {"WEIGHT": xr.DataArray(np.ones(shape), dims=dimensions)},
+            attrs={"data_groups": {"base": {"weight": "WEIGHT"}}},
+        )
+    }
+    cached = {
+        "ms": xr.Dataset(
+            {"RETAINED_WEIGHT": xr.DataArray(np.full(shape, 2.0), dims=dimensions)},
+            attrs={"weight_imaging_name": "RETAINED_WEIGHT"},
+        )
+    }
+
+    actual = continuum_node._attach_imaging_weights_continuum(
+        loaded,
+        cached,
+        processing_set_data_group_name="base",
+    )
+
+    np.testing.assert_array_equal(actual["ms"].RETAINED_WEIGHT, 2.0)
+    assert (
+        actual["ms"].attrs["data_groups"]["base"]["weight_imaging"] == "RETAINED_WEIGHT"
+    )
+
+
 def test_recompute_mfs_append_does_not_require_or_modify_a_cache():
     """Recompute mode leaves the freshly reduced visibility residual untouched."""
     reduced = _mfs_uv_grid(2.5)
