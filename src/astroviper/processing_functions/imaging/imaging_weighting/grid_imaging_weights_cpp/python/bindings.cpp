@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include "../include/grid_imaging_weights.hpp"
 
@@ -19,6 +20,27 @@ static void require_c_contiguous(const py::buffer_info& info, const char* name) 
                 std::string(name) + " must be C-contiguous (pass np.ascontiguousarray() if needed)");
         stride *= info.shape[i];
     }
+}
+
+static void require_int64_element_count(
+    const py::buffer_info& info, const char* name
+) {
+    std::int64_t total = 1;
+    for (const py::ssize_t dimension : info.shape) {
+        if (dimension < 0 ||
+            (dimension != 0 &&
+             total > std::numeric_limits<std::int64_t>::max() / dimension))
+            throw std::overflow_error(
+                std::string(name) + " element count exceeds int64 indexing");
+        total *= static_cast<std::int64_t>(dimension);
+    }
+}
+
+static int checked_int_dimension(py::ssize_t dimension, const char* name) {
+    if (dimension < 0 || dimension > std::numeric_limits<int>::max())
+        throw std::overflow_error(
+            std::string(name) + " dimension exceeds the kernel int range");
+    return static_cast<int>(dimension);
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +88,10 @@ void grid_imaging_weights_bind(
     require_c_contiguous(sum_info,  "sum_weight");
     require_c_contiguous(uvw_info,  "uvw");
     require_c_contiguous(wt_info,   "data_weights");
+    require_int64_element_count(grid_info, "grid");
+    require_int64_element_count(sum_info, "sum_weight");
+    require_int64_element_count(uvw_info, "uvw");
+    require_int64_element_count(wt_info, "data_weights");
 
     if (grid_info.readonly)
         throw std::runtime_error("grid must be a writable array (modified in place)");
@@ -80,15 +106,18 @@ void grid_imaging_weights_bind(
             "grid must be float32 or float64 (no implicit conversion is "
             "performed; the array is modified in place)");
 
-    const int n_chan_g = static_cast<int>(grid_info.shape[0]);
-    const int n_pol_g  = static_cast<int>(grid_info.shape[1]);
-    const int m_u      = static_cast<int>(grid_info.shape[2]);
-    const int m_v      = static_cast<int>(grid_info.shape[3]);
+    const int n_chan_g = checked_int_dimension(grid_info.shape[0], "grid channel");
+    const int n_pol_g = checked_int_dimension(grid_info.shape[1], "grid polarization");
+    const int m_u = checked_int_dimension(grid_info.shape[2], "grid u");
+    const int m_v = checked_int_dimension(grid_info.shape[3], "grid v");
 
-    const int n_time     = static_cast<int>(uvw_info.shape[0]);
-    const int n_baseline = static_cast<int>(uvw_info.shape[1]);
-    const int n_vis_chan = static_cast<int>(chan_map.shape(0));
-    const int n_pol      = static_cast<int>(wt_info.shape[3]);
+    const int n_time = checked_int_dimension(uvw_info.shape[0], "uvw time");
+    const int n_baseline = checked_int_dimension(
+        uvw_info.shape[1], "uvw baseline");
+    const int n_vis_chan = checked_int_dimension(
+        chan_map.shape(0), "visibility channel");
+    const int n_pol = checked_int_dimension(
+        wt_info.shape[3], "data-weight polarization");
 
     (void)n_uv;  // grid dimensions are taken from the grid array itself
 
@@ -168,6 +197,11 @@ void degrid_imaging_weights_bind(
     require_c_contiguous(briggs_info, "briggs_factors");
     require_c_contiguous(uvw_info,    "uvw");
     require_c_contiguous(wt_info,     "data_weight");
+    require_int64_element_count(out_info, "imaging_weight");
+    require_int64_element_count(grid_info, "grid_imaging_weight");
+    require_int64_element_count(briggs_info, "briggs_factors");
+    require_int64_element_count(uvw_info, "uvw");
+    require_int64_element_count(wt_info, "data_weight");
 
     if (out_info.readonly)
         throw std::runtime_error(
@@ -183,16 +217,20 @@ void degrid_imaging_weights_bind(
             "grid_imaging_weight must be float32 or float64 (no implicit "
             "conversion is performed)");
 
-    const int n_chan_g = static_cast<int>(grid_info.shape[0]);
-    const int n_pol_g  = static_cast<int>(grid_info.shape[1]);
-    const int m_u      = static_cast<int>(grid_info.shape[2]);
-    const int m_v      = static_cast<int>(grid_info.shape[3]);
+    const int n_chan_g = checked_int_dimension(grid_info.shape[0], "grid channel");
+    const int n_pol_g = checked_int_dimension(grid_info.shape[1], "grid polarization");
+    const int m_u = checked_int_dimension(grid_info.shape[2], "grid u");
+    const int m_v = checked_int_dimension(grid_info.shape[3], "grid v");
 
-    const int n_time     = static_cast<int>(uvw_info.shape[0]);
-    const int n_baseline = static_cast<int>(uvw_info.shape[1]);
-    const int n_vis_chan = static_cast<int>(chan_map.shape(0));
-    const int n_pol      = static_cast<int>(wt_info.shape[3]);
-    const int n_pol_out  = static_cast<int>(pol_map.shape(0));
+    const int n_time = checked_int_dimension(uvw_info.shape[0], "uvw time");
+    const int n_baseline = checked_int_dimension(
+        uvw_info.shape[1], "uvw baseline");
+    const int n_vis_chan = checked_int_dimension(
+        chan_map.shape(0), "visibility channel");
+    const int n_pol = checked_int_dimension(
+        wt_info.shape[3], "data-weight polarization");
+    const int n_pol_out = checked_int_dimension(
+        pol_map.shape(0), "output polarization");
 
     (void)n_uv;  // grid dimensions are taken from the grid array itself
 

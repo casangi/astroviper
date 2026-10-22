@@ -135,6 +135,17 @@ def _make_inputs(seed=0, n_time=4, n_baseline=32, n_chan=3, n_pol=2, m_u=64, m_v
     )
 
 
+def _logical_oversized_empty_grid():
+    """Create a contiguous zero-element grid with an oversized channel axis."""
+    base = np.empty(0, dtype=np.float32)
+    return np.lib.stride_tricks.as_strided(
+        base,
+        shape=(np.iinfo(np.int32).max + 1, 1, 0, 1),
+        strides=(0, 0, base.itemsize, base.itemsize),
+        writeable=True,
+    )
+
+
 def _run_grid_cpp(inp, dtype=np.float64):
     grid = np.zeros((inp["n_chan"], 1, inp["m_u"], inp["m_v"]), dtype=dtype)
     sum_weight = np.zeros((inp["n_chan"], 1), dtype=np.float64)
@@ -343,6 +354,20 @@ class TestGridImagingWeightsCpp(unittest.TestCase):
                 inp["delta_lm"],
             )
 
+    def test_oversized_grid_dimension_raises(self):
+        """The binding rejects dimensions that the kernel loop type cannot hold."""
+        with self.assertRaisesRegex(OverflowError, "grid channel dimension"):
+            grid_imaging_weights(
+                _logical_oversized_empty_grid(),
+                np.empty((1, 1), dtype=np.float64),
+                np.empty((1, 1, 3), dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.int64),
+                np.empty((1, 1, 0, 1), dtype=np.float64),
+                np.array([0, 1], dtype=np.int64),
+                np.array([1.0, 1.0]),
+            )
+
 
 class TestDegridImagingWeightsCpp(unittest.TestCase):
     def _briggs(self, inp, seed=0):
@@ -451,6 +476,22 @@ class TestDegridImagingWeightsCpp(unittest.TestCase):
 
         np.testing.assert_array_equal(nearest, [[[[0.2]]]])
         np.testing.assert_array_equal(truncated, [[[[0.1]]]])
+
+    def test_oversized_grid_dimension_raises(self):
+        """The degrid binding rejects dimensions that cannot be represented."""
+        with self.assertRaisesRegex(OverflowError, "grid channel dimension"):
+            degrid_imaging_weights(
+                np.empty((1, 1, 0, 1), dtype=np.float64),
+                _logical_oversized_empty_grid(),
+                np.empty((2, 1, 1), dtype=np.float64),
+                np.empty((1, 1, 3), dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.int64),
+                np.array([0], dtype=np.int64),
+                np.empty((1, 1, 0, 1), dtype=np.float64),
+                np.array([0, 1], dtype=np.int64),
+                np.array([1.0, 1.0]),
+            )
 
 
 if __name__ == "__main__":
