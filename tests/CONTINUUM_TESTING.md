@@ -176,59 +176,34 @@ weighting and Taylor order. No distributed multi-host or MPI guarantee follows
 from local Dask tests. New supported functionality should add focused tests
 rather than merely increasing the number of equivalent configurations.
 
-## Measured coverage (2026-10-06)
+## Measured coverage (2026-10-21)
 
-On `RADPS-roadmap-194` at source commit `eca8472`, the original 135 dedicated
-continuum tests passed. The 76 added cases also pass (68 unit, eight component).
-The following comparison uses the same 11 continuum-named Python implementation
-modules and the original suite plus these additions; it excludes shared modules
-and does not measure native C++ coverage. Installed implementation files were
-verified byte-for-byte against the checkout.
+A fresh branch-coverage run includes the continuum processing, node-task and
+distributed-application suites, the imaging-weighting tests, the component
+configuration and known-truth matrices, and the real TW Hydra processing set.
+All 792 tests and five subtests pass. The table reports the current four large
+continuum implementation modules directly; it does not infer their coverage
+from the smaller GitHub patch diff and does not measure native C++ kernels.
 
-| Suite | Statement coverage | Branch coverage |
-| --- | --- | --- |
-| Original 135 cases | 2898/3452 (84.0%) | 1007/1562 (64.5%) |
-| Original suite + 76 additions | 2937/3452 (85.1%) | 1039/1562 (66.5%) |
-| Including 96 additional boundary cases (307 total) | 3040/3452 (88.1%) | 1128/1562 (72.2%) |
-| Including 107 exception cases (414 total) | 3142/3452 (91.0%) | 1229/1562 (78.7%) |
-| Including 102 execution/lifecycle cases (516 total) | 3190/3452 (92.4%) | 1275/1562 (81.6%) |
+| Module | Statements | Branches |
+| --- | ---: | ---: |
+| Distributed continuum driver | 1175/1250 (94.0%) | 517/604 (85.6%) |
+| Continuum node tasks | 863/948 (91.0%) | 323/406 (79.6%) |
+| Continuum processing functions | 852/895 (95.2%) | 341/390 (87.4%) |
+| Imaging-weight calculation | 274/325 (84.3%) | 97/148 (65.5%) |
+| **Total** | **3164/3418 (92.6%)** | **1278/1548 (82.6%)** |
 
-These percentages describe executed code, not exhaustive correctness. Several
-new tests strengthen assertions on paths that were already executed, so their
-value is not captured by the coverage increment alone. Remaining branches
-include validation/error paths and less-used execution options.
+The run covers in-process and two-worker process-based MFS and MVC execution;
+the latter verifies that TW Hydra results survive Dask serialization. These
+percentages describe executed Python code, not exhaustive scientific
+correctness. Remaining branches are concentrated in validation failures and
+less-used weighting options, especially in imaging-weight calculation.
 
-Validation also ran the full repository unit suite plus the new component matrix:
-1,721 passed, six skipped, 35 subtests passed. Eight final harness-derived
-contract cases were added after that run collected its tests and are included
-in the separately verified 76-case additions run. Ruff lint and format checks
-pass. No imaging source code or existing reference data was changed.
-
-The final combined continuum run, including the 96 boundary cases, passed all
-307 tests in 221 seconds on smurf. Ruff lint and formatting checks passed.
-The coverage row above comes from a fresh run of the entire dedicated suite,
-using the same 11 implementation modules as the earlier measurements.
-
-The subsequent combined run including the 107 exception cases passed all 414
-tests in 221 seconds. These additions exercise 95 previously uncovered explicit
-`raise` statements (194 remain uncovered, down from 289). They require no new
-stored data or downloads. Ruff lint/format checks pass; imaging code and
-existing data fixtures remain unchanged.
-
-Before the storage fixes, the combined run passed 512 cases with four strict expected failures
-in 231 seconds. The expected failures reproduce the two storage defects
-described above; at that stage they were not passing correctness checks. Coverage includes
-code executed by those cases before their expected failure. Ruff lint and
-format checks pass for all four newly added Python files. No production code,
-stored data fixtures or download requirements were changed.
-
-After the storage fixes, the full dedicated continuum suite passes all 516
-cases in 171 seconds, with no skips or expected failures. The 22-case lifecycle
-module also passes separately. Both changed implementation modules were
-verified byte-for-byte against the GCC-14-built installation in `viper`. Ruff
-lint/format, parameter documentation sync and `git diff --check` pass.
-The coverage table above records the pre-fix implementation and was not
-remeasured for this storage patch.
+The source and tests also compile with the local Python 3.14 interpreter. The
+merged Linux and macOS workflows execute the repository test suite on Python
+3.12, 3.13 and 3.14 for pull requests and pushes to `main`; this workstation
+does not have a separate Python 3.14 dependency environment, so the local
+runtime result above is from the `viper` Python 3.11 environment.
 
 ## External input and primary-beam references
 

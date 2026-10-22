@@ -1400,6 +1400,7 @@ def test_continuum_statistics_record_taylor_zero_entropy_only_when_enabled():
 @pytest.mark.parametrize("explicit_mask", [False, True])
 def test_refreshed_statistics_respect_clean_support(explicit_mask):
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        _continuum_clean_support,
         build_continuum_residual_imaging_dict,
     )
 
@@ -1425,6 +1426,13 @@ def test_refreshed_statistics_respect_clean_support(explicit_mask):
     if explicit_mask:
         image["MASK"] = (("l", "m"), [[True, False], [True, True]])
         image.attrs["data_groups"]["residual"]["mask"] = "MASK"
+    support = _continuum_clean_support(
+        image,
+        "residual",
+        image.R.isel(taylor_term=0, drop=True),
+        {"primary_beam_limit": 0.2},
+    )
+    assert support.flags.c_contiguous
     stats = build_continuum_residual_imaging_dict(
         image, "residual", {"primary_beam_limit": 0.2}
     )

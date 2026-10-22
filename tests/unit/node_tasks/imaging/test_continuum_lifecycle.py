@@ -212,7 +212,8 @@ def test_image_cache_replacement_and_repeated_cleanup(
 def test_weight_cache_activation_replacement_and_cleanup(
     tmp_path, zarr_format, interrupted
 ):
-    store = str(tmp_path / "weights.zarr")
+    ps_store = str(tmp_path / "input.zarr")
+    image_store = str(tmp_path / "image.zarr")
     name = "WEIGHT_IMAGING_CONTINUUM_CACHE"
     group = {"weight": "WEIGHT"}
     if interrupted:
@@ -222,49 +223,48 @@ def test_weight_cache_activation_replacement_and_cleanup(
         coords={"frequency": [100.0, 110.0]},
         attrs={"data_groups": {"base": group}},
     )
-    zarr.open_group(store, mode="w", zarr_format=zarr_format)
+    zarr.open_group(ps_store, mode="w", zarr_format=zarr_format)
     child.to_zarr(
-        store, group="child", mode="a", consolidated=False, zarr_format=zarr_format
+        ps_store,
+        group="child",
+        mode="a",
+        consolidated=False,
+        zarr_format=zarr_format,
     )
+    zarr.consolidate_metadata(ps_store)
+    zarr.open_group(image_store, mode="w", zarr_format=zarr_format)
     ps = xr.DataTree.from_dict({"child": child})
     for value in (3.0, 7.0):
-        original = driver._create_continuum_weight_cache_store(ps, store, "base")
-        root = zarr.open_group(store, mode="r+", use_consolidated=False)
-        assert np.isnan(root["child"][name][:]).all()
-        assert root["child"][name].dtype == np.dtype("float64")
-        assert root["child"][name].chunks == (1,)
+        driver._create_continuum_weight_cache_store(
+            ps, ps_store, image_store, "base", None
+        )
+        root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+        cache = root["_CONTINUUM_WEIGHT_CACHE"]["child"]
+        assert np.isnan(cache[name][:]).all()
+        assert cache[name].dtype == np.dtype("float64")
+        assert cache[name].chunks == (1,)
         task_child = child.copy(deep=True)
         task_child["CALCULATED"] = ("frequency", [value, value + 1])
         task_child.attrs["data_groups"]["base"]["weight_imaging"] = "CALCULATED"
         node._write_continuum_weights_in_place(
-            xr.DataTree.from_dict({"child": task_child}), store
+            xr.DataTree.from_dict({"child": task_child}), image_store
         )
-        driver._activate_continuum_weight_cache(ps, store, "base")
-        root = zarr.open_group(store, mode="r", use_consolidated=False)
-        assert root["child"].attrs["data_groups"]["base"]["weight_imaging"] == name
-        np.testing.assert_array_equal(root["child"][name][:], [value, value + 1])
+        root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+        cache = root["_CONTINUUM_WEIGHT_CACHE"]["child"]
+        np.testing.assert_array_equal(cache[name][:], [value, value + 1])
         for consolidated in (False, True):
-            for path in (None, "child"):
-                view = zarr.open_group(
-                    store, path=path, mode="r", use_consolidated=consolidated
-                )
-                if path is None:
-                    view = view["child"]
-                np.testing.assert_array_equal(view[name][:], [value, value + 1])
-                assert view.attrs["data_groups"]["base"]["weight_imaging"] == name
-    driver._remove_continuum_weight_cache(ps, store, original)
-    driver._remove_continuum_weight_cache(ps, store, original)
-    root = zarr.open_group(store, mode="r", use_consolidated=False)
-    assert name not in root["child"]
-    assert "weight_imaging" not in root["child"].attrs["data_groups"]["base"]
-    np.testing.assert_array_equal(root["child"]["WEIGHT"][:], [1.0, 2.0])
-    for consolidated in (False, True):
-        for path in (None, "child"):
             view = zarr.open_group(
-                store, path=path, mode="r", use_consolidated=consolidated
-            )
-            if path is None:
-                view = view["child"]
-            assert name not in view
-            assert "weight_imaging" not in view.attrs["data_groups"]["base"]
-            np.testing.assert_array_equal(view["WEIGHT"][:], [1.0, 2.0])
+                image_store, mode="r", use_consolidated=consolidated
+            )["_CONTINUUM_WEIGHT_CACHE"]["child"]
+            np.testing.assert_array_equal(view[name][:], [value, value + 1])
+    driver._remove_continuum_weight_cache(image_store)
+    driver._remove_continuum_weight_cache(image_store)
+    root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    assert "_CONTINUUM_WEIGHT_CACHE" not in root
+    for consolidated in (False, True):
+        view = zarr.open_group(ps_store, mode="r", use_consolidated=consolidated)[
+            "child"
+        ]
+        assert name not in view
+        assert ("weight_imaging" in view.attrs["data_groups"]["base"]) is interrupted
+        np.testing.assert_array_equal(view["WEIGHT"][:], [1.0, 2.0])

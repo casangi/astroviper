@@ -2026,6 +2026,8 @@ def _continuum_clean_support(
         Boolean support, shape ``(time, polarization, l, m)``; ``None`` when
         the data group has neither a mask nor a primary beam.
     """
+    import numpy as np
+
     group = img_xds.attrs["data_groups"][image_data_group_in_name]
 
     def plane_zero(array):
@@ -2053,7 +2055,10 @@ def _continuum_clean_support(
         )
     if support is None:
         return None
-    return support.transpose("time", "polarization", "l", "m").values
+    return np.ascontiguousarray(
+        support.transpose("time", "polarization", "l", "m").values,
+        dtype=bool,
+    )
 
 
 def build_continuum_residual_imaging_dict(
@@ -2736,8 +2741,32 @@ def model_update_mtmfs_single_field(
     hogbom_mask_name = hogbom_xds.attrs["data_groups"][image_data_group_in_name].get(
         "mask"
     )
+    hogbom_data_group = hogbom_xds.attrs["data_groups"][image_data_group_in_name]
+    primary_beam_name = hogbom_data_group.get("primary_beam")
+    if hogbom_mask_name is None and primary_beam_name in hogbom_xds:
+        from astroviper.processing_functions.image_analysis.make_mask import make_mask
+
+        make_mask(
+            hogbom_xds,
+            primary_beam_limit=cube_deconvolve_params.get("primary_beam_limit", 0.0),
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_in_name,
+            combine_mask=False,
+            overwrite=False,
+        )
+        hogbom_mask_name = hogbom_xds.attrs["data_groups"][image_data_group_in_name][
+            "mask"
+        ]
+
     if hogbom_mask_name in hogbom_xds:
-        hogbom_mask = hogbom_xds[hogbom_mask_name]
+        hogbom_mask = hogbom_xds[hogbom_mask_name].transpose(
+            "time", "frequency", "polarization", "l", "m", missing_dims="ignore"
+        )
+        if "frequency" not in hogbom_mask.dims:
+            hogbom_mask = hogbom_mask.expand_dims(
+                frequency=frequency_coord,
+                axis=1,
+            )
         mask_values = np.asarray(hogbom_mask.values)
         hogbom_xds[hogbom_mask_name] = hogbom_mask.copy(
             data=np.ascontiguousarray(
@@ -2772,7 +2801,10 @@ def model_update_mtmfs_single_field(
     hogbom_xds[residual_name] = hogbom_xds[residual_name].real.astype(
         float_dtype, copy=False
     )
-    hogbom_xds[psf_name] = hogbom_xds[psf_name].real.astype(float_dtype, copy=False)
+    psf = hogbom_xds[psf_name].real
+    hogbom_xds[psf_name] = psf.copy(
+        data=np.ascontiguousarray(psf.values, dtype=float_dtype)
+    )
     hogbom_xds[model_name] = hogbom_xds[model_name].real.astype(float_dtype, copy=False)
 
     # ------------------------------------------------------------------

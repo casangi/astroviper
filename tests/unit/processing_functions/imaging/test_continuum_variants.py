@@ -626,8 +626,10 @@ def test_hogbom_model_update_does_not_leak_temporary_mask_metadata(monkeypatch):
 def test_hogbom_model_update_preserves_image_precision(monkeypatch, dtype):
     """Högbom receives and returns the configured image precision unchanged."""
     image = make_continuum_image()
-    for name in ("SKY_MODEL", "SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+    for name in ("SKY_MODEL", "SKY_RESIDUAL"):
         image[name] = image[name].astype(dtype)
+    psf_dtype = np.float64 if dtype == np.float32 else np.float32
+    image["POINT_SPREAD_FUNCTION"] = image.POINT_SPREAD_FUNCTION.astype(psf_dtype)
     image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
         ("time", "polarization"),
         np.asarray([[0.2]], dtype=dtype),
@@ -669,16 +671,60 @@ def test_hogbom_adapter_builds_one_contiguous_boolean_mask_plane(monkeypatch):
     mask = np.ones(image.SKY_RESIDUAL.shape, dtype=np.float64)
     mask[..., 0, 0] = 0.3
     mask[..., 0, 1] = np.nan
-    image["MASK"] = (image.SKY_RESIDUAL.dims, mask)
+    # Exercise the layout produced when a spatial mask is broadcast across
+    # polarization: polarization is the innermost dimension before the
+    # continuum adapter canonicalizes the temporary cube.
+    image["MASK"] = (
+        ("time", "taylor_term", "l", "m", "polarization"),
+        mask.transpose(0, 1, 3, 4, 2),
+    )
     image.attrs["data_groups"]["residual"]["mask"] = "MASK"
 
     def hogbom_backend(hogbom_image, *args, **kwargs):
         received = hogbom_image.MASK.values
         assert received.dtype == np.bool_
         assert received.flags.c_contiguous
+        assert hogbom_image.MASK.dims == (
+            "time",
+            "frequency",
+            "polarization",
+            "l",
+            "m",
+        )
         assert not received[..., 0, 0].any()
         assert not received[..., 0, 1].any()
         assert received[..., 1:, :].all()
+        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.model_update."
+        "model_update_cube_single_field",
+        hogbom_backend,
+    )
+
+    model_update_mtmfs_single_field(image, "hogbom", {"max_iter": 1})
+
+
+def test_hogbom_adapter_canonicalizes_generated_primary_beam_mask(monkeypatch):
+    """The adapter also canonicalizes the default primary-beam mask."""
+    image = make_continuum_image()
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+        ("time", "polarization"),
+        np.zeros((1, 1)),
+    )
+
+    def hogbom_backend(hogbom_image, *args, **kwargs):
+        mask_name = hogbom_image.attrs["data_groups"]["residual"]["mask"]
+        received = hogbom_image[mask_name]
+        assert received.dims == (
+            "time",
+            "frequency",
+            "polarization",
+            "l",
+            "m",
+        )
+        assert received.dtype == np.bool_
+        assert received.values.flags.c_contiguous
         return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
 
     monkeypatch.setattr(
