@@ -109,7 +109,7 @@ def _image(
     polarization_coords,
     *,
     basis="linear",
-    specmode="mfs",
+    continuum_mode="mfs",
     max_iter=0,
     weighting=None,
     **kwargs,
@@ -125,7 +125,9 @@ def _image(
     shutil.copytree(pristine_store, ps_store)
     before = _arrays_and_groups(ps_store)
     frequency = np.asarray(open_processing_set(ps_store).xr_ps.get_freq_axis().values)
-    image_store = str(tmp_path / f"{specmode}_{'_'.join(polarization_coords)}.img.zarr")
+    image_store = str(
+        tmp_path / f"{continuum_mode}_{'_'.join(polarization_coords)}.img.zarr"
+    )
     with dask.config.set(scheduler="synchronous"):
         distributed_applications.imaging.image_continuum_single_field(
             ps_store=ps_store,
@@ -138,7 +140,7 @@ def _image(
                 "polarization_coords": polarization_coords,
                 "time_coords": [0],
                 "fft_padding": 1.2,
-                "nterms": 1,
+                "n_taylor_terms": 1,
                 "reference_frequency": float(np.mean(frequency)),
             },
             imaging_weights_params=weighting
@@ -153,7 +155,7 @@ def _image(
                 "min_psf_fraction": 0.05,
                 "max_psf_fraction": 0.8,
             },
-            specmode=specmode,
+            continuum_mode=continuum_mode,
             instrument_polarization_basis=basis,
             image_data_variables_keep=[
                 "sky_residual",
@@ -161,7 +163,7 @@ def _image(
                 "point_spread_function",
             ],
             processing_set_data_group_name="base",
-            n_chunks=1,
+            n_mapping_parallelism={"frequency": 1},
             overwrite=True,
             **kwargs,
         )
@@ -177,7 +179,7 @@ def _centre(img, variable):
 
 
 @pytest.mark.parametrize(
-    ("layout", "basis", "polarization_coords", "specmode"),
+    ("layout", "basis", "polarization_coords", "continuum_mode"),
     [
         ("four", "linear", ["I", "Q"], "mfs"),
         ("four", "linear", ["I", "Q"], "mvc"),
@@ -190,7 +192,7 @@ def _centre(img, variable):
     ],
 )
 def test_requested_stokes_planes_are_imaged_from_their_correlations(
-    tmp_path, processing_sets, layout, basis, polarization_coords, specmode
+    tmp_path, processing_sets, layout, basis, polarization_coords, continuum_mode
 ):
     """The dirty image of the source holds the requested Stokes planes, with the
     right labels and signs (a reversed ``YY, XX`` set gives ``Q > 0``), whatever
@@ -201,7 +203,7 @@ def test_requested_stokes_planes_are_imaged_from_their_correlations(
             processing_sets[layout],
             polarization_coords,
             basis=basis,
-            specmode=specmode,
+            continuum_mode=continuum_mode,
         )
     )
     assert [str(p) for p in img.polarization.values] == polarization_coords
@@ -252,21 +254,21 @@ def test_four_correlations_are_cleaned_in_every_stokes_plane(
 def two_hand_images(tmp_path_factory, processing_sets):
     """``I, Q`` images of the two-hand ``XX, YY`` processing set, cleaned."""
     images = {}
-    for specmode in ("mfs", "mvc"):
-        tmp_path = tmp_path_factory.mktemp(f"two_hands_{specmode}")
-        images[specmode] = load_image(
+    for continuum_mode in ("mfs", "mvc"):
+        tmp_path = tmp_path_factory.mktemp(f"two_hands_{continuum_mode}")
+        images[continuum_mode] = load_image(
             _image(
                 tmp_path,
                 processing_sets["two_hands"],
                 ["I", "Q"],
-                specmode=specmode,
+                continuum_mode=continuum_mode,
                 max_iter=30,
             )
         )
     return images
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 @pytest.mark.parametrize(
     ("layout", "kwargs"),
     [
@@ -277,7 +279,7 @@ def two_hand_images(tmp_path_factory, processing_sets):
     ],
 )
 def test_parallel_hands_are_loaded_alone(
-    tmp_path, processing_sets, two_hand_images, specmode, layout, kwargs
+    tmp_path, processing_sets, two_hand_images, continuum_mode, layout, kwargs
 ):
     """``I, Q`` from four correlations, from four with a flagged cross hand, or
     from ``YY, XX`` loads only ``XX, YY`` in this order: the images equal those
@@ -288,12 +290,12 @@ def test_parallel_hands_are_loaded_alone(
             tmp_path,
             processing_sets[layout],
             ["I", "Q"],
-            specmode=specmode,
+            continuum_mode=continuum_mode,
             max_iter=30,
             **kwargs,
         )
     )
-    reference = two_hand_images[specmode]
+    reference = two_hand_images[continuum_mode]
     for variable in ("SKY_RESIDUAL", "SKY_MODEL", "POINT_SPREAD_FUNCTION"):
         assert np.isfinite(img[variable].values).all(), variable
         np.testing.assert_array_equal(
@@ -302,7 +304,7 @@ def test_parallel_hands_are_loaded_alone(
 
 
 @pytest.mark.parametrize(
-    ("layout", "basis", "polarization_coords", "specmode", "message"),
+    ("layout", "basis", "polarization_coords", "continuum_mode", "message"),
     [
         ("one", "linear", ["I", "Q"], "mfs", r"holds the correlations \['XX'\]"),
         (
@@ -315,11 +317,17 @@ def test_parallel_hands_are_loaded_alone(
         ("two_hands", "linear", ["I"], "mfs", "polarization_coords"),
         ("two_hands", "linear", ["I", "V"], "mfs", "polarization_coords"),
         ("two_hands", "linear", ["Q", "I"], "mfs", "polarization_coords"),
-        ("four", "linear", ["I", "Q", "U", "V"], "mvc", "specmode='mvc'"),
+        ("four", "linear", ["I", "Q", "U", "V"], "mvc", "continuum_mode='mvc'"),
     ],
 )
 def test_unsupported_requests_are_refused_before_anything_is_written(
-    tmp_path, processing_sets, layout, basis, polarization_coords, specmode, message
+    tmp_path,
+    processing_sets,
+    layout,
+    basis,
+    polarization_coords,
+    continuum_mode,
+    message,
 ):
     """A request the processing set cannot give, a Stokes set outside the two
     supported ones, or ``I, Q, U, V`` with MVC raises ``ValueError`` before the
@@ -330,7 +338,7 @@ def test_unsupported_requests_are_refused_before_anything_is_written(
             processing_sets[layout],
             polarization_coords,
             basis=basis,
-            specmode=specmode,
+            continuum_mode=continuum_mode,
         )
     assert [path.name for path in tmp_path.iterdir()] == ["input.ps.zarr"]
     input_store = str(tmp_path / "input.ps.zarr")

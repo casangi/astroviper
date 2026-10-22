@@ -41,21 +41,21 @@ def test_append_rejects_invalid_reduction_envelopes(data, error, message):
     "params,error,message",
     [
         ({}, KeyError, "image_params"),
-        ({"image_params": {}}, KeyError, "nterms"),
-        ({"image_params": {"nterms": 0}}, ValueError, "positive"),
-        ({"image_params": {"nterms": 2}}, KeyError, "reference_frequency"),
+        ({"image_params": {}}, KeyError, "n_taylor_terms"),
+        ({"image_params": {"n_taylor_terms": 0}}, ValueError, "positive"),
+        ({"image_params": {"n_taylor_terms": 2}}, KeyError, "reference_frequency"),
         (
-            {"image_params": {"nterms": 2, "reference_frequency_hz": 100.0}},
+            {"image_params": {"n_taylor_terms": 2, "reference_frequency_hz": 100.0}},
             KeyError,
             "'reference_frequency'",
         ),
         (
-            {"image_params": {"nterms": 2, "reference_frequency": np.nan}},
+            {"image_params": {"n_taylor_terms": 2, "reference_frequency": np.nan}},
             ValueError,
             "finite",
         ),
         (
-            {"image_params": {"nterms": 2, "reference_frequency": -1}},
+            {"image_params": {"n_taylor_terms": 2, "reference_frequency": -1}},
             ValueError,
             "positive",
         ),
@@ -71,7 +71,7 @@ def test_append_supports_reference_frequency_and_explicit_controls(
     single_precision,
 ):
     params = {
-        "image_params": {"nterms": 3, "reference_frequency": 100.0},
+        "image_params": {"n_taylor_terms": 3, "reference_frequency": 100.0},
         "single_precision_image": single_precision,
         "processing_function_threads": 2,
         "fft_backend": "numpy",

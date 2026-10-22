@@ -21,9 +21,11 @@ processing = importlib.import_module(
 
 
 @pytest.mark.parametrize("prepared", [False, True])
-@pytest.mark.parametrize("restore,pbcor", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    "restore,primary_beam_correction", [(False, False), (True, False), (True, True)]
+)
 def test_finalization_prepares_only_when_needed_and_restores_once(
-    monkeypatch, prepared, restore, pbcor
+    monkeypatch, prepared, restore, primary_beam_correction
 ):
     image = make_continuum_image()
     model = image[["SKY_MODEL"]].copy(deep=True)
@@ -53,7 +55,7 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
             "model_xds": model,
             "prepared_continuum_image": prepared,
             "restore": restore,
-            "pbcor": pbcor,
+            "primary_beam_correction": primary_beam_correction,
         },
     )
     assert calls == ([] if prepared else ["prepare"]) + (["restore"] if restore else [])
@@ -62,26 +64,26 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
     assert not np.shares_memory(result["image"].SKY_MODEL, model.SKY_MODEL)
     if restore:
         expected, _ = original_restore(
-            make_continuum_image(), primary_beam_correction=pbcor
+            make_continuum_image(), primary_beam_correction=primary_beam_correction
         )
         xr.testing.assert_allclose(result["image"].SKY_RESTORED, expected.SKY_RESTORED)
     else:
         assert "SKY_RESTORED" not in result["image"]
         assert result["timing_restore"] is None
-    if pbcor:
+    if primary_beam_correction:
         xr.testing.assert_allclose(
-            result["image"].SKY_RESTORED_PBCOR,
-            expected.SKY_RESTORED_PBCOR,
+            result["image"].SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
+            expected.SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
         )
         assert (
             result["image"].attrs["data_groups"]["restored"][
                 "sky_primary_beam_corrected"
             ]
-            == "SKY_RESTORED_PBCOR"
+            == "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
         )
         assert "T_correct_sky_by_primary_beam" in result["timing_restore"]
     else:
-        assert "SKY_RESTORED_PBCOR" not in result["image"]
+        assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" not in result["image"]
         if restore:
             assert "T_correct_sky_by_primary_beam" not in result["timing_restore"]
 

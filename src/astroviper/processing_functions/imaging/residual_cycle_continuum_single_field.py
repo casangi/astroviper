@@ -7,8 +7,8 @@ def residual_cycle_continuum_single_field(
     img_xds,
     model_uv_xds,
     image_params,
-    is_n_iter_0,
-    specmode="mfs",
+    is_first_cycle,
+    continuum_mode="mfs",
     model_xds=None,
     primary_beam_xds=None,
     processing_set_data_group_name="corrected",
@@ -33,7 +33,7 @@ def residual_cycle_continuum_single_field(
 
     Parameters
     ----------
-    specmode : {"mfs", "mvc"}
+    continuum_mode : {"mfs", "mvc"}
         Select Taylor UV gridding or frequency-resolved MVC processing.
     model_xds : xarray.Dataset, optional
         Accumulated image-domain Taylor model used for MVC prediction.
@@ -51,7 +51,7 @@ def residual_cycle_continuum_single_field(
         first imaging cycle.
     image_params : dict
         Image geometry and continuum imaging parameters.
-    is_n_iter_0 : bool
+    is_first_cycle : bool
         True for the first imaging cycle, in which no model prediction is required.
     processing_set_data_group_name : str, optional
         Processing-set data group containing the observed visibilities.
@@ -105,10 +105,10 @@ def residual_cycle_continuum_single_field(
     if image_data_variables_keep is None:
         image_data_variables_keep = []
 
-    specmode = str(specmode).lower()
-    if specmode not in ("mfs", "mvc"):
+    continuum_mode = str(continuum_mode).lower()
+    if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
     if visibility_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
@@ -116,11 +116,11 @@ def residual_cycle_continuum_single_field(
             f"'recompute'; received {visibility_memory_mode!r}."
         )
 
-    nterms = int(image_params.get("nterms", 2))
+    n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
     reference_frequency = float(image_params["reference_frequency"])
 
-    if nterms < 1:
-        raise ValueError("image_params['nterms'] must be at least 1.")
+    if n_taylor_terms < 1:
+        raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
@@ -143,10 +143,10 @@ def residual_cycle_continuum_single_field(
     # Later imaging cycles:
     # predict the current model and form residual visibilities.
     # ------------------------------------------------------------
-    if not is_n_iter_0:
+    if not is_first_cycle:
         start = time.time()
 
-        if specmode == "mfs":
+        if continuum_mode == "mfs":
             # delete an old residual if present
             residual_data_group = img_xds.attrs.get("data_groups", {}).get(
                 image_data_group_out_name,
@@ -164,7 +164,7 @@ def residual_cycle_continuum_single_field(
                 ps_xdt,
                 model_uv_xds,
                 cgk_1D,
-                nterms=nterms,
+                n_taylor_terms=n_taylor_terms,
                 reference_frequency=reference_frequency,
                 ms_data_group_in_name=ps_data_group_name,
                 ms_data_group_out_name="model",
@@ -261,7 +261,7 @@ def residual_cycle_continuum_single_field(
 
     start = time.time()
 
-    if specmode == "mfs":
+    if continuum_mode == "mfs":
         from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
             make_undeconvolved_image_continuum_single_field,
         )
@@ -274,7 +274,7 @@ def residual_cycle_continuum_single_field(
             img_xds,
             image_params,
             cgk_1D,
-            nterms=nterms,
+            n_taylor_terms=n_taylor_terms,
             reference_frequency=reference_frequency,
             ms_data_group_in_name=ps_data_group_name,
             image_data_group_out_name=image_data_group_out_name,
@@ -282,7 +282,7 @@ def residual_cycle_continuum_single_field(
             complex_dtype=complex_dtype,
         )
 
-    elif specmode == "mvc":
+    elif continuum_mode == "mvc":
         from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum_mvc import (
             make_undeconvolved_image_mvc_single_field,
         )
@@ -301,7 +301,7 @@ def residual_cycle_continuum_single_field(
             complex_dtype=complex_dtype,
         )
 
-        if not is_n_iter_0 and visibility_memory_mode != "recompute":
+        if not is_first_cycle and visibility_memory_mode != "recompute":
             if observed_visibility_grid_xds is None:
                 raise ValueError(
                     "Cached-grid MVC cycles require a task-local observed "
@@ -317,11 +317,11 @@ def residual_cycle_continuum_single_field(
                 image_data_group_name=image_data_group_out_name,
                 grid_kind="MVC",
             )
-            img_xds.attrs["specmode"] = "mvc"
+            img_xds.attrs["continuum_mode"] = "mvc"
 
     else:
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
 
     T_grid = time.time() - start
@@ -332,8 +332,8 @@ def residual_cycle_continuum_single_field(
             "T_degrid": [T_degrid],
             "T_residual_vis": [T_residual_vis],
             "T_grid": [T_grid],
-            "nterms": [nterms],
-            "is_n_iter_0": [bool(is_n_iter_0)],
+            "n_taylor_terms": [n_taylor_terms],
+            "is_first_cycle": [bool(is_first_cycle)],
             "last_residual_cycle": [bool(last_residual_cycle)],
         }
     )
@@ -350,7 +350,7 @@ def make_visibility_model_continuum_single_field(
     ps_xdt,
     model_xds,
     cgk_1D,
-    nterms,
+    n_taylor_terms,
     reference_frequency,
     ms_data_group_in_name="base",
     ms_data_group_out_name="model",
@@ -394,7 +394,7 @@ def make_visibility_model_continuum_single_field(
         coefficients.
     cgk_1D : numpy.ndarray
         One-dimensional prolate-spheroidal convolution kernel.
-    nterms : int
+    n_taylor_terms : int
         Number of Taylor terms to reconstruct.
     reference_frequency : float
         Common MT-MFS reference frequency in Hz.
@@ -447,11 +447,11 @@ def make_visibility_model_continuum_single_field(
         }
     output_visibility_name = ms_data_group_out_modified["correlated_data"]
 
-    nterms = int(nterms)
+    n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
 
-    if nterms < 1:
-        raise ValueError("nterms must be at least 1.")
+    if n_taylor_terms < 1:
+        raise ValueError("n_taylor_terms must be at least 1.")
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
@@ -491,14 +491,14 @@ def make_visibility_model_continuum_single_field(
 
     available_nterms = model_taylor_grid.sizes["taylor_term"]
 
-    if available_nterms < nterms:
+    if available_nterms < n_taylor_terms:
         raise ValueError(
             f"The model contains {available_nterms} Taylor terms, but "
-            f"nterms={nterms} was requested."
+            f"n_taylor_terms={n_taylor_terms} was requested."
         )
 
     # Ignore any extra Taylor terms that may be present.
-    model_taylor_grid = model_taylor_grid.isel(taylor_term=slice(0, nterms))
+    model_taylor_grid = model_taylor_grid.isel(taylor_term=slice(0, n_taylor_terms))
     model_grid_dtype = np.dtype(model_taylor_grid.dtype)
     if not np.issubdtype(model_grid_dtype, np.complexfloating):
         raise TypeError(
@@ -557,7 +557,7 @@ def make_visibility_model_continuum_single_field(
         frequency_map = np.zeros(frequency_values.size, dtype=np.int64)
         accumulated_model = None
 
-        for taylor_term in range(nterms):
+        for taylor_term in range(n_taylor_terms):
             taylor_grid = model_taylor_grid.isel(
                 taylor_term=taylor_term,
                 drop=True,

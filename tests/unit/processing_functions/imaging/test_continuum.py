@@ -64,7 +64,7 @@ def test_accumulate_continuum_model_copies_initial_mvc_state():
     """The initial MVC state retains its Taylor model and effective beam."""
     initial = _model_dataset(2.0, include_primary_beam=True)
 
-    actual = accumulate_continuum_model(initial, specmode="mvc")
+    actual = accumulate_continuum_model(initial, continuum_mode="mvc")
 
     assert set(actual.data_vars) == {"SKY_MODEL", "PRIMARY_BEAM"}
     np.testing.assert_array_equal(actual["SKY_MODEL"], initial["SKY_MODEL"])
@@ -178,7 +178,7 @@ def test_accumulate_continuum_model_adds_later_increment_positionally():
     actual = accumulate_continuum_model(
         increment,
         previous_model_xds=previous,
-        specmode="mfs",
+        continuum_mode="mfs",
     )
 
     np.testing.assert_array_equal(actual.SKY_MODEL.isel(taylor_term=0), 2.5)
@@ -232,7 +232,7 @@ def test_continuum_prediction_degrids_and_accumulates_each_taylor_plane(monkeypa
         {"partition": ms_xds},
         model_xds,
         np.ones(351),
-        nterms=2,
+        n_taylor_terms=2,
         reference_frequency=1.0e9,
         ms_data_group_in_name="corrected",
     )
@@ -266,7 +266,7 @@ def test_primary_beam_correction_returns_restored_taylor_zero_only():
         primary_beam_correction=True,
         primary_beam_limit=0.2,
     )
-    corrected = result["SKY_RESTORED_PBCOR"]
+    corrected = result["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
     assert corrected.dims == ("time", "polarization", "l", "m")
 
     kernel_ft = _clean_beam_kernel_ft(beam[0, 0], 8, 8, 1.0e-5, model.dtype, 1)
@@ -435,7 +435,7 @@ def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypat
             make_child(child_weight),
             np.ones(8),
             image,
-            nterms=1,
+            n_taylor_terms=1,
             reference_frequency=1.0e9,
         )
 
@@ -485,9 +485,9 @@ def test_mvc_conversion_forms_weighted_taylor_normal_equations():
         _frequency_cube(pb, frequency),
         _frequency_normalization(weight, frequency),
         _frequency_normalization(weight, frequency),
-        nterms=2,
+        n_taylor_terms=2,
         reference_frequency=1.0e9,
-        pblimit=0.2,
+        primary_beam_limit=0.2,
     )
     expected_pb = np.sum(weight * pb) / np.sum(weight)
     np.testing.assert_allclose(effective_pb.squeeze(), expected_pb)
@@ -521,9 +521,9 @@ def test_mvc_conversion_uses_psf_weights_for_common_response():
         _frequency_cube(pb, frequency),
         _frequency_normalization(residual_weight, frequency),
         _frequency_normalization(psf_weight, frequency),
-        nterms=1,
+        n_taylor_terms=1,
         reference_frequency=1.0e9,
-        pblimit=0.2,
+        primary_beam_limit=0.2,
     )
 
     np.testing.assert_allclose(
@@ -548,7 +548,7 @@ def test_mvc_conversion_preserves_single_precision_image_products():
         cube,
         normalization,
         normalization,
-        nterms=2,
+        n_taylor_terms=2,
         reference_frequency=1.0e9,
     )
 
@@ -571,7 +571,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result():
         primary_beam_cube,
         normalization,
         normalization,
-        nterms=2,
+        n_taylor_terms=2,
         reference_frequency=1.0e9,
     )
     chunks = []
@@ -584,7 +584,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result():
                 primary_beam_cube.isel(selection),
                 normalization.isel(selection),
                 normalization.isel(selection),
-                nterms=2,
+                n_taylor_terms=2,
                 reference_frequency=1.0e9,
             )
         )
@@ -634,7 +634,7 @@ def test_mvc_residual_responds_to_model_through_psf_moments(channel_pb):
     x = (frequency - 1.0e9) / 1.0e9
     weight = _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency)
     model_change = np.array([0.3, -0.2])
-    options = dict(nterms=2, reference_frequency=1.0e9, pblimit=0.2)
+    options = dict(n_taylor_terms=2, reference_frequency=1.0e9, primary_beam_limit=0.2)
 
     def two_pixel_cube(centre, source):
         values = np.stack(
@@ -688,10 +688,10 @@ def test_mvc_residual_responds_to_model_through_psf_moments(channel_pb):
 def test_mvc_channel_near_beam_null_adds_bounded_residual(channel_pb):
     """A channel near a null of its beam does not amplify its residual.
 
-    The effective beam is above pblimit, but one channel beam is 1e-6.  A unit
+    The effective beam is above primary_beam_limit, but one channel beam is 1e-6.  A unit
     image in any channel must change every Taylor residual by less than one;
     dividing the channel residual by its beam changes them by up to
-    ``Abar * 1e6 / nchan``.  With one channel beam above pblimit, two Taylor
+    ``Abar * 1e6 / nchan``.  With one channel beam above primary_beam_limit, two Taylor
     terms are not determined and only Taylor term zero is fitted.
     """
     nchan = len(channel_pb)
@@ -704,9 +704,9 @@ def test_mvc_channel_near_beam_null_adds_bounded_residual(channel_pb):
             _frequency_cube(channel_pb, frequency),
             weight,
             weight,
-            nterms=2,
+            n_taylor_terms=2,
             reference_frequency=1.0e9,
-            pblimit=0.2,
+            primary_beam_limit=0.2,
         )
         assert float(effective_beam.squeeze()) > 0.2
         assert np.all(np.isfinite(residual.values))
@@ -728,7 +728,7 @@ def _mvc_image_point_sources(sources, threshold):
     """
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
 
-    size, centre, nterms = 64, 32, 2
+    size, centre, n_taylor_terms = 64, 32, 2
     x = (np.arange(8) - 3.5) / 32.0
     frequency = 1.0e11 * (1.0 + x)
     offsets = np.arange(size) - centre
@@ -769,8 +769,8 @@ def _mvc_image_point_sources(sources, threshold):
         dims=("time", "frequency", "polarization"),
         coords={name: coords[name] for name in ("time", "frequency", "polarization")},
     )
-    basis = x[:, None] ** np.arange(nterms)
-    model = np.zeros((nterms, size, size))
+    basis = x[:, None] ** np.arange(n_taylor_terms)
+    model = np.zeros((n_taylor_terms, size, size))
     effective_beam = None
     for _ in range(20):
         apparent = sky.copy()
@@ -791,9 +791,9 @@ def _mvc_image_point_sources(sources, threshold):
                 cube(channel_beam),
                 weight,
                 weight if first else None,
-                nterms=nterms,
+                n_taylor_terms=n_taylor_terms,
                 reference_frequency=1.0e11,
-                pblimit=0.2,
+                primary_beam_limit=0.2,
             ),
             effective_primary_beam=effective_beam,
         )
@@ -932,10 +932,10 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
         fake_fft,
     )
     result = prepare_model_uv_continuum_single_field(
-        model, {"nterms": 2}, instrument_polarization_basis="linear"
+        model, {"n_taylor_terms": 2}, instrument_polarization_basis="linear"
     )
     assert result.VISIBILITY_MODEL.sizes["taylor_term"] == 2
-    assert result.VISIBILITY_MODEL.attrs["nterms"] == 2
+    assert result.VISIBILITY_MODEL.attrs["n_taylor_terms"] == 2
     assert fft_options["image_data_variables_keep"] == []
     np.testing.assert_array_equal(
         result.VISIBILITY_MODEL.isel(taylor_term=0), 2.0 + 0.0j
@@ -984,7 +984,7 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         model,
         channel_pb,
         [0.9e9, 1.1e9],
-        {"nterms": 2, "reference_frequency": 1.0e9},
+        {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
     )
     assert result.SKY_MODEL_MVC.dims == (
         "time",
@@ -999,8 +999,10 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
     )
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
-def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(monkeypatch, specmode):
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
+    monkeypatch, continuum_mode
+):
     """The processing entry point runs setup once and MVC image conversion locally."""
     import importlib
 
@@ -1056,13 +1058,13 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(monkeypatch, specm
     result, timing = residual_update_continuum_single_field(
         {},
         image,
-        {"nterms": 2, "reference_frequency": 1.0e9},
+        {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
         {},
-        specmode=specmode,
-        is_n_iter_0=True,
+        continuum_mode=continuum_mode,
+        is_first_cycle=True,
     )
-    assert timing.iloc[0].nterms == 2
-    if specmode == "mvc":
+    assert timing.iloc[0].n_taylor_terms == 2
+    if continuum_mode == "mvc":
         assert "SKY_RESIDUAL_MVC_CUBE" in result
         assert "POINT_SPREAD_FUNCTION_MVC_CUBE" in result
 
@@ -1302,9 +1304,9 @@ def test_mvc_clips_channel_beams_only_in_effective_beam(clipped_pb):
         _frequency_cube([1.0, clipped_pb], frequency),
         _frequency_normalization([1.0, 3.0], frequency),
         _frequency_normalization([1.0, 3.0], frequency),
-        nterms=1,
+        n_taylor_terms=1,
         reference_frequency=1e9,
-        pblimit=0.2,
+        primary_beam_limit=0.2,
     )
     np.testing.assert_allclose(pb.squeeze(), 0.25)
     np.testing.assert_allclose(psf.squeeze(), (1.0 * 2.0 + 3.0 * 10.0) / 4.0)

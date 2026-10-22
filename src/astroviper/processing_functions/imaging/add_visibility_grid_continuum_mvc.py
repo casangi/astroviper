@@ -474,7 +474,7 @@ def add_visibility_grid_mvc_single_field(
     img_xds[visibility_name].attrs.update(
         {
             "description": ("Frequency-resolved MVC visibility UV grids."),
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
             "channel_mapping": "nearest",
             "n_frequency_planes": n_image_chan,
         }
@@ -483,7 +483,7 @@ def add_visibility_grid_mvc_single_field(
     img_xds[normalization_name].attrs.update(
         {
             "description": ("Per-frequency MVC visibility-grid normalization sums."),
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
             "channel_mapping": "nearest",
             "n_frequency_planes": n_image_chan,
         }

@@ -41,19 +41,21 @@ def _mvc_inputs(dtype=np.float64):
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-@pytest.mark.parametrize("nterms", [1, 2, 3])
-def test_mvc_moments_preserve_independent_time_and_polarization_planes(dtype, nterms):
+@pytest.mark.parametrize("n_taylor_terms", [1, 2, 3])
+def test_mvc_moments_preserve_independent_time_and_polarization_planes(
+    dtype, n_taylor_terms
+):
     inputs = _mvc_inputs(dtype)
     residual, psf, beam = convert_mvc_cubes_to_taylor_normal_equations(
-        *inputs, nterms=nterms, reference_frequency=100.0
+        *inputs, n_taylor_terms=n_taylor_terms, reference_frequency=100.0
     )
     # Independent scalar sums, deliberately avoiding xarray's reduction/alignment.
-    expected = np.zeros((2, nterms, 2, 2, 2))
-    expected_psf = np.zeros((2, 2 * nterms - 1, 2, 2, 2))
+    expected = np.zeros((2, n_taylor_terms, 2, 2, 2))
+    expected_psf = np.zeros((2, 2 * n_taylor_terms - 1, 2, 2, 2))
     for time in range(2):
         for pol in range(2):
             weights = inputs[3].values[time, :, pol]
-            for term in range(nterms):
+            for term in range(n_taylor_terms):
                 for channel, x in enumerate([-0.2, 0.0, 0.2]):
                     expected[time, term, pol] += (
                         weights[channel]
@@ -61,7 +63,7 @@ def test_mvc_moments_preserve_independent_time_and_polarization_planes(dtype, nt
                         * inputs[0].values[time, channel, pol]
                         / weights.sum()
                     )
-            for term in range(2 * nterms - 1):
+            for term in range(2 * n_taylor_terms - 1):
                 expected_psf[time, term, pol] = (
                     sum(
                         w * x**term
@@ -91,11 +93,11 @@ def test_mvc_ignores_invalid_channel_weights_but_rejects_empty_planes(bad_weight
     for weights in inputs[3:]:
         weights.values[:, 0, :] = bad_weight
     actual = convert_mvc_cubes_to_taylor_normal_equations(
-        *inputs, nterms=2, reference_frequency=100.0
+        *inputs, n_taylor_terms=2, reference_frequency=100.0
     )
     expected = convert_mvc_cubes_to_taylor_normal_equations(
         *(array.isel(frequency=slice(1, None)) for array in inputs),
-        nterms=2,
+        n_taylor_terms=2,
         reference_frequency=100.0,
     )
     for left, right in zip(actual, expected, strict=True):
@@ -103,7 +105,7 @@ def test_mvc_ignores_invalid_channel_weights_but_rejects_empty_planes(bad_weight
     inputs[3].values[1, :, 1] = bad_weight
     with pytest.raises(ValueError, match="residual normalization.*empty"):
         convert_mvc_cubes_to_taylor_normal_equations(
-            *inputs, nterms=2, reference_frequency=100.0
+            *inputs, n_taylor_terms=2, reference_frequency=100.0
         )
 
 
@@ -112,23 +114,23 @@ def test_mvc_rejects_empty_psf_plane_independently_of_residual_weights():
     inputs[4].values[0, :, 1] = 0
     with pytest.raises(ValueError, match="PSF normalization.*empty"):
         convert_mvc_cubes_to_taylor_normal_equations(
-            *inputs, nterms=2, reference_frequency=100.0
+            *inputs, n_taylor_terms=2, reference_frequency=100.0
         )
 
 
 @pytest.mark.parametrize(
     ("parameter", "value"),
     [
-        ("nterms", 0),
+        ("n_taylor_terms", 0),
         ("reference_frequency", 0),
         ("reference_frequency", np.nan),
         ("reference_frequency", np.inf),
-        ("pblimit", -0.1),
-        ("pblimit", np.nan),
+        ("primary_beam_limit", -0.1),
+        ("primary_beam_limit", np.nan),
     ],
 )
 def test_mvc_rejects_invalid_equation_parameters(parameter, value):
-    kwargs = dict(nterms=2, reference_frequency=100.0, pblimit=0.2)
+    kwargs = dict(n_taylor_terms=2, reference_frequency=100.0, primary_beam_limit=0.2)
     kwargs[parameter] = value
     with pytest.raises(ValueError, match=parameter):
         make_mvc_taylor_normal_equation_contributions(*_mvc_inputs(), **kwargs)
@@ -140,17 +142,23 @@ def test_mvc_rejects_misaligned_channel_coordinates(index):
     inputs[index] = inputs[index].assign_coords(frequency=[81.0, 101.0, 121.0])
     with pytest.raises(ValueError, match="coordinate-aligned"):
         make_mvc_taylor_normal_equation_contributions(
-            *inputs, nterms=2, reference_frequency=100.0
+            *inputs, n_taylor_terms=2, reference_frequency=100.0
         )
 
 
 def test_mvc_later_residual_update_reuses_effective_beam_without_psf():
     inputs = _mvc_inputs()
     expected, _, beam = convert_mvc_cubes_to_taylor_normal_equations(
-        *inputs, nterms=2, reference_frequency=100.0
+        *inputs, n_taylor_terms=2, reference_frequency=100.0
     )
     contribution = make_mvc_taylor_normal_equation_contributions(
-        inputs[0], None, inputs[2], inputs[3], None, nterms=2, reference_frequency=100.0
+        inputs[0],
+        None,
+        inputs[2],
+        inputs[3],
+        None,
+        n_taylor_terms=2,
+        reference_frequency=100.0,
     )
     actual, psf, reused_beam = finalize_mvc_taylor_normal_equations(
         contribution, effective_primary_beam=beam
@@ -215,9 +223,9 @@ def test_cached_residual_rejects_incompatible_cache(axis, fault):
         form_residual_grid_from_cache(observed, model)
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 @pytest.mark.parametrize("fault", ["missing_model", "dimensions", "shape"])
-def test_model_accumulation_rejects_incompatible_state(specmode, fault):
+def test_model_accumulation_rejects_incompatible_state(continuum_mode, fault):
     previous = xr.Dataset({"SKY_MODEL": (("taylor_term", "l"), np.ones((2, 2)))})
     increment = previous.copy(deep=True)
     if fault == "missing_model":
@@ -227,7 +235,7 @@ def test_model_accumulation_rejects_incompatible_state(specmode, fault):
     else:
         increment = increment.isel(l=slice(0, 1))
     with pytest.raises(KeyError if fault == "missing_model" else ValueError):
-        accumulate_continuum_model(increment, previous, specmode=specmode)
+        accumulate_continuum_model(increment, previous, continuum_mode=continuum_mode)
 
 
 @pytest.mark.parametrize(
@@ -247,18 +255,18 @@ def test_pb_correction_rejects_invalid_final_products(fault):
         image["PRIMARY_BEAM"] = image.PRIMARY_BEAM.expand_dims(
             frequency=[100.0, 110.0], axis=1
         )
-    pblimit = 0.2
+    primary_beam_limit = 0.2
     if fault == "missing_beam":
         image = image.drop_vars("PRIMARY_BEAM")
     elif fault == "missing_model":
         image = image.drop_vars("SKY_MODEL")
     elif fault == "negative_limit":
-        pblimit = -0.1
+        primary_beam_limit = -0.1
     elif fault == "unit_limit":
-        pblimit = 1.0
+        primary_beam_limit = 1.0
     with pytest.raises(KeyError if fault.startswith("missing") else ValueError):
         restore_continuum_image(
             image,
             primary_beam_correction=True,
-            primary_beam_limit=pblimit,
+            primary_beam_limit=primary_beam_limit,
         )

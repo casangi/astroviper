@@ -96,7 +96,7 @@ def casa_airy_disk_response(
     return np.where(rho <= max_rad_1GHz / (frequency / 1e9), val**ipower, 0.0)
 
 
-def resolve_continuum_primary_beam(image_params, antenna_xds, *, specmode="mfs"):
+def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode="mfs"):
     """Resolve a beam prescription without changing user parameters or metadata.
 
     Parameters
@@ -107,7 +107,7 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, specmode="mfs")
         and ``primary_beam_max_radius_1ghz`` parameters take precedence.
     antenna_xds : xarray.Dataset
         Antenna metadata with physical diameters and telescope identification.
-    specmode : {"mfs", "mvc"}
+    continuum_mode : {"mfs", "mvc"}
         MFS selects the VLA band at the continuum reference frequency; MVC
         uses the first image channel, matching CASA makePBImage. Resolve once
         before partitioning so every task uses the same prescription.
@@ -141,10 +141,10 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, specmode="mfs")
     # which instead uses a 24.5-m unobstructed aperture with the same support.
     reference_frequency = params.get("reference_frequency")
     frequencies = np.asarray(params.get("frequency_coords", []), dtype=float)
-    if specmode == "mvc":
+    if continuum_mode == "mvc":
         reference_frequency = frequencies.flat[0] if frequencies.size else np.nan
-    elif specmode != "mfs":
-        raise ValueError("specmode must be 'mfs' or 'mvc'.")
+    elif continuum_mode != "mfs":
+        raise ValueError("continuum_mode must be 'mfs' or 'mvc'.")
     elif reference_frequency is None:
         reference_frequency = np.mean(frequencies) if frequencies.size else np.nan
     frequency_ghz = float(reference_frequency) / 1e9

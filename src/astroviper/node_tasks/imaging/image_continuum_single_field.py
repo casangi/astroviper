@@ -290,7 +290,7 @@ def _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id):
         attrs={
             "primary_beam_name": primary_beam_name,
             "task_id": int(task_id),
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
         },
     )
 
@@ -374,7 +374,7 @@ def _load_wideband_primary_beam_in_place(img_xds, image_store):
         {_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE: primary_beam},
         attrs={
             "primary_beam_name": _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
         },
     )
 
@@ -616,13 +616,15 @@ def _resolve_continuum_append_configuration(input_params):
 
     image_params = input_params["image_params"]
 
-    if "nterms" not in image_params:
-        raise KeyError("image_params must contain 'nterms'.")
+    if "n_taylor_terms" not in image_params:
+        raise KeyError("image_params must contain 'n_taylor_terms'.")
 
-    nterms = int(image_params["nterms"])
+    n_taylor_terms = int(image_params["n_taylor_terms"])
 
-    if nterms < 1:
-        raise ValueError(f"image_params['nterms'] must be positive; received {nterms}.")
+    if n_taylor_terms < 1:
+        raise ValueError(
+            f"image_params['n_taylor_terms'] must be positive; received {n_taylor_terms}."
+        )
 
     if "reference_frequency" not in image_params:
         raise KeyError("image_params must contain 'reference_frequency'.")
@@ -639,8 +641,8 @@ def _resolve_continuum_append_configuration(input_params):
 
     return {
         "image_params": image_params,
-        "nterms": nterms,
-        "n_psf_taylor_terms": 2 * nterms - 1,
+        "n_taylor_terms": n_taylor_terms,
+        "n_psf_taylor_terms": 2 * n_taylor_terms - 1,
         "reference_frequency": reference_frequency,
         "complex_dtype": (np.complex64 if single_precision_image else np.complex128),
         "processing_function_threads": int(
@@ -1004,7 +1006,7 @@ def _install_continuum_clean_mask(
 
     expanded = mask_plane.reshape((1,) * (residual.ndim - 2) + mask_plane.shape)
     mask_values = np.broadcast_to(expanded, residual.shape).copy()
-    img_xds["CLEAN_MASK"] = xr.DataArray(
+    img_xds["MASK"] = xr.DataArray(
         mask_values,
         dims=residual.dims,
         coords={dimension: residual.coords[dimension] for dimension in residual.dims},
@@ -1021,7 +1023,7 @@ def _install_continuum_clean_mask(
             f"{image_data_group_name!r}."
         )
     residual_group = dict(data_groups[image_data_group_name])
-    residual_group["mask"] = "CLEAN_MASK"
+    residual_group["mask"] = "MASK"
     modify_data_groups_xds(
         img_xds,
         data_group_out_name=image_data_group_name,
@@ -1038,7 +1040,7 @@ def residual_update_continuum_single_field(
     data_selection,
     image_store,
     input_data_store,
-    specmode="mfs",
+    continuum_mode="mfs",
     model_xds=None,
     processing_set_data_group_name="corrected",
     instrument_polarization_basis="linear",
@@ -1049,13 +1051,13 @@ def residual_update_continuum_single_field(
     memory_mode="in_memory",
     weight_memory_mode="in_place",
     visibility_memory_mode="recompute",
-    widebandpb_memory_mode="recompute",
+    wideband_primary_beam_memory_mode="recompute",
     skunk_works=False,
     data_group=None,
-    is_n_iter_0=True,
+    is_first_cycle=True,
     model_uv_xds=None,
     task_id=0,
-    pblimit=0.2,
+    primary_beam_limit=0.2,
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
@@ -1093,7 +1095,7 @@ def residual_update_continuum_single_field(
 
     Parameters
     ----------
-    specmode : {"mfs", "mvc"}
+    continuum_mode : {"mfs", "mvc"}
         Select Taylor UV gridding or frequency-resolved MVC processing.
     model_xds : xarray.Dataset, optional
         Accumulated image-domain Taylor model used for MVC prediction.
@@ -1201,7 +1203,7 @@ def residual_update_continuum_single_field(
         cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
         map task's exclusively owned frequency-resolved UV planes.
 
-    widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
+    wideband_primary_beam_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MVC-only storage policy for the frequency-dependent primary beam.
         ``"in_place"`` stores it temporarily in the image Zarr store and reads
         only task-local channels. The default ``"recompute"`` regenerates the
@@ -1215,7 +1217,7 @@ def residual_update_continuum_single_field(
     data_group : dict, optional
         Role-to-variable mapping used by the skunk-works loader.
 
-    is_n_iter_0 : bool, optional
+    is_first_cycle : bool, optional
         Indicates whether this is the first imaging cycle.
 
     model_uv_xds : xarray.Dataset, optional
@@ -1225,7 +1227,7 @@ def residual_update_continuum_single_field(
     task_id : int, optional
         Identifier of the parallel chunk being processed.
 
-    pblimit : float, optional
+    primary_beam_limit : float, optional
         Channel primary-beam cutoff used for MVC map-local Taylor products.
 
     input_data : dict, optional
@@ -1286,10 +1288,10 @@ def residual_update_continuum_single_field(
             "visibility_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {visibility_memory_mode!r}."
         )
-    if widebandpb_memory_mode not in ("in_memory", "in_place", "recompute"):
+    if wideband_primary_beam_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
-            "widebandpb_memory_mode must be 'in_memory', 'in_place', or "
-            f"'recompute'; received {widebandpb_memory_mode!r}."
+            "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
+            f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
         )
 
     if image_data_variables_keep is None:
@@ -1299,11 +1301,11 @@ def residual_update_continuum_single_field(
             "primary_beam",
         ]
 
-    specmode = str(specmode).lower()
+    continuum_mode = str(continuum_mode).lower()
 
-    if specmode not in ("mfs", "mvc"):
+    if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
 
     # Build the empty image in the correlation basis expected by the gridder.
@@ -1336,7 +1338,7 @@ def residual_update_continuum_single_field(
     start = time.time()
 
     omit_observed_visibility = (
-        visibility_memory_mode in ("in_memory", "in_place") and not is_n_iter_0
+        visibility_memory_mode in ("in_memory", "in_place") and not is_first_cycle
     )
 
     if input_data is not None:
@@ -1412,7 +1414,7 @@ def residual_update_continuum_single_field(
             processing_set_data_group_name,
         )
 
-    elif is_n_iter_0 and not weight_cache_is_active:
+    elif is_first_cycle and not weight_cache_is_active:
         # This run has not prepared imaging weights, so setup calculates them.
         ps_xdt = _unregister_imaging_weights_continuum(
             ps_xdt,
@@ -1423,22 +1425,22 @@ def residual_update_continuum_single_field(
     # Resolve the task-local MVC primary beam
     # =============================================================
 
-    specmode = str(specmode).lower()
+    continuum_mode = str(continuum_mode).lower()
 
-    if specmode not in ("mfs", "mvc"):
+    if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
 
-    if specmode == "mvc" and not is_n_iter_0:
+    if continuum_mode == "mvc" and not is_first_cycle:
         task_id = int(task_id)
 
-        if widebandpb_memory_mode == "in_place":
+        if wideband_primary_beam_memory_mode == "in_place":
             primary_beam_xds = _load_wideband_primary_beam_in_place(
                 img_xds,
                 image_store,
             )
-        elif widebandpb_memory_mode == "recompute":
+        elif wideband_primary_beam_memory_mode == "recompute":
             primary_beam_xds = _recompute_wideband_primary_beam(
                 img_xds,
                 image_params,
@@ -1448,7 +1450,7 @@ def residual_update_continuum_single_field(
         elif primary_beam_xds is None:
             raise ValueError(
                 "Later MVC imaging cycles with "
-                "widebandpb_memory_mode='in_memory' require a task-local "
+                "wideband_primary_beam_memory_mode='in_memory' require a task-local "
                 "primary_beam_xds."
             )
 
@@ -1531,13 +1533,13 @@ def residual_update_continuum_single_field(
         image_data_variables_keep=(image_data_variables_keep),
         visibility_memory_mode=visibility_memory_mode,
         observed_visibility_grid_xds=observed_visibility_grid_xds,
-        is_n_iter_0=is_n_iter_0,
+        is_first_cycle=is_first_cycle,
         model_uv_xds=model_uv_xds,
         model_xds=model_xds,
         primary_beam_xds=primary_beam_xds,
-        specmode=specmode,
+        continuum_mode=continuum_mode,
         task_id=task_id,
-        pblimit=pblimit,
+        primary_beam_limit=primary_beam_limit,
     )
 
     # Retain the task-local frequency-dependent PB for MVC
@@ -1545,17 +1547,17 @@ def residual_update_continuum_single_field(
     mvc_observed_visibility_grid_xds = None
 
     if (
-        specmode == "mvc"
-        and is_n_iter_0
-        and widebandpb_memory_mode in ("in_memory", "in_place")
+        continuum_mode == "mvc"
+        and is_first_cycle
+        and wideband_primary_beam_memory_mode in ("in_memory", "in_place")
     ):
         pb_xds = _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id)
-        if widebandpb_memory_mode == "in_place":
+        if wideband_primary_beam_memory_mode == "in_place":
             _write_wideband_primary_beam_in_place(pb_xds, image_store)
             pb_xds = None
 
-    if specmode == "mvc":
-        if is_n_iter_0 and visibility_memory_mode != "recompute":
+    if continuum_mode == "mvc":
+        if is_first_cycle and visibility_memory_mode != "recompute":
             img_xds, mvc_observed_visibility_grid_xds = (
                 _extract_mvc_observed_visibility_grid(img_xds)
             )
@@ -1584,7 +1586,7 @@ def residual_update_continuum_single_field(
 
     T_write_imaging_weights = 0.0
     if (
-        is_n_iter_0
+        is_first_cycle
         and weight_datasets is None
         and weight_cache_mapping is None
         and not weight_cache_is_active
@@ -2191,11 +2193,11 @@ def _prepare_continuum_image(
 ):
     """Convert globally reduced MFS or MVC products to image-domain products.
 
-    For ``specmode='mfs'``, the reduced visibility grids already represent
+    For ``continuum_mode='mfs'``, the reduced visibility grids already represent
     Taylor residual terms. They are inverse Fourier-transformed directly into
     ``SKY_RESIDUAL(taylor_term)``.
 
-    For ``specmode='mvc'``, map tasks have already normalized and inverse
+    For ``continuum_mode='mvc'``, map tasks have already normalized and inverse
     Fourier-transformed their exclusively owned channels, applied the channel
     primary-beam convention, and constructed additive Taylor numerators. The
     reducer sums those compact products; this function performs only their
@@ -2253,21 +2255,21 @@ def _prepare_continuum_image(
     config = _resolve_continuum_append_configuration(input_params)
 
     image_params = config["image_params"]
-    nterms = config["nterms"]
+    n_taylor_terms = config["n_taylor_terms"]
     n_psf_taylor_terms = config["n_psf_taylor_terms"]
     reference_frequency = config["reference_frequency"]
     image_data_group_name = config["image_data_group_in_name"]
 
-    specmode = str(
+    continuum_mode = str(
         input_params.get(
-            "specmode",
-            image_params.get("specmode", "mfs"),
+            "continuum_mode",
+            image_params.get("continuum_mode", "mfs"),
         )
     ).lower()
 
-    if specmode not in ("mfs", "mvc"):
+    if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
 
     if pb_cache_mapping is None:
@@ -2277,7 +2279,7 @@ def _prepare_continuum_image(
     # inverse FFT globally. MVC map tasks already returned Taylor products.
     residual_output_name = "SKY_RESIDUAL"
 
-    if specmode == "mfs":
+    if continuum_mode == "mfs":
         img_xds = ifft_norm_img_xds(
             img_xds,
             image_params=image_params,
@@ -2292,7 +2294,7 @@ def _prepare_continuum_image(
             complex_dtype=config["complex_dtype"],
         )
 
-    if specmode == "mfs" and residual_output_name not in img_xds:
+    if continuum_mode == "mfs" and residual_output_name not in img_xds:
         raise RuntimeError(
             f"The global residual inverse FFT did not create {residual_output_name!r}."
         )
@@ -2300,7 +2302,7 @@ def _prepare_continuum_image(
     # ------------------------------------------------------------------
     # Direct MFS: the inverse-FFT result is already a Taylor stack.
     # ------------------------------------------------------------------
-    if specmode == "mfs":
+    if continuum_mode == "mfs":
         residual = img_xds["SKY_RESIDUAL"]
 
         if "taylor_term" not in residual.dims:
@@ -2310,22 +2312,22 @@ def _prepare_continuum_image(
 
         actual_nterms = img_xds["SKY_RESIDUAL"].sizes["taylor_term"]
 
-        if actual_nterms != nterms:
+        if actual_nterms != n_taylor_terms:
             raise ValueError(
-                "The residual Taylor stack is inconsistent with nterms: "
-                f"received {actual_nterms}, expected {nterms}."
+                "The residual Taylor stack is inconsistent with n_taylor_terms: "
+                f"received {actual_nterms}, expected {n_taylor_terms}."
             )
 
         residual.attrs.update(
             {
                 "description": "Continuum residual Taylor products.",
-                "nterms": nterms,
+                "n_taylor_terms": n_taylor_terms,
                 "reference_frequency": reference_frequency,
                 "placeholder": False,
             }
         )
 
-    elif specmode == "mvc":
+    elif continuum_mode == "mvc":
         effective_primary_beam = None
         if not initialize_static_products:
             static_primary_beam = input_params["static_xds"]["PRIMARY_BEAM"]
@@ -2386,7 +2388,7 @@ def _prepare_continuum_image(
             {
                 "description": "Effective MVC primary beam",
                 "type": "primary_beam",
-                "specmode": "mvc",
+                "continuum_mode": "mvc",
                 "primary_beam_usage": "common_taylor_convention",
                 "method": "airy_disk",
             }
@@ -2415,7 +2417,7 @@ def _prepare_continuum_image(
     # ------------------------------------------------------------------
 
     if initialize_static_products:
-        if specmode == "mfs":
+        if continuum_mode == "mfs":
             img_xds = ifft_norm_img_xds(
                 img_xds,
                 image_params=image_params,
@@ -2451,7 +2453,7 @@ def _prepare_continuum_image(
 
         if actual_psf_terms != n_psf_taylor_terms:
             raise ValueError(
-                "The PSF Taylor stack is inconsistent with nterms: "
+                "The PSF Taylor stack is inconsistent with n_taylor_terms: "
                 f"received {actual_psf_terms}, "
                 f"expected {n_psf_taylor_terms}."
             )
@@ -2460,7 +2462,7 @@ def _prepare_continuum_image(
         img_xds[psf_name].attrs.update(
             {
                 "type": "point_spread_function",
-                "nterms": nterms,
+                "n_taylor_terms": n_taylor_terms,
                 "n_psf_taylor_terms": n_psf_taylor_terms,
                 "reference_frequency": reference_frequency,
             }
@@ -2481,7 +2483,7 @@ def _prepare_continuum_image(
         # Construct or validate the PB used by the model-update/static API.
         # ----------------------------------------------------------
 
-        if specmode == "mfs":
+        if continuum_mode == "mfs":
             # Install the static PB evaluated at the Taylor reference frequency.
             img_xds = _finalize_reference_primary_beam(
                 img_xds,
@@ -2489,7 +2491,7 @@ def _prepare_continuum_image(
                 image_data_group_name=image_data_group_name,
             )
 
-        elif specmode == "mvc":
+        elif continuum_mode == "mvc":
             # MVC already constructed PRIMARY_BEAM immediately after the
             # frequency-cube-to-Taylor conversion.
             if "PRIMARY_BEAM" not in img_xds:
@@ -2520,7 +2522,7 @@ def _prepare_continuum_image(
 
         else:
             raise ValueError(
-                f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+                f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
             )
 
         # Static variables shared with the model-update controls.
@@ -2654,22 +2656,22 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
         prepare_model_uv_continuum_single_field,
     )
 
-    is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
+    is_first_cycle = bool(input_params.get("is_first_cycle", True))
     previous_model_xds = input_params.get("model_xds")
 
-    if not is_n_iter_0 and previous_model_xds is None:
+    if not is_first_cycle and previous_model_xds is None:
         raise KeyError(
             "Later continuum append nodes require input_params['model_xds']."
         )
 
-    specmode = str(input_params.get("specmode", "mfs")).lower()
+    continuum_mode = str(input_params.get("continuum_mode", "mfs")).lower()
     model_xds = accumulate_continuum_model(
         model_increment_xds,
         previous_model_xds=previous_model_xds,
-        specmode=specmode,
+        continuum_mode=continuum_mode,
     )
 
-    if specmode == "mfs":
+    if continuum_mode == "mfs":
         model_uv_xds = prepare_model_uv_continuum_single_field(
             model_xds,
             image_params=input_params["image_params"],
@@ -2687,11 +2689,11 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
             ),
             fft_backend=input_params.get("fft_backend", "pyfftw"),
         )
-    elif specmode == "mvc":
+    elif continuum_mode == "mvc":
         model_uv_xds = None
     else:
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
 
     return model_xds, model_uv_xds
@@ -2718,14 +2720,14 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
             f"'recompute'; received {visibility_memory_mode!r}."
         )
 
-    specmode = str(input_params.get("specmode", "mfs")).lower()
-    if specmode == "mvc":
+    continuum_mode = str(input_params.get("continuum_mode", "mfs")).lower()
+    if continuum_mode == "mvc":
         # MVC caches are task-local and have already been applied before each
         # map task's inverse FFT and Taylor construction.
         return None
-    if specmode != "mfs":
+    if continuum_mode != "mfs":
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
 
     image_data_group_name = input_params.get(
@@ -2733,9 +2735,9 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
         "residual",
     )
     image_xds = input_data["image"]
-    is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
+    is_first_cycle = bool(input_params.get("is_first_cycle", True))
 
-    if is_n_iter_0:
+    if is_first_cycle:
         data_groups = image_xds.attrs.get("data_groups", {})
         if image_data_group_name not in data_groups:
             raise KeyError(
@@ -2840,7 +2842,7 @@ def continuum_cycle_append_node(
         "continuum_cycle_append_node",
     )
 
-    is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
+    is_first_cycle = bool(input_params.get("is_first_cycle", True))
 
     observed_visibility_grid_xds = _prepare_cached_mfs_residual_grid(
         input_data,
@@ -2865,7 +2867,7 @@ def continuum_cycle_append_node(
     ) = _prepare_continuum_image(
         input_data["image"],
         input_params,
-        initialize_static_products=is_n_iter_0,
+        initialize_static_products=is_first_cycle,
         pb_cache_mapping=pb_cache_mapping,
     )
 
@@ -2910,7 +2912,7 @@ def continuum_cycle_append_node(
     # residual-update graph. The distributed application only forwards these
     # returned objects.
     start = time.time()
-    if return_dict.get("residual_converged", False) and not is_n_iter_0:
+    if return_dict.get("residual_converged", False) and not is_first_cycle:
         model_xds = input_params["model_xds"]
         model_uv_xds = input_params.get("model_uv_xds")
     else:
@@ -3044,8 +3046,8 @@ def continuum_finalize_node(
                 "processing_function_threads",
                 1,
             ),
-            primary_beam_correction=input_params.get("pbcor", False),
-            primary_beam_limit=input_params.get("pblimit", 0.2),
+            primary_beam_correction=input_params.get("primary_beam_correction", False),
+            primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
         )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
@@ -3123,7 +3125,7 @@ def model_update_continuum_single_field(
         ``processing_function_threads``
             Number of threads passed to the model-update processing function.
 
-        ``is_n_iter_0``
+        ``is_first_cycle``
             Whether this is the first imaging cycle. Defaults to ``True``.
 
         ``controller``
@@ -3206,7 +3208,7 @@ def model_update_continuum_single_field(
         "processing_function_threads",
         1,
     )
-    is_n_iter_0 = input_params.get("is_n_iter_0", True)
+    is_first_cycle = input_params.get("is_first_cycle", True)
 
     image_data_group_in_name = input_params.get(
         "image_data_group_in_name",
@@ -3275,7 +3277,7 @@ def model_update_continuum_single_field(
                 "stopdesc": stopdesc,
                 "residual_statistics": residual_imaging_dict,
                 "residual_converged": True,
-                "is_n_iter_0": False,
+                "is_first_cycle": False,
             }
         )
 
@@ -3308,7 +3310,7 @@ def model_update_continuum_single_field(
         img_xds,
         deconvolver,
         deconvolve_params,
-        is_n_iter_0=is_n_iter_0,
+        is_first_cycle=is_first_cycle,
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
@@ -3367,6 +3369,6 @@ def model_update_continuum_single_field(
             "controller": controller,
             "stopcode": stopcode,
             "stopdesc": stopdesc,
-            "is_n_iter_0": False,
+            "is_first_cycle": False,
         }
     )

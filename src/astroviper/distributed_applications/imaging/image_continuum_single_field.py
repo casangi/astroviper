@@ -536,7 +536,7 @@ def _persist_continuum_weight_cache_to_processing_set(
     zarr.consolidate_metadata(ps_store)
 
 
-def _continuum_image_for_disk(img_xds, image_data_variables_keep, pbcor=False):
+def _continuum_image_for_disk(img_xds, image_data_variables_keep):
     """Return a lazy view containing the requested finalized continuum products.
 
     Continuum products carry Taylor-term and PSF-Taylor-order dimensions that
@@ -550,9 +550,6 @@ def _continuum_image_for_disk(img_xds, image_data_variables_keep, pbcor=False):
 
     registry = imaging_data_variables_and_dims_double_precision
     requested_names = {registry[key]["name"] for key in image_data_variables_keep}
-    if pbcor and "SKY_RESTORED_PBCOR" in img_xds:
-        requested_names.add("SKY_RESTORED_PBCOR")
-
     output = img_xds.copy(deep=False)
     # The XRADIO deletion accessor mutates its dataset in place; isolate the
     # attributes while retaining zero-copy views of the large arrays.
@@ -1303,23 +1300,23 @@ def combine_continuum_chunks(input_data, input_params):
     if not input_data:
         raise ValueError("combine_continuum_chunks received no inputs.")
 
-    # Extract the specmode
-    specmode = input_params.get("specmode")
+    # Extract the continuum_mode
+    continuum_mode = input_params.get("continuum_mode")
 
-    if specmode is None:
-        specmode = (
+    if continuum_mode is None:
+        continuum_mode = (
             input_data[0]["image"]
             .attrs.get(
                 "continuum_imaging",
                 {},
             )
-            .get("specmode", "mfs")
+            .get("continuum_mode", "mfs")
         )
 
     static_variables = tuple(
         input_params.get(
             "static_variables",
-            ("PRIMARY_BEAM_REFERENCE",) if specmode == "mfs" else (),
+            ("PRIMARY_BEAM_REFERENCE",) if continuum_mode == "mfs" else (),
         )
     )
 
@@ -1340,9 +1337,9 @@ def combine_continuum_chunks(input_data, input_params):
         metadata = dataset.attrs.get("continuum_imaging", {})
 
         return {
-            "nterms": metadata.get(
-                "nterms",
-                dataset.attrs.get("nterms"),
+            "n_taylor_terms": metadata.get(
+                "n_taylor_terms",
+                dataset.attrs.get("n_taylor_terms"),
             ),
             "reference_frequency_hz": metadata.get(
                 "reference_frequency_hz",
@@ -1360,7 +1357,7 @@ def combine_continuum_chunks(input_data, input_params):
         candidate = _continuum_metadata(candidate_dataset)
 
         for key in (
-            "nterms",
+            "n_taylor_terms",
             "n_psf_taylor_terms",
         ):
             reference_value = reference[key]
@@ -1731,7 +1728,7 @@ def combine_continuum_chunks(input_data, input_params):
     # MVC frequency-cube products are reconstructed globally below.
     # Do not retain the first map task's local frequency coordinate or
     # frequency-dependent variables in the accumulator.
-    if specmode == "mvc" and frequency_cube_variables:
+    if continuum_mode == "mvc" and frequency_cube_variables:
         local_frequency_variables = [
             name
             for name, data_array in combined_image.data_vars.items()
@@ -2521,9 +2518,9 @@ def _apply_exact_frequency_selection_to_continuum_mapping(
 def calculate_number_of_chunks_for_continuum_imaging(
     img_xds,
     single_precision_image,
-    n_chunks,
+    n_frequency_chunks,
     thread_info,
-    nterms=1,
+    n_taylor_terms=1,
     n_correlations=2,
     fft_padding=1.2,
 ):
@@ -2531,8 +2528,8 @@ def calculate_number_of_chunks_for_continuum_imaging(
 
     Computes the memory required per single-frequency chunk and delegates to
     :func:`calculate_data_chunking` to find a chunk count that satisfies both
-    memory and parallelism constraints. If ``n_chunks`` is already provided it
-    is returned unchanged.
+    memory and parallelism constraints. If ``n_frequency_chunks`` is already
+    provided it is returned unchanged.
 
     Parameters
     ----------
@@ -2542,12 +2539,12 @@ def calculate_number_of_chunks_for_continuum_imaging(
         If ``True``, use single-precision (complex64 / float32) memory estimates
         for the image-domain arrays; otherwise double-precision
         (complex128 / float64).
-    n_chunks : int or None
+    n_frequency_chunks : int or None
         If not ``None``, this value is returned directly without any computation.
     thread_info : dict or None
         Thread information as returned by :func:`get_thread_info`.
         If ``None``, thread information is queried automatically.
-    nterms : int, optional
+    n_taylor_terms : int, optional
         Number of continuum Taylor terms held by every map task.
     n_correlations : int, optional
         Number of instrument-basis correlation planes gridded by each task.
@@ -2561,7 +2558,7 @@ def calculate_number_of_chunks_for_continuum_imaging(
     """
     import toolviper.utils.logger as logger
 
-    if n_chunks is None:
+    if n_frequency_chunks is None:
         from astroviper.processing_functions.imaging.utils.fft_sizing import (
             padded_grid_size,
         )
@@ -2586,10 +2583,10 @@ def calculate_number_of_chunks_for_continuum_imaging(
             / (1024**3)
         )
         # Taylor grids are allocated once per task, not once per input channel.
-        # The residual has nterms UV grids and the PSF has 2*nterms-1, all in
+        # The residual has n_taylor_terms UV grids and the PSF has 2*n_taylor_terms-1, all in
         # the correlation basis. Taylor residual/model work arrays are in the
         # requested Stokes basis and are constant per task as well.
-        n_taylor_uv_grids = nterms + (2 * nterms - 1)
+        n_taylor_uv_grids = n_taylor_terms + (2 * n_taylor_terms - 1)
         constant_memory = (
             fudge_factor
             * (
@@ -2597,7 +2594,7 @@ def calculate_number_of_chunks_for_continuum_imaging(
                 + n_image_pixels
                 * img_xds.sizes["polarization"]
                 * 3
-                * nterms
+                * n_taylor_terms
                 * float_bytes
             )
             / (1024**3)
@@ -2611,7 +2608,7 @@ def calculate_number_of_chunks_for_continuum_imaging(
 
         from astroviper.utils.data_partitioning import calculate_frequency_chunking
 
-        n_chunks = calculate_frequency_chunking(
+        n_frequency_chunks = calculate_frequency_chunking(
             img_xds.sizes["frequency"],
             memory_per_frequency,
             constant_memory,
@@ -2621,11 +2618,11 @@ def calculate_number_of_chunks_for_continuum_imaging(
         )
         logger.info(
             "Number of frequency chunks: "
-            + str(n_chunks)
+            + str(n_frequency_chunks)
             + " frequency channels: "
             + str(img_xds.sizes["frequency"])
         )
-    return n_chunks
+    return n_frequency_chunks
 
 
 def _load_continuum_clean_mask(clean_mask, image_size):
@@ -2665,27 +2662,29 @@ def _resolve_continuum_deconvolver(deconvolver, image_params):
     if deconvolver != "mtmfs":
         return deconvolver
 
-    if "nterms" not in image_params:
-        raise KeyError("image_params must contain 'nterms' when deconvolver='mtmfs'.")
+    if "n_taylor_terms" not in image_params:
+        raise KeyError(
+            "image_params must contain 'n_taylor_terms' when deconvolver='mtmfs'."
+        )
     try:
-        nterms = operator.index(image_params["nterms"])
+        n_taylor_terms = operator.index(image_params["n_taylor_terms"])
     except TypeError as exc:
         raise TypeError(
-            "image_params['nterms'] must be an integer when deconvolver='mtmfs'."
+            "image_params['n_taylor_terms'] must be an integer when deconvolver='mtmfs'."
         ) from exc
 
-    if nterms == 1:
+    if n_taylor_terms == 1:
         warnings.warn(
-            "deconvolver='mtmfs' was requested with nterms=1; falling back "
+            "deconvolver='mtmfs' was requested with n_taylor_terms=1; falling back "
             "to deconvolver='hogbom'.",
             UserWarning,
             stacklevel=3,
         )
         return "hogbom"
-    if not 2 <= nterms <= 4:
+    if not 2 <= n_taylor_terms <= 4:
         raise ValueError(
-            "deconvolver='mtmfs' requires image_params['nterms'] between "
-            f"2 and 4; received {nterms}."
+            "deconvolver='mtmfs' requires image_params['n_taylor_terms'] between "
+            f"2 and 4; received {n_taylor_terms}."
         )
     return deconvolver
 
@@ -2694,24 +2693,24 @@ def _resolve_continuum_taylor_expansion(image_params):
     """Resolve the Taylor expansion of the sky model before graph creation.
 
     The node tasks and processing functions read only
-    ``image_params["nterms"]`` and ``image_params["reference_frequency"]``.
+    ``image_params["n_taylor_terms"]`` and ``image_params["reference_frequency"]``.
     The deprecated alias ``image_params["reference_frequency_hz"]`` is
     resolved here, once, so that every stage uses the same frequency.
 
     Parameters
     ----------
     image_params : dict
-        Application-local copy of the image parameters, with ``nterms``
-        present and at least 1 (checked by the schema). ``nterms`` may be any
+        Application-local copy of the image parameters, with ``n_taylor_terms``
+        present and at least 1 (checked by the schema). ``n_taylor_terms`` may be any
         integer type, and the reference frequency any real scalar (Python,
-        NumPy or xarray). Modified in place: on return ``nterms`` is an int,
+        NumPy or xarray). Modified in place: on return ``n_taylor_terms`` is an int,
         ``reference_frequency`` holds the reference frequency in Hz as a float,
         and ``reference_frequency_hz`` is removed.
 
     Raises
     ------
     TypeError
-        If ``nterms`` is not an integer.
+        If ``n_taylor_terms`` is not an integer.
     KeyError
         If neither ``reference_frequency`` nor ``reference_frequency_hz`` is
         given.
@@ -2727,9 +2726,9 @@ def _resolve_continuum_taylor_expansion(image_params):
     )
 
     try:
-        image_params["nterms"] = operator.index(image_params["nterms"])
+        image_params["n_taylor_terms"] = operator.index(image_params["n_taylor_terms"])
     except TypeError as exc:
-        raise TypeError("image_params['nterms'] must be an integer.") from exc
+        raise TypeError("image_params['n_taylor_terms'] must be an integer.") from exc
 
     if "reference_frequency_hz" in image_params:
         warnings.warn(
@@ -2768,9 +2767,9 @@ def image_continuum_single_field(
     cycle_control_params: dict[str, Any],
     gridder: str = "anti_alias",
     deconvolver: str = "hogbom",
-    pbcor: bool = False,
-    pblimit: float = 0.2,
-    specmode: str = "mfs",
+    primary_beam_correction: bool = False,
+    primary_beam_limit: float = 0.2,
+    continuum_mode: str = "mfs",
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json requires list/str (not nullable); never mutated
     field_name: str | None = None,
@@ -2782,16 +2781,16 @@ def image_continuum_single_field(
         "beam_fit_params_point_spread_function",
     ],
     compressor=None,
-    processing_set_data_group_name: str = "base",
-    single_precision_image: bool = False,
+    processing_set_data_group_name: str = "corrected",
+    single_precision_image: bool = True,
     thread_info: dict | None = None,
     processing_function_threads: int = 1,
-    n_chunks: int | None = None,
+    n_mapping_parallelism: dict[str, int | None] | None = None,
     overwrite: bool = False,
     memory_mode: str = "in_memory",
     weight_memory_mode: str = "in_place",
     visibility_memory_mode: str = "recompute",
-    widebandpb_memory_mode: str = "recompute",
+    wideband_primary_beam_memory_mode: str = "recompute",
     cache_directory: str | None = None,
     write_visibility_model_to_ps: bool = False,
     write_imaging_weights_to_ps: bool = False,
@@ -2851,11 +2850,14 @@ def image_continuum_single_field(
         Input Processing Set and output image-store paths.
     image_store : str
         Path/URL of the on-disk Zarr image cube.
-    pbcor : bool
-        If ``True``, also write ``SKY_RESTORED_PBCOR`` using the shared
-        model-first restoration convention: divide the model by the primary
-        beam before clean-beam convolution, then add the residual divided by
-        the primary beam. Requires ``restore=True``.
+    primary_beam_correction : bool
+        If ``True`` write the primary beam corrected restored sky to the
+        ``sky_restored_primary_beam_corrected``
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
+        by the (power) primary beam and convolved with the clean beam, plus
+        the residual divided by the primary beam; pixels below the primary
+        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
+        ``restore``.
     restore : bool
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
@@ -2898,7 +2900,7 @@ def image_continuum_single_field(
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
-    specmode : {"mfs", "mvc"}
+    continuum_mode : {"mfs", "mvc"}
         Taylor UV gridding or channel-image Taylor construction. ``"mvc"``
         images the two parallel hands only; ``["I", "Q", "U", "V"]`` is
         refused.
@@ -2906,13 +2908,15 @@ def image_continuum_single_field(
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
         (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["nterms"]`` from 2 to 4; with
-        ``nterms=1`` it falls back to ``"hogbom"`` with a warning. Other values
+        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
+        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
         are refused before anything is written.
-    pblimit : float
-        PB cutoff for the MVC channel beams in the effective beam and the
-        spectral fit of the Taylor residuals, and for final model-first
-        PB-corrected restoration. Pixels below this limit are blanked with NaN.
+    primary_beam_limit : float
+        Primary-beam cutoff in ``[0, 1]``. This single setting controls CLEAN
+        support, MVC channel correction and spectral fitting, and final
+        model-first PB-corrected restoration. Pixels below this limit are
+        excluded from cleaning and blanked with NaN in the corrected product.
+        This corresponds to CASA ``pblimit`` / ``pbmask``.
     instrument_polarization_basis : str
         Correlation (instrument) polarization basis the gridding is performed in:
         ``"linear"`` or ``"circular"``. The residual update grids and degrids the
@@ -2939,8 +2943,9 @@ def image_continuum_single_field(
     processing_function_threads : int
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
-    n_chunks : int, optional
-        Requested number of map partitions.
+    n_mapping_parallelism : dict, optional
+        Mapping parallelism as ``{"frequency": count}``. ``count=None`` or a
+        missing dictionary auto-determines the number of frequency chunks.
     overwrite : bool
         Allow replacement of the output image store.
     vizualize_graph : bool
@@ -3225,7 +3230,7 @@ def image_continuum_single_field(
         cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
         map task's exclusively owned frequency-resolved UV planes.
 
-    widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
+    wideband_primary_beam_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MVC-only storage policy for the frequency-dependent primary beam.
         ``"in_place"`` stores it temporarily in the image Zarr store and reads
         only task-local channels. The default ``"recompute"`` regenerates the
@@ -3236,7 +3241,7 @@ def image_continuum_single_field(
     Notes
     -----
     The sky model is a Taylor expansion in frequency with
-    ``image_params["nterms"]`` terms (an integer of at least 1) about
+    ``image_params["n_taylor_terms"]`` terms (an integer of at least 1) about
     ``image_params["reference_frequency"]``, one frequency in Hz shared by all
     frequency chunks. Both are required.
     ``image_params["reference_frequency_hz"]`` is a deprecated alias of
@@ -3279,6 +3284,9 @@ def image_continuum_single_field(
     from xradio.image import make_empty_sky_image, write_image
     from xradio.measurement_set import open_processing_set
 
+    from astroviper.distributed_applications.imaging.image_cube_single_field import (
+        _validate_n_mapping_parallelism,
+    )
     from astroviper.processing_functions.imaging.check_imaging_parameters import (
         check_imaging_weights_params,
     )
@@ -3301,6 +3309,14 @@ def image_continuum_single_field(
     if compressor is None:
         compressor = BloscCodec(cname="lz4", clevel=5)
 
+    if n_mapping_parallelism is not None:
+        _validate_n_mapping_parallelism(n_mapping_parallelism)
+
+    if primary_beam_correction and not restore:
+        raise ValueError("primary_beam_correction requires restore=True.")
+    if not 0.0 <= primary_beam_limit <= 1.0:
+        raise ValueError("primary_beam_limit must be between 0 and 1.")
+
     assert memory_mode == "in_memory", (
         "Currently only in_memory is supported for memory_mode is implemented."
     )
@@ -3319,10 +3335,10 @@ def image_continuum_single_field(
             "visibility_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {visibility_memory_mode!r}."
         )
-    if widebandpb_memory_mode not in ("in_memory", "in_place", "recompute"):
+    if wideband_primary_beam_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
-            "widebandpb_memory_mode must be 'in_memory', 'in_place', or "
-            f"'recompute'; received {widebandpb_memory_mode!r}."
+            "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
+            f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
         )
     if weight_memory_mode == "in_place" and skunk_works:
         raise NotImplementedError(
@@ -3334,11 +3350,11 @@ def image_continuum_single_field(
             "and requires weight_memory_mode='in_place'."
         )
 
-    # Validate specmode
-    specmode = str(specmode).lower()
-    if specmode not in ("mfs", "mvc"):
+    # Validate continuum_mode
+    continuum_mode = str(continuum_mode).lower()
+    if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
     # Work with an application-local copy: continuum setup may augment the
     # image parameters with metadata derived from the Processing Set.
@@ -3373,15 +3389,27 @@ def image_continuum_single_field(
         )
 
     # not implemented by now
-    # if specmode == "mvc" and deconvolver != "mtmfs":
+    # if continuum_mode == "mvc" and deconvolver != "mtmfs":
     #    raise ValueError(
-    #        "specmode='mvc' requires deconvolver='mtmfs'."
+    #        "continuum_mode='mvc' requires deconvolver='mtmfs'."
     #    )
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
     if restore and "sky_restored" not in image_data_variables_keep:
         image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
+    if (
+        primary_beam_correction
+        and "sky_restored_primary_beam_corrected" not in image_data_variables_keep
+    ):
+        image_data_variables_keep = list(image_data_variables_keep) + [
+            "sky_restored_primary_beam_corrected"
+        ]
+
+    # One public primary-beam limit controls CLEAN support, MVC correction,
+    # and restored-image blanking throughout the continuum stack.
+    cycle_control_params = dict(cycle_control_params)
+    cycle_control_params["primary_beam_limit"] = float(primary_beam_limit)
 
     # Every driver step is timed into ``timing_distributed_application``; the
     # individual per-step timing log messages are replaced by the formatted
@@ -3397,11 +3425,11 @@ def image_continuum_single_field(
     )
     # MVC makes its Taylor terms real, which drops the imaginary part of the
     # cross-hand images (V for linear feeds, U for circular feeds).
-    if specmode == "mvc" and is_four_correlation_basis(correlation_coords):
+    if continuum_mode == "mvc" and is_four_correlation_basis(correlation_coords):
         raise ValueError(
-            f"specmode='mvc' does not image polarization_coords "
+            f"continuum_mode='mvc' does not image polarization_coords "
             f"{list(image_params['polarization_coords'])}: request the two "
-            "parallel hands or use specmode='mfs'."
+            "parallel hands or use continuum_mode='mfs'."
         )
 
     start = time.time()
@@ -3454,15 +3482,18 @@ def image_continuum_single_field(
             "populated by its node tasks.",
         )
 
-    # Determine number of chunks
+    # Determine the mapping parallelism. Continuum imaging maps only over
+    # frequency, matching the cube driver's public dictionary interface.
     start = time.time()
-    n_chunks = int(
+    n_frequency_chunks = int(
         calculate_number_of_chunks_for_continuum_imaging(
             img_xds,
             single_precision_image,
-            n_chunks,
+            None
+            if n_mapping_parallelism is None
+            else n_mapping_parallelism["frequency"],
             thread_info,
-            nterms=image_params["nterms"],
+            n_taylor_terms=image_params["n_taylor_terms"],
             n_correlations=len(correlation_coords),
             fft_padding=image_params["fft_padding"],
         )
@@ -3471,7 +3502,7 @@ def image_continuum_single_field(
     # Make Parallel Coords
     parallel_coords = {}
     parallel_coords["frequency"] = make_parallel_coord(
-        coord=img_xds.frequency, n_chunks=n_chunks
+        coord=img_xds.frequency, n_chunks=n_frequency_chunks
     )
     logger.info(
         "Number of frequency chunks ... : "
@@ -3514,7 +3545,9 @@ def image_continuum_single_field(
     input_params["memory_mode"] = memory_mode
     input_params["weight_memory_mode"] = weight_memory_mode
     input_params["visibility_memory_mode"] = visibility_memory_mode
-    input_params["widebandpb_memory_mode"] = widebandpb_memory_mode
+    input_params["wideband_primary_beam_memory_mode"] = (
+        wideband_primary_beam_memory_mode
+    )
     input_params["cache_directory"] = cache_directory
     input_params["write_visibility_model_to_ps"] = write_visibility_model_to_ps
     input_params["write_imaging_weights_to_ps"] = write_imaging_weights_to_ps
@@ -3522,11 +3555,11 @@ def image_continuum_single_field(
     input_params["processing_function_threads"] = processing_function_threads
     input_params["cycle_control_params"] = cycle_control_params
     input_params["gridder"] = gridder
-    input_params["is_n_iter_0"] = True
+    input_params["is_first_cycle"] = True
     input_params["deconvolver"] = deconvolver
-    input_params["pbcor"] = bool(pbcor)
-    input_params["pblimit"] = float(pblimit)
-    input_params["specmode"] = specmode
+    input_params["primary_beam_correction"] = bool(primary_beam_correction)
+    input_params["primary_beam_limit"] = float(primary_beam_limit)
+    input_params["continuum_mode"] = continuum_mode
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
@@ -3543,7 +3576,9 @@ def image_continuum_single_field(
     # Resolve telescope/band once before task partitioning. Every MVC chunk
     # must use the prescription selected from the full image frequency axis.
     image_params = resolve_continuum_primary_beam(
-        image_params, ps_xdt.xr_ps.get_combined_antenna_xds(), specmode=specmode
+        image_params,
+        ps_xdt.xr_ps.get_combined_antenna_xds(),
+        continuum_mode=continuum_mode,
     )
     input_params["image_params"] = image_params
 
@@ -3567,7 +3602,7 @@ def image_continuum_single_field(
             if task["data_selection"].get(ms_name) is not None:
                 task["data_selection"][ms_name]["polarization"] = selection
 
-    if specmode == "mvc" and widebandpb_memory_mode == "in_place":
+    if continuum_mode == "mvc" and wideband_primary_beam_memory_mode == "in_place":
         start = time.time()
         _create_wideband_primary_beam_cache_store(
             image_store,
@@ -3581,7 +3616,7 @@ def image_continuum_single_field(
             time.time() - start
         )
 
-    if specmode == "mvc" and visibility_memory_mode == "in_place":
+    if continuum_mode == "mvc" and visibility_memory_mode == "in_place":
         start = time.time()
         _create_mvc_visibility_grid_cache_store(
             image_store,
@@ -3658,7 +3693,7 @@ def image_continuum_single_field(
         timing_distributed_application["T_compute_dask_graph"] = 0.0
 
         # State carried between independently computed distributed graphs.
-        is_n_iter_0 = True
+        is_first_cycle = True
         static_xds = None
         model_xds = None
         model_uv_xds = None
@@ -3748,7 +3783,7 @@ def image_continuum_single_field(
             # ---------------------------------------------------------
             cycle_input_params = dict(input_params)
 
-            cycle_input_params["is_n_iter_0"] = is_n_iter_0
+            cycle_input_params["is_first_cycle"] = is_first_cycle
             cycle_input_params["restore"] = False
 
             # Prepared once before the imaging-cycle loop. In-memory weights
@@ -3756,14 +3791,14 @@ def image_continuum_single_field(
             # the complete all-task cache into every map-node parameter dict.
             cycle_input_params["weight_cache_is_active"] = weight_cache_is_active
 
-            if not is_n_iter_0:
+            if not is_first_cycle:
                 if model_xds is None:
                     raise RuntimeError(
                         "No accumulated continuum model is available for "
                         f"imaging cycle {n_cycles}."
                     )
 
-                if specmode == "mfs" and model_uv_xds is None:
+                if continuum_mode == "mfs" and model_uv_xds is None:
                     raise RuntimeError("No Fourier-domain MFS model is available.")
 
                 if static_xds is None:
@@ -3774,27 +3809,27 @@ def image_continuum_single_field(
 
                 cycle_input_params["model_uv_xds"] = model_uv_xds
 
-                if specmode == "mvc":
+                if continuum_mode == "mvc":
                     cycle_input_params["model_xds"] = model_xds
 
             # During the first imaging cycle the PSF and residual Taylor products
             # are reduced. Later cycles only produce new residual products; the
             # static PSF/PB products are supplied by continuum_append_node.
-            if specmode == "mfs":
-                if is_n_iter_0:
-                    reduce_input_params = {"specmode": "mfs"}
+            if continuum_mode == "mfs":
+                if is_first_cycle:
+                    reduce_input_params = {"continuum_mode": "mfs"}
                 else:
                     reduce_input_params = {
-                        "specmode": "mfs",
+                        "continuum_mode": "mfs",
                         "additive_variables": (
                             "VISIBILITY",
                             "VISIBILITY_NORMALIZATION",
                         ),
                     }
             else:
-                if is_n_iter_0:
+                if is_first_cycle:
                     reduce_input_params = {
-                        "specmode": "mvc",
+                        "continuum_mode": "mvc",
                         "additive_variables": (
                             "MVC_RESIDUAL_TAYLOR_NUMERATOR",
                             "MVC_RESIDUAL_WEIGHT_SUM",
@@ -3808,7 +3843,7 @@ def image_continuum_single_field(
                     }
                 else:
                     reduce_input_params = {
-                        "specmode": "mvc",
+                        "continuum_mode": "mvc",
                         "additive_variables": (
                             "MVC_RESIDUAL_TAYLOR_NUMERATOR",
                             "MVC_RESIDUAL_WEIGHT_SUM",
@@ -3825,7 +3860,7 @@ def image_continuum_single_field(
                 "cycle_control_params": cycle_control_params,
                 "deconvolver": deconvolver,
                 "processing_function_threads": processing_function_threads,
-                "is_n_iter_0": is_n_iter_0,
+                "is_first_cycle": is_first_cycle,
                 "controller": controller,
                 "image_data_group_in_name": "residual",
                 "image_data_group_out_name": "model",
@@ -3834,25 +3869,25 @@ def image_continuum_single_field(
                 "fft_backend": fft_backend,
                 "single_precision_image": single_precision_image,
                 "instrument_polarization_basis": instrument_polarization_basis,
-                "specmode": specmode,
+                "continuum_mode": continuum_mode,
                 "visibility_memory_mode": visibility_memory_mode,
                 "image_store": image_store,
-                "pblimit": pblimit,
+                "primary_beam_limit": primary_beam_limit,
                 "clean_mask": clean_mask_array,
                 "restore": restore,
-                "pbcor": pbcor,
+                "primary_beam_correction": primary_beam_correction,
             }
 
             # Static products from the first cycle are required in later cycles.
             # This holds static quantities such as PSF and PB
-            if not is_n_iter_0:
+            if not is_first_cycle:
                 append_input_params["static_xds"] = static_xds
                 append_input_params["model_xds"] = model_xds
                 append_input_params["model_uv_xds"] = model_uv_xds
                 append_input_params["deconvolution"] = last_cycle_return_dict[
                     "deconvolution"
                 ]
-                if specmode == "mfs" and visibility_memory_mode == "in_memory":
+                if continuum_mode == "mfs" and visibility_memory_mode == "in_memory":
                     if observed_visibility_grid_xds is None:
                         raise RuntimeError(
                             "No cached observed-data MFS grid is available for "
@@ -3874,17 +3909,17 @@ def image_continuum_single_field(
                     weight_cache_mapping,
                 )
             if (
-                specmode == "mvc"
-                and not is_n_iter_0
-                and widebandpb_memory_mode == "in_memory"
+                continuum_mode == "mvc"
+                and not is_first_cycle
+                and wideband_primary_beam_memory_mode == "in_memory"
             ):
                 cycle_node_task_data_mapping = _mapping_with_task_primary_beams(
                     cycle_node_task_data_mapping,
                     pb_cache_mapping,
                 )
             if (
-                specmode == "mvc"
-                and not is_n_iter_0
+                continuum_mode == "mvc"
+                and not is_first_cycle
                 and visibility_memory_mode == "in_memory"
             ):
                 cycle_node_task_data_mapping = _mapping_with_task_observed_grids(
@@ -3931,7 +3966,7 @@ def image_continuum_single_field(
             # ---------------------------------------------------------
             # Capture append-prepared state for the next cycle.
             # ---------------------------------------------------------
-            if is_n_iter_0:
+            if is_first_cycle:
                 if "static_xds" not in cycle_return_dict:
                     raise KeyError(
                         "The first continuum append node did not return 'static_xds'."
@@ -3940,7 +3975,7 @@ def image_continuum_single_field(
                 # PSF, PB and PSF sidelobe level are computed only in cycle one.
                 static_xds = cycle_return_dict["static_xds"]
 
-                if specmode == "mfs" and visibility_memory_mode == "in_memory":
+                if continuum_mode == "mfs" and visibility_memory_mode == "in_memory":
                     observed_visibility_grid_xds = cycle_return_dict.get(
                         "observed_visibility_grid_xds"
                     )
@@ -3950,7 +3985,7 @@ def image_continuum_single_field(
                             "observed-data visibility-grid cache."
                         )
 
-                if specmode == "mvc" and visibility_memory_mode == "in_memory":
+                if continuum_mode == "mvc" and visibility_memory_mode == "in_memory":
                     observed_visibility_grid_mapping = cycle_return_dict.get(
                         "observed_visibility_grid_mapping"
                     )
@@ -3986,11 +4021,11 @@ def image_continuum_single_field(
             model_xds = cycle_return_dict["model_xds"]
             model_uv_xds = cycle_return_dict["model_uv_xds"]
 
-            if specmode == "mfs" and model_uv_xds is None:
+            if continuum_mode == "mfs" and model_uv_xds is None:
                 raise RuntimeError(
                     "The MFS append node did not prepare the Fourier-domain model."
                 )
-            if specmode == "mvc" and model_uv_xds is not None:
+            if continuum_mode == "mvc" and model_uv_xds is not None:
                 raise RuntimeError(
                     "The MVC append node returned unexpected MFS UV state."
                 )
@@ -3998,7 +4033,7 @@ def image_continuum_single_field(
             # Locally calculated weights either return to the driver or become
             # visible through the Processing Set after the first graph completes.
             if (
-                is_n_iter_0
+                is_first_cycle
                 and weight_memory_mode == "in_memory"
                 and weight_cache_mapping is None
             ):
@@ -4022,7 +4057,7 @@ def image_continuum_single_field(
                     )
 
             if (
-                is_n_iter_0
+                is_first_cycle
                 and weight_memory_mode == "in_place"
                 and not weight_cache_is_active
             ):
@@ -4030,9 +4065,9 @@ def image_continuum_single_field(
 
             # Store frequency-dependent primary beam in the cache if running as mvc
             if (
-                specmode == "mvc"
-                and is_n_iter_0
-                and widebandpb_memory_mode == "in_memory"
+                continuum_mode == "mvc"
+                and is_first_cycle
+                and wideband_primary_beam_memory_mode == "in_memory"
             ):
                 pb_cache_mapping = cycle_return_dict.get("pb_cache_mapping")
                 if pb_cache_mapping is None:
@@ -4050,7 +4085,7 @@ def image_continuum_single_field(
                         f"received={sorted(actual_task_ids)}."
                     )
 
-            is_n_iter_0 = False
+            is_first_cycle = False
             if cycle_return_dict["residual_converged"]:
                 # Verification does not constitute a model update or consume a cycle.
                 n_cycles -= 1
@@ -4084,7 +4119,6 @@ def image_continuum_single_field(
         output_image = _continuum_image_for_disk(
             return_dict["image"],
             image_data_variables_keep,
-            pbcor=pbcor,
         )
         if write_imaging_weights_to_ps:
             persist_start = time.time()
@@ -4097,11 +4131,11 @@ def image_continuum_single_field(
             timing_distributed_application["T_persist_imaging_weights"] = (
                 time.time() - persist_start
             )
-        if specmode == "mvc" and widebandpb_memory_mode == "in_place":
+        if continuum_mode == "mvc" and wideband_primary_beam_memory_mode == "in_place":
             _remove_wideband_primary_beam_cache(image_store)
-        if specmode == "mvc" and visibility_memory_mode == "in_place":
+        if continuum_mode == "mvc" and visibility_memory_mode == "in_place":
             _remove_mvc_visibility_grid_cache(image_store)
-        if specmode == "mfs" and visibility_memory_mode == "in_place":
+        if continuum_mode == "mfs" and visibility_memory_mode == "in_place":
             _remove_mfs_visibility_grid_cache(image_store)
         write_image(
             output_image,

@@ -68,14 +68,14 @@ def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
 
     continuum_node._install_continuum_clean_mask(image, mask)
 
-    assert image["CLEAN_MASK"].dims == residual.dims
+    assert image["MASK"].dims == residual.dims
     np.testing.assert_array_equal(
-        image["CLEAN_MASK"].isel(time=0, taylor_term=0, polarization=0), mask
+        image["MASK"].isel(time=0, taylor_term=0, polarization=0), mask
     )
     np.testing.assert_array_equal(
-        image["CLEAN_MASK"].isel(time=0, taylor_term=1, polarization=0), mask
+        image["MASK"].isel(time=0, taylor_term=1, polarization=0), mask
     )
-    assert image.attrs["data_groups"]["residual"]["mask"] == "CLEAN_MASK"
+    assert image.attrs["data_groups"]["residual"]["mask"] == "MASK"
     assert (
         "User-supplied continuum deconvolution mask installed"
         in (image.attrs["data_groups"]["residual"]["description"])
@@ -108,9 +108,9 @@ def test_first_cached_mfs_append_captures_an_independent_observed_grid():
     cached = continuum_node._prepare_cached_mfs_residual_grid(
         {"image": reduced},
         {
-            "specmode": "mfs",
+            "continuum_mode": "mfs",
             "visibility_memory_mode": "in_memory",
-            "is_n_iter_0": True,
+            "is_first_cycle": True,
         },
     )
 
@@ -126,9 +126,9 @@ def test_later_cached_mfs_append_forms_residual_from_reduced_model_grid():
     returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
         input_data,
         {
-            "specmode": "mfs",
+            "continuum_mode": "mfs",
             "visibility_memory_mode": "in_memory",
-            "is_n_iter_0": False,
+            "is_first_cycle": False,
             "observed_visibility_grid_xds": _mfs_uv_grid(5.0),
         },
     )
@@ -150,9 +150,9 @@ def test_in_place_mfs_append_persists_and_reloads_observed_grid(tmp_path):
     returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
         {"image": reduced},
         {
-            "specmode": "mfs",
+            "continuum_mode": "mfs",
             "visibility_memory_mode": "in_place",
-            "is_n_iter_0": True,
+            "is_first_cycle": True,
             "image_store": str(image_store),
         },
     )
@@ -166,9 +166,9 @@ def test_in_place_mfs_append_persists_and_reloads_observed_grid(tmp_path):
     continuum_node._prepare_cached_mfs_residual_grid(
         later_input,
         {
-            "specmode": "mfs",
+            "continuum_mode": "mfs",
             "visibility_memory_mode": "in_place",
-            "is_n_iter_0": False,
+            "is_first_cycle": False,
             "image_store": str(image_store),
         },
     )
@@ -187,9 +187,9 @@ def test_recompute_mfs_append_does_not_require_or_modify_a_cache():
     returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
         {"image": reduced},
         {
-            "specmode": "mfs",
+            "continuum_mode": "mfs",
             "visibility_memory_mode": "recompute",
-            "is_n_iter_0": False,
+            "is_first_cycle": False,
         },
     )
 
@@ -255,10 +255,10 @@ def test_mfs_append_accumulates_before_preparing_fourier_model(monkeypatch):
     model_xds, model_uv_xds = continuum_node._prepare_post_update_continuum_model_state(
         increment,
         {
-            "is_n_iter_0": False,
+            "is_first_cycle": False,
             "model_xds": previous,
-            "specmode": "mfs",
-            "image_params": {"nterms": 2},
+            "continuum_mode": "mfs",
+            "image_params": {"n_taylor_terms": 2},
             "instrument_polarization_basis": "circular",
             "single_precision_image": False,
             "processing_function_threads": 3,
@@ -292,9 +292,9 @@ def test_mvc_append_returns_accumulated_image_model_without_global_fft(monkeypat
     model_xds, model_uv_xds = continuum_node._prepare_post_update_continuum_model_state(
         increment,
         {
-            "is_n_iter_0": False,
+            "is_first_cycle": False,
             "model_xds": previous,
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
         },
     )
 
@@ -397,7 +397,7 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
             "pb_xds": pb_xds,
             "weight_datasets": weights,
         },
-        {"is_n_iter_0": True},
+        {"is_first_cycle": True},
     )
     assert captured["pb_cache_mapping"] == {7: pb_xds}
     assert result["weight_cache_mapping"] == {7: weights}
@@ -438,7 +438,7 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
 
     continuum_node.continuum_cycle_append_node(
         {"image": xr.Dataset(), "deconvolution": reduced_history},
-        {"is_n_iter_0": False, "deconvolution": previous_history},
+        {"is_first_cycle": False, "deconvolution": previous_history},
     )
 
     assert captured["history"] is previous_history
@@ -690,7 +690,7 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
             {
                 "cycle_control_params": params,
                 "controller": controller,
-                "is_n_iter_0": initial,
+                "is_first_cycle": initial,
             },
         )
     assert params["max_iter_per_cycle"] == 5
@@ -1030,9 +1030,9 @@ def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch)
     accumulated, model_uv = continuum_node._prepare_post_update_continuum_model_state(
         increment,
         {
-            "is_n_iter_0": False,
+            "is_first_cycle": False,
             "model_xds": previous,
-            "specmode": "mfs",
+            "continuum_mode": "mfs",
             "image_params": {},
         },
     )
@@ -1200,8 +1200,8 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
         },
     )
     if masked:
-        image["CLEAN_MASK"] = (("l", "m"), np.zeros((2, 2), dtype=bool))
-        image.attrs["data_groups"]["residual"]["mask"] = "CLEAN_MASK"
+        image["MASK"] = (("l", "m"), np.zeros((2, 2), dtype=bool))
+        image.attrs["data_groups"]["residual"]["mask"] = "MASK"
 
     def unexpected_update(*args, **kwargs):
         pytest.fail("A confirmed residual stop must not run a model update")

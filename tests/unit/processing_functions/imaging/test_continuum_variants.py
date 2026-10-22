@@ -22,18 +22,20 @@ from tests.utils.continuum_images import (
 )
 
 
-def _native_mtmfs_continuum_image(nterms, shape, dtype, support_kind):
+def _native_mtmfs_continuum_image(n_taylor_terms, shape, dtype, support_kind):
     """Build coupled Taylor point sources for the real continuum adapter."""
     ntime, npol = 2, 2
     nl, nm = shape
-    frequencies = np.linspace(-0.75, 0.75, nterms + 4)
+    frequencies = np.linspace(-0.75, 0.75, n_taylor_terms + 4)
     moments = np.asarray(
-        [(frequencies**order).mean() for order in range(2 * nterms - 1)],
+        [(frequencies**order).mean() for order in range(2 * n_taylor_terms - 1)],
         dtype=dtype,
     )
-    hessian = moments[np.add.outer(np.arange(nterms), np.arange(nterms))]
-    psf = np.zeros((ntime, 2 * nterms - 1, npol, nl, nm), dtype=dtype)
-    residual = np.zeros((ntime, nterms, npol, nl, nm), dtype=dtype)
+    hessian = moments[
+        np.add.outer(np.arange(n_taylor_terms), np.arange(n_taylor_terms))
+    ]
+    psf = np.zeros((ntime, 2 * n_taylor_terms - 1, npol, nl, nm), dtype=dtype)
+    residual = np.zeros((ntime, n_taylor_terms, npol, nl, nm), dtype=dtype)
     expected_model = np.zeros_like(residual)
     source = (nl // 2, nm // 2)
     for tt in range(ntime):
@@ -41,7 +43,7 @@ def _native_mtmfs_continuum_image(nterms, shape, dtype, support_kind):
             coefficients = np.asarray(
                 [
                     (1.0 + 0.25 * tt + 0.125 * pp) * ((-0.4) ** order)
-                    for order in range(nterms)
+                    for order in range(n_taylor_terms)
                 ],
                 dtype=dtype,
             )
@@ -51,8 +53,8 @@ def _native_mtmfs_continuum_image(nterms, shape, dtype, support_kind):
 
     coords = {
         "time": np.arange(ntime, dtype=float),
-        "taylor_term": np.arange(nterms),
-        "psf_taylor_order": np.arange(2 * nterms - 1),
+        "taylor_term": np.arange(n_taylor_terms),
+        "psf_taylor_order": np.arange(2 * n_taylor_terms - 1),
         "polarization": ["I", "Q"],
         "l": np.arange(nl),
         "m": np.arange(nm),
@@ -86,8 +88,8 @@ def _native_mtmfs_continuum_image(nterms, shape, dtype, support_kind):
     support = np.zeros(shape, dtype=dtype)
     support[source] = 1.0
     if support_kind == "mask":
-        image["CLEAN_MASK"] = (("l", "m"), support)
-        image.attrs["data_groups"]["residual"]["mask"] = "CLEAN_MASK"
+        image["MASK"] = (("l", "m"), support)
+        image.attrs["data_groups"]["residual"]["mask"] = "MASK"
     else:
         image["PRIMARY_BEAM"] = (("l", "m"), support)
         image.attrs["data_groups"]["residual"]["primary_beam"] = "PRIMARY_BEAM"
@@ -125,16 +127,18 @@ def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype
 
     assert result.SKY_RESTORED.sizes["l"] == image_shape[0]
     assert result.SKY_RESTORED.sizes["m"] == image_shape[1]
-    assert result.SKY_RESTORED_PBCOR.sizes["l"] == image_shape[0]
-    assert result.SKY_RESTORED_PBCOR.sizes["m"] == image_shape[1]
+    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.sizes["l"] == image_shape[0]
+    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.sizes["m"] == image_shape[1]
     assert result.SKY_RESTORED.dtype == dtype
-    assert result.SKY_RESTORED_PBCOR.dtype == dtype
+    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.dtype == dtype
     restored_taylor_zero = result.SKY_RESTORED.isel(taylor_term=0)
     assert np.isfinite(restored_taylor_zero).all()
     assert result.SKY_RESTORED.isel(taylor_term=slice(1, None)).isnull().all()
-    assert np.isfinite(result.SKY_RESTORED_PBCOR).all()
+    assert np.isfinite(result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED).all()
     assert float(restored_taylor_zero.max()) == pytest.approx(2.25, rel=1e-6)
-    assert float(result.SKY_RESTORED_PBCOR.max()) == pytest.approx(4.5, rel=1e-6)
+    assert float(result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.max()) == pytest.approx(
+        4.5, rel=1e-6
+    )
     xr.testing.assert_identical(result.SKY_MODEL, snapshot.SKY_MODEL)
     xr.testing.assert_identical(result.SKY_RESIDUAL, snapshot.SKY_RESIDUAL)
     assert "T_restore" in timing
@@ -323,17 +327,17 @@ def test_native_mtmfs_refuses_gain_and_divergence_values_deconvolve_refuses(
 
 
 @pytest.mark.parametrize(
-    "nterms,image_shape",
+    "n_taylor_terms,image_shape",
     [(2, (8, 8)), (3, (7, 10)), (4, (10, 7))],
 )
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("support_kind", ["mask", "primary_beam"])
 def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
-    nterms, image_shape, dtype, support_kind
+    n_taylor_terms, image_shape, dtype, support_kind
 ):
     """The real adapter preserves every plane and Taylor model coefficient."""
     image, expected_model = _native_mtmfs_continuum_image(
-        nterms, image_shape, dtype, support_kind
+        n_taylor_terms, image_shape, dtype, support_kind
     )
     residual_storage = image.SKY_RESIDUAL.values
     residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
@@ -545,7 +549,7 @@ def test_pb_correction_cutoff_includes_exact_boundary(dtype):
         primary_beam_correction=True,
         primary_beam_limit=float(limit),
     )
-    finite = np.isfinite(result.SKY_RESTORED_PBCOR.values[0, 0])
+    finite = np.isfinite(result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[0, 0])
     np.testing.assert_array_equal(finite[:, 0::4], False)
     np.testing.assert_array_equal(finite[:, 1::4], True)
     np.testing.assert_array_equal(finite[:, 2::4], True)
@@ -575,7 +579,7 @@ def test_mvc_single_term_extreme_and_zero_weights_match_scalar_oracle(dtype, wei
         xr.ones_like(residual),
         norm,
         norm,
-        nterms=1,
+        n_taylor_terms=1,
         reference_frequency=100.0,
     )
     expected = sum(float(w) * float(i + 1) for i, w in enumerate(weights)) / sum(
@@ -616,9 +620,9 @@ def test_mvc_channel_cutoff_excludes_exact_boundary_without_renormalizing(dtype)
         pb,
         weights,
         weights,
-        nterms=1,
+        n_taylor_terms=1,
         reference_frequency=100.0,
-        pblimit=float(limit),
+        primary_beam_limit=float(limit),
     )
     expected_beam = (float(pb.values.ravel()[2]) + 1.0) / 4.0
     # The cutoff applies to the effective beam only: the residual fits every

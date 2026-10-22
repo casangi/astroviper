@@ -340,8 +340,8 @@ IMAGING_PARAM_DOCS = {
         'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
         'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
         "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
-        'together and needs ``image_params["nterms"]`` from 2 to 4; with\n'
-        '``nterms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
+        'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
+        '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
         "are refused before anything is written."
     ),
     "instrument_polarization_basis": (
@@ -388,7 +388,7 @@ IMAGING_PARAM_DOCS = {
         "cycles. The distributed application supplies this only for in-memory MVC\n"
         "caching; other modes and first cycles leave it unset."
     ),
-    "widebandpb_memory_mode": (
+    "wideband_primary_beam_memory_mode": (
         "MVC-only storage policy for the frequency-dependent primary beam.\n"
         '``"in_place"`` stores it temporarily in the image Zarr store and reads\n'
         'only task-local channels. The default ``"recompute"`` regenerates the\n'

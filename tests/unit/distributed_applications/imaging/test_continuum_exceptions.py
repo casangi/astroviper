@@ -52,7 +52,9 @@ def test_reducer_rejects_incomplete_or_malformed_results(fault, error, message):
     else:
         leaf["observed_visibility_grid_mapping"] = []
     with pytest.raises(error, match=message):
-        combine_continuum_chunks([leaf], {"specmode": "mfs", "additive_variables": []})
+        combine_continuum_chunks(
+            [leaf], {"continuum_mode": "mfs", "additive_variables": []}
+        )
 
 
 @pytest.mark.parametrize("kind", ["weight_cache_mapping", "pb_cache_mapping", "pb_xds"])
@@ -67,7 +69,9 @@ def test_reducer_rejects_duplicate_weight_and_beam_cache_ownership(kind):
         else:
             leaf[kind] = xr.Dataset()
     with pytest.raises(ValueError, match="Duplicate"):
-        combine_continuum_chunks(leaves, {"specmode": "mvc", "additive_variables": []})
+        combine_continuum_chunks(
+            leaves, {"continuum_mode": "mvc", "additive_variables": []}
+        )
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,7 @@
             "type": ["dict"],
             "allow_unknown": true,
             "schema": {
-                "nterms": { "required": true, "min": 1 },
+                "n_taylor_terms": { "required": true, "min": 1 },
                 "reference_frequency": {},
                 "reference_frequency_hz": {}
             }
@@ -19,9 +19,9 @@
             "type": ["str"],
             "allowed": ["hogbom", "mtmfs"]
         },
-        "pbcor": { "type": "boolean" },
-        "pblimit": {"type": "float"},
-        "specmode": {
+        "primary_beam_correction": { "type": "boolean" },
+        "primary_beam_limit": {"type": "float"},
+        "continuum_mode": {
             "type": ["str"],
             "allowed": ["mfs", "mvc"]
         },
@@ -38,7 +38,7 @@
         "single_precision_image": { "type": "boolean" },
         "thread_info": { "type": ["dict"], "nullable": true },
         "processing_function_threads": { "type": ["int"], "min": 1 },
-        "n_chunks": { "type": ["int"], "nullable": true, "min": 1 },
+        "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
         "overwrite": { "type": "boolean" },
         "memory_mode": {
             "type": ["str"],
@@ -52,7 +52,7 @@
             "type": ["str"],
             "allowed": ["in_memory", "in_place", "recompute"]
         },
-        "widebandpb_memory_mode": {
+        "wideband_primary_beam_memory_mode": {
             "type": ["str"],
             "allowed": ["in_place", "recompute", "in_memory"]
         },

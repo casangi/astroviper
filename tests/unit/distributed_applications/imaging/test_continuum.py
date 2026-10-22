@@ -5,6 +5,7 @@ These tests ensure the disk output uses those finalized dimensions and values,
 rather than retaining the frequency-cube NaN placeholders created at startup.
 """
 
+import inspect
 import json
 import shutil
 import warnings
@@ -238,7 +239,11 @@ def _final_continuum_image():
             "SKY_MODEL": (sky_dims, np.ones((1, 2, 1, 2, 3))),
             "POINT_SPREAD_FUNCTION": (psf_dims, np.ones((1, 3, 1, 2, 3))),
             "PRIMARY_BEAM": (pb_dims, np.full((1, 1, 1, 2, 3), 0.8)),
-            "SKY_RESTORED_PBCOR": (sky_dims, np.full((1, 2, 1, 2, 3), 2.5)),
+            "MASK": (sky_dims, np.ones((1, 2, 1, 2, 3), dtype=bool)),
+            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED": (
+                sky_dims,
+                np.full((1, 2, 1, 2, 3), 2.5),
+            ),
         },
         coords=coords,
         attrs={
@@ -248,13 +253,32 @@ def _final_continuum_image():
                     "sky": "SKY_RESIDUAL",
                     "point_spread_function": "POINT_SPREAD_FUNCTION",
                     "primary_beam": "PRIMARY_BEAM",
+                    "mask": "MASK",
                 },
                 "model": {"sky": "SKY_MODEL"},
-                "restored_pbcor": {"sky": "SKY_RESTORED_PBCOR"},
+                "restored": {
+                    "sky_primary_beam_corrected": (
+                        "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+                    )
+                },
             },
         },
     )
     return image
+
+
+def test_continuum_public_api_matches_shared_imaging_names_and_defaults():
+    """The continuum driver uses cube-style names and data/precision defaults."""
+    parameters = inspect.signature(image_continuum_single_field).parameters
+
+    assert parameters["processing_set_data_group_name"].default == "corrected"
+    assert parameters["single_precision_image"].default is True
+    assert parameters["n_mapping_parallelism"].default is None
+    assert "n_chunks" not in parameters
+    assert "primary_beam_correction" in parameters
+    assert "primary_beam_limit" in parameters
+    assert "continuum_mode" in parameters
+    assert "wideband_primary_beam_memory_mode" in parameters
 
 
 def test_continuum_image_for_disk_keeps_requested_products_without_copying_data():
@@ -291,8 +315,8 @@ def test_final_continuum_image_round_trips_finite_taylor_data(tmp_path):
             "sky_residual",
             "point_spread_function",
             "primary_beam",
+            "sky_restored_primary_beam_corrected",
         ],
-        pbcor=True,
     )
     store = tmp_path / "continuum.img.zarr"
 
@@ -312,12 +336,20 @@ def test_final_continuum_image_round_trips_finite_taylor_data(tmp_path):
     )
     assert np.isfinite(persisted["SKY_RESIDUAL"].values).all()
     assert np.isfinite(persisted["POINT_SPREAD_FUNCTION"].values).all()
-    assert "SKY_RESTORED_PBCOR" in persisted
+    assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in persisted
 
 
-def _map_result(specmode, task_id, frequency=1.0e9, value=1.0):
+def test_continuum_image_for_disk_keeps_registry_mask_and_role():
+    """The canonical mask registry key retains MASK and its residual role."""
+    output = _continuum_image_for_disk(_final_continuum_image(), ["mask"])
+
+    assert set(output.data_vars) == {"MASK"}
+    assert output.attrs["data_groups"]["residual"]["mask"] == "MASK"
+
+
+def _map_result(continuum_mode, task_id, frequency=1.0e9, value=1.0):
     """Construct a minimal MFS or MVC reducer leaf."""
-    if specmode == "mvc":
+    if continuum_mode == "mvc":
         image = xr.Dataset(
             {
                 "SKY_RESIDUAL_MVC_CUBE": xr.DataArray(
@@ -337,8 +369,8 @@ def _map_result(specmode, task_id, frequency=1.0e9, value=1.0):
             }
         )
     image.attrs["continuum_imaging"] = {
-        "specmode": specmode,
-        "nterms": 2,
+        "continuum_mode": continuum_mode,
+        "n_taylor_terms": 2,
         "reference_frequency_hz": 1.0e9,
     }
     return {
@@ -352,7 +384,7 @@ def test_mvc_reducer_sorts_disjoint_frequency_ownership():
     result = combine_continuum_chunks(
         [_map_result("mvc", 1, 1.1e9, 1.0), _map_result("mvc", 2, 0.9e9, 2.0)],
         {
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
             "additive_variables": (),
             "frequency_cube_variables": ("SKY_RESIDUAL_MVC_CUBE",),
         },
@@ -368,7 +400,7 @@ def test_mvc_reducer_rejects_duplicate_frequency_ownership():
         combine_continuum_chunks(
             [_map_result("mvc", 1), _map_result("mvc", 2)],
             {
-                "specmode": "mvc",
+                "continuum_mode": "mvc",
                 "additive_variables": (),
                 "frequency_cube_variables": ("SKY_RESIDUAL_MVC_CUBE",),
             },
@@ -379,7 +411,7 @@ def test_mfs_reducer_retains_one_identical_static_primary_beam():
     """MFS keeps a static PB once and validates duplicate copies."""
     result = combine_continuum_chunks(
         [_map_result("mfs", 1, value=3.0), _map_result("mfs", 2, value=3.0)],
-        {"specmode": "mfs", "additive_variables": ()},
+        {"continuum_mode": "mfs", "additive_variables": ()},
     )
     np.testing.assert_allclose(result["image"]["PRIMARY_BEAM_REFERENCE"], 3.0)
 
@@ -389,7 +421,7 @@ def test_mfs_reducer_rejects_inconsistent_static_primary_beams():
     with pytest.raises(ValueError, match="Static variable.*differs"):
         combine_continuum_chunks(
             [_map_result("mfs", 1, value=1.0), _map_result("mfs", 2, value=2.0)],
-            {"specmode": "mfs", "additive_variables": ()},
+            {"continuum_mode": "mfs", "additive_variables": ()},
         )
 
 
@@ -670,7 +702,7 @@ def _tw_hydra_image_params(processing_set, overrides=None):
         "time_coords": [0],
         "fft_padding": 1.2,
         "cpp_gridder": True,
-        "nterms": 2,
+        "n_taylor_terms": 2,
         "reference_frequency": reference_frequency,
     }
     image_params.update(overrides or {})
@@ -682,7 +714,7 @@ def _run_tw_hydra_continuum(
     output_store,
     processing_set,
     n_chunks,
-    specmode,
+    continuum_mode,
     weighting,
     *,
     deconvolver="hogbom",
@@ -690,8 +722,8 @@ def _run_tw_hydra_continuum(
     image_param_overrides=None,
     image_params=None,
     restore=False,
-    pbcor=False,
-    pblimit=0.2,
+    primary_beam_correction=False,
+    primary_beam_limit=0.2,
     single_precision_image=False,
     skunk_works=False,
     disk_chunk_sizes=None,
@@ -703,7 +735,7 @@ def _run_tw_hydra_continuum(
     cache_directory=None,
     weight_memory_mode="in_memory",
     visibility_memory_mode="recompute",
-    widebandpb_memory_mode="recompute",
+    wideband_primary_beam_memory_mode="recompute",
     write_visibility_model_to_ps=False,
     write_imaging_weights_to_ps=False,
     clear_cache=True,
@@ -736,9 +768,9 @@ def _run_tw_hydra_continuum(
             gridder="anti_alias",
             deconvolver=deconvolver,
             restore=restore,
-            pbcor=pbcor,
-            pblimit=pblimit,
-            specmode=specmode,
+            primary_beam_correction=primary_beam_correction,
+            primary_beam_limit=primary_beam_limit,
+            continuum_mode=continuum_mode,
             scan_intents=["OBSERVE_TARGET#ON_SOURCE"],
             image_data_variables_keep=[
                 "sky_model",
@@ -750,7 +782,7 @@ def _run_tw_hydra_continuum(
             processing_set_data_group_name=processing_set_data_group_name,
             single_precision_image=single_precision_image,
             processing_function_threads=1,
-            n_chunks=n_chunks,
+            n_mapping_parallelism={"frequency": n_chunks},
             overwrite=True,
             memory_mode="in_memory",
             **(
@@ -759,7 +791,7 @@ def _run_tw_hydra_continuum(
                 else {"weight_memory_mode": weight_memory_mode}
             ),
             visibility_memory_mode=visibility_memory_mode,
-            widebandpb_memory_mode=widebandpb_memory_mode,
+            wideband_primary_beam_memory_mode=wideband_primary_beam_memory_mode,
             cache_directory=cache_directory,
             write_visibility_model_to_ps=write_visibility_model_to_ps,
             write_imaging_weights_to_ps=write_imaging_weights_to_ps,
@@ -802,9 +834,9 @@ def test_task_primary_beam_mapping_rejects_incomplete_cache():
         _mapping_with_task_primary_beams({0: {}, 1: {}}, {0: xr.Dataset()})
 
 
-@pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "in_memory"])
-def test_tw_hydra_widebandpb_memory_modes_match_recompute(
-    tmp_path, tw_hydra_store, widebandpb_memory_mode
+@pytest.mark.parametrize("wideband_primary_beam_memory_mode", ["in_place", "in_memory"])
+def test_tw_hydra_wideband_primary_beam_memory_modes_match_recompute(
+    tmp_path, tw_hydra_store, wideband_primary_beam_memory_mode
 ):
     """MVC disk-backed and task-local memory PBs reproduce recomputation."""
     processing_set = open_processing_set(str(tw_hydra_store))
@@ -816,7 +848,7 @@ def test_tw_hydra_widebandpb_memory_modes_match_recompute(
         "mvc",
         {"weighting": "natural", "weighting_scope": "local"},
     )
-    output_store = tmp_path / f"widebandpb_{widebandpb_memory_mode}.img.zarr"
+    output_store = tmp_path / f"widebandpb_{wideband_primary_beam_memory_mode}.img.zarr"
     _, actual = _run_tw_hydra_continuum(
         tw_hydra_store,
         output_store,
@@ -824,7 +856,7 @@ def test_tw_hydra_widebandpb_memory_modes_match_recompute(
         2,
         "mvc",
         {"weighting": "natural", "weighting_scope": "local"},
-        widebandpb_memory_mode=widebandpb_memory_mode,
+        wideband_primary_beam_memory_mode=wideband_primary_beam_memory_mode,
     )
 
     for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
@@ -838,7 +870,9 @@ def test_tw_hydra_widebandpb_memory_modes_match_recompute(
     assert "_WIDEBAND_PRIMARY_BEAM_CACHE" not in zarr.open_group(output_store)
 
 
-def test_tw_hydra_mfs_ignores_widebandpb_memory_mode(tmp_path, tw_hydra_store):
+def test_tw_hydra_mfs_ignores_wideband_primary_beam_memory_mode(
+    tmp_path, tw_hydra_store
+):
     """The MVC-specific PB storage keyword leaves MFS products unchanged."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, reference = _run_tw_hydra_continuum(
@@ -857,7 +891,7 @@ def test_tw_hydra_mfs_ignores_widebandpb_memory_mode(tmp_path, tw_hydra_store):
         2,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
-        widebandpb_memory_mode="in_place",
+        wideband_primary_beam_memory_mode="in_place",
     )
 
     for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
@@ -886,7 +920,7 @@ def _store_snapshot(store, parse_metadata=False):
 
 
 @pytest.mark.parametrize(
-    ("specmode", "weighting"),
+    ("continuum_mode", "weighting"),
     [
         pytest.param(
             "mfs",
@@ -921,7 +955,7 @@ def _store_snapshot(store, parse_metadata=False):
     ],
 )
 def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
-    tmp_path, tw_hydra_store, specmode, weighting
+    tmp_path, tw_hydra_store, continuum_mode, weighting
 ):
     """Task-local disk weights reproduce the default and are temporary.
 
@@ -947,7 +981,7 @@ def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
         tmp_path / "reference.img.zarr",
         reference_processing_set,
         2,
-        specmode,
+        continuum_mode,
         weighting,
         cycle_control_params=cycle_control_params,
         weight_memory_mode="in_memory",
@@ -962,7 +996,7 @@ def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
         tmp_path / "in_place.img.zarr",
         in_place_processing_set,
         2,
-        specmode,
+        continuum_mode,
         weighting,
         cycle_control_params=cycle_control_params,
         weight_memory_mode=None,
@@ -1127,22 +1161,22 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
             id="zero-reference-frequency",
         ),
         pytest.param(
-            lambda params: params.pop("nterms"),
+            lambda params: params.pop("n_taylor_terms"),
             AssertionError,
             None,
-            id="no-nterms",
+            id="no-n_taylor_terms",
         ),
         pytest.param(
-            lambda params: params.update(nterms=0),
+            lambda params: params.update(n_taylor_terms=0),
             AssertionError,
             None,
-            id="zero-nterms",
+            id="zero-n_taylor_terms",
         ),
         pytest.param(
-            lambda params: params.update(nterms=2.0),
+            lambda params: params.update(n_taylor_terms=2.0),
             TypeError,
             "must be an integer",
-            id="non-integer-nterms",
+            id="non-integer-n_taylor_terms",
         ),
         pytest.param(
             lambda params: params.update(
@@ -1180,9 +1214,9 @@ def test_tw_hydra_refused_image_params_write_nothing(
     assert not output_store.exists()
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 def test_tw_hydra_reference_frequency_alias_gives_the_same_images(
-    tmp_path, tw_hydra_store, specmode
+    tmp_path, tw_hydra_store, continuum_mode
 ):
     """``reference_frequency`` alone, both keys equal and the deprecated
     ``reference_frequency_hz`` alone give the same images."""
@@ -1207,10 +1241,10 @@ def test_tw_hydra_reference_frequency_alias_gives_the_same_images(
             warnings.simplefilter("always")
             result, images[name] = _run_tw_hydra_continuum(
                 tw_hydra_store,
-                tmp_path / f"reference_frequency_{specmode}_{name}.img.zarr",
+                tmp_path / f"reference_frequency_{continuum_mode}_{name}.img.zarr",
                 processing_set,
                 2,
-                specmode,
+                continuum_mode,
                 {"weighting": "natural", "weighting_scope": "local"},
                 image_params=image_params,
                 cycle_control_params={
@@ -1238,11 +1272,11 @@ def test_tw_hydra_reference_frequency_alias_gives_the_same_images(
         xr.testing.assert_equal(images[name], images["reference_frequency"])
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 def test_tw_hydra_numpy_and_xarray_scalars_give_the_same_images(
-    tmp_path, tw_hydra_store, specmode
+    tmp_path, tw_hydra_store, continuum_mode
 ):
-    """A NumPy integer ``nterms`` and a NumPy or xarray scalar reference
+    """A NumPy integer ``n_taylor_terms`` and a NumPy or xarray scalar reference
     frequency are accepted and give the same images as Python numbers."""
     processing_set = open_processing_set(str(tw_hydra_store))
     # Rounded to float32 so that every variant holds the same value.
@@ -1251,28 +1285,28 @@ def test_tw_hydra_numpy_and_xarray_scalars_give_the_same_images(
     )
     images = {}
     for name, keys in (
-        ("python", {"nterms": 2, "reference_frequency": reference_frequency}),
+        ("python", {"n_taylor_terms": 2, "reference_frequency": reference_frequency}),
         (
             "numpy",
             {
-                "nterms": np.int64(2),
+                "n_taylor_terms": np.int64(2),
                 "reference_frequency": np.float32(reference_frequency),
             },
         ),
         (
             "xarray",
             {
-                "nterms": np.int64(2),
+                "n_taylor_terms": np.int64(2),
                 "reference_frequency": xr.DataArray(reference_frequency),
             },
         ),
     ):
         result, images[name] = _run_tw_hydra_continuum(
             tw_hydra_store,
-            tmp_path / f"scalars_{specmode}_{name}.img.zarr",
+            tmp_path / f"scalars_{continuum_mode}_{name}.img.zarr",
             processing_set,
             2,
-            specmode,
+            continuum_mode,
             {"weighting": "natural", "weighting_scope": "local"},
             image_param_overrides=keys,
             cycle_control_params={
@@ -1519,7 +1553,7 @@ def test_tw_hydra_rerun_calculates_its_own_weights(
 
 
 @pytest.mark.parametrize(
-    ("specmode", "weighting"),
+    ("continuum_mode", "weighting"),
     [
         pytest.param(
             "mfs",
@@ -1554,24 +1588,24 @@ def test_tw_hydra_rerun_calculates_its_own_weights(
     ],
 )
 def test_tw_hydra_distributed_continuum_is_partition_invariant(
-    tmp_path, tw_hydra_store, specmode, weighting
+    tmp_path, tw_hydra_store, continuum_mode, weighting
 ):
     """Real TW Hydra data give equivalent products with one and five leaves."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, one_chunk = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"tw_hydra_{specmode}_one.img.zarr",
+        tmp_path / f"tw_hydra_{continuum_mode}_one.img.zarr",
         processing_set,
         1,
-        specmode,
+        continuum_mode,
         weighting,
     )
     _, five_chunks = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"tw_hydra_{specmode}_five.img.zarr",
+        tmp_path / f"tw_hydra_{continuum_mode}_five.img.zarr",
         processing_set,
         5,
-        specmode,
+        continuum_mode,
         weighting,
     )
 
@@ -1589,18 +1623,18 @@ def test_tw_hydra_distributed_continuum_is_partition_invariant(
         assert relative_difference < TW_HYDRA_RELATIVE_TOLERANCE
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
-    tmp_path, tw_hydra_store, specmode
+    tmp_path, tw_hydra_store, continuum_mode
 ):
     """A per-cycle cap exercises prediction and cached later-cycle state."""
     processing_set = open_processing_set(str(tw_hydra_store))
     result, image = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"tw_hydra_{specmode}_clean.img.zarr",
+        tmp_path / f"tw_hydra_{continuum_mode}_clean.img.zarr",
         processing_set,
         2,
-        specmode,
+        continuum_mode,
         {"weighting": "natural", "weighting_scope": "local"},
         cycle_control_params={
             "max_iter": 20,
@@ -1623,9 +1657,9 @@ def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
     assert np.isfinite(image.SKY_MODEL.values).all()
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
-    tmp_path, tw_hydra_store, specmode
+    tmp_path, tw_hydra_store, continuum_mode
 ):
     """Native MT-MFS survives later cycles across distributed execution modes."""
     processing_set = open_processing_set(str(tw_hydra_store))
@@ -1648,10 +1682,10 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
     }
     reference_result, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"native_mtmfs_{specmode}_tree_recompute.img.zarr",
+        tmp_path / f"native_mtmfs_{continuum_mode}_tree_recompute.img.zarr",
         processing_set,
         2,
-        specmode,
+        continuum_mode,
         {"weighting": "natural", "weighting_scope": "local"},
         reduce_mode="tree",
         visibility_memory_mode="recompute",
@@ -1659,10 +1693,10 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
     )
     cached_result, cached = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"native_mtmfs_{specmode}_single_cached.img.zarr",
+        tmp_path / f"native_mtmfs_{continuum_mode}_single_cached.img.zarr",
         processing_set,
         2,
-        specmode,
+        continuum_mode,
         {"weighting": "natural", "weighting_scope": "local"},
         reduce_mode="single_node",
         visibility_memory_mode="in_memory",
@@ -1699,7 +1733,7 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
         )
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 @pytest.mark.parametrize(
     "weighting",
     [
@@ -1722,7 +1756,7 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
     tmp_path,
     tw_hydra_store,
     weighting,
-    specmode,
+    continuum_mode,
 ):
     """Cached GWVobs reproduces visibility-domain subtraction through CLEAN."""
     processing_set = open_processing_set(str(tw_hydra_store))
@@ -1738,10 +1772,11 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
     }
     reference_result, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"visibility_{specmode}_{weighting['weighting']}_recompute.img.zarr",
+        tmp_path
+        / f"visibility_{continuum_mode}_{weighting['weighting']}_recompute.img.zarr",
         processing_set,
         2,
-        specmode,
+        continuum_mode,
         weighting,
         cycle_control_params=cycle_control_params,
         visibility_memory_mode="recompute",
@@ -1749,14 +1784,14 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
     for cache_mode in ("in_memory", "in_place"):
         output_store = (
             tmp_path
-            / f"visibility_{specmode}_{weighting['weighting']}_{cache_mode}.img.zarr"
+            / f"visibility_{continuum_mode}_{weighting['weighting']}_{cache_mode}.img.zarr"
         )
         cached_result, cached = _run_tw_hydra_continuum(
             tw_hydra_store,
             output_store,
             processing_set,
             2,
-            specmode,
+            continuum_mode,
             weighting,
             cycle_control_params=cycle_control_params,
             visibility_memory_mode=cache_mode,
@@ -1779,16 +1814,16 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
 
         cache_group = (
             "_MFS_VISIBILITY_GRID_CACHE"
-            if specmode == "mfs"
+            if continuum_mode == "mfs"
             else "_MVC_VISIBILITY_GRID_CACHE"
         )
         assert cache_group not in zarr.open_group(output_store)
 
 
 @pytest.mark.parametrize("visibility_memory_mode", ["recompute", "in_memory"])
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 def test_tw_hydra_corrected_data_group_matches_base(
-    tmp_path, tw_hydra_corrected_store, specmode, visibility_memory_mode
+    tmp_path, tw_hydra_corrected_store, continuum_mode, visibility_memory_mode
 ):
     """Imaging a copy of ``base`` as ``corrected`` gives bitwise equal products.
 
@@ -1804,7 +1839,7 @@ def test_tw_hydra_corrected_data_group_matches_base(
             tmp_path / f"{data_group_name}.img.zarr",
             processing_set,
             2,
-            specmode,
+            continuum_mode,
             {"weighting": "natural", "weighting_scope": "local"},
             cycle_control_params={
                 "max_iter": 20,
@@ -1835,9 +1870,9 @@ def test_tw_hydra_corrected_data_group_matches_base(
         assert actual.tobytes() == expected.tobytes()
 
 
-@pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])
+@pytest.mark.parametrize("wideband_primary_beam_memory_mode", ["in_place", "recompute"])
 def test_tw_hydra_widebandpb_modes_preserve_later_mvc_imaging_cycles(
-    tmp_path, tw_hydra_store, widebandpb_memory_mode
+    tmp_path, tw_hydra_store, wideband_primary_beam_memory_mode
 ):
     """Both low-memory PB policies reproduce MVC prediction after real CLEAN."""
     processing_set = open_processing_set(str(tw_hydra_store))
@@ -1862,13 +1897,13 @@ def test_tw_hydra_widebandpb_modes_preserve_later_mvc_imaging_cycles(
     )
     _, actual = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"clean_{widebandpb_memory_mode}.img.zarr",
+        tmp_path / f"clean_{wideband_primary_beam_memory_mode}.img.zarr",
         processing_set,
         2,
         "mvc",
         {"weighting": "natural", "weighting_scope": "local"},
         cycle_control_params=cycle_control_params,
-        widebandpb_memory_mode=widebandpb_memory_mode,
+        wideband_primary_beam_memory_mode=wideband_primary_beam_memory_mode,
     )
 
     for variable in ("SKY_MODEL", "SKY_RESIDUAL"):
@@ -1898,14 +1933,14 @@ def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(
             "cell_size": np.array([-1.0, 1.0]) * np.pi / (180 * 3600),
         },
         restore=True,
-        pbcor=True,
-        pblimit=0.2,
+        primary_beam_correction=True,
+        primary_beam_limit=0.2,
     )
 
     assert "SKY_RESTORED" in image
-    assert "SKY_RESTORED_PBCOR" in image
+    assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in image
     assert np.isfinite(image.SKY_RESTORED.isel(taylor_term=0).values).all()
-    pbcor_finite = np.isfinite(image.SKY_RESTORED_PBCOR.values)
+    pbcor_finite = np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values)
     assert np.any(pbcor_finite)
     assert np.any(~pbcor_finite)
     primary_beam = np.squeeze(np.asarray(image.PRIMARY_BEAM.values), axis=1)
@@ -1914,7 +1949,7 @@ def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(
 
 
 @pytest.mark.parametrize(
-    ("specmode", "weighting"),
+    ("continuum_mode", "weighting"),
     [
         pytest.param(
             "mfs",
@@ -1939,16 +1974,16 @@ def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(
     ],
 )
 def test_tw_hydra_additional_weighting_paths(
-    tmp_path, tw_hydra_store, specmode, weighting
+    tmp_path, tw_hydra_store, continuum_mode, weighting
 ):
     """Briggs-local MFS and Briggs-global MVC produce finite products."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, image = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"tw_hydra_{specmode}_{weighting['weighting_scope']}.img.zarr",
+        tmp_path / f"tw_hydra_{continuum_mode}_{weighting['weighting_scope']}.img.zarr",
         processing_set,
         2,
-        specmode,
+        continuum_mode,
         weighting,
     )
 
@@ -2007,8 +2042,8 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
             "cell_size": np.array([-1.0, 1.0]) * np.pi / (180 * 3600),
         },
         restore=True,
-        pbcor=True,
-        pblimit=0.2,
+        primary_beam_correction=True,
+        primary_beam_limit=0.2,
         single_precision_image=True,
     )
 
@@ -2021,12 +2056,12 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert image.SKY_RESIDUAL.dtype == np.dtype(np.float32)
     assert np.isfinite(image.SKY_RESTORED.isel(taylor_term=0).values).all()
-    assert np.isfinite(image.SKY_RESTORED_PBCOR.values).any()
-    assert not np.isfinite(image.SKY_RESTORED_PBCOR.values).all()
+    assert np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).any()
+    assert not np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).all()
 
 
 @pytest.mark.parametrize(
-    ("specmode", "weighting"),
+    ("continuum_mode", "weighting"),
     [
         pytest.param(
             "mvc",
@@ -2056,16 +2091,16 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     ],
 )
 def test_tw_hydra_remaining_weighting_schemes(
-    tmp_path, tw_hydra_store, specmode, weighting
+    tmp_path, tw_hydra_store, continuum_mode, weighting
 ):
     """Remaining supported weighting configurations produce finite products."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, image = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"tw_hydra_{specmode}_{weighting['weighting']}.img.zarr",
+        tmp_path / f"tw_hydra_{continuum_mode}_{weighting['weighting']}.img.zarr",
         processing_set,
         2,
-        specmode,
+        continuum_mode,
         weighting,
     )
 
@@ -2115,7 +2150,7 @@ def wideband_store(tmp_path_factory):
     return store
 
 
-def _run_wideband_scopes(tmp_path, store, specmode, weighting, scopes):
+def _run_wideband_scopes(tmp_path, store, continuum_mode, weighting, scopes):
     """Image ``store`` with ``weighting`` and each ``weighting_scope`` of
     ``scopes``; ``"default"`` leaves the scope out."""
     processing_set = open_processing_set(str(store))
@@ -2126,10 +2161,10 @@ def _run_wideband_scopes(tmp_path, store, specmode, weighting, scopes):
             scoped["weighting_scope"] = scope
         _, images[scope] = _run_tw_hydra_continuum(
             store,
-            tmp_path / f"wideband_{specmode}_{scope}.img.zarr",
+            tmp_path / f"wideband_{continuum_mode}_{scope}.img.zarr",
             processing_set,
             2,
-            specmode,
+            continuum_mode,
             scoped,
             image_param_overrides={
                 "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600)
@@ -2139,7 +2174,7 @@ def _run_wideband_scopes(tmp_path, store, specmode, weighting, scopes):
 
 
 @pytest.mark.parametrize(
-    ("specmode", "weighting", "widening"),
+    ("continuum_mode", "weighting", "widening"),
     [
         pytest.param("mfs", {"weighting": "uniform"}, 1.2, id="mfs-uniform"),
         pytest.param("mvc", {"weighting": "uniform"}, 1.2, id="mvc-uniform"),
@@ -2149,7 +2184,7 @@ def _run_wideband_scopes(tmp_path, store, specmode, weighting, scopes):
     ],
 )
 def test_wideband_uniform_and_briggs_weights_default_to_the_global_density(
-    tmp_path, wideband_store, specmode, weighting, widening
+    tmp_path, wideband_store, continuum_mode, weighting, widening
 ):
     """Uniform and Briggs weights of a continuum image default to the weight
     density of all channels (``weighting_scope="global"``); the density of each
@@ -2159,7 +2194,11 @@ def test_wideband_uniform_and_briggs_weights_default_to_the_global_density(
     is wider (measured: major axis 1.29 times for uniform, 1.03 times for
     Briggs 0.5)."""
     images = _run_wideband_scopes(
-        tmp_path, wideband_store, specmode, weighting, ("default", "global", "local")
+        tmp_path,
+        wideband_store,
+        continuum_mode,
+        weighting,
+        ("default", "global", "local"),
     )
 
     xr.testing.assert_equal(images["default"], images["global"])
@@ -2223,22 +2262,26 @@ def test_tw_hydra_direct_max_iter_zero_dirty_image(tmp_path, tw_hydra_store):
     assert np.count_nonzero(image.SKY_MODEL.values) == 0
 
 
-@pytest.mark.parametrize("nterms", [1, 3])
-def test_tw_hydra_supports_alternate_taylor_orders(tmp_path, tw_hydra_store, nterms):
+@pytest.mark.parametrize("n_taylor_terms", [1, 3])
+def test_tw_hydra_supports_alternate_taylor_orders(
+    tmp_path, tw_hydra_store, n_taylor_terms
+):
     """Continuum dimensions follow one- and three-term Taylor expansions."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, image = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"tw_hydra_nterms_{nterms}.img.zarr",
+        tmp_path / f"tw_hydra_nterms_{n_taylor_terms}.img.zarr",
         processing_set,
         2,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
-        image_param_overrides={"nterms": nterms},
+        image_param_overrides={"n_taylor_terms": n_taylor_terms},
     )
 
-    assert image.SKY_RESIDUAL.sizes["taylor_term"] == nterms
-    assert image.POINT_SPREAD_FUNCTION.sizes["psf_taylor_order"] == 2 * nterms - 1
+    assert image.SKY_RESIDUAL.sizes["taylor_term"] == n_taylor_terms
+    assert (
+        image.POINT_SPREAD_FUNCTION.sizes["psf_taylor_order"] == 2 * n_taylor_terms - 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -2298,7 +2341,7 @@ def test_chunk_count_respects_override_and_calculates_when_absent(monkeypatch):
             False,
             None,
             {"n_threads": 1, "memory_per_thread": 8.0},
-            nterms=3,
+            n_taylor_terms=3,
             n_correlations=4,
             fft_padding=1.2,
         )
@@ -2366,9 +2409,9 @@ def test_continuum_passes_compressor_to_the_final_image_write(
     assert write_calls[-1]["compressor"] is compressor
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 def test_tw_hydra_continuum_transfers_results_between_processes(
-    tmp_path, tw_hydra_store, specmode
+    tmp_path, tw_hydra_store, continuum_mode
 ):
     from distributed import Client, LocalCluster
 
@@ -2386,14 +2429,14 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
     kwargs = dict(
         cycle_control_params=params,
         visibility_memory_mode="in_memory",
-        widebandpb_memory_mode="in_memory",
+        wideband_primary_beam_memory_mode="in_memory",
     )
     _, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
         tmp_path / "serial.img.zarr",
         processing_set,
         3,
-        specmode,
+        continuum_mode,
         {
             "weighting": "briggs",
             "weighting_scope": "global",
@@ -2429,7 +2472,7 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
             tmp_path / "distributed.img.zarr",
             processing_set,
             3,
-            specmode,
+            continuum_mode,
             {
                 "weighting": "briggs",
                 "weighting_scope": "global",
@@ -2463,7 +2506,7 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
             )
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 @pytest.mark.parametrize(
     "visibility_memory_mode", ["recompute", "in_memory", "in_place"]
 )
@@ -2472,7 +2515,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     tmp_path,
     tw_hydra_store,
     monkeypatch,
-    specmode,
+    continuum_mode,
     visibility_memory_mode,
     max_iter,
     expected_updates,
@@ -2514,11 +2557,11 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         tmp_path / "verified.img.zarr",
         processing_set,
         2,
-        specmode,
+        continuum_mode,
         {"weighting": "natural", "weighting_scope": "local"},
         visibility_memory_mode=visibility_memory_mode,
         restore=True,
-        image_param_overrides={"polarization_coords": ["I", "Q"], "nterms": 1},
+        image_param_overrides={"polarization_coords": ["I", "Q"], "n_taylor_terms": 1},
         cycle_control_params={
             "max_iter": max_iter,
             "max_cycles": 3,

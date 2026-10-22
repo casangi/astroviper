@@ -39,8 +39,8 @@ def test_reference_frequency_is_read_from_one_key_without_fallback(params):
 
 
 def test_invalid_taylor_order_is_rejected_before_setup():
-    with pytest.raises(ValueError, match="nterms"):
-        _validate_continuum_parameters({"nterms": 0})
+    with pytest.raises(ValueError, match="n_taylor_terms"):
+        _validate_continuum_parameters({"n_taylor_terms": 0})
 
 
 @pytest.mark.parametrize("fault", ["empty", "group", "role", "variable", "none"])
@@ -247,7 +247,7 @@ def test_mvc_grid_rejects_incompatible_preallocated_buffers(
     [
         ("type", "Dataset"),
         ("basis", "polarization_basis"),
-        ("nterms", "nterms"),
+        ("n_taylor_terms", "n_taylor_terms"),
         ("group", "data group"),
         ("role", "sky"),
         ("variable", "not present"),
@@ -260,7 +260,7 @@ def test_model_fft_rejects_incompatible_models_before_transform(fault, message):
         {"SKY_MODEL": ("taylor_term", [1.0, 2.0])},
         attrs={"data_groups": {"model": {"sky": "SKY_MODEL"}}},
     )
-    params = {"nterms": 2}
+    params = {"n_taylor_terms": 2}
     basis = "linear"
     error = ValueError
     if fault == "type":
@@ -268,8 +268,8 @@ def test_model_fft_rejects_incompatible_models_before_transform(fault, message):
         error = TypeError
     elif fault == "basis":
         basis = "unknown"
-    elif fault == "nterms":
-        params["nterms"] = 0
+    elif fault == "n_taylor_terms":
+        params["n_taylor_terms"] = 0
     elif fault == "group":
         model.attrs["data_groups"] = {}
         error = KeyError
@@ -282,7 +282,7 @@ def test_model_fft_rejects_incompatible_models_before_transform(fault, message):
     elif fault == "dimensions":
         model = model.rename({"taylor_term": "frequency"})
     else:
-        params["nterms"] = 3
+        params["n_taylor_terms"] = 3
     with pytest.raises(error, match=message):
         prepare_model_uv_continuum_single_field(
             model, params, instrument_polarization_basis=basis

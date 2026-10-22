@@ -1,8 +1,8 @@
 """Taylor-weighted point-spread-function creation for MT-MFS continuum imaging.
 
 This module mirrors the cube-imaging PSF path, but grids a stack of Taylor-weighted
-UV-sampling functions.  For ``nterms`` sky-model Taylor coefficients, the MT-MFS
-normal equations require ``2 * nterms - 1`` PSF/Hessian Taylor orders.
+UV-sampling functions.  For ``n_taylor_terms`` sky-model Taylor coefficients, the MT-MFS
+normal equations require ``2 * n_taylor_terms - 1`` PSF/Hessian Taylor orders.
 
 For a channel frequency ``nu`` and a shared reference frequency ``nu0``,
 
@@ -37,17 +37,19 @@ from astroviper.utils.param_docs import shares_param_docs
 def _validate_mtmfs_parameters(
     image_params: dict,
 ) -> tuple[int, int, float]:
-    """Return validated ``nterms``, number of PSF terms, and reference frequency."""
-    if "nterms" not in image_params:
-        raise KeyError("image_params must contain 'nterms' for MT-MFS imaging.")
+    """Return validated ``n_taylor_terms``, number of PSF terms, and reference frequency."""
+    if "n_taylor_terms" not in image_params:
+        raise KeyError("image_params must contain 'n_taylor_terms' for MT-MFS imaging.")
     if "reference_frequency" not in image_params:
         raise KeyError(
             "image_params must contain one globally shared 'reference_frequency'."
         )
 
-    nterms = int(image_params["nterms"])
-    if nterms < 1:
-        raise ValueError(f"nterms must be at least 1; received {nterms}.")
+    n_taylor_terms = int(image_params["n_taylor_terms"])
+    if n_taylor_terms < 1:
+        raise ValueError(
+            f"n_taylor_terms must be at least 1; received {n_taylor_terms}."
+        )
 
     reference_frequency = float(image_params["reference_frequency"])
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
@@ -56,7 +58,7 @@ def _validate_mtmfs_parameters(
             f"received {reference_frequency}."
         )
 
-    return nterms, 2 * nterms - 1, reference_frequency
+    return n_taylor_terms, 2 * n_taylor_terms - 1, reference_frequency
 
 
 def add_uv_sampling_grid_continuum_single_field(
@@ -307,7 +309,7 @@ def make_point_spread_function_mvc_single_field(
     """Grid a frequency-resolved PSF cube for an MVC map partition.
 
     Unlike direct MFS, MVC does not apply Taylor weights during gridding.  Channels use the shared cube nearest-channel policy. Map tasks subsequently
-    FFT these planes and form ``2*nterms-1`` Taylor Hessian contributions;
+    FFT these planes and form ``2*n_taylor_terms-1`` Taylor Hessian contributions;
     reduction combines the contributions before global normalization.
 
     Returns
@@ -390,7 +392,7 @@ def make_point_spread_function_continuum_single_field(
     ps_xdt,
     img_xds,
     image_params,
-    nterms=None,
+    n_taylor_terms=None,
     reference_frequency=None,
     ms_data_group_in_name="base",
     image_data_group_in_name="residual",
@@ -404,9 +406,9 @@ def make_point_spread_function_continuum_single_field(
 ):
     """Build the MT-MFS Taylor UV-sampling stack for one continuum-imaging chunk.
 
-    For ``nterms`` sky-model Taylor coefficients, this function produces
+    For ``n_taylor_terms`` sky-model Taylor coefficients, this function produces
 
-    ``2 * nterms - 1``
+    ``2 * n_taylor_terms - 1``
 
     PSF/Hessian Taylor orders.  Each measurement-set channel is weighted by
     ``((nu - nu0) / nu0)**k`` before gridding order ``k``.  The reference
@@ -438,8 +440,8 @@ def make_point_spread_function_continuum_single_field(
     image_params = copy.deepcopy(image_params)
 
     # Support both explicit keyword arguments and values stored in image_params.
-    if nterms is not None:
-        image_params["nterms"] = int(nterms)
+    if n_taylor_terms is not None:
+        image_params["n_taylor_terms"] = int(n_taylor_terms)
 
     if reference_frequency is not None:
         image_params["reference_frequency"] = float(reference_frequency)

@@ -103,7 +103,7 @@ def test_mvc_reduction_invariant_under_partition_order_tree_and_zero_chunk(
             pb.isel(frequency=selection),
             weights.isel(frequency=selection),
             weights.isel(frequency=selection),
-            nterms=3,
+            n_taylor_terms=3,
             reference_frequency=100.0,
         )
 
@@ -127,7 +127,7 @@ def test_mvc_reduction_invariant_under_partition_order_tree_and_zero_chunk(
     )
     if reverse:
         leaves.reverse()
-    params = {"specmode": "mvc", "additive_variables": list(whole.data_vars)}
+    params = {"continuum_mode": "mvc", "additive_variables": list(whole.data_vars)}
     flat = combine_continuum_chunks(leaves, params)
     tree = leaves[0]
     for leaf in leaves[1:]:  # Intentionally unbalanced reduction tree.

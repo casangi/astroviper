@@ -11,7 +11,7 @@ def make_undeconvolved_image_continuum_single_field(
     img_xds,
     image_params,
     cgk_1D,
-    nterms=None,
+    n_taylor_terms=None,
     reference_frequency=None,
     ms_data_group_in_name="corrected",
     image_data_group_out_name="residual",
@@ -44,18 +44,18 @@ def make_undeconvolved_image_continuum_single_field(
     if complex_dtype is None:
         complex_dtype = np.complex128
 
-    if nterms is None:
-        nterms = int(image_params.get("nterms", 2))
+    if n_taylor_terms is None:
+        n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
     else:
-        nterms = int(nterms)
+        n_taylor_terms = int(n_taylor_terms)
 
     if reference_frequency is None:
         reference_frequency = float(image_params["reference_frequency"])
     else:
         reference_frequency = float(reference_frequency)
 
-    if nterms < 1:
-        raise ValueError("nterms must be at least 1.")
+    if n_taylor_terms < 1:
+        raise ValueError("n_taylor_terms must be at least 1.")
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
@@ -76,7 +76,7 @@ def make_undeconvolved_image_continuum_single_field(
             ms_xdt,
             cgk_1D,
             img_xds,
-            nterms=nterms,
+            n_taylor_terms=n_taylor_terms,
             reference_frequency=reference_frequency,
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_out_name,

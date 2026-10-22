@@ -184,7 +184,9 @@ def test_mvc_selects_first_channel_once():
         "reference_frequency": 1.5e9,
         "frequency_coords": np.arange(20) * 5e7 + 1e9,
     }
-    resolved = resolve_continuum_primary_beam(geometry, antennas(), specmode="mvc")
+    resolved = resolve_continuum_primary_beam(
+        geometry, antennas(), continuum_mode="mvc"
+    )
     assert resolved["list_dish_diameters"] == [24.5]
     assert resolved["list_blockage_diameters"] == [0.0]
     l, m, frequency, expected = CASA_VLA_MVC_SAMPLES.T
@@ -202,7 +204,9 @@ def test_mvc_selects_first_channel_once():
     np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-7)
     # Reversing the spectral axis deliberately changes CASA's band selection.
     geometry["frequency_coords"] = geometry["frequency_coords"][::-1]
-    resolved = resolve_continuum_primary_beam(geometry, antennas(), specmode="mvc")
+    resolved = resolve_continuum_primary_beam(
+        geometry, antennas(), continuum_mode="mvc"
+    )
     assert resolved["list_dish_diameters"] == [25]
     assert resolved["list_blockage_diameters"] == [2.36]
 
@@ -220,7 +224,9 @@ def test_partitioned_mvc_reuses_resolved_vla_prescription(dtype):
         "frequency_coords": [1e9, 1.5e9],
         "reference_frequency": 1.5e9,
     }
-    resolved = resolve_continuum_primary_beam(geometry, antennas(), specmode="mvc")
+    resolved = resolve_continuum_primary_beam(
+        geometry, antennas(), continuum_mode="mvc"
+    )
     assert resolved["list_dish_diameters"] == [24.5]
     # This partition starts inside VLA L-band. It must still use the NVSS
     # choice resolved from the full cube's first channel, without re-selection.

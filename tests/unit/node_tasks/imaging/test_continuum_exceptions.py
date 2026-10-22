@@ -17,7 +17,7 @@ from astroviper.node_tasks.imaging.image_continuum_single_field import (
     "fault,error,message",
     [
         ("mode", ValueError, "visibility_memory_mode"),
-        ("specmode", ValueError, "specmode"),
+        ("continuum_mode", ValueError, "continuum_mode"),
         ("group", KeyError, "data group"),
         ("role", KeyError, "register both"),
         ("variable", KeyError, "missing variables"),
@@ -35,11 +35,11 @@ def test_cached_mfs_append_rejects_incomplete_state(fault, error, message):
             }
         },
     )
-    params = {"visibility_memory_mode": "in_memory", "specmode": "mfs"}
+    params = {"visibility_memory_mode": "in_memory", "continuum_mode": "mfs"}
     if fault == "mode":
         params["visibility_memory_mode"] = "unsupported"
-    elif fault == "specmode":
-        params["specmode"] = "cube"
+    elif fault == "continuum_mode":
+        params["continuum_mode"] = "cube"
     elif fault == "group":
         image.attrs["data_groups"] = {}
     elif fault == "role":
@@ -48,9 +48,9 @@ def test_cached_mfs_append_rejects_incomplete_state(fault, error, message):
         image = image.drop_vars("SUM")
     elif fault in ("initial_store", "later_store"):
         params["visibility_memory_mode"] = "in_place"
-        params["is_n_iter_0"] = fault == "initial_store"
+        params["is_first_cycle"] = fault == "initial_store"
     else:
-        params["is_n_iter_0"] = False
+        params["is_first_cycle"] = False
     snapshot = image.copy(deep=True)
     with pytest.raises(error, match=message):
         _prepare_cached_mfs_residual_grid({"image": image}, params)

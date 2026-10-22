@@ -39,7 +39,7 @@ def continuum_input(tmp_path, tw_hydra_archive):
             time_coords=[0],
             fft_padding=1.2,
             cpp_gridder=True,
-            nterms=2,
+            n_taylor_terms=2,
             reference_frequency=float(np.mean(frequency)),
         )
         mask = np.zeros((64, 64), dtype=bool)
@@ -54,7 +54,7 @@ def _run(
     params,
     mask_path,
     output,
-    specmode,
+    continuum_mode,
     scope,
     casa,
     cache_mode,
@@ -84,10 +84,10 @@ def _run(
             ),
             gridder="anti_alias",
             deconvolver="hogbom",
-            specmode=specmode,
+            continuum_mode=continuum_mode,
             restore=True,
-            pbcor=True,
-            pblimit=0.2,
+            primary_beam_correction=True,
+            primary_beam_limit=0.2,
             clean_mask=str(mask_path),
             scan_intents=["OBSERVE_TARGET#ON_SOURCE"],
             processing_set_data_group_name="base",
@@ -100,11 +100,11 @@ def _run(
             ],
             single_precision_image=False,
             processing_function_threads=1,
-            n_chunks=3,
+            n_mapping_parallelism={"frequency": 3},
             memory_mode="in_memory",
             weight_memory_mode="in_memory" if cache_mode == "recompute" else cache_mode,
             visibility_memory_mode=cache_mode,
-            widebandpb_memory_mode=cache_mode,
+            wideband_primary_beam_memory_mode=cache_mode,
             overwrite=True,
             vizualize_graph=False,
             compute_backend="dask",
@@ -115,13 +115,13 @@ def _run(
     return result, image
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 @pytest.mark.parametrize("scope", ["local", "global"])
 @pytest.mark.parametrize(
     "casa", [False, True], ids=["native-weighting", "casa-weighting"]
 )
 def test_continuum_configuration_cache_and_reduction_regression(
-    tmp_path, continuum_input, specmode, scope, casa
+    tmp_path, continuum_input, continuum_mode, scope, casa
 ):
     store, params, mask_path, mask = continuum_input
     reference_result, reference = _run(
@@ -129,7 +129,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
         params,
         mask_path,
         tmp_path / "reference.img.zarr",
-        specmode,
+        continuum_mode,
         scope,
         casa,
         "recompute",
@@ -140,7 +140,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
         params,
         mask_path,
         tmp_path / "cached.img.zarr",
-        specmode,
+        continuum_mode,
         scope,
         casa,
         "in_place",
@@ -153,7 +153,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
         "PRIMARY_BEAM",
         "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
         "SKY_RESTORED",
-        "SKY_RESTORED_PBCOR",
+        "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
     ]
     assert result["n_cycles"] == reference_result["n_cycles"] == 2
     # max_iter is per image plane; the reported total sums polarizations.
@@ -187,7 +187,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
     # Channel caches must not leak into the final public image store.
     assert not any("CACHE" in name or "MVC_" in name for name in actual.data_vars)
     beam = actual.PRIMARY_BEAM.isel(frequency=0, drop=True)
-    corrected = actual.SKY_RESTORED_PBCOR
+    corrected = actual.SKY_RESTORED_PRIMARY_BEAM_CORRECTED
     assert corrected.dims == ("time", "polarization", "l", "m")
     np.testing.assert_array_equal(
         np.isfinite(corrected),
@@ -195,9 +195,9 @@ def test_continuum_configuration_cache_and_reduction_regression(
     )
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 def test_continuum_uses_writer_resolved_path(
-    tmp_path, continuum_input, monkeypatch, specmode
+    tmp_path, continuum_input, monkeypatch, continuum_mode
 ):
     """Follow XRADIO's returned path for allocation, caches, and final output."""
     import xradio.image
@@ -221,7 +221,7 @@ def test_continuum_uses_writer_resolved_path(
         params,
         mask_path,
         requested,
-        specmode,
+        continuum_mode,
         "global",
         True,
         "in_place",
@@ -233,5 +233,5 @@ def test_continuum_uses_writer_resolved_path(
     assert resolved.is_dir()
     assert result["n_cycles"] == 2
     assert np.isfinite(image.SKY_RESIDUAL).all()
-    assert "SKY_RESTORED_PBCOR" in image
+    assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in image
     assert not any("CACHE" in name or "MVC_" in name for name in image.data_vars)
