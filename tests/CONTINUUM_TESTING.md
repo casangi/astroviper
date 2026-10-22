@@ -2,8 +2,8 @@
 
 These tests protect the continuum implementation during development and PR
 review. Generated known-truth point sources check continuum flux, spectral-index
-and primary-beam recovery, but scientific equivalence to CASA, QA2 acceptance,
-and deployment-cluster performance remain harness/demonstrator work.
+and primary-beam recovery. Scientific equivalence to CASA, QA2 acceptance, and
+deployment-cluster performance are outside the repository test suite's scope.
 
 ## Coverage map
 
@@ -28,13 +28,13 @@ Paths below are relative to `tests/`.
 - `unit/distributed_applications/imaging/test_continuum_reduction_contracts.py`:
   reducer consistency, validation and task-local cache ownership.
 - `component/test_continuum_configurations.py`: eight configuration regressions
-  using the five-channel TW Hydra fixture downloaded from the same Google
-  Drive file as the cube notebook. No CASA installation or external harness
-  checkout is needed. Each case extracts its own writable Processing Set.
-- `component/test_continuum_known_truth.py`: compact generated equivalents of
-  the harness phase-centre spectral-index and single-field off-axis point-source
-  cases. MFS and MVC must recover the two Taylor coefficients and the
-  primary-beam-corrected one-Jy flux without CASA or stored visibility data.
+  using the five-channel TW Hydra fixture obtained through ToolVIPER's managed
+  data service. No CASA installation is needed. Each case extracts its own
+  writable Processing Set.
+- `component/test_continuum_known_truth.py`: compact generated phase-centre
+  spectral-index and single-field off-axis point-source cases. MFS and MVC must
+  recover the two Taylor coefficients and the primary-beam-corrected one-Jy
+  flux without CASA or stored visibility data.
 
 The component comparisons are within each algorithm configuration. They do
 **not** require MFS and MVC, local and global weighting, or native and CASA
@@ -63,18 +63,18 @@ match the in-memory return. The restored reference-frequency image is a single
 `(time, polarization, l, m)` product without a Taylor axis: higher Taylor terms
 describe spectral coefficients, not additional restored images. Its values are
 checked against the Taylor-zero model convolved with the fitted clean beam plus
-the Taylor-zero residual. PB-corrected values use the model-first convention
-`(model / PB) * clean_beam + residual / PB` and are NaN below the PB cutoff.
+the Taylor-zero residual. PB correction uses the model-first convention
+`convolve(model / PB, clean_beam) + residual / PB`. Unit tests verify these
+values; component tests verify that pixels below the PB cutoff are NaN.
 
 ## Additional boundary coverage
 
 The three `test_continuum_edge_cases.py` modules (processing functions,
-node tasks and distributed applications) add 96 cases:
+node tasks and distributed applications) cover:
 
 - Reference-frequency precedence and fallback; scalar, empty, nonfinite and
   nonpositive inputs; invalid Taylor orders and incomplete model registrations.
-- Empty Processing Sets and partially available weights; positional copies
-  preserve destination coordinates without silently reindexing values.
+- Empty Processing Sets and partially available weights.
 - MVC grid allocation and reuse at complex64/128; malformed visibility arrays,
   missing axes, incompatible preallocated buffers and invalid execution options.
   These wrapper tests replace only the compiled gridding call with a small
@@ -89,10 +89,10 @@ node tasks and distributed applications) add 96 cases:
 
 ## Exception contracts without stored test data
 
-The three `test_continuum_exceptions.py` modules add 107 cases using only
-small in-memory NumPy/xarray objects. They create no files, add no fixture
-archives and require no downloads. Each case checks the exception type and
-an informative part of its message.
+The three `test_continuum_exceptions.py` modules use only small in-memory
+NumPy/xarray objects. They create no files, add no fixture archives and require
+no downloads. Each case checks the exception type and an informative part of
+its message.
 
 - Processing functions: incomplete restoration/model/PSF registrations,
   missing Taylor dimensions and empty axes, unsupported deconvolution,
@@ -108,18 +108,18 @@ an informative part of its message.
 Restoration, model-update and cached-MFS rejection tests also verify that the
 input image remains unchanged on those early failure paths. The tests use
 ordinary xarray objects; they do not fabricate impossible dimension states to
-force otherwise unreachable guards. Existing complete imaging regressions
-use the same downloaded TW Hydra fixture, unchanged.
+force otherwise unreachable guards. Existing complete imaging regressions use
+the same managed TW Hydra fixture, unchanged.
 
 ## Execution variants and lifecycle regressions
 
-An additional 102 cases cover all proposed follow-up areas:
+Additional modules cover execution variants and lifecycle contracts:
 
-| Module | Cases | Contracts |
-| --- | ---: | --- |
-| `unit/processing_functions/imaging/test_continuum_variants.py` | 45 | 32 PSF/beam/legacy-metadata layouts through the real restoration backend; missing backend output; invalid layouts; exact PB cutoffs; zero/extreme weights and single-channel/single-Taylor inputs |
-| `unit/node_tasks/imaging/test_continuum_lifecycle.py` | 22 | Direct versus already-prepared finalization, exactly-once restoration, immutable accumulated model, cache replacement and repeated cleanup in Zarr v2/v3 |
-| `unit/distributed_applications/imaging/test_continuum_variants.py` | 35 | Uneven frequency partitions, reordered inputs, unbalanced trees, zero-contribution leaves, corrupt upstream graph results, remaining geometry/metadata exceptions |
+| Module | Contracts |
+| --- | --- |
+| `unit/processing_functions/imaging/test_continuum_variants.py` | PSF/beam/legacy-metadata layouts through the real restoration backend; missing backend output; invalid layouts; exact PB cutoffs; zero/extreme weights and single-channel/single-Taylor inputs |
+| `unit/node_tasks/imaging/test_continuum_lifecycle.py` | Direct versus already-prepared finalization, exactly-once restoration, immutable accumulated model, cache replacement and repeated cleanup in Zarr v2/v3 |
+| `unit/distributed_applications/imaging/test_continuum_variants.py` | Uneven frequency partitions, reordered inputs, unbalanced trees, zero-contribution leaves, corrupt upstream graph results, remaining geometry/metadata exceptions |
 
 `tests/utils/continuum_images.py` generates the small images in memory. Disk
 cache cases use only pytest temporary directories. No stored data fixtures or downloads
@@ -166,19 +166,10 @@ python -m pytest tests/unit tests/component/test_continuum_configurations.py \
 ```
 
 The new files follow existing pytest discovery conventions; Linux CI already
-runs `tests/`, so no separate workflow is required. Existing Google Drive cube
-references are unchanged.
+runs `tests/`, so no separate workflow is required. Existing cube references
+are unchanged.
 
-## Harness audit and limits
-
-The light harness supplied useful cases for unreduced PB rejection and
-preserving task-local observed grids through a reduction tree; these now live
-in repository tests. Other light-harness contracts were already represented,
-and have been extended with failure and ownership checks. Medium-harness
-storage/scheduler and persisted-image comparisons informed the component
-matrix; its CASA assertions were deliberately not imported. Large datasets,
-source-specific imaging behavior, scientific flux/noise/beam tolerances,
-storage-volume benchmarks and runtime scaling remain outside this suite.
+## Scope and limits
 
 Coverage is not exhaustive. The eight-case matrix uses linear parallel hands,
 double precision and the current Högbom continuum path. Existing tests cover
@@ -188,34 +179,12 @@ weighting and Taylor order. No distributed multi-host or MPI guarantee follows
 from local Dask tests. New supported functionality should add focused tests
 rather than merely increasing the number of equivalent configurations.
 
-## Measured coverage (2026-10-21)
+## Coverage reporting
 
-A fresh branch-coverage run includes the continuum processing, node-task and
-distributed-application suites, the imaging-weighting tests, the component
-configuration and known-truth matrices, and the real TW Hydra processing set.
-All 792 tests and five subtests pass. The table reports the current four large
-continuum implementation modules directly; it does not infer their coverage
-from the smaller GitHub patch diff and does not measure native C++ kernels.
-
-| Module | Statements | Branches |
-| --- | ---: | ---: |
-| Distributed continuum driver | 1175/1250 (94.0%) | 517/604 (85.6%) |
-| Continuum node tasks | 863/948 (91.0%) | 323/406 (79.6%) |
-| Continuum processing functions | 852/895 (95.2%) | 341/390 (87.4%) |
-| Imaging-weight calculation | 274/325 (84.3%) | 97/148 (65.5%) |
-| **Total** | **3164/3418 (92.6%)** | **1278/1548 (82.6%)** |
-
-The run covers in-process and two-worker process-based MFS and MVC execution;
-the latter verifies that TW Hydra results survive Dask serialization. These
-percentages describe executed Python code, not exhaustive scientific
-correctness. Remaining branches are concentrated in validation failures and
-less-used weighting options, especially in imaging-weight calculation.
-
-The source and tests also compile with the local Python 3.14 interpreter. The
-merged Linux and macOS workflows execute the repository test suite on Python
-3.12, 3.13 and 3.14 for pull requests and pushes to `main`; this workstation
-does not have a separate Python 3.14 dependency environment, so the local
-runtime result above is from the `viper` Python 3.11 environment.
+The coverage command above measures the current Python statement and branch
+coverage for the continuum suites. Native C++ kernels and scientific
+equivalence to external imaging packages require separate validation; Python
+coverage alone is not evidence of scientific correctness.
 
 ## External input and primary-beam references
 
@@ -229,4 +198,4 @@ remain subject to pytest's normal temporary-directory retention.
 
 Primary-beam tests embed small tables of independent CASA output values;
 no PB data downloads are required.
-The extensive image-level comparisons remain in the external scientific harness.
+Large-data image-level comparisons are outside the repository test suite.
