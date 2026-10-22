@@ -1732,6 +1732,65 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
         )
 
 
+@pytest.mark.parametrize("reduce_mode", ["tree", "tree_n"])
+def test_tw_hydra_single_task_mvc_in_memory_cache_matches_recompute(
+    tmp_path,
+    tw_hydra_store,
+    reduce_mode,
+):
+    """One-leaf MVC graphs retain their task-local observed visibility grid."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    cycle_control_params = {
+        "max_iter": 2,
+        "max_cycles": 2,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": 1,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    common = {
+        "cycle_control_params": cycle_control_params,
+        "reduce_mode": reduce_mode,
+    }
+    reference_result, reference = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"mvc_single_{reduce_mode}_recompute.img.zarr",
+        processing_set,
+        1,
+        "mvc",
+        {"weighting": "natural", "weighting_scope": "local"},
+        visibility_memory_mode="recompute",
+        **common,
+    )
+    cached_result, cached = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"mvc_single_{reduce_mode}_in_memory.img.zarr",
+        processing_set,
+        1,
+        "mvc",
+        {"weighting": "natural", "weighting_scope": "local"},
+        visibility_memory_mode="in_memory",
+        **common,
+    )
+
+    assert cached_result["n_cycles"] == reference_result["n_cycles"]
+    for variable in (
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        np.testing.assert_allclose(
+            cached[variable],
+            reference[variable],
+            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
+            atol=1.0e-12,
+            equal_nan=True,
+        )
+
+
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 @pytest.mark.parametrize(
     "weighting",

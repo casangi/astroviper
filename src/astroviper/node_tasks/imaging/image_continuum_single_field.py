@@ -67,6 +67,23 @@ def _prepare_continuum_result_for_transfer(result):
     return result
 
 
+def _single_leaf_cache_mapping(
+    input_data,
+    mapping_key,
+    leaf_key,
+    fallback=None,
+):
+    """Normalize an unreduced one-task cache to the reducer's mapping schema."""
+    mapping = input_data.get(mapping_key, fallback)
+    if mapping is not None or leaf_key not in input_data:
+        return mapping
+    if "task_id" not in input_data:
+        raise KeyError(
+            f"A single-leaf {leaf_key!r} result must also contain 'task_id'."
+        )
+    return {int(input_data["task_id"]): input_data[leaf_key]}
+
+
 def _add_task_execution_metadata(timing_df, task_start):
     """Add the common wall-clock and worker identity columns in place."""
     import os
@@ -2857,17 +2874,19 @@ def continuum_cycle_append_node(
         input_data,
         input_params,
     )
-    observed_visibility_grid_mapping = input_data.get(
-        "observed_visibility_grid_mapping"
+    observed_visibility_grid_mapping = _single_leaf_cache_mapping(
+        input_data,
+        "observed_visibility_grid_mapping",
+        "observed_visibility_grid_xds",
     )
 
     # prepare continuum image, this is doing 1.-4.
-    pb_cache_mapping = input_data.get(
+    pb_cache_mapping = _single_leaf_cache_mapping(
+        input_data,
         "pb_cache_mapping",
-        input_params.get("pb_cache_mapping"),
+        "pb_xds",
+        fallback=input_params.get("pb_cache_mapping"),
     )
-    if pb_cache_mapping is None and "pb_xds" in input_data:
-        pb_cache_mapping = {int(input_data["task_id"]): input_data["pb_xds"]}
 
     (
         img_xds,
@@ -2905,11 +2924,11 @@ def continuum_cycle_append_node(
         input_data["deconvolution"] = previous_deconvolution
 
     # Preserve imaging weights collected during the first imaging-cycle reduce.
-    weight_cache_mapping = input_data.get("weight_cache_mapping")
-    if weight_cache_mapping is None and "weight_datasets" in input_data:
-        weight_cache_mapping = {
-            int(input_data["task_id"]): input_data["weight_datasets"]
-        }
+    weight_cache_mapping = _single_leaf_cache_mapping(
+        input_data,
+        "weight_cache_mapping",
+        "weight_datasets",
+    )
 
     # Run the model update.
     return_dict = model_update_continuum_single_field(

@@ -370,9 +370,10 @@ def test_install_static_products_rejects_frequency_still_in_use():
 
 
 def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
-    """A one-leaf result becomes task-keyed PB and weight cache mappings."""
+    """A one-leaf result makes every task-local cache into a task mapping."""
     pb_xds = xr.Dataset({"PRIMARY_BEAM": xr.DataArray([1.0], dims=("frequency",))})
     weights = {"ms_0": xr.Dataset({"WEIGHT_IMAGING": xr.DataArray([1.0])})}
+    observed_grid = _mfs_uv_grid(5.0)
     captured = {}
 
     def fake_prepare(image, input_params, **kwargs):
@@ -396,11 +397,13 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
             "task_id": 7,
             "pb_xds": pb_xds,
             "weight_datasets": weights,
+            "observed_visibility_grid_xds": observed_grid,
         },
         {"is_first_cycle": True},
     )
     assert captured["pb_cache_mapping"] == {7: pb_xds}
     assert result["weight_cache_mapping"] == {7: weights}
+    assert result["observed_visibility_grid_mapping"] == {7: observed_grid}
 
 
 def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch):
