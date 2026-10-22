@@ -17,9 +17,9 @@ from astroviper.processing_functions.imaging.degrid_visibility_grid import (
     degrid_visibility_grid_single_field,
 )
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
+    _convert_mvc_cubes_to_taylor_normal_equations,
     accumulate_continuum_model,
     apply_mvc_primary_beam_convention,
-    convert_mvc_cubes_to_taylor_normal_equations,
     finalize_mvc_taylor_normal_equations,
     form_mfs_residual_grid_from_cache,
     form_residual_grid_from_cache,
@@ -498,7 +498,7 @@ def test_mvc_conversion_forms_weighted_taylor_normal_equations():
         residual_taylor,
         psf_taylor,
         effective_pb,
-    ) = convert_mvc_cubes_to_taylor_normal_equations(
+    ) = _convert_mvc_cubes_to_taylor_normal_equations(
         _frequency_cube(residual, frequency),
         _frequency_cube(psf, frequency),
         _frequency_cube(pb, frequency),
@@ -534,7 +534,7 @@ def test_mvc_conversion_uses_psf_weights_for_common_response():
     psf = np.array([1.0, 4.0])
     pb = np.array([0.5, 1.5])
 
-    _, psf_taylor, effective_pb = convert_mvc_cubes_to_taylor_normal_equations(
+    _, psf_taylor, effective_pb = _convert_mvc_cubes_to_taylor_normal_equations(
         _frequency_cube([2.0, 6.0], frequency),
         _frequency_cube(psf, frequency),
         _frequency_cube(pb, frequency),
@@ -561,7 +561,7 @@ def test_mvc_conversion_preserves_single_precision_image_products():
     cube = _frequency_cube([1.0, 2.0], frequency).astype(np.float32)
     normalization = _frequency_normalization([1.0, 1.0], frequency)
 
-    residual, psf, primary_beam = convert_mvc_cubes_to_taylor_normal_equations(
+    residual, psf, primary_beam = _convert_mvc_cubes_to_taylor_normal_equations(
         cube,
         cube,
         cube,
@@ -584,7 +584,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result():
     primary_beam_cube = _frequency_cube([0.5, 0.7, 1.1, 1.3], frequency)
     normalization = _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency)
 
-    expected = convert_mvc_cubes_to_taylor_normal_equations(
+    expected = _convert_mvc_cubes_to_taylor_normal_equations(
         residual_cube,
         psf_cube,
         primary_beam_cube,
@@ -672,7 +672,7 @@ def test_mvc_residual_responds_to_model_through_psf_moments(channel_pb):
         )
 
     channel_beam = two_pixel_cube(1.0, channel_pb)
-    _, psf, effective_beam = convert_mvc_cubes_to_taylor_normal_equations(
+    _, psf, effective_beam = _convert_mvc_cubes_to_taylor_normal_equations(
         two_pixel_cube(0.0, 0.0),
         two_pixel_cube(1.0, 0.0),
         channel_beam,
@@ -717,7 +717,7 @@ def test_mvc_channel_near_beam_null_adds_bounded_residual(channel_pb):
     frequency = np.linspace(0.85e9, 1.15e9, nchan)
     weight = _frequency_normalization(np.ones(nchan), frequency)
     for channel in range(nchan):
-        residual, _, effective_beam = convert_mvc_cubes_to_taylor_normal_equations(
+        residual, _, effective_beam = _convert_mvc_cubes_to_taylor_normal_equations(
             _frequency_cube(np.eye(nchan)[channel], frequency),
             _frequency_cube(np.ones(nchan), frequency),
             _frequency_cube(channel_pb, frequency),
@@ -1451,7 +1451,7 @@ def test_mvc_clips_channel_beams_only_in_effective_beam(clipped_pb):
     beam is finite, with weight ``w * pb**2``.
     """
     frequency = np.array([0.9e9, 1.1e9])
-    residual, psf, pb = convert_mvc_cubes_to_taylor_normal_equations(
+    residual, psf, pb = _convert_mvc_cubes_to_taylor_normal_equations(
         _frequency_cube([5.0, 100.0], frequency),
         _frequency_cube([2.0, 10.0], frequency),
         _frequency_cube([1.0, clipped_pb], frequency),

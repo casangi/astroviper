@@ -347,29 +347,18 @@ def test_continuum_image_for_disk_keeps_registry_mask_and_role():
     assert output.attrs["data_groups"]["residual"]["mask"] == "MASK"
 
 
-def _map_result(continuum_mode, task_id, frequency=1.0e9, value=1.0):
-    """Construct a minimal MFS or MVC reducer leaf."""
-    if continuum_mode == "mvc":
-        image = xr.Dataset(
-            {
-                "SKY_RESIDUAL_MVC_CUBE": xr.DataArray(
-                    np.full((1, 1, 1, 2, 2), value),
-                    dims=("time", "frequency", "polarization", "l", "m"),
-                    coords={"frequency": [frequency]},
-                )
-            }
-        )
-    else:
-        image = xr.Dataset(
-            {
-                "PRIMARY_BEAM_REFERENCE": xr.DataArray(
-                    np.full((1, 1, 2, 2), value),
-                    dims=("time", "polarization", "l", "m"),
-                )
-            }
-        )
+def _mfs_map_result(task_id, value=1.0):
+    """Construct a minimal MFS reducer leaf."""
+    image = xr.Dataset(
+        {
+            "PRIMARY_BEAM_REFERENCE": xr.DataArray(
+                np.full((1, 1, 2, 2), value),
+                dims=("time", "polarization", "l", "m"),
+            )
+        }
+    )
     image.attrs["continuum_imaging"] = {
-        "continuum_mode": continuum_mode,
+        "continuum_mode": "mfs",
         "n_taylor_terms": 2,
         "reference_frequency_hz": 1.0e9,
     }
@@ -379,38 +368,10 @@ def _map_result(continuum_mode, task_id, frequency=1.0e9, value=1.0):
     }
 
 
-def test_mvc_reducer_sorts_disjoint_frequency_ownership():
-    """MVC concatenates exclusively owned channels into frequency order."""
-    result = combine_continuum_chunks(
-        [_map_result("mvc", 1, 1.1e9, 1.0), _map_result("mvc", 2, 0.9e9, 2.0)],
-        {
-            "continuum_mode": "mvc",
-            "additive_variables": (),
-            "frequency_cube_variables": ("SKY_RESIDUAL_MVC_CUBE",),
-        },
-    )
-    residual = result["image"]["SKY_RESIDUAL_MVC_CUBE"]
-    np.testing.assert_array_equal(residual.frequency, [0.9e9, 1.1e9])
-    np.testing.assert_allclose(residual.isel(frequency=0), 2.0)
-
-
-def test_mvc_reducer_rejects_duplicate_frequency_ownership():
-    """MVC refuses two leaves that claim the same channel."""
-    with pytest.raises(ValueError, match="exclusive frequency ownership"):
-        combine_continuum_chunks(
-            [_map_result("mvc", 1), _map_result("mvc", 2)],
-            {
-                "continuum_mode": "mvc",
-                "additive_variables": (),
-                "frequency_cube_variables": ("SKY_RESIDUAL_MVC_CUBE",),
-            },
-        )
-
-
 def test_mfs_reducer_retains_one_identical_static_primary_beam():
     """MFS keeps a static PB once and validates duplicate copies."""
     result = combine_continuum_chunks(
-        [_map_result("mfs", 1, value=3.0), _map_result("mfs", 2, value=3.0)],
+        [_mfs_map_result(1, value=3.0), _mfs_map_result(2, value=3.0)],
         {"continuum_mode": "mfs", "additive_variables": ()},
     )
     np.testing.assert_allclose(result["image"]["PRIMARY_BEAM_REFERENCE"], 3.0)
@@ -420,7 +381,7 @@ def test_mfs_reducer_rejects_inconsistent_static_primary_beams():
     """MFS rejects numerically different copies of a static PB."""
     with pytest.raises(ValueError, match="Static variable.*differs"):
         combine_continuum_chunks(
-            [_map_result("mfs", 1, value=1.0), _map_result("mfs", 2, value=2.0)],
+            [_mfs_map_result(1, value=1.0), _mfs_map_result(2, value=2.0)],
             {"continuum_mode": "mfs", "additive_variables": ()},
         )
 

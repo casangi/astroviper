@@ -1944,7 +1944,6 @@ def grid_imaging_weight_density_continuum_node(
         ms_data_group_in_name=processing_set_data_group_name,
         single_precision_gridding=single_precision_gridding,
         processing_function_threads=processing_function_threads,
-        collapse_frequency=True,
     )
 
     T_grid_weight_density = time.time() - start
@@ -2351,7 +2350,6 @@ def _prepare_continuum_image(
     input_params,
     *,
     initialize_static_products,
-    pb_cache_mapping=None,
 ):
     """Convert globally reduced MFS or MVC products to image-domain products.
 
@@ -2382,11 +2380,6 @@ def _prepare_continuum_image(
         If true, construct and cache the global PSF, restoring-beam fit, and
         primary-beam products. This should be true only for the first major
         cycle.
-
-    pb_cache_mapping : dict, optional
-        MVC channel-primary-beam cache carried through the append node for
-        later map-task model prediction. Taylor image preparation itself uses
-        the already reduced PB sum rather than assembling this cache.
 
     Returns
     -------
@@ -2432,9 +2425,6 @@ def _prepare_continuum_image(
         raise ValueError(
             f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
-
-    if pb_cache_mapping is None:
-        pb_cache_mapping = input_params.get("pb_cache_mapping")
 
     # MFS still reduces Taylor-weighted UV grids and therefore performs its
     # inverse FFT globally. MVC map tasks already returned Taylor products.
@@ -3104,7 +3094,6 @@ def continuum_cycle_append_node(
         input_data["image"],
         input_params,
         initialize_static_products=is_first_cycle,
-        pb_cache_mapping=pb_cache_mapping,
     )
 
     input_data["image"] = img_xds
@@ -3244,17 +3233,10 @@ def continuum_finalize_node(
     else:
         _prepare_cached_mfs_residual_grid(input_data, input_params)
 
-        # Shared functionality with the model update.
-        pb_cache_mapping = input_data.get(
-            "pb_cache_mapping",
-            input_params.get("pb_cache_mapping"),
-        )
-
         img_xds, static_xds, _ = _prepare_continuum_image(
             input_data["image"],
             input_params,
             initialize_static_products=False,
-            pb_cache_mapping=pb_cache_mapping,
         )
 
     model_xds = input_params["model_xds"]

@@ -1512,13 +1512,6 @@ def combine_continuum_chunks(input_data, input_params):
         )
     )
 
-    frequency_cube_variables = tuple(
-        input_params.get(
-            "frequency_cube_variables",
-            (),
-        )
-    )
-
     # ------------------------------------------------------------------
     # Helper functions
     # ------------------------------------------------------------------
@@ -1652,126 +1645,6 @@ def combine_continuum_chunks(input_data, input_params):
                 raise ValueError(f"Imaging-weight mapping for task {task_id} is empty.")
 
             destination[task_id] = weight_datasets
-
-    def _combine_frequency_cube_variable(
-        images,
-        variable_name,
-    ):
-        """Combine task-local MVC frequency cubes."""
-        import numpy as np
-        import xarray as xr
-
-        expanded = []
-
-        for input_index, image_xds in enumerate(images):
-            if variable_name not in image_xds:
-                raise KeyError(
-                    f"{variable_name!r} is missing from MVC input {input_index}."
-                )
-
-            array = image_xds[variable_name]
-
-            if "frequency" not in array.dims:
-                raise ValueError(
-                    f"{variable_name!r} in MVC input {input_index} "
-                    "does not have a frequency dimension."
-                )
-
-            if "frequency" in array.coords:
-                frequency = np.asarray(
-                    array.coords["frequency"].values,
-                    dtype=np.float64,
-                )
-            elif "frequency" in image_xds.coords:
-                frequency = np.asarray(
-                    image_xds.coords["frequency"].values,
-                    dtype=np.float64,
-                )
-            else:
-                raise KeyError(
-                    f"Neither {variable_name!r} nor its parent "
-                    f"dataset in MVC input {input_index} contains "
-                    "a frequency coordinate."
-                )
-
-            if frequency.ndim != 1:
-                raise ValueError(
-                    f"The frequency coordinate in MVC input "
-                    f"{input_index} must be one-dimensional."
-                )
-
-            if frequency.size != array.sizes["frequency"]:
-                raise ValueError(
-                    f"Frequency length mismatch for {variable_name!r} "
-                    f"in MVC input {input_index}: "
-                    f"{frequency.size} != "
-                    f"{array.sizes['frequency']}."
-                )
-
-            if not np.all(np.isfinite(frequency)):
-                raise ValueError(
-                    f"The frequency coordinate in MVC input "
-                    f"{input_index} contains non-finite values."
-                )
-
-            # Discard task-dependent auxiliary coordinates such as velocity.
-            # Preserve only true dimension coordinates.
-            clean_coords = {
-                dim: array.coords[dim]
-                for dim in array.dims
-                if dim != "frequency" and dim in array.coords
-            }
-
-            clean_array = xr.DataArray(
-                data=array.data,
-                dims=array.dims,
-                coords=clean_coords,
-                attrs=array.attrs.copy(),
-                name=variable_name,
-            )
-
-            clean_array = clean_array.rename({"frequency": "_mvc_frequency_sample"})
-
-            clean_array = clean_array.assign_coords(
-                frequency=(
-                    "_mvc_frequency_sample",
-                    frequency,
-                )
-            )
-
-            expanded.append(clean_array)
-
-        concatenated = xr.concat(
-            expanded,
-            dim="_mvc_frequency_sample",
-            join="exact",
-            compat="override",
-            coords="minimal",
-        )
-
-        combined_frequency = np.asarray(
-            concatenated.coords["frequency"].values,
-            dtype=np.float64,
-        )
-        unique_frequency, frequency_counts = np.unique(
-            combined_frequency,
-            return_counts=True,
-        )
-        duplicate_frequency = unique_frequency[frequency_counts > 1]
-        if duplicate_frequency.size:
-            raise ValueError(
-                "MVC node-local normalized image cubes require exclusive "
-                "frequency ownership. Duplicate channel coordinates were "
-                f"returned by multiple map tasks: {duplicate_frequency}."
-            )
-
-        combined = concatenated.swap_dims(
-            {"_mvc_frequency_sample": "frequency"}
-        ).drop_vars("_mvc_frequency_sample", errors="ignore")
-        combined = combined.sortby("frequency")
-        combined.attrs = images[0][variable_name].attrs.copy()
-
-        return combined
 
     # ------------------------------------------------------------------
     # Timing and deconvolution metadata
@@ -1916,61 +1789,6 @@ def combine_continuum_chunks(input_data, input_params):
     # Make a copy for the combined image
     # In this way, dimensions, shapes, metadata and coordinates are going to be correct
     combined_image = first_image.copy(deep=copy_image_deep)
-
-    # MVC frequency-cube products are reconstructed globally below.
-    # Do not retain the first map task's local frequency coordinate or
-    # frequency-dependent variables in the accumulator.
-    if continuum_mode == "mvc" and frequency_cube_variables:
-        local_frequency_variables = [
-            name
-            for name, data_array in combined_image.data_vars.items()
-            if "frequency" in data_array.dims
-        ]
-
-        if local_frequency_variables:
-            combined_image = combined_image.drop_vars(
-                local_frequency_variables,
-                errors="ignore",
-            )
-
-        if "frequency" in combined_image.dims:
-            combined_image = combined_image.drop_dims(
-                "frequency",
-                errors="ignore",
-            )
-
-    # explicitly build the frequency cubes
-    for variable_name in frequency_cube_variables:
-        images = []
-
-        for input_index, result in enumerate(input_data):
-            if "image" not in result:
-                raise KeyError(f"input[{input_index}] does not contain 'image'.")
-
-            candidate_image = result["image"]
-
-            if variable_name not in candidate_image:
-                if strict:
-                    raise KeyError(
-                        f"Frequency-cube variable {variable_name!r} "
-                        f"is missing from input[{input_index}]."
-                    )
-                continue
-
-            images.append(candidate_image)
-
-        if images:
-            combined_variable = _combine_frequency_cube_variable(
-                images,
-                variable_name,
-            )
-
-            # Remove the copy inherited from the first image before installing the
-            # globally combined frequency cube.
-            if variable_name in combined_image:
-                combined_image = combined_image.drop_vars(variable_name)
-
-            combined_image[variable_name] = combined_variable
 
     for variable_name in additive_variables:
         if variable_name not in combined_image:

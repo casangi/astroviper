@@ -9,9 +9,9 @@ import xarray as xr
 
 from astroviper.processing_functions.imaging.deconvolvers import mtmfs
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
+    _convert_mvc_cubes_to_taylor_normal_equations,
     accumulate_continuum_model,
     build_continuum_residual_imaging_dict,
-    convert_mvc_cubes_to_taylor_normal_equations,
     model_update_mtmfs_single_field,
     restore_continuum_image,
 )
@@ -810,7 +810,7 @@ def test_mvc_single_term_extreme_and_zero_weights_match_scalar_oracle(dtype, wei
     norm = xr.DataArray(
         weights.reshape(1, n, 1), dims=dims[:3], coords={k: coords[k] for k in dims[:3]}
     )
-    actual, psf, beam = convert_mvc_cubes_to_taylor_normal_equations(
+    actual, psf, beam = _convert_mvc_cubes_to_taylor_normal_equations(
         residual,
         xr.ones_like(residual),
         xr.ones_like(residual),
@@ -851,7 +851,7 @@ def test_mvc_channel_cutoff_excludes_exact_boundary_without_renormalizing(dtype)
         ).reshape(residual.shape)
     )
     weights = xr.ones_like(residual.isel(l=0, m=0, drop=True))
-    actual, psf, beam = convert_mvc_cubes_to_taylor_normal_equations(
+    actual, psf, beam = _convert_mvc_cubes_to_taylor_normal_equations(
         residual,
         xr.ones_like(residual),
         pb,

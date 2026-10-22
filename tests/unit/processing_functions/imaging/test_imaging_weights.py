@@ -24,7 +24,6 @@ import xarray as xr
 from astroviper.processing_functions.imaging.calculate_imaging_weights import (
     _equalize_parallel_hand_weights,
     calculate_imaging_weights,
-    collapse_continuum_weight_density,
     grid_imaging_weight_density_continuum,
 )
 from astroviper.processing_functions.imaging.check_imaging_parameters import (
@@ -526,8 +525,8 @@ class TestGridContinuumWeightDensity(unittest.TestCase):
         """Register the image accessor used to obtain cell sizes."""
         import xradio.image.image_xds  # noqa: F401
 
-    def test_children_may_cover_disjoint_subsets_of_image_frequencies(self):
-        """Multiple MS children accumulate into their matching output channels."""
+    def test_children_collapse_disjoint_frequency_subsets(self):
+        """Multiple MS children accumulate into one continuum density plane."""
         image_frequencies = np.array([1.00e9, 1.05e9, 1.10e9, 1.15e9])
         ps_xdt = xr.DataTree()
         for name, indices in (
@@ -555,63 +554,17 @@ class TestGridContinuumWeightDensity(unittest.TestCase):
             },
         )
 
-        np.testing.assert_array_equal(result.frequency.values, image_frequencies)
-        self.assertTrue(np.all(result.SUM_WEIGHT.values > 0.0))
-        self.assertTrue(
-            np.all(
-                np.count_nonzero(
-                    result.WEIGHT_DENSITY_GRID.values,
-                    axis=(1, 2, 3),
-                )
-                > 0
-            )
+        np.testing.assert_array_equal(
+            result.frequency.values, [np.mean(image_frequencies)]
         )
+        self.assertEqual(result.sizes["frequency"], 1)
+        self.assertTrue(result.attrs["continuum_frequency_collapsed"])
+        self.assertTrue(np.all(result.SUM_WEIGHT.values > 0.0))
+        self.assertGreater(np.count_nonzero(result.WEIGHT_DENSITY_GRID.values), 0)
         self.assertEqual(result.attrs["n_processing_set_datasets_gridded"], 2)
 
-    def test_child_frequency_outside_image_axis_is_rejected(self):
-        """A genuinely absent visibility channel still raises a clear error."""
-        ps_xdt = _make_ps_xdt(n_chan=1)
-        ps_xdt["ms_0"].coords["frequency"] = [2.0e9]
-        image = _make_img_xds(n_chan=2)
-
-        with self.assertRaisesRegex(
-            ValueError, "more than half an image channel width"
-        ):
-            grid_imaging_weight_density_continuum(
-                ps_xdt,
-                image,
-                {
-                    "weighting": "briggs",
-                    "robust": 0.5,
-                },
-            )
-
-    def test_nearest_mapping_sums_multiple_channels_into_one_plane(self):
-        """Global continuum density retains all many-to-one contributions."""
-        frequencies = np.array([1.01e9, 1.02e9, 1.11e9])
-        dataset = _make_ms_ds(n_baseline=1, n_chan=3, weight_per_pol=[2.0, 6.0])
-        dataset = dataset.assign_coords(frequency=frequencies)
-        dataset["UVW"].values[...] = 0.0
-        ps = xr.DataTree.from_dict({"ms": dataset})
-        params = {
-            "weighting": "briggs",
-            "robust": 0.5,
-            "casa_weighting_implementation": True,
-        }
-        fine = _make_img_xds(n_chan=3).assign_coords(frequency=frequencies)
-        coarse = _make_img_xds(n_chan=2).assign_coords(frequency=[1.0e9, 1.1e9])
-        reference = grid_imaging_weight_density_continuum(ps, fine, params)
-        actual = grid_imaging_weight_density_continuum(ps, coarse, params)
-        for name in ("WEIGHT_DENSITY_GRID", "SUM_WEIGHT"):
-            expected = np.stack(
-                [reference[name].values[:2].sum(axis=0), reference[name].values[2]]
-            )
-            np.testing.assert_allclose(
-                actual[name].values, expected, rtol=1e-14, atol=0
-            )
-
-    def test_direct_continuum_plane_matches_post_gridding_collapse(self):
-        """Direct map-side collapse preserves CASA and proper density values."""
+    def test_direct_continuum_plane_matches_channel_contribution_sum(self):
+        """Direct collapse equals the sum of independently gridded channels."""
         ps_xdt = _make_ps_xdt(n_time=2, n_baseline=5, n_chan=3)
         image = _make_img_xds(n_l=16, n_m=16, n_chan=3)
 
@@ -622,27 +575,42 @@ class TestGridContinuumWeightDensity(unittest.TestCase):
                     "robust": 0.5,
                     "casa_weighting_implementation": casa_implementation,
                 }
-                resolved = grid_imaging_weight_density_continuum(ps_xdt, image, params)
-                expected = collapse_continuum_weight_density(resolved)
                 actual = grid_imaging_weight_density_continuum(
                     ps_xdt,
                     image,
                     params,
-                    collapse_frequency=True,
                 )
+                channel_results = []
+                for channel in range(3):
+                    channel_ps = xr.DataTree.from_dict(
+                        {
+                            "ms_0": ps_xdt["ms_0"].dataset.isel(
+                                frequency=slice(channel, channel + 1)
+                            )
+                        }
+                    )
+                    channel_results.append(
+                        grid_imaging_weight_density_continuum(
+                            channel_ps,
+                            image,
+                            params,
+                        )
+                    )
 
                 self.assertEqual(actual.sizes["frequency"], 1)
                 self.assertTrue(actual.attrs["continuum_frequency_collapsed"])
                 self.assertEqual(actual.attrs["n_input_frequency_channels"], 3)
                 np.testing.assert_allclose(
                     actual.WEIGHT_DENSITY_GRID,
-                    expected.WEIGHT_DENSITY_GRID,
+                    sum(
+                        result.WEIGHT_DENSITY_GRID.values for result in channel_results
+                    ),
                     rtol=1.0e-14,
                     atol=0.0,
                 )
                 np.testing.assert_allclose(
                     actual.SUM_WEIGHT,
-                    expected.SUM_WEIGHT,
+                    sum(result.SUM_WEIGHT.values for result in channel_results),
                     rtol=1.0e-14,
                     atol=0.0,
                 )

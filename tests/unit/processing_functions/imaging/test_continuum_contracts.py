@@ -5,8 +5,8 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
+    _convert_mvc_cubes_to_taylor_normal_equations,
     accumulate_continuum_model,
-    convert_mvc_cubes_to_taylor_normal_equations,
     finalize_mvc_taylor_normal_equations,
     form_residual_grid_from_cache,
     make_mvc_taylor_normal_equation_contributions,
@@ -54,7 +54,7 @@ def test_mvc_moments_preserve_independent_time_and_polarization_planes(
     dtype, n_taylor_terms
 ):
     inputs = _mvc_inputs(dtype)
-    residual, psf, beam = convert_mvc_cubes_to_taylor_normal_equations(
+    residual, psf, beam = _convert_mvc_cubes_to_taylor_normal_equations(
         *inputs, n_taylor_terms=n_taylor_terms, reference_frequency=100.0
     )
     # Independent scalar sums, deliberately avoiding xarray's reduction/alignment.
@@ -100,10 +100,10 @@ def test_mvc_ignores_invalid_channel_weights_but_rejects_empty_planes(bad_weight
     inputs = list(_mvc_inputs())
     for weights in inputs[3:]:
         weights.values[:, 0, :] = bad_weight
-    actual = convert_mvc_cubes_to_taylor_normal_equations(
+    actual = _convert_mvc_cubes_to_taylor_normal_equations(
         *inputs, n_taylor_terms=2, reference_frequency=100.0
     )
-    expected = convert_mvc_cubes_to_taylor_normal_equations(
+    expected = _convert_mvc_cubes_to_taylor_normal_equations(
         *(array.isel(frequency=slice(1, None)) for array in inputs),
         n_taylor_terms=2,
         reference_frequency=100.0,
@@ -112,7 +112,7 @@ def test_mvc_ignores_invalid_channel_weights_but_rejects_empty_planes(bad_weight
         xr.testing.assert_allclose(left, right)
     inputs[3].values[1, :, 1] = bad_weight
     with pytest.raises(ValueError, match="residual normalization.*empty"):
-        convert_mvc_cubes_to_taylor_normal_equations(
+        _convert_mvc_cubes_to_taylor_normal_equations(
             *inputs, n_taylor_terms=2, reference_frequency=100.0
         )
 
@@ -121,7 +121,7 @@ def test_mvc_rejects_empty_psf_plane_independently_of_residual_weights():
     inputs = list(_mvc_inputs())
     inputs[4].values[0, :, 1] = 0
     with pytest.raises(ValueError, match="PSF normalization.*empty"):
-        convert_mvc_cubes_to_taylor_normal_equations(
+        _convert_mvc_cubes_to_taylor_normal_equations(
             *inputs, n_taylor_terms=2, reference_frequency=100.0
         )
 
@@ -156,7 +156,7 @@ def test_mvc_rejects_misaligned_channel_coordinates(index):
 
 def test_mvc_later_residual_update_reuses_effective_beam_without_psf():
     inputs = _mvc_inputs()
-    expected, _, beam = convert_mvc_cubes_to_taylor_normal_equations(
+    expected, _, beam = _convert_mvc_cubes_to_taylor_normal_equations(
         *inputs, n_taylor_terms=2, reference_frequency=100.0
     )
     contribution = make_mvc_taylor_normal_equation_contributions(

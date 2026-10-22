@@ -1502,7 +1502,7 @@ def finalize_mvc_taylor_normal_equations(
     return residual_taylor, psf_taylor, effective_primary_beam
 
 
-def convert_mvc_cubes_to_taylor_normal_equations(
+def _convert_mvc_cubes_to_taylor_normal_equations(
     residual_cube,
     psf_cube,
     primary_beam_cube,
@@ -1513,11 +1513,11 @@ def convert_mvc_cubes_to_taylor_normal_equations(
     reference_frequency,
     primary_beam_limit=0.2,
 ):
-    """Convert complete MVC channel cubes into Taylor normal equations.
+    """Convert complete MVC channel cubes into Taylor normal equations for tests.
 
-    This compatibility entry point composes the map-contribution and append
-    finalization helpers.  Distributed imaging calls those two stages
-    separately so channel cubes never enter the reduce stage.
+    This private test oracle composes the map-contribution and append
+    finalization helpers. Distributed imaging calls those two stages separately
+    so channel cubes never enter the reduce stage.
 
     Parameters
     ----------

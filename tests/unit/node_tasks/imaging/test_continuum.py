@@ -461,10 +461,8 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
     pb_xds = xr.Dataset({"PRIMARY_BEAM": xr.DataArray([1.0], dims=("frequency",))})
     weights = {"ms_0": xr.Dataset({"WEIGHT_IMAGING": xr.DataArray([1.0])})}
     observed_grid = _mfs_uv_grid(5.0)
-    captured = {}
 
     def fake_prepare(image, input_params, **kwargs):
-        captured.update(kwargs)
         return image, xr.Dataset(), None
 
     monkeypatch.setattr(continuum_node, "_prepare_continuum_image", fake_prepare)
@@ -488,7 +486,7 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
         },
         {"is_first_cycle": True},
     )
-    assert captured["pb_cache_mapping"] == {7: pb_xds}
+    assert result["pb_cache_mapping"] == {7: pb_xds}
     assert result["weight_cache_mapping"] == {7: weights}
     assert result["observed_visibility_grid_mapping"] == {7: observed_grid}
 
@@ -572,22 +570,19 @@ def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
     """The first weighting node packages density products and timings."""
     monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
 
-    collapse_requests = []
-
     def fake_grid(ps_xdt, image, params, **kwargs):
-        collapse_requests.append(kwargs["collapse_frequency"])
         return xr.Dataset(
             {
                 "WEIGHT_DENSITY_GRID": (
                     ("frequency", "weight_polarization", "u", "v"),
-                    np.ones((2, 1, 2, 2)),
+                    np.ones((1, 1, 2, 2)),
                 ),
                 "SUM_WEIGHT": (
                     ("frequency", "weight_polarization"),
-                    np.ones((2, 1)),
+                    np.ones((1, 1)),
                 ),
             },
-            coords={"frequency": [1.0e9, 1.1e9]},
+            coords={"frequency": [1.05e9]},
         )
 
     monkeypatch.setattr(
@@ -599,9 +594,8 @@ def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
         **_weight_node_params()
     )
     assert result["task_id"] == 4
-    assert collapse_requests == [True]
     assert set(result["weight_density"]) == {"WEIGHT_DENSITY_GRID", "SUM_WEIGHT"}
-    assert result["timing_node_tasks"].iloc[0].n_frequency_channels == 2
+    assert result["timing_node_tasks"].iloc[0].n_frequency_channels == 1
     assert {
         "start_unixtime",
         "hostname",
