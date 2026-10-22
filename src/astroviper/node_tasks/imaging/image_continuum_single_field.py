@@ -84,6 +84,15 @@ def _single_leaf_cache_mapping(
     return {int(input_data["task_id"]): input_data[leaf_key]}
 
 
+def _weighting_drop_variables(data_group, node_name):
+    """Return the correlated-data variable omitted by a weighting node load."""
+    if not isinstance(data_group, dict) or "correlated_data" not in data_group:
+        raise ValueError(
+            f"{node_name} requires the resolved processing-set data_group mapping."
+        )
+    return [data_group["correlated_data"]]
+
+
 def _add_task_execution_metadata(timing_df, task_start):
     """Add the common wall-clock and worker identity columns in place."""
     import os
@@ -1823,7 +1832,9 @@ def grid_imaging_weight_density_continuum_node(
     skunk_works : bool, optional
         Use the experimental direct Measurement Set loader.
     data_group : dict or None, optional
-        Data-group override for the experimental loader.
+        Resolved data-group role mapping. Its correlated-data variable is
+        omitted from ordinary loads because global density gridding uses only
+        UVW, weights, and flags. It also configures the experimental loader.
     input_data : xarray.DataTree or mapping or None, optional
         Preloaded Processing Set partition; when supplied, skip disk loading.
     task_id : int, optional
@@ -1881,6 +1892,7 @@ def grid_imaging_weight_density_continuum_node(
             frequency_coords=task_coords["frequency"]["data"],
             instrument_polarization_basis=(instrument_polarization_basis),
             processing_function_threads=(processing_function_threads),
+            load_correlated_data=False,
         )
 
     else:
@@ -1890,6 +1902,9 @@ def grid_imaging_weight_density_continuum_node(
             input_data_store,
             sel_parms=data_selection,
             data_group_name=processing_set_data_group_name,
+            drop_variables=_weighting_drop_variables(
+                data_group, "grid_imaging_weight_density_continuum_node"
+            ),
             load_sub_datasets=False,
         )
 
@@ -2111,7 +2126,9 @@ def degrid_imaging_weights_continuum_node(
     skunk_works : bool, optional
         Use the experimental direct Measurement Set loader.
     data_group : dict or None, optional
-        Data-group override for the experimental loader.
+        Resolved data-group role mapping. Its correlated-data variable is
+        omitted from ordinary loads because weight degridding uses only UVW,
+        weights, and flags. It also configures the experimental loader.
     input_data : xarray.DataTree or mapping or None, optional
         Preloaded Processing Set partition; when supplied, skip disk loading.
     task_id : int, optional
@@ -2171,6 +2188,7 @@ def degrid_imaging_weights_continuum_node(
             frequency_coords=task_coords["frequency"]["data"],
             instrument_polarization_basis=(instrument_polarization_basis),
             processing_function_threads=(processing_function_threads),
+            load_correlated_data=False,
         )
 
     else:
@@ -2180,6 +2198,9 @@ def degrid_imaging_weights_continuum_node(
             input_data_store,
             sel_parms=data_selection,
             data_group_name=processing_set_data_group_name,
+            drop_variables=_weighting_drop_variables(
+                data_group, "degrid_imaging_weights_continuum_node"
+            ),
             load_sub_datasets=False,
         )
 

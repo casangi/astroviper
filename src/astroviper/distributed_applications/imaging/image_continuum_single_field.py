@@ -3825,6 +3825,7 @@ def image_continuum_single_field(
             "processing_function_threads": (processing_function_threads),
             "weight_memory_mode": weight_memory_mode,
             "image_store": image_store,
+            "data_group": input_params["data_group"],
         }
 
         if skunk_works:

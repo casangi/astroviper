@@ -1,5 +1,7 @@
 """Unit tests for continuum map, reduce-root, and append node tasks."""
 
+import importlib
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -569,6 +571,14 @@ def _weight_node_params():
 def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
     """The first weighting node packages density products and timings."""
     monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
+    load_kwargs = {}
+
+    def fake_load(*args, **kwargs):
+        load_kwargs.update(kwargs)
+        return {"ms": xr.Dataset()}
+
+    load_module = importlib.import_module("xradio.measurement_set.load_processing_set")
+    monkeypatch.setattr(load_module, "load_processing_set", fake_load)
 
     def fake_grid(ps_xdt, image, params, **kwargs):
         return xr.Dataset(
@@ -590,10 +600,14 @@ def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
         "grid_imaging_weight_density_continuum",
         fake_grid,
     )
-    result = continuum_node.grid_imaging_weight_density_continuum_node(
-        **_weight_node_params()
+    params = _weight_node_params()
+    params.update(
+        input_data=None,
+        data_group={"correlated_data": "VISIBILITY"},
     )
+    result = continuum_node.grid_imaging_weight_density_continuum_node(**params)
     assert result["task_id"] == 4
+    assert load_kwargs["drop_variables"] == ["VISIBILITY"]
     assert set(result["weight_density"]) == {"WEIGHT_DENSITY_GRID", "SUM_WEIGHT"}
     assert result["timing_node_tasks"].iloc[0].n_frequency_channels == 1
     assert {
@@ -608,6 +622,14 @@ def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
 def test_weight_degrid_node_extracts_only_registered_weight_arrays(monkeypatch):
     """The second weighting node returns lightweight per-child weight caches."""
     monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
+    load_kwargs = {}
+
+    def fake_load(*args, **kwargs):
+        load_kwargs.update(kwargs)
+        return {"ms": xr.Dataset()}
+
+    load_module = importlib.import_module("xradio.measurement_set.load_processing_set")
+    monkeypatch.setattr(load_module, "load_processing_set", fake_load)
     weight = xr.DataArray(
         np.ones((1, 1, 2, 2)),
         dims=("time", "baseline", "frequency", "polarization"),
@@ -626,8 +648,11 @@ def test_weight_degrid_node_extracts_only_registered_weight_arrays(monkeypatch):
     params["global_weighting_xds"] = xr.Dataset()
     params["weight_memory_mode"] = "in_memory"
     params["image_store"] = "unused-image"
+    params["input_data"] = None
+    params["data_group"] = {"correlated_data": "VISIBILITY"}
     result = continuum_node.degrid_imaging_weights_continuum_node(**params)
     cached = result["weight_datasets"]["ms"]
+    assert load_kwargs["drop_variables"] == ["VISIBILITY"]
     assert set(cached) == {"WEIGHT_IMAGING"}
     assert cached.WEIGHT_IMAGING.attrs["units"] == "arbitrary"
     assert result["timing_node_tasks"].iloc[0].n_processing_set_children == 1
