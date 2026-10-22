@@ -213,31 +213,40 @@ def imaging_setup_continuum_single_field(
         Empty continuum image dataset. On return, the dataset contains the
         partition-local static imaging products.
     image_params : dict
-        Image geometry and continuum parameters. The following continuum-specific
-        entries are used:
-
-        ``n_taylor_terms``
-            Number of MT-MFS sky Taylor terms.
-
-        ``reference_frequency``
-            Common Taylor-expansion reference frequency in Hz, shared by all
-            visibility partitions.
-
-        Standard imaging parameters such as image size, cell size, phase center,
-        and FFT padding are forwarded to the lower-level processing functions.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;
+        ``list_dish_diameters``, ``list_blockage_diameters`` and
+        ``primary_beam_max_radius_1ghz`` override the inferred beam prescription.
     imaging_weights_params : dict
-        Imaging-weight configuration. This function does not calculate imaging
-        weights but retains this argument for API compatibility.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
     processing_set_data_group_name : str, optional
-        Processing-set data group containing the prepared imaging weights.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool, optional
-        If true, image-domain arrays are allocated using single precision.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
-        Number of threads passed to the lower-level processing functions.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
-        FFT backend used by the PSF-generation routine.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
     image_data_variables_keep : list of str, optional
-        Image products that should be retained in the returned dataset.
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     image_data_group_out_name : str, optional
         Name of the continuum image data group. Defaults to ``"residual"``.
 

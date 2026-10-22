@@ -180,7 +180,7 @@ def collapse_continuum_weight_density(weight_density_xds: xr.Dataset) -> xr.Data
     return result
 
 
-# @shares_param_docs
+@shares_param_docs
 def grid_imaging_weight_density_continuum(
     ps_xdt: xr.DataTree,
     img_xds: xr.Dataset,
@@ -214,12 +214,12 @@ def grid_imaging_weight_density_continuum(
         angular cell size.
 
     imaging_weights_params : dict
-        Imaging-weight configuration. Only Briggs and uniform weighting require
-        this function. Uniform weighting is treated as Briggs weighting with
-        ``robust=-2``.
-
-        The entry ``casa_weighting_implementation`` selects the parallel-hand
-        equalization convention.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
 
     ms_data_group_in_name : str, optional
         Processing-set data group containing the raw weights, flags, and UVW
@@ -230,7 +230,8 @@ def grid_imaging_weight_density_continuum(
         ``float64``. ``SUM_WEIGHT`` is always accumulated in ``float64``.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the weight-density gridder.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     collapse_frequency : bool, optional
         If true, map every visibility channel directly into one common
@@ -622,7 +623,7 @@ def grid_imaging_weight_density_continuum(
     return result_xds
 
 
-# @shares_param_docs
+@shares_param_docs
 def degrid_imaging_weights_continuum(
     ps_xdt: xr.DataTree,
     img_xds: xr.Dataset,
@@ -670,8 +671,12 @@ def degrid_imaging_weights_continuum(
             ``(briggs_parameter, frequency, weight_polarization)``.
 
     imaging_weights_params : dict
-        Imaging-weight configuration. Uniform weighting is normalized to Briggs
-        weighting with ``robust=-2``.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
 
     ms_data_group_in_name : str, optional
         Name of the processing-set input data group containing UVW, raw weights,
@@ -690,7 +695,8 @@ def degrid_imaging_weights_continuum(
         Whether an existing output variable may be replaced.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the degridding kernel.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     Returns
     -------
@@ -1155,8 +1161,12 @@ def calculate_imaging_weights(
         Image xarray Dataset containing image parameters (e.g., image size, cell
         size).
     imaging_weights_params : dict
-        Weighting scheme configuration: ``weighting`` (``"natural"`` or
-        ``"briggs"``) and the Briggs ``robust`` parameter.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
     ms_data_group_in_name : str, default ``"base"``
         Name of the input data group.
     ms_data_group_out_name : str, default ``"imaging"``

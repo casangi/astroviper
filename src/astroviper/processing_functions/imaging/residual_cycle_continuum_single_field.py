@@ -40,7 +40,9 @@ def residual_cycle_continuum_single_field(
     primary_beam_xds : xarray.Dataset, optional
         Cached primary beam for this MVC partition.
     observed_visibility_grid_xds : xarray.Dataset, optional
-        Cached observed UV planes for this MVC partition.
+        Task-local cached observed visibility grid used by later residual-update
+        cycles. The distributed application supplies this only for in-memory MVC
+        caching; other modes and first cycles leave it unset.
     ps_xdt : xarray.DataTree or mapping
         Processing-set partition containing the observed (or residual)
         visibilities together with previously prepared imaging weights.
@@ -50,27 +52,57 @@ def residual_cycle_continuum_single_field(
         Globally prepared Fourier-domain Taylor model. This is only used after the
         first imaging cycle.
     image_params : dict
-        Image geometry and continuum imaging parameters.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;
+        ``list_dish_diameters``, ``list_blockage_diameters`` and
+        ``primary_beam_max_radius_1ghz`` override the inferred beam prescription.
     is_first_cycle : bool
         True for the first imaging cycle, in which no model prediction is required.
     processing_set_data_group_name : str, optional
-        Processing-set data group containing the observed visibilities.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     instrument_polarization_basis : str, optional
-        Instrument correlation basis.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
     single_precision_image : bool, optional
-        Whether complex image-domain arrays use single precision.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
-        Number of threads supplied to the gridding kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
-        FFT backend used by the lower-level imaging functions.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
     image_data_variables_keep : list of str, optional
-        Image products retained in the returned dataset.
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        Cache observed UV grids in memory or the image store, or recompute
-        residual visibilities each cycle. MFS caches reduced Taylor grids;
-        MVC caches each map task's frequency planes.
+        Continuum residual-update storage policy for observed visibility grids.
+        ``"in_memory"`` retains the first-cycle grid in driver memory, while
+        ``"in_place"`` stores it temporarily in the image Zarr store. Later
+        cycles grid only the predicted-model contribution and subtract it from
+        the cached observed grid. ``"recompute"`` instead reloads the original
+        observed visibilities and grids their visibility-domain residual every
+        cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
+        map task's exclusively owned frequency-resolved UV planes.
     image_data_group_in_name : str, optional
-        Image data group containing the current Taylor model.
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Image data group receiving the residual Taylor products.
     last_residual_cycle : bool, optional

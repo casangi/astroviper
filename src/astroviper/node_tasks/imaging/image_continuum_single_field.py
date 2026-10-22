@@ -1126,10 +1126,19 @@ def residual_update_continuum_single_field(
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;
+        ``list_dish_diameters``, ``list_blockage_diameters`` and
+        ``primary_beam_max_radius_1ghz`` override the inferred beam prescription.
 
     imaging_weights_params : dict
-        Weighting scheme configuration: ``weighting`` (``"natural"`` or
-        ``"briggs"``) and the Briggs ``robust`` parameter.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
 
     task_coords : dict
         Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies

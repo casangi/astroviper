@@ -71,30 +71,49 @@ def imaging_preparation_continuum_single_field(
         Empty image dataset carrying the geometry and coordinates for this chunk.
 
     image_params : dict
-        Image geometry and continuum configuration. This includes the image size,
-        cell size, reference frequency, number of Taylor terms, and gridding or FFT
-        configuration required by the setup processing functions.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;
+        ``list_dish_diameters``, ``list_blockage_diameters`` and
+        ``primary_beam_max_radius_1ghz`` override the inferred beam prescription.
 
     imaging_weights_params : dict
-        Imaging-weight configuration.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
 
     processing_set_data_group_name : str, optional
-        Processing-set data group used as the input for imaging.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
 
     single_precision_image : bool, optional
-        Whether continuum image and grid products use single precision.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
 
     processing_function_threads : int, optional
-        Number of threads supplied to lower-level processing functions.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     fft_backend : str, optional
-        FFT backend supplied to setup functions that require Fourier transforms.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
 
     image_data_variables_keep : list of str, optional
-        Logical image products to retain in the returned dataset.
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
 
     task_id : int, optional
-        Identifier of the frequency-chunk task, used for logging.
+        Identifier of the parallel chunk being processed.
 
     Returns
     -------
@@ -419,23 +438,41 @@ def prepare_model_uv_continuum_single_field(
         ``taylor_term`` dimension.
 
     image_params : dict
-        Continuum imaging configuration, including the image geometry, FFT
-        parameters, and the number of Taylor terms.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;
+        ``list_dish_diameters``, ``list_blockage_diameters`` and
+        ``primary_beam_max_radius_1ghz`` override the inferred beam prescription.
 
     instrument_polarization_basis : {"linear", "circular"}, optional
-        Instrumental correlation basis into which the Stokes model is
-        transformed before the Fourier transform.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
 
     single_precision_image : bool, optional
-        If ``True``, create ``complex64`` Fourier grids; otherwise create
-        ``complex128`` grids.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the polarization transformation and FFT
-        routines.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     fft_backend : str, optional
-        FFT backend passed to ``fft_norm_continuum_img_xds``.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
 
     image_data_group_name : str, optional
         Data group containing the continuum sky model and receiving the Fourier-
@@ -1517,7 +1554,9 @@ def residual_update_continuum_single_field(
     primary_beam_xds : xarray.Dataset, optional
         Cached primary beam for this MVC partition.
     observed_visibility_grid_xds : xarray.Dataset, optional
-        Cached observed UV planes for this MVC partition.
+        Task-local cached observed visibility grid used by later residual-update
+        cycles. The distributed application supplies this only for in-memory MVC
+        caching; other modes and first cycles leave it unset.
     model_xds : xarray.Dataset, optional
         Accumulated image-domain Taylor model used for MVC prediction.
     ps_xdt : xarray.DataTree
@@ -1528,36 +1567,74 @@ def residual_update_continuum_single_field(
         products.
 
     image_params : dict
-        Image geometry and continuum imaging configuration.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;
+        ``list_dish_diameters``, ``list_blockage_diameters`` and
+        ``primary_beam_max_radius_1ghz`` override the inferred beam prescription.
 
     imaging_weights_params : dict
-        Imaging-weight configuration.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
 
     processing_set_data_group_name : str, optional
-        Processing-set data group to image.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
 
     deconvolver : str, optional
-        Reserved for future continuum deconvolution implementations.
+        Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
+        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
+        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
+        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
+        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
+        are refused before anything is written.
 
     instrument_polarization_basis : {"linear", "circular"}, optional
-        Instrument correlation basis used during gridding and degridding.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
 
     single_precision_image : bool, optional
-        Whether continuum products use single precision.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the lower-level processing functions.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     fft_backend : str, optional
-        FFT backend used by the underlying processing functions.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
 
     image_data_variables_keep : list of str, optional
-        Logical image products retained in the returned dataset.
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        Cache observed UV grids in memory or the image store, or recompute
-        residual visibilities each cycle. MFS caches reduced Taylor grids;
-        MVC caches each map task's frequency planes.
+        Continuum residual-update storage policy for observed visibility grids.
+        ``"in_memory"`` retains the first-cycle grid in driver memory, while
+        ``"in_place"`` stores it temporarily in the image Zarr store. Later
+        cycles grid only the predicted-model contribution and subtract it from
+        the cached observed grid. ``"recompute"`` instead reloads the original
+        observed visibilities and grids their visibility-domain residual every
+        cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
+        map task's exclusively owned frequency-resolved UV planes.
     is_first_cycle : bool, optional
         Indicates whether this is the first imaging cycle.
 
@@ -1566,7 +1643,7 @@ def residual_update_continuum_single_field(
         all imaging cycles after the first.
 
     task_id : int, optional
-        Identifier of the current frequency chunk.
+        Identifier of the parallel chunk being processed.
 
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used by MVC map-local Taylor construction.
@@ -2266,10 +2343,12 @@ def model_update_mtmfs_single_field(
         function uses ``psf_taylor_order``.
 
     deconvolver : str
-        ``"mtmfs"`` uses the native Taylor-stack deconvolver for two to four
-        Taylor terms. ``"hogbom"`` cleans Taylor term zero. The public
-        continuum-imaging API resolves an MT-MFS request with one Taylor term
-        to Högbom before this processing-function boundary.
+        Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
+        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
+        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
+        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
+        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
+        are refused before anything is written.
 
     deconvolve_params : dict
         Model-update control parameters. These typically include entries such as
@@ -2296,10 +2375,13 @@ def model_update_mtmfs_single_field(
         Indicates whether this is the first model update.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the deconvolution backend.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     image_data_group_in_name : str, optional
-        Name of the residual image data group.
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
 
     image_data_group_out_name : str, optional
         Name of the output model data group.

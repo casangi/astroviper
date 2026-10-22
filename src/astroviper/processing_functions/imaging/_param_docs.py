@@ -17,18 +17,70 @@ A key ``"<function name>.<parameter name>"`` gives the decorated functions of
 that name their own description of the parameter, in place of the shared one.
 """
 
+_IMAGE_PARAMS_DOC = (
+    "Image geometry and output coordinates: ``image_size``, ``cell_size``,\n"
+    "``phase_direction``, ``time_coords``, ``polarization_coords`` and the\n"
+    "``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is\n"
+    '``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image\n'
+    'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
+    "correlations (see ``instrument_polarization_basis``)."
+)
+
+_CONTINUUM_IMAGE_PARAMS_DOC = (
+    _IMAGE_PARAMS_DOC + "\nContinuum imaging also requires ``frequency_coords``,\n"
+    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.\n"
+    "``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;\n"
+    "``list_dish_diameters``, ``list_blockage_diameters`` and\n"
+    "``primary_beam_max_radius_1ghz`` override the inferred beam prescription."
+)
+
+_CONTINUUM_DECONVOLVER_DOC = (
+    'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
+    'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
+    "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
+    'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
+    '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
+    "are refused before anything is written."
+)
+
 IMAGING_PARAM_DOCS = {
-    "image_params": (
-        "Image geometry and output coordinates: ``image_size``, ``cell_size``,\n"
-        "``phase_direction``, ``time_coords``, ``polarization_coords`` and the\n"
-        "``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is\n"
-        '``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image\n'
-        'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
-        "correlations (see ``instrument_polarization_basis``)."
+    "image_params": _IMAGE_PARAMS_DOC,
+    "image_continuum_single_field.image_params": _CONTINUUM_IMAGE_PARAMS_DOC,
+    "residual_update_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
     ),
+    "grid_imaging_weight_density_continuum_node.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "degrid_imaging_weights_continuum_node.image_params": (_CONTINUUM_IMAGE_PARAMS_DOC),
+    "imaging_preparation_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "prepare_model_uv_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "prepare_model_uv_mvc_single_field.image_params": _CONTINUUM_IMAGE_PARAMS_DOC,
+    "imaging_setup_continuum_single_field.image_params": (_CONTINUUM_IMAGE_PARAMS_DOC),
+    "make_point_spread_function_mvc_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "make_point_spread_function_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "make_undeconvolved_image_continuum_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "make_undeconvolved_image_mvc_single_field.image_params": (
+        _CONTINUUM_IMAGE_PARAMS_DOC
+    ),
+    "residual_cycle_continuum_single_field.image_params": (_CONTINUUM_IMAGE_PARAMS_DOC),
     "imaging_weights_params": (
-        'Weighting scheme configuration: ``weighting`` (``"natural"`` or\n'
-        '``"briggs"``) and the Briggs ``robust`` parameter.'
+        'Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,\n'
+        '``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs\n'
+        'trade-off. ``weighting_scope`` is ``"local"`` for a density per\n'
+        'frequency channel or ``"global"`` for one density across all selected\n'
+        "channels in distributed continuum imaging. Natural weighting is\n"
+        "independent of this scope."
     ),
     "gridding_kernel_params": (
         "The gridding convolution kernel the gridder and degridder use:\n"
@@ -98,13 +150,12 @@ IMAGING_PARAM_DOCS = {
         "visibilities, grid and inverse FFT them into the residual image)\n"
         "followed by one **model update** (deconvolve the residual image into\n"
         "the sky model). Every limit and threshold is applied independently to\n"
-        "each ``(time, frequency, polarization)`` plane: a plane stops when it\n"
-        "meets its own criterion. The imaging cycle loop runs separately for\n"
-        "every frequency channel in cube imaging (one channel per node task),\n"
-        "so a channel's cycles continue until all of its (time, polarization)\n"
-        "planes have stopped, and a channel that has stopped does no further\n"
-        "residual updates while the others carry on. **Cycle control** is the\n"
-        "stop test between the residual update and the model update, which\n"
+        "each image plane: a plane stops when it meets its own criterion. Cube\n"
+        "imaging runs the cycle loop separately for every frequency channel\n"
+        "(one channel per node task); continuum imaging has one controller for\n"
+        "the Taylor stack after reduction across frequency partitions. **Cycle\n"
+        "control** is the stop test between the residual update and the model\n"
+        "update, which\n"
         "decides whether a plane gets another cycle and sets the limits of its\n"
         "next model update. It is made after every residual update, the first\n"
         "included, on the residual that update has just made, never on the\n"
@@ -127,10 +178,10 @@ IMAGING_PARAM_DOCS = {
         "  every model update is followed by a residual update, whose residual\n"
         "  the stop test checks; the last one's residual is written.\n"
         "  ``max_cycles = 0`` makes only the dirty image; ``max_cycles = -1``\n"
-        "  removes the limit. Counted per\n"
-        "  frequency channel: a channel that converges early stops cycling while\n"
-        '  the others continue. ``max_cycles = "auto"`` predicts the limit of a\n'
-        "  channel from its dirty image: every plane takes ``P0``, its peak\n"
+        "  removes the limit. Cube imaging counts this per frequency channel;\n"
+        "  continuum imaging counts it once for the reduced Taylor stack.\n"
+        '  ``max_cycles = "auto"`` predicts the limit of an imaging unit from\n'
+        "  its dirty image: every plane takes ``P0``, its peak\n"
         "  residual at the start of the first cycle (the ``peak_residual``\n"
         "  below), ``f``, its PSF fraction (below), and ``L``, its threshold or,\n"
         "  when that is 0, its theoretical point source sensitivity, worked out\n"
@@ -147,7 +198,7 @@ IMAGING_PARAM_DOCS = {
         "  about 1 over the square root of the number of visibilities (natural\n"
         "  weighting; 1e-3 for a million) in the units of the data; the limit\n"
         "  grows only with ``ln(P0 / L)``, and on the same prediction ``3 * n``\n"
-        "  cycles bring the peak down to ``P0 * (L / P0)**3``. The channel's\n"
+        "  cycles bring the peak down to ``P0 * (L / P0)**3``. The imaging unit's\n"
         "  ``max_cycles`` is the largest limit of its planes (at least 1; a\n"
         "  plane without a pixel in the clean mask, with a peak of 0 or without\n"
         "  data is left out) and then counts down like a number. Every plane\n"
@@ -184,9 +235,10 @@ IMAGING_PARAM_DOCS = {
         "- ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary beam\n"
         "  mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.\n"
         "  Pixels where the primary beam is below this fraction are excluded\n"
-        "  from cleaning. A masking cutoff, distinct from ``threshold``.\n"
-        "  Default 0: without a clean mask, the model update cleans and the\n"
-        "  stop test measures every pixel where the primary beam is above 0.\n"
+        "  from cleaning. A masking cutoff, distinct from ``threshold``. Cube\n"
+        "  imaging reads this key (default 0). Continuum imaging instead takes\n"
+        "  the top-level ``primary_beam_limit`` (default 0.2) and injects it into\n"
+        "  cycle control so cleaning and PB correction use one cutoff.\n"
         "- ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the\n"
         "  selected peak flux subtracted from the residual image at each\n"
         "  deconvolution iteration (``0 < gain <= 1``).\n"
@@ -336,14 +388,9 @@ IMAGING_PARAM_DOCS = {
         "(C++, threaded across *and* within planes -- faster when there are\n"
         'few planes, e.g. single-channel imaging) or ``"asp"``.'
     ),
-    "image_continuum_single_field.deconvolver": (
-        'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
-        'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
-        "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
-        'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
-        '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
-        "are refused before anything is written."
-    ),
+    "image_continuum_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
+    "residual_update_continuum_single_field.deconvolver": (_CONTINUUM_DECONVOLVER_DOC),
+    "model_update_mtmfs_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
     "instrument_polarization_basis": (
         "Correlation (instrument) polarization basis the gridding is performed in:\n"
         '``"linear"`` or ``"circular"``. The residual update grids and degrids the\n'

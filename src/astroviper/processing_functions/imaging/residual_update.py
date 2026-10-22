@@ -57,8 +57,12 @@ def imaging_setup_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
     imaging_weights_params : dict
-        Weighting scheme configuration: ``weighting`` (``"natural"`` or
-        ``"briggs"``) and the Briggs ``robust`` parameter.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool, optional

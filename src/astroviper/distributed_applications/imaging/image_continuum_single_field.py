@@ -2819,9 +2819,10 @@ def image_continuum_single_field(
     falls back to Högbom. Restoration is optional.
 
     The imaging cycle loop (``cycle_control_params``) does not run separately
-    for every frequency channel as in cube imaging: continuum updates
-    Taylor-zero planes after reduction across frequency partitions; higher
-    Taylor terms have no independent CLEAN loop.
+    for every frequency channel as in cube imaging. Continuum performs one
+    model update after reduction across frequency partitions: Högbom updates
+    Taylor term zero, while MT-MFS jointly updates all Taylor terms. Higher
+    terms never run independent imaging-cycle loops.
 
     ``imaging_weights_params`` also accepts ``weighting_scope``, the uv
     weight density that uniform and Briggs weights are made from:
@@ -2897,9 +2898,18 @@ def image_continuum_single_field(
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;
+        ``list_dish_diameters``, ``list_blockage_diameters`` and
+        ``primary_beam_max_radius_1ghz`` override the inferred beam prescription.
     imaging_weights_params : dict
-        Weighting scheme configuration: ``weighting`` (``"natural"`` or
-        ``"briggs"``) and the Briggs ``robust`` parameter.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
     continuum_mode : {"mfs", "mvc"}
         Taylor UV gridding or channel-image Taylor construction. ``"mvc"``
         images the two parallel hands only; ``["I", "Q", "U", "V"]`` is
@@ -2963,13 +2973,12 @@ def image_continuum_single_field(
         visibilities, grid and inverse FFT them into the residual image)
         followed by one **model update** (deconvolve the residual image into
         the sky model). Every limit and threshold is applied independently to
-        each ``(time, frequency, polarization)`` plane: a plane stops when it
-        meets its own criterion. The imaging cycle loop runs separately for
-        every frequency channel in cube imaging (one channel per node task),
-        so a channel's cycles continue until all of its (time, polarization)
-        planes have stopped, and a channel that has stopped does no further
-        residual updates while the others carry on. **Cycle control** is the
-        stop test between the residual update and the model update, which
+        each image plane: a plane stops when it meets its own criterion. Cube
+        imaging runs the cycle loop separately for every frequency channel
+        (one channel per node task); continuum imaging has one controller for
+        the Taylor stack after reduction across frequency partitions. **Cycle
+        control** is the stop test between the residual update and the model
+        update, which
         decides whether a plane gets another cycle and sets the limits of its
         next model update. It is made after every residual update, the first
         included, on the residual that update has just made, never on the
@@ -2992,10 +3001,10 @@ def image_continuum_single_field(
           every model update is followed by a residual update, whose residual
           the stop test checks; the last one's residual is written.
           ``max_cycles = 0`` makes only the dirty image; ``max_cycles = -1``
-          removes the limit. Counted per
-          frequency channel: a channel that converges early stops cycling while
-          the others continue. ``max_cycles = "auto"`` predicts the limit of a
-          channel from its dirty image: every plane takes ``P0``, its peak
+          removes the limit. Cube imaging counts this per frequency channel;
+          continuum imaging counts it once for the reduced Taylor stack.
+          ``max_cycles = "auto"`` predicts the limit of an imaging unit from
+          its dirty image: every plane takes ``P0``, its peak
           residual at the start of the first cycle (the ``peak_residual``
           below), ``f``, its PSF fraction (below), and ``L``, its threshold or,
           when that is 0, its theoretical point source sensitivity, worked out
@@ -3012,7 +3021,7 @@ def image_continuum_single_field(
           about 1 over the square root of the number of visibilities (natural
           weighting; 1e-3 for a million) in the units of the data; the limit
           grows only with ``ln(P0 / L)``, and on the same prediction ``3 * n``
-          cycles bring the peak down to ``P0 * (L / P0)**3``. The channel's
+          cycles bring the peak down to ``P0 * (L / P0)**3``. The imaging unit's
           ``max_cycles`` is the largest limit of its planes (at least 1; a
           plane without a pixel in the clean mask, with a peak of 0 or without
           data is left out) and then counts down like a number. Every plane
@@ -3049,9 +3058,10 @@ def image_continuum_single_field(
         - ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary beam
           mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
           Pixels where the primary beam is below this fraction are excluded
-          from cleaning. A masking cutoff, distinct from ``threshold``.
-          Default 0: without a clean mask, the model update cleans and the
-          stop test measures every pixel where the primary beam is above 0.
+          from cleaning. A masking cutoff, distinct from ``threshold``. Cube
+          imaging reads this key (default 0). Continuum imaging instead takes
+          the top-level ``primary_beam_limit`` (default 0.2) and injects it into
+          cycle control so cleaning and PB correction use one cutoff.
         - ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the
           selected peak flux subtracted from the residual image at each
           deconvolution iteration (``0 < gain <= 1``).
