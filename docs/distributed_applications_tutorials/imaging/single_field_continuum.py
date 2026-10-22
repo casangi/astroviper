@@ -110,6 +110,7 @@ gridder = "anti_alias"
 deconvolver = "hogbom"
 scan_intents = "OBSERVE_TARGET#ON_SOURCE"
 image_data_variables_keep = [
+    "sky_model",
     "sky_residual",
     "point_spread_function",
     "primary_beam",

@@ -2775,6 +2775,7 @@ def image_continuum_single_field(
     field_name: str | None = None,
     clean_mask: str | None = None,
     image_data_variables_keep: list[str] = [  # noqa: B006 - param.json requires a list (not nullable); never mutated
+        "sky_model",
         "sky_residual",
         "point_spread_function",
         "primary_beam",

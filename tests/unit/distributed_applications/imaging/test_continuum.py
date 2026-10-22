@@ -740,6 +740,13 @@ def _run_tw_hydra_continuum(
     clear_cache=True,
     scheduler="synchronous",
     processing_set_data_group_name="base",
+    image_data_variables_keep=(
+        "sky_model",
+        "sky_residual",
+        "point_spread_function",
+        "primary_beam",
+        "beam_fit_params_point_spread_function",
+    ),
 ):
     """Run one public distributed continuum configuration on TW Hydra."""
     if cycle_control_params is None:
@@ -771,13 +778,13 @@ def _run_tw_hydra_continuum(
             primary_beam_limit=primary_beam_limit,
             continuum_mode=continuum_mode,
             scan_intents=["OBSERVE_TARGET#ON_SOURCE"],
-            image_data_variables_keep=[
-                "sky_model",
-                "sky_residual",
-                "point_spread_function",
-                "primary_beam",
-                "beam_fit_params_point_spread_function",
-            ],
+            **(
+                {}
+                if image_data_variables_keep is None
+                else {
+                    "image_data_variables_keep": list(image_data_variables_keep),
+                }
+            ),
             processing_set_data_group_name=processing_set_data_group_name,
             single_precision_image=single_precision_image,
             processing_function_threads=1,
@@ -806,6 +813,33 @@ def _run_tw_hydra_continuum(
             reduce_n_batch=reduce_n_batch,
         )
     return result, xr.open_zarr(output_store)
+
+
+def test_tw_hydra_default_output_keeps_nonzero_model(tmp_path, tw_hydra_store):
+    """A default deconvolution run persists its accumulated sky model."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    _, image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "default_keep.img.zarr",
+        processing_set,
+        2,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        cycle_control_params={
+            "max_iter": 5,
+            "max_cycles": 2,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": 2,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+        },
+        image_data_variables_keep=None,
+    )
+
+    assert "SKY_MODEL" in image
+    assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
 
 
 def test_task_primary_beam_mapping_contains_only_each_local_dataset():

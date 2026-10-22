@@ -1327,6 +1327,7 @@ def residual_update_continuum_single_field(
 
     if image_data_variables_keep is None:
         image_data_variables_keep = [
+            "sky_model",
             "sky_residual",
             "point_spread_function",
             "primary_beam",
