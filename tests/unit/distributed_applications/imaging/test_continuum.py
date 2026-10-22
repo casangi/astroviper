@@ -24,6 +24,7 @@ from xradio.measurement_set import open_processing_set
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _accumulate_graph_timings,
     _apply_exact_frequency_selection_to_continuum_mapping,
+    _combine_graph_timing_frames,
     _continuum_image_for_disk,
     _create_continuum_weight_cache_store,
     _graph_timing_record,
@@ -591,6 +592,40 @@ def test_graph_timing_record_normalizes_weight_task_phases():
     timing = record["timing_node_tasks"].iloc[0]
     assert timing.T_image_cube_task == 3.0
     assert timing.T_write == 0.0
+
+
+def test_graph_timing_record_retains_model_update_timing():
+    """All-graph records retain append-node model-update measurements."""
+    model_timing = pd.DataFrame(
+        {"T_model_update_node_task": [3.0], "T_model_update": [2.0]}
+    )
+    record = _graph_timing_record(
+        "imaging cycle 1",
+        {
+            "timing_node_tasks": pd.DataFrame({"T_image_cube_task": [4.0]}),
+            "timing_model_update": model_timing,
+        },
+        {"T_compute_dask_graph": 5.0},
+    )
+
+    pd.testing.assert_frame_equal(record["timing_model_update"], model_timing)
+    assert record["timing_model_update"] is not model_timing
+
+
+def test_combine_graph_timing_frames_includes_every_graph():
+    """Summary input contains tasks from weighting and every imaging cycle."""
+    records = [
+        {"timing_node_tasks": pd.DataFrame({"stage_value": [1.0, 2.0]})},
+        {"timing_node_tasks": pd.DataFrame({"stage_value": [3.0]})},
+        {"timing_model_update": pd.DataFrame({"T_model_update": [4.0]})},
+    ]
+
+    node_timing = _combine_graph_timing_frames(records, "timing_node_tasks")
+    model_timing = _combine_graph_timing_frames(records, "timing_model_update")
+
+    assert node_timing.stage_value.tolist() == [1.0, 2.0, 3.0]
+    assert model_timing.T_model_update.tolist() == [4.0]
+    assert _combine_graph_timing_frames([], "timing_node_tasks") is None
 
 
 def test_graph_timing_accumulation_excludes_absolute_anchors():

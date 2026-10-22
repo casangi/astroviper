@@ -38,6 +38,8 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     imaging_dict_to_dataframe,
 )
 from astroviper.processing_functions.imaging.utils.timing import (
+    CONTINUUM_IMAGING_TIMING_PHASES,
+    CONTINUUM_MODEL_UPDATE_TIMING_PHASES,
     IMAGING_TIMING_PHASES,
     IMAGING_TIMING_TOTAL_KEY,
     accumulate_timing,
@@ -74,6 +76,8 @@ __all__ = [
     "print_imaging_dict",
     "accumulate_timing",
     "format_timing_summary",
+    "CONTINUUM_IMAGING_TIMING_PHASES",
+    "CONTINUUM_MODEL_UPDATE_TIMING_PHASES",
     "IMAGING_TIMING_PHASES",
     "IMAGING_TIMING_TOTAL_KEY",
     "next_fft_friendly_size",

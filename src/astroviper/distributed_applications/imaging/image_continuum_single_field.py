@@ -40,20 +40,62 @@ _PARAM_CONFIG_DIR = os.path.dirname(__file__)
 
 DISTRIBUTED_APPLICATION_TIMING_PHASES = [
     (
-        "DISTRIBUTED APPLICATION (driver)",
+        "DRIVER SETUP",
         None,
         [
             ("create empty image xds", "T_make_empty_image_xds"),
-            ("write empty image to disk", "T_write_empty_image"),
             (
                 "determine chunks + parallel coords",
                 "T_determine_chunks_and_parallel_coords",
             ),
             ("open processing set", "T_open_processing_set"),
             ("interpolate data coords", "T_interpolate_data_coords"),
-            ("create map/reduce/append graph", "T_create_map_reduce_graph"),
+            ("write empty image", "T_write_empty_image"),
+        ],
+    ),
+    (
+        "GLOBAL WEIGHTING GRAPHS",
+        None,
+        [
+            ("create density graph", "T_create_imaging_weight_graph"),
+            ("generate density graph", "T_generate_imaging_weight_dask_graph"),
+            ("compute density graph", "T_compute_imaging_weight_graph"),
+            ("calculate Briggs factors", "T_calculate_global_briggs_factors"),
+            ("create weight-degrid graph", "T_create_imaging_weight_degrid_graph"),
+            (
+                "generate weight-degrid graph",
+                "T_generate_imaging_weight_degrid_dask_graph",
+            ),
+            ("compute weight-degrid graph", "T_compute_imaging_weight_degrid_graph"),
+        ],
+    ),
+    (
+        "CACHE MANAGEMENT",
+        None,
+        [
+            ("create weight cache", "T_create_in_place_weight_cache"),
+            ("activate imaging weights", "T_persist_imaging_weights"),
+            ("create visibility cache", "T_create_in_place_visibility_cache"),
+            ("create wideband-PB cache", "T_create_in_place_widebandpb_cache"),
+            ("remove weight cache", "T_remove_in_place_weight_cache"),
+        ],
+    ),
+    (
+        "CONTINUUM IMAGING GRAPHS",
+        None,
+        [
+            (
+                "create map/reduce/append graphs",
+                "T_create_map_reduce_append_graph",
+            ),
             ("generate dask graph", "T_generate_dask_graph"),
             ("compute graph", "T_compute_dask_graph"),
+        ],
+    ),
+    (
+        "FINAL OUTPUT",
+        None,
+        [
             ("write final continuum image", "T_write_final_image"),
             ("consolidate metadata", "T_consolidate_metadata"),
         ],
@@ -594,13 +636,27 @@ def _graph_timing_record(stage, graph_result, graph_timings):
                 compute_duration = graph_timings[duration_key]
                 break
 
-    return {
+    record = {
         "stage": stage,
         "timing_node_tasks": timing_node_tasks,
         "compute_start_unixtime": graph_timings.get("compute_start_unixtime"),
         "compute_end_unixtime": graph_timings.get("compute_end_unixtime"),
         "T_compute": compute_duration,
     }
+    timing_model_update = graph_result.get("timing_model_update")
+    if timing_model_update is not None:
+        record["timing_model_update"] = timing_model_update.copy(deep=True)
+    return record
+
+
+def _combine_graph_timing_frames(timing_graphs, key):
+    """Concatenate one timing-frame kind from every recorded graph."""
+    import pandas as pd
+
+    frames = [record[key] for record in timing_graphs if record.get(key) is not None]
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True, sort=False)
 
 
 def _accumulate_graph_timings(destination, graph_timings):
@@ -3279,7 +3335,8 @@ def image_continuum_single_field(
         check_imaging_weights_params,
     )
     from astroviper.processing_functions.imaging.utils import (
-        IMAGING_TIMING_PHASES,
+        CONTINUUM_IMAGING_TIMING_PHASES,
+        CONTINUUM_MODEL_UPDATE_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
@@ -4165,24 +4222,43 @@ def image_continuum_single_field(
         )
     )
 
-    # Per-node-task timing summarized across all frequency chunks: the mean of
-    # each timing column over all chunks, then the max (the slowest chunk).
-    timing_node_tasks = return_dict["timing_node_tasks"]
+    # Summarize every map task from every graph, not just the final residual
+    # graph retained under the historical ``timing_node_tasks`` return key.
+    timing_node_tasks = _combine_graph_timing_frames(
+        timing_graphs,
+        "timing_node_tasks",
+    )
+    if timing_node_tasks is None:
+        timing_node_tasks = return_dict["timing_node_tasks"]
     logger.info(
         format_timing_summary(
             timing_node_tasks.mean(numeric_only=True).to_dict(),
-            IMAGING_TIMING_PHASES,
+            CONTINUUM_IMAGING_TIMING_PHASES,
             total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER node-task timing: MEAN over frequency chunks (seconds)",
+            title="AstroVIPER continuum task timing: MEAN over all graph tasks (seconds)",
         )
     )
     logger.info(
         format_timing_summary(
             timing_node_tasks.max(numeric_only=True).to_dict(),
-            IMAGING_TIMING_PHASES,
+            CONTINUUM_IMAGING_TIMING_PHASES,
             total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER node-task timing: MAX over frequency chunks (seconds)",
+            title="AstroVIPER continuum task timing: MAX over all graph tasks (seconds)",
         )
     )
+
+    timing_model_updates = _combine_graph_timing_frames(
+        timing_graphs,
+        "timing_model_update",
+    )
+    if timing_model_updates is not None:
+        logger.info(
+            format_timing_summary(
+                timing_model_updates.sum(numeric_only=True).to_dict(),
+                CONTINUUM_MODEL_UPDATE_TIMING_PHASES,
+                total_key="T_model_update_node_task",
+                title="AstroVIPER continuum model-update timing (all cycles, seconds)",
+            )
+        )
 
     return return_dict

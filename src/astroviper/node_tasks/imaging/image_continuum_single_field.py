@@ -1278,7 +1278,7 @@ def residual_update_continuum_single_field(
 
     import astroviper.processing_functions as pf
     from astroviper.processing_functions.imaging.utils import (
-        IMAGING_TIMING_PHASES,
+        CONTINUUM_IMAGING_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
     )
     from astroviper.utils.timing import print_timing_summary
@@ -1666,6 +1666,7 @@ def residual_update_continuum_single_field(
     timing_df["T_make_empty_image"] = T_make_empty_image
     timing_df["T_load"] = T_load
     timing_df["T_write_imaging_weights"] = T_write_imaging_weights
+    timing_df["T_write"] = T_write_imaging_weights
 
     # Keep this column for compatibility with the existing timing schema while
     # making it explicit that no writing occurred.
@@ -1699,7 +1700,7 @@ def residual_update_continuum_single_field(
 
     print_timing_summary(
         timing_df,
-        IMAGING_TIMING_PHASES,
+        CONTINUUM_IMAGING_TIMING_PHASES,
         total_key=IMAGING_TIMING_TOTAL_KEY,
         printer=logger.debug,
     )
