@@ -1,8 +1,9 @@
 # Continuum software test coverage
 
 These tests protect the continuum implementation during development and PR
-review. They do not establish scientific equivalence to CASA, QA2 acceptance,
-or performance on a deployment cluster. Those remain harness/demonstrator work.
+review. Generated known-truth point sources check continuum flux, spectral-index
+and primary-beam recovery, but scientific equivalence to CASA, QA2 acceptance,
+and deployment-cluster performance remain harness/demonstrator work.
 
 ## Coverage map
 
@@ -30,6 +31,10 @@ Paths below are relative to `tests/`.
   using the five-channel TW Hydra fixture downloaded from the same Google
   Drive file as the cube notebook. No CASA installation or external harness
   checkout is needed. Each case extracts its own writable Processing Set.
+- `component/test_continuum_known_truth.py`: compact generated equivalents of
+  the harness phase-centre spectral-index and single-field off-axis point-source
+  cases. MFS and MVC must recover the two Taylor coefficients and the
+  primary-beam-corrected one-Jy flux without CASA or stored visibility data.
 
 The component comparisons are within each algorithm configuration. They do
 **not** require MFS and MVC, local and global weighting, or native and CASA
