@@ -363,8 +363,9 @@ def make_visibility_model_continuum_single_field(
 
     The continuum imaging cycle maintains the sky model as Fourier-transformed Taylor
     coefficients rather than frequency images. This function reconstructs the model
-    visibility grid at the actual observing frequencies of one processing-set
-    partition and degrids that model into predicted visibilities.
+    visibility at the actual observing frequencies of one processing-set
+    partition. Each Taylor grid is degridded once and its channel-dependent
+    Taylor contribution is accumulated in visibility space.
 
     For each frequency channel ν, the model visibility grid is reconstructed as
 
@@ -375,9 +376,9 @@ def make_visibility_model_continuum_single_field(
     where ``M_t`` denotes the Fourier-domain Taylor coefficient and ``ν_ref`` is
     the common continuum reference frequency.
 
-    The reconstructed frequency grid is passed directly to the shared standard
-    degridding primitive, which produces predicted model visibilities in the
-    measurement set.
+    This avoids materializing a channel-sized UV-grid cube. The shared standard
+    degridding primitive samples each Taylor plane for every visibility channel,
+    after which the corresponding spectral weights are applied to its output.
 
     This reconstruction is repeated independently for every visibility partition,
     whereas the Fourier Taylor model itself is prepared only once after each global
@@ -421,17 +422,16 @@ def make_visibility_model_continuum_single_field(
 
     Notes
     -----
-    For each processing-set partition this continuum implementation reconstructs
-    the frequency-dependent UV grid from the stored Taylor coefficients and calls
-    the shared standard degridding primitive directly. It does not route model
-    prediction through the cube processing API.
+    For each processing-set partition this continuum implementation degrids each
+    stored Fourier Taylor coefficient through the shared standard primitive. It
+    combines the results in visibility space and does not route model prediction
+    through the cube processing API.
 
     The Fourier-domain Taylor model is prepared only once after each global
     continuum model update. Consequently, this function performs only the spectral
     reconstruction and degridding required for the current visibility partition.
     """
     import numpy as np
-    import xarray as xr
 
     from astroviper.processing_functions.imaging.degrid_visibility_grid import (
         degrid_visibility_grid_single_field,
@@ -445,6 +445,7 @@ def make_visibility_model_continuum_single_field(
         ms_data_group_out_modified = {
             "correlated_data": "VISIBILITY_MODEL",
         }
+    output_visibility_name = ms_data_group_out_modified["correlated_data"]
 
     nterms = int(nterms)
     reference_frequency = float(reference_frequency)
@@ -498,6 +499,21 @@ def make_visibility_model_continuum_single_field(
 
     # Ignore any extra Taylor terms that may be present.
     model_taylor_grid = model_taylor_grid.isel(taylor_term=slice(0, nterms))
+    model_grid_dtype = np.dtype(model_taylor_grid.dtype)
+    if not np.issubdtype(model_grid_dtype, np.complexfloating):
+        raise TypeError(
+            "The Fourier Taylor model must use complex64 or complex128; "
+            f"received {model_grid_dtype}."
+        )
+    if model_grid_dtype.itemsize == np.dtype(np.complex64).itemsize:
+        native_grid_dtype = np.complex64
+    elif model_grid_dtype.itemsize == np.dtype(np.complex128).itemsize:
+        native_grid_dtype = np.complex128
+    else:
+        raise TypeError(
+            "The Fourier Taylor model must use complex64 or complex128; "
+            f"received {model_grid_dtype}."
+        )
 
     # ------------------------------------------------------------
     # Wrapper around cube implementation, may need refactoring into a native continuum implementation later
@@ -535,78 +551,73 @@ def make_visibility_model_continuum_single_field(
                 "The measurement-set frequency coordinate contains non-finite values."
             )
 
-        taylor_coordinate = np.arange(nterms, dtype=np.int64)
-
         spectral_coordinate = (
             frequency_values - reference_frequency
         ) / reference_frequency
+        frequency_map = np.zeros(frequency_values.size, dtype=np.int64)
+        accumulated_model = None
 
-        # dimensions:
-        #
-        #     frequency x taylor_term
-        #
-        taylor_weights = xr.DataArray(
-            spectral_coordinate[:, np.newaxis] ** taylor_coordinate[np.newaxis, :],
-            dims=("frequency", "taylor_term"),
-            coords={
-                "frequency": frequency_values,
-                "taylor_term": model_taylor_grid.coords.get(
-                    "taylor_term",
-                    taylor_coordinate,
-                ),
-            },
-        )
-
-        # Reconstruct the uv model for every actual visibility channel:
-        #
-        #     M(nu) = sum_t M_t x^t.
-        #
-        frequency_model_grid = (model_taylor_grid * taylor_weights).sum(
-            dim="taylor_term",
-            keep_attrs=True,
-        )
-
-        preferred_dimension_order = [
-            dimension
-            for dimension in (
-                "time",
-                "frequency",
-                "polarization",
-                "u",
-                "v",
+        for taylor_term in range(nterms):
+            taylor_grid = model_taylor_grid.isel(
+                taylor_term=taylor_term,
+                drop=True,
             )
-            if dimension in frequency_model_grid.dims
-        ]
+            preferred_dimension_order = [
+                dimension
+                for dimension in ("time", "polarization", "u", "v")
+                if dimension in taylor_grid.dims
+            ]
+            remaining_dimensions = [
+                dimension
+                for dimension in taylor_grid.dims
+                if dimension not in preferred_dimension_order
+            ]
+            taylor_grid = taylor_grid.transpose(
+                *preferred_dimension_order,
+                *remaining_dimensions,
+            )
 
-        remaining_dimensions = [
-            dimension
-            for dimension in frequency_model_grid.dims
-            if dimension not in preferred_dimension_order
-        ]
+            # A single Taylor plane supplies every channel; the spectral
+            # dependence is applied afterward in the much smaller visibility
+            # domain instead of constructing a channel-sized UV-grid cube.
+            single_plane_grid = np.ascontiguousarray(
+                np.expand_dims(taylor_grid.values, axis=1),
+                dtype=native_grid_dtype,
+            )
+            degrid_visibility_grid_single_field(
+                ms_xdt,
+                cgk_1D,
+                model_xds,
+                single_plane_grid,
+                frequency_map,
+                ms_data_group_in_name=ms_data_group_in_name,
+                ms_data_group_out_name=ms_data_group_out_name,
+                ms_data_group_out_modified=ms_data_group_out_modified,
+                overwrite=True,
+                fft_padding=fft_padding,
+                processing_function_threads=processing_function_threads,
+                description=(
+                    "Continuum Taylor model sampled with the standard degridder."
+                ),
+            )
 
-        frequency_model_grid = frequency_model_grid.transpose(
-            *preferred_dimension_order,
-            *remaining_dimensions,
-        )
+            predicted_model = ms_xdt[output_visibility_name].values
+            if accumulated_model is None:
+                # The zeroth Taylor weight is one for every channel.
+                accumulated_model = predicted_model.copy()
+                continue
 
-        # Degrid the continuum-owned reconstructed grid through the common
-        # numerical primitive; no cube processing function is involved.
-        degrid_visibility_grid_single_field(
-            ms_xdt,
-            cgk_1D,
-            model_xds,
-            frequency_model_grid.values,
-            np.arange(frequency_values.size, dtype=np.int64),
-            ms_data_group_in_name=ms_data_group_in_name,
-            ms_data_group_out_name=ms_data_group_out_name,
-            ms_data_group_out_modified=ms_data_group_out_modified,
-            overwrite=True,
-            fft_padding=fft_padding,
-            processing_function_threads=processing_function_threads,
-            description=(
-                "Continuum Taylor model reconstructed at visibility frequencies "
-                "and sampled with the standard degridder."
-            ),
-        )
+            weight_shape = [1] * predicted_model.ndim
+            weight_shape[ms_xdt[output_visibility_name].get_axis_num("frequency")] = (
+                frequency_values.size
+            )
+            np.multiply(
+                predicted_model,
+                (spectral_coordinate**taylor_term).reshape(weight_shape),
+                out=predicted_model,
+            )
+            accumulated_model += predicted_model
+
+        ms_xdt[output_visibility_name].data[...] = accumulated_model
 
     return

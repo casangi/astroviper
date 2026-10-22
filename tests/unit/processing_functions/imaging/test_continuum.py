@@ -188,8 +188,8 @@ def test_accumulate_continuum_model_adds_later_increment_positionally():
     assert actual["SKY_MODEL"].attrs == previous["SKY_MODEL"].attrs
 
 
-def test_continuum_prediction_calls_shared_degridder_with_frequency_grid(monkeypatch):
-    """Taylor grids are evaluated per channel without calling the cube API."""
+def test_continuum_prediction_degrids_and_accumulates_each_taylor_plane(monkeypatch):
+    """Taylor planes are degridded separately and combined in visibility space."""
     frequencies = np.array([0.9e9, 1.1e9])
     ms_xds = xr.Dataset(coords={"frequency": frequencies})
     model_grid = np.empty((1, 2, 1, 2, 2), dtype=np.complex128)
@@ -205,15 +205,22 @@ def test_continuum_prediction_calls_shared_degridder_with_frequency_grid(monkeyp
         coords={"taylor_term": [0, 1], "l": [0.0, 1.0], "m": [0.0, 1.0]},
         attrs={"data_groups": {"model": {"visibility": "MODEL_UV"}}},
     )
-    captured = {}
+    captured = []
 
     def fake_degrid(ms_arg, kernel, geometry, grid, frequency_map, **kwargs):
-        captured.update(
-            ms_xds=ms_arg,
-            geometry=geometry,
-            grid=grid.copy(),
-            frequency_map=frequency_map.copy(),
-            kwargs=kwargs,
+        captured.append(
+            {
+                "ms_xds": ms_arg,
+                "geometry": geometry,
+                "grid": grid.copy(),
+                "frequency_map": frequency_map.copy(),
+                "kwargs": kwargs,
+            }
+        )
+        ms_arg["VISIBILITY_MODEL"] = xr.DataArray(
+            np.full(frequencies.size, grid[0, 0, 0, 0, 0], dtype=np.complex128),
+            dims=("frequency",),
+            coords={"frequency": frequencies},
         )
 
     monkeypatch.setattr(
@@ -229,14 +236,15 @@ def test_continuum_prediction_calls_shared_degridder_with_frequency_grid(monkeyp
         reference_frequency=1.0e9,
         ms_data_group_in_name="corrected",
     )
-    expected = np.broadcast_to(
-        np.array([1.7, 2.3])[:, np.newaxis, np.newaxis], (2, 2, 2)
-    )
-    np.testing.assert_allclose(captured["grid"][0, :, 0, :, :], expected)
-    np.testing.assert_array_equal(captured["frequency_map"], [0, 1])
-    assert captured["ms_xds"] is ms_xds
-    assert captured["geometry"] is model_xds
-    assert captured["kwargs"]["ms_data_group_in_name"] == "corrected"
+    assert len(captured) == 2
+    np.testing.assert_array_equal(captured[0]["grid"], model_grid[:, 0:1, ...])
+    np.testing.assert_array_equal(captured[1]["grid"], model_grid[:, 1:2, ...])
+    for call in captured:
+        np.testing.assert_array_equal(call["frequency_map"], [0, 0])
+        assert call["ms_xds"] is ms_xds
+        assert call["geometry"] is model_xds
+        assert call["kwargs"]["ms_data_group_in_name"] == "corrected"
+    np.testing.assert_allclose(ms_xds.VISIBILITY_MODEL, [1.7, 2.3])
 
 
 def test_primary_beam_correction_returns_restored_taylor_zero_only():
