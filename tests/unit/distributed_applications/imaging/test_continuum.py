@@ -702,7 +702,7 @@ def _run_tw_hydra_continuum(
     cache_directory=None,
     weight_memory_mode="in_memory",
     visibility_memory_mode="recompute",
-    widebandpb_memory_mode="in_memory",
+    widebandpb_memory_mode="recompute",
     write_visibility_model_to_ps=False,
     write_imaging_weights_to_ps=False,
     clear_cache=True,
@@ -800,11 +800,11 @@ def test_task_primary_beam_mapping_rejects_incomplete_cache():
         _mapping_with_task_primary_beams({0: {}, 1: {}}, {0: xr.Dataset()})
 
 
-@pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])
-def test_tw_hydra_widebandpb_memory_modes_match_in_memory(
+@pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "in_memory"])
+def test_tw_hydra_widebandpb_memory_modes_match_recompute(
     tmp_path, tw_hydra_store, widebandpb_memory_mode
 ):
-    """MVC disk-backed and recomputed PBs reproduce task-local memory results."""
+    """MVC disk-backed and task-local memory PBs reproduce recomputation."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, reference = _run_tw_hydra_continuum(
         tw_hydra_store,

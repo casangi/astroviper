@@ -1071,7 +1071,7 @@ def residual_update_continuum_single_field(
     memory_mode="in_memory",
     weight_memory_mode="in_place",
     visibility_memory_mode="recompute",
-    widebandpb_memory_mode="in_memory",
+    widebandpb_memory_mode="recompute",
     skunk_works=False,
     data_group=None,
     is_n_iter_0=True,
@@ -1226,9 +1226,10 @@ def residual_update_continuum_single_field(
     widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MVC-only storage policy for the frequency-dependent primary beam.
         ``"in_place"`` stores it temporarily in the image Zarr store and reads
-        only task-local channels, ``"recompute"`` regenerates the analytic beam
-        inside every later map, and ``"in_memory"`` retains it at the driver but
-        passes each map only its local beam. The setting is ignored for MFS.
+        only task-local channels. The default ``"recompute"`` regenerates the
+        analytic beam inside every later map, and ``"in_memory"`` retains it at
+        the driver but passes each map only its local beam. The setting is ignored
+        for MFS.
 
     skunk_works : bool, optional
         Use the experimental direct-Zarr loading path.

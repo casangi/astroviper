@@ -391,9 +391,10 @@ IMAGING_PARAM_DOCS = {
     "widebandpb_memory_mode": (
         "MVC-only storage policy for the frequency-dependent primary beam.\n"
         '``"in_place"`` stores it temporarily in the image Zarr store and reads\n'
-        'only task-local channels, ``"recompute"`` regenerates the analytic beam\n'
-        'inside every later map, and ``"in_memory"`` retains it at the driver but\n'
-        "passes each map only its local beam. The setting is ignored for MFS."
+        'only task-local channels. The default ``"recompute"`` regenerates the\n'
+        'analytic beam inside every later map, and ``"in_memory"`` retains it at\n'
+        "the driver but passes each map only its local beam. The setting is ignored\n"
+        "for MFS."
     ),
     "processing_function_threads": (
         "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."
