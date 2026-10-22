@@ -451,8 +451,6 @@ def _extract_mvc_observed_visibility_grid(img_xds):
     """Remove and return the first-cycle MVC observed UV-grid cache payload."""
     import copy
 
-    import xarray as xr
-
     required = (
         _MVC_OBSERVED_VISIBILITY_CACHE,
         _MVC_OBSERVED_NORMALIZATION_CACHE,
@@ -463,15 +461,15 @@ def _extract_mvc_observed_visibility_grid(img_xds):
             f"The first MVC map result is missing cache variables {missing}."
         )
 
-    observed_grid_xds = xr.Dataset(
+    observed_grid_xds = img_xds[list(required)].rename(
         {
-            "VISIBILITY": img_xds[_MVC_OBSERVED_VISIBILITY_CACHE].copy(deep=True),
-            "VISIBILITY_NORMALIZATION": img_xds[_MVC_OBSERVED_NORMALIZATION_CACHE].copy(
-                deep=True
-            ),
-        },
-        attrs=copy.deepcopy(img_xds.attrs),
+            _MVC_OBSERVED_VISIBILITY_CACHE: "VISIBILITY",
+            _MVC_OBSERVED_NORMALIZATION_CACHE: "VISIBILITY_NORMALIZATION",
+        }
     )
+    # The processing function already made these buffers independent before its
+    # in-place IFFT, so transfer their ownership without copying them a second time.
+    observed_grid_xds.attrs = copy.deepcopy(img_xds.attrs)
     observed_grid_xds.attrs.setdefault("data_groups", {}).setdefault(
         "residual", {}
     ).update(
@@ -1629,12 +1627,12 @@ def residual_update_continuum_single_field(
     return_weight_datasets = {}
 
     T_write_imaging_weights = 0.0
-    if (
+    imaging_weights_calculated = bool(
         is_first_cycle
-        and weight_datasets is None
-        and weight_cache_mapping is None
-        and not weight_cache_is_active
-    ):
+        and "imaging_weights_calculated" in timing_df
+        and timing_df["imaging_weights_calculated"].iloc[0]
+    )
+    if imaging_weights_calculated:
         import xarray as xr
 
         for ms_name, ms_xds in ps_xdt.items():

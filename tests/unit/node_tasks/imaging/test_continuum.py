@@ -263,7 +263,7 @@ def test_recompute_mfs_append_does_not_require_or_modify_a_cache():
 
 
 def test_extract_mvc_observed_grid_removes_private_map_payload():
-    """The MVC map returns its cache separately from reduced Taylor products."""
+    """The MVC map transfers its owned cache buffers without copying them again."""
     frequency = [1.0e9, 1.1e9]
     image = xr.Dataset(
         {
@@ -284,6 +284,8 @@ def test_extract_mvc_observed_grid_removes_private_map_payload():
         },
         attrs={"data_groups": {}},
     )
+    visibility_buffer = image[continuum_node._MVC_OBSERVED_VISIBILITY_CACHE].data
+    normalization_buffer = image[continuum_node._MVC_OBSERVED_NORMALIZATION_CACHE].data
 
     reduced_image, observed = continuum_node._extract_mvc_observed_visibility_grid(
         image
@@ -293,6 +295,8 @@ def test_extract_mvc_observed_grid_removes_private_map_payload():
     assert continuum_node._MVC_OBSERVED_NORMALIZATION_CACHE not in reduced_image
     np.testing.assert_array_equal(observed.VISIBILITY, 5.0)
     np.testing.assert_array_equal(observed.VISIBILITY_NORMALIZATION, 4.0)
+    assert observed.VISIBILITY.data is visibility_buffer
+    assert observed.VISIBILITY_NORMALIZATION.data is normalization_buffer
     assert observed.attrs["data_groups"]["residual"] == {
         "visibility": "VISIBILITY",
         "visibility_normalization": "VISIBILITY_NORMALIZATION",
@@ -566,6 +570,56 @@ def _weight_node_params():
         "input_data": {"ms": xr.Dataset()},
         "task_id": 4,
     }
+
+
+def test_first_cycle_does_not_rewrite_loaded_global_weights(monkeypatch):
+    """A global in-place weight cache is read once and never written back."""
+    monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
+    weight = xr.DataArray(
+        np.ones((1, 1, 2, 2)),
+        dims=("time", "baseline", "frequency", "polarization"),
+    )
+    processing_set = {
+        "ms": xr.Dataset(
+            {"WEIGHT_IMAGING": weight},
+            attrs={"data_groups": {"base": {"weight_imaging": "WEIGHT_IMAGING"}}},
+        )
+    }
+    calls = {"load": 0, "write": 0}
+
+    def fake_load_weights(ps_xdt, *args, **kwargs):
+        calls["load"] += 1
+        return ps_xdt
+
+    monkeypatch.setattr(
+        continuum_node, "_load_continuum_weights_in_place", fake_load_weights
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "_write_continuum_weights_in_place",
+        lambda *args, **kwargs: calls.__setitem__("write", calls["write"] + 1),
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.residual_update_continuum_single_field",
+        lambda ps_xdt, img_xds, *args, **kwargs: (
+            img_xds,
+            pd.DataFrame({"imaging_weights_calculated": [0.0]}),
+        ),
+    )
+    params = _weight_node_params()
+    params.update(
+        image_store="image.zarr",
+        weight_memory_mode="in_place",
+        weight_cache_is_active=True,
+        continuum_mode="mfs",
+        data_group={"correlated_data": "VISIBILITY"},
+        input_data=processing_set,
+    )
+
+    result = continuum_node.residual_update_continuum_single_field(**params)
+
+    assert calls == {"load": 1, "write": 0}
+    assert "weight_datasets" not in result
 
 
 def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
