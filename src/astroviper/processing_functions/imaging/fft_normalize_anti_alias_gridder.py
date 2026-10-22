@@ -157,9 +157,9 @@ def ifft_norm_img_xds(
 
     Returns
     -------
-    None
-        ``img_xds`` is modified in place.  Sky / PSF / primary-beam arrays are
-        added as new data variables with dimensions
+    xarray.Dataset
+        The input ``img_xds``, modified in place. Sky / PSF / primary-beam
+        arrays are added as new data variables with dimensions
         ``(time, plane, polarization, l, m)``, preserving the input plane
         dimension. They are real, except the
         sky in a four-correlation basis (``XX, XY, YX, YY`` or
@@ -286,13 +286,7 @@ def ifft_norm_img_xds(
         if out_name in img_xds:
             existing = img_xds[out_name]
             if existing.dims != output_dims or existing.shape != output_shape:
-                if not overwrite:
-                    raise ValueError(
-                        f"Existing {out_name} has dimensions {existing.dims} "
-                        f"and shape {existing.shape}; expected {output_dims} "
-                        f"and {output_shape}."
-                    )
-                img_xds = img_xds.drop_vars(out_name)
+                del img_xds[out_name]
 
         if out_name not in img_xds or img_xds[out_name].dtype != out_dtype:
             output_coords = {
