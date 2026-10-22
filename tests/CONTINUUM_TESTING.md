@@ -42,6 +42,18 @@ weighting to produce identical images. They protect equivalence of execution
 and storage choices. Independent numerical unit-test oracles complement these
 comparisons, which alone could miss a defect shared by both execution paths.
 
+### Taylor-coefficient convention
+
+The MFS and MVC tests intentionally use different primary-beam conventions.
+MFS fits the apparent sky, `A_nu * I_nu`, so `SKY_MODEL` `tt1 / tt0` contains
+the intrinsic source spectral index plus the primary-beam spectral index. MVC
+fits the intrinsic spectrum under its common-beam convention by predicting
+`M_nu * A_nu / Abar`, so its `tt1 / tt0` excludes the primary-beam spectral
+index. This matches CASA's standard-gridder MT-MFS and MVC behavior. Tests that
+compare recovered Taylor coefficients must therefore use the expected
+convention for the selected mode rather than requiring off-axis MFS and MVC
+coefficients to be equal.
+
 The component matrix uses 64×64 images, three frequency tasks, one kernel
 thread and two imaging cycles. The controller's iteration total sums the two
 polarization planes; `max_iter` is a per-plane budget. Product comparisons use

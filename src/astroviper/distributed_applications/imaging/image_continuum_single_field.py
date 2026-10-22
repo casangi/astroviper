@@ -3137,9 +3137,18 @@ def image_continuum_single_field(
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
     continuum_mode : {"mfs", "mvc"}
-        Taylor UV gridding or channel-image Taylor construction. ``"mvc"``
-        images the two parallel hands only; ``["I", "Q", "U", "V"]`` is
-        refused.
+        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
+        the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
+        both the intrinsic source spectral index and the primary-beam spectral
+        index. Its reference-frequency primary beam corrects the Taylor-zero
+        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        channel images and common-beam Taylor equations, and predicts
+        ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
+        the intrinsic spectrum under the common-beam convention, so
+        ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
+        match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
+        parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"mtmfs"``

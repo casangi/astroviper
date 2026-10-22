@@ -48,6 +48,21 @@ _CONTINUUM_DECONVOLVER_DOC = (
     "are refused before anything is written."
 )
 
+_CONTINUUM_MODE_DOC = (
+    'Continuum construction mode. ``"mfs"`` grids Taylor-weighted\n'
+    "visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe\n"
+    "the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains\n"
+    "both the intrinsic source spectral index and the primary-beam spectral\n"
+    "index. Its reference-frequency primary beam corrects the Taylor-zero\n"
+    'restored product, but not the higher Taylor coefficients. ``"mvc"`` forms\n'
+    "channel images and common-beam Taylor equations, and predicts\n"
+    "``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe\n"
+    "the intrinsic spectrum under the common-beam convention, so\n"
+    "``tt1 / tt0`` excludes the primary-beam spectral index. These conventions\n"
+    "match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two\n"
+    'parallel hands only; ``["I", "Q", "U", "V"]`` is refused.'
+)
+
 IMAGING_PARAM_DOCS = {
     "image_params": _IMAGE_PARAMS_DOC,
     "image_continuum_single_field.image_params": _CONTINUUM_IMAGE_PARAMS_DOC,
@@ -87,6 +102,7 @@ IMAGING_PARAM_DOCS = {
         "channels in distributed continuum imaging. Natural weighting is\n"
         "independent of this scope."
     ),
+    "continuum_mode": _CONTINUUM_MODE_DOC,
     "gridding_kernel_params": (
         "The gridding convolution kernel the gridder and degridder use:\n"
         '``type`` (``"prolate_spheroidal_casa"``, Schwab\'s rational\n'

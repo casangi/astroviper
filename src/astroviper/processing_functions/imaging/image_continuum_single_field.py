@@ -118,7 +118,18 @@ def imaging_preparation_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Select Taylor UV gridding or frequency-resolved MVC processing.
+        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
+        the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
+        both the intrinsic source spectral index and the primary-beam spectral
+        index. Its reference-frequency primary beam corrects the Taylor-zero
+        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        channel images and common-beam Taylor equations, and predicts
+        ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
+        the intrinsic spectrum under the common-beam convention, so
+        ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
+        match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
+        parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
     ps_xdt : xarray.DataTree
         Visibility data for this frequency chunk.
 
@@ -1774,7 +1785,18 @@ def residual_update_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Select Taylor UV gridding or frequency-resolved MVC processing.
+        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
+        the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
+        both the intrinsic source spectral index and the primary-beam spectral
+        index. Its reference-frequency primary beam corrects the Taylor-zero
+        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        channel images and common-beam Taylor equations, and predicts
+        ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
+        the intrinsic spectrum under the common-beam convention, so
+        ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
+        match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
+        parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
     primary_beam_xds : xarray.Dataset, optional
         Cached primary beam for this MVC partition.
     observed_visibility_grid_xds : xarray.Dataset, optional
