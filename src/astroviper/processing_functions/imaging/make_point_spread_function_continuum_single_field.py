@@ -89,9 +89,9 @@ def add_uv_sampling_grid_continuum_single_field(
 
     ``(time, psf_taylor_order, polarization)``.
 
-    The C++ cube gridder is reused one Taylor order at a time.  All channels map
-    into one temporary continuum plane, while their imaging weights are multiplied
-    by ``x**k`` for Taylor order ``k``.
+    The C++ cube gridder is reused one Taylor order at a time. All channels map
+    directly into one Taylor plane of the output grid, while their imaging weights
+    are multiplied by ``x**k`` for Taylor order ``k``.
 
     Parameters
     ----------
@@ -125,7 +125,7 @@ def add_uv_sampling_grid_continuum_single_field(
     gcf_oversampling : int, optional
         Convolution-kernel oversampling factor.
     complex_dtype : numpy.dtype or None, optional
-        Complex dtype of the temporary and accumulated UV grids.
+        Complex dtype of the accumulated UV grids.
 
     Notes
     -----
@@ -280,28 +280,30 @@ def add_uv_sampling_grid_continuum_single_field(
         anti_alias_grid_uv_sampling,
     )
 
-    # Reuse the existing continuum channel map.  A contiguous one-plane work
-    # array is used because a slice through the Taylor-order axis of the full
-    # target array is not guaranteed to satisfy the C++ gridder's memory-layout
-    # requirements.
+    # Reuse the existing continuum channel map. With one image-time plane, each
+    # Taylor-order view has the contiguous layout required by the C++ gridder.
     for taylor_order in range(n_psf_taylor_terms):
         taylor_factor = np.power(x_frequency, taylor_order)
 
-        effective_weight = np.ascontiguousarray(
-            weight_imaging * taylor_factor[np.newaxis, np.newaxis, :, np.newaxis]
-        )
+        if (
+            taylor_order == 0
+            and weight_imaging.dtype == np.float64
+            and weight_imaging.flags.c_contiguous
+        ):
+            effective_weight = weight_imaging
+        else:
+            effective_weight = np.ascontiguousarray(
+                weight_imaging * taylor_factor[np.newaxis, np.newaxis, :, np.newaxis]
+            )
 
-        temporary_grid = np.zeros(
-            (n_image_time, 1, n_pol, n_uv[0], n_uv[1]),
-            dtype=complex_dtype,
-        )
+        grid_view = target_grid[:, taylor_order : taylor_order + 1, ...]
         temporary_normalization = np.zeros(
             (n_image_time, 1, n_pol),
             dtype=np.float64,
         )
 
         anti_alias_grid_uv_sampling(
-            temporary_grid,
+            grid_view,
             temporary_normalization,
             uvw,
             frequency_coord,
@@ -316,8 +318,6 @@ def add_uv_sampling_grid_continuum_single_field(
             oversampling=gcf_oversampling,
             processing_function_threads=processing_function_threads,
         )
-
-        target_grid[:, taylor_order, ...] += temporary_grid[:, 0, ...]
 
         # Only order zero defines the common MT-MFS normalization.
         if taylor_order == 0:

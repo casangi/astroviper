@@ -32,6 +32,9 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
 from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
     _convert_primary_beam_to_reference_frequency,
 )
+from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
+    add_uv_sampling_grid_continuum_single_field,
+)
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
     residual_cycle_continuum_single_field,
@@ -41,6 +44,69 @@ from astroviper.processing_functions.imaging.utils.frequency_mapping import (
     map_visibility_frequencies_to_image,
 )
 from tests.utils.continuum_images import make_continuum_image
+
+
+def test_psf_taylor_gridding_uses_output_views_and_reuses_order_zero_weights(
+    monkeypatch,
+):
+    """Each Taylor order is gridded in place without a full temporary plane."""
+    weights = np.ones((1, 1, 2, 1), dtype=np.float64, order="C")
+    measurement_set = xr.Dataset(
+        {
+            "WEIGHT_IMAGING": (
+                ("time", "baseline", "frequency", "polarization"),
+                weights,
+            ),
+            "UVW": (
+                ("time", "baseline", "uvw_label"),
+                np.zeros((1, 1, 3), dtype=np.float64),
+            ),
+        },
+        coords={"frequency": [90.0, 110.0]},
+        attrs={
+            "data_groups": {
+                "base": {
+                    "weight_imaging": "WEIGHT_IMAGING",
+                    "uvw": "UVW",
+                }
+            }
+        },
+    )
+    image = xr.Dataset(
+        coords={"l": np.arange(4) * -1.0e-5, "m": np.arange(4) * 1.0e-5},
+        attrs={"type": "image_dataset", "data_groups": {"residual": {}}},
+    )
+    calls = []
+
+    def fake_grid(grid, normalization, *args, **kwargs):
+        order = len(calls)
+        calls.append((grid, args[5]))
+        grid[...] += order + 1
+        normalization[...] = 7.0 + order
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "anti_alias_grid_uv_sampling",
+        fake_grid,
+    )
+
+    add_uv_sampling_grid_continuum_single_field(
+        measurement_set,
+        np.ones(1),
+        image,
+        n_psf_taylor_terms=3,
+        reference_frequency=100.0,
+        fft_padding=1.0,
+    )
+
+    output_grid = image["UV_SAMPLING"].data
+    assert len(calls) == 3
+    assert all(np.shares_memory(grid, output_grid) for grid, _ in calls)
+    assert calls[0][1] is weights
+    np.testing.assert_array_equal(output_grid[:, 0], 1.0)
+    np.testing.assert_array_equal(output_grid[:, 1], 2.0)
+    np.testing.assert_array_equal(output_grid[:, 2], 3.0)
+    np.testing.assert_array_equal(image["UV_SAMPLING_NORMALIZATION"], 7.0)
 
 
 def _model_dataset(value, *, include_primary_beam=False):
