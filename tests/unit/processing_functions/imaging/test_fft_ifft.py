@@ -1,10 +1,9 @@
 # run using eg
 # python -m pytest ../astroviper/tests/domain/imaging/test_fft_ifft.py
 
-import sys
 import unittest
-from types import SimpleNamespace
 
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 
@@ -39,11 +38,7 @@ def test_forward_image_fft_does_not_open_a_matplotlib_window(monkeypatch):
     def fail_show():
         raise AssertionError("fft_norm_img_xds called matplotlib.pyplot.show()")
 
-    monkeypatch.setitem(
-        sys.modules,
-        "matplotlib.pyplot",
-        SimpleNamespace(show=fail_show),
-    )
+    monkeypatch.setattr(plt, "show", fail_show)
     image = xr.Dataset(
         {
             "SKY_MODEL": (
