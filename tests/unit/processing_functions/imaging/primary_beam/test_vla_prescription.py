@@ -5,7 +5,6 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam import (
-    casa_airy_disk_response,
     evaluate_primary_beam,
     resolve_continuum_primary_beam,
 )
@@ -21,80 +20,6 @@ CASA_VLA_MFS_SAMPLES = np.array(
         [0, 0, 0.11041608452796936],
         [25, 150, 0.4628506600856781],
         [175, 25, 0.33019864559173584],
-    ]
-)
-
-
-# CASA MVC samples: l, m [rad], frequency [Hz], clipped power.
-CASA_VLA_MVC_SAMPLES = np.array(
-    [
-        [
-            -0.00019392547244381441,
-            0.00019392547244381441,
-            999988830.2104049,
-            0.9987678527832031,
-        ],
-        [
-            -0.003975472185098195,
-            -0.00484813681109536,
-            999988830.2104049,
-            0.5032012462615967,
-        ],
-        [
-            0.00484813681109536,
-            -0.00484813681109536,
-            999988830.2104049,
-            0.4352755546569824,
-        ],
-        [
-            0.00484813681109536,
-            -0.00484813681109536,
-            999988830.2104049,
-            0.4352755546569824,
-        ],
-        [
-            -0.00019392547244381441,
-            0.00019392547244381441,
-            1499984801.867004,
-            0.9972193241119385,
-        ],
-        [
-            0.0029573634547681695,
-            -0.0029573634547681695,
-            1499984801.867004,
-            0.502850353717804,
-        ],
-        [
-            0.00484813681109536,
-            -0.00484813681109536,
-            1499984801.867004,
-            0.12125224620103836,
-        ],
-        [
-            0.00484813681109536,
-            -0.00484813681109536,
-            1499984801.867004,
-            0.12125224620103836,
-        ],
-        [
-            -0.00019392547244381441,
-            0.00019392547244381441,
-            1949981176.357943,
-            0.9953176975250244,
-        ],
-        [
-            -0.0027149566142134016,
-            -0.001696847883883376,
-            1949981176.357943,
-            0.5063600540161133,
-        ],
-        [
-            -0.0033452143996557985,
-            -0.004217879025652963,
-            1949981176.357943,
-            0.10825737565755844,
-        ],
-        [0.00484813681109536, -0.00484813681109536, 1949981176.357943, 0.0],
     ]
 )
 
@@ -179,7 +104,7 @@ def test_casa_vla_image():
     )
 
 
-def test_mvc_selects_first_channel_once():
+def test_mvc_selects_reference_frequency_independent_of_channel_order():
     geometry = {
         "reference_frequency": 1.5e9,
         "frequency_coords": np.arange(20) * 5e7 + 1e9,
@@ -187,28 +112,23 @@ def test_mvc_selects_first_channel_once():
     resolved = resolve_continuum_primary_beam(
         geometry, antennas(), continuum_mode="mvc"
     )
-    assert resolved["list_dish_diameters"] == [24.5]
-    assert resolved["list_blockage_diameters"] == [0.0]
-    l, m, frequency, expected = CASA_VLA_MVC_SAMPLES.T
-    actual = casa_airy_disk_response(
-        l,
-        m,
-        frequency,
-        resolved["list_dish_diameters"][0],
-        resolved["list_blockage_diameters"][0],
-        resolved["primary_beam_max_radius_1ghz"],
-        ipower=2,
-    )
-    # CASA normalizes/clips its PB cube before forming Taylor products.
-    actual = np.where(actual > 0.1, actual, 0.0)
-    np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-7)
-    # Reversing the spectral axis deliberately changes CASA's band selection.
-    geometry["frequency_coords"] = geometry["frequency_coords"][::-1]
-    resolved = resolve_continuum_primary_beam(
-        geometry, antennas(), continuum_mode="mvc"
-    )
     assert resolved["list_dish_diameters"] == [25]
     assert resolved["list_blockage_diameters"] == [2.36]
+
+    reversed_geometry = {
+        **geometry,
+        "frequency_coords": geometry["frequency_coords"][::-1],
+    }
+    reversed_resolved = resolve_continuum_primary_beam(
+        reversed_geometry, antennas(), continuum_mode="mvc"
+    )
+    for key in (
+        "primary_beam_model",
+        "list_dish_diameters",
+        "list_blockage_diameters",
+        "primary_beam_max_radius_1ghz",
+    ):
+        assert reversed_resolved[key] == resolved[key]
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -227,9 +147,9 @@ def test_partitioned_mvc_reuses_resolved_vla_prescription(dtype):
     resolved = resolve_continuum_primary_beam(
         geometry, antennas(), continuum_mode="mvc"
     )
-    assert resolved["list_dish_diameters"] == [24.5]
-    # This partition starts inside VLA L-band. It must still use the NVSS
-    # choice resolved from the full cube's first channel, without re-selection.
+    assert resolved["list_dish_diameters"] == [25]
+    # Every partition must retain the VLA L-band choice resolved from the
+    # Taylor reference frequency, without re-selection from its own channels.
     image = xr.Dataset(
         coords={
             "time": [0],

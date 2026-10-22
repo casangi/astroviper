@@ -108,9 +108,11 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode=
     antenna_xds : xarray.Dataset
         Antenna metadata with physical diameters and telescope identification.
     continuum_mode : {"mfs", "mvc"}
-        MFS selects the VLA band at the continuum reference frequency; MVC
-        uses the first image channel, matching CASA makePBImage. Resolve once
-        before partitioning so every task uses the same prescription.
+        Both modes select the VLA band at the Taylor reference frequency so
+        that channel order cannot change the beam prescription. CASA
+        ``makePBImage`` instead selects the MVC beam from the first image
+        channel. Resolve once before partitioning so every task uses the same
+        prescription.
 
     Returns
     -------
@@ -141,11 +143,9 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode=
     # which instead uses a 24.5-m unobstructed aperture with the same support.
     reference_frequency = params.get("reference_frequency")
     frequencies = np.asarray(params.get("frequency_coords", []), dtype=float)
-    if continuum_mode == "mvc":
-        reference_frequency = frequencies.flat[0] if frequencies.size else np.nan
-    elif continuum_mode != "mfs":
+    if continuum_mode not in ("mfs", "mvc"):
         raise ValueError("continuum_mode must be 'mfs' or 'mvc'.")
-    elif reference_frequency is None:
+    if reference_frequency is None:
         reference_frequency = np.mean(frequencies) if frequencies.size else np.nan
     frequency_ghz = float(reference_frequency) / 1e9
     is_vla = (

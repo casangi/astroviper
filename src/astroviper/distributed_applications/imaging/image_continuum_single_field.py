@@ -3248,10 +3248,12 @@ def image_continuum_single_field(
     Auto selects the CASA ALMA/ACA effective aperture and legacy VLA/NVSS
     prescriptions. EVLA polynomial beams are not implemented; EVLA and other
     telescopes retain the physical Airy fallback. Explicit dish/blockage lists
-    and ``primary_beam_max_radius_1ghz`` override the inferred values. MFS
-    selects the VLA band at its reference frequency; MVC uses the first image
-    channel and retains that selection across all partitions. These choices
-    affect only continuum imaging; cube imaging keeps its existing beam path.
+    and ``primary_beam_max_radius_1ghz`` override the inferred values. MFS and
+    MVC select the VLA band at the Taylor reference frequency and retain that
+    selection across all partitions, making the beam independent of channel
+    order. CASA ``makePBImage`` instead selects the MVC beam from the first
+    image channel. These choices affect only continuum imaging; cube imaging
+    keeps its existing beam path.
 
     Returns
     -------
