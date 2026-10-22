@@ -697,6 +697,7 @@ def _run_tw_hydra_continuum(
     disk_chunk_sizes=None,
     image_sharding=None,
     image_chunking=None,
+    compressor=None,
     reduce_mode="tree",
     reduce_n_batch=2,
     cache_directory=None,
@@ -767,6 +768,7 @@ def _run_tw_hydra_continuum(
             disk_chunk_sizes=disk_chunk_sizes,
             image_sharding=image_sharding,
             image_chunking=image_chunking,
+            compressor=compressor,
             vizualize_graph=False,
             compute_backend="dask",
             reduce_mode=reduce_mode,
@@ -2243,21 +2245,20 @@ def test_tw_hydra_supports_alternate_taylor_orders(tmp_path, tw_hydra_store, nte
     ("reduce_mode", "reduce_n_batch"),
     [("tree_n", 3), ("single_node", 2)],
 )
-def test_tw_hydra_alternate_reduction_and_sharded_direct_io(
+def test_tw_hydra_alternate_reduction_and_direct_io(
     tmp_path, tw_hydra_store, reduce_mode, reduce_n_batch
 ):
-    """Alternate reducers work with direct loading and channel-sharded output."""
+    """Alternate reducers work with the direct Processing Set loading path."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, image = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"tw_hydra_{reduce_mode}_sharded.img.zarr",
+        tmp_path / f"tw_hydra_{reduce_mode}_direct.img.zarr",
         processing_set,
         5,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
         skunk_works=True,
         disk_chunk_sizes="Auto",
-        image_sharding={"frequency": 2},
         reduce_mode=reduce_mode,
         reduce_n_batch=reduce_n_batch,
     )
@@ -2289,37 +2290,20 @@ def test_chunk_count_respects_override_and_calculates_when_absent(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("sharding", [None, {"frequency": 2}])
-def test_continuum_initial_store_uses_shared_chunk_and_shard_api(
-    monkeypatch, tmp_path, tw_hydra_store, sharding
+@pytest.mark.parametrize(
+    "layout",
+    [
+        {"image_sharding": {"frequency": 2}},
+        {"image_chunking": {"l": 32, "m": 32}},
+    ],
+)
+def test_continuum_rejects_output_layout_options_until_final_node_writes(
+    tmp_path, tw_hydra_store, layout
 ):
-    """The public driver creates the requested on-disk layout before computing."""
-    import astroviper.utils.io as image_io
-
-    writer = image_io.create_empty_data_variables_on_disk
-    output = tmp_path / "layout.img.zarr"
-
-    class StoreCreated(Exception):
-        pass
-
-    def create_and_inspect(*args, **kwargs):
-        assert kwargs["image_sharding"] == sharding
-        assert kwargs["image_chunking"] == {"l": 1, "m": 1}
-        writer(*args, **kwargs)
-        array = zarr.open_array(str(output / "SKY_RESIDUAL"), mode="r")
-        assert array.chunks[-2:] == (1, 1)
-        assert array.chunks[1] == 1
-        if sharding:
-            assert array.shards[1] == 2
-        else:
-            assert array.shards is None
-        raise StoreCreated
-
-    monkeypatch.setattr(
-        image_io, "create_empty_data_variables_on_disk", create_and_inspect
-    )
+    """Continuum fails fast instead of discarding a requested output layout."""
+    output = tmp_path / "unsupported_layout.img.zarr"
     processing_set = open_processing_set(str(tw_hydra_store))
-    with pytest.raises(StoreCreated):
+    with pytest.raises(NotImplementedError, match="not supported"):
         _run_tw_hydra_continuum(
             tw_hydra_store,
             output,
@@ -2328,9 +2312,38 @@ def test_continuum_initial_store_uses_shared_chunk_and_shard_api(
             "mfs",
             {"weighting": "natural", "weighting_scope": "local"},
             skunk_works=True,
-            image_sharding=sharding,
-            image_chunking={"l": 1, "m": 1},
+            **layout,
         )
+    assert not output.exists()
+
+
+def test_continuum_passes_compressor_to_the_final_image_write(
+    monkeypatch, tmp_path, tw_hydra_store
+):
+    """The requested codec applies to the real Taylor products, not placeholders."""
+    import xradio.image
+
+    compressor = zarr.codecs.BloscCodec(cname="zstd", clevel=1)
+    write_calls = []
+    write_image = xradio.image.write_image
+
+    def capture_write(*args, **kwargs):
+        write_calls.append(kwargs.copy())
+        return write_image(*args, **kwargs)
+
+    monkeypatch.setattr(xradio.image, "write_image", capture_write)
+    processing_set = open_processing_set(str(tw_hydra_store))
+    _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "compressed.img.zarr",
+        processing_set,
+        2,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        compressor=compressor,
+    )
+
+    assert write_calls[-1]["compressor"] is compressor
 
 
 @pytest.mark.parametrize("specmode", ["mfs", "mvc"])

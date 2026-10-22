@@ -10,7 +10,7 @@ from typing import Any
 
 import toolviper.utils.parameter
 import zarr
-from numcodecs import Blosc
+from zarr.codecs import BloscCodec
 
 import astroviper.node_tasks as node_tasks
 from astroviper.node_tasks.imaging.image_continuum_single_field import (
@@ -31,7 +31,6 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
                 "determine chunks + parallel coords",
                 "T_determine_chunks_and_parallel_coords",
             ),
-            ("create empty data vars on disk", "T_create_empty_data_variables"),
             ("open processing set", "T_open_processing_set"),
             ("interpolate data coords", "T_interpolate_data_coords"),
             ("create map/reduce/append graph", "T_create_map_reduce_graph"),
@@ -3158,14 +3157,13 @@ def image_continuum_single_field(
         Its shape must equal ``image_params["image_size"]``. Finite values greater
         than 0.5 select pixels in every continuum residual plane.
     image_sharding : dict, optional
-        Shard dimensions for the initial frequency-resolved Zarr arrays, e.g.
-        ``{"frequency": 2}``. Requires ``skunk_works=True``. Uses the same
-        dimension-based interface as cube imaging. Final continuum Taylor
-        products are written separately by the existing finalization path.
+        Reserved for a future node-task finalization path. Continuum imaging
+        currently raises ``NotImplementedError`` when this is supplied rather
+        than silently discarding the requested layout at finalization.
     image_chunking : dict, optional
-        Chunk dimensions for the initial image arrays; for sharded arrays these
-        are the inner chunks. Unspecified dimensions use the task extent.
-        Chunk and shard sizes are validated by the shared image writer.
+        Reserved for a future node-task finalization path. Continuum imaging
+        currently raises ``NotImplementedError`` when this is supplied rather
+        than silently discarding the requested layout at finalization.
     weight_memory_mode : {"in_memory", "in_place"}, optional
         Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
@@ -3257,18 +3255,22 @@ def image_continuum_single_field(
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
     from astroviper.utils.io import (
-        create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
         write_zarr_image_store,
     )
     from astroviper.utils.timing import format_timing_summary
 
     if compressor is None:
-        compressor = Blosc(cname="lz4", clevel=5)
+        compressor = BloscCodec(cname="lz4", clevel=5)
 
     assert memory_mode == "in_memory", (
         "Currently only in_memory is supported for memory_mode is implemented."
     )
+    if image_sharding is not None or image_chunking is not None:
+        raise NotImplementedError(
+            "Continuum image_sharding and image_chunking are not supported until "
+            "final Taylor products are written by node tasks."
+        )
     if weight_memory_mode not in ("in_memory", "in_place"):
         raise ValueError(
             "weight_memory_mode must be 'in_memory' or 'in_place'; received "
@@ -3292,16 +3294,6 @@ def image_continuum_single_field(
         raise ValueError(
             "write_imaging_weights_to_ps=True keeps the in-place imaging weights "
             "and requires weight_memory_mode='in_place'."
-        )
-
-    # Sharded output is written by the concurrent direct-blob (skunk_works) writer;
-    # the standard write path cannot safely write partial shards concurrently, so
-    # creating sharded arrays without it would corrupt the output. Fail fast rather
-    # than silently create sharded arrays a non-concurrent writer will clobber.
-    if image_sharding and not skunk_works:
-        raise ValueError(
-            "image_sharding requires skunk_works=True (sharded output is "
-            "written by the concurrent direct-blob writer)."
         )
 
     # Validate specmode
@@ -3461,24 +3453,6 @@ def image_continuum_single_field(
     image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
     timing_distributed_application["T_write_empty_image"] = time.time() - start
 
-    # Add nan images (these will be overwritten with the actual image data but this ensures the coordinates and dtypes are correct and allows for lazy writing of the data)
-    # create_empty_data_varable_on_disk(zarr_store, dv_names, dims, shape, chunk, variable_dtype, compressor)
-    start = time.time()
-    create_empty_data_variables_on_disk(
-        image_store,
-        image_data_variables_keep,
-        shape_dict=img_xds.sizes,
-        parallel_coords=parallel_coords,
-        compressor=compressor,
-        double_precision=not single_precision_image,
-        data_variable_definitions="imaging",
-        image_sharding=image_sharding,
-        image_chunking=image_chunking,
-    )
-    timing_distributed_application["T_create_empty_data_variables"] = (
-        time.time() - start
-    )
-
     zarr_meta = {}
 
     input_params = {}
@@ -3514,8 +3488,6 @@ def image_continuum_single_field(
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
     input_params["skunk_works"] = skunk_works
-    input_params["image_sharding"] = image_sharding
-    input_params["image_chunking"] = image_chunking
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
     controller = _make_continuum_cycle_controller(cycle_control_params)
@@ -3628,20 +3600,7 @@ def image_continuum_single_field(
             k: v for k, v in image_params.items() if k != "frequency_coords"
         }
 
-        # Sharded output: dispatch the tasks in shard-interleaved "waves" (each wave
-        # touches every shard file once) so the concurrently running tasks write to
-        # all shard files -- and hence all Lustre OSTs -- instead of piling onto the
-        # few shards that consecutive task_ids share. Derived from the on-disk shard
-        # layout of the first kept variable, for any combination of sharded dims.
         task_priorities = None
-        if skunk_works and image_sharding:
-            from astroviper.node_tasks.imaging.utils import (
-                compute_shard_task_priorities,
-            )
-
-            task_priorities = compute_shard_task_priorities(
-                image_store, image_data_variables_keep[0], node_task_data_mapping
-            )
 
         # =============================================================
         # Distributed major/model-update loop
@@ -4106,6 +4065,7 @@ def image_continuum_single_field(
             imagename=image_store,
             out_format="zarr",
             overwrite=True,
+            compressor=compressor,
         )
         timing_distributed_application["T_write_final_image"] = time.time() - start
 
