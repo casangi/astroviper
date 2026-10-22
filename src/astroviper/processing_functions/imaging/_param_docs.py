@@ -364,15 +364,14 @@ IMAGING_PARAM_DOCS = {
         "Storage policy for calculated continuum imaging weights.\n"
         '``"in_memory"``\n'
         "returns task-local weights to the driver and embeds them in subsequent\n"
-        'graphs. ``"in_place"`` writes each task\'s weights into the input\n'
-        "Processing Set and reloads only the required partition during each major\n"
-        "cycle, reducing scheduler and worker memory at the cost of additional\n"
-        "disk I/O. This option is intentionally separate from ``memory_mode`` in\n"
-        "the initial implementation; the two policies may be unified later.\n"
-        "The in-place weights are removed when the run ends, also after an error;\n"
-        "a run that completes keeps them when ``write_imaging_weights_to_ps=True``.\n"
-        'While an ``"in_place"`` run is in progress, no other run may use the same\n'
-        "Processing Set."
+        'graphs. ``"in_place"`` writes each task\'s weights into a temporary group\n'
+        "in the output image store and reloads only the required partition during\n"
+        "each imaging cycle. It is the default because it bounds scheduler and\n"
+        "worker memory without modifying the input Processing Set. The temporary\n"
+        "group is removed when the run ends, also after an error. A completed cache\n"
+        "is copied into the input only when ``write_imaging_weights_to_ps=True``.\n"
+        "This option remains separate from ``memory_mode`` for now; the policies\n"
+        "may be unified later."
     ),
     "visibility_memory_mode": (
         "Continuum residual-update storage policy for observed visibility grids.\n"

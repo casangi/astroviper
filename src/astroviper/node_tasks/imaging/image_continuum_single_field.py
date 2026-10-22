@@ -1,6 +1,7 @@
 from astroviper.utils.param_docs import shares_param_docs
 
 _CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
+_CONTINUUM_WEIGHT_CACHE_GROUP = "_CONTINUUM_WEIGHT_CACHE"
 _MFS_VISIBILITY_GRID_CACHE_GROUP = "_MFS_VISIBILITY_GRID_CACHE"
 _MVC_VISIBILITY_GRID_CACHE_GROUP = "_MVC_VISIBILITY_GRID_CACHE"
 _MVC_OBSERVED_VISIBILITY_CACHE = "_MVC_OBSERVED_VISIBILITY_CACHE"
@@ -139,12 +140,15 @@ def _stored_coordinate_indexer(stored_values, selected_values, dimension):
     return indices
 
 
-def _write_continuum_weights_in_place(ps_xdt, ps_store):
-    """Write task-local imaging weights into disjoint Processing Set regions."""
+def _write_continuum_weights_in_place(ps_xdt, image_store):
+    """Write task-local imaging weights into the output-store cache."""
     import numpy as np
     import zarr
 
-    root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _CONTINUUM_WEIGHT_CACHE_GROUP not in root:
+        raise KeyError("The in-place continuum weight cache is not initialized.")
+    cache_root = root[_CONTINUUM_WEIGHT_CACHE_GROUP]
     for ms_name, ms_xdt in ps_xdt.items():
         data_groups = ms_xdt.ds.attrs.get("data_groups", {})
         weight_name = next(
@@ -161,16 +165,16 @@ def _write_continuum_weights_in_place(ps_xdt, ps_store):
             )
 
         weight = ms_xdt.ds[weight_name]
-        ms_group = zarr.open_group(
-            root.store, path=ms_name, mode="r+", use_consolidated=False
-        )
-        if _CONTINUUM_WEIGHT_CACHE_VARIABLE not in ms_group:
+        if ms_name not in cache_root:
+            raise KeyError(f"No in-place weight cache exists for {ms_name!r}.")
+        ms_cache = cache_root[ms_name]
+        if _CONTINUUM_WEIGHT_CACHE_VARIABLE not in ms_cache:
             raise KeyError(
                 f"In-place weight array {_CONTINUUM_WEIGHT_CACHE_VARIABLE!r} "
                 f"has not been initialized for {ms_name!r}."
             )
 
-        target = ms_group[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
+        target = ms_cache[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
         if target.metadata.zarr_format == 3:
             dimensions = tuple(target.metadata.dimension_names)
         else:
@@ -183,20 +187,88 @@ def _write_continuum_weights_in_place(ps_xdt, ps_store):
 
         indexers = []
         for dimension in dimensions:
-            if dimension not in weight.coords or dimension not in ms_group:
+            if dimension not in weight.coords or dimension not in ms_cache:
                 raise KeyError(
                     f"Coordinate {dimension!r} required to write in-place "
                     f"weights for {ms_name!r} is missing."
                 )
             indexers.append(
                 _stored_coordinate_indexer(
-                    ms_group[dimension][:],
+                    ms_cache[dimension][:],
                     weight.coords[dimension].values,
                     dimension,
                 )
             )
 
         target.oindex[tuple(indexers)] = np.asarray(weight.values)
+
+
+def _load_continuum_weights_in_place(
+    ps_xdt,
+    image_store,
+    processing_set_data_group_name,
+):
+    """Load only this task's imaging-weight partition from the output cache."""
+    import numpy as np
+    import xarray as xr
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    if _CONTINUUM_WEIGHT_CACHE_GROUP not in root:
+        raise KeyError("The in-place continuum weight cache is missing.")
+    cache_root = root[_CONTINUUM_WEIGHT_CACHE_GROUP]
+    weight_datasets = {}
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        if ms_name not in cache_root:
+            raise KeyError(f"No cached imaging weights exist for {ms_name!r}.")
+        ms_cache = cache_root[ms_name]
+        target = ms_cache[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
+        dimensions = (
+            tuple(target.metadata.dimension_names)
+            if target.metadata.zarr_format == 3
+            else tuple(target.attrs["_ARRAY_DIMENSIONS"])
+        )
+        indexers = []
+        coordinates = {}
+        for dimension in dimensions:
+            if dimension not in ms_xdt.ds.coords or dimension not in ms_cache:
+                raise KeyError(
+                    f"Coordinate {dimension!r} required to load cached weights "
+                    f"for {ms_name!r} is missing."
+                )
+            selected = np.asarray(ms_xdt.ds.coords[dimension].values)
+            indexers.append(
+                _stored_coordinate_indexer(
+                    ms_cache[dimension][:],
+                    selected,
+                    dimension,
+                )
+            )
+            coordinates[dimension] = ms_xdt.ds.coords[dimension]
+
+        values = target.oindex[tuple(indexers)]
+        weight_datasets[ms_name] = xr.Dataset(
+            {
+                "WEIGHT_IMAGING": xr.DataArray(
+                    values,
+                    dims=dimensions,
+                    coords=coordinates,
+                    attrs=dict(target.attrs),
+                )
+            },
+            attrs={
+                "weight_imaging_name": "WEIGHT_IMAGING",
+                "processing_set_data_group_name": processing_set_data_group_name,
+            },
+        )
+
+    return _attach_imaging_weights_continuum(
+        ps_xdt,
+        weight_datasets,
+        processing_set_data_group_name=processing_set_data_group_name,
+        weight_imaging_name="WEIGHT_IMAGING",
+    )
 
 
 def _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id):
@@ -1126,15 +1198,14 @@ def residual_update_continuum_single_field(
         Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
-        graphs. ``"in_place"`` writes each task's weights into the input
-        Processing Set and reloads only the required partition during each major
-        cycle, reducing scheduler and worker memory at the cost of additional
-        disk I/O. This option is intentionally separate from ``memory_mode`` in
-        the initial implementation; the two policies may be unified later.
-        The in-place weights are removed when the run ends, also after an error;
-        a run that completes keeps them when ``write_imaging_weights_to_ps=True``.
-        While an ``"in_place"`` run is in progress, no other run may use the same
-        Processing Set.
+        graphs. ``"in_place"`` writes each task's weights into a temporary group
+        in the output image store and reloads only the required partition during
+        each imaging cycle. It is the default because it bounds scheduler and
+        worker memory without modifying the input Processing Set. The temporary
+        group is removed when the run ends, also after an error. A completed cache
+        is copied into the input only when ``write_imaging_weights_to_ps=True``.
+        This option remains separate from ``memory_mode`` for now; the policies
+        may be unified later.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         Continuum residual-update storage policy for observed visibility grids.
@@ -1341,6 +1412,13 @@ def residual_update_continuum_single_field(
             weight_imaging_name="WEIGHT_IMAGING",
         )
 
+    elif weight_cache_is_active:
+        ps_xdt = _load_continuum_weights_in_place(
+            ps_xdt,
+            image_store,
+            processing_set_data_group_name,
+        )
+
     elif is_n_iter_0 and not weight_cache_is_active:
         # This run has not prepared imaging weights, so setup calculates them.
         ps_xdt = _unregister_imaging_weights_continuum(
@@ -1545,7 +1623,7 @@ def residual_update_continuum_single_field(
 
         if weight_memory_mode == "in_place":
             start = time.time()
-            _write_continuum_weights_in_place(ps_xdt, input_data_store)
+            _write_continuum_weights_in_place(ps_xdt, image_store)
             T_write_imaging_weights = time.time() - start
             weight_datasets = {}
 
@@ -1848,6 +1926,7 @@ def degrid_imaging_weights_continuum_node(
     task_coords,
     data_selection,
     input_data_store,
+    image_store,
     processing_set_data_group_name="corrected",
     instrument_polarization_basis="linear",
     processing_function_threads=1,
@@ -1863,8 +1942,9 @@ def degrid_imaging_weights_continuum_node(
     weighting graph. It loads one processing-set partition, selects the
     corresponding planes from the globally reduced weight-density products,
     degrids the global Briggs weighting solution onto the local visibility
-    samples, and returns the weights or persists them in the Processing Set
-    according to ``weight_memory_mode``, together with timing metadata.
+    samples, and either returns the weights or writes them to the temporary
+    output-image cache according to ``weight_memory_mode``, together with
+    timing metadata.
 
     No density gridding or Briggs-factor calculation is performed here.
 
@@ -1874,15 +1954,14 @@ def degrid_imaging_weights_continuum_node(
         Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
-        graphs. ``"in_place"`` writes each task's weights into the input
-        Processing Set and reloads only the required partition during each major
-        cycle, reducing scheduler and worker memory at the cost of additional
-        disk I/O. This option is intentionally separate from ``memory_mode`` in
-        the initial implementation; the two policies may be unified later.
-        The in-place weights are removed when the run ends, also after an error;
-        a run that completes keeps them when ``write_imaging_weights_to_ps=True``.
-        While an ``"in_place"`` run is in progress, no other run may use the same
-        Processing Set."""
+        graphs. ``"in_place"`` writes each task's weights into a temporary group
+        in the output image store and reloads only the required partition during
+        each imaging cycle. It is the default because it bounds scheduler and
+        worker memory without modifying the input Processing Set. The temporary
+        group is removed when the run ends, also after an error. A completed cache
+        is copied into the input only when ``write_imaging_weights_to_ps=True``.
+        This option remains separate from ``memory_mode`` for now; the policies
+        may be unified later."""
     import time
 
     import pandas as pd
@@ -2061,7 +2140,7 @@ def degrid_imaging_weights_continuum_node(
 
     if weight_memory_mode == "in_place":
         start = time.time()
-        _write_continuum_weights_in_place(ps_xdt, input_data_store)
+        _write_continuum_weights_in_place(ps_xdt, image_store)
         T_write_imaging_weights = time.time() - start
         weight_datasets = {}
 

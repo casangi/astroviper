@@ -23,7 +23,6 @@ from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _accumulate_graph_timings,
-    _activate_continuum_weight_cache,
     _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
     _create_continuum_weight_cache_store,
@@ -587,7 +586,6 @@ def test_global_weight_preparation_builds_factors_and_returns_all_tasks(monkeypa
     module = importlib.import_module(
         "astroviper.distributed_applications.imaging.image_continuum_single_field"
     )
-
     leaf = _weight_density([1.05e9])
     leaf["weight_density"].attrs.update(
         continuum_frequency_collapsed=True,
@@ -898,7 +896,7 @@ def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
 ):
     """Task-local disk weights reproduce the default and are temporary.
 
-    The default keeps the weights in memory and leaves the input Processing Set
+    The default uses the output-store cache and leaves the input Processing Set
     byte for byte unchanged.
     """
     cycle_control_params = {
@@ -923,7 +921,7 @@ def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
         specmode,
         weighting,
         cycle_control_params=cycle_control_params,
-        weight_memory_mode=None,
+        weight_memory_mode="in_memory",
     )
     assert _store_snapshot(reference_store) == reference_files
 
@@ -938,7 +936,7 @@ def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
         specmode,
         weighting,
         cycle_control_params=cycle_control_params,
-        weight_memory_mode="in_place",
+        weight_memory_mode=None,
     )
 
     assert np.nanmax(np.abs(reference.SKY_MODEL.values)) > 0.0
@@ -957,7 +955,7 @@ def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
 
 
 def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
-    """The persistence flag keeps usable in-place weights registered in the PS."""
+    """The persistence flag explicitly copies usable weights into the input PS."""
     in_place_store = tmp_path / "retained.ps.zarr"
     shutil.copytree(tw_hydra_store, in_place_store)
     processing_set = open_processing_set(str(in_place_store))
@@ -982,7 +980,7 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
         assert np.isfinite(cached_weights).any()
         assert np.nanmax(cached_weights) > 0.0
 
-    # A later temporary run can safely replace and then remove a retained cache.
+    # A later temporary run ignores and leaves explicitly retained weights.
     _run_tw_hydra_continuum(
         in_place_store,
         tmp_path / "rerun.img.zarr",
@@ -994,8 +992,11 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
     )
     cleaned = open_processing_set(str(in_place_store))
     for _, ms_xdt in cleaned.items():
-        assert "WEIGHT_IMAGING_CONTINUUM_CACHE" not in ms_xdt.ds
-        assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
+        assert "WEIGHT_IMAGING_CONTINUUM_CACHE" in ms_xdt.ds
+        assert (
+            ms_xdt.ds.attrs["data_groups"]["base"]["weight_imaging"]
+            == "WEIGHT_IMAGING_CONTINUUM_CACHE"
+        )
 
 
 @pytest.mark.parametrize(
@@ -1041,7 +1042,10 @@ def test_tw_hydra_refused_deconvolvers_write_nothing(
         ),
         pytest.param(
             {"weighting": "natural", "weighting_scope": "local"},
-            {"weight_memory_mode": None, "write_imaging_weights_to_ps": True},
+            {
+                "weight_memory_mode": "in_memory",
+                "write_imaging_weights_to_ps": True,
+            },
             "requires weight_memory_mode='in_place'",
             id="keep-weights-in-memory",
         ),
@@ -1273,29 +1277,31 @@ def test_tw_hydra_numpy_and_xarray_scalars_give_the_same_images(
 def test_tw_hydra_failed_in_place_run_removes_its_weights(
     tmp_path, tw_hydra_store, monkeypatch, weighting
 ):
-    """An error after the in-place weights are registered removes them again."""
+    """An error removes the output cache without modifying the input PS."""
     import importlib
 
-    module = importlib.import_module(
-        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    node_module = importlib.import_module(
+        "astroviper.node_tasks.imaging.image_continuum_single_field"
     )
     store = tmp_path / "input.ps.zarr"
     shutil.copytree(tw_hydra_store, store)
     contents = _store_snapshot(store, parse_metadata=True)
-    activate = module._activate_continuum_weight_cache
+    write_weights = node_module._write_continuum_weights_in_place
 
-    def activate_then_fail(ps_xdt, ps_store, processing_set_data_group_name):
-        activate(ps_xdt, ps_store, processing_set_data_group_name)
-        for _, ms_xdt in open_processing_set(ps_store).items():
-            data_group = ms_xdt.ds.attrs["data_groups"]["base"]
-            assert data_group["weight_imaging"] == "WEIGHT_IMAGING_CONTINUUM_CACHE"
+    def write_then_fail(ps_xdt, image_store):
+        write_weights(ps_xdt, image_store)
         raise RuntimeError("injected failure")
 
-    monkeypatch.setattr(module, "_activate_continuum_weight_cache", activate_then_fail)
+    monkeypatch.setattr(
+        node_module,
+        "_write_continuum_weights_in_place",
+        write_then_fail,
+    )
+    image_store = tmp_path / "failed.img.zarr"
     with pytest.raises(RuntimeError, match="injected failure"):
         _run_tw_hydra_continuum(
             store,
-            tmp_path / "failed.img.zarr",
+            image_store,
             open_processing_set(str(store)),
             2,
             "mfs",
@@ -1303,6 +1309,8 @@ def test_tw_hydra_failed_in_place_run_removes_its_weights(
             weight_memory_mode="in_place",
         )
     assert _store_snapshot(store, parse_metadata=True) == contents
+    image_root = zarr.open_group(str(image_store), mode="r", use_consolidated=False)
+    assert "_CONTINUUM_WEIGHT_CACHE" not in image_root
 
 
 def test_weight_cache_store_checks_every_child_before_writing(tmp_path, tw_hydra_store):
@@ -1312,27 +1320,40 @@ def test_weight_cache_store_checks_every_child_before_writing(tmp_path, tw_hydra
     files = _store_snapshot(store)
     processing_set = dict(open_processing_set(str(store)).items())
     processing_set["without_base"] = xr.DataTree(xr.Dataset(attrs={"data_groups": {}}))
+    image_store = tmp_path / "image.zarr"
+    zarr.open_group(str(image_store), mode="w")
     with pytest.raises(KeyError, match="does not contain data group"):
-        _create_continuum_weight_cache_store(processing_set, str(store), "base")
+        _create_continuum_weight_cache_store(
+            processing_set,
+            str(store),
+            str(image_store),
+            "base",
+            None,
+        )
     assert _store_snapshot(store) == files
+    assert "_CONTINUUM_WEIGHT_CACHE" not in zarr.open_group(str(image_store), mode="r")
 
 
-def test_weight_cache_store_removes_an_earlier_registration(tmp_path, tw_hydra_store):
-    """A cache that an earlier run left registered is unregistered on disk."""
+def test_weight_cache_store_is_external_to_the_input(tmp_path, tw_hydra_store):
+    """Creating the disk cache changes only the output image store."""
     store = tmp_path / "input.ps.zarr"
     shutil.copytree(tw_hydra_store, store)
+    files = _store_snapshot(store, parse_metadata=True)
     processing_set = open_processing_set(str(store))
-    _create_continuum_weight_cache_store(processing_set, str(store), "base")
-    _activate_continuum_weight_cache(processing_set, str(store), "base")
-
-    original_data_groups = _create_continuum_weight_cache_store(
-        open_processing_set(str(store)), str(store), "base"
+    image_store = tmp_path / "image.zarr"
+    zarr.open_group(str(image_store), mode="w")
+    _create_continuum_weight_cache_store(
+        processing_set,
+        str(store),
+        str(image_store),
+        "base",
+        None,
     )
-
-    for ms_name, ms_xdt in open_processing_set(str(store)).items():
-        assert "WEIGHT_IMAGING_CONTINUUM_CACHE" in ms_xdt.ds
-        assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
-        assert "weight_imaging" not in original_data_groups[ms_name]["base"]
+    assert _store_snapshot(store, parse_metadata=True) == files
+    cache = zarr.open_group(str(image_store), mode="r")["_CONTINUUM_WEIGHT_CACHE"]
+    assert set(cache.group_keys()) == set(processing_set.children)
+    for ms_name in processing_set.children:
+        assert "WEIGHT_IMAGING_CONTINUUM_CACHE" in cache[ms_name]
 
 
 def _flag_one_hand(store):
@@ -1346,27 +1367,18 @@ def _flag_one_hand(store):
 
 
 @pytest.mark.parametrize("weight_memory_mode", ["in_memory", "in_place"])
-@pytest.mark.parametrize("earlier_run", ["retained", "interrupted", "foreign"])
+@pytest.mark.parametrize("earlier_run", ["retained", "foreign"])
 def test_tw_hydra_rerun_calculates_its_own_weights(
     tmp_path, tw_hydra_store, monkeypatch, earlier_run, weight_memory_mode
 ):
     """Imaging weights registered by an earlier run or another tool are not used.
 
-    The earlier run uses Briggs weighting and keeps its in-place weights
-    (``write_imaging_weights_to_ps=True``), or stops after it registered them
-    without its cleanup, as a killed process does. Or, with one hand flagged
-    on some rows, another tool registers the input weights, NaN only on the
-    flagged samples, as imaging weights: the two hands then get different
-    weights. A natural-weighting rerun over two imaging cycles equals the same
-    run on a clean copy with the same flags.
+    The earlier run uses Briggs weighting and explicitly retains its weights,
+    or another tool registers the input weights. A natural-weighting rerun over
+    two imaging cycles equals the same run on a clean copy with the same flags.
     """
-    import importlib
-
     import toolviper.utils.logger
 
-    module = importlib.import_module(
-        "astroviper.distributed_applications.imaging.image_continuum_single_field"
-    )
     cycle_control_params = {
         "max_iter": 20,
         "max_cycles": 2,
@@ -1418,28 +1430,6 @@ def test_tw_hydra_rerun_calculates_its_own_weights(
             reference.POINT_SPREAD_FUNCTION.values,
             equal_nan=True,
         )
-    elif earlier_run == "interrupted":
-        activate = module._activate_continuum_weight_cache
-
-        def activate_then_stop(ps_xdt, ps_store, processing_set_data_group_name):
-            activate(ps_xdt, ps_store, processing_set_data_group_name)
-            raise RuntimeError("process stopped")
-
-        with monkeypatch.context() as patch:
-            patch.setattr(
-                module, "_activate_continuum_weight_cache", activate_then_stop
-            )
-            patch.setattr(module, "_remove_continuum_weight_cache", lambda *args: None)
-            with pytest.raises(RuntimeError, match="process stopped"):
-                _run_tw_hydra_continuum(
-                    store,
-                    tmp_path / "earlier.img.zarr",
-                    open_processing_set(str(store)),
-                    2,
-                    "mfs",
-                    briggs,
-                    weight_memory_mode="in_place",
-                )
     else:
         _flag_one_hand(store)
         root = zarr.open_group(str(store), mode="r+", use_consolidated=False)
@@ -1493,12 +1483,10 @@ def test_tw_hydra_rerun_calculates_its_own_weights(
     if weight_memory_mode == "in_memory":
         assert _store_snapshot(store) == files
     elif earlier_run == "foreign":
-        # The foreign array is untouched and its registration is restored.
+        # The foreign array and registration are untouched.
         assert _store_snapshot(store, parse_metadata=True) == files
     else:
-        for _, ms_xdt in open_processing_set(str(store)).items():
-            assert "WEIGHT_IMAGING_CONTINUUM_CACHE" not in ms_xdt.ds
-            assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
+        assert _store_snapshot(store, parse_metadata=True) == files
 
 
 @pytest.mark.parametrize(

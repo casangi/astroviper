@@ -46,6 +46,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
 _CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
+_CONTINUUM_WEIGHT_CACHE_GROUP = "_CONTINUUM_WEIGHT_CACHE"
 _MFS_VISIBILITY_GRID_CACHE_GROUP = "_MFS_VISIBILITY_GRID_CACHE"
 _MVC_VISIBILITY_GRID_CACHE_GROUP = "_MVC_VISIBILITY_GRID_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
@@ -297,31 +298,16 @@ def _mapping_with_task_observed_grids(
 def _create_continuum_weight_cache_store(
     ps_xdt,
     ps_store,
+    image_store,
     processing_set_data_group_name,
+    compressor,
 ):
-    """Create empty, frequency-safe arrays for task-local imaging weights.
-
-    The cache variable is deliberately not registered in the processing-set
-    data group here.  Registration happens only after every weight-producing
-    map task has completed, so an interrupted preparation cannot make a
-    partially populated cache appear valid to later imaging tasks.  A
-    registration of the cache that an earlier run kept or left behind is
-    removed together with its array.
-
-    Returns
-    -------
-    dict
-        Original data-group mappings keyed by processing-set child name.  The
-        mappings are used to restore the input Processing Set when temporary
-        in-place weights are removed after imaging.
-    """
+    """Create a temporary disk-backed weight cache beside the output image."""
     import numpy as np
 
-    from astroviper.utils.data_group_tools import modify_data_groups_xds
-
-    original_data_groups = {}
     weight_sources = []
-    root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
+    ps_root = zarr.open_group(ps_store, mode="r", use_consolidated=False)
+    image_root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
 
     for ms_name, ms_xdt in ps_xdt.items():
         data_groups = ms_xdt.ds.attrs.get("data_groups", {})
@@ -342,48 +328,24 @@ def _create_continuum_weight_cache_store(
         # Open the child directly: disabling root consolidation does not
         # disable a child's own consolidated metadata.
         ms_group = zarr.open_group(
-            root.store, path=ms_name, mode="r+", use_consolidated=False
+            ps_root.store, path=ms_name, mode="r", use_consolidated=False
         )
         if source_weight_name not in ms_group:
             raise KeyError(
                 f"Registered input weight {source_weight_name!r} is absent "
                 f"from processing-set child {ms_name!r}."
             )
-        weight_sources.append((ms_name, ms_xdt, ms_group, source_weight_name))
+        weight_sources.append((ms_name, ms_xdt, ms_group[source_weight_name]))
 
-    # Every child is checked above before the first array is created, so a
-    # refused Processing Set is left unchanged.
-    for ms_name, ms_xdt, ms_group, source_weight_name in weight_sources:
-        # A cache registration kept or left behind by an earlier run is
-        # removed with the array it names.
-        data_groups = ms_xdt.ds.attrs["data_groups"]
-        stale_group_names = [
-            group_name
-            for group_name, group in data_groups.items()
-            if group.get("weight_imaging") == _CONTINUUM_WEIGHT_CACHE_VARIABLE
-        ]
-        for group_name in stale_group_names:
-            modify_data_groups_xds(
-                ms_xdt.ds,
-                data_group_out_name=group_name,
-                data_group_out={
-                    role: name
-                    for role, name in data_groups[group_name].items()
-                    if role != "weight_imaging"
-                },
-                description=(
-                    "AstroVIPER continuum imaging-weight cache of an earlier "
-                    "run removed."
-                ),
-            )
-        if stale_group_names:
-            ms_group.attrs["data_groups"] = copy.deepcopy(data_groups)
-        original_data_groups[ms_name] = copy.deepcopy(data_groups)
+    # The output image belongs to this run, so separate image stores provide
+    # independent caches without locking or per-run names in the input PS.
+    if _CONTINUUM_WEIGHT_CACHE_GROUP in image_root:
+        del image_root[_CONTINUUM_WEIGHT_CACHE_GROUP]
+    cache_root = image_root.create_group(_CONTINUUM_WEIGHT_CACHE_GROUP)
+    output_zarr_format = image_root.metadata.zarr_format
 
-        if _CONTINUUM_WEIGHT_CACHE_VARIABLE in ms_group:
-            del ms_group[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
-
-        source = ms_group[source_weight_name]
+    for ms_name, ms_xdt, source in weight_sources:
+        ms_cache = cache_root.create_group(ms_name)
         zarr_format = source.metadata.zarr_format
         if zarr_format == 3:
             dimensions = tuple(source.metadata.dimension_names)
@@ -403,44 +365,123 @@ def _create_continuum_weight_cache_store(
             # so in-place and in-memory execution remain numerically identical.
             "dtype": np.dtype("<f8"),
             "chunks": tuple(chunks),
-            "filters": source.filters,
             "fill_value": np.nan,
             "attributes": dict(source.attrs),
         }
-        if zarr_format == 3:
-            create_options.update(
-                compressors=source.compressors,
-                serializer=source.serializer,
-                dimension_names=dimensions,
-            )
+        if output_zarr_format == 3:
+            create_options["dimension_names"] = dimensions
         else:
-            create_options["compressor"] = source.compressor
+            create_options["compressor"] = compressor
 
-        ms_group.create_array(
+        target = ms_cache.create_array(
             _CONTINUUM_WEIGHT_CACHE_VARIABLE,
             **create_options,
         )
+        if output_zarr_format == 2:
+            target.attrs["_ARRAY_DIMENSIONS"] = list(dimensions)
 
-    # Refresh children as well as the root for readers opening either level.
-    for ms_name in ps_xdt:
-        zarr.consolidate_metadata(ps_store, path=ms_name)
-    zarr.consolidate_metadata(ps_store)
-    return original_data_groups
+        for dimension, size in zip(dimensions, source.shape, strict=True):
+            if dimension not in ms_xdt.ds.coords:
+                raise KeyError(
+                    f"Coordinate {dimension!r} required by the imaging weights "
+                    f"is missing from processing-set child {ms_name!r}."
+                )
+            values = np.asarray(ms_xdt.ds.coords[dimension].values)
+            if values.shape != (size,):
+                raise ValueError(
+                    f"Coordinate {dimension!r} in processing-set child "
+                    f"{ms_name!r} has shape {values.shape}; expected {(size,)}."
+                )
+            coordinate_options = {
+                "data": values,
+                "chunks": (min(1024, max(1, size)),),
+            }
+            if output_zarr_format == 3:
+                coordinate_options["dimension_names"] = (dimension,)
+            coordinate = ms_cache.create_array(dimension, **coordinate_options)
+            if output_zarr_format == 2:
+                coordinate.attrs["_ARRAY_DIMENSIONS"] = [dimension]
+
+    zarr.consolidate_metadata(image_store)
 
 
-def _activate_continuum_weight_cache(
+def _remove_continuum_weight_cache(
+    image_store,
+):
+    """Remove the temporary disk-backed imaging-weight cache if present."""
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _CONTINUUM_WEIGHT_CACHE_GROUP in root:
+        del root[_CONTINUUM_WEIGHT_CACHE_GROUP]
+
+
+def _persist_continuum_weight_cache_to_processing_set(
     ps_xdt,
     ps_store,
+    image_store,
     processing_set_data_group_name,
 ):
-    """Register the fully populated in-place weight cache for later loads."""
+    """Copy a completed external weight cache into the input PS on request."""
+    import numpy as np
+
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,
         modify_data_groups_xds,
     )
 
-    root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
+    image_root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    if _CONTINUUM_WEIGHT_CACHE_GROUP not in image_root:
+        raise KeyError("The continuum imaging-weight cache is missing.")
+    cache_root = image_root[_CONTINUUM_WEIGHT_CACHE_GROUP]
+    ps_root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
+
+    # Validate all children before modifying the input Processing Set.
+    for ms_name in ps_xdt:
+        if ms_name not in cache_root:
+            raise KeyError(f"No cached imaging weights exist for {ms_name!r}.")
+
     for ms_name, ms_xdt in ps_xdt.items():
+        cached = cache_root[ms_name][_CONTINUUM_WEIGHT_CACHE_VARIABLE]
+        ms_group = zarr.open_group(
+            ps_root.store, path=ms_name, mode="r+", use_consolidated=False
+        )
+        if _CONTINUUM_WEIGHT_CACHE_VARIABLE in ms_group:
+            del ms_group[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
+
+        dimensions = (
+            tuple(cached.metadata.dimension_names)
+            if cached.metadata.zarr_format == 3
+            else tuple(cached.attrs["_ARRAY_DIMENSIONS"])
+        )
+        options = {
+            "shape": cached.shape,
+            "dtype": cached.dtype,
+            "chunks": cached.chunks,
+            "fill_value": np.nan,
+            "attributes": dict(cached.attrs),
+        }
+        if ms_group.metadata.zarr_format == 3:
+            options["dimension_names"] = dimensions
+        else:
+            # The temporary image-store cache can be Zarr v3 while Processing
+            # Sets are commonly Zarr v2. A v3 codec pipeline cannot be passed
+            # through the deprecated v2 ``compressor`` argument.
+            options["compressor"] = (
+                cached.compressor if cached.metadata.zarr_format == 2 else None
+            )
+        destination = ms_group.create_array(
+            _CONTINUUM_WEIGHT_CACHE_VARIABLE,
+            **options,
+        )
+        if ms_group.metadata.zarr_format == 2:
+            destination.attrs["_ARRAY_DIMENSIONS"] = list(dimensions)
+
+        frequency_axis = dimensions.index("frequency")
+        for channel in range(cached.shape[frequency_axis]):
+            selection = [slice(None)] * len(dimensions)
+            selection[frequency_axis] = slice(channel, channel + 1)
+            selection = tuple(selection)
+            destination[selection] = cached[selection]
+
         _, data_group_out = create_data_groups_in_and_out(
             ms_xdt.ds,
             data_group_in_name=processing_set_data_group_name,
@@ -454,40 +495,9 @@ def _activate_continuum_weight_cache(
             ms_xdt.ds,
             data_group_out_name=processing_set_data_group_name,
             data_group_out=data_group_out,
-            description="AstroVIPER continuum imaging-weight cache.",
-        )
-        ms_group = zarr.open_group(
-            root.store, path=ms_name, mode="r+", use_consolidated=False
+            description="AstroVIPER continuum imaging weights retained by request.",
         )
         ms_group.attrs["data_groups"] = copy.deepcopy(ms_xdt.ds.attrs["data_groups"])
-
-    # Refresh children as well as the root for readers opening either level.
-    for ms_name in ps_xdt:
-        zarr.consolidate_metadata(ps_store, path=ms_name)
-    zarr.consolidate_metadata(ps_store)
-
-
-def _remove_continuum_weight_cache(
-    ps_xdt,
-    ps_store,
-    original_data_groups,
-):
-    """Remove temporary in-place weights and restore original data groups."""
-    root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
-    for ms_name, ms_xdt in ps_xdt.items():
-        # Open the child directly: disabling root consolidation does not
-        # disable a child's own consolidated metadata.
-        ms_group = zarr.open_group(
-            root.store, path=ms_name, mode="r+", use_consolidated=False
-        )
-        if _CONTINUUM_WEIGHT_CACHE_VARIABLE in ms_group:
-            del ms_group[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
-        restored = copy.deepcopy(original_data_groups[ms_name])
-        ms_xdt.ds.attrs["data_groups"] = restored
-        ms_group.attrs["data_groups"] = copy.deepcopy(restored)
-
-    # Refresh children as well as the root for readers opening either level.
-    for ms_name in ps_xdt:
         zarr.consolidate_metadata(ps_store, path=ms_name)
     zarr.consolidate_metadata(ps_store)
 
@@ -2724,7 +2734,7 @@ def image_continuum_single_field(
     n_chunks: int | None = None,
     overwrite: bool = False,
     memory_mode: str = "in_memory",
-    weight_memory_mode: str = "in_memory",
+    weight_memory_mode: str = "in_place",
     visibility_memory_mode: str = "recompute",
     widebandpb_memory_mode: str = "in_memory",
     cache_directory: str | None = None,
@@ -2808,9 +2818,9 @@ def image_continuum_single_field(
     write_visibility_model_to_ps : bool
         Request persistence of predicted visibilities and imaging weights.
     write_imaging_weights_to_ps : bool
-        Keep the in-place imaging weights in the input Processing Set; requires
-        ``weight_memory_mode="in_place"``. Later runs do not use them: every run
-        calculates its own imaging weights.
+        Copy the completed disk-backed imaging weights into the input Processing
+        Set; requires ``weight_memory_mode="in_place"``. Later runs do not use
+        them: every run calculates its own imaging weights.
     compute_backend : object
         Reserved interface options; this continuum driver executes with Dask.
     mpi_cluster_setup : object
@@ -3142,15 +3152,14 @@ def image_continuum_single_field(
         Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
-        graphs. ``"in_place"`` writes each task's weights into the input
-        Processing Set and reloads only the required partition during each major
-        cycle, reducing scheduler and worker memory at the cost of additional
-        disk I/O. This option is intentionally separate from ``memory_mode`` in
-        the initial implementation; the two policies may be unified later.
-        The in-place weights are removed when the run ends, also after an error;
-        a run that completes keeps them when ``write_imaging_weights_to_ps=True``.
-        While an ``"in_place"`` run is in progress, no other run may use the same
-        Processing Set.
+        graphs. ``"in_place"`` writes each task's weights into a temporary group
+        in the output image store and reloads only the required partition during
+        each imaging cycle. It is the default because it bounds scheduler and
+        worker memory without modifying the input Processing Set. The temporary
+        group is removed when the run ends, also after an error. A completed cache
+        is copied into the input only when ``write_imaging_weights_to_ps=True``.
+        This option remains separate from ``memory_mode`` for now; the policies
+        may be unified later.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         Continuum residual-update storage policy for observed visibility grids.
@@ -3569,23 +3578,23 @@ def image_continuum_single_field(
             "run calculates its own imaging weights from imaging_weights_params."
         )
 
-    original_weight_data_groups = None
     weight_cache_is_active = False
     if weight_memory_mode == "in_place":
         start = time.time()
-        original_weight_data_groups = _create_continuum_weight_cache_store(
+        _create_continuum_weight_cache_store(
             ps_xdt,
             ps_store,
+            image_store,
             processing_set_data_group_name,
+            compressor,
         )
         timing_distributed_application["T_create_in_place_weight_cache"] = (
             time.time() - start
         )
 
-    # The temporary in-place weights are removed however the run ends, also
-    # after an error; a completed run keeps them only when
-    # write_imaging_weights_to_ps=True.
-    keep_weight_cache = False
+    # The temporary disk-backed weights are removed however the run ends.
+    # The input Processing Set is touched only after a successful run and only
+    # when write_imaging_weights_to_ps=True.
     try:
         # Auto-detect native on-disk chunk sizes if not supplied by the caller.
         if disk_chunk_sizes == "Auto":
@@ -3650,6 +3659,7 @@ def image_continuum_single_field(
             "instrument_polarization_basis": (instrument_polarization_basis),
             "processing_function_threads": (processing_function_threads),
             "weight_memory_mode": weight_memory_mode,
+            "image_store": image_store,
         }
 
         if skunk_works:
@@ -3678,15 +3688,6 @@ def image_continuum_single_field(
                     reduce_n_batch=reduce_n_batch,
                 )
                 if weight_memory_mode == "in_place":
-                    start = time.time()
-                    _activate_continuum_weight_cache(
-                        ps_xdt,
-                        ps_store,
-                        processing_set_data_group_name,
-                    )
-                    timing_distributed_application[
-                        "T_activate_in_place_weight_cache"
-                    ] = time.time() - start
                     weight_return_dict["weight_cache_mapping"] = None
                     weight_cache_is_active = True
             else:
@@ -4000,15 +4001,6 @@ def image_continuum_single_field(
                 and weight_memory_mode == "in_place"
                 and not weight_cache_is_active
             ):
-                start = time.time()
-                _activate_continuum_weight_cache(
-                    ps_xdt,
-                    ps_store,
-                    processing_set_data_group_name,
-                )
-                timing_distributed_application["T_activate_in_place_weight_cache"] = (
-                    time.time() - start
-                )
                 weight_cache_is_active = True
 
             # Store frequency-dependent primary beam in the cache if running as mvc
@@ -4069,6 +4061,17 @@ def image_continuum_single_field(
             image_data_variables_keep,
             pbcor=pbcor,
         )
+        if write_imaging_weights_to_ps:
+            persist_start = time.time()
+            _persist_continuum_weight_cache_to_processing_set(
+                ps_xdt,
+                ps_store,
+                image_store,
+                processing_set_data_group_name,
+            )
+            timing_distributed_application["T_persist_imaging_weights"] = (
+                time.time() - persist_start
+            )
         if specmode == "mvc" and widebandpb_memory_mode == "in_place":
             _remove_wideband_primary_beam_cache(image_store)
         if specmode == "mvc" and visibility_memory_mode == "in_place":
@@ -4087,15 +4090,10 @@ def image_continuum_single_field(
         start = time.time()
         zarr.consolidate_metadata(image_store)
         timing_distributed_application["T_consolidate_metadata"] = time.time() - start
-        keep_weight_cache = write_imaging_weights_to_ps
     finally:
-        if weight_memory_mode == "in_place" and not keep_weight_cache:
+        if weight_memory_mode == "in_place":
             start = time.time()
-            _remove_continuum_weight_cache(
-                ps_xdt,
-                ps_store,
-                original_weight_data_groups,
-            )
+            _remove_continuum_weight_cache(image_store)
             timing_distributed_application["T_remove_in_place_weight_cache"] = (
                 time.time() - start
             )
