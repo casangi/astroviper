@@ -167,6 +167,26 @@ def test_cached_mvc_frequency_grid_subtracts_model_plane_by_plane():
     )
 
 
+def test_cached_grid_accepts_distinct_observed_and_model_groups():
+    """Each cached-grid input resolves its explicitly named data group."""
+    observed = _mfs_grid_dataset(5.0)
+    model = _mfs_grid_dataset(1.5)
+    observed.attrs["data_groups"]["observed"] = observed.attrs["data_groups"].pop(
+        "residual"
+    )
+    model.attrs["data_groups"]["predicted"] = model.attrs["data_groups"].pop("residual")
+
+    residual = form_residual_grid_from_cache(
+        observed,
+        model,
+        image_data_group_in_observed="observed",
+        image_data_group_in_model="predicted",
+    )
+
+    np.testing.assert_array_equal(residual.VISIBILITY, 3.5)
+    np.testing.assert_array_equal(residual.VISIBILITY_NORMALIZATION, 4.0)
+
+
 def test_accumulate_continuum_model_adds_later_increment_positionally():
     """A later increment reproduces the former driver-side model addition."""
     previous = _model_dataset(0.0)
@@ -880,6 +900,7 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency():
         image_params=image_params,
         reference_frequency_hz=1.5e9,
         float_dtype=np.float64,
+        image_data_group_in_name="residual",
     )
     assert "PRIMARY_BEAM_REFERENCE" in result
     assert "PRIMARY_BEAM" not in result
@@ -922,7 +943,9 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
     def fake_fft(dataset, **kwargs):
         fft_options.update(kwargs)
         dataset["VISIBILITY_MODEL"] = dataset.SKY_MODEL.astype(np.complex64)
-        dataset.attrs["data_groups"]["model"]["visibility"] = "VISIBILITY_MODEL"
+        dataset.attrs["data_groups"][kwargs["image_data_group_out_name"]] = {
+            "visibility": "VISIBILITY_MODEL"
+        }
         return dataset
 
     monkeypatch.setattr(
@@ -931,11 +954,17 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
         fake_fft,
     )
     result = prepare_model_uv_continuum_single_field(
-        model, {"n_taylor_terms": 2}, instrument_polarization_basis="linear"
+        model,
+        {"n_taylor_terms": 2},
+        instrument_polarization_basis="linear",
+        image_data_group_in_name="model",
+        image_data_group_out_name="model_uv",
     )
     assert result.VISIBILITY_MODEL.sizes["taylor_term"] == 2
     assert result.VISIBILITY_MODEL.attrs["n_taylor_terms"] == 2
     assert fft_options["image_data_variables_keep"] == []
+    assert fft_options["image_data_group_in_name"] == "model"
+    assert fft_options["image_data_group_out_name"] == "model_uv"
     np.testing.assert_array_equal(
         result.VISIBILITY_MODEL.isel(taylor_term=0), 2.0 + 0.0j
     )
@@ -974,25 +1003,38 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         "transform_polarization_basis",
         lambda dataset, **kwargs: dataset,
     )
+    fft_options = {}
+
+    def fake_fft(dataset, **kwargs):
+        fft_options.update(kwargs)
+        return dataset
+
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
         "fft_norm_img_xds",
-        lambda dataset, **kwargs: dataset,
+        fake_fft,
     )
     result = prepare_model_uv_mvc_single_field(
         model,
         channel_pb,
         [0.9e9, 1.1e9],
         {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
+        image_data_group_in_name="model",
+        image_data_group_out_name="model_uv",
     )
     repeated = prepare_model_uv_mvc_single_field(
         model,
         channel_pb,
         [0.9e9, 1.1e9],
         {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
+        image_data_group_in_name="model",
+        image_data_group_out_name="model_uv",
     )
     assert model.attrs["data_groups"]["model"] == {"sky": "SKY_MODEL"}
     assert result.attrs["data_groups"] is not model.attrs["data_groups"]
+    assert result.attrs["data_groups"]["model_uv"]["sky"] == "SKY_MODEL_MVC"
+    assert fft_options["image_data_group_in_name"] == "model_uv"
+    assert fft_options["image_data_group_out_name"] == "model_uv"
     assert result.SKY_MODEL_MVC.dims == (
         "time",
         "frequency",

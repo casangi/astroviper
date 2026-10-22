@@ -2870,7 +2870,8 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
     input_data["image"] = form_mfs_residual_grid_from_cache(
         observed_grid_xds,
         image_xds,
-        image_data_group_name=image_data_group_name,
+        image_data_group_in_observed=image_data_group_name,
+        image_data_group_in_model=image_data_group_name,
     )
     return None
 

@@ -100,7 +100,7 @@ def _convert_primary_beam_to_reference_frequency(
     image_params,
     reference_frequency_hz,
     float_dtype,
-    image_data_group_name="residual",
+    image_data_group_in_name="residual",
 ):
     """Replace an MFS channel PB cube by the PB evaluated at ``reffreq``.
 
@@ -118,10 +118,10 @@ def _convert_primary_beam_to_reference_frequency(
 
     data_groups = img_xds.attrs.get("data_groups", {})
 
-    if image_data_group_name not in data_groups:
-        raise KeyError(f"Image data group {image_data_group_name!r} is missing.")
+    if image_data_group_in_name not in data_groups:
+        raise KeyError(f"Image data group {image_data_group_in_name!r} is missing.")
 
-    image_data_group = data_groups[image_data_group_name]
+    image_data_group = data_groups[image_data_group_in_name]
 
     reference_frequency_hz = float(reference_frequency_hz)
     if not np.isfinite(reference_frequency_hz) or reference_frequency_hz <= 0.0:
@@ -434,7 +434,7 @@ def imaging_setup_continuum_single_field(
             image_params=image_params,
             reference_frequency_hz=reference_frequency_hz,
             float_dtype=float_dtype,
-            image_data_group_name=image_data_group_out_name,
+            image_data_group_in_name=image_data_group_out_name,
         )
         primary_beam_return_df = pd.DataFrame({"T_primary_beam": [time.time() - start]})
     else:

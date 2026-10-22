@@ -252,7 +252,8 @@ def residual_cycle_continuum_single_field(
                 single_precision_image=(single_precision_image),
                 processing_function_threads=(processing_function_threads),
                 fft_backend=fft_backend,
-                image_data_group_name=(image_data_group_in_name),
+                image_data_group_in_name=image_data_group_in_name,
+                image_data_group_out_name=image_data_group_in_name,
             )
 
             make_visibility_model_single_field(
@@ -345,7 +346,8 @@ def residual_cycle_continuum_single_field(
             img_xds = form_residual_grid_from_cache(
                 observed_visibility_grid_xds,
                 img_xds,
-                image_data_group_name=image_data_group_out_name,
+                image_data_group_in_observed=image_data_group_out_name,
+                image_data_group_in_model=image_data_group_out_name,
                 grid_kind="MVC",
             )
             img_xds.attrs["continuum_mode"] = "mvc"

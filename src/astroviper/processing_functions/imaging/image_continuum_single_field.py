@@ -471,7 +471,8 @@ def prepare_model_uv_continuum_single_field(
     single_precision_image=True,
     processing_function_threads=1,
     fft_backend="pyfftw",
-    image_data_group_name="model",
+    image_data_group_in_name="model",
+    image_data_group_out_name="model",
 ):
     """Prepare the Fourier-domain continuum model for the next imaging cycle.
 
@@ -489,7 +490,7 @@ def prepare_model_uv_continuum_single_field(
     ----------
     model_xds : xarray.Dataset
         Image-domain continuum model dataset. The data group selected by
-        ``image_data_group_name`` must contain a ``sky`` variable with a
+        ``image_data_group_in_name`` must contain a ``sky`` variable with a
         ``taylor_term`` dimension.
 
     image_params : dict
@@ -529,9 +530,12 @@ def prepare_model_uv_continuum_single_field(
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
 
-    image_data_group_name : str, optional
-        Data group containing the continuum sky model and receiving the Fourier-
-        domain model visibility grids.
+    image_data_group_in_name : str, optional
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
+    image_data_group_out_name : str, optional
+        Data group receiving the Fourier-domain model visibility grids.
 
     Returns
     -------
@@ -577,18 +581,18 @@ def prepare_model_uv_continuum_single_field(
 
     data_groups = model_xds.attrs.get("data_groups", {})
 
-    if image_data_group_name not in data_groups:
+    if image_data_group_in_name not in data_groups:
         raise KeyError(
-            f"Model data group {image_data_group_name!r} is not present in "
+            f"Model data group {image_data_group_in_name!r} is not present in "
             "model_xds.attrs['data_groups']."
         )
 
-    model_data_group = data_groups[image_data_group_name]
+    model_data_group = data_groups[image_data_group_in_name]
     model_sky_name = model_data_group.get("sky")
 
     if model_sky_name is None:
         raise KeyError(
-            f"Model data group {image_data_group_name!r} does not define "
+            f"Model data group {image_data_group_in_name!r} does not define "
             "a 'sky' variable."
         )
 
@@ -628,8 +632,8 @@ def prepare_model_uv_continuum_single_field(
     model_uv_xds = fft_norm_continuum_img_xds(
         model_uv_xds,
         image_params=image_params,
-        image_data_group_in_name=image_data_group_name,
-        image_data_group_out_name=image_data_group_name,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
         image_data_group_out_modified={
             "visibility": "VISIBILITY_MODEL",
         },
@@ -643,13 +647,13 @@ def prepare_model_uv_continuum_single_field(
 
     output_data_groups = model_uv_xds.attrs.get("data_groups", {})
 
-    if image_data_group_name not in output_data_groups:
+    if image_data_group_out_name not in output_data_groups:
         raise RuntimeError(
             "The model FFT removed or failed to create data group "
-            f"{image_data_group_name!r}."
+            f"{image_data_group_out_name!r}."
         )
 
-    output_model_group = output_data_groups[image_data_group_name]
+    output_model_group = output_data_groups[image_data_group_out_name]
     model_visibility_name = output_model_group.get("visibility")
 
     if model_visibility_name is None:
@@ -788,7 +792,8 @@ def prepare_model_uv_mvc_single_field(
     single_precision_image=True,
     processing_function_threads=1,
     fft_backend="pyfftw",
-    image_data_group_name="model",
+    image_data_group_in_name="model",
+    image_data_group_out_name="model",
 ):
     """Construct a local MVC model UV cube in the channel-PB convention.
 
@@ -818,7 +823,7 @@ def prepare_model_uv_mvc_single_field(
     reference_frequency = float(image_params["reference_frequency"])
     n_taylor_terms = int(image_params["n_taylor_terms"])
 
-    model_name = model_xds.attrs["data_groups"][image_data_group_name]["sky"]
+    model_name = model_xds.attrs["data_groups"][image_data_group_in_name]["sky"]
 
     model_taylor = model_xds[model_name].isel(taylor_term=slice(0, n_taylor_terms))
 
@@ -934,7 +939,7 @@ def prepare_model_uv_mvc_single_field(
 
     modify_data_groups_xds(
         mvc_xds,
-        data_group_out_name=image_data_group_name,
+        data_group_out_name=image_data_group_out_name,
         data_group_out={
             "sky": "SKY_MODEL_MVC",
         },
@@ -955,8 +960,8 @@ def prepare_model_uv_mvc_single_field(
     mvc_xds = fft_norm_img_xds(
         mvc_xds,
         image_params=image_params,
-        image_data_group_in_name=(image_data_group_name),
-        image_data_group_out_name=(image_data_group_name),
+        image_data_group_in_name=image_data_group_out_name,
+        image_data_group_out_name=image_data_group_out_name,
         image_data_group_out_modified={
             "visibility": "VISIBILITY_MODEL",
         },
@@ -1429,7 +1434,8 @@ def convert_mvc_cubes_to_taylor_normal_equations(
 def form_residual_grid_from_cache(
     observed_grid_xds,
     model_grid_xds,
-    image_data_group_name="residual",
+    image_data_group_in_observed="residual",
+    image_data_group_in_model="residual",
     grid_kind="continuum",
 ):
     """Form a residual UV grid from cached observed and model grids.
@@ -1449,9 +1455,12 @@ def form_residual_grid_from_cache(
         Cached observed-data UV grid.
     model_grid_xds : xarray.Dataset
         Predicted-model UV grid for the current cycle.
-    image_data_group_name : str, optional
-        Image data group registering ``visibility`` and
-        ``visibility_normalization`` in both datasets.
+    image_data_group_in_observed : str, optional
+        Observed-grid data group registering ``visibility`` and
+        ``visibility_normalization``.
+    image_data_group_in_model : str, optional
+        Model-grid data group registering ``visibility`` and
+        ``visibility_normalization``.
     grid_kind : str, optional
         Human-readable grid type used in diagnostics and metadata.
 
@@ -1467,17 +1476,17 @@ def form_residual_grid_from_cache(
     import numpy as np
     import xarray as xr
 
-    def _registered_arrays(dataset, label):
+    def _registered_arrays(dataset, label, data_group_name):
         if not isinstance(dataset, xr.Dataset):
             raise TypeError(
                 f"{label} must be an xarray.Dataset; received {type(dataset).__name__}."
             )
         data_groups = dataset.attrs.get("data_groups", {})
-        if image_data_group_name not in data_groups:
+        if data_group_name not in data_groups:
             raise KeyError(
-                f"{label} does not contain image data group {image_data_group_name!r}."
+                f"{label} does not contain image data group {data_group_name!r}."
             )
-        data_group = data_groups[image_data_group_name]
+        data_group = data_groups[data_group_name]
         variable_names = {
             role: data_group.get(role)
             for role in ("visibility", "visibility_normalization")
@@ -1485,7 +1494,7 @@ def form_residual_grid_from_cache(
         missing_roles = [role for role, name in variable_names.items() if name is None]
         if missing_roles:
             raise KeyError(
-                f"{label} data group {image_data_group_name!r} does not register "
+                f"{label} data group {data_group_name!r} does not register "
                 f"roles {missing_roles}."
             )
         missing_variables = [
@@ -1495,8 +1504,16 @@ def form_residual_grid_from_cache(
             raise KeyError(f"{label} is missing variables {missing_variables}.")
         return variable_names
 
-    observed_names = _registered_arrays(observed_grid_xds, "observed_grid_xds")
-    model_names = _registered_arrays(model_grid_xds, "model_grid_xds")
+    observed_names = _registered_arrays(
+        observed_grid_xds,
+        "observed_grid_xds",
+        image_data_group_in_observed,
+    )
+    model_names = _registered_arrays(
+        model_grid_xds,
+        "model_grid_xds",
+        image_data_group_in_model,
+    )
 
     observed_grid = observed_grid_xds[observed_names["visibility"]]
     model_grid = model_grid_xds[model_names["visibility"]]
@@ -1553,13 +1570,15 @@ def form_residual_grid_from_cache(
 def form_mfs_residual_grid_from_cache(
     observed_grid_xds,
     model_grid_xds,
-    image_data_group_name="residual",
+    image_data_group_in_observed="residual",
+    image_data_group_in_model="residual",
 ):
     """Form an MFS Taylor residual grid using the generic cache operation."""
     return form_residual_grid_from_cache(
         observed_grid_xds,
         model_grid_xds,
-        image_data_group_name=image_data_group_name,
+        image_data_group_in_observed=image_data_group_in_observed,
+        image_data_group_in_model=image_data_group_in_model,
         grid_kind="MFS",
     )
 
