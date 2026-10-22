@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.calculate_imaging_weights import (
@@ -59,6 +60,21 @@ def test_degrid_imaging_weights_accepts_non_native_float_density_grid():
     )
 
     np.testing.assert_allclose(actual, 0.25, rtol=0.0, atol=0.0)
+
+
+def test_degrid_imaging_weights_rejects_non_float_density_grid():
+    """Density grids with integer storage fail before reaching the C++ kernel."""
+    with pytest.raises(TypeError, match="floating-point dtype"):
+        degrid_imaging_weights(
+            np.zeros((1, 1, 4, 4), dtype=np.int64),
+            np.zeros((1, 1, 3), dtype=np.float64),
+            np.ones((1, 1, 1, 1), dtype=np.float64),
+            np.ones((2, 1, 1), dtype=np.float64),
+            np.asarray([1.0e9], dtype=np.float64),
+            np.asarray([4, 4], dtype=np.int64),
+            np.asarray([1.0e-5, 1.0e-5], dtype=np.float64),
+            processing_function_threads=1,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +666,25 @@ class TestCheckImagingWeightsParams(unittest.TestCase):
         params = {"weighting": "natural", "casa_weighting_implementation": True}
         self.assertTrue(check_imaging_weights_params(params))
         self.assertTrue(params["casa_weighting_implementation"])
+
+    def test_weighting_scope_defaults_to_local(self):
+        """The checker writes the local weighting scope when it is omitted."""
+        params = {"weighting": "briggs", "robust": 0.0}
+        self.assertTrue(check_imaging_weights_params(params))
+        self.assertEqual(params["weighting_scope"], "local")
+
+    def test_natural_global_scope_is_rewritten_to_local(self):
+        """Natural weighting warns and canonicalizes its irrelevant scope."""
+        params = {"weighting": "natural", "weighting_scope": "global"}
+        logger_path = (
+            "astroviper.processing_functions.imaging.check_imaging_parameters."
+            "logger.warning"
+        )
+        with mock.patch(logger_path) as warning:
+            self.assertTrue(check_imaging_weights_params(params))
+
+        self.assertEqual(params["weighting_scope"], "local")
+        warning.assert_called_once()
 
     def test_briggs_requires_robust_in_range(self):
         """``robust`` outside ``[-2, 2]`` fails the check."""

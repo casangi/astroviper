@@ -1134,6 +1134,27 @@ class TestCheckConvergence(unittest.TestCase):
         )
         self.assertEqual(desc, "Continue imaging cycles")
 
+    def test_scalar_stop_code_is_not_treated_as_a_model_update_code(self):
+        """Only the typed StopCode contract can report a model-update reason."""
+        controller = CycleController(max_iter=1000, threshold=0.01)
+        rd = ImagingDict()
+        rd.add(
+            {"peakres": 0.5, "masksum": 100, "iter_done": 1, "stop_code": 4},
+            time=0,
+            pol=0,
+            chan=0,
+        )
+
+        controller.check_convergence(rd, model_update_ran=True)
+
+        self.assertEqual(
+            controller.stop_code_model_update[0, 0, 0], MODEL_UPDATE_CONTINUE
+        )
+        self.assertEqual(
+            rd.sel(time=0, pol=0, chan=0)["stop_code"],
+            StopCode(IMAGING_CONTINUE, MODEL_UPDATE_CONTINUE),
+        )
+
     def test_fresh_residual_check_keeps_model_update_stop_code(self):
         """A later residual-only check keeps the code until the next model update."""
         controller = CycleController(max_iter=1000, threshold=0.01)

@@ -897,6 +897,16 @@ class TestDeconvolve:
         with pytest.raises(RuntimeError, match="mask.*wrong dtype"):
             deconvolve(img_xds=xds, algorithm="hogbom")
 
+    def test_hogbom_rejects_non_contiguous_registered_mask(self):
+        """The shared entry point leaves mask layout validation to the binding."""
+        xds = _make_img_xds(with_mask=True)
+        mask = np.asfortranarray(xds.MASK_RESIDUAL.values)
+        assert not mask.flags.c_contiguous
+        xds["MASK_RESIDUAL"] = (xds.MASK_RESIDUAL.dims, mask)
+
+        with pytest.raises(RuntimeError, match="mask.*contiguous"):
+            deconvolve(img_xds=xds, algorithm="hogbom")
+
     def test_processing_function_threads_parameter_passes_through(self):
         """processing_function_threads > 1 must not change the result for a deterministic
         input (same-input-same-output contract)."""
