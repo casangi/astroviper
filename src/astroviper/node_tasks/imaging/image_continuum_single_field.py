@@ -397,7 +397,7 @@ def _load_wideband_primary_beam_in_place(img_xds, image_store):
 
 
 def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store):
-    """Persist the globally reduced observed MFS Taylor grid in the image store."""
+    """Write the globally reduced observed MFS grid into its prepared cache."""
     import xarray as xr
     import zarr
 
@@ -408,16 +408,14 @@ def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store):
         )
 
     root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
-    if _MFS_VISIBILITY_GRID_CACHE_GROUP in root:
-        del root[_MFS_VISIBILITY_GRID_CACHE_GROUP]
+    if _MFS_VISIBILITY_GRID_CACHE_GROUP not in root:
+        raise KeyError("The in-place MFS visibility-grid cache is not initialized.")
 
     observed_grid_xds.to_zarr(
         image_store,
         group=_MFS_VISIBILITY_GRID_CACHE_GROUP,
-        mode="a",
+        mode="r+",
         consolidated=False,
-        # A new subgroup must use the existing root format, not xarray's default.
-        zarr_format=root.metadata.zarr_format,
     )
 
 

@@ -109,17 +109,43 @@ def test_image_cache_replacement_and_repeated_cleanup(
         cache = xr.Dataset(
             {
                 "VISIBILITY": (
-                    ("taylor_term", "u"),
+                    ("time", "taylor_term", "polarization", "u", "v"),
                     np.ones(
-                        (1, 2),
+                        (1, 2, 2, 2, 2),
                         dtype=np.complex64 if single_precision else np.complex128,
                     ),
-                )
+                ),
+                "VISIBILITY_NORMALIZATION": (
+                    ("time", "taylor_term", "polarization"),
+                    np.ones((1, 2, 2), dtype=np.float64),
+                ),
             },
-            coords={"taylor_term": [0]},
+            coords={
+                "time": [0.0],
+                "taylor_term": [0, 1],
+                "polarization": ["XX", "YY"],
+            },
+            attrs={
+                "data_groups": {
+                    "residual": {
+                        "visibility": "VISIBILITY",
+                        "visibility_normalization": "VISIBILITY_NORMALIZATION",
+                    }
+                },
+                "visibility_grid_source": "observed_data",
+            },
         )
         for value in (1.0, 7.0):
             cache.VISIBILITY.data[:] = value
+            cache.VISIBILITY_NORMALIZATION.data[:] = value
+            driver._create_mfs_visibility_grid_cache_store(
+                store,
+                image,
+                {"fft_padding": 1.0, "n_taylor_terms": 2},
+                ["XX", "YY"],
+                single_precision,
+                None,
+            )
             node._write_mfs_visibility_grid_in_place(cache, store)
             assert zarr.open_group(store).metadata.zarr_format == zarr_format
             np.testing.assert_array_equal(zarr.open_group(store)["PUBLIC"][:], [42.0])

@@ -4,9 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+import zarr
 
 import astroviper.node_tasks.imaging.image_continuum_single_field as continuum_node
 import astroviper.processing_functions.imaging.image_continuum_single_field as continuum_processing
+from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+    _create_mfs_visibility_grid_cache_store,
+)
 from astroviper.processing_functions.imaging.utils import ImagingDict
 from tests.utils.continuum_images import make_runaway_taylor_image
 
@@ -146,6 +150,22 @@ def test_in_place_mfs_append_persists_and_reloads_observed_grid(tmp_path):
     image_store = tmp_path / "continuum.img.zarr"
     xr.Dataset().to_zarr(image_store, mode="w")
     reduced = _mfs_uv_grid(5.0)
+    image_geometry = xr.Dataset(
+        coords={
+            "time": [0.0],
+            "polarization": ["XX"],
+            "l": [0.0, 1.0],
+            "m": [0.0, 1.0],
+        }
+    )
+    _create_mfs_visibility_grid_cache_store(
+        str(image_store),
+        image_geometry,
+        {"fft_padding": 1.0, "n_taylor_terms": 2},
+        ["XX"],
+        False,
+        None,
+    )
 
     returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
         {"image": reduced},
@@ -178,6 +198,20 @@ def test_in_place_mfs_append_persists_and_reloads_observed_grid(tmp_path):
         later_input["image"].VISIBILITY_NORMALIZATION,
         3.0,
     )
+
+
+def test_in_place_mfs_writer_requires_driver_created_cache(tmp_path):
+    """The append node never creates its own temporary cache structure."""
+    image_store = tmp_path / "continuum.img.zarr"
+    xr.Dataset().to_zarr(image_store, mode="w")
+
+    with pytest.raises(KeyError, match="not initialized"):
+        continuum_node._write_mfs_visibility_grid_in_place(
+            _mfs_uv_grid(5.0),
+            str(image_store),
+        )
+
+    assert "_MFS_VISIBILITY_GRID_CACHE" not in zarr.open_group(image_store)
 
 
 def test_attach_imaging_weights_uses_each_cached_dataset_variable_name():

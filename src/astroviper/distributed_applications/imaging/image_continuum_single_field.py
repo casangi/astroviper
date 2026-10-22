@@ -189,6 +189,109 @@ def _remove_wideband_primary_beam_cache(image_store):
         del root[_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP]
 
 
+def _create_mfs_visibility_grid_cache_store(
+    image_store,
+    img_xds,
+    image_params,
+    correlations,
+    single_precision_image,
+    compressor,
+):
+    """Create the temporary globally reduced MFS observed-grid cache."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.utils.fft_sizing import (
+        padded_grid_size,
+    )
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _MFS_VISIBILITY_GRID_CACHE_GROUP in root:
+        del root[_MFS_VISIBILITY_GRID_CACHE_GROUP]
+    cache = root.create_group(_MFS_VISIBILITY_GRID_CACHE_GROUP)
+
+    n_taylor_terms = int(image_params["n_taylor_terms"])
+    polarizations = np.asarray(tuple(correlations))
+    n_u, n_v = padded_grid_size(
+        (img_xds.sizes["l"], img_xds.sizes["m"]),
+        image_params["fft_padding"],
+    )
+    visibility_dims = ("time", "taylor_term", "polarization", "u", "v")
+    normalization_dims = ("time", "taylor_term", "polarization")
+    visibility_shape = (
+        int(img_xds.sizes["time"]),
+        n_taylor_terms,
+        int(polarizations.size),
+        int(n_u),
+        int(n_v),
+    )
+    normalization_shape = visibility_shape[:3]
+    zarr_format = root.metadata.zarr_format
+
+    visibility_options = {
+        "shape": visibility_shape,
+        "dtype": np.dtype("<c8" if single_precision_image else "<c16"),
+        "chunks": (
+            1,
+            1,
+            1,
+            min(256, int(n_u)),
+            min(256, int(n_v)),
+        ),
+        "fill_value": np.nan + 1j * np.nan,
+        "attributes": {"description": "Temporary MFS observed visibility grid."},
+    }
+    normalization_options = {
+        "shape": normalization_shape,
+        "dtype": np.dtype("<f8"),
+        "chunks": (1, 1, 1),
+        "fill_value": np.nan,
+        "attributes": {"description": "Temporary MFS visibility normalization."},
+    }
+    if zarr_format == 3:
+        visibility_options["dimension_names"] = visibility_dims
+        normalization_options["dimension_names"] = normalization_dims
+    else:
+        visibility_options["compressor"] = compressor
+        normalization_options["compressor"] = compressor
+
+    visibility = cache.create_array("VISIBILITY", **visibility_options)
+    normalization = cache.create_array(
+        "VISIBILITY_NORMALIZATION", **normalization_options
+    )
+
+    coordinate_values = {
+        "time": np.asarray(img_xds.coords["time"].values),
+        "taylor_term": np.arange(n_taylor_terms, dtype=np.int64),
+        "polarization": polarizations,
+    }
+    for name, values in coordinate_values.items():
+        options = {
+            "data": values,
+            "chunks": (max(1, values.size),),
+            # Coordinate values such as time=0 and Taylor order zero are valid
+            # data, not missing-value sentinels for xarray's Zarr decoder.
+            "fill_value": None,
+        }
+        if zarr_format == 3:
+            options["dimension_names"] = (name,)
+        coordinate = cache.create_array(name, **options)
+        if zarr_format == 2:
+            coordinate.attrs["_ARRAY_DIMENSIONS"] = [name]
+
+    if zarr_format == 2:
+        visibility.attrs["_ARRAY_DIMENSIONS"] = list(visibility_dims)
+        normalization.attrs["_ARRAY_DIMENSIONS"] = list(normalization_dims)
+
+    cache.attrs["data_groups"] = {
+        "residual": {
+            "visibility": "VISIBILITY",
+            "visibility_normalization": "VISIBILITY_NORMALIZATION",
+        }
+    }
+    cache.attrs["visibility_grid_source"] = "observed_data"
+    zarr.consolidate_metadata(image_store)
+
+
 def _remove_mfs_visibility_grid_cache(image_store):
     """Remove the temporary disk-backed MFS observed-grid cache if present."""
     root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
@@ -3658,6 +3761,20 @@ def image_continuum_single_field(
             compressor,
         )
         timing_distributed_application["T_create_in_place_widebandpb_cache"] = (
+            time.time() - start
+        )
+
+    if continuum_mode == "mfs" and visibility_memory_mode == "in_place":
+        start = time.time()
+        _create_mfs_visibility_grid_cache_store(
+            image_store,
+            img_xds,
+            image_params,
+            correlation_coords,
+            single_precision_image,
+            compressor,
+        )
+        timing_distributed_application["T_create_in_place_visibility_cache"] = (
             time.time() - start
         )
 
