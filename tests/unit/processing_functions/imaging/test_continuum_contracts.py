@@ -15,6 +15,14 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
 from tests.utils.continuum_images import make_continuum_image
 
 
+def test_processing_imaging_exports_only_bound_public_names():
+    """The imaging public API must not advertise unbound module names."""
+    import astroviper.processing_functions.imaging as imaging
+
+    assert "image_continuum_single_field" not in imaging.__all__
+    assert all(hasattr(imaging, name) for name in imaging.__all__)
+
+
 def _mvc_inputs(dtype=np.float64):
     # Multiple times and polarizations must each retain their own weight sum.
     coords = dict(
