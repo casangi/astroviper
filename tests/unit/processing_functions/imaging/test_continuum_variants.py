@@ -152,6 +152,37 @@ def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_mtmfs_restoration_uses_principal_residual_copy(dtype):
+    """MT-MFS restores the principal tt0 solution without changing residuals."""
+    image = make_continuum_image()
+    nl, nm = image.sizes["l"], image.sizes["m"]
+    moments = np.asarray([1.0, 0.25, 0.5], dtype=dtype)
+    hessian = moments[np.add.outer(np.arange(2), np.arange(2))]
+    coefficients = np.asarray([0.25, -0.1], dtype=dtype)
+    dirty_terms = hessian @ coefficients
+
+    residual = np.empty((1, 2, 1, nl, nm), dtype=dtype)
+    residual[:, 0] = dirty_terms[0]
+    residual[:, 1] = dirty_terms[1]
+    image["SKY_RESIDUAL"] = (image.SKY_RESIDUAL.dims, residual)
+    image["SKY_MODEL"] = xr.zeros_like(image.SKY_RESIDUAL)
+
+    psf = np.zeros((1, 3, 1, nl, nm), dtype=dtype)
+    psf[0, :, 0, nl // 2, nm // 2] = moments
+    image = image.drop_dims("psf_taylor_order")
+    image["POINT_SPREAD_FUNCTION"] = (
+        ("time", "psf_taylor_order", "polarization", "l", "m"),
+        psf,
+    )
+    residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
+
+    result, _ = restore_continuum_image(image, deconvolver="mtmfs")
+
+    np.testing.assert_allclose(result.SKY_RESTORED, coefficients[0], rtol=1e-6)
+    xr.testing.assert_identical(result.SKY_RESIDUAL, residual_snapshot)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtype):
     image = make_continuum_image()
     psf_zero = image.POINT_SPREAD_FUNCTION.isel(psf_taylor_order=0, drop=True)

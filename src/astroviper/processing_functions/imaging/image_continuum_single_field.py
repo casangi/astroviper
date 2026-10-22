@@ -36,6 +36,61 @@ def _continuum_plane_to_frequency(img_xds, data_array, plane_dimension):
     return plane.expand_dims(frequency=frequency_coord, axis=axis)
 
 
+def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
+    """Return a principal-solution residual copy for MT-MFS restoration."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+
+    residual_dims = ("time", "taylor_term", "polarization", "l", "m")
+    psf_dims = ("time", "psf_taylor_order", "polarization", "l", "m")
+    missing_residual_dims = [
+        dim for dim in residual_dims if dim not in residual_da.dims
+    ]
+    missing_psf_dims = [dim for dim in psf_dims if dim not in psf_da.dims]
+    if missing_residual_dims:
+        raise ValueError(
+            "MT-MFS restoration requires residual dimensions "
+            f"{residual_dims}; missing {missing_residual_dims}."
+        )
+    if missing_psf_dims:
+        raise ValueError(
+            "MT-MFS restoration requires PSF dimensions "
+            f"{psf_dims}; missing {missing_psf_dims}."
+        )
+
+    residual_ordered = residual_da.transpose(*residual_dims)
+    psf_ordered = psf_da.transpose(*psf_dims)
+    n_taylor_terms = residual_ordered.sizes["taylor_term"]
+    expected_psf_terms = 2 * n_taylor_terms - 1
+    if psf_ordered.sizes["psf_taylor_order"] != expected_psf_terms:
+        raise ValueError(
+            "MT-MFS restoration requires 2 * n_taylor_terms - 1 PSF Taylor "
+            f"orders; received {psf_ordered.sizes['psf_taylor_order']} for "
+            f"n_taylor_terms={n_taylor_terms}."
+        )
+
+    principal_values = np.array(residual_ordered.values, copy=True, order="C")
+    psf_values = psf_ordered.values
+    for time_index in range(residual_ordered.sizes["time"]):
+        for polarization_index in range(residual_ordered.sizes["polarization"]):
+            psf_stack = np.ascontiguousarray(
+                psf_values[time_index, :, polarization_index]
+            )
+            inverse_hessian = mtmfs.hessian(psf_stack)["inverse_hessian"][0]
+            residual_stack = np.ascontiguousarray(
+                principal_values[time_index, :, polarization_index]
+            )
+            finite_pixels = np.all(np.isfinite(residual_stack), axis=0)
+            residual_stack[:, ~finite_pixels] = 0
+            mtmfs.principal_solution(residual_stack, inverse_hessian)
+            residual_stack[:, ~finite_pixels] = np.nan
+            principal_values[time_index, :, polarization_index] = residual_stack
+
+    principal = residual_ordered.copy(data=principal_values)
+    return principal.transpose(*residual_da.dims)
+
+
 ###############################################################################
 # Imaging setup and PSF beam fitting
 ###############################################################################
@@ -2855,6 +2910,7 @@ def restore_continuum_image(
     primary_beam_correction=False,
     primary_beam_limit=0.2,
     primary_beam_key="primary_beam",
+    deconvolver="hogbom",
 ):
     """Restore the continuum image.
 
@@ -2919,6 +2975,11 @@ def restore_continuum_image(
 
     primary_beam_key : str, optional
         Role key of the primary beam in the residual data group.
+
+    deconvolver : {"hogbom", "mtmfs"}, optional
+        Deconvolver that produced the model. MT-MFS restoration applies the
+        Taylor Hessian's principal solution to a private residual copy before
+        selecting Taylor term zero. The stored residual remains unchanged.
 
     Returns
     -------
@@ -3032,6 +3093,12 @@ def restore_continuum_image(
 
     psf_da = img_xds[psf_name]
 
+    restoration_residual_da = residual_da
+    if str(deconvolver).lower() == "mtmfs":
+        restoration_residual_da = _mtmfs_principal_residual_for_restoration(
+            residual_da, psf_da
+        )
+
     # ------------------------------------------------------------------
     # Resolve the fitted restoring beam.
     # ------------------------------------------------------------------
@@ -3079,7 +3146,7 @@ def restore_continuum_image(
     cube_xds = cube_xds.assign_coords(frequency=("frequency", frequency_value))
 
     cube_xds[residual_name] = _continuum_plane_to_frequency(
-        img_xds, residual_da, "taylor_term"
+        img_xds, restoration_residual_da, "taylor_term"
     )
     cube_xds[model_name] = _continuum_plane_to_frequency(
         img_xds, model_da, "taylor_term"

@@ -1361,3 +1361,28 @@ def test_finalization_reuses_prepared_residual_without_another_transform(monkeyp
     assert result["image"].SKY_RESIDUAL.data is original_residual
     np.testing.assert_array_equal(result["image"].SKY_MODEL, model.SKY_MODEL)
     assert result["residual_converged"]
+
+
+def test_finalization_passes_mtmfs_to_restoration(monkeypatch):
+    """The final append node enables MT-MFS principal-solution restoration."""
+    image = _model_dataset(0.25).rename({"SKY_MODEL": "SKY_RESIDUAL"})
+    image.attrs["data_groups"] = {"residual": {"sky": "SKY_RESIDUAL"}}
+    received = {}
+
+    def fake_restore(image, **kwargs):
+        received.update(kwargs)
+        return image, pd.DataFrame({"T_restore": [0.0]})
+
+    monkeypatch.setattr(continuum_processing, "restore_continuum_image", fake_restore)
+    continuum_node.continuum_finalize_node(
+        {"image": image, "residual_converged": True},
+        {
+            "prepared_continuum_image": True,
+            "static_xds": xr.Dataset(),
+            "model_xds": _model_dataset(0.75),
+            "restore": True,
+            "deconvolver": "mtmfs",
+        },
+    )
+
+    assert received["deconvolver"] == "mtmfs"

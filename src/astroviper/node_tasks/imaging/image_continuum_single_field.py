@@ -3079,6 +3079,7 @@ def continuum_finalize_node(
             ),
             primary_beam_correction=input_params.get("primary_beam_correction", False),
             primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
+            deconvolver=input_params.get("deconvolver", "hogbom"),
         )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
