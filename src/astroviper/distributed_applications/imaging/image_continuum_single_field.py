@@ -2983,7 +2983,7 @@ def image_continuum_single_field(
     Parameters
     ----------
     ps_store : str
-        Input Processing Set and output image-store paths.
+        Path or URL of the input Processing Set.
     image_store : str
         Path/URL of the on-disk Zarr image cube.
     primary_beam_correction : bool
@@ -2999,33 +2999,49 @@ def image_continuum_single_field(
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     scan_intents : list of str or str, optional
-        Visibility selection by intent and field.
-    field_name : list of str or str, optional
-        Visibility selection by intent and field.
-    memory_mode : object
-        Processing-set loading and cache configuration forwarded to map tasks.
-    cache_directory : object
-        Processing-set loading and cache configuration forwarded to map tasks.
-    clear_cache : object
-        Processing-set loading and cache configuration forwarded to map tasks.
+        Scan intent or intents passed to
+        :func:`xradio.measurement_set.open_processing_set` when opening the
+        input Processing Set.
+    field_name : str or None, optional
+        Reserved field-selection interface. It is currently ignored; select a
+        field when preparing the input Processing Set.
+    memory_mode : str, optional
+        General processing-set memory policy. Continuum imaging currently
+        supports only ``"in_memory"``; the weight, visibility-grid, and
+        wideband-primary-beam policies are controlled separately below.
+    cache_directory : str or None, optional
+        Reserved general processing-set cache location. It is currently ignored
+        by continuum imaging.
+    clear_cache : bool, optional
+        Reserved general processing-set cache cleanup switch. It is currently
+        ignored by continuum imaging; private continuum caches are always
+        removed when their lifetime ends.
     write_visibility_model_to_ps : bool
-        Request persistence of predicted visibilities and imaging weights.
+        Reserved processing-set model-persistence switch. Continuum imaging does
+        not currently write predicted model visibilities to the input Processing
+        Set.
     write_imaging_weights_to_ps : bool
         Copy the completed disk-backed imaging weights into the input Processing
         Set; requires ``weight_memory_mode="in_place"``. Later runs do not use
         them: every run calculates its own imaging weights.
-    compute_backend : object
-        Reserved interface options; this continuum driver executes with Dask.
-    mpi_cluster_setup : object
-        Reserved interface options; this continuum driver executes with Dask.
-    reduce_mode : str and int
-        Reduction topology and batch size.
-    reduce_n_batch : str and int
-        Reduction topology and batch size.
+    compute_backend : str, optional
+        Reserved backend selector. The continuum driver currently builds and
+        computes Dask graphs regardless of this value.
+    mpi_cluster_setup : dict or None, optional
+        Reserved MPI cluster configuration. It is currently ignored by the
+        continuum driver.
+    reduce_mode : {"tree", "single_node", "tree_n"}, optional
+        GraphVIPER reduction topology used for continuum and global-weighting
+        graphs.
+    reduce_n_batch : int, optional
+        Number of inputs combined by each ``"tree_n"`` reduction task. Must be
+        at least 2; ignored by the other reduction modes.
     task_time_kill_switch_seconds : float, optional
-        Node runtime limit and resource sampling interval.
+        Abort a continuum map task when its wall-clock runtime exceeds this
+        many seconds. ``None`` disables the limit.
     monitor_resources_seconds : float, optional
-        Node runtime limit and resource sampling interval.
+        Sampling interval in seconds for per-task CPU, memory, and I/O resource
+        monitoring. ``None`` disables sampling.
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
@@ -3034,10 +3050,15 @@ def image_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
-        ``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;
-        ``list_dish_diameters``, ``list_blockage_diameters`` and
-        ``primary_beam_max_radius_1ghz`` override the inferred beam prescription.
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
         ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
@@ -3094,7 +3115,7 @@ def image_continuum_single_field(
     overwrite : bool
         Allow replacement of the output image store.
     vizualize_graph : bool
-        Write graph visualizations.
+        Reserved graph-visualization switch. It is currently ignored.
     disk_chunk_sizes : dict or str, optional
         Input chunk sizes; ``"Auto"`` infers native storage chunks.
     fft_backend : str
@@ -3417,8 +3438,28 @@ def image_continuum_single_field(
     Returns
     -------
     dict
-        Final node results, deconvolution statistics, and node/graph/driver
-        timings. Image products are written to ``image_store``.
+        Final continuum result. Stable entries are:
+
+        ``image``
+            Final in-memory image dataset. Requested products are also written
+            to ``image_store``.
+        ``static_xds``
+            Dataset containing reusable PSF, primary-beam, and beam-fit state.
+        ``model_xds`` and ``model_uv_xds``
+            Accumulated image-domain model and, for MFS, its Fourier-domain
+            prediction state. ``model_uv_xds`` is ``None`` for MVC.
+        ``n_cycles``
+            Number of model-update cycles performed.
+        ``deconvolution`` and ``residual_statistics``
+            Accumulated deconvolution and final residual statistics.
+        ``controller``, ``stopcode``, ``stopdesc`` and ``residual_converged``
+            Final cycle-controller state and convergence result.
+        ``timing_node_tasks``, ``timing_model_update``, ``timing_psf_fit``,
+        ``timing_restore``, ``timing_graphs`` and
+        ``timing_distributed_application``
+            Node, model-update, PSF-fit, restoration, graph, and driver timing
+            records. Optional cache mappings may also be present for the
+            selected memory policies.
     """
     import time
 
@@ -3626,7 +3667,7 @@ def image_continuum_single_field(
             img_xds,
             data_group_out_name=data_group_name,
             data_group_out=data_group,
-            description="Created by the image_cube_single_field driver; "
+            description="Created by the image_continuum_single_field driver; "
             "populated by its node tasks.",
         )
 

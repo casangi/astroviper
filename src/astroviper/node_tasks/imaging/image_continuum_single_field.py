@@ -1136,10 +1136,15 @@ def residual_update_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
-        ``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;
-        ``list_dish_diameters``, ``list_blockage_diameters`` and
-        ``primary_beam_max_radius_1ghz`` override the inferred beam prescription.
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
 
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,

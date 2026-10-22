@@ -28,10 +28,15 @@ _IMAGE_PARAMS_DOC = (
 
 _CONTINUUM_IMAGE_PARAMS_DOC = (
     _IMAGE_PARAMS_DOC + "\nContinuum imaging also requires ``frequency_coords``,\n"
-    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.\n"
-    "``primary_beam_model`` selects ``auto``, ``airy`` or ``casa_airy``;\n"
-    "``list_dish_diameters``, ``list_blockage_diameters`` and\n"
-    "``primary_beam_max_radius_1ghz`` override the inferred beam prescription."
+    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;\n"
+    "``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``\n"
+    'sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``\n'
+    "selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and\n"
+    "``list_blockage_diameters`` are arrays in metres,\n"
+    "``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and\n"
+    "``primary_beam_ipower`` is the exponent applied to the voltage pattern\n"
+    "(default 2, the power beam). These primary-beam keys override the inferred\n"
+    "beam prescription."
 )
 
 _CONTINUUM_DECONVOLVER_DOC = (
