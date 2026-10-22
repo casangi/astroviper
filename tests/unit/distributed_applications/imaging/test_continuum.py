@@ -29,6 +29,7 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _graph_timing_record,
     _load_continuum_clean_mask,
     _mapping_with_task_primary_beams,
+    _mapping_with_task_weights,
     calculate_number_of_chunks_for_continuum_imaging,
     combine_continuum_chunks,
     combine_continuum_imaging_weight_chunks,
@@ -47,6 +48,32 @@ from astroviper.utils.telescope_layout import read_telescope_layout
 
 TW_HYDRA_STORE_NAME = "twhya_selfcal_lsrk_5chans.ps.zarr"
 TW_HYDRA_RELATIVE_TOLERANCE = 1.0e-6
+
+
+def test_mapping_with_task_weights_attaches_only_each_task_partition():
+    """In-memory weights enter each map task without an all-task cache copy."""
+    mappings = {
+        0: {"data_selection": {"ms": {"frequency": slice(0, 1)}}},
+        1: {"data_selection": {"ms": {"frequency": slice(1, 2)}}},
+    }
+    weights = {
+        0: {"ms": xr.Dataset({"WEIGHT_IMAGING": ("frequency", [1.0])})},
+        1: {"ms": xr.Dataset({"WEIGHT_IMAGING": ("frequency", [2.0])})},
+    }
+
+    actual = _mapping_with_task_weights(mappings, weights)
+
+    assert actual[0]["weight_datasets"] is weights[0]
+    assert actual[1]["weight_datasets"] is weights[1]
+    assert "weight_datasets" not in mappings[0]
+    assert "weight_datasets" not in mappings[1]
+
+
+def test_mapping_with_task_weights_requires_every_task_once():
+    """A partial or foreign task cache is rejected before graph construction."""
+    mappings = {0: {}, 1: {}}
+    with pytest.raises(ValueError, match="does not match"):
+        _mapping_with_task_weights(mappings, {0: {}})
 
 
 def _frequency_mapping(task_frequency_chunks, child_frequencies):

@@ -272,6 +272,24 @@ def _mapping_with_task_primary_beams(node_task_data_mapping, pb_cache_mapping):
     return task_mapping
 
 
+def _mapping_with_task_weights(node_task_data_mapping, weight_cache_mapping):
+    """Attach only each task's own in-memory imaging weights to its mapping."""
+    expected = {int(task_id) for task_id in node_task_data_mapping}
+    actual = {int(task_id) for task_id in weight_cache_mapping}
+    if actual != expected:
+        raise ValueError(
+            "The imaging-weight cache does not match the continuum tasks: "
+            f"expected={sorted(expected)}, received={sorted(actual)}."
+        )
+
+    task_mapping = {}
+    for task_id, mapping in node_task_data_mapping.items():
+        task_id = int(task_id)
+        task_mapping[task_id] = dict(mapping)
+        task_mapping[task_id]["weight_datasets"] = weight_cache_mapping[task_id]
+    return task_mapping
+
+
 def _mapping_with_task_observed_grids(
     node_task_data_mapping,
     observed_visibility_grid_mapping,
@@ -3489,7 +3507,6 @@ def image_continuum_single_field(
     input_params["deconvolver"] = deconvolver
     input_params["pbcor"] = bool(pbcor)
     input_params["pblimit"] = float(pblimit)
-    input_params["clean_mask"] = clean_mask_array
     input_params["specmode"] = specmode
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
@@ -3730,8 +3747,9 @@ def image_continuum_single_field(
             cycle_input_params["is_n_iter_0"] = is_n_iter_0
             cycle_input_params["restore"] = False
 
-            # Prepared once before the imaging-cycle loop.
-            cycle_input_params["weight_cache_mapping"] = weight_cache_mapping
+            # Prepared once before the imaging-cycle loop. In-memory weights
+            # are attached task by task below so GraphViper does not deep-copy
+            # the complete all-task cache into every map-node parameter dict.
             cycle_input_params["weight_cache_is_active"] = weight_cache_is_active
 
             if not is_n_iter_0:
@@ -3751,7 +3769,6 @@ def image_continuum_single_field(
                     )
 
                 cycle_input_params["model_uv_xds"] = model_uv_xds
-                cycle_input_params["static_xds"] = static_xds
 
                 if specmode == "mvc":
                     cycle_input_params["model_xds"] = model_xds
@@ -3847,13 +3864,18 @@ def image_continuum_single_field(
 
             # Call the graph with continuum_minor_cycle_node
             cycle_node_task_data_mapping = node_task_data_mapping
+            if weight_cache_mapping is not None:
+                cycle_node_task_data_mapping = _mapping_with_task_weights(
+                    cycle_node_task_data_mapping,
+                    weight_cache_mapping,
+                )
             if (
                 specmode == "mvc"
                 and not is_n_iter_0
                 and widebandpb_memory_mode == "in_memory"
             ):
                 cycle_node_task_data_mapping = _mapping_with_task_primary_beams(
-                    node_task_data_mapping,
+                    cycle_node_task_data_mapping,
                     pb_cache_mapping,
                 )
             if (

@@ -1081,6 +1081,7 @@ def residual_update_continuum_single_field(
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
+    weight_datasets=None,
     weight_cache_is_active=False,
     primary_beam_xds=None,
     observed_visibility_grid_xds=None,
@@ -1119,7 +1120,12 @@ def residual_update_continuum_single_field(
     model_xds : xarray.Dataset, optional
         Accumulated image-domain Taylor model used for MVC prediction.
     weight_cache_mapping : dict, optional
-        Task-indexed prepared imaging weights.
+        Legacy all-task prepared imaging-weight mapping. New graph callers
+        attach only this task's weights through ``weight_datasets``.
+    weight_datasets : dict, optional
+        Prepared imaging weights for this map task only, supplied through
+        ``node_task_data_mapping`` to avoid copying every task's weights into
+        every map-node parameter dictionary.
     weight_cache_is_active : bool, optional
         ``True`` when this run's in-place imaging weights are already
         registered in the Processing Set (global weighting with
@@ -1399,7 +1405,15 @@ def residual_update_continuum_single_field(
     # Load Imaging Cache
     # =============================================================
 
-    if weight_cache_mapping is not None:
+    if weight_datasets is not None:
+        ps_xdt = _attach_imaging_weights_continuum(
+            ps_xdt,
+            weight_datasets,
+            processing_set_data_group_name=(processing_set_data_group_name),
+            weight_imaging_name="WEIGHT_IMAGING",
+        )
+
+    elif weight_cache_mapping is not None:
         task_id = int(task_id)
 
         if task_id not in weight_cache_mapping:
@@ -1587,10 +1601,15 @@ def residual_update_continuum_single_field(
 
     # Preserve the first-cycle imaging weights for reuse by later imaging cycles.
     # They may have been loaded from the processing set or calculated in setup.
-    weight_datasets = {}
+    return_weight_datasets = {}
 
     T_write_imaging_weights = 0.0
-    if is_n_iter_0 and weight_cache_mapping is None:
+    if (
+        is_n_iter_0
+        and weight_datasets is None
+        and weight_cache_mapping is None
+        and not weight_cache_is_active
+    ):
         import xarray as xr
 
         for ms_name, ms_xds in ps_xdt.items():
@@ -1606,7 +1625,7 @@ def residual_update_continuum_single_field(
 
             weight_da = ms_xds[weight_name]
 
-            weight_datasets[ms_name] = xr.Dataset(
+            return_weight_datasets[ms_name] = xr.Dataset(
                 {
                     weight_name: xr.Variable(
                         dims=weight_da.dims,
@@ -1625,7 +1644,7 @@ def residual_update_continuum_single_field(
             start = time.time()
             _write_continuum_weights_in_place(ps_xdt, image_store)
             T_write_imaging_weights = time.time() - start
-            weight_datasets = {}
+            return_weight_datasets = {}
 
     # No output image writing is performed here. The Taylor products stay in
     # memory and flow directly into the GraphViper reduction stage.
@@ -1689,9 +1708,9 @@ def residual_update_continuum_single_field(
     }
 
     # If we have computed weights in the first major loop locally, we need to communicate that back to the driver
-    if weight_datasets:
+    if return_weight_datasets:
         return_dict["task_id"] = int(task_id)
-        return_dict["weight_datasets"] = weight_datasets
+        return_dict["weight_datasets"] = return_weight_datasets
 
     # Return primary beams per channel if present
     if pb_xds is not None:

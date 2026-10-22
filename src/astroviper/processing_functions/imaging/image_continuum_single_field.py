@@ -541,7 +541,9 @@ def prepare_model_uv_continuum_single_field(
         image_data_group_out_modified={
             "visibility": "VISIBILITY_MODEL",
         },
-        image_data_variables_keep=["sky"],
+        # The accumulated image-domain model is returned separately. Keeping
+        # it here would double the large state copied to each map task.
+        image_data_variables_keep=[],
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,

@@ -910,7 +910,10 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
         lambda dataset, **kwargs: dataset,
     )
 
+    fft_options = {}
+
     def fake_fft(dataset, **kwargs):
+        fft_options.update(kwargs)
         dataset["VISIBILITY_MODEL"] = dataset.SKY_MODEL.astype(np.complex64)
         dataset.attrs["data_groups"]["model"]["visibility"] = "VISIBILITY_MODEL"
         return dataset
@@ -925,6 +928,7 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
     )
     assert result.VISIBILITY_MODEL.sizes["taylor_term"] == 2
     assert result.VISIBILITY_MODEL.attrs["nterms"] == 2
+    assert fft_options["image_data_variables_keep"] == []
     np.testing.assert_array_equal(
         result.VISIBILITY_MODEL.isel(taylor_term=0), 2.0 + 0.0j
     )
