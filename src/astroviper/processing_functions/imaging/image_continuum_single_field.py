@@ -1996,6 +1996,8 @@ def _continuum_clean_support(
     for a peak its model update may not clean. It is the clean mask of the
     data group (values above 0.5) or, without one, the pixels where the
     primary beam is at least ``primary_beam_limit`` times its peak and not 0.
+    When both are present, their intersection is used so an explicit mask
+    cannot re-enable pixels below the primary-beam cutoff.
     ``primary_beam_limit`` defaults to 0, every pixel where the primary beam
     is above 0, as for the continuum Högbom model update and cube imaging,
     which make the same mask with the same default
@@ -2035,16 +2037,21 @@ def _continuum_clean_support(
         return array.isel(selection, drop=True)
 
     mask_name = group.get("mask")
+    primary_beam_name = group.get("primary_beam")
+    support = None
     if mask_name is not None:
         support = plane_zero(img_xds[mask_name]).broadcast_like(residual_plane) > 0.5
-    elif group.get("primary_beam") is not None:
-        primary_beam = plane_zero(img_xds[group["primary_beam"]])
+    if primary_beam_name is not None:
+        primary_beam = plane_zero(img_xds[primary_beam_name])
         primary_beam_limit = float(control_params.get("primary_beam_limit", 0.0))
-        support = (
+        primary_beam_support = (
             (primary_beam >= primary_beam_limit * primary_beam.max(skipna=True))
             & (primary_beam != 0)
         ).broadcast_like(residual_plane)
-    else:
+        support = (
+            primary_beam_support if support is None else support & primary_beam_support
+        )
+    if support is None:
         return None
     return support.transpose("time", "polarization", "l", "m").values
 
@@ -2469,10 +2476,10 @@ def model_update_mtmfs_single_field(
         Asp), or at once when its peak exceeds ``(1 + gain)`` times the
         peak at the start of the model update. ``gain``
         (``0 < gain <= 1``) and ``max_iter_divergence`` are checked as in
-        the cube deconvolver. Without a clean mask, both deconvolvers clean
-        the pixels where the primary beam is at least
-        ``primary_beam_limit`` (default 0) times its peak and not 0, the
-        pixels the stop test measures.
+        the cube deconvolver. Both deconvolvers restrict cleaning to pixels
+        where the primary beam is at least ``primary_beam_limit`` (default 0)
+        times its peak and not 0. When a clean mask is present, its intersection
+        with that PB support is used; the stop test measures the same pixels.
 
     is_first_cycle : bool, optional
         Indicates whether this is the first model update.

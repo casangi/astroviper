@@ -81,6 +81,38 @@ def processing_sets(tmp_path_factory):
                 n_frequency_chunks=1,
                 overwrite=True,
             )
+
+    stores["mtmfs_low_pb"] = str(work_dir / "mtmfs_low_pb.ps.zarr")
+    off_axis = PHASE_CENTER + np.array(
+        [np.deg2rad(45.0 / 3600.0) / np.cos(PHASE_CENTER[1]), 0.0]
+    )
+    with dask.config.set(scheduler="synchronous"):
+        distributed_applications.simulation.simulate_processing_set(
+            ps_store=stores["mtmfs_low_pb"],
+            antenna_xds=antenna_xds,
+            time_params={
+                "time_start": "2019-10-03T19:00:00.000",
+                "time_delta": 600.0,
+                "n_samples": 4,
+            },
+            frequency_params={
+                "freq_start": 100e9,
+                "freq_delta": 0.5e9,
+                "n_channels": 3,
+                "channel_width": 2e6,
+            },
+            polarization=CORRELATIONS["two_hands"],
+            sky_components=[
+                {"kind": "point", "flux": CORRELATION_FLUX, "ra_dec": PHASE_CENTER},
+                {"kind": "point", "flux": CORRELATION_FLUX, "ra_dec": off_axis},
+            ],
+            phase_center_ra_dec=PHASE_CENTER[None, :],
+            beam_models=[airy_disk_model("alma")],
+            beam_model_map=np.zeros(antenna_xds.sizes["antenna_name"], int),
+            n_time_chunks=1,
+            n_frequency_chunks=1,
+            overwrite=True,
+        )
     root = zarr.open_group(
         stores["four_cross_hand_flagged"], mode="r+", use_consolidated=False
     )
@@ -129,6 +161,10 @@ def _image(
     continuum_mode="mfs",
     max_iter=0,
     weighting=None,
+    image_param_overrides=None,
+    cycle_control_overrides=None,
+    image_data_variables_keep=None,
+    return_result=False,
     **kwargs,
 ):
     """Image a fresh copy of ``pristine_store`` and return its image store path.
@@ -146,47 +182,53 @@ def _image(
     image_store = str(
         tmp_path / f"{continuum_mode}_{'_'.join(polarization_coords)}.img.zarr"
     )
+    image_params = {
+        "image_size": IMAGE_SIZE,
+        "cell_size": np.array([-0.7, 0.7]) * np.pi / (180 * 3600),
+        "phase_direction": PHASE_CENTER,
+        "frequency_coords": frequency,
+        "polarization_coords": polarization_coords,
+        "time_coords": [0],
+        "fft_padding": 1.2,
+        "n_taylor_terms": 1,
+        "reference_frequency": float(np.mean(frequency)),
+    }
+    image_params.update(image_param_overrides or {})
+    cycle_control_params = {
+        "max_iter": max_iter,
+        "max_cycles": 5 if max_iter else 0,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": max(max_iter, 1),
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    cycle_control_params.update(cycle_control_overrides or {})
+    if image_data_variables_keep is None:
+        image_data_variables_keep = [
+            "sky_residual",
+            "sky_model",
+            "point_spread_function",
+        ]
     with dask.config.set(scheduler="synchronous"):
-        distributed_applications.imaging.image_continuum_single_field(
+        result = distributed_applications.imaging.image_continuum_single_field(
             ps_store=ps_store,
             image_store=image_store,
-            image_params={
-                "image_size": IMAGE_SIZE,
-                "cell_size": np.array([-0.7, 0.7]) * np.pi / (180 * 3600),
-                "phase_direction": PHASE_CENTER,
-                "frequency_coords": frequency,
-                "polarization_coords": polarization_coords,
-                "time_coords": [0],
-                "fft_padding": 1.2,
-                "n_taylor_terms": 1,
-                "reference_frequency": float(np.mean(frequency)),
-            },
+            image_params=image_params,
             imaging_weights_params=weighting
             or {"weighting": "natural", "weighting_scope": "local"},
-            cycle_control_params={
-                "max_iter": max_iter,
-                "max_cycles": 5 if max_iter else 0,
-                "threshold": 0.0,
-                "gain": 0.1,
-                "psf_sidelobe_factor": 1.5,
-                "max_iter_per_cycle": max(max_iter, 1),
-                "min_psf_fraction": 0.05,
-                "max_psf_fraction": 0.8,
-            },
+            cycle_control_params=cycle_control_params,
             continuum_mode=continuum_mode,
             instrument_polarization_basis=basis,
-            image_data_variables_keep=[
-                "sky_residual",
-                "sky_model",
-                "point_spread_function",
-            ],
+            image_data_variables_keep=image_data_variables_keep,
             processing_set_data_group_name="base",
             n_mapping_parallelism={"frequency": 1},
             overwrite=True,
             **kwargs,
         )
     assert _arrays_and_groups(ps_store) == before
-    return image_store
+    return (result, image_store) if return_result else image_store
 
 
 def _centre(img, variable):
@@ -389,6 +431,55 @@ def test_one_flagged_parallel_hand_drops_the_whole_sample(
             images["one_parallel_hand_flagged"][variable],
             images["both_parallel_hands_flagged"][variable],
         )
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_mtmfs_ignores_masked_structure_below_the_primary_beam_limit(
+    tmp_path, processing_sets, continuum_mode
+):
+    """MT-MFS cleans valid support and converges with masked low-PB structure."""
+    threshold = 0.053
+    clean_mask = tmp_path / "clean_mask.npy"
+    np.save(clean_mask, np.ones(IMAGE_SIZE, dtype=bool))
+    result, image_store = _image(
+        tmp_path,
+        processing_sets["mtmfs_low_pb"],
+        ["I", "Q"],
+        continuum_mode=continuum_mode,
+        max_iter=100,
+        image_param_overrides={
+            "cell_size": np.array([-2.0, 2.0]) * np.pi / (180 * 3600),
+            "n_taylor_terms": 2,
+        },
+        cycle_control_overrides={
+            "max_cycles": 15,
+            "threshold": threshold,
+            "max_iter_per_cycle": 20,
+            "scales": [0.0],
+        },
+        image_data_variables_keep=[
+            "sky_residual",
+            "sky_model",
+            "point_spread_function",
+            "primary_beam",
+        ],
+        return_result=True,
+        deconvolver="mtmfs",
+        primary_beam_limit=0.2,
+        clean_mask=str(clean_mask),
+    )
+    image = load_image(image_store)
+    primary_beam = image.PRIMARY_BEAM.isel(time=0, frequency=0, polarization=0)
+    low_beam = (primary_beam > 0.05) & (primary_beam < 0.2)
+    residual = np.abs(image.SKY_RESIDUAL.isel(time=0, taylor_term=0, polarization=0))
+    model = np.abs(image.SKY_MODEL.isel(time=0, taylor_term=0, polarization=0))
+
+    assert result["n_cycles"] < 15
+    assert result["controller"].total_iter_done > 0
+    assert float(model.max()) > 0.0
+    if continuum_mode == "mfs":
+        assert float(residual.where(low_beam).max()) > threshold
+    assert float(model.where(low_beam, 0).max()) == 0.0
 
 
 @pytest.mark.parametrize(

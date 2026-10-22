@@ -662,6 +662,10 @@ def test_hogbom_model_update_preserves_image_precision(monkeypatch, dtype):
 def test_hogbom_adapter_builds_one_contiguous_boolean_mask_plane(monkeypatch):
     """Continuum applies its >0.5 mask rule before calling cube Högbom."""
     image = make_continuum_image()
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+        ("time", "polarization"),
+        np.zeros((1, 1)),
+    )
     mask = np.ones(image.SKY_RESIDUAL.shape, dtype=np.float64)
     mask[..., 0, 0] = 0.3
     mask[..., 0, 1] = np.nan
