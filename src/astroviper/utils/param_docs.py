@@ -113,6 +113,8 @@ def _target_files():
         "processing_functions/imaging/image_continuum_single_field.py",
         "processing_functions/imaging/imaging_setup_continuum_single_field.py",
         "processing_functions/imaging/make_point_spread_function_continuum_single_field.py",
+        "processing_functions/imaging/primary_beam/continuum_primary_beam.py",
+        "processing_functions/imaging/primary_beam/make_primary_beam.py",
         "processing_functions/imaging/make_undeconvolved_image_continuum.py",
         "processing_functions/imaging/make_undeconvolved_image_continuum_mvc.py",
         "processing_functions/imaging/residual_cycle_continuum_single_field.py",

@@ -39,6 +39,70 @@ _CONTINUUM_IMAGE_PARAMS_DOC = (
     "beam prescription."
 )
 
+_PRIMARY_BEAM_IMAGE_PARAMS_DOC = (
+    'Image geometry. Must contain ``"image_size"`` (``(nx, ny)``) and\n'
+    '``"cell_size"`` (l, m cell sizes in radians). The image centre is derived\n'
+    "internally as ``image_size // 2``; the supplied dictionary is not mutated."
+)
+
+_CONTINUUM_PRIMARY_BEAM_IMAGE_PARAMS_DOC = (
+    _PRIMARY_BEAM_IMAGE_PARAMS_DOC
+    + '\n``primary_beam_model`` selects ``"airy"`` (the default for direct\n'
+    'calls) or ``"casa_airy"``; the continuum driver resolves ``"auto"`` from\n'
+    "telescope metadata first. ``primary_beam_max_radius_1ghz`` is the support\n"
+    "radius in radians at 1 GHz and scales inversely with frequency."
+)
+
+_CONTINUUM_PRIMARY_BEAM_RESOLUTION_PARAMS_DOC = (
+    'Primary-beam configuration. ``primary_beam_model`` accepts ``"auto"``\n'
+    '(default), ``"airy"`` (physical annular aperture), or ``"casa_airy"``.\n'
+    "``list_dish_diameters`` and ``list_blockage_diameters`` contain metres;\n"
+    "``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz; and\n"
+    "``primary_beam_ipower`` is the voltage-pattern exponent (default 2, the\n"
+    "power beam). Explicit values take precedence over telescope inference."
+)
+
+_CONTINUUM_PRIMARY_BEAM_MODE_DOC = (
+    "Continuum mode used for beam selection. Both modes select a VLA band at\n"
+    "the Taylor reference frequency so channel order cannot change the\n"
+    "prescription; CASA ``makePBImage`` instead selects the MVC beam from the\n"
+    "first image channel. Resolve once before partitioning so every task uses\n"
+    "the same prescription."
+)
+
+_PRIMARY_BEAM_IMAGE_DATASET_DOC = (
+    "Image dataset with ``time``, ``frequency``, ``polarization``, ``l`` and\n"
+    "``m`` coordinates. Modified in place."
+)
+
+_PRIMARY_BEAM_DATA_GROUP_IN_DOC = (
+    "Image data group whose existing entries are carried into the output\n"
+    'group. Default ``"residual"``.'
+)
+
+_PRIMARY_BEAM_DATA_GROUP_OUT_DOC = (
+    "Name of the data group under which ``PRIMARY_BEAM`` is registered.\n"
+    'Default ``"residual"``.'
+)
+
+_PRIMARY_BEAM_DISH_DIAMETERS_DOC = (
+    "Antenna dish diameters in metres. Defaults to ``numpy.array([10.7])``,\n"
+    "the effective ALMA 12 m diameter used by the reference imaging tests."
+)
+
+_PRIMARY_BEAM_BLOCKAGE_DIAMETERS_DOC = (
+    "Sub-reflector blockage diameters in metres. Defaults to\n``numpy.array([0.75])``."
+)
+
+_PRIMARY_BEAM_IPOWER_DOC = (
+    "Voltage-pattern exponent: ``1`` returns voltage and ``2`` returns the\n"
+    "power primary beam. Defaults to ``2``."
+)
+
+_PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
+    "Floating-point precision for the primary beam. Defaults to\n``numpy.float64``."
+)
+
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
     'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
@@ -65,6 +129,47 @@ _CONTINUUM_MODE_DOC = (
 
 IMAGING_PARAM_DOCS = {
     "image_params": _IMAGE_PARAMS_DOC,
+    "make_primary_beam_single_field.image_params": _PRIMARY_BEAM_IMAGE_PARAMS_DOC,
+    "make_continuum_primary_beam_single_field.image_params": (
+        _CONTINUUM_PRIMARY_BEAM_IMAGE_PARAMS_DOC
+    ),
+    "resolve_continuum_primary_beam.image_params": (
+        _CONTINUUM_PRIMARY_BEAM_RESOLUTION_PARAMS_DOC
+    ),
+    "make_primary_beam_single_field.img_xds": _PRIMARY_BEAM_IMAGE_DATASET_DOC,
+    "make_continuum_primary_beam_single_field.img_xds": (
+        _PRIMARY_BEAM_IMAGE_DATASET_DOC
+    ),
+    "make_primary_beam_single_field.image_data_group_in_name": (
+        _PRIMARY_BEAM_DATA_GROUP_IN_DOC
+    ),
+    "make_continuum_primary_beam_single_field.image_data_group_in_name": (
+        _PRIMARY_BEAM_DATA_GROUP_IN_DOC
+    ),
+    "make_primary_beam_single_field.image_data_group_out_name": (
+        _PRIMARY_BEAM_DATA_GROUP_OUT_DOC
+    ),
+    "make_continuum_primary_beam_single_field.image_data_group_out_name": (
+        _PRIMARY_BEAM_DATA_GROUP_OUT_DOC
+    ),
+    "make_primary_beam_single_field.list_dish_diameters": (
+        _PRIMARY_BEAM_DISH_DIAMETERS_DOC
+    ),
+    "make_continuum_primary_beam_single_field.list_dish_diameters": (
+        _PRIMARY_BEAM_DISH_DIAMETERS_DOC
+    ),
+    "make_primary_beam_single_field.list_blockage_diameters": (
+        _PRIMARY_BEAM_BLOCKAGE_DIAMETERS_DOC
+    ),
+    "make_continuum_primary_beam_single_field.list_blockage_diameters": (
+        _PRIMARY_BEAM_BLOCKAGE_DIAMETERS_DOC
+    ),
+    "make_primary_beam_single_field.ipower": _PRIMARY_BEAM_IPOWER_DOC,
+    "make_continuum_primary_beam_single_field.ipower": _PRIMARY_BEAM_IPOWER_DOC,
+    "make_primary_beam_single_field.float_dtype": _PRIMARY_BEAM_FLOAT_DTYPE_DOC,
+    "make_continuum_primary_beam_single_field.float_dtype": (
+        _PRIMARY_BEAM_FLOAT_DTYPE_DOC
+    ),
     "image_continuum_single_field.image_params": _CONTINUUM_IMAGE_PARAMS_DOC,
     "residual_update_continuum_single_field.image_params": (
         _CONTINUUM_IMAGE_PARAMS_DOC
@@ -103,6 +208,7 @@ IMAGING_PARAM_DOCS = {
         "independent of this scope."
     ),
     "continuum_mode": _CONTINUUM_MODE_DOC,
+    "resolve_continuum_primary_beam.continuum_mode": (_CONTINUUM_PRIMARY_BEAM_MODE_DOC),
     "gridding_kernel_params": (
         "The gridding convolution kernel the gridder and degridder use:\n"
         '``type`` (``"prolate_spheroidal_casa"``, Schwab\'s rational\n'
