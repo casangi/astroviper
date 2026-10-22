@@ -2728,6 +2728,55 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
     return model_xds, model_uv_xds
 
 
+def _add_previous_continuum_model_flux(deconvolve_dict, previous_model_xds):
+    """Convert per-cycle continuum model increments to cumulative diagnostics."""
+    if previous_model_xds is None:
+        return
+    if "SKY_MODEL" not in previous_model_xds:
+        raise KeyError("previous continuum model does not contain 'SKY_MODEL'.")
+
+    import numpy as np
+
+    previous_model = previous_model_xds["SKY_MODEL"]
+    required_dims = ("time", "taylor_term", "polarization", "l", "m")
+    missing_dims = [dim for dim in required_dims if dim not in previous_model.dims]
+    if missing_dims:
+        raise ValueError(
+            "The previous continuum model cannot provide per-plane fluxes; "
+            f"missing dimensions {missing_dims}."
+        )
+    previous_taylor_zero = previous_model.transpose(*required_dims).isel(
+        taylor_term=0, drop=True
+    )
+    previous_flux = np.sum(previous_taylor_zero.values, axis=(-2, -1))
+
+    for key, fields in deconvolve_dict.data.items():
+        if key.time >= previous_flux.shape[0] or key.pol >= previous_flux.shape[1]:
+            raise ValueError(
+                "Continuum deconvolution statistics refer to a model plane "
+                f"outside the previous model: time={key.time}, pol={key.pol}."
+            )
+        offset = float(previous_flux[key.time, key.pol])
+        model_flux = fields.get("model_flux")
+        if model_flux is None:
+            continue
+        model_flux = model_flux if isinstance(model_flux, list) else [model_flux]
+        fields["model_flux"] = [float(value) + offset for value in model_flux]
+
+        start_model_flux = fields.get("start_model_flux")
+        if start_model_flux is None:
+            fields["start_model_flux"] = [offset] * len(model_flux)
+        else:
+            start_model_flux = (
+                start_model_flux
+                if isinstance(start_model_flux, list)
+                else [start_model_flux]
+            )
+            fields["start_model_flux"] = [
+                float(value) + offset for value in start_model_flux
+            ]
+
+
 def _prepare_cached_mfs_residual_grid(input_data, input_params):
     """Cache the first MFS observed grid or form a later residual grid.
 
@@ -3349,6 +3398,10 @@ def model_update_continuum_single_field(
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
+    )
+    _add_previous_continuum_model_flux(
+        deconvolve_dict,
+        input_params.get("model_xds"),
     )
     copy_residual_entropy(deconvolve_dict, residual_imaging_dict)
 

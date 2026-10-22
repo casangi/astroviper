@@ -752,8 +752,11 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
     assert params["max_iter_per_cycle"] == 5
 
 
-def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch):
-    """The append node preserves native MT-MFS accounting and diagnostics."""
+@pytest.mark.parametrize("deconvolver", ["hogbom", "mtmfs"])
+def test_continuum_node_updates_controller_and_cumulative_flux(
+    monkeypatch, deconvolver
+):
+    """Both backends report cumulative flux from the previous Taylor-0 model."""
     from astroviper.processing_functions.imaging.utils import (
         CycleController,
         StopCode,
@@ -810,9 +813,12 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
     controller = CycleController(
         **{key: value for key, value in params.items() if key != "primary_beam_limit"}
     )
+    previous_model = xr.Dataset({"SKY_MODEL": xr.zeros_like(image.SKY_RESIDUAL)})
+    previous_model.SKY_MODEL.loc[{"taylor_term": 0, "polarization": "I"}] = 2.0
+    previous_model.SKY_MODEL.loc[{"taylor_term": 0, "polarization": "Q"}] = 3.0
 
-    def native_backend(image_arg, deconvolver, controls, **kwargs):
-        assert deconvolver == "mtmfs"
+    def native_backend(image_arg, selected_deconvolver, controls, **kwargs):
+        assert selected_deconvolver == deconvolver
         assert controls["max_iter_per_cycle_updated"].shape == (1, 1, 2)
         assert controls["threshold_per_cycle"].shape == (1, 1, 2)
         image_arg["SKY_MODEL"] = xr.zeros_like(image_arg.SKY_RESIDUAL)
@@ -825,6 +831,7 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
                     "iter_done": iterations,
                     "peakres": 0.5,
                     "masksum": 16,
+                    "start_model_flux": 0.0,
                     "model_flux": float(16 * (pol + 1)),
                     "max_psf_sidelobe": 0.1 * (pol + 1),
                     "stop_code": StopCode(
@@ -848,8 +855,10 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
         {"image": image},
         {
             "controller": controller,
-            "deconvolver": "mtmfs",
+            "deconvolver": deconvolver,
             "cycle_control_params": params,
+            "is_first_cycle": False,
+            "model_xds": previous_model,
         },
     )
 
@@ -871,9 +880,12 @@ def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch)
     )
     assert result["timing_model_update"].loc[0, "T_mtmfs"] == pytest.approx(0.25)
     assert len(result["deconvolution"].data) == 2
-    for fields in result["deconvolution"].data.values():
+    for pol, fields in enumerate(result["deconvolution"].data.values()):
         assert fields["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
         assert np.isfinite(fields["hessian_condition_number"]).all()
+        previous_flux = 16.0 * (pol + 2)
+        assert fields["start_model_flux"] == [previous_flux]
+        assert fields["model_flux"] == [previous_flux + 16.0 * (pol + 1)]
 
 
 @pytest.mark.parametrize(
