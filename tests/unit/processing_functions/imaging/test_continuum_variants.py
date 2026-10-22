@@ -22,9 +22,9 @@ from tests.utils.continuum_images import (
 )
 
 
-def _native_mtmfs_continuum_image(n_taylor_terms, shape, dtype, support_kind):
+def _native_mtmfs_continuum_image(n_taylor_terms, shape, dtype, support_kind, npol=2):
     """Build coupled Taylor point sources for the real continuum adapter."""
-    ntime, npol = 2, 2
+    ntime = 2
     nl, nm = shape
     frequencies = np.linspace(-0.75, 0.75, n_taylor_terms + 4)
     moments = np.asarray(
@@ -55,7 +55,7 @@ def _native_mtmfs_continuum_image(n_taylor_terms, shape, dtype, support_kind):
         "time": np.arange(ntime, dtype=float),
         "taylor_term": np.arange(n_taylor_terms),
         "psf_taylor_order": np.arange(2 * n_taylor_terms - 1),
-        "polarization": ["I", "Q"],
+        "polarization": ["I", "Q", "U", "V"][:npol],
         "l": np.arange(nl),
         "m": np.arange(nm),
     }
@@ -272,6 +272,53 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     np.testing.assert_array_equal(fields["scales"], [0.0])
     np.testing.assert_array_equal(fields["hessian_condition_number"], [2.0])
     assert "T_mtmfs" in timing
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("read_only", [False, True])
+def test_native_mtmfs_copies_and_writes_back_mvc_four_polarization_layout(
+    monkeypatch, dtype, read_only
+):
+    """MVC Taylor-last and read-only residuals use a writable native copy."""
+    image, _ = _native_mtmfs_continuum_image(2, (8, 8), dtype, "mask", npol=4)
+    canonical = image.SKY_RESIDUAL.values
+    storage = np.ascontiguousarray(canonical.transpose(0, 2, 3, 4, 1))
+    if read_only:
+        storage.flags.writeable = False
+    image["SKY_RESIDUAL"] = xr.DataArray(
+        storage,
+        dims=("time", "polarization", "l", "m", "taylor_term"),
+        coords={dim: image.coords[dim] for dim in image.SKY_RESIDUAL.dims},
+    )
+    residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
+    calls = []
+
+    def native_clean(residual, psf, model, **kwargs):
+        calls.append(residual)
+        assert residual.flags.c_contiguous
+        assert residual.flags.writeable
+        assert not np.shares_memory(residual, storage)
+        residual *= dtype(0.5)
+        model[0] = dtype(1.0)
+        return {
+            "iterations_performed": 1,
+            "peak_residual": float(np.max(np.abs(residual[0]))),
+            "model_flux": float(model[0].sum()),
+            "stop_code": mtmfs.STOP_MAX_ITER,
+            "scales": np.asarray([0.0]),
+            "hessian_condition_number": np.asarray([1.0]),
+        }
+
+    monkeypatch.setattr(mtmfs, "clean", native_clean)
+    model_update_mtmfs_single_field(
+        image,
+        "mtmfs",
+        {"max_iter": 1, "gain": 0.1, "scales": [0.0]},
+    )
+
+    assert len(calls) == 8
+    np.testing.assert_array_equal(image.SKY_RESIDUAL, residual_snapshot * dtype(0.5))
+    np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=0), dtype(1.0))
 
 
 @pytest.mark.parametrize(

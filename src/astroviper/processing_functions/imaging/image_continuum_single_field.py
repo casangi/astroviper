@@ -2157,6 +2157,7 @@ def _model_update_native_mtmfs(
         MODEL_UPDATE_STOP_DESCRIPTIONS,
     )
 
+    stored_residual_dims = img_xds[residual_name].dims
     residual_da = img_xds[residual_name].transpose(
         "time", "taylor_term", "polarization", "l", "m"
     )
@@ -2189,6 +2190,14 @@ def _model_update_native_mtmfs(
             "Native MT-MFS residual and PSF dtypes must match; "
             f"received {residual.dtype} and {psf.dtype}."
         )
+
+    # A read-only source cannot receive the native kernel's residual update.
+    # Give the dataset writable storage while preserving its current layout;
+    # individual non-canonical Taylor stacks are handled below.
+    if not residual.flags.writeable:
+        residual = np.array(residual, copy=True, order="K")
+        residual_da = residual_da.copy(data=residual)
+        img_xds[residual_name] = residual_da.transpose(*stored_residual_dims)
 
     reference_plane = residual_da.isel(taylor_term=0, drop=True)
     support = _continuum_clean_support(
@@ -2274,11 +2283,24 @@ def _model_update_native_mtmfs(
     start = time.time()
     for tt in range(ntime):
         for pp in range(npol):
-            # Pass the writable Taylor-stack view directly. Its spatial planes
-            # are contiguous; the native binding honors the Taylor-term stride
-            # introduced by the polarization axis and updates SKY_RESIDUAL in
-            # place without allocating a second residual stack.
-            residual_work = residual[tt, :, pp, :, :]
+            residual_view = residual[tt, :, pp, :, :]
+            itemsize = residual_view.dtype.itemsize
+            plane_bytes = nl * nm * itemsize
+            native_layout = (
+                residual_view.flags.writeable
+                and residual_view.strides[2] == itemsize
+                and residual_view.strides[1] == nm * itemsize
+                and residual_view.strides[0] >= plane_bytes
+                and residual_view.strides[0] % itemsize == 0
+            )
+            # Preserve the zero-copy path for canonical image storage. MVC and
+            # external callers may instead place Taylor terms after the image
+            # axes; copy those stacks into the native layout and write them back.
+            residual_work = (
+                residual_view
+                if native_layout
+                else np.array(residual_view, copy=True, order="C")
+            )
             psf_work = np.ascontiguousarray(psf[tt, :, pp, :, :])
             model_work = np.zeros_like(residual_work)
             mask_work = np.ascontiguousarray(support[tt, pp], dtype=residual_work.dtype)
@@ -2309,6 +2331,8 @@ def _model_update_native_mtmfs(
                 mask_threshold=deconvolve_params.get("mask_threshold", 0.9),
                 **divergence,
             )
+            if not native_layout:
+                residual_view[...] = residual_work
             model[tt, :, pp, :, :] = model_work
             final_selected = support[tt, pp] & np.isfinite(residual_work[0])
             model_update_stop_code = int(result["stop_code"])
