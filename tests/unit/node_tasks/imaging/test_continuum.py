@@ -1290,6 +1290,52 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
     assert np.all(result["image"].SKY_MODEL.values == 0)
 
 
+def test_model_update_constructs_controller_when_omitted():
+    """A direct node call builds the documented continuum cycle controller."""
+    from astroviper.processing_functions.imaging.utils import CycleController
+
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.ones((1, 1, 1, 2, 2)),
+            ),
+            "PRIMARY_BEAM": (("l", "m"), np.ones((2, 2))),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization"),
+                [[0.1]],
+            ),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "primary_beam": "PRIMARY_BEAM",
+                }
+            }
+        },
+    )
+    params = {
+        "max_iter": 0,
+        "max_cycles": 2,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+        "max_iter_per_cycle": 1,
+    }
+
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": image},
+        {"cycle_control_params": params},
+    )
+
+    assert isinstance(result["controller"], CycleController)
+    assert result["controller"].max_cycles == 2
+    assert result["residual_converged"]
+
+
 def test_finalization_reuses_prepared_residual_without_another_transform(monkeypatch):
     image = _model_dataset(0.25).rename({"SKY_MODEL": "SKY_RESIDUAL"})
     image.attrs["data_groups"] = {"residual": {"sky": "SKY_RESIDUAL"}}

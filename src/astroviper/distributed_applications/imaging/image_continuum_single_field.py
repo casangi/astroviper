@@ -66,35 +66,10 @@ DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 def _make_continuum_cycle_controller(cycle_control_params):
     """Build the shared controller with every continuum cycle control option."""
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
-        validate_entropy_params,
-    )
-    from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
-        THRESHOLD_TOLERANCE,
+        make_continuum_cycle_controller,
     )
 
-    entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
-        validate_entropy_params(cycle_control_params)
-    )
-    return CycleController(
-        max_iter=cycle_control_params["max_iter"],
-        max_cycles=cycle_control_params["max_cycles"],
-        threshold_sigma=cycle_control_params.get("threshold_sigma", 0.0),
-        threshold=cycle_control_params["threshold"],
-        gain=cycle_control_params["gain"],
-        psf_sidelobe_factor=cycle_control_params["psf_sidelobe_factor"],
-        min_psf_fraction=cycle_control_params["min_psf_fraction"],
-        max_psf_fraction=cycle_control_params["max_psf_fraction"],
-        max_iter_per_cycle=cycle_control_params["max_iter_per_cycle"],
-        entropy_stop=entropy_stop,
-        entropy_max_snr=entropy_max_snr,
-        entropy_spatial_bins=entropy_spatial_bins,
-        entropy_flux_bins=entropy_flux_bins,
-        max_cycles_divergence=cycle_control_params.get("max_cycles_divergence", -1),
-        threshold_tolerance=cycle_control_params.get(
-            "threshold_tolerance", THRESHOLD_TOLERANCE
-        ),
-    )
+    return make_continuum_cycle_controller(cycle_control_params)
 
 
 def _create_wideband_primary_beam_cache_store(

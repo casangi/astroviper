@@ -3200,6 +3200,7 @@ def model_update_continuum_single_field(
         ImagingDict,
         copy_residual_entropy,
         get_per_cycle_limits,
+        make_continuum_cycle_controller,
         merge_imaging_dicts,
     )
 
@@ -3254,6 +3255,8 @@ def model_update_continuum_single_field(
     # Obtain the cycle controller.
     # -------------------------------------------------------------
     controller = input_params.get("controller")
+    if controller is None:
+        controller = make_continuum_cycle_controller(cycle_control_params)
 
     # A fresh map/reduce graph does not contain the preceding append node's
     # convergence history. Accept that persistent state through input_params so
