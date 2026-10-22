@@ -2721,6 +2721,24 @@ def model_update_mtmfs_single_field(
     if "SKY_MODEL" not in hogbom_xds:
         hogbom_xds["SKY_MODEL"] = xr.zeros_like(hogbom_xds["SKY_RESIDUAL"])
 
+    # The Taylor-plane selection above can leave a strided view. Högbom's C++
+    # binding deliberately accepts only a C-contiguous bool mask, so make the
+    # one-plane adapter buffer explicit. The > 0.5 rule is the same mask
+    # interpretation used by continuum starting and stopping statistics; NaNs
+    # therefore remain outside the CLEAN support rather than becoming True.
+    hogbom_mask_name = hogbom_xds.attrs["data_groups"][image_data_group_in_name].get(
+        "mask"
+    )
+    if hogbom_mask_name in hogbom_xds:
+        hogbom_mask = hogbom_xds[hogbom_mask_name]
+        mask_values = np.asarray(hogbom_mask.values)
+        hogbom_xds[hogbom_mask_name] = hogbom_mask.copy(
+            data=np.ascontiguousarray(
+                np.isfinite(mask_values) & (mask_values > 0.5),
+                dtype=np.bool_,
+            )
+        )
+
     # Register the temporary model through the data-group interface expected by
     # deconvolve() and starting_statistics().
     _, hogbom_model_group = create_data_groups_in_and_out(

@@ -889,6 +889,14 @@ class TestDeconvolve:
         with pytest.raises(ValueError, match="not recognized"):
             deconvolve(img_xds=xds, algorithm="clark")
 
+    def test_hogbom_rejects_non_boolean_registered_mask(self):
+        """The shared entry point preserves the binding's strict mask dtype."""
+        xds = _make_img_xds(with_mask=True)
+        xds["MASK_RESIDUAL"] = xds.MASK_RESIDUAL.astype(np.float32)
+
+        with pytest.raises(RuntimeError, match="mask.*wrong dtype"):
+            deconvolve(img_xds=xds, algorithm="hogbom")
+
     def test_processing_function_threads_parameter_passes_through(self):
         """processing_function_threads > 1 must not change the result for a deterministic
         input (same-input-same-output contract)."""

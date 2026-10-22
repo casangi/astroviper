@@ -659,6 +659,33 @@ def test_hogbom_model_update_preserves_image_precision(monkeypatch, dtype):
     np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=0), value)
 
 
+def test_hogbom_adapter_builds_one_contiguous_boolean_mask_plane(monkeypatch):
+    """Continuum applies its >0.5 mask rule before calling cube Högbom."""
+    image = make_continuum_image()
+    mask = np.ones(image.SKY_RESIDUAL.shape, dtype=np.float64)
+    mask[..., 0, 0] = 0.3
+    mask[..., 0, 1] = np.nan
+    image["MASK"] = (image.SKY_RESIDUAL.dims, mask)
+    image.attrs["data_groups"]["residual"]["mask"] = "MASK"
+
+    def hogbom_backend(hogbom_image, *args, **kwargs):
+        received = hogbom_image.MASK.values
+        assert received.dtype == np.bool_
+        assert received.flags.c_contiguous
+        assert not received[..., 0, 0].any()
+        assert not received[..., 0, 1].any()
+        assert received[..., 1:, :].all()
+        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.model_update."
+        "model_update_cube_single_field",
+        hogbom_backend,
+    )
+
+    model_update_mtmfs_single_field(image, "hogbom", {"max_iter": 1})
+
+
 def test_restoration_reports_incomplete_backend_result(monkeypatch):
     module = importlib.import_module("astroviper.processing_functions.imaging.restore")
 
