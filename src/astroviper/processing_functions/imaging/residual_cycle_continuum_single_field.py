@@ -176,8 +176,6 @@ def residual_cycle_continuum_single_field(
     # predict the current model and form residual visibilities.
     # ------------------------------------------------------------
     if not is_first_cycle:
-        start = time.time()
-
         if continuum_mode == "mfs":
             # delete an old residual if present
             residual_data_group = img_xds.attrs.get("data_groups", {}).get(
@@ -190,7 +188,7 @@ def residual_cycle_continuum_single_field(
             if residual_sky_name is not None and residual_sky_name in img_xds:
                 img_xds.xr_img.delete_data_variables(variables=[residual_sky_name])
 
-            start = time.time()
+            degrid_start = time.time()
 
             make_visibility_model_continuum_single_field(
                 ps_xdt,
@@ -208,10 +206,10 @@ def residual_cycle_continuum_single_field(
                 fft_padding=image_params["fft_padding"],
             )
 
-            T_degrid += time.time() - start
+            T_degrid += time.time() - degrid_start
 
             if visibility_memory_mode == "recompute":
-                start = time.time()
+                residual_vis_start = time.time()
 
                 calculate_residual_visibilities(
                     ps_xdt,
@@ -220,7 +218,7 @@ def residual_cycle_continuum_single_field(
                     ms_data_group_in_observed=ps_data_group_name,
                 )
 
-                T_residual_vis += time.time() - start
+                T_residual_vis += time.time() - residual_vis_start
                 ps_data_group_name = "residual"
             else:
                 # The globally reduced observed-data grid is retained by the
@@ -244,6 +242,7 @@ def residual_cycle_continuum_single_field(
                 dtype=np.float64,
             )
 
+            degrid_start = time.time()
             local_model_uv_xds = prepare_model_uv_mvc_single_field(
                 model_xds,
                 primary_beam_xds,
@@ -269,10 +268,12 @@ def residual_cycle_continuum_single_field(
                 processing_function_threads=(processing_function_threads),
                 fft_padding=image_params["fft_padding"],
             )
-
-            start = time.time()
+            # MVC prepares its channel-dependent UV model locally immediately
+            # before degridding, so report both prediction steps together.
+            T_degrid += time.time() - degrid_start
 
             if visibility_memory_mode == "recompute":
+                residual_vis_start = time.time()
                 calculate_residual_visibilities(
                     ps_xdt,
                     ms_data_group_out_residual="residual",
@@ -280,12 +281,10 @@ def residual_cycle_continuum_single_field(
                     ms_data_group_in_observed=ps_data_group_name,
                 )
 
-                T_residual_vis += time.time() - start
+                T_residual_vis += time.time() - residual_vis_start
                 ps_data_group_name = "residual"
             else:
                 ps_data_group_name = "model"
-
-        T_degrid += time.time() - start
 
     # ------------------------------------------------------------
     # Grid residual

@@ -34,6 +34,7 @@ from astroviper.processing_functions.imaging.imaging_setup_continuum_single_fiel
 )
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
+    residual_cycle_continuum_single_field,
 )
 from astroviper.processing_functions.imaging.utils import Key
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (
@@ -1074,6 +1075,101 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
     if continuum_mode == "mvc":
         assert "SKY_RESIDUAL_MVC_CUBE" in result
         assert "POINT_SPREAD_FUNCTION_MVC_CUBE" in result
+
+
+@pytest.mark.parametrize("continuum_mode,degrid_time", [("mfs", 0.3), ("mvc", 0.5)])
+@pytest.mark.parametrize("visibility_memory_mode", ["recompute", "in_memory"])
+def test_residual_cycle_times_prediction_stages_once(
+    monkeypatch, continuum_mode, degrid_time, visibility_memory_mode
+):
+    """Prediction, residual formation, and gridding have independent timers."""
+    import time
+
+    import pandas as pd
+
+    image = xr.Dataset(
+        coords={"frequency": [1.0e9]},
+        attrs={"data_groups": {"residual": {}}},
+    )
+    image_params = {
+        "n_taylor_terms": 2,
+        "reference_frequency": 1.0e9,
+        "fft_padding": 1.2,
+    }
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.gridding_convolution_functions."
+        "gcf_prolate_spheroidal."
+        "create_prolate_spheroidal_kernel_1D",
+        lambda *args: np.ones(1),
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.residual_cycle_continuum_single_field."
+        "make_visibility_model_continuum_single_field",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.image_continuum_single_field."
+        "prepare_model_uv_mvc_single_field",
+        lambda *args, **kwargs: xr.Dataset(),
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.residual_update."
+        "make_visibility_model_single_field",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.residual_update."
+        "calculate_residual_visibilities",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_grid(*args, **kwargs):
+        return args[1], pd.DataFrame()
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.make_undeconvolved_image_continuum."
+        "make_undeconvolved_image_continuum_single_field",
+        fake_grid,
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.make_undeconvolved_image_continuum_mvc."
+        "make_undeconvolved_image_mvc_single_field",
+        fake_grid,
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.image_continuum_single_field."
+        "form_residual_grid_from_cache",
+        lambda observed, current, **kwargs: current,
+    )
+
+    times = [0.0, 0.1, 1.0, 1.0 + degrid_time]
+    if visibility_memory_mode == "recompute":
+        times.extend([2.0, 2.7])
+    times.extend([3.0, 3.4])
+    clock = iter(times)
+    monkeypatch.setattr(time, "time", lambda: next(clock))
+
+    _, timing = residual_cycle_continuum_single_field(
+        {},
+        image,
+        xr.Dataset(),
+        image_params,
+        is_first_cycle=False,
+        continuum_mode=continuum_mode,
+        model_xds=xr.Dataset(),
+        primary_beam_xds=xr.Dataset(),
+        visibility_memory_mode=visibility_memory_mode,
+        observed_visibility_grid_xds=(
+            xr.Dataset() if continuum_mode == "mvc" else None
+        ),
+    )
+
+    assert timing.T_degrid.iloc[0] == pytest.approx(degrid_time)
+    assert timing.T_residual_vis.iloc[0] == pytest.approx(
+        0.7 if visibility_memory_mode == "recompute" else 0.0
+    )
+    assert timing.T_grid.iloc[0] == pytest.approx(0.4)
 
 
 def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
