@@ -842,6 +842,42 @@ def test_tw_hydra_default_output_keeps_nonzero_model(tmp_path, tw_hydra_store):
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
 
 
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_tw_hydra_primary_beam_keeps_reference_frequency_through_cycles(
+    tmp_path,
+    tw_hydra_store,
+    continuum_mode,
+):
+    """Written MFS and MVC beams retain the Taylor reference frequency."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    image_params = _tw_hydra_image_params(processing_set)
+    _, image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"{continuum_mode}_primary_beam_frequency.img.zarr",
+        processing_set,
+        2,
+        continuum_mode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        image_params=image_params,
+        cycle_control_params={
+            "max_iter": 2,
+            "max_cycles": 2,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": 1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+        },
+    )
+
+    assert "frequency" in image.PRIMARY_BEAM.coords
+    np.testing.assert_array_equal(
+        image.PRIMARY_BEAM.frequency,
+        [image_params["reference_frequency"]],
+    )
+
+
 def test_task_primary_beam_mapping_contains_only_each_local_dataset():
     """In-memory MVC graph inputs contain one PB partition, not the full cache."""
     mapping = {

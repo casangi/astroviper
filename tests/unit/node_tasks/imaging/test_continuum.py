@@ -355,7 +355,10 @@ def _static_products():
     )
 
 
-def test_install_static_products_replaces_unused_frequency_coordinate():
+@pytest.mark.parametrize("chunk_frequency", [[1.0e9], [1.0e9, 2.0e9]])
+def test_install_static_products_replaces_unused_frequency_coordinate(
+    chunk_frequency,
+):
     """Reference frequency replaces a chunk coordinate no variable uses."""
     image = xr.Dataset(
         {
@@ -364,12 +367,33 @@ def test_install_static_products_replaces_unused_frequency_coordinate():
                 dims=("time", "taylor_term", "polarization", "l", "m"),
             )
         },
-        coords={"frequency": [1.0e9, 2.0e9]},
+        coords={"frequency": chunk_frequency},
     )
     result = continuum_node._install_static_continuum_products(
         image, _static_products()
     )
     np.testing.assert_array_equal(result.frequency, [1.5e9])
+
+
+def test_finalize_reference_primary_beam_preserves_reference_frequency():
+    """MFS beam construction retains its explicit reference-frequency label."""
+    image = xr.Dataset(
+        {
+            "PRIMARY_BEAM_REFERENCE": xr.DataArray(
+                np.ones((1, 1, 2, 2)),
+                dims=("time", "polarization", "l", "m"),
+            )
+        },
+        coords={"frequency": [1.0e9]},
+    )
+
+    result = continuum_node._finalize_reference_primary_beam(
+        image,
+        reference_frequency=1.5e9,
+    )
+
+    np.testing.assert_array_equal(result.PRIMARY_BEAM.frequency, [1.5e9])
+    assert result.PRIMARY_BEAM.attrs["effective_frequency_hz"] == 1.5e9
 
 
 def test_install_static_products_does_not_alias_the_cache():

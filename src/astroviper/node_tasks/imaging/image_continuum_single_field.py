@@ -699,11 +699,7 @@ def _install_static_continuum_products(
         if name not in img_xds:
             source = static_xds[name]
 
-            if (
-                "frequency" in source.dims
-                and "frequency" in img_xds.dims
-                and source.sizes["frequency"] != img_xds.sizes["frequency"]
-            ):
+            if "frequency" in source.dims and "frequency" in img_xds.dims:
                 frequency_users = [
                     variable_name
                     for variable_name, variable in img_xds.data_vars.items()
@@ -916,7 +912,6 @@ def _finalize_reference_primary_beam(
 ):
     """Install the static MFS primary beam evaluated at reference frequency."""
     import numpy as np
-    import xarray as xr
 
     reference_name = "PRIMARY_BEAM_REFERENCE"
     if reference_name not in img_xds:
@@ -967,13 +962,7 @@ def _finalize_reference_primary_beam(
         }
     )
 
-    # Direct Variable assignment is safe now because the dataset has no
-    # conflicting frequency coordinate.
-    img_xds["PRIMARY_BEAM"] = xr.Variable(
-        primary_beam.dims,
-        primary_beam.data,
-        attrs=primary_beam.attrs.copy(),
-    )
+    img_xds["PRIMARY_BEAM"] = primary_beam
 
     data_groups = img_xds.attrs.setdefault("data_groups", {})
     image_data_group = data_groups.setdefault(
@@ -2271,7 +2260,6 @@ def _prepare_continuum_image(
         products are initialized.
     """
     import numpy as np
-    import xarray as xr
 
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
@@ -2426,11 +2414,20 @@ def _prepare_continuum_image(
             }
         )
 
-        img_xds["PRIMARY_BEAM"] = xr.Variable(
-            dims=effective_primary_beam.dims,
-            data=effective_primary_beam.data,
-            attrs=effective_primary_beam.attrs.copy(),
-        )
+        if "frequency" in img_xds.dims:
+            frequency_users = [
+                variable_name
+                for variable_name, variable in img_xds.data_vars.items()
+                if "frequency" in variable.dims
+            ]
+            if frequency_users:
+                raise ValueError(
+                    "Cannot install the effective MVC primary beam while "
+                    f"variables still use the chunk frequency: {frequency_users}."
+                )
+            img_xds = img_xds.drop_dims("frequency")
+
+        img_xds["PRIMARY_BEAM"] = effective_primary_beam
 
         residual_group = img_xds.attrs.setdefault(
             "data_groups",
