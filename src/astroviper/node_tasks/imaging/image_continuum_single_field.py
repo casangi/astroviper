@@ -1758,6 +1758,66 @@ def grid_imaging_weight_density_continuum_node(
     create ``WEIGHT_IMAGING``. Those operations occur only after all local
     density contributions have been combined by the GraphViper reduce stage.
 
+    Parameters
+    ----------
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+    imaging_weights_params : dict
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
+    task_coords : dict
+        Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
+        this chunk's parallel coordinate values (``"data"``) and its
+        ``"slice"`` into the full output array (for cube imaging the
+        parallel dim is ``frequency``).
+    data_selection : dict
+        Selection passed to the Processing Set loader.
+    input_data_store : str
+        Path or URL of the input Processing Set.
+    processing_set_data_group_name : str, optional
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+    instrument_polarization_basis : {"linear", "circular"}, optional
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
+    single_precision_gridding : bool, optional
+        Use single-precision density-grid storage when true.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    skunk_works : bool, optional
+        Use the experimental direct Measurement Set loader.
+    data_group : dict or None, optional
+        Data-group override for the experimental loader.
+    input_data : xarray.DataTree or mapping or None, optional
+        Preloaded Processing Set partition; when supplied, skip disk loading.
+    task_id : int, optional
+        Identifier of the parallel chunk being processed.
+
     Returns
     -------
     dict
@@ -1975,6 +2035,57 @@ def degrid_imaging_weights_continuum_node(
 
     Parameters
     ----------
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+    imaging_weights_params : dict
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
+    global_weighting_xds : xarray.Dataset
+        Reduced continuum density grid and global Briggs factors.
+    task_coords : dict
+        Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
+        this chunk's parallel coordinate values (``"data"``) and its
+        ``"slice"`` into the full output array (for cube imaging the
+        parallel dim is ``frequency``).
+    data_selection : dict
+        Selection passed to the Processing Set loader.
+    input_data_store : str
+        Path or URL of the input Processing Set.
+    image_store : str
+        Path/URL of the on-disk Zarr image cube.
+    processing_set_data_group_name : str, optional
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+    instrument_polarization_basis : {"linear", "circular"}, optional
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     weight_memory_mode : {"in_memory", "in_place"}, optional
         Storage policy for calculated continuum imaging weights.
         ``"in_memory"``
@@ -1986,7 +2097,22 @@ def degrid_imaging_weights_continuum_node(
         group is removed when the run ends, also after an error. A completed cache
         is copied into the input only when ``write_imaging_weights_to_ps=True``.
         This option remains separate from ``memory_mode`` for now; the policies
-        may be unified later."""
+        may be unified later.
+    skunk_works : bool, optional
+        Use the experimental direct Measurement Set loader.
+    data_group : dict or None, optional
+        Data-group override for the experimental loader.
+    input_data : xarray.DataTree or mapping or None, optional
+        Preloaded Processing Set partition; when supplied, skip disk loading.
+    task_id : int, optional
+        Identifier of the parallel chunk being processed.
+
+    Returns
+    -------
+    dict
+        Task identifier, task-local weight datasets or disk-cache references,
+        and one-row node timing metadata.
+    """
     import time
 
     import pandas as pd
@@ -2916,6 +3042,20 @@ def continuum_cycle_append_node(
 
     This node performs no distributed processing. It operates on the single,
     globally reduced continuum dataset produced by the GraphViper reduce stage.
+
+    Parameters
+    ----------
+    input_data : dict or list of dict
+        Reduced continuum graph result, optionally wrapped by GraphVIPER.
+    input_params : dict
+        Cycle state, image/deconvolution configuration, cached products, and
+        output-product policy supplied by the distributed driver.
+
+    Returns
+    -------
+    dict
+        Updated continuum image, model state, static products, convergence
+        state, caches, and timing metadata for the next driver cycle.
     """
 
     import time
@@ -3051,12 +3191,26 @@ def continuum_finalize_node(
     input_data,
     input_params,
 ):
-    """Write final continuum products, optionally restoring the model.
+    """Finalize continuum products and optionally restore the model.
 
     Reuse the verified residual when ``prepared_continuum_image=True``.
     Otherwise prepare reduced MFS UV grids or MVC Taylor contributions first.
     Reuse static products and remove unrequested intermediates; do not perform
-    another model update or change iteration budgets.
+    another model update, change iteration budgets, or write the image store.
+
+    Parameters
+    ----------
+    input_data : dict or list of dict
+        Reduced or already prepared continuum graph result.
+    input_params : dict
+        Static products, accumulated model, restoration options, cache state,
+        and output-product policy supplied by the distributed driver.
+
+    Returns
+    -------
+    dict
+        Final in-memory image, model and static state, convergence metadata,
+        caches, and restoration/PSF timing records.
     """
 
     from astroviper.utils.data_group_tools import modify_data_groups_xds

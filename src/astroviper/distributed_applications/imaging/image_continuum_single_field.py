@@ -907,6 +907,34 @@ def prepare_continuum_imaging_weights_global(
     Collapse density frequency planes before reduction, calculate Briggs
     factors, then attach or persist each partition's imaging weights.
     Return the weight mapping and graph timings.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree or mapping
+        Processing Set used as the input to both weighting graphs.
+    node_task_data_mapping : dict
+        GraphVIPER mapping from task identifiers to Processing Set selections.
+    input_params : dict
+        Parameters forwarded to the density-grid and weight-degridding nodes.
+    disk_chunk_sizes : dict or None
+        Disk-level chunk sizes used when loading each map-task partition.
+    processing_set_data_group_name : str
+        Processing Set data group loaded by the weighting nodes.
+    monitor_resources_seconds : float or None
+        Resource-monitor sampling interval for map tasks.
+    task_priorities : dict or None
+        Optional GraphVIPER task-priority configuration.
+    reduce_mode : {"tree", "single_node", "tree_n"}, optional
+        GraphVIPER reduction topology.
+    reduce_n_batch : int, optional
+        Number of inputs combined by each ``"tree_n"`` reduction task.
+
+    Returns
+    -------
+    weight_result : dict
+        Task-indexed imaging-weight cache mapping and graph timing records.
+    timings : dict
+        Graph construction, execution, and Briggs-factor timings.
     """
     import time
 
@@ -1218,7 +1246,37 @@ def compute_continuum_imaging_weight_degrid_graph(
     reduce_mode="tree",
     reduce_n_batch=2,
 ):
-    """Compute final per-visibility weights from global weighting products."""
+    """Compute final per-visibility weights from global weighting products.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree or mapping
+        Processing Set used as the map input.
+    node_task_data_mapping : dict
+        GraphVIPER mapping from task identifiers to Processing Set selections.
+    input_params : dict
+        Parameters forwarded to each weight-degridding node. Must contain
+        ``global_weighting_xds``.
+    disk_chunk_sizes : dict or None
+        Disk-level chunk sizes used when loading each map-task partition.
+    processing_set_data_group_name : str
+        Processing Set data group loaded by each map task.
+    monitor_resources_seconds : float or None
+        Resource-monitor sampling interval for map tasks.
+    task_priorities : dict or None
+        Optional GraphVIPER task-priority configuration.
+    reduce_mode : {"tree", "single_node", "tree_n"}, optional
+        GraphVIPER reduction topology.
+    reduce_n_batch : int, optional
+        Number of inputs combined by each ``"tree_n"`` reduction task.
+
+    Returns
+    -------
+    result : dict
+        Task-indexed imaging-weight cache mapping and node timing records.
+    timings : dict
+        Graph construction and execution timings.
+    """
     import time
 
     import dask
@@ -2419,6 +2477,18 @@ def combine_continuum_imaging_weight_chunks(
 
     The function is associative and can therefore be used by GraphViper's
     tree, tree_n, and single-node reduction modes.
+
+    Parameters
+    ----------
+    input_data : list of dict
+        Leaf or partially reduced imaging-weight results.
+    input_params : dict
+        Reserved reducer configuration; currently unused.
+
+    Returns
+    -------
+    dict
+        Combined ``weight_cache_mapping`` and concatenated node-task timings.
     """
     import pandas as pd
 

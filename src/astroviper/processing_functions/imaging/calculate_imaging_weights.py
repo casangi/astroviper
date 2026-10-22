@@ -70,7 +70,19 @@ def _equalize_parallel_hand_weights(
 
 
 def normalize_imaging_weight_params(imaging_weights_params):
-    """Validate and normalize the imaging-weight configuration."""
+    """Validate and normalize the imaging-weight configuration.
+
+    Parameters
+    ----------
+    imaging_weights_params : dict
+        User imaging-weight configuration.
+
+    Returns
+    -------
+    dict
+        Validated copy in which uniform weighting is represented by Briggs
+        weighting with robust parameter ``-2``.
+    """
     import copy
 
     from astroviper.processing_functions.imaging.check_imaging_parameters import (
@@ -95,7 +107,24 @@ def prepare_local_data_weights(
     *,
     casa_weighting_implementation,
 ):
-    """Return flagged and parallel-hand-equalized data weights."""
+    """Return flagged and parallel-hand-equalized data weights.
+
+    Parameters
+    ----------
+    ms_xds : xarray.Dataset
+        Measurement Set partition containing statistical weights and flags.
+    ms_data_group : dict
+        Data-group mapping that registers the weight and flag variables.
+    casa_weighting_implementation : bool
+        Use CASA's arithmetic parallel-hand equalization when true; otherwise
+        use the harmonic prescription.
+
+    Returns
+    -------
+    numpy.ndarray
+        Copy of the data weights with flagged samples set to NaN and parallel
+        hands equalized.
+    """
     import numpy as np
 
     data_weight = np.array(

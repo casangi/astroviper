@@ -196,11 +196,11 @@ def imaging_setup_continuum_single_field(
 ):
     """Prepare static products for one continuum partition.
 
-    Require prepared imaging weights, attach continuum metadata, and build
-    the primary beam and UV sampling grids. MFS produces ``2*n_taylor_terms-1``
-    Taylor sampling planes; MVC retains frequency planes for map-local FFT
-    and Taylor conversion. Residual calculation and global beam fitting follow
-    in later stages.
+    Reuse prepared imaging weights or calculate local weights when absent,
+    attach continuum metadata, and build the primary beam and UV sampling
+    grids. MFS produces ``2*n_taylor_terms-1`` Taylor sampling planes; MVC
+    retains frequency planes for map-local FFT and Taylor conversion. Residual
+    calculation and global beam fitting follow in later stages.
 
     Parameters
     ----------

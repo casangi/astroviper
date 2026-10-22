@@ -714,6 +714,21 @@ def apply_mvc_primary_beam_convention(
 
     This applies ``M'_nu = M_nu * A_nu / Abar`` and sets pixels with a
     non-finite or non-positive effective primary beam to zero.
+
+    Parameters
+    ----------
+    model_cube : xarray.DataArray
+        Frequency-resolved MVC sky model in the common effective-beam
+        convention.
+    primary_beam_cube : xarray.DataArray
+        Channel-dependent primary-beam power pattern ``A_nu``.
+    effective_primary_beam : xarray.DataArray
+        Imaging-weighted common primary beam ``Abar``.
+
+    Returns
+    -------
+    xarray.DataArray
+        Model cube transformed to the channel-primary-beam convention.
     """
     import numpy as np
 
@@ -810,6 +825,63 @@ def prepare_model_uv_mvc_single_field(
     The Taylor model uses the common effective primary-beam convention.  Before
     prediction this function evaluates the Taylor polynomial at each channel and
     applies ``A_nu / Abar``, matching CASA's MVC imaging-cycle convention.
+
+    Parameters
+    ----------
+    model_xds : xarray.Dataset
+        Taylor-coefficient sky model and effective primary beam.
+    primary_beam_xds : xarray.Dataset
+        Channel-dependent primary-beam cube for this frequency partition.
+    frequency_values : array-like
+        Channel frequencies in Hz at which to evaluate the Taylor model.
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+    instrument_polarization_basis : {"linear", "circular"}, optional
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
+    single_precision_image : bool, optional
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    fft_backend : str, optional
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+    image_data_group_in_name : str, optional
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
+    image_data_group_out_name : str, optional
+        Output data-group name for the channelized model grid.
+
+    Returns
+    -------
+    xarray.Dataset
+        Frequency-resolved apparent model and its Fourier-domain grid.
     """
 
     import copy
@@ -1300,7 +1372,25 @@ def finalize_mvc_taylor_normal_equations(
     *,
     effective_primary_beam=None,
 ):
-    """Normalize globally reduced MVC map contributions in the append node."""
+    """Normalize globally reduced MVC map contributions in the append node.
+
+    Parameters
+    ----------
+    contributions : xarray.Dataset
+        Globally accumulated MVC residual, PSF, beam, and weight sums.
+    effective_primary_beam : xarray.DataArray or None, optional
+        Previously calculated common primary beam. When omitted, calculate it
+        from the supplied PSF-weighted beam sums.
+
+    Returns
+    -------
+    residual_taylor : xarray.DataArray
+        Normalized MVC Taylor residual planes.
+    psf_taylor : xarray.DataArray or None
+        Normalized Taylor PSF/Hessian planes when PSF contributions are present.
+    effective_primary_beam : xarray.DataArray
+        Imaging-weighted common primary beam.
+    """
     import numpy as np
     import xarray as xr
 
@@ -1417,6 +1507,34 @@ def convert_mvc_cubes_to_taylor_normal_equations(
     This compatibility entry point composes the map-contribution and append
     finalization helpers.  Distributed imaging calls those two stages
     separately so channel cubes never enter the reduce stage.
+
+    Parameters
+    ----------
+    residual_cube : xarray.DataArray
+        Frequency-resolved residual image cube.
+    psf_cube : xarray.DataArray
+        Frequency-resolved PSF image cube.
+    primary_beam_cube : xarray.DataArray
+        Frequency-resolved primary-beam cube.
+    residual_normalization : xarray.DataArray
+        Per-channel residual normalization weights.
+    psf_normalization : xarray.DataArray
+        Per-channel PSF normalization weights.
+    n_taylor_terms : int
+        Number of sky-model Taylor coefficients.
+    reference_frequency : float
+        Taylor-expansion reference frequency in Hz.
+    primary_beam_limit : float, optional
+        Minimum common primary-beam response used by the Taylor solution.
+
+    Returns
+    -------
+    residual_taylor : xarray.DataArray
+        Normalized MVC Taylor residual planes.
+    psf_taylor : xarray.DataArray or None
+        Normalized Taylor PSF/Hessian planes.
+    effective_primary_beam : xarray.DataArray
+        Imaging-weighted common primary beam.
     """
     if residual_cube.sizes.get("frequency", 0) < int(n_taylor_terms):
         raise ValueError(
@@ -1583,7 +1701,24 @@ def form_mfs_residual_grid_from_cache(
     image_data_group_in_observed="residual",
     image_data_group_in_model="residual",
 ):
-    """Form an MFS Taylor residual grid using the generic cache operation."""
+    """Form an MFS Taylor residual grid using the generic cache operation.
+
+    Parameters
+    ----------
+    observed_grid_xds : xarray.Dataset
+        Cached observed-data Taylor UV grid.
+    model_grid_xds : xarray.Dataset
+        Predicted-model Taylor UV grid for the current cycle.
+    image_data_group_in_observed : str, optional
+        Observed-grid data group registering the visibility arrays.
+    image_data_group_in_model : str, optional
+        Model-grid data group registering the visibility arrays.
+
+    Returns
+    -------
+    xarray.Dataset
+        Residual Taylor UV grid formed as observed minus model.
+    """
     return form_residual_grid_from_cache(
         observed_grid_xds,
         model_grid_xds,
@@ -2090,6 +2225,22 @@ def build_continuum_residual_imaging_dict(
     history entries are advanced. When entropy stopping is enabled, residual
     entropy and SNR are measured on Taylor term zero using that same clean
     support. The cube workflow is unchanged.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Continuum image containing residual, PSF-sidelobe, mask, and optional
+        primary-beam products.
+    image_data_group_in_name : str
+        Image data group registering the residual products.
+    cycle_control_params : dict
+        CLEAN gain, mask/PB support, and optional entropy-stop configuration.
+
+    Returns
+    -------
+    astroviper.processing_functions.imaging.utils.ImagingDict
+        One synthetic frequency plane of residual statistics for the shared
+        iteration controller.
     """
     import numpy as np
     import xarray as xr

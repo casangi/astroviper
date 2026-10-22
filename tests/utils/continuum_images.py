@@ -10,6 +10,25 @@ def make_continuum_image(
     legacy=False,
     image_shape=(8, 8),
 ):
+    """Create a small deterministic continuum image for unit tests.
+
+    Parameters
+    ----------
+    psf_axis : str or None, optional
+        Optional Taylor-like dimension added to the point-spread function.
+    beam_axis : str or None, optional
+        Optional Taylor-like dimension added to the fitted beam parameters.
+    legacy : bool, optional
+        Omit PSF and beam-fit roles from the residual data group when true.
+    image_shape : tuple of int, optional
+        Spatial ``(l, m)`` image shape.
+
+    Returns
+    -------
+    xarray.Dataset
+        Synthetic two-term model/residual image with PSF, beam, and primary
+        beam products.
+    """
     nl, nm = image_shape
     coords = dict(
         time=[0.0],
@@ -74,6 +93,17 @@ def make_runaway_taylor_image(dtype=np.float64):
     a tie. Taylor term one of the residual is zero; PSF orders one and two
     are 0 and 0.25 times order zero (a band symmetric about the reference
     frequency). One time and one polarization, no mask or primary beam.
+
+    Parameters
+    ----------
+    dtype : numpy.dtype, optional
+        Numeric dtype of the generated image products.
+
+    Returns
+    -------
+    xarray.Dataset
+        Synthetic two-term residual and three-order PSF that exercise the
+        MT-MFS divergence guard.
     """
     n = 32
     psf = np.zeros((n, n))
