@@ -944,7 +944,7 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
 
 
 def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch):
-    """MVC builds a channel cube, applies PB convention, and performs one FFT."""
+    """MVC preparation is repeatable and does not rewrite the caller's group."""
     model = _taylor_model(0.0)
     model.SKY_MODEL.loc[{"taylor_term": 0}] = 2.0
     model.SKY_MODEL.loc[{"taylor_term": 1}] = 3.0
@@ -984,6 +984,14 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         [0.9e9, 1.1e9],
         {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
     )
+    repeated = prepare_model_uv_mvc_single_field(
+        model,
+        channel_pb,
+        [0.9e9, 1.1e9],
+        {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
+    )
+    assert model.attrs["data_groups"]["model"] == {"sky": "SKY_MODEL"}
+    assert result.attrs["data_groups"] is not model.attrs["data_groups"]
     assert result.SKY_MODEL_MVC.dims == (
         "time",
         "frequency",
@@ -995,6 +1003,7 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         result.SKY_MODEL_MVC.isel(time=0, polarization=0, l=0, m=0),
         [1.7, 2.3],
     )
+    xr.testing.assert_identical(repeated.SKY_MODEL_MVC, result.SKY_MODEL_MVC)
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])

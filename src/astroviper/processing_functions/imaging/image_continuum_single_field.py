@@ -742,6 +742,8 @@ def prepare_model_uv_mvc_single_field(
     applies ``A_nu / Abar``, matching CASA's MVC imaging-cycle convention.
     """
 
+    import copy
+
     import numpy as np
     import xarray as xr
 
@@ -845,6 +847,9 @@ def prepare_model_uv_mvc_single_field(
         list(model_xds.data_vars),
         errors="ignore",
     ).copy(deep=False)
+    # Xarray's shallow dataset operations also share the nested attrs mapping.
+    # Isolate it before registering the temporary MVC sky and visibility roles.
+    mvc_xds.attrs = copy.deepcopy(model_xds.attrs)
 
     if "taylor_term" in mvc_xds.dims:
         mvc_xds = mvc_xds.drop_dims(
