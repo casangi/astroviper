@@ -1231,7 +1231,7 @@ def test_tw_hydra_reference_frequency_alias_gives_the_same_images(
             and "reference_frequency_hz" in str(warning.message)
         ]
         assert len(deprecations) == ("reference_frequency_hz" in keys)
-        assert result["n_major_cycles"] >= 2
+        assert result["n_cycles"] >= 2
         assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
 
     for name in ("both", "alias"):
@@ -1286,7 +1286,7 @@ def test_tw_hydra_numpy_and_xarray_scalars_give_the_same_images(
                 "max_psf_fraction": 0.8,
             },
         )
-        assert result["n_major_cycles"] >= 2
+        assert result["n_cycles"] >= 2
         assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
 
     for name in ("numpy", "xarray"):
@@ -1590,7 +1590,7 @@ def test_tw_hydra_distributed_continuum_is_partition_invariant(
 
 
 @pytest.mark.parametrize("specmode", ["mfs", "mvc"])
-def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
+def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
     tmp_path, tw_hydra_store, specmode
 ):
     """A per-cycle cap exercises prediction and cached later-cycle state."""
@@ -1614,9 +1614,9 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
         },
     )
 
-    assert result["n_major_cycles"] >= 2
-    assert len(result["timing_graphs"]) == result["n_major_cycles"] + 1
-    assert result["timing_graphs"][0]["stage"].startswith("major loop 1")
+    assert result["n_cycles"] >= 2
+    assert len(result["timing_graphs"]) == result["n_cycles"] + 1
+    assert result["timing_graphs"][0]["stage"].startswith("imaging cycle 1")
     assert result["timing_graphs"][-1]["stage"] == "final residual + restoration"
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
@@ -1673,7 +1673,7 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
         (reference_result, reference),
         (cached_result, cached),
     ):
-        assert result["n_major_cycles"] == 2
+        assert result["n_cycles"] == 2
         assert result["controller"].cycles_done == 2
         assert result["controller"].total_iter_done > 0
         assert result["deconvolution"].data
@@ -1762,7 +1762,7 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
             visibility_memory_mode=cache_mode,
         )
 
-        assert cached_result["n_major_cycles"] == reference_result["n_major_cycles"]
+        assert cached_result["n_cycles"] == reference_result["n_cycles"]
         for variable in (
             "SKY_MODEL",
             "SKY_RESIDUAL",
@@ -1819,7 +1819,7 @@ def test_tw_hydra_corrected_data_group_matches_base(
             visibility_memory_mode=visibility_memory_mode,
             processing_set_data_group_name=data_group_name,
         )
-        assert result["n_major_cycles"] == 2
+        assert result["n_cycles"] == 2
         assert np.nanmax(np.abs(images[data_group_name].SKY_MODEL.values)) > 0.0
 
     for variable in (
@@ -1836,7 +1836,7 @@ def test_tw_hydra_corrected_data_group_matches_base(
 
 
 @pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])
-def test_tw_hydra_widebandpb_modes_preserve_later_mvc_major_cycles(
+def test_tw_hydra_widebandpb_modes_preserve_later_mvc_imaging_cycles(
     tmp_path, tw_hydra_store, widebandpb_memory_mode
 ):
     """Both low-memory PB policies reproduce MVC prediction after real CLEAN."""
@@ -2012,8 +2012,8 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
         single_precision_image=True,
     )
 
-    assert result["n_major_cycles"] >= 2
-    assert len(result["timing_graphs"]) == result["n_major_cycles"] + 3
+    assert result["n_cycles"] >= 2
+    assert len(result["timing_graphs"]) == result["n_cycles"] + 3
     assert [record["stage"] for record in result["timing_graphs"][:2]] == [
         "global weight density",
         "global weight degridding",
@@ -2448,7 +2448,7 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
     # Do not override the scheduler here: later tests must be able to run
     # ordinary Dask computations without this test's now-closed client.
     assert dask.delayed(sum)([1, 2, 3]).compute() == 6
-    assert result["n_major_cycles"] == 2
+    assert result["n_cycles"] == 2
     # The helper reopens the output store lazily; read it locally after the
     # distributed client has closed.
     with dask.config.set(scheduler="synchronous"):
@@ -2477,7 +2477,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     max_iter,
     expected_updates,
 ):
-    """An optimistic minor-cycle peak cannot terminate the distributed driver."""
+    """An optimistic model-update peak cannot terminate the distributed driver."""
     import astroviper.processing_functions.imaging.image_continuum_single_field as processing
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_MAX_CYCLES,
@@ -2491,7 +2491,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     def optimistic_update(*args, **kwargs):
         result, timings = original_update(*args, **kwargs)
         events.append("update")
-        # Emulate an approximate minor-cycle residual below threshold, while
+        # Emulate an approximate model-update residual below threshold, while
         # keeping the actual model and visibility-based residual untouched.
         for fields in result.data.values():
             if isinstance(fields["peakres"], list):
@@ -2534,9 +2534,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     assert result["stopcode"].imaging == (
         IMAGING_MAX_CYCLES if max_iter == 100 else IMAGING_MAX_ITER
     )
-    assert (
-        result["controller"].cycles_done == result["n_major_cycles"] == expected_updates
-    )
+    assert result["controller"].cycles_done == result["n_cycles"] == expected_updates
     assert len(result["timing_graphs"]) == expected_updates + 1
     assert result["controller"].total_iter_done > 0
     assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8

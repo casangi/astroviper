@@ -390,7 +390,7 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
         "_prepare_post_update_continuum_model_state",
         lambda image, input_params: (xr.Dataset(), None),
     )
-    result = continuum_node.continuum_minor_cycle_node(
+    result = continuum_node.continuum_cycle_append_node(
         {
             "image": xr.Dataset(),
             "task_id": 7,
@@ -436,7 +436,7 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
         lambda image, input_params: (xr.Dataset(), None),
     )
 
-    continuum_node.continuum_minor_cycle_node(
+    continuum_node.continuum_cycle_append_node(
         {"image": xr.Dataset(), "deconvolution": reduced_history},
         {"is_n_iter_0": False, "deconvolution": previous_history},
     )

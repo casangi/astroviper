@@ -2270,7 +2270,7 @@ def model_update_mtmfs_single_field(
         to Högbom before this processing-function boundary.
 
     deconvolve_params : dict
-        Minor-cycle control parameters. These typically include entries such as
+        Model-update control parameters. These typically include entries such as
         ``max_iter``, ``max_iter_per_cycle_updated``, ``threshold_per_cycle``,
         ``gain``, ``scales``, ``small_scale_bias``, and ``mask_threshold``.
         The per-cycle limits and thresholds accept scalars or per-plane arrays,

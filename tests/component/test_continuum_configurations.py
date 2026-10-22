@@ -155,7 +155,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
         "SKY_RESTORED",
         "SKY_RESTORED_PBCOR",
     ]
-    assert result["n_major_cycles"] == reference_result["n_major_cycles"] == 2
+    assert result["n_cycles"] == reference_result["n_cycles"] == 2
     # max_iter is per image plane; the reported total sums polarizations.
     assert 0 < result["controller"].total_iter_done <= 8 * actual.sizes["polarization"]
     assert (
@@ -231,7 +231,7 @@ def test_continuum_uses_writer_resolved_path(
     assert calls == [str(requested), str(resolved)]
     assert not requested.exists()
     assert resolved.is_dir()
-    assert result["n_major_cycles"] == 2
+    assert result["n_cycles"] == 2
     assert np.isfinite(image.SKY_RESIDUAL).all()
     assert "SKY_RESTORED_PBCOR" in image
     assert not any("CACHE" in name or "MVC_" in name for name in image.data_vars)

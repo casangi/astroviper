@@ -573,7 +573,7 @@ def plot_application_task_stream(source, title=None, save_path=None):
     Unlike :func:`plot_task_stream`, which deliberately retains the historical
     final-graph view, this diagnostic consumes ``source["timing_graphs"]`` and
     gives each graph its own panel.  Panels are independently time-scaled so
-    short weighting graphs remain readable beside longer major-cycle graphs.
+    short weighting graphs remain readable beside longer imaging-cycle graphs.
 
     Parameters
     ----------
@@ -675,8 +675,8 @@ def plot_application_task_stream(source, title=None, save_path=None):
                     )
 
         stage = str(record.get("stage", f"graph {graph_index}"))
-        if "major loop" in stage:
-            post_label = "reduce + minor cycle"
+        if "imaging cycle" in stage:
+            post_label = "reduce + model update"
         elif "restoration" in stage:
             post_label = "reduce + restoration"
         else:

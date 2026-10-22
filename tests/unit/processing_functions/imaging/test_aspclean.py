@@ -935,7 +935,7 @@ class TestResolvedSource:
             divergence_peak_factor=np.inf,
         )
         assert out["retval"] != -3  # no spurious "diverging" stop
-        assert out["iterations_performed"] >= 30  # the minor cycle actually ran
+        assert out["iterations_performed"] >= 30  # the model update actually ran
         assert out["peak_residual"] < 0.2 * np.abs(dirty).max()
         np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.15)
         # the residual update subtracts the exact linear convolution

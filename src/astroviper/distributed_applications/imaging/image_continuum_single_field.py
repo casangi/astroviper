@@ -3647,7 +3647,7 @@ def image_continuum_single_field(
         task_priorities = None
 
         # =============================================================
-        # Distributed major/model-update loop
+        # Distributed imaging-cycle loop
         # =============================================================
 
         # These timing entries accumulate over all imaging cycles
@@ -3664,12 +3664,12 @@ def image_continuum_single_field(
         model_uv_xds = None
         observed_visibility_grid_xds = None
         observed_visibility_grid_mapping = None
-        last_minor_return_dict = None
-        n_major_cycles = 0
+        last_cycle_return_dict = None
+        n_cycles = 0
         timing_graphs = []
 
         # =============================================================
-        # Prepare imaging weights once before entering the major loop
+        # Prepare imaging weights once before entering the imaging-cycle loop.
         # =============================================================
 
         weight_preparation_input_params = {
@@ -3736,12 +3736,12 @@ def image_continuum_single_field(
         # Main loop
         # ---------------------------------------------------------
 
-        # Minor-cycle stopping is provisional. The next residual graph verifies
+        # Model-update stopping is provisional. The next residual graph verifies
         # it and its append either continues cleaning or finalizes that residual.
         while True:
-            n_major_cycles += 1
+            n_cycles += 1
 
-            logger.debug(f"Starting continuum imaging cycle {n_major_cycles}.")
+            logger.debug(f"Starting continuum imaging cycle {n_cycles}.")
 
             # ---------------------------------------------------------
             # Configure the distributed residual/imaging-cycle map tasks.
@@ -3760,7 +3760,7 @@ def image_continuum_single_field(
                 if model_xds is None:
                     raise RuntimeError(
                         "No accumulated continuum model is available for "
-                        f"imaging cycle {n_major_cycles}."
+                        f"imaging cycle {n_cycles}."
                     )
 
                 if specmode == "mfs" and model_uv_xds is None:
@@ -3769,7 +3769,7 @@ def image_continuum_single_field(
                 if static_xds is None:
                     raise RuntimeError(
                         "No static continuum products are available for "
-                        f"imaging cycle {n_major_cycles}."
+                        f"imaging cycle {n_cycles}."
                     )
 
                 cycle_input_params["model_uv_xds"] = model_uv_xds
@@ -3843,20 +3843,20 @@ def image_continuum_single_field(
                 "pbcor": pbcor,
             }
 
-            # In later major loops, a static_xds should be present
+            # Static products from the first cycle are required in later cycles.
             # This holds static quantities such as PSF and PB
             if not is_n_iter_0:
                 append_input_params["static_xds"] = static_xds
                 append_input_params["model_xds"] = model_xds
                 append_input_params["model_uv_xds"] = model_uv_xds
-                append_input_params["deconvolution"] = last_minor_return_dict[
+                append_input_params["deconvolution"] = last_cycle_return_dict[
                     "deconvolution"
                 ]
                 if specmode == "mfs" and visibility_memory_mode == "in_memory":
                     if observed_visibility_grid_xds is None:
                         raise RuntimeError(
                             "No cached observed-data MFS grid is available for "
-                            f"imaging cycle {n_major_cycles}."
+                            f"imaging cycle {n_cycles}."
                         )
                     append_input_params["observed_visibility_grid_xds"] = (
                         observed_visibility_grid_xds
@@ -3866,7 +3866,7 @@ def image_continuum_single_field(
             # Execute one imaging cycle followed by one model update.
             # ---------------------------------------------------------
 
-            # Call the graph with continuum_minor_cycle_node
+            # The append node completes this imaging cycle after the reduction.
             cycle_node_task_data_mapping = node_task_data_mapping
             if weight_cache_mapping is not None:
                 cycle_node_task_data_mapping = _mapping_with_task_weights(
@@ -3903,7 +3903,7 @@ def image_continuum_single_field(
                 task_priorities=task_priorities,
                 reduce_mode=reduce_mode,
                 reduce_n_batch=reduce_n_batch,
-                append_node=node_tasks.imaging.continuum_minor_cycle_node,
+                append_node=node_tasks.imaging.continuum_cycle_append_node,
                 append_input_params=append_input_params,
             )
 
@@ -3916,7 +3916,7 @@ def image_continuum_single_field(
                 (
                     "final residual + restoration"
                     if cycle_return_dict["residual_converged"]
-                    else f"major loop {n_major_cycles} (residual + model update)"
+                    else f"imaging cycle {n_cycles} (residual + model update)"
                 ),
                 cycle_return_dict,
                 graph_timings,
@@ -3925,7 +3925,7 @@ def image_continuum_single_field(
                 timing_graphs.append(record)
 
             # Get current status for bookkeeping
-            last_minor_return_dict = cycle_return_dict
+            last_cycle_return_dict = cycle_return_dict
             controller = cycle_return_dict["controller"]
 
             # ---------------------------------------------------------
@@ -3937,8 +3937,7 @@ def image_continuum_single_field(
                         "The first continuum append node did not return 'static_xds'."
                     )
 
-                # Static holding quantities that are only computed in the first major loop
-                # PSF, PB, PSF sidelobe level ...
+                # PSF, PB and PSF sidelobe level are computed only in cycle one.
                 static_xds = cycle_return_dict["static_xds"]
 
                 if specmode == "mfs" and visibility_memory_mode == "in_memory":
@@ -4054,7 +4053,7 @@ def image_continuum_single_field(
             is_n_iter_0 = False
             if cycle_return_dict["residual_converged"]:
                 # Verification does not constitute a model update or consume a cycle.
-                n_major_cycles -= 1
+                n_cycles -= 1
                 final_return_dict = cycle_return_dict
                 logger.debug(
                     "Continuum stopped after refreshed residual verification: "
@@ -4076,7 +4075,7 @@ def image_continuum_single_field(
         # stop code from the refreshed residual, without a fictitious model update.
 
         return_dict["static_xds"] = static_xds
-        return_dict["n_major_cycles"] = n_major_cycles
+        return_dict["n_cycles"] = n_cycles
 
         # The initial on-disk arrays are cube-shaped NaN placeholders.  Continuum
         # finalization instead produces Taylor-term products, so replace the store

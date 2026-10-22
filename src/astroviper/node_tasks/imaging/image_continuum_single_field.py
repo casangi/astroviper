@@ -1686,7 +1686,7 @@ def residual_update_continuum_single_field(
         "timing_node_tasks": timing_df,
     }
 
-    # If we have computed weights in the first major loop locally, we need to communicate that back to the driver
+    # Return weights computed locally in the first imaging cycle to the driver.
     if return_weight_datasets:
         return_dict["task_id"] = int(task_id)
         return_dict["weight_datasets"] = return_weight_datasets
@@ -2357,7 +2357,7 @@ def _prepare_continuum_image(
             ] = "POINT_SPREAD_FUNCTION"
 
         # ----------------------------------------------------------
-        # Construct the effective PB used only by the minor loop.
+        # Construct the effective PB used only by the model update.
         # ----------------------------------------------------------
 
         contribution_variables = [
@@ -2478,7 +2478,7 @@ def _prepare_continuum_image(
         )
 
         # ----------------------------------------------------------
-        # Construct or validate the PB used by the minor-loop/static API.
+        # Construct or validate the PB used by the model-update/static API.
         # ----------------------------------------------------------
 
         if specmode == "mfs":
@@ -2523,7 +2523,7 @@ def _prepare_continuum_image(
                 f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
             )
 
-        # Static variables to be shared with the minor loop controls
+        # Static variables shared with the model-update controls.
         static_variable_names = (
             "POINT_SPREAD_FUNCTION",
             "PRIMARY_BEAM",
@@ -2797,7 +2797,7 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
 
 
 @shares_param_docs
-def continuum_minor_cycle_node(
+def continuum_cycle_append_node(
     input_data,
     input_params,
 ):
@@ -2837,7 +2837,7 @@ def continuum_minor_cycle_node(
 
     input_data = _unwrap_continuum_reduce_result(
         input_data,
-        "continuum_minor_cycle_node",
+        "continuum_cycle_append_node",
     )
 
     is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
@@ -2992,7 +2992,7 @@ def continuum_finalize_node(
     else:
         _prepare_cached_mfs_residual_grid(input_data, input_params)
 
-        # shared functionality with the minor loop
+        # Shared functionality with the model update.
         pb_cache_mapping = input_data.get(
             "pb_cache_mapping",
             input_params.get("pb_cache_mapping"),
@@ -3152,7 +3152,7 @@ def model_update_continuum_single_field(
 
         ``"residual_converged"``
             True only when refreshed residual statistics confirm a stop,
-            including exhausted budgets. A minor-cycle stop is provisional.
+            including exhausted budgets. A model-update stop is provisional.
     """
     import time
 
@@ -3241,7 +3241,7 @@ def model_update_continuum_single_field(
 
     # The refreshed residual verifies the current accumulated model. This
     # check consumes neither iterations nor a model-update cycle; a threshold
-    # stop reported by the preceding minor cycle may be revoked here.
+    # stop reported by the preceding model update may be revoked here.
     start = time.time()
     controller.ensure_planes(img_xds.sizes["time"], 1, img_xds.sizes["polarization"])
     residual_imaging_dict = build_continuum_residual_imaging_dict(
@@ -3280,7 +3280,7 @@ def model_update_continuum_single_field(
         )
 
     # Reuse the shared controls with fresh statistics on every cycle, rather
-    # than using the preceding approximate minor-cycle residual history.
+    # than using the preceding approximate model-update residual history.
     max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
         controller, residual_imaging_dict
     )

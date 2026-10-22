@@ -152,7 +152,7 @@ def test_application_task_stream_plots_every_graph(tmp_path):
                 "T_compute": 41.0,
             },
             {
-                "stage": "major loop 1 (residual + minor cycle)",
+                "stage": "imaging cycle 1 (residual + model update)",
                 "timing_node_tasks": graph_two,
                 "compute_start_unixtime": graph_two.start_unixtime.min() - 2,
                 "compute_end_unixtime": graph_two.start_unixtime.max() + 20,
@@ -165,7 +165,7 @@ def test_application_task_stream_plots_every_graph(tmp_path):
     assert figure is not None
     assert len(figure.axes) == 2
     assert "global weight density" in figure.axes[0].get_title(loc="left")
-    assert "major loop 1" in figure.axes[1].get_title(loc="left")
+    assert "imaging cycle 1" in figure.axes[1].get_title(loc="left")
     assert output.exists()
 
 
