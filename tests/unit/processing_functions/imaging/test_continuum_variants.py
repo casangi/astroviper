@@ -505,6 +505,45 @@ def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):
     assert called == []
 
 
+def test_hogbom_model_update_does_not_leak_temporary_mask_metadata(monkeypatch):
+    """Repeated Högbom updates isolate their mask and register the real model."""
+    image = make_continuum_image()
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+        ("time", "polarization"),
+        [[0.2]],
+    )
+    del image.attrs["data_groups"]["model"]
+    calls = []
+
+    def hogbom_backend(hogbom_image, *args, **kwargs):
+        calls.append(hogbom_image)
+        hogbom_image["MASK"] = xr.ones_like(hogbom_image.SKY_RESIDUAL)
+        hogbom_image.attrs["data_groups"]["residual"]["mask"] = "MASK"
+        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.model_update."
+        "model_update_cube_single_field",
+        hogbom_backend,
+    )
+
+    for _ in range(2):
+        model_update_mtmfs_single_field(
+            image,
+            "hogbom",
+            {"max_iter": 0, "primary_beam_limit": 0.2},
+        )
+
+    assert len(calls) == 2
+    assert all(
+        call.attrs["data_groups"]["residual"]["mask"] == "MASK" for call in calls
+    )
+    assert "mask" not in image.attrs["data_groups"]["residual"]
+    assert "MASK" not in image
+    assert image.attrs["data_groups"]["model"]["sky"] == "SKY_MODEL"
+    assert "SKY_MODEL" in image
+
+
 def test_restoration_reports_incomplete_backend_result(monkeypatch):
     module = importlib.import_module("astroviper.processing_functions.imaging.restore")
 

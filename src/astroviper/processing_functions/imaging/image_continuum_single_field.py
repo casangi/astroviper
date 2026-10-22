@@ -2414,6 +2414,11 @@ def model_update_mtmfs_single_field(
     import pandas as pd
     import xarray as xr
 
+    from astroviper.utils.data_group_tools import (
+        create_data_groups_in_and_out,
+        modify_data_groups_xds,
+    )
+
     deconvolver = deconvolver.lower()
     if deconvolver not in {"hogbom", "mtmfs"}:
         raise NotImplementedError(
@@ -2540,7 +2545,7 @@ def model_update_mtmfs_single_field(
 
     frequency_coord = _continuum_frequency_coord(img_xds)
 
-    hogbom_xds = xr.Dataset(attrs=dict(img_xds.attrs))
+    hogbom_xds = xr.Dataset(attrs=copy.deepcopy(img_xds.attrs))
 
     # Preserve coordinates that do not depend on a Taylor-order dimension.
     for coord_name, coord in img_xds.coords.items():
@@ -2620,12 +2625,20 @@ def model_update_mtmfs_single_field(
 
     # Register the temporary model through the data-group interface expected by
     # deconvolve() and starting_statistics().
-    hogbom_xds.attrs.setdefault("data_groups", {})
-
-    hogbom_xds.attrs["data_groups"][image_data_group_out_name] = {
-        "sky": "SKY_MODEL",
-    }
-    model_name = hogbom_xds.attrs["data_groups"][image_data_group_out_name]["sky"]
+    _, hogbom_model_group = create_data_groups_in_and_out(
+        hogbom_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified={"sky": "SKY_MODEL"},
+        overwrite=True,
+    )
+    modify_data_groups_xds(
+        hogbom_xds,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out=hogbom_model_group,
+        description="Temporary single-plane Högbom continuum model.",
+    )
+    model_name = hogbom_model_group["sky"]
 
     T_make_hogbom_view = time.time() - start
 
@@ -2680,6 +2693,20 @@ def model_update_mtmfs_single_field(
     # Use positional assignment because the Taylor coordinate need not
     # literally contain the value zero.
     img_xds["SKY_MODEL"].data[:, 0, ...] = model_zero.data
+
+    _, continuum_model_group = create_data_groups_in_and_out(
+        img_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified={"sky": "SKY_MODEL"},
+        overwrite=True,
+    )
+    modify_data_groups_xds(
+        img_xds,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out=continuum_model_group,
+        description="Continuum model increment produced by Högbom CLEAN.",
+    )
 
     T_copy_model = time.time() - start
 
