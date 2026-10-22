@@ -4,6 +4,11 @@ These prescriptions are used only by continuum MFS/MVC callers. The shared
 ``airy_disk`` and ``make_primary_beam`` utilities used by cube imaging and
 simulation deliberately retain their existing behavior. This module reproduces
 CASA PBMath1DAiry's image-table rounding, support and telescope selection.
+Its ``casa_airy`` path also preserves CASA's inverted blockage argument
+``x * dish_diameter / blockage_diameter``, rather than the physical annular-
+aperture argument ``x * blockage_diameter / dish_diameter``. The resulting
+difference is illustrated in
+``docs/processing_functions_tutorials/imaging/cube_single_field_primary_beam.ipynb``.
 EVLA polynomial prescriptions are not implemented here.
 """
 
@@ -34,6 +39,13 @@ def casa_airy_disk_response(
     :data:`CASA_AIRY_TWIDDLE` reproduces its truncated constants.  Directions
     beyond ``max_rad_1GHz / (frequency / 1 GHz)`` are zeroed, matching the
     support of CASA's lookup table.
+
+    For tclean parity this function deliberately retains PBMath1DAiry's
+    inverted blockage argument ``x * dish_diameter / blockage_diameter``.
+    This differs from the obscured-Airy annular-aperture expression, which uses
+    ``x * blockage_diameter / dish_diameter``. See the discussion and numerical
+    comparison in
+    ``docs/processing_functions_tutorials/imaging/cube_single_field_primary_beam.ipynb``.
 
     Parameters
     ----------
@@ -98,6 +110,11 @@ def casa_airy_disk_response(
 
 def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode="mfs"):
     """Resolve a beam prescription without changing user parameters or metadata.
+
+    Resolutions to ``casa_airy`` intentionally retain CASA PBMath1DAiry's
+    inverted blockage argument rather than the physical annular-aperture
+    expression. The distinction is documented and compared in
+    ``docs/processing_functions_tutorials/imaging/cube_single_field_primary_beam.ipynb``.
 
     Parameters
     ----------
