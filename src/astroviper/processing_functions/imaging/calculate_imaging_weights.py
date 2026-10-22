@@ -940,16 +940,9 @@ def degrid_imaging_weights_continuum(
                     "A frequency-collapsed continuum density must contain "
                     "exactly one stored density plane."
                 )
-            local_density_grid = np.repeat(
-                np.asarray(global_density_da.values),
-                local_frequency.size,
-                axis=0,
-            )
-            local_briggs_factors = np.repeat(
-                np.asarray(global_briggs_da.values),
-                local_frequency.size,
-                axis=1,
-            )
+            local_density_grid = np.asarray(global_density_da.values)
+            local_briggs_factors = np.asarray(global_briggs_da.values)
+            frequency_map = np.zeros(local_frequency.size, dtype=np.int64)
         else:
             from astroviper.processing_functions.imaging.utils.frequency_mapping import (
                 map_visibility_frequencies_to_image,
@@ -967,9 +960,14 @@ def degrid_imaging_weights_continuum(
             local_briggs_factors = np.asarray(
                 global_briggs_da.isel(frequency=global_indices).values
             )
+            frequency_map = None
+
+        n_local_grid_planes = (
+            1 if continuum_frequency_collapsed else local_frequency.size
+        )
 
         expected_local_density_shape = (
-            local_frequency.size,
+            n_local_grid_planes,
             global_density_da.sizes["weight_polarization"],
             n_uv[0],
             n_uv[1],
@@ -984,7 +982,7 @@ def degrid_imaging_weights_continuum(
 
         expected_local_briggs_shape = (
             2,
-            local_frequency.size,
+            n_local_grid_planes,
             global_density_da.sizes["weight_polarization"],
         )
 
@@ -1038,6 +1036,7 @@ def degrid_imaging_weights_continuum(
             n_uv,
             delta_lm,
             processing_function_threads=(processing_function_threads),
+            frequency_map=frequency_map,
             truncate_uv_cells=True,
         )
 

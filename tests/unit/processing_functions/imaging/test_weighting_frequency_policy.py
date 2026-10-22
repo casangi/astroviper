@@ -128,3 +128,44 @@ def test_global_weight_lookup_uses_nearest_channel_for_shifted_frequencies():
         )
     # Both shifted observations select the third global density plane.
     np.testing.assert_array_equal(degrid.call_args.args[0], density[[2, 2]])
+
+
+def test_collapsed_global_weight_lookup_maps_channels_without_repeating_grid():
+    """Continuum weighting shares one density plane through a zero channel map."""
+    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        degrid_imaging_weights_continuum,
+    )
+
+    ps, image = _inputs([1.0e9, 1.2e9])
+    density = np.ones((1, 1, 8, 8))
+    briggs_factors = np.arange(2, dtype=np.float64).reshape(2, 1, 1)
+    global_weights = xr.Dataset(
+        {
+            "WEIGHT_DENSITY_GRID": (
+                ("frequency", "weight_polarization", "u", "v"),
+                density,
+            ),
+            "SUM_WEIGHT": (("frequency", "weight_polarization"), np.ones((1, 1))),
+            "BRIGGS_FACTORS": (
+                ("briggs_parameter", "frequency", "weight_polarization"),
+                briggs_factors,
+            ),
+        },
+        coords={"frequency": [1.1e9]},
+        attrs={"continuum_frequency_collapsed": True},
+    )
+    module = (
+        "astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights"
+    )
+    with patch(
+        module + ".degrid_imaging_weights", return_value=np.ones((1, 1, 2, 1))
+    ) as degrid:
+        degrid_imaging_weights_continuum(
+            ps, image, global_weights, {"weighting": "briggs", "robust": 0.5}
+        )
+
+    np.testing.assert_array_equal(degrid.call_args.args[0], density)
+    np.testing.assert_array_equal(degrid.call_args.args[3], briggs_factors)
+    np.testing.assert_array_equal(
+        degrid.call_args.kwargs["frequency_map"], np.zeros(2, dtype=np.int64)
+    )

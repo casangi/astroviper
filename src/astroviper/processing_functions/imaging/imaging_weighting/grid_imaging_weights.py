@@ -155,15 +155,16 @@ def degrid_imaging_weights(
         UVW coordinates in meters.
     data_weight : np.ndarray (float64), shape (n_time, n_baseline, n_vis_chan, n_pol)
         Used as the starting point before applying the UV-grid-based reweighting.
-    briggs_factors : np.ndarray (float64), shape (2, n_chan, n_pol)
+    briggs_factors : np.ndarray (float64), shape (2, n_grid_chan, n_pol)
         Pre-computed Briggs/robust factors. The per-sample denominator is:
-        ``briggs_factors[0, chan, pol] * grid_imaging_weight + briggs_factors[1, chan, pol]``.
+        ``briggs_factors[0, grid_chan, pol] * grid_imaging_weight + briggs_factors[1, grid_chan, pol]``.
     freq_chan : np.ndarray (float64), shape (n_chan,)
         Frequencies (Hz) of visibility channels.
     frequency_map : np.ndarray (int64), shape (n_vis_chan,), optional
-        Grid plane (image channel) each visibility channel samples; must be the
-        same map used to grid the weights. ``None`` (default) uses the
-        identity map.
+        Grid plane (image channel) each visibility channel samples for both the
+        density grid and Briggs factors; must be the same map used to grid the
+        weights. ``None`` (default) uses the identity map. An all-zero map lets
+        every visibility channel sample one collapsed continuum plane.
     grid_parms : dict
         Dictionary with required keys:
         - ``"image_size"`` : tuple(int, int), UV grid size.
