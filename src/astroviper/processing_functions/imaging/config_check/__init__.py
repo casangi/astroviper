@@ -4,11 +4,23 @@ Only a first subset of issue #319 is implemented. Runtime array/native checks
 remain independent of configuration validation and must never be bypassed.
 """
 
-from ._common import CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD, ImagingMode
-from .check_config import check_config
-from .param_check_driver_workflow import check_driver_workflow
-from .param_check_model_update import check_model_update
-from .param_check_residual_update import check_residual_update
+from astroviper.processing_functions.imaging.config_check._common import (
+    CONTINUUM_SINGLE_FIELD,
+    CUBE_SINGLE_FIELD,
+    ImagingMode,
+)
+from astroviper.processing_functions.imaging.config_check.check_config import (
+    check_config,
+)
+from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+    check_driver_workflow,
+)
+from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+    check_model_update,
+)
+from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+    check_residual_update,
+)
 
 __all__ = [
     "ImagingMode",
