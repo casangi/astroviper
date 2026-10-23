@@ -116,3 +116,22 @@ def selected_frequency_mask(frequencies, requested_frequencies):
     return np.isclose(frequencies, lower, rtol=1e-12, atol=0) | np.isclose(
         frequencies, upper, rtol=1e-12, atol=0
     )
+
+
+def check_continuum_mode(value):
+    """Require one of the implemented continuum image representations."""
+    if value not in ("mfs", "mvc"):
+        raise ValueError("continuum_mode must be 'mfs' or 'mvc'.")
+
+
+def check_fft_backend(backend):
+    """Require a supported and locally importable FFT implementation."""
+    from importlib import import_module
+
+    if backend not in ("scipy", "pyfftw"):
+        raise ValueError(
+            f"Unknown FFT backend {backend!r}; fft_backend must be 'scipy' or 'pyfftw'."
+        )
+    return import_module(
+        "scipy.fft" if backend == "scipy" else "pyfftw.interfaces.scipy_fft"
+    )

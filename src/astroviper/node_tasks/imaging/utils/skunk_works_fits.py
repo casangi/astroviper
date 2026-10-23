@@ -112,58 +112,33 @@ def _stokes_axis(pol_labels):
     """
     from xradio.measurement_set._utils._utils.stokes_types import stokes_types
 
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_fits_coordinates,
+    )
+
+    check_fits_coordinates({"polarization_coords": pol_labels})
     label_to_code = {label: code for code, label in stokes_types.items()}
-    try:
-        codes = [label_to_code[label] for label in pol_labels]
-    except KeyError as exc:
-        raise ValueError(f"Unknown polarization label {exc} for FITS output.") from exc
-    if list(codes) != list(range(codes[0], codes[0] + len(codes))):
-        raise ValueError(
-            f"Polarization labels {list(pol_labels)} map to non-consecutive "
-            f"Stokes codes {codes}; a linear FITS STOKES axis cannot represent "
-            "them."
-        )
-    return float(codes[0]), 1.0, 1.0
+    return float(label_to_code[pol_labels[0]]), 1.0, 1.0
 
 
 def _frequency_axis(freq_values):
     """FITS ``FREQ`` axis ``(crval, cdelt, crpix, max_deviation_hz)`` for the
     channel centers.
 
-    A FITS axis is linear, and the imager never regrids spectrally, so a
-    non-uniform channel grid (normal when the imaged processing set
-    concatenates spectral windows) cannot be represented exactly. Such a grid
-    is approximated by the uniform axis through the first and last channel
-    centers, with a logged warning; ``max_deviation_hz`` is the worst
-    ``|true - linear|`` channel-center error (``0.0`` when the axis is exact)
-    and is recorded as a ``HISTORY`` card by :func:`_build_primary_header`.
+    A linear FITS axis must represent the supplied channel centres within the
+    shared round-off tolerance. Nonuniform axes raise rather than replacing
+    the frequencies with a first-to-last approximation.
     """
-    import toolviper.utils.logger as logger
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_fits_coordinates,
+    )
 
+    check_fits_coordinates({"frequency_coords": freq_values})
     freq_values = np.asarray(freq_values, dtype=np.float64)
     if freq_values.size == 1:
-        # Any nonzero increment is valid for a single-channel axis (the reader
-        # evaluates the axis only at the reference pixel).
         return float(freq_values[0]), 1.0, 1.0, 0.0
     cdelt = float((freq_values[-1] - freq_values[0]) / (freq_values.size - 1))
-    if cdelt == 0.0:
-        raise ValueError(
-            "Frequency coordinates have zero overall span; a FITS FREQ axis "
-            "cannot represent them."
-        )
-    linear = freq_values[0] + cdelt * np.arange(freq_values.size)
-    max_deviation = float(np.max(np.abs(freq_values - linear)))
-    if max_deviation <= 1e-6 * abs(cdelt):
-        return float(freq_values[0]), cdelt, 1.0, 0.0
-    logger.warning(
-        "FITS FREQ axis: channel centers are not uniformly spaced (e.g. "
-        "concatenated spectral windows), which a linear FITS axis cannot "
-        "represent. Writing the uniform axis through the first and last "
-        f"centers instead; worst channel-center error {max_deviation:.6g} Hz "
-        f"({max_deviation / abs(cdelt):.3g} channel widths). A HISTORY card "
-        "records the approximation."
-    )
-    return float(freq_values[0]), cdelt, 1.0, max_deviation
+    return float(freq_values[0]), cdelt, 1.0, 0.0
 
 
 def _direction_axis_values(coord_values):
@@ -183,27 +158,22 @@ def _build_primary_header(
     ``RADESYS``/``EQUINOX``/``LONPOLE``/``LATPOLE``/``PC``, spectral axis +
     ``RESTFRQ``/``SPECSYS``, ``TELESCOP``, ``DATE-OBS``/``TIMESYS``), and every
     keyword written is one the reader consumes or excludes from the user attrs,
-    so nothing leaks into ``attrs["user"]`` on read. A non-uniform frequency
-    grid is approximated (see :func:`_frequency_axis`) and noted in a
-    ``HISTORY`` card (also excluded by the reader).
+    so nothing leaks into ``attrs["user"]`` on read. Nonuniform frequency
+    grids are rejected by the shared coordinate check.
     """
     from astropy.io import fits
     from astropy.time import Time
 
-    if img_xds.sizes["time"] != 1:
-        raise ValueError(
-            "FITS output supports a single time plane (4 FITS axes); got "
-            f"{img_xds.sizes['time']} time planes."
-        )
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_fits_coordinates,
+    )
 
     csys = img_xds.attrs["coordinate_system_info"]
     reference_direction = csys["reference_direction"]
     frame = reference_direction["attrs"]["frame"].upper()
-    if frame not in ("FK5", "ICRS"):
-        raise ValueError(
-            f"Direction frame {frame!r} is not supported for FITS output "
-            "(XRADIO's FITS reader supports RA/DEC axes: FK5 or ICRS)."
-        )
+    check_fits_coordinates(
+        {"time_coords": img_xds.time.values, "direction_reference": frame}
+    )
     projection = csys["projection"]
 
     cdelt1, crpix1 = _direction_axis_values(img_xds.l.values)
@@ -339,21 +309,22 @@ def _classify_kept_variables(image_data_variables_keep, double_precision):
         if double_precision
         else imaging_data_variables_and_dims_single_precision
     )
-    image_variables, beam_variables, unsupported = [], [], []
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_kept_variables,
+    )
+
+    check_kept_variables(
+        {"image_data_variables_keep": image_data_variables_keep},
+        fits=True,
+        require_image=False,
+    )
+    image_variables, beam_variables = [], []
     for key in image_data_variables_keep:
         dims = tuple(definitions[key]["dims"])
         if dims == _FULL_DIMS_LM:
             image_variables.append(key)
         elif dims == _BEAM_PARAMS_DIMS:
             beam_variables.append(key)
-        else:
-            unsupported.append(key)
-    if unsupported:
-        raise ValueError(
-            f"Variables {unsupported} have no FITS representation (only "
-            "image-domain time/frequency/polarization/l/m variables and "
-            "beam-fit-params variables can be written to FITS)."
-        )
     return image_variables, beam_variables
 
 
@@ -415,11 +386,13 @@ def create_empty_fits_images(
     image_variables, beam_variables = _classify_kept_variables(
         image_data_variables_keep, double_precision
     )
-    if not image_variables:
-        raise ValueError(
-            "image_data_variables_keep contains no image-domain variables to "
-            "write to FITS."
-        )
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_kept_variables,
+    )
+
+    check_kept_variables(
+        {"image_data_variables_keep": image_data_variables_keep}, fits=True
+    )
 
     if os.path.exists(image_store):
         if not overwrite:

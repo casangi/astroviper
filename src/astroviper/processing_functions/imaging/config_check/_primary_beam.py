@@ -102,6 +102,8 @@ def check_cube_primary_beam(params):
         if set(params) & {"effective_dish_diameter", "blockage_diameter"}:
             raise ValueError("VLA primary beams do not accept dish/blockage overrides.")
         if "max_rad_1GHz" in params:
+            if params["max_rad_1GHz"] is None:
+                raise ValueError("max_rad_1GHz must be strictly positive.")
             require_finite_real(
                 "max_rad_1GHz", params["max_rad_1GHz"], positive=True, scalar=True
             )
@@ -155,7 +157,11 @@ def _check_explicit_beam_model(model):
 
     # --- Polynomial model ---
     # Imaging supports symmetric power beams, not Jones/aperture models.
-    if not isinstance(model, xr.Dataset) or "BPC" not in model:
+    if not isinstance(model, xr.Dataset):
+        raise TypeError(
+            "Unsupported beam model: expected an analytic mapping or beam-polynomial dataset."
+        )
+    if "BPC" not in model:
         raise ValueError(
             "beam_model must be an analytic mapping or beam-polynomial dataset."
         )
@@ -183,3 +189,10 @@ def _check_explicit_beam_model(model):
         )
     if model.attrs.get("n_sample") is not None:
         require_integer("beam_model n_sample", model.attrs["n_sample"], minimum=2)
+
+
+def check_primary_beam_limit(value):
+    """Reject cutoffs that cannot retain a finite, nonempty beam region."""
+    limit = require_finite_real("primary_beam_limit", value, scalar=True)
+    if not 0 <= limit < 1:
+        raise ValueError("primary_beam_limit must lie in [0, 1).")

@@ -40,13 +40,13 @@ class TestParams:
     @pytest.mark.parametrize(
         "bad, match",
         [
-            ({"oversamplng": 10}, "unknown"),
-            ({"type": "boxcar"}, "not one of"),
-            ({"support": 6}, "odd integer"),
-            ({"support": 1, "type": "exponential_semicircle"}, "odd integer"),
-            ({"support": 9}, "spans 7 grid points"),
-            ({"oversampling": 0}, "positive integer"),
-            ({"oversampling": 2.5}, "positive integer"),
+            ({"oversamplng": 10}, "Unknown gridding_kernel_params"),
+            ({"type": "boxcar"}, "must be one of"),
+            ({"support": 6}, "support must be odd"),
+            ({"support": 1, "type": "exponential_semicircle"}, "support must be >= 3"),
+            ({"support": 9}, "support=7"),
+            ({"oversampling": 0}, "oversampling must be >= 1"),
+            ({"oversampling": 2.5}, "oversampling must be an integer"),
         ],
     )
     def test_refusals(self, bad, match):
@@ -119,7 +119,7 @@ class TestInterpolation:
 
 
 def test_prolate_spheroidal_table_exists_for_support_7_only():
-    with pytest.raises(ValueError, match="spans 7 grid points"):
+    with pytest.raises(ValueError, match="support=7"):
         create_prolate_spheroidal_kernel_1D(100, 9)
     assert create_prolate_spheroidal_kernel_1D(100, 7).size == 400
 

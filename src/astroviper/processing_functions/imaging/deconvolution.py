@@ -221,18 +221,16 @@ def validate_record_iteration_history(deconvolver, record_iteration_history):
         requested from a deconvolver other than ``"hogbom"`` or
         ``"hogbom_many_threads"``.
     """
-    if not isinstance(record_iteration_history, bool | np.bool_):
-        raise ValueError(
-            "record_iteration_history must be a bool; got "
-            f"{record_iteration_history!r}."
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_hogbom_option,
+    )
+
+    try:
+        check_hogbom_option(
+            deconvolver.lower(), "record_iteration_history", record_iteration_history
         )
-    if record_iteration_history and (
-        deconvolver.lower() not in ITERATION_HISTORY_ALGORITHMS
-    ):
-        raise ValueError(
-            "record_iteration_history is supported by the Hogbom deconvolvers "
-            f"{ITERATION_HISTORY_ALGORITHMS} only; got deconvolver {deconvolver!r}."
-        )
+    except TypeError as error:
+        raise ValueError(str(error)) from error
 
 
 def validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction):
@@ -257,18 +255,16 @@ def validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction):
         If ``exact_psf_subtraction`` is not a bool, or if it is requested from
         a deconvolver other than ``"hogbom"`` or ``"hogbom_many_threads"``.
     """
-    if not isinstance(exact_psf_subtraction, bool | np.bool_):
-        raise ValueError(
-            f"exact_psf_subtraction must be a bool; got {exact_psf_subtraction!r}."
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_hogbom_option,
+    )
+
+    try:
+        check_hogbom_option(
+            deconvolver.lower(), "exact_psf_subtraction", exact_psf_subtraction
         )
-    if exact_psf_subtraction and (
-        deconvolver.lower() not in EXACT_PSF_SUBTRACTION_ALGORITHMS
-    ):
-        raise ValueError(
-            "exact_psf_subtraction is supported by the Hogbom deconvolvers "
-            f"{EXACT_PSF_SUBTRACTION_ALGORITHMS} only; got deconvolver "
-            f"{deconvolver!r}."
-        )
+    except TypeError as error:
+        raise ValueError(str(error)) from error
 
 
 def _divergence_factors(gain):
@@ -791,14 +787,6 @@ def deconvolve(
         )
 
     algorithm_l = algorithm
-    if algorithm_l not in (
-        "hogbom",
-        "hogbom_many_threads",
-        "asp",
-        "aspclean",
-        "asp_clean",
-    ):
-        raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
     exact_psf_subtraction = (deconvolve_params or {}).get(
         "exact_psf_subtraction", False
     )

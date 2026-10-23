@@ -140,7 +140,7 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
         ({"record_iteration_history": 1}, "hogbom", "must be a bool"),
         ({"max_cycles": "Auto"}, "hogbom", "must be an integer"),
         ({"max_cycles": 2.5}, "hogbom", "must be an integer"),
-        ({"max_psf_fraction": 1.0}, "hogbom", "max_psf_fraction < 1"),
+        ({"max_psf_fraction": 1.0}, "hogbom", "max_psf_fraction below 1"),
         ({"threshold_tolerance": -0.01}, "hogbom", "threshold_tolerance must be"),
         (
             {"record_iteration_history": False, "exact_psf_subtraction": True},

@@ -4,7 +4,6 @@ import numpy as np
 
 from astroviper.processing_functions.imaging.config_check._common import (
     require_finite_real,
-    require_integer,
     require_mapping,
 )
 
@@ -83,7 +82,7 @@ def check_fits_coordinates(image_params):
             raise ValueError("FITS direction_reference must be FK5 or ICRS.")
 
 
-def check_kept_variables(config, *, fits=False):
+def check_kept_variables(config, *, fits=False, require_image=True):
     """Check the requested variable registry and the FITS representation.
 
     Parameters
@@ -134,7 +133,9 @@ def check_kept_variables(config, *, fits=False):
         raise ValueError(
             f"Variables {sorted(unsupported)} have no FITS representation."
         )
-    if not any(tuple(definitions[name]["dims"]) == image_dims for name in effective):
+    if require_image and not any(
+        tuple(definitions[name]["dims"]) == image_dims for name in effective
+    ):
         raise ValueError(
             "image_data_variables_keep contains no image-domain variables for FITS."
         )
@@ -152,55 +153,26 @@ def check_output_layout(config, *, parallel_coords=None):
     """
     # --- Layout schema ---
     # A positive count and a known dimension are decidable before partitioning.
-    valid_dims = {"time", "frequency", "polarization", "l", "m", "u", "v"}
-    layouts = {}
-    for name in ("image_chunking", "image_sharding"):
-        value = config.get(name)
-        layouts[name] = {} if value is None else require_mapping(name, value)
-        for dim, size in layouts[name].items():
-            if dim not in valid_dims:
-                raise ValueError(f"{name} key {dim!r} is not an image dimension.")
-            if isinstance(size, bool) or not isinstance(size, int):
-                raise TypeError(
-                    f"{name}[{dim!r}] must be a Python int, as required by the writer."
-                )
-            require_integer(f"{name}[{dim!r}]", size, minimum=1)
+    from astroviper.utils.io import validate_image_chunking_and_sharding
 
-    # --- Known image extents ---
-    # The automatically chosen frequency task size is checked only once known.
+    # Before mapping, only image extents and explicit disk chunks are known.
+    # Once task coordinates exist, the same validator checks write alignment.
     image = config.get("image_params", {})
-    shape = {}
-    for dim in ("time", "frequency", "polarization"):
-        if f"{dim}_coords" in image:
-            shape[dim] = len(image[f"{dim}_coords"])
+    shape = {
+        dim: len(image[f"{dim}_coords"])
+        for dim in ("time", "frequency", "polarization")
+        if f"{dim}_coords" in image
+    }
     if "image_size" in image:
         shape.update(zip(("l", "m"), image["image_size"], strict=True))
-    chunks, shards = layouts["image_chunking"], layouts["image_sharding"]
-    for dim, size in chunks.items():
-        if dim in shape and size > shape[dim]:
-            raise ValueError(
-                f"image_chunking[{dim!r}] exceeds the image extent ({shape[dim]})."
-            )
-    for dim, size in shards.items():
-        if dim in shape and dim in chunks and size < shape[dim] and size % chunks[dim]:
-            raise ValueError(
-                f"image_sharding[{dim!r}] must be a multiple of its on-disk chunk."
-            )
-
-    # --- Planned concurrent writes ---
-    # A disk chunk cannot straddle tasks; keep the original writer check too.
-    if parallel_coords is not None:
-        from astroviper.utils.io import validate_image_chunking_and_sharding
-
-        validate_image_chunking_and_sharding(chunks, shards, shape, parallel_coords)
-
-    # --- Sharding capability ---
-    # The fixed-slot writer requires the Zarr v3 sharding representation.
-    if shards:
-        import zarr
-
-        if int(zarr.__version__.split(".")[0]) < 3:
-            raise ValueError("image_sharding requires Zarr v3.")
+    validate_image_chunking_and_sharding(
+        config.get("image_chunking"),
+        config.get("image_sharding"),
+        shape,
+        parallel_coords,
+        extra_dims=("time", "frequency", "polarization", "l", "m", "u", "v"),
+        parallelism_pending=parallel_coords is None,
+    )
 
 
 def check_output_codec(config):

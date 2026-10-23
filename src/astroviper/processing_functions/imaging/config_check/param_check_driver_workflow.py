@@ -66,13 +66,11 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # --- Primary-beam cutoff ---
     # The fractional cutoff must be one finite value in the interval [0, 1).
     if "primary_beam_limit" in config:
-        primary_beam_limit = require_finite_real(
-            "primary_beam_limit", config["primary_beam_limit"], scalar=True
+        from astroviper.processing_functions.imaging.config_check._primary_beam import (
+            check_primary_beam_limit,
         )
-        if not 0 <= primary_beam_limit < 1:
-            raise ValueError(
-                "primary_beam_limit must satisfy 0 <= primary_beam_limit < 1."
-            )
+
+        check_primary_beam_limit(config["primary_beam_limit"])
 
     # --- Required configuration groups ---
     # A distributed driver must not defer missing input groups to a worker.

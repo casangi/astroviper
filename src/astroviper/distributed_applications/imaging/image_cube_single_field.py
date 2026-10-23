@@ -1280,10 +1280,6 @@ def image_cube_single_field(
         # Same absolute compute-call anchors as the MPI branch (see above).
         timing_distributed_application["compute_start_unixtime"] = start
         timing_distributed_application["compute_end_unixtime"] = end
-    else:
-        raise ValueError(
-            f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
-        )
     # A graph of one map task has no reduce node: its result is the node
     # task's own dict, whose monitor series are folded in here as the reduce
     # folds them in.
@@ -1509,21 +1505,17 @@ def _validate_n_mapping_parallelism(n_mapping_parallelism):
     ValueError
         On any other key, or a non-positive/non-integer chunk count.
     """
-    if set(n_mapping_parallelism) != {"frequency"}:
-        raise ValueError(
-            "n_mapping_parallelism must be a dict with the single key "
-            "'frequency' (cube imaging always maps over frequency), e.g. "
-            '{"frequency": 500}; got keys '
-            f"{sorted(n_mapping_parallelism)}."
+    from astroviper.processing_functions.imaging.config_check import (
+        CUBE_SINGLE_FIELD,
+        check_driver_workflow,
+    )
+
+    try:
+        check_driver_workflow(
+            {"n_mapping_parallelism": n_mapping_parallelism}, mode=CUBE_SINGLE_FIELD
         )
-    count = n_mapping_parallelism["frequency"]
-    if count is not None and (
-        isinstance(count, bool) or not isinstance(count, int) or count < 1
-    ):
-        raise ValueError(
-            "n_mapping_parallelism['frequency'] must be a positive int or "
-            f"None (auto), got {count!r}."
-        )
+    except TypeError as error:
+        raise ValueError(str(error)) from error
 
 
 def calculate_mapping_parallelism_for_cube_imaging(

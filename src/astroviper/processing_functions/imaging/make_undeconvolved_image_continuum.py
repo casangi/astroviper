@@ -119,14 +119,6 @@ def make_undeconvolved_image_continuum_single_field(
     else:
         reference_frequency = float(reference_frequency)
 
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
-
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be a positive finite frequency in Hz."
-        )
-
     T_vis_mask = 0.0
     T_uv_sampling_grid = 0.0
     T_vis_grid = 0.0

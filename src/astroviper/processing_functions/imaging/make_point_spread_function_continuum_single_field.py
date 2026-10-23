@@ -38,26 +38,15 @@ def _validate_mtmfs_parameters(
     image_params: dict,
 ) -> tuple[int, int, float]:
     """Return validated ``n_taylor_terms``, number of PSF terms, and reference frequency."""
-    if "n_taylor_terms" not in image_params:
-        raise KeyError("image_params must contain 'n_taylor_terms' for MT-MFS imaging.")
-    if "reference_frequency" not in image_params:
-        raise KeyError(
-            "image_params must contain one globally shared 'reference_frequency'."
-        )
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_continuum_basis,
+    )
 
+    check_continuum_basis(image_params)
     n_taylor_terms = int(image_params["n_taylor_terms"])
-    if n_taylor_terms < 1:
-        raise ValueError(
-            f"n_taylor_terms must be at least 1; received {n_taylor_terms}."
-        )
-
-    reference_frequency = float(image_params["reference_frequency"])
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be finite and positive; "
-            f"received {reference_frequency}."
-        )
-
+    reference_frequency = float(
+        np.asarray(image_params["reference_frequency"]).reshape(())
+    )
     return n_taylor_terms, 2 * n_taylor_terms - 1, reference_frequency
 
 
@@ -149,16 +138,6 @@ def add_uv_sampling_grid_continuum_single_field(
             "uv_sampling": "UV_SAMPLING",
             "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
         }
-
-    if n_psf_taylor_terms < 1:
-        raise ValueError(
-            f"n_psf_taylor_terms must be at least 1; received {n_psf_taylor_terms}."
-        )
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be finite and positive; "
-            f"received {reference_frequency}."
-        )
 
     if complex_dtype is None:
         complex_dtype = np.complex128
@@ -349,6 +328,7 @@ def make_point_spread_function_mvc_single_field(
     gcf_support=7,
     processing_function_threads=1,
     complex_dtype=None,
+    input_checked: bool = False,
 ):
     """Grid a frequency-resolved PSF cube for an MVC map partition.
 
@@ -397,6 +377,12 @@ def make_point_spread_function_mvc_single_field(
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the UV-sampling grids.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -406,6 +392,14 @@ def make_point_spread_function_mvc_single_field(
         One-row timing dataframe for kernel creation, visibility filtering, and
         UV-sampling gridding.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_kernel_1D,
     )
@@ -488,6 +482,7 @@ def make_point_spread_function_continuum_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
+    input_checked: bool = False,
 ):
     """Build the MT-MFS Taylor UV-sampling stack for one continuum-imaging chunk.
 
@@ -551,6 +546,12 @@ def make_point_spread_function_continuum_single_field(
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the UV-sampling grids.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -561,6 +562,14 @@ def make_point_spread_function_continuum_single_field(
         One-row timing frame with ``T_gcf``, ``T_vis_mask``,
         and ``T_uv_sampling_grid``.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_kernel_1D,
     )
@@ -582,8 +591,9 @@ def make_point_spread_function_continuum_single_field(
     if reference_frequency is not None:
         image_params["reference_frequency"] = float(reference_frequency)
 
-    _, n_psf_taylor_terms, reference_frequency = _validate_mtmfs_parameters(
-        image_params
+    n_psf_taylor_terms = 2 * image_params["n_taylor_terms"] - 1
+    reference_frequency = float(
+        np.asarray(image_params["reference_frequency"]).reshape(())
     )
 
     start = time.time()
@@ -621,6 +631,7 @@ def make_point_spread_function_continuum_single_field(
             gcf_support=gcf_support,
             gcf_oversampling=gcf_oversampling,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
         T_uv_sampling_grid += time.time() - start
 

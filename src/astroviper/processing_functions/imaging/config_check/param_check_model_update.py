@@ -164,9 +164,7 @@ def check_model_update(config, *, mode, require_complete=False):
 
     for name in ("threshold", "threshold_per_cycle"):
         if name in controls:
-            values = require_finite_real(name, controls[name])
-            if (values < 0).any():
-                raise ValueError(f"{name} must be non-negative.")
+            check_nonnegative(name, controls[name])
 
     # --- Per-plane control geometry ---
     # Valid values with the wrong number of planes cannot drive the controller.
@@ -282,12 +280,7 @@ def check_model_update(config, *, mode, require_complete=False):
     # --- Imaging-cycle limit ---
     # Automatic cycle prediction requires a contraction factor below one.
     if "max_cycles" in controls:
-        max_cycles = controls["max_cycles"]
-        if isinstance(max_cycles, str) and max_cycles == "auto":
-            if controls.get("max_psf_fraction", 0.8) >= 1:
-                raise ValueError("max_cycles='auto' requires max_psf_fraction < 1.")
-        else:
-            require_integer("max_cycles", max_cycles, allow_minus_one=True)
+        check_max_cycles(controls["max_cycles"], controls.get("max_psf_fraction", 0.8))
 
     # --- Threshold and PSF policies ---
     # Fractions bound the adaptive cycle threshold; all multipliers are finite.
@@ -307,9 +300,7 @@ def check_model_update(config, *, mode, require_complete=False):
         raise ValueError("min_psf_fraction must not exceed max_psf_fraction.")
     for name in ("threshold_sigma", "threshold_tolerance", "psf_sidelobe_factor"):
         if name in controls:
-            value = require_finite_real(name, controls[name], scalar=True)
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative.")
+            check_nonnegative(name, controls[name], scalar=True)
 
     # --- MT-MFS scale bias ---
     # Reject a bias the native implementation would otherwise clamp.
@@ -358,9 +349,6 @@ def check_model_update(config, *, mode, require_complete=False):
     # --- Algorithm-specific Boolean controls ---
     # Iteration history and exact PSF subtraction belong to Högbom only.
     boolean_controls = (
-        "record_iteration_history",
-        "exact_psf_subtraction",
-        "entropy_stop",
         "asp_stop_after_hogbom_run",
         "asp_residual_components",
         "asp_scale_significance",
@@ -369,10 +357,9 @@ def check_model_update(config, *, mode, require_complete=False):
     for name in boolean_controls:
         if name in controls:
             require_boolean(name, controls[name])
-    if deconvolver not in (None, "hogbom", "hogbom_many_threads"):
-        for name in ("record_iteration_history", "exact_psf_subtraction"):
-            if controls.get(name, False):
-                raise ValueError(f"{name} is supported only by Hogbom deconvolvers.")
+    for name in ("record_iteration_history", "exact_psf_subtraction"):
+        if name in controls:
+            check_hogbom_option(deconvolver, name, controls[name])
     if deconvolver in ("hogbom", "hogbom_many_threads", "mtmfs"):
         unsupported = [
             name
@@ -414,13 +401,7 @@ def check_model_update(config, *, mode, require_complete=False):
 
     # --- Entropy stopping ---
     # Bin counts are positive integers; the SNR cutoff must be finite and positive.
-    for name in ("entropy_spatial_bins", "entropy_flux_bins"):
-        if name in controls:
-            require_integer(name, controls[name], minimum=1)
-    if "entropy_max_snr" in controls:
-        require_finite_real(
-            "entropy_max_snr", controls["entropy_max_snr"], positive=True, scalar=True
-        )
+    check_entropy_controls(controls)
 
 
 def _check_control_shapes(controls, image_params, *, mode):
@@ -1127,3 +1108,54 @@ def check_model_products(
                 }
             )
     return diagnostics
+
+
+def check_max_cycles(value, max_psf_fraction=None, *, allow_integral_float=False):
+    """Check cycle limits, retaining the standalone controller's legacy float API."""
+    if isinstance(value, str) and value == "auto":
+        if max_psf_fraction is not None and max_psf_fraction >= 1:
+            raise ValueError("max_cycles='auto' requires max_psf_fraction below 1.")
+        return
+    if (
+        allow_integral_float
+        and isinstance(value, float | np.floating)
+        and float(value).is_integer()
+    ):
+        value = int(value)
+    try:
+        require_integer("max_cycles", value, allow_minus_one=True)
+    except (ValueError, TypeError) as error:
+        if allow_integral_float:
+            raise ValueError(
+                'max_cycles must be an integer >= -1 or "auto".'
+            ) from error
+        raise
+
+
+def check_hogbom_option(deconvolver, name, value):
+    """Check Boolean options implemented only by the Högbom kernels."""
+    require_boolean(name, value)
+    if value and deconvolver not in (None, "hogbom", "hogbom_many_threads"):
+        raise ValueError(
+            f"{name} is supported only by Hogbom deconvolvers; received {deconvolver!r}."
+        )
+
+
+def check_entropy_controls(controls):
+    """Check the small entropy histogram controls before allocating state."""
+    if "entropy_stop" in controls:
+        require_boolean("entropy_stop", controls["entropy_stop"])
+    for name in ("entropy_spatial_bins", "entropy_flux_bins"):
+        if name in controls:
+            require_integer(name, controls[name], minimum=1)
+    if "entropy_max_snr" in controls:
+        require_finite_real(
+            "entropy_max_snr", controls["entropy_max_snr"], positive=True, scalar=True
+        )
+
+
+def check_nonnegative(name, value, *, scalar=False):
+    """Require a finite non-negative threshold or multiplier."""
+    values = require_finite_real(name, value, scalar=scalar)
+    if np.any(values < 0):
+        raise ValueError(f"{name} must be non-negative.")

@@ -142,20 +142,6 @@ def add_visibility_grid_mvc_single_field(
     if complex_dtype is None:
         complex_dtype = np.complex128
 
-    if not np.issubdtype(
-        np.dtype(complex_dtype),
-        np.complexfloating,
-    ):
-        raise TypeError(
-            "complex_dtype must be a complex floating-point dtype; "
-            f"received {complex_dtype!r}."
-        )
-
-    if not np.isfinite(fft_padding) or fft_padding < 1.0:
-        raise ValueError(
-            f"fft_padding must be finite and at least 1.0; received {fft_padding}."
-        )
-
     # ------------------------------------------------------------------
     # Resolve input and output data groups.
     # ------------------------------------------------------------------

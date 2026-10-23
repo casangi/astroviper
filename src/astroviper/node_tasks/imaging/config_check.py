@@ -78,29 +78,13 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
     selected_inputs = []
     for ms_name, child in processing_set.items():
         source = child.ds if hasattr(child, "ds") else child
-        group = source.attrs.get("data_groups", {}).get(group_name)
-        if group is None:
-            raise KeyError(
-                f"Preflight: data group {group_name!r} is missing from {ms_name!r}."
-            )
-        for role in ("weight", "flag", "uvw"):
-            if role not in group or group[role] not in source:
-                raise KeyError(
-                    f"Preflight: {ms_name!r} data group {group_name!r} lacks {role!r}."
-                )
-        units = source.frequency.attrs.get("units", ["Hz"])
-        if set(np.atleast_1d(units)) != {"Hz"}:
-            raise ValueError(
-                f"Selected frequencies in {ms_name!r} must be expressed in Hz; received units={units!r}."
-            )
+        check_input_metadata(source, config, mode=mode, measurement_set=ms_name)
+        group = source.attrs["data_groups"][group_name]
         frequencies = np.asarray(source.frequency.values)
         selected = selected_frequency_mask(frequencies, requested_frequencies)
         indices = np.flatnonzero(selected)
         if not indices.size:
             continue
-        # Inspect role targets and dimensions before reading any weight blocks.
-        # Existing guards here and in the processing functions remain active.
-        check_input_metadata(source, config, mode=mode, measurement_set=ms_name)
         pol_selection = correlation_selection(
             source.polarization.values, correlation_coords, ms_name
         )

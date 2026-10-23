@@ -108,14 +108,6 @@ def add_visibility_grid_continuum_single_field(
     n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
 
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
-
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be a positive finite frequency in Hz."
-        )
-
     if complex_dtype is None:
         complex_dtype = np.complex128
 

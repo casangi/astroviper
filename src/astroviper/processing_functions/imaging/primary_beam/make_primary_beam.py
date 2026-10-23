@@ -225,33 +225,15 @@ def pack_primary_beam_model(beam_model, frequency):
 
 
 def _checked_primary_beam_model(beam_model):
+    from astroviper.processing_functions.imaging.config_check._primary_beam import (
+        check_cube_primary_beam,
+    )
     from astroviper.processing_functions.simulation.antenna_beams import (
-        beam_model_kind,
         normalize_beam_model,
     )
 
-    kind = beam_model_kind(beam_model)
-    if kind not in ("analytic", "beam_polynomial_coefficients"):
-        raise ValueError(
-            f"beam_model of kind {kind!r} is not supported: the primary beam is "
-            "an analytic or beam-polynomial model, azimuthally symmetric and "
-            "independent of the parallactic angle"
-        )
-    beam_model = normalize_beam_model(beam_model)
-    if kind == "analytic":
-        dish, blockage = beam_model["dish_diameter"], beam_model["blockage_diameter"]
-        if beam_model["func"] not in ("casa_airy", "airy", "none") or not (
-            dish > 0.0 and 0.0 <= blockage < dish
-        ):
-            raise ValueError(
-                "an analytic beam_model needs func 'casa_airy', 'airy' or 'none', "
-                "dish_diameter > 0 and 0 <= blockage_diameter < dish_diameter; "
-                f"got {beam_model}"
-            )
-    max_rad = (beam_model if kind == "analytic" else beam_model.attrs)["max_rad_1GHz"]
-    if max_rad is not None and not max_rad > 0.0:
-        raise ValueError(f"beam_model needs max_rad_1GHz > 0; got {max_rad}")
-    return beam_model
+    check_cube_primary_beam({"beam_model": beam_model})
+    return normalize_beam_model(beam_model)
 
 
 @functools.cache
@@ -302,48 +284,26 @@ def resolve_primary_beam_params(primary_beam_params=None):
     TypeError
         For a ``beam_model`` that is not a beam model.
     """
-    from astroviper.utils.beam_models import AIRY_DISK_MODELS, airy_disk_model
+    from astroviper.processing_functions.imaging.config_check._primary_beam import (
+        check_cube_primary_beam,
+    )
+    from astroviper.utils.beam_models import airy_disk_model
+
+    check_cube_primary_beam(primary_beam_params)
 
     if primary_beam_params is None:
         return {}
-    unknown = set(primary_beam_params) - set(PRIMARY_BEAM_PARAMS_KEYS)
-    if unknown:
-        raise ValueError(
-            f"unknown primary_beam_params key(s) {sorted(unknown)}; expected "
-            f"{list(PRIMARY_BEAM_PARAMS_KEYS)}"
-        )
     if "beam_model" in primary_beam_params:
-        refused = sorted(set(primary_beam_params) - {"beam_model"})
-        if refused:
-            raise ValueError(
-                f"primary_beam_params {refused} do not apply with beam_model, "
-                "which holds its own values"
-            )
-        return {
-            "beam_model": _checked_primary_beam_model(primary_beam_params["beam_model"])
-        }
+        from astroviper.processing_functions.simulation.antenna_beams import (
+            normalize_beam_model,
+        )
+
+        return {"beam_model": normalize_beam_model(primary_beam_params["beam_model"])}
     telescope = str(primary_beam_params.get("telescope", "alma"))
     if telescope.lower() == "vla":
-        refused = sorted(
-            {"effective_dish_diameter", "blockage_diameter"} & set(primary_beam_params)
-        )
-        if refused:
-            raise ValueError(
-                f"primary_beam_params {refused} do not apply to telescope "
-                f"{telescope!r}, CASA's EVLA beam polynomial"
-            )
         model = _evla_beam_polynomial_coefficients()
         max_rad = primary_beam_params.get("max_rad_1GHz", model.attrs["max_rad_1GHz"])
-        if max_rad is None or not float(max_rad) > 0.0:
-            raise ValueError(
-                f"primary_beam_params need max_rad_1GHz > 0; got {max_rad}"
-            )
         return {"beam_model": model.assign_attrs(max_rad_1GHz=float(max_rad))}
-    if telescope.lower() not in AIRY_DISK_MODELS:
-        raise ValueError(
-            f"primary_beam_params['telescope'] {telescope!r} is not one of "
-            f"{sorted(AIRY_DISK_MODELS)}"
-        )
     model = airy_disk_model(telescope)
     dish = float(
         primary_beam_params.get("effective_dish_diameter", model["dish_diameter"])
@@ -354,14 +314,6 @@ def resolve_primary_beam_params(primary_beam_params=None):
     max_rad = primary_beam_params.get("max_rad_1GHz", model["max_rad_1GHz"])
     if max_rad is not None:
         max_rad = float(max_rad)
-    if not (
-        dish > 0.0 and 0.0 <= blockage < dish and (max_rad is None or max_rad > 0.0)
-    ):
-        raise ValueError(
-            "primary_beam_params need effective_dish_diameter > 0, "
-            "0 <= blockage_diameter < effective_dish_diameter and max_rad_1GHz > 0; "
-            f"got {dish}, {blockage}, {max_rad}"
-        )
     return {
         "beam_model": {
             **model,

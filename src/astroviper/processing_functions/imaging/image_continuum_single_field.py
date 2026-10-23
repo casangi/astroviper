@@ -625,16 +625,7 @@ def prepare_model_uv_continuum_single_field(
             f"model_xds must be an xarray.Dataset; received {type(model_xds).__name__}."
         )
 
-    if instrument_polarization_basis not in ("linear", "circular"):
-        raise ValueError(
-            "instrument_polarization_basis must be either 'linear' or "
-            f"'circular'; received {instrument_polarization_basis!r}."
-        )
-
     n_taylor_terms = int(image_params.get("n_taylor_terms", 0))
-
-    if n_taylor_terms < 1:
-        raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
 
     data_groups = model_xds.attrs.get("data_groups", {})
 
@@ -1254,8 +1245,6 @@ def make_mvc_taylor_normal_equation_contributions(
 
     normalizations = {"residual_normalization": residual_normalization}
     if psf_cube is not None:
-        if psf_normalization is None:
-            raise ValueError("psf_normalization is required when psf_cube is supplied.")
         normalizations["psf_normalization"] = psf_normalization
     for name, normalization in normalizations.items():
         if normalization.dims != required_normalization_dims:
@@ -1290,13 +1279,6 @@ def make_mvc_taylor_normal_equation_contributions(
     n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
     primary_beam_limit = float(primary_beam_limit)
-
-    if n_taylor_terms < 1:
-        raise ValueError(f"n_taylor_terms must be positive; received {n_taylor_terms}.")
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError("reference_frequency must be finite and positive.")
-    if not np.isfinite(primary_beam_limit) or primary_beam_limit < 0.0:
-        raise ValueError("primary_beam_limit must be finite and non-negative.")
 
     frequency = np.asarray(residual_cube.frequency.values, dtype=np.float64)
     if frequency.size == 0:
@@ -2423,8 +2405,21 @@ def _model_update_native_mtmfs(
     max_sidelobe_name,
     image_data_group_in_name,
     image_data_group_out_name,
+    *,
+    input_checked=False,
 ):
     """Run the native MT-MFS kernel on each time/polarization Taylor stack."""
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(
+            {"deconvolver": "mtmfs", "deconvolve_params": deconvolve_params},
+            mode=CONTINUUM_SINGLE_FIELD,
+        )
+
     import time
 
     import numpy as np
@@ -2543,17 +2538,6 @@ def _model_update_native_mtmfs(
     # is refused as on the Hogbom path.
     gain = deconvolve_params.get("gain", 0.1)
     max_iter_divergence = deconvolve_params.get("max_iter_divergence", 1)
-    if not 0 < gain <= 1:
-        raise ValueError("CLEAN gain must be between 0 and 1.")
-    if (
-        isinstance(max_iter_divergence, bool)
-        or not isinstance(max_iter_divergence, int | np.integer)
-        or not (max_iter_divergence == -1 or max_iter_divergence >= 1)
-    ):
-        raise ValueError(
-            "max_iter_divergence must be a positive integer, or -1 to "
-            f"disable the divergence test; got {max_iter_divergence!r}."
-        )
     _, limit = _divergence_factors(gain)
     divergence = {
         "max_iter_divergence": int(max_iter_divergence),
@@ -2807,12 +2791,6 @@ def model_update_mtmfs_single_field(
         modify_data_groups_xds,
     )
 
-    if deconvolver not in {"hogbom", "mtmfs"}:
-        raise NotImplementedError(
-            "Continuum deconvolution supports 'hogbom' and 'mtmfs'; "
-            f"received {deconvolver!r}."
-        )
-
     if "SKY_RESIDUAL" not in img_xds:
         raise KeyError("The continuum image dataset does not contain SKY_RESIDUAL.")
 
@@ -2936,6 +2914,7 @@ def model_update_mtmfs_single_field(
             max_sidelobe_name,
             image_data_group_in_name,
             image_data_group_out_name,
+            input_checked=True,
         )
 
     # ------------------------------------------------------------------
@@ -3189,6 +3168,7 @@ def accumulate_continuum_model(
     model_increment_xds,
     previous_model_xds=None,
     continuum_mode="mfs",
+    input_checked=False,
 ):
     """Create the accumulated continuum model for the next residual update.
 
@@ -3211,6 +3191,10 @@ def accumulate_continuum_model(
         Continuum execution mode. MVC retains the effective primary beam with
         the accumulated Taylor model.
 
+    input_checked : bool, optional
+        Whether an upper layer has validated this unchanged configuration.
+        Direct calls default to False.
+
     Returns
     -------
     xarray.Dataset
@@ -3227,17 +3211,20 @@ def accumulate_continuum_model(
         If the mode is unsupported or the increment layout differs from the
         previous accumulated model.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import xarray as xr
 
     if not isinstance(model_increment_xds, xr.Dataset):
         raise TypeError(
             "model_increment_xds must be an xarray.Dataset; received "
             f"{type(model_increment_xds).__name__}."
-        )
-
-    if continuum_mode not in ("mfs", "mvc"):
-        raise ValueError(
-            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
 
     if "SKY_MODEL" not in model_increment_xds:
@@ -3306,6 +3293,7 @@ def restore_continuum_image(
     primary_beam_limit=0.2,
     primary_beam_key="primary_beam",
     deconvolver="hogbom",
+    input_checked=False,
 ):
     """Restore the continuum image.
 
@@ -3376,6 +3364,10 @@ def restore_continuum_image(
         Taylor Hessian's principal solution to a private residual copy before
         selecting Taylor term zero. The stored residual remains unchanged.
 
+    input_checked : bool, optional
+        Whether an upper layer has validated this unchanged configuration.
+        Direct calls default to False.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -3393,6 +3385,16 @@ def restore_continuum_image(
     produces the restored reference-frequency continuum image. Primary-beam
     correction follows the shared cube restoration convention from ``main``;
     it is not a post-restoration division."""
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+        )
+
+        check_driver_workflow(
+            {**locals(), "restore": True}, mode=CONTINUUM_SINGLE_FIELD
+        )
 
     import copy
 
@@ -3424,12 +3426,6 @@ def restore_continuum_image(
 
     residual_group = data_groups[image_data_group_in_residual_name]
     model_group = data_groups[image_data_group_in_model_name]
-
-    if primary_beam_correction and not 0.0 <= float(primary_beam_limit) < 1.0:
-        raise ValueError(
-            "primary_beam_limit must satisfy 0 <= primary_beam_limit < 1; "
-            f"received {primary_beam_limit}."
-        )
 
     residual_name = residual_group.get("sky")
     model_name = model_group.get("sky")

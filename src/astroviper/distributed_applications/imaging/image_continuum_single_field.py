@@ -2628,17 +2628,11 @@ def _resolve_continuum_deconvolver(deconvolver, image_params):
 
 def _resolve_continuum_taylor_expansion(image_params):
     """Check the canonical Taylor basis without changing the supplied mapping."""
-    from astroviper.processing_functions.imaging.config_check import (
-        CONTINUUM_SINGLE_FIELD,
-        check_model_update,
-        check_residual_update,
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_continuum_basis,
     )
 
-    for name in ("n_taylor_terms", "reference_frequency"):
-        if name not in image_params:
-            raise KeyError(f"image_params must contain {name!r}.")
-    check_residual_update({"image_params": image_params}, mode=CONTINUUM_SINGLE_FIELD)
-    check_model_update({"image_params": image_params}, mode=CONTINUUM_SINGLE_FIELD)
+    check_continuum_basis(image_params)
 
 
 ###############################################################################
@@ -3250,9 +3244,6 @@ def image_continuum_single_field(
     from xradio.image import make_empty_sky_image, write_image
     from xradio.measurement_set import open_processing_set
 
-    from astroviper.distributed_applications.imaging.image_cube_single_field import (
-        _validate_n_mapping_parallelism,
-    )
     from astroviper.processing_functions.imaging.utils import (
         CONTINUUM_IMAGING_TIMING_PHASES,
         CONTINUUM_MODEL_UPDATE_TIMING_PHASES,
@@ -3261,7 +3252,6 @@ def image_continuum_single_field(
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
         correlation_selection,
         correlations_for_stokes,
-        is_four_correlation_basis,
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
     from astroviper.utils.io import (
@@ -3273,9 +3263,6 @@ def image_continuum_single_field(
 
     if compressor is None:
         compressor = BloscCodec(cname="lz4", clevel=5)
-
-    if n_mapping_parallelism is not None:
-        _validate_n_mapping_parallelism(n_mapping_parallelism)
 
     # Keep the caller's configuration unchanged; all configuration checks ran
     # before entering the driver body.
@@ -3325,15 +3312,6 @@ def image_continuum_single_field(
     correlation_coords = correlations_for_stokes(
         image_params["polarization_coords"], instrument_polarization_basis
     )
-    # MVC makes its Taylor terms real, which drops the imaginary part of the
-    # cross-hand images (V for linear feeds, U for circular feeds).
-    if continuum_mode == "mvc" and is_four_correlation_basis(correlation_coords):
-        raise ValueError(
-            f"continuum_mode='mvc' does not image polarization_coords "
-            f"{list(image_params['polarization_coords'])}: request the two "
-            "parallel hands or use continuum_mode='mfs'."
-        )
-
     start = time.time()
     ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
     timing_distributed_application["T_open_processing_set"] = time.time() - start
@@ -3707,12 +3685,6 @@ def image_continuum_single_field(
                 # task, returned as a cache, and reattached in later cycles.
                 weight_return_dict = {"weight_cache_mapping": None}
                 weight_graph_timings = {}
-
-        else:
-            raise ValueError(
-                "Unsupported imaging weighting scheme "
-                f"{imaging_weights_params['weighting']!r}."
-            )
 
         _accumulate_graph_timings(
             timing_distributed_application,

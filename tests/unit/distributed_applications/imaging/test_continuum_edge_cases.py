@@ -131,8 +131,8 @@ def test_taylor_expansion_preserves_supplied_scalars(n_taylor_terms, reference):
         ),
         (
             {"n_taylor_terms": 2, "reference_frequency_hz": -1.0},
-            KeyError,
-            "reference_frequency",
+            ValueError,
+            "reference_frequency_hz is not accepted",
         ),
         (
             {"n_taylor_terms": 2, "reference_frequency": [100.0, 200.0]},

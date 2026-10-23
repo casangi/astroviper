@@ -129,25 +129,6 @@ def point_spread_function_gaussian_fit(
             "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         }
 
-    if not isinstance(npix_window, list | tuple | np.ndarray):
-        raise TypeError("npix_window must be a list, tuple, or numpy array")
-    if npix_window[0] <= 0 or npix_window[1] <= 0:
-        raise ValueError("npix_window must be positive")
-    if type(npix_window[0]) is not int or type(npix_window[1]) is not int:
-        raise TypeError("npix_window must be integers")
-    if npix_window[0] % 2 == 0 or npix_window[1] % 2 == 0:
-        raise ValueError(
-            "npix_window must be odd so the search window is centered on the peak"
-        )
-    if not isinstance(sampling, list | tuple | np.ndarray):
-        raise TypeError("sampling must be a list, tuple, or numpy array")
-    if sampling[0] <= 1 or sampling[1] <= 1:
-        raise ValueError("sampling must contain at least two points per axis")
-    if type(sampling[0]) is not int or type(sampling[1]) is not int:
-        raise TypeError("sampling must be integers")
-    if cutoff < 0:
-        raise ValueError("cutoff must be non-negative")
-
     image_data_group_in, image_data_group_out = create_data_groups_in_and_out(
         img_xds,
         data_group_in_name=image_data_group_in_name,
@@ -220,10 +201,6 @@ def point_spread_function_gaussian_fit(
             delta,
             interpolation_method,
             processing_function_threads=processing_function_threads,
-        )
-    else:
-        raise ValueError(
-            f"fitting_method must be 'astroviper' or 'casa', got {fitting_method!r}."
         )
     max_sidelobe = _max_sidelobe_after_gaussian_subtraction(
         img_xds[psf_name].values,

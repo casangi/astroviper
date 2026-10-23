@@ -71,16 +71,6 @@ _BASELINE_NAME_CODES = {
 #: index (the sorted unique names of both coordinates).
 _ANTENNA_NAME_TABLE = "baseline_antenna_name_table"
 
-#: Arguments of ``open_msv2`` that the distributed application sets itself:
-#: they are refused in ``msv2_open_options`` (name -> what sets it).
-_RESERVED_OPEN_OPTIONS = {
-    "array_backend": (
-        'fixed to "xarray": lazily indexed arrays, so that a node task reads '
-        "only its own selection"
-    ),
-    "scan_intents": "pass the scan_intents parameter instead",
-}
-
 #: XRADIO's environment variable for the default partition-cache mode.
 _PARTITION_CACHE_ENV = "XRADIO_MSV2_PARTITION_CACHE"
 
@@ -207,14 +197,15 @@ def open_processing_set_skunk_works_msv2(
         If XRADIO's ``xradio_msv2`` engine is not available (see
         :func:`require_msv2_engine`).
     """
+    from astroviper.processing_functions.imaging.config_check import (
+        CUBE_SINGLE_FIELD,
+        check_driver_workflow,
+    )
+
+    check_driver_workflow(
+        {"msv2_open_options": msv2_open_options}, mode=CUBE_SINGLE_FIELD
+    )
     options = dict(msv2_open_options or {})
-    reserved = sorted(set(options) & set(_RESERVED_OPEN_OPTIONS))
-    if reserved:
-        raise ValueError(
-            f"msv2_open_options may not set {reserved}: "
-            + "; ".join(f"{name}: {_RESERVED_OPEN_OPTIONS[name]}" for name in reserved)
-            + "."
-        )
     open_msv2 = require_msv2_engine()
 
     defaults = {"with_pointing": False}

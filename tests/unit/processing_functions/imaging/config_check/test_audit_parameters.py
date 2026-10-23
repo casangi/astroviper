@@ -428,7 +428,7 @@ def test_shared_coordinator_rejects_audit_probe_regressions():
             check_config(config, mode=mode)
 
 
-def test_direct_gridder_reuses_shared_check_and_retains_original_guard(monkeypatch):
+def test_direct_gridder_checks_once_then_trusts_checked_input(monkeypatch):
     import astroviper.processing_functions.imaging.config_check as checks
     from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
         add_visibility_grid_continuum_single_field,
@@ -444,14 +444,20 @@ def test_direct_gridder_reuses_shared_check_and_retains_original_guard(monkeypat
     with pytest.raises(ValueError, match="shared checker reached"):
         add_visibility_grid_continuum_single_field(None, None, None, -1, 1e9)
     assert len(calls) == 1
-    with pytest.raises(ValueError, match="n_taylor_terms"):
+
+    class RuntimeInput:
+        @property
+        def attrs(self):
+            raise RuntimeError("runtime input reached")
+
+    with pytest.raises(RuntimeError, match="runtime input reached"):
         add_visibility_grid_continuum_single_field(
-            None, None, None, -1, 1e9, input_checked=True
+            RuntimeInput(), None, None, 1, 1e9, input_checked=True
         )
     assert len(calls) == 1
 
 
-def test_checked_fitter_retains_original_value_guard(monkeypatch):
+def test_checked_fitter_still_requires_runtime_data_group(monkeypatch):
     import astroviper.processing_functions.imaging.config_check as checks
     from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
         point_spread_function_gaussian_fit,
@@ -461,8 +467,10 @@ def test_checked_fitter_retains_original_value_guard(monkeypatch):
         raise AssertionError("Repeated the shared configuration check")
 
     monkeypatch.setattr(checks, "check_model_update", unexpected_check)
-    with pytest.raises(ValueError, match="cutoff"):
-        point_spread_function_gaussian_fit(None, cutoff=-1.0, input_checked=True)
+    import xarray as xr
+
+    with pytest.raises(AssertionError, match="Data group image not found"):
+        point_spread_function_gaussian_fit(xr.Dataset(), input_checked=True)
 
 
 def test_direct_cube_setup_checks_fitter_before_input_access():

@@ -147,12 +147,12 @@ class TestValidateNMappingParallelism:
         ids=["wrong-axis", "extra-axis", "empty"],
     )
     def test_non_frequency_keys_rejected(self, bad_keys):
-        with pytest.raises(ValueError, match="single key\\s+'frequency'"):
+        with pytest.raises(ValueError, match="must contain only 'frequency'"):
             self._validate(bad_keys)
 
     @pytest.mark.parametrize("bad", [0, -3, 2.5, True, "5"])
     def test_bad_count_rejected(self, bad):
-        with pytest.raises(ValueError, match="positive int"):
+        with pytest.raises(ValueError, match="must be >= 1|must be an integer"):
             self._validate({"frequency": bad})
 
 

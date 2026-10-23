@@ -312,7 +312,13 @@ def _task_chunk_lengths(dim, parallel_coords):
 
 
 def validate_image_chunking_and_sharding(
-    image_chunking, image_sharding, shape_dict, parallel_coords, extra_dims=("u", "v")
+    image_chunking,
+    image_sharding,
+    shape_dict,
+    parallel_coords,
+    extra_dims=("u", "v"),
+    *,
+    parallelism_pending=False,
 ):
     """Validate the on-disk image chunking and sharding against the image and
     the mapping parallelism.
@@ -349,6 +355,10 @@ def validate_image_chunking_and_sharding(
         ``frequency``), providing the per-task chunk lengths.
     extra_dims : tuple of str, optional
         Dimension names accepted as keys although absent from ``shape_dict``.
+    parallelism_pending : bool, optional
+        Before mapping, defer the implicit frequency chunk's shard divisibility
+        check until task extents are known. Explicit chunks and known image
+        extents are still checked. Default False.
 
     Raises
     ------
@@ -357,8 +367,21 @@ def validate_image_chunking_and_sharding(
         larger than the task extent or not dividing the task chunks, or a shard
         that is not a multiple of its chunk.
     """
+    from collections.abc import Mapping
+
+    for label, value in (
+        ("image_chunking", image_chunking),
+        ("image_sharding", image_sharding),
+    ):
+        if value is not None and not isinstance(value, Mapping):
+            raise TypeError(f"{label} must be a mapping.")
     chunking = dict(image_chunking or {})
     sharding = dict(image_sharding or {})
+    if sharding:
+        import zarr
+
+        if int(zarr.__version__.split(".")[0]) < 3:
+            raise ValueError("image_sharding requires Zarr v3.")
     valid_dims = set(shape_dict) | set(extra_dims)
     for label, mapping in (("image_chunking", chunking), ("image_sharding", sharding)):
         for dim, size in mapping.items():
@@ -392,6 +415,8 @@ def validate_image_chunking_and_sharding(
                     )
     for dim, size in sharding.items():
         if dim not in shape_dict:
+            continue
+        if parallelism_pending and dim == "frequency" and dim not in chunking:
             continue
         chunk = chunking.get(dim, _task_extent(dim, shape_dict, parallel_coords))
         if size < int(shape_dict[dim]) and size % chunk:
@@ -551,11 +576,6 @@ def create_empty_data_variables_on_disk(
     validate_image_chunking_and_sharding(
         image_chunking, image_sharding, shape_dict, parallel_coords
     )
-    if image_sharding and not _ZARR_V3:
-        raise ValueError(
-            "image_sharding (output sharding) requires Zarr v3; the installed "
-            "zarr is v2."
-        )
     sharded = bool(image_sharding) and _ZARR_V3
 
     if _ZARR_V3 and compressor is not None:

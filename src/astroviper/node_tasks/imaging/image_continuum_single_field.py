@@ -632,9 +632,6 @@ def _resolve_continuum_append_configuration(input_params):
     """Resolve validated continuum parameters used by global append nodes."""
     import numpy as np
 
-    if "image_params" not in input_params:
-        raise KeyError("A continuum append node requires input_params['image_params'].")
-
     image_params = input_params["image_params"]
 
     if not input_params.get("input_checked", False):
@@ -643,12 +640,13 @@ def _resolve_continuum_append_configuration(input_params):
             check_model_update,
             check_residual_update,
         )
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_continuum_basis,
+        )
 
+        check_continuum_basis(image_params)
         check_residual_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
         check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
-    for name in ("n_taylor_terms", "reference_frequency"):
-        if name not in image_params:
-            raise KeyError(f"image_params must contain {name!r}.")
     n_taylor_terms = image_params["n_taylor_terms"]
     reference_frequency = image_params["reference_frequency"]
     single_precision_image = input_params.get("single_precision_image", True)
@@ -2447,11 +2445,6 @@ def _prepare_continuum_image(
         "continuum_mode", image_params.get("continuum_mode", "mfs")
     )
 
-    if continuum_mode not in ("mfs", "mvc"):
-        raise ValueError(
-            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
-        )
-
     # MFS still reduces Taylor-weighted UV grids and therefore performs its
     # inverse FFT globally. MVC map tasks already returned Taylor products.
     residual_output_name = "SKY_RESIDUAL"
@@ -2706,11 +2699,6 @@ def _prepare_continuum_image(
                     "MVC PRIMARY_BEAM must have exactly one effective frequency plane."
                 )
 
-        else:
-            raise ValueError(
-                f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
-            )
-
         # Static variables shared with the model-update controls.
         static_variable_names = (
             "POINT_SPREAD_FUNCTION",
@@ -2859,6 +2847,7 @@ def _prepare_post_update_continuum_model_state(
         model_increment_xds,
         previous_model_xds=previous_model_xds,
         continuum_mode=continuum_mode,
+        input_checked=input_checked or input_params.get("input_checked", False),
     )
 
     if continuum_mode == "mfs":
@@ -2882,10 +2871,6 @@ def _prepare_post_update_continuum_model_state(
         )
     elif continuum_mode == "mvc":
         model_uv_xds = None
-    else:
-        raise ValueError(
-            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
-        )
 
     return model_xds, model_uv_xds
 
@@ -3330,6 +3315,7 @@ def continuum_finalize_node(
             primary_beam_correction=input_params.get("primary_beam_correction", False),
             primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
             deconvolver=input_params.get("deconvolver", "hogbom"),
+            input_checked=True,
         )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)

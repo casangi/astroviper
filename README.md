@@ -57,9 +57,9 @@ Input metadata and generated task boundaries are checked before output writes
 or graph execution when they become available. Continuum beam inference needs
 only antenna metadata and now runs before the first output write. Kernel-design
 preflight reuses the production kernel cache. Direct entry points use
-`input_checked=False`; validated callers pass `True` through the stack. Existing
-lower-level checks remain active, including actual-product and native-buffer
-guards. Both multifield modes remain explicitly unsupported.
+`input_checked=False`; validated callers pass `True` through the stack. Configuration predicates live in the parameter-check package; legacy helpers
+reuse those predicates. Actual-product, cache-consistency, and native-buffer
+guards remain active even for checked calls. Both multifield modes remain explicitly unsupported.
 
 See [the configuration-check tutorial](docs/processing_functions_tutorials/imaging/demo_config_check.ipynb)
 for valid and invalid examples.

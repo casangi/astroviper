@@ -102,11 +102,11 @@ def create_prolate_spheroidal_kernel_1D(oversampling, support):
     optimised for and break the image plane correction that goes with it, so
     it is refused.
     """
-    if support != 7:
-        raise ValueError(
-            "the prolate spheroidal kernel is Schwab's approximation of the "
-            f"m = 6, alpha = 1 function and spans 7 grid points; got support {support}"
-        )
+    from astroviper.processing_functions.imaging.config_check._gridding import (
+        check_casa_support,
+    )
+
+    check_casa_support(support)
     support_center = support // 2
     u = np.arange(oversampling * (support_center)) / (support_center * oversampling)
 

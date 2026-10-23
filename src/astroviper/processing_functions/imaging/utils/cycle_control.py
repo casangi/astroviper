@@ -618,29 +618,22 @@ def validate_entropy_params(cycle_control_params):
         If ``entropy_stop`` is not a bool, ``entropy_max_snr`` is not a
         positive number, or a number of bins is not a positive integer.
     """
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_entropy_controls,
+    )
+
     params = {**ENTROPY_PARAM_DEFAULTS, **(cycle_control_params or {})}
-    entropy_stop = params["entropy_stop"]
-    if not isinstance(entropy_stop, bool | np.bool_):
-        raise ValueError(f"entropy_stop must be a bool; got {entropy_stop!r}.")
-    max_snr = params["entropy_max_snr"]
-    if (
-        isinstance(max_snr, bool)
-        or not isinstance(max_snr, int | float | np.integer | np.floating)
-        or not np.isfinite(max_snr)
-        or max_snr <= 0
-    ):
-        raise ValueError(f"entropy_max_snr must be a positive number; got {max_snr!r}.")
-    bins = []
-    for key in ("entropy_spatial_bins", "entropy_flux_bins"):
-        value = params[key]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int | np.integer)
-            or value < 1
-        ):
-            raise ValueError(f"{key} must be a positive integer; got {value!r}.")
-        bins.append(int(value))
-    return bool(entropy_stop), float(max_snr), bins[0], bins[1]
+    entropy = {name: params[name] for name in ENTROPY_PARAM_DEFAULTS}
+    try:
+        check_entropy_controls(entropy)
+    except TypeError as error:
+        raise ValueError(str(error)) from error
+    return (
+        bool(params["entropy_stop"]),
+        float(params["entropy_max_snr"]),
+        int(params["entropy_spatial_bins"]),
+        int(params["entropy_flux_bins"]),
+    )
 
 
 def make_continuum_cycle_controller(cycle_control_params):
@@ -702,22 +695,15 @@ def validate_max_cycles(max_cycles, max_psf_fraction=None):
         below -1 or any other string; or for ``"auto"`` with a
         ``max_psf_fraction`` of 1 or more.
     """
-    if _is_auto_max_cycles(max_cycles):
-        if max_psf_fraction is not None and max_psf_fraction >= 1:
-            raise ValueError(
-                f'max_cycles="{AUTO_MAX_CYCLES}" needs a max_psf_fraction below '
-                f"1; got {max_psf_fraction!r}."
-            )
-        return max_cycles
-    integral = isinstance(max_cycles, int | np.integer) or (
-        isinstance(max_cycles, float | np.floating) and float(max_cycles).is_integer()
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_max_cycles,
     )
-    if isinstance(max_cycles, bool | np.bool_) or not integral or max_cycles < -1:
-        raise ValueError(
-            f'max_cycles must be an integer >= -1 or "{AUTO_MAX_CYCLES}"; '
-            f"got {max_cycles!r}."
-        )
-    return int(max_cycles)
+
+    try:
+        check_max_cycles(max_cycles, max_psf_fraction, allow_integral_float=True)
+    except TypeError as error:
+        raise ValueError(str(error)) from error
+    return max_cycles if _is_auto_max_cycles(max_cycles) else int(max_cycles)
 
 
 def validate_threshold_tolerance(threshold_tolerance):
@@ -740,16 +726,14 @@ def validate_threshold_tolerance(threshold_tolerance):
         For a bool, anything that is not a number, NaN, infinity or a value
         below 0.
     """
-    if (
-        isinstance(threshold_tolerance, bool)
-        or not isinstance(threshold_tolerance, int | float | np.integer | np.floating)
-        or not np.isfinite(threshold_tolerance)
-        or threshold_tolerance < 0
-    ):
-        raise ValueError(
-            "threshold_tolerance must be a finite number >= 0; got "
-            f"{threshold_tolerance!r}."
-        )
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_nonnegative,
+    )
+
+    try:
+        check_nonnegative("threshold_tolerance", threshold_tolerance, scalar=True)
+    except TypeError as error:
+        raise ValueError(str(error)) from error
     return float(threshold_tolerance)
 
 
@@ -983,15 +967,23 @@ class CycleController:
         self.max_entropy = None
         self.entropy_stopped = None
         # Divergence stop: parameter and per-plane state (allocated lazily).
-        if (
-            isinstance(max_cycles_divergence, bool)
-            or not isinstance(max_cycles_divergence, int | np.integer)
-            or not (max_cycles_divergence == -1 or max_cycles_divergence >= 1)
-        ):
-            raise ValueError(
-                "max_cycles_divergence must be -1 or a positive integer; got "
-                f"{max_cycles_divergence!r}."
+        from astroviper.processing_functions.imaging.config_check._common import (
+            require_integer,
+        )
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_nonnegative,
+        )
+
+        try:
+            require_integer(
+                "max_cycles_divergence",
+                max_cycles_divergence,
+                minimum=1,
+                allow_minus_one=True,
             )
+            check_nonnegative("threshold", threshold)
+        except TypeError as error:
+            raise ValueError(str(error)) from error
         self.max_cycles_divergence = int(max_cycles_divergence)
         self.diverged_model_updates = None
         self.divergence_stopped = None
@@ -1005,8 +997,6 @@ class CycleController:
             self.threshold = threshold
         else:
             self.threshold = tuple(float(value) for value in threshold)
-            if min(self.threshold) < 0:
-                raise ValueError(f"threshold must be >= 0; got {self.threshold}")
         self.threshold_sigma = threshold_sigma
         self.threshold_tolerance = validate_threshold_tolerance(threshold_tolerance)
 

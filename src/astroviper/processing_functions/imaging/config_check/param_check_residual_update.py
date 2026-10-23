@@ -46,14 +46,11 @@ def check_residual_update(config, *, mode, require_complete=False):
     # --- FFT implementation ---
     # Fail before allocating grids if the requested transform is unavailable.
     if "fft_backend" in config:
-        from importlib import import_module
-
-        backend = config["fft_backend"]
-        if backend not in ("scipy", "pyfftw"):
-            raise ValueError("fft_backend must be 'scipy' or 'pyfftw'.")
-        import_module(
-            "scipy.fft" if backend == "scipy" else "pyfftw.interfaces.scipy_fft"
+        from astroviper.processing_functions.imaging.config_check._common import (
+            check_fft_backend,
         )
+
+        check_fft_backend(config["fft_backend"])
 
     # --- Implemented gridder ---
     # The single-field nodes implement anti-alias gridding only; no fallback.
@@ -97,12 +94,7 @@ def check_residual_update(config, *, mode, require_complete=False):
     # --- Reference frequency ---
     # The Taylor reference must be one finite, strictly positive frequency.
     if "reference_frequency" in image_params:
-        require_finite_real(
-            "reference_frequency",
-            image_params["reference_frequency"],
-            positive=True,
-            scalar=True,
-        )
+        check_reference_frequency(image_params["reference_frequency"])
 
     # --- Direct Taylor-grid counts ---
     # Gridding helpers need positive counts even without a deconvolver choice.
@@ -134,9 +126,15 @@ def check_residual_update(config, *, mode, require_complete=False):
 
     # --- Continuum construction ---
     # Continuum residuals can be formed by either the MFS or MVC path.
-    if mode.imaging_kind == "continuum" and "continuum_mode" in config:
-        if config["continuum_mode"] not in ("mfs", "mvc"):
-            raise ValueError("continuum_mode must be 'mfs' or 'mvc'.")
+    continuum_mode = config.get(
+        "continuum_mode", image_params.get("continuum_mode", "mfs")
+    )
+    if mode.imaging_kind == "continuum":
+        from astroviper.processing_functions.imaging.config_check._common import (
+            check_continuum_mode,
+        )
+
+        check_continuum_mode(continuum_mode)
 
     # --- Cube weighting scope ---
     # Cube imaging does not implement a density shared across all channels.
@@ -214,10 +212,28 @@ def check_residual_update(config, *, mode, require_complete=False):
         # The current MVC gridder accumulates all integrations into one plane.
         if (
             mode.imaging_kind == "continuum"
-            and config.get("continuum_mode") == "mvc"
+            and continuum_mode == "mvc"
             and time_coords.size != 1
         ):
             raise ValueError("Single-field MVC requires exactly one image time plane.")
+
+    # --- Instrument feeds ---
+    # A direct model-preparation call may supply the basis without Stokes labels.
+    if "instrument_polarization_basis" in config and config[
+        "instrument_polarization_basis"
+    ] not in ("linear", "circular"):
+        raise ValueError(
+            "instrument_polarization_basis must be 'linear' or 'circular'."
+        )
+
+    # --- MVC beam support ---
+    # The cutoff is known before a primary-beam image is available.
+    if "primary_beam_limit" in config:
+        from astroviper.processing_functions.imaging.config_check._primary_beam import (
+            check_primary_beam_limit,
+        )
+
+        check_primary_beam_limit(config["primary_beam_limit"])
 
     # --- Requested Stokes planes ---
     # Validate supported feed/Stokes combinations when this boundary knows the feeds.
@@ -229,9 +245,19 @@ def check_residual_update(config, *, mode, require_complete=False):
             correlations_for_stokes,
         )
 
-        correlations_for_stokes(
+        correlations = correlations_for_stokes(
             image_params["polarization_coords"], config["instrument_polarization_basis"]
         )
+        if continuum_mode == "mvc":
+            from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+                is_four_correlation_basis,
+            )
+
+            # Real MVC Taylor images cannot retain the imaginary cross-hand plane.
+            if is_four_correlation_basis(correlations):
+                raise ValueError(
+                    f"continuum_mode='mvc' does not image polarization_coords {list(image_params['polarization_coords'])}: request the two parallel hands or use continuum_mode='mfs'."
+                )
 
     # --- Primary-beam prescription ---
     # Explicit choices and physical apertures are known without a PSF.
@@ -337,6 +363,14 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
     group_name = config.get("processing_set_data_group_name", "corrected")
     group = source.attrs.get("data_groups", {}).get(group_name)
 
+    # --- Spectral units ---
+    # Metadata are compared in Hz; never interpret another unit as Hz.
+    units = source.frequency.attrs.get("units", ["Hz"])
+    if set(np.atleast_1d(units)) != {"Hz"}:
+        raise ValueError(
+            f"Selected frequencies in {measurement_set!r} must be expressed in Hz; received units={units!r}."
+        )
+
     # --- Role targets ---
     # A registered role is insufficient if its variable is absent on disk.
     if group is None:
@@ -393,8 +427,9 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
     # --- Channel assignment ---
     # Use the production nearest-channel rule, preserving averaging/shifted axes.
     image = config.get("image_params", {})
+    continuum_mode = config.get("continuum_mode", image.get("continuum_mode", "mfs"))
     if "frequency_coords" in image and (
-        mode.imaging_kind == "cube" or config.get("continuum_mode") == "mvc"
+        mode.imaging_kind == "cube" or continuum_mode == "mvc"
     ):
         from astroviper.processing_functions.imaging.config_check._common import (
             selected_frequency_mask,
@@ -662,3 +697,33 @@ def check_spectral_sampling(
         )
 
     return diagnostics
+
+
+def check_continuum_basis(image_params):
+    """Require the common Taylor order and reference frequency for map helpers."""
+    from astroviper.processing_functions.imaging.config_check._common import (
+        CONTINUUM_SINGLE_FIELD,
+    )
+
+    require_mapping("image_params", image_params)
+    check_residual_update({"image_params": image_params}, mode=CONTINUUM_SINGLE_FIELD)
+    for name in ("n_taylor_terms", "reference_frequency"):
+        if name not in image_params:
+            raise KeyError(f"image_params must contain {name!r}.")
+
+
+def check_reference_frequency(value, *, allow_one_element=False):
+    """Check a shared reference, allowing legacy one-element helper inputs."""
+    values = value
+    if allow_one_element:
+        values = np.asarray(value)
+        if values.size == 1:
+            values = values.reshape(())
+    try:
+        require_finite_real("reference_frequency", values, positive=True, scalar=True)
+    except (ValueError, TypeError) as error:
+        if allow_one_element:
+            raise ValueError(
+                "The reference frequency must be scalar, finite and positive."
+            ) from error
+        raise

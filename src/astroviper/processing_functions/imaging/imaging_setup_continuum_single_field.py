@@ -9,48 +9,26 @@ def _get_reference_frequency_hz(image_params):
     """Return ``image_params["reference_frequency"]`` in Hz. Distributed
     callers must supply one common reference frequency before partitioning.
     """
-    if "reference_frequency" not in image_params:
-        raise KeyError(
-            "image_params must contain 'reference_frequency', the reference "
-            "frequency of the Taylor expansion in Hz."
-        )
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_reference_frequency,
+    )
 
-    # Permit a scalar xarray/numpy object while rejecting a vector.
-    reference_frequency = np.asarray(image_params["reference_frequency"])
-
-    if reference_frequency.size != 1:
-        raise ValueError(
-            "image_params['reference_frequency'] must be a scalar frequency "
-            "shared by all continuum map tasks."
-        )
-
-    reference_frequency_hz = float(reference_frequency.reshape(()))
-
-    if not np.isfinite(reference_frequency_hz) or reference_frequency_hz <= 0.0:
-        raise ValueError(
-            "The continuum reference frequency must be finite and positive."
-        )
-
-    return reference_frequency_hz
+    check_reference_frequency(
+        image_params["reference_frequency"], allow_one_element=True
+    )
+    return float(np.asarray(image_params["reference_frequency"]).reshape(()))
 
 
 def _validate_continuum_parameters(image_params):
     """Validate and return ``(n_taylor_terms, reference_frequency_hz)``."""
-    from astroviper.processing_functions.imaging.config_check._common import (
-        require_integer,
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_continuum_basis,
     )
 
-    if "n_taylor_terms" not in image_params:
-        raise KeyError("image_params must contain 'n_taylor_terms'.")
-    n_taylor_terms = image_params["n_taylor_terms"]
-    require_integer("n_taylor_terms", n_taylor_terms, minimum=1)
-
-    if n_taylor_terms < 1:
-        raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
-
-    reference_frequency_hz = _get_reference_frequency_hz(image_params)
-
-    return n_taylor_terms, reference_frequency_hz
+    check_continuum_basis(image_params)
+    return image_params["n_taylor_terms"], float(
+        np.asarray(image_params["reference_frequency"]).reshape(())
+    )
 
 
 def _imaging_weights_are_available(
@@ -131,8 +109,14 @@ def _convert_primary_beam_to_reference_frequency(
     image_data_group = data_groups[image_data_group_in_name]
 
     reference_frequency_hz = float(reference_frequency_hz)
-    if not np.isfinite(reference_frequency_hz) or reference_frequency_hz <= 0.0:
-        raise ValueError("reference_frequency_hz must be finite and positive.")
+    from astroviper.processing_functions.imaging.config_check import (
+        CONTINUUM_SINGLE_FIELD,
+        check_residual_update,
+    )
+
+    check_residual_update(
+        {"reference_frequency": reference_frequency_hz}, mode=CONTINUUM_SINGLE_FIELD
+    )
 
     dish_diameters = image_params.get("list_dish_diameters")
     blockage_diameters = image_params.get("list_blockage_diameters")
@@ -439,6 +423,7 @@ def imaging_setup_continuum_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
     elif continuum_mode == "mvc":
         (
@@ -453,10 +438,7 @@ def imaging_setup_continuum_single_field(
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
-        )
-    else:
-        raise ValueError(
-            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
+            input_checked=True,
         )
 
     T_make_point_spread_function = time.time() - start

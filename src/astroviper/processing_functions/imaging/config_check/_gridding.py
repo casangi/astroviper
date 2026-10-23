@@ -7,16 +7,13 @@ from astroviper.processing_functions.imaging.config_check._common import (
 )
 
 
-def check_gridding_kernel(params, *, fft_padding=None):
-    """Check a kernel recipe and its parameter-derived edge correction.
+def check_gridding_kernel_parameters(params):
+    """Check the recipe schema without constructing a numerical kernel.
 
     Parameters
     ----------
     params : mapping or None
         Explicit kernel settings. Missing keys retain the builder's defaults.
-    fft_padding : float or None
-        Padding used to design non-CASA kernels.
-
     Notes
     -----
     The production builder caches kernels by their recipe, so this preflight
@@ -24,9 +21,6 @@ def check_gridding_kernel(params, *, fft_padding=None):
     """
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         DEFAULT_GRIDDING_KERNEL_PARAMS,
-        KERNEL_TYPES,
-        MIN_DESIGN_PADDING,
-        make_gridding_kernel,
     )
 
     # --- Recognized recipe ---
@@ -38,10 +32,7 @@ def check_gridding_kernel(params, *, fft_padding=None):
     if unknown:
         raise ValueError(f"Unknown gridding_kernel_params keys: {sorted(unknown)}.")
     recipe = {**DEFAULT_GRIDDING_KERNEL_PARAMS, **params}
-    if recipe["type"] not in KERNEL_TYPES:
-        raise ValueError(
-            f"gridding_kernel_params['type'] must be one of {KERNEL_TYPES}."
-        )
+    check_kernel_options(recipe["type"], recipe["interpolation"])
 
     # --- Table sampling ---
     # Stencils need an odd support and a positive integral sampling density.
@@ -49,25 +40,54 @@ def check_gridding_kernel(params, *, fft_padding=None):
     if recipe["support"] % 2 == 0:
         raise ValueError("kernel support must be odd.")
     require_integer("kernel oversampling", recipe["oversampling"], minimum=1)
-    if recipe["interpolation"] not in ("nearest", "linear"):
-        raise ValueError("kernel interpolation must be 'nearest' or 'linear'.")
 
     # --- CASA support ---
     # The tabulated CASA spheroidal approximation is defined for support 7.
     if recipe["type"] == "prolate_spheroidal_casa":
-        if recipe["support"] != 7:
-            raise ValueError("prolate_spheroidal_casa requires kernel support=7.")
+        check_casa_support(recipe["support"])
         return
 
-    # --- Designed image region ---
-    # Other kernels need padding to suppress aliases over the retained image.
+
+def check_kernel_padding(fft_padding):
+    """Require a padding that leaves a design region below the alias boundary."""
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        MIN_DESIGN_PADDING,
+    )
+
     if fft_padding is None:
         raise ValueError("This gridding kernel requires fft_padding >= 1.05.")
     padding = require_finite_real("fft_padding", fft_padding, scalar=True)
     if padding < MIN_DESIGN_PADDING:
         raise ValueError("This gridding kernel requires fft_padding >= 1.05.")
 
-    # --- Image-edge correction ---
-    # The builder rejects correction < 1e-6 before division would distort flux.
-    # Keep that original guard and reuse its cached numerical construction.
-    make_gridding_kernel(recipe, fft_padding=fft_padding)
+
+def check_gridding_kernel(params, *, fft_padding=None):
+    """Check the recipe and cached numerical image-edge correction."""
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
+    )
+
+    if params is not None:
+        # The builder delegates its recipe and padding checks to this module.
+        # Its numerical correction guard is also used by direct builder calls.
+        make_gridding_kernel(params, fft_padding=fft_padding)
+
+
+def check_kernel_options(kernel_type, interpolation):
+    """Check options shared by recipe builders and explicitly supplied tables."""
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        KERNEL_TYPES,
+    )
+
+    if kernel_type not in KERNEL_TYPES:
+        raise ValueError(
+            f"gridding_kernel_params['type'] must be one of {KERNEL_TYPES}."
+        )
+    if interpolation not in ("nearest", "linear"):
+        raise ValueError("kernel interpolation must be 'nearest' or 'linear'.")
+
+
+def check_casa_support(support):
+    """Schwab's tabulated approximation is defined for exactly seven grid points."""
+    if support != 7:
+        raise ValueError("prolate_spheroidal_casa requires kernel support=7.")

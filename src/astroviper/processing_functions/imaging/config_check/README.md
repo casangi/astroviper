@@ -279,3 +279,27 @@ Sparse XRADIO padding is excluded only when the absent time-centroid, all-NaN
 UVW, and all-NaN weights agree. Real rows with invalid weights still raise.
 Channel matching uses a sorted private lookup with linear memory, and cube
 sampling diagnostics retain only each channel's own selection.
+
+
+## Configuration checks and runtime guards
+
+Static configuration predicates have one implementation in this package.
+Imaging entry points validate direct calls and propagate `input_checked=True`
+after validation. Legacy controller, beam, and gridding helpers delegate to the
+same predicates rather than keeping independent copies. The standalone
+controller retains its documented acceptance of integral float cycle counts;
+distributed configuration still requires integers.
+
+Output-layout validation uses the shared generic implementation in `utils.io`,
+which also serves direct writers without introducing an upward layer dependency.
+Before mapping, it checks known image extents and explicit chunks; after mapping,
+it additionally checks task alignment and inferred chunk sizes. FITS direct
+calls enforce the same representable-coordinate policy as preflight: irregular
+channels are rejected rather than approximated.
+
+Checks of actual products are still required: source roles and units, cache
+contents, residual/model/PSF geometry and precision, normalization arrays,
+spatial Hessians, and native memory layout. A valid configuration cannot prove
+that these runtime objects satisfy their contracts. Metadata-driven beam
+inference and the cached numerical kernel-edge test are single shared
+implementations called during preflight, not duplicate configuration predicates.

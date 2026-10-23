@@ -1,7 +1,6 @@
 import time
 
 import numpy as np
-import scipy.fft
 import toolviper.utils.logger as logger
 import xarray as xr
 
@@ -50,22 +49,16 @@ def _fft_module(backend):
     ValueError
         If ``backend`` is not a recognised string.
     """
-    if backend == "scipy":
-        return scipy.fft
-    if backend == "pyfftw":
-        try:
-            import pyfftw
-            import pyfftw.interfaces.scipy_fft as _pyfftw_fft
-
-            pyfftw.interfaces.cache.enable()
-            return _pyfftw_fft
-        except ImportError as err:
-            raise ImportError(
-                "pyfftw is not installed. Install it with: pip install pyfftw"
-            ) from err
-    raise ValueError(
-        f"Unknown FFT backend '{backend}'. Supported values: 'scipy', 'pyfftw'."
+    from astroviper.processing_functions.imaging.config_check._common import (
+        check_fft_backend,
     )
+
+    fft = check_fft_backend(backend)
+    if backend == "pyfftw":
+        import pyfftw
+
+        pyfftw.interfaces.cache.enable()
+    return fft
 
 
 # @profile(precision=1)
