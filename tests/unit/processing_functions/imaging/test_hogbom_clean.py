@@ -1041,6 +1041,72 @@ class TestCubeReturnShapes:
 CUBE_KERNELS = ["clean_cube", "clean_cube_many_threads"]
 
 
+@pytest.mark.parametrize("kernel", CUBE_KERNELS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("threads", [1, 4])
+def test_per_plane_mask_boxes_preserve_clean_box_ties_and_history(
+    kernel, dtype, threads
+):
+    """Different mask islands, holes and empty intersections keep all kernels equal."""
+    shape = (1, 1, 4, 32, 48)
+    dirty = np.zeros(shape, dtype=dtype)
+    mask = np.zeros(shape, dtype=bool)
+    for plane, points in enumerate([[(4, 8), (6, 12)], [(20, 36), (22, 38)]]):
+        for (y, x), amplitude in zip(points, [4.0, -4.0], strict=True):
+            dirty[0, 0, plane, y, x] = amplitude
+            mask[0, 0, plane, y, x] = True
+    # A mask hole, a peak outside the box, an empty mask, and a mask whose
+    # only nonzero pixel is outside clean_box must all remain uncleaned.
+    dirty[0, 0, 0, 5, 10] = 100.0
+    dirty[..., 1, 1] = 200.0
+    mask[0, 0, 1, 1, 1] = True
+    mask[0, 0, 3, 1, 1] = True
+    psf = np.zeros((1, 1, 1, 32, 48), dtype=dtype)
+    psf[..., 16, 24] = 1.0
+    box = (4, 44, 3, 27)
+    residual = dirty.copy()
+    model = np.zeros_like(dirty)
+    out = getattr(hogbom, kernel)(
+        residual_cube=residual,
+        psf_cube=psf,
+        model_cube=model,
+        mask_cube=mask,
+        clean_box=box,
+        max_iter_per_cycle_updated=np.full(shape[:3], 3, np.int32),
+        threshold_per_cycle=np.zeros(shape[:3], dtype),
+        gain=1.0,
+        processing_function_threads=threads,
+        record_iteration_history=True,
+    )
+    np.testing.assert_array_equal(out["iterations_performed"].ravel(), [2, 2, 0, 0])
+    np.testing.assert_array_equal(out["stop_code"], 2)  # STOP_THRESHOLD
+    for plane in range(4):
+        single_residual = dirty[0, 0, plane].copy()
+        single_model = np.zeros_like(single_residual)
+        single = hogbom.clean(
+            single_residual,
+            psf[0, 0, 0],
+            single_model,
+            mask=mask[0, 0, plane],
+            clean_box=box,
+            max_iter_per_cycle_updated=3,
+            gain=1.0,
+            record_iteration_history=True,
+        )
+        np.testing.assert_array_equal(residual[0, 0, plane], single_residual)
+        np.testing.assert_array_equal(model[0, 0, plane], single_model)
+        for key in ["iteration_peak_residual", "iteration_residual_rms"]:
+            np.testing.assert_array_equal(out[key][0][0][plane], single[key])
+        np.testing.assert_array_equal(
+            single["iteration_peak_residual"], [4.0, -4.0] if plane < 2 else []
+        )
+        np.testing.assert_array_equal(
+            single["iteration_residual_rms"], [np.sqrt(8.0), 0.0] if plane < 2 else []
+        )
+    assert residual[0, 0, 0, 5, 10] == 100.0
+    np.testing.assert_array_equal(residual[..., 1, 1], 200.0)
+
+
 def _exact_inputs(ny, nx, np_psf, dtype, seed=0):
     """Two residual planes of noise, a PSF of twice their size with seeded
     sidelobes out to its edge (peak 1 at (ny, nx)), a disc mask and a box."""

@@ -45,6 +45,31 @@
 
 namespace hclean {
 
+namespace {
+
+// Inclusive pixel box [i0, i1] x [j0, j1], as in Asp and MT-MFS.
+struct Box {
+    int i0 = 0, j0 = 0, i1 = -1, j1 = -1;
+};
+
+Box mask_bounding_box(const bool* mask, int nx,
+                      int xbeg, int xend, int ybeg, int yend) {
+    const Box clean_box{xbeg, ybeg, xend - 1, yend - 1};
+    if (mask == nullptr) return clean_box;
+    Box box{xend, yend, -1, -1};
+    for (int j = ybeg; j < yend; ++j)
+        for (int i = xbeg; i < xend; ++i)
+            if (mask[static_cast<std::size_t>(j) * nx + i]) {
+                box.i0 = std::min(box.i0, i); box.j0 = std::min(box.j0, j);
+                box.i1 = std::max(box.i1, i); box.j1 = std::max(box.j1, j);
+            }
+    // Preserve the existing empty-mask stop and peak conventions, including
+    // native callers using a negative threshold to disable threshold stopping.
+    return (box.i1 < box.i0) ? clean_box : box;
+}
+
+} // namespace
+
 /**
  * Templated function to find minimum and maximum values in a 2D image array.
  * The mask is a bool array; pixels with mask == true are considered.
@@ -123,6 +148,11 @@ void clean(T* limage, T* limagestep, const T* lpsf,
     PlaneStopTest<T> stop_test;
     stop_reason = STOP_NONE;
     const bool* search_mask = (domask == 0) ? nullptr : lmask;
+    // Build once per plane, intersecting mask support with the supplied box.
+    // Only the search shrinks; PSF subtraction still covers its full footprint.
+    const Box box = mask_bounding_box(search_mask, nx, xbeg, xend, ybeg, yend);
+    xbeg = box.i0; xend = box.i1 + 1;
+    ybeg = box.j0; yend = box.j1 + 1;
     // Pixels the peak search covers: the denominator of the recorded RMS.
     const double n_searched = (history == nullptr)
         ? 0.0
@@ -481,12 +511,16 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             ? mask_cube + static_cast<std::size_t>(pl) * plane_size
             : nullptr;
     };
+    std::vector<Box> mask_boxes(nplanes, Box{});
+    for (int pl = 0; pl < nplanes; ++pl)
+        mask_boxes[pl] = mask_bounding_box(plane_mask(pl), nx, xbeg, xend, ybeg, yend);
     std::vector<double> n_searched;
     if (history != nullptr) {
         n_searched.resize(nplanes);
         for (int pl = 0; pl < nplanes; ++pl) {
+            const Box& box = mask_boxes[pl];
             n_searched[pl] = static_cast<double>(searched_pixels(
-                plane_mask(pl), nx, xbeg, xend, ybeg, yend));
+                plane_mask(pl), nx, box.i0, box.i1 + 1, box.j0, box.j1 + 1));
         }
     }
     std::vector<T> row_max(static_cast<std::size_t>(nplanes) * ny);
@@ -534,7 +568,8 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             for (long r = r0; r < r1; ++r) {
                 const int pl = static_cast<int>(r / ny);
                 const int iy = static_cast<int>(r % ny);
-                if (!active[pl] || it >= max_iter_per_cycle_updated[pl] || iy < ybeg || iy >= yend) {
+                const Box& box = mask_boxes[pl];
+                if (!active[pl] || it >= max_iter_per_cycle_updated[pl] || iy < box.j0 || iy > box.j1) {
                     row_max[r] = static_cast<T>(-1);
                     continue;
                 }
@@ -547,7 +582,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                     : nullptr;
                 // Same row scan as clean<T>: row maximum and row sum of squares.
                 row_sum_squares[r] = scan_row<T>(
-                    res, msk, xbeg, xend, row_max[r], row_ix[r]);
+                    res, msk, box.i0, box.i1 + 1, row_max[r], row_ix[r]);
             }
         });
 
@@ -555,17 +590,21 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
         bool any_active = false;
         for (int pl = 0; pl < nplanes; ++pl) {
             if (!active[pl] || it >= max_iter_per_cycle_updated[pl]) continue;
+            const Box& box = mask_boxes[pl];
             T best = static_cast<T>(-1);
-            int py = ybeg, px = xbeg;
+            int py = box.j0, px = box.i0;
             const long base = static_cast<long>(pl) * ny;
             // Row sums are added in row order, as in clean<T>, so the sum does
             // not depend on how the rows were split over the threads.
             double sum_squares = 0.0;
-            for (int iy = ybeg; iy < yend; ++iy) {
+            for (int iy = box.j0; iy <= box.j1; ++iy) {
                 T rm = row_max[base + iy];
                 if (rm > best) { best = rm; py = iy; px = row_ix[base + iy]; }
                 sum_squares += row_sum_squares[base + iy];
             }
+            // A zero peak used to retain the supplied box's first pixel.
+            // This matters only when a negative threshold keeps the plane running.
+            if (best == static_cast<T>(0)) { py = ybeg; px = xbeg; }
             // The search summed the squares of the residual the plane's
             // previous iteration left: its RMS, as in clean<T>.
             if (history != nullptr && iter_out[pl] > 0) {
@@ -646,10 +685,11 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
     if (history != nullptr) {
         for (int pl = 0; pl < nplanes; ++pl) {
             if (history[pl].rms.size() < history[pl].peak.size()) {
+                const Box& box = mask_boxes[pl];
                 history[pl].rms.push_back(std::sqrt(
                     searched_sum_squares<T>(
                         residual_cube + static_cast<std::size_t>(pl) * plane_size,
-                        plane_mask(pl), nx, xbeg, xend, ybeg, yend)
+                        plane_mask(pl), nx, box.i0, box.i1 + 1, box.j0, box.j1 + 1)
                     / n_searched[pl]));
             }
         }
