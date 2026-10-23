@@ -109,6 +109,8 @@ def imaging_preparation_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     task_id=0,
+    *,
+    input_checked: bool = False,
 ):
     """Prepare static products once per continuum map task.
 
@@ -186,6 +188,12 @@ def imaging_preparation_continuum_single_field(
     task_id : int, optional
         Identifier of the parallel chunk being processed.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -199,6 +207,14 @@ def imaging_preparation_continuum_single_field(
     T_setup : float
         Total wall-clock duration of the setup call, in seconds.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
     import time
 
@@ -224,6 +240,7 @@ def imaging_preparation_continuum_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
+        input_checked=True,
     )
 
     T_setup = time.time() - start
@@ -1761,6 +1778,8 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
+    *,
+    input_checked: bool = False,
 ):
     """Perform one continuum imaging-cycle update for a single frequency chunk.
 
@@ -1842,12 +1861,9 @@ def residual_update_continuum_single_field(
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
 
     deconvolver : str, optional
-        Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
-        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
-        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
-        are refused before anything is written.
+        Deconvolution algorithm: ``"hogbom"`` updates a one-term continuum model;
+        ``"mtmfs"`` jointly updates two to four Taylor terms. Both use C++ kernels.
+        Unsupported algorithms and Taylor-order combinations raise without substitution.
 
     instrument_polarization_basis : {"linear", "circular"}, optional
         Correlation (instrument) polarization basis the gridding is performed in:
@@ -1899,6 +1915,12 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used by MVC map-local Taylor construction.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -1908,6 +1930,14 @@ def residual_update_continuum_single_field(
     timing_df : pandas.DataFrame
         Timing summary for the setup (when applicable) and residual-update
         processing performed by this function."""
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
     import time
 
@@ -1949,6 +1979,7 @@ def residual_update_continuum_single_field(
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
             task_id=task_id,
+            input_checked=True,
         )
 
         timing["T_prep"] = T_setup
@@ -2007,6 +2038,7 @@ def residual_update_continuum_single_field(
         image_data_variables_keep=image_data_variables_keep,
         visibility_memory_mode=visibility_memory_mode,
         observed_visibility_grid_xds=observed_visibility_grid_xds,
+        input_checked=True,
     )
 
     timing["T_residual_cycle"] = time.time() - start
@@ -2021,7 +2053,7 @@ def residual_update_continuum_single_field(
 
     mvc_observed_grid_xds = None
     if (
-        str(continuum_mode).lower() == "mvc"
+        continuum_mode == "mvc"
         and is_first_cycle
         and visibility_memory_mode != "recompute"
     ):
@@ -2034,7 +2066,7 @@ def residual_update_continuum_single_field(
         mvc_observed_grid_xds.attrs = img_xds.attrs.copy()
         mvc_observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
 
-    if str(continuum_mode).lower() == "mvc":
+    if continuum_mode == "mvc":
         from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
             ifft_norm_img_xds,
         )
@@ -2531,7 +2563,9 @@ def _model_update_native_mtmfs(
                 psf_work,
                 model_work,
                 mask=mask_work,
-                scales=deconvolve_params.get("scales", []),
+                scales=img_xds.attrs["input_validation"]["model_products"][
+                    "effective_scales"
+                ],
                 small_scale_bias=deconvolve_params.get("small_scale_bias", 0.0),
                 max_iter_per_cycle_updated=max_iter,
                 gain=deconvolve_params.get("gain", 0.1),
@@ -2570,6 +2604,7 @@ def _model_update_native_mtmfs(
                 "masksum": int(np.count_nonzero(final_selected)),
                 "scales": result["scales"],
                 "hessian_condition_number": result["hessian_condition_number"],
+                "taylor_hessian_condition_number": result["hessian_condition_number"],
             }
             imaging_dict.add(fields, time=tt, pol=pp, chan=0)
 
@@ -2592,6 +2627,8 @@ def model_update_mtmfs_single_field(
     processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
+    *,
+    input_checked: bool = False,
 ):
     """Perform one continuum model update.
 
@@ -2636,12 +2673,9 @@ def model_update_mtmfs_single_field(
         function uses ``psf_taylor_order``.
 
     deconvolver : str
-        Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
-        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
-        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
-        are refused before anything is written.
+        Deconvolution algorithm: ``"hogbom"`` updates a one-term continuum model;
+        ``"mtmfs"`` jointly updates two to four Taylor terms. Both use C++ kernels.
+        Unsupported algorithms and Taylor-order combinations raise without substitution.
 
     deconvolve_params : dict
         Model-update control parameters. These typically include entries such as
@@ -2679,6 +2713,12 @@ def model_update_mtmfs_single_field(
     image_data_group_out_name : str, optional
         Name of the output model data group.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     deconvolve_dict : ImagingDict
@@ -2695,6 +2735,14 @@ def model_update_mtmfs_single_field(
     residual copy or reshape is made. The model buffer remains a zero-initialized
     increment for the current model update.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import copy
     import time
 
@@ -2707,7 +2755,6 @@ def model_update_mtmfs_single_field(
         modify_data_groups_xds,
     )
 
-    deconvolver = deconvolver.lower()
     if deconvolver not in {"hogbom", "mtmfs"}:
         raise NotImplementedError(
             "Continuum deconvolution supports 'hogbom' and 'mtmfs'; "
@@ -2752,6 +2799,35 @@ def model_update_mtmfs_single_field(
     if psf.sizes["psf_taylor_order"] < 1:
         raise ValueError("POINT_SPREAD_FUNCTION contains no PSF Taylor terms.")
 
+    from astroviper.processing_functions.imaging.config_check._common import (
+        CONTINUUM_SINGLE_FIELD,
+    )
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_model_products,
+    )
+
+    max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+
+    if max_sidelobe_name not in img_xds:
+        raise KeyError(
+            f"{max_sidelobe_name} is required before running the "
+            "continuum model update. It must be created by "
+            "point_spread_function_gaussian_fit_continuum() during "
+            "the first append node and restored from static_xds during "
+            "later append nodes."
+        )
+
+    product_diagnostics = check_model_products(
+        img_xds,
+        {"deconvolver": deconvolver, "deconvolve_params": deconvolve_params},
+        mode=CONTINUUM_SINGLE_FIELD,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+    )
+    img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
+        product_diagnostics
+    )
+
     # make a cube-compatible copy of the per-plane controls
     cube_deconvolve_params = copy.deepcopy(deconvolve_params)
 
@@ -2786,17 +2862,6 @@ def model_update_mtmfs_single_field(
         )
 
     start = time.time()
-
-    max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
-
-    if max_sidelobe_name not in img_xds:
-        raise KeyError(
-            f"{max_sidelobe_name} is required before running the "
-            "continuum model update. It must be created by "
-            "point_spread_function_gaussian_fit_continuum() during "
-            "the first append node and restored from static_xds during "
-            "later append nodes."
-        )
 
     data_groups = img_xds.attrs.setdefault(
         "data_groups",
@@ -3002,6 +3067,7 @@ def model_update_mtmfs_single_field(
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
+        input_checked=True,
     )
 
     T_hogbom = time.time() - start
@@ -3117,7 +3183,6 @@ def accumulate_continuum_model(
             f"{type(model_increment_xds).__name__}."
         )
 
-    continuum_mode = str(continuum_mode).lower()
     if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
             f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
@@ -3372,7 +3437,7 @@ def restore_continuum_image(
     psf_da = img_xds[psf_name]
 
     restoration_residual_da = residual_da
-    if str(deconvolver).lower() == "mtmfs":
+    if deconvolver == "mtmfs":
         restoration_residual_da = _mtmfs_principal_residual_for_restoration(
             residual_da, psf_da
         )

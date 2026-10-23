@@ -297,79 +297,17 @@ def check_norm_params(norm_params):
 
 
 def check_imaging_weights_params(imaging_weights_params):
-    import numbers
+    """Validate weighting parameters without modifying their mapping."""
+    from astroviper.processing_functions.imaging.config_check import (
+        CONTINUUM_SINGLE_FIELD,
+        check_residual_update,
+    )
 
-    params_passed = True
-
-    if not (
-        check_params(
-            imaging_weights_params,
-            "weighting",
-            [str],
-            acceptable_data=["natural", "uniform", "briggs", "briggs_abs"],
-            default="natural",
-        )
-    ):
-        params_passed = False
-
-    if imaging_weights_params["weighting"] == "briggs_abs":
-        if not (
-            check_params(
-                imaging_weights_params,
-                "briggs_abs_noise",
-                [numbers.Number],
-                default=1.0,
-            )
-        ):
-            params_passed = False
-
-    if (imaging_weights_params["weighting"] == "briggs") or (
-        imaging_weights_params["weighting"] == "briggs_abs"
-    ):
-        if not (
-            check_params(
-                imaging_weights_params,
-                "robust",
-                [numbers.Number],
-                default=0.5,
-                acceptable_range=[-2, 2],
-            )
-        ):
-            params_passed = False
-
-    if not (
-        check_params(
-            imaging_weights_params,
-            "casa_weighting_implementation",
-            [bool],
-            default=False,
-        )
-    ):
-        params_passed = False
-
-    if not (
-        check_params(
-            imaging_weights_params,
-            "weighting_scope",
-            [str],
-            acceptable_data=["local", "global"],
-            default="local",
-        )
-    ):
-        params_passed = False
-
-    if (
-        params_passed
-        and imaging_weights_params["weighting"] == "natural"
-        and imaging_weights_params["weighting_scope"] == "global"
-    ):
-        logger.warning(
-            "Natural imaging weighting is identical for local and global "
-            "weighting scopes. Using weighting_scope='local'."
-        )
-        imaging_weights_params["weighting_scope"] = "local"
-
-    return params_passed
+    check_residual_update(
+        {"imaging_weights_params": imaging_weights_params},
+        mode=CONTINUUM_SINGLE_FIELD,
+    )
+    return True
 
 
 def check_pb_params(img_dataset, pb_params):

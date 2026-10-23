@@ -62,7 +62,9 @@ def _equalize_parallel_hand_weights(
     if casa_weighting_implementation:
         equalized = (w0 + w1) / 2
     else:
-        equalized = (2 * w0 * w1) / (w0 + w1)
+        equalized = np.divide(
+            2 * w0 * w1, w0 + w1, out=np.zeros_like(w0), where=(w0 + w1) != 0
+        )
     if cross_flagged is not None and cross_flagged.any():
         # a flagged cross hand drops the sample for every correlation
         equalized = np.where(cross_flagged, np.nan, equalized)
@@ -70,35 +72,17 @@ def _equalize_parallel_hand_weights(
 
 
 def normalize_imaging_weight_params(imaging_weights_params):
-    """Validate and normalize the imaging-weight configuration.
+    """Validate and return the original weighting configuration unchanged.
 
-    Parameters
-    ----------
-    imaging_weights_params : dict
-        User imaging-weight configuration.
-
-    Returns
-    -------
-    dict
-        Validated copy in which uniform weighting is represented by Briggs
-        weighting with robust parameter ``-2``.
+    The historical name is kept for internal callers. Uniform weighting is
+    handled by the Briggs kernel recipe without rewriting this mapping.
     """
-    import copy
-
     from astroviper.processing_functions.imaging.check_imaging_parameters import (
         check_imaging_weights_params,
     )
 
-    params = copy.deepcopy(imaging_weights_params)
-
-    if not check_imaging_weights_params(params):
-        raise ValueError("Invalid imaging-weight parameters.")
-
-    if params["weighting"] == "uniform":
-        params["weighting"] = "briggs"
-        params["robust"] = -2.0
-
-    return params
+    check_imaging_weights_params(imaging_weights_params)
+    return imaging_weights_params
 
 
 def prepare_local_data_weights(
@@ -149,6 +133,8 @@ def grid_imaging_weight_density_continuum(
     ms_data_group_in_name: str = "base",
     single_precision_gridding: bool = False,
     processing_function_threads: int = 1,
+    *,
+    input_checked: bool = False,
 ) -> xr.Dataset:
     """Grid one visibility partition's contribution to the weight density.
 
@@ -192,6 +178,12 @@ def grid_imaging_weight_density_continuum(
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     xarray.Dataset
@@ -218,14 +210,19 @@ def grid_imaging_weight_density_continuum(
     Natural weighting does not require a UV-density grid and is therefore
     rejected by this function.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import copy
 
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.check_imaging_parameters import (
-        check_imaging_weights_params,
-    )
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
         grid_imaging_weights,
     )
@@ -241,27 +238,19 @@ def grid_imaging_weight_density_continuum(
 
     weight_params = copy.deepcopy(imaging_weights_params)
 
-    if not check_imaging_weights_params(weight_params):
-        raise ValueError("imaging_weights_params validation failed.")
-
-    weighting = str(weight_params["weighting"]).lower()
+    weighting = str(weight_params.get("weighting", "natural")).lower()
 
     if weighting == "natural":
         raise ValueError("Natural weighting does not require a weight-density grid.")
 
-    if weighting == "uniform":
-        # The robust value is not used during density gridding, but normalize
-        # the configuration here so that all stages use the same convention.
-        weight_params["weighting"] = "briggs"
-        weight_params["robust"] = -2.0
-
-    elif weighting != "briggs":
+    if weighting not in ("briggs", "uniform"):
         raise ValueError(
-            "grid_imaging_weight_density_continuum supports only "
-            f"'briggs' and 'uniform'; received {weighting!r}."
+            "Weight-density gridding supports only Briggs and uniform weighting."
         )
 
-    casa_weighting_implementation = bool(weight_params["casa_weighting_implementation"])
+    casa_weighting_implementation = bool(
+        weight_params.get("casa_weighting_implementation", False)
+    )
 
     # ------------------------------------------------------------------
     # Resolve the common local output layout.
@@ -507,7 +496,7 @@ def grid_imaging_weight_density_continuum(
             ),
         },
         attrs={
-            "weighting": weight_params["weighting"],
+            "weighting": weight_params.get("weighting", "natural"),
             "robust": weight_params.get("robust"),
             "casa_weighting_implementation": (casa_weighting_implementation),
             "n_processing_set_datasets_gridded": datasets_gridded,
@@ -532,6 +521,8 @@ def degrid_imaging_weights_continuum(
     ms_data_group_out_modified: dict | None = None,
     overwrite: bool = False,
     processing_function_threads: int = 1,
+    *,
+    input_checked: bool = False,
 ) -> xr.DataTree:
     """Create per-visibility imaging weights from the global density grid.
 
@@ -595,6 +586,12 @@ def degrid_imaging_weights_continuum(
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     xarray.DataTree
@@ -609,6 +606,14 @@ def degrid_imaging_weights_continuum(
     Global continuum weighting always uses a single density plane accumulated
     from all selected visibility channels.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import copy
 
     import numpy as np
@@ -636,11 +641,11 @@ def degrid_imaging_weights_continuum(
             f"{type(global_weighting_xds).__name__}."
         )
 
-    weight_params = normalize_imaging_weight_params(imaging_weights_params)
+    weight_params = imaging_weights_params
 
-    weighting = str(weight_params["weighting"]).lower()
+    weighting = str(weight_params.get("weighting", "natural")).lower()
 
-    if weighting != "briggs":
+    if weighting not in ("briggs", "uniform"):
         raise ValueError(
             "degrid_imaging_weights_continuum requires Briggs or uniform "
             f"weighting; normalized weighting is {weighting!r}."
@@ -807,7 +812,9 @@ def degrid_imaging_weights_continuum(
         overwrite=overwrite,
     )
 
-    casa_weighting_implementation = bool(weight_params["casa_weighting_implementation"])
+    casa_weighting_implementation = bool(
+        weight_params.get("casa_weighting_implementation", False)
+    )
 
     datasets_processed = 0
 
@@ -974,7 +981,7 @@ def degrid_imaging_weights_continuum(
                     "Per-visibility continuum imaging weights derived "
                     "from the globally reduced UV-density grid."
                 ),
-                "weighting": weight_params["weighting"],
+                "weighting": weight_params.get("weighting", "natural"),
                 "robust": weight_params.get("robust"),
             },
         )
@@ -1011,6 +1018,8 @@ def calculate_imaging_weights(
     processing_function_threads: int = 1,
     truncate_uv_cells: bool = False,
     frequency_matching: str = "nearest",
+    *,
+    input_checked: bool = False,
 ) -> None | np.ndarray:
     """
     Calculate imaging weights for interferometric data.
@@ -1068,6 +1077,12 @@ def calculate_imaging_weights(
         channel. Exact matching can optionally enforce one-to-one
         channel assignment. This policy is independent of UV-cell truncation.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     weight_density_grid : numpy.ndarray, optional
@@ -1123,9 +1138,14 @@ def calculate_imaging_weights(
     ... )
     """
 
-    from astroviper.processing_functions.imaging.check_imaging_parameters import (
-        check_imaging_weights_params,
-    )
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CUBE_SINGLE_FIELD)
+
     from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
         calculate_briggs_params,
     )
@@ -1146,18 +1166,10 @@ def calculate_imaging_weights(
 
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
     _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
-    assert check_imaging_weights_params(_imaging_weights_params), (
-        "######### ERROR: imaging_weights_params checking failed"
+
+    casa_weighting_implementation = _imaging_weights_params.get(
+        "casa_weighting_implementation", False
     )
-
-    # Uniform weighting is implemented as Briggs with robust = -2.0.
-    if _imaging_weights_params["weighting"] == "uniform":
-        _imaging_weights_params["weighting"] = "briggs"
-        _imaging_weights_params["robust"] = -2.0
-
-    casa_weighting_implementation = _imaging_weights_params[
-        "casa_weighting_implementation"
-    ]
 
     ms_data_group_in, ms_data_group_out = create_ps_xdt_data_groups_in_and_out(
         ps_xdt,
@@ -1168,7 +1180,7 @@ def calculate_imaging_weights(
     )
 
     # for natural weighting, we can skip the gridding and degridding operations
-    if _imaging_weights_params["weighting"] == "natural":
+    if _imaging_weights_params.get("weighting", "natural") == "natural":
         logger.debug(
             "Calculating natural imaging weights (parallel-hand equalization only; "
             "no rescaling of data weights)."
@@ -1283,7 +1295,7 @@ def calculate_imaging_weights(
         data_group_out_name=ms_data_group_out_name,
         data_group_out=ms_data_group_out,
         description=(
-            f"Briggs imaging weights with robust={_imaging_weights_params['robust']}; "
+            f"Imaging weights with weighting={_imaging_weights_params.get('weighting', 'natural')}, robust={_imaging_weights_params.get('robust')}; "
             "parallel-hand correlation weights equalized, then rescaled by "
             "robust-dependent factors computed from the weight-density grid and "
             "channel-wise sum of data weights."

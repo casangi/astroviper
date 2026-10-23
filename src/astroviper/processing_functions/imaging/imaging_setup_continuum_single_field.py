@@ -36,7 +36,14 @@ def _get_reference_frequency_hz(image_params):
 
 def _validate_continuum_parameters(image_params):
     """Validate and return ``(n_taylor_terms, reference_frequency_hz)``."""
-    n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
+    from astroviper.processing_functions.imaging.config_check._common import (
+        require_integer,
+    )
+
+    if "n_taylor_terms" not in image_params:
+        raise KeyError("image_params must contain 'n_taylor_terms'.")
+    n_taylor_terms = image_params["n_taylor_terms"]
+    require_integer("n_taylor_terms", n_taylor_terms, minimum=1)
 
     if n_taylor_terms < 1:
         raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
@@ -193,6 +200,8 @@ def imaging_setup_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     image_data_group_out_name="residual",
+    *,
+    input_checked: bool = False,
 ):
     """Prepare static products for one continuum partition.
 
@@ -266,6 +275,12 @@ def imaging_setup_continuum_single_field(
     image_data_group_out_name : str, optional
         Name of the continuum image data group. Defaults to ``"residual"``.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -275,6 +290,14 @@ def imaging_setup_continuum_single_field(
         One-row timing dataframe summarizing the setup stage.
 
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import pandas as pd
     import toolviper.utils.logger as logger
 
@@ -298,9 +321,8 @@ def imaging_setup_continuum_single_field(
 
     ps_data_group_name = processing_set_data_group_name
 
-    n_taylor_terms, reference_frequency_hz = _validate_continuum_parameters(
-        image_params
-    )
+    n_taylor_terms = image_params["n_taylor_terms"]
+    reference_frequency_hz = image_params["reference_frequency"]
 
     img_xds = _attach_continuum_metadata(
         img_xds,
@@ -361,6 +383,7 @@ def imaging_setup_continuum_single_field(
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=True,
             frequency_matching="nearest",
+            input_checked=True,
         )
 
         weights_were_calculated = True

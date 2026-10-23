@@ -5,10 +5,10 @@ These tests ensure the disk output uses those finalized dimensions and values,
 rather than retaining the frequency-cube NaN placeholders created at startup.
 """
 
+import copy
 import inspect
 import json
 import shutil
-import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -723,7 +723,7 @@ def _run_tw_hydra_continuum(
     continuum_mode,
     weighting,
     *,
-    deconvolver="hogbom",
+    deconvolver="mtmfs",
     cycle_control_params=None,
     image_param_overrides=None,
     image_params=None,
@@ -1291,61 +1291,31 @@ def test_tw_hydra_refused_image_params_write_nothing(
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
-def test_tw_hydra_reference_frequency_alias_gives_the_same_images(
-    tmp_path, tw_hydra_store, continuum_mode
+@pytest.mark.parametrize("keep_canonical", [False, True])
+def test_tw_hydra_reference_frequency_alias_is_rejected(
+    tmp_path, tw_hydra_store, continuum_mode, keep_canonical
 ):
-    """``reference_frequency`` alone, both keys equal and the deprecated
-    ``reference_frequency_hz`` alone give the same images."""
+    """Deprecated keys raise before any output is created or config is rewritten."""
     processing_set = open_processing_set(str(tw_hydra_store))
-    reference_frequency = _tw_hydra_image_params(processing_set)["reference_frequency"]
-    images = {}
-    for name, keys in (
-        ("reference_frequency", {"reference_frequency": reference_frequency}),
-        (
-            "both",
-            {
-                "reference_frequency": reference_frequency,
-                "reference_frequency_hz": reference_frequency,
-            },
-        ),
-        ("alias", {"reference_frequency_hz": reference_frequency}),
-    ):
-        image_params = _tw_hydra_image_params(processing_set)
-        del image_params["reference_frequency"]
-        image_params.update(keys)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result, images[name] = _run_tw_hydra_continuum(
-                tw_hydra_store,
-                tmp_path / f"reference_frequency_{continuum_mode}_{name}.img.zarr",
-                processing_set,
-                2,
-                continuum_mode,
-                {"weighting": "natural", "weighting_scope": "local"},
-                image_params=image_params,
-                cycle_control_params={
-                    "max_iter": 20,
-                    "max_cycles": 2,
-                    "threshold": 0.001,
-                    "gain": 0.1,
-                    "psf_sidelobe_factor": 1.5,
-                    "max_iter_per_cycle": 5,
-                    "min_psf_fraction": 0.05,
-                    "max_psf_fraction": 0.8,
-                },
-            )
-        deprecations = [
-            warning
-            for warning in caught
-            if issubclass(warning.category, FutureWarning)
-            and "reference_frequency_hz" in str(warning.message)
-        ]
-        assert len(deprecations) == ("reference_frequency_hz" in keys)
-        assert result["n_cycles"] == 2
-        assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
-
-    for name in ("both", "alias"):
-        xr.testing.assert_equal(images[name], images["reference_frequency"])
+    params = _tw_hydra_image_params(processing_set)
+    params["reference_frequency_hz"] = params["reference_frequency"]
+    if not keep_canonical:
+        del params["reference_frequency"]
+    snapshot = copy.deepcopy(params)
+    output = tmp_path / "alias.img.zarr"
+    with pytest.raises(ValueError, match="reference_frequency_hz is not accepted"):
+        _run_tw_hydra_continuum(
+            tw_hydra_store,
+            output,
+            processing_set,
+            2,
+            continuum_mode,
+            {"weighting": "natural"},
+            image_params=params,
+        )
+    assert not output.exists()
+    for key in params:
+        np.testing.assert_array_equal(params[key], snapshot[key])
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
@@ -2422,6 +2392,7 @@ def test_tw_hydra_supports_alternate_taylor_orders(
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
         image_param_overrides={"n_taylor_terms": n_taylor_terms},
+        deconvolver="hogbom" if n_taylor_terms == 1 else "mtmfs",
     )
 
     assert image.SKY_RESIDUAL.sizes["taylor_term"] == n_taylor_terms

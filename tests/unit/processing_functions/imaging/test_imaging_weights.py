@@ -435,8 +435,7 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         self.briggs_mock.return_value = np.zeros((2, 1, 1))
 
     def test_uniform_dispatches_to_briggs_with_robust_neg_2(self):
-        """``weighting="uniform"`` is rewritten to ``briggs`` with ``robust=-2.0``
-        before the Briggs-factor calculation runs."""
+        """The public uniform method reaches the kernel recipe unchanged."""
         ps_xdt = _make_ps_xdt()
         calculate_imaging_weights(
             ps_xdt,
@@ -446,8 +445,8 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
 
         self.briggs_mock.assert_called_once()
         params_arg = self.briggs_mock.call_args[0][2]
-        self.assertEqual(params_arg["weighting"], "briggs")
-        self.assertEqual(params_arg["robust"], -2.0)
+        self.assertEqual(params_arg["weighting"], "uniform")
+        self.assertNotIn("robust", params_arg)
 
     def test_briggs_default_casa_implementation_is_false(self):
         """The Briggs path does not crash when the caller omits
@@ -621,12 +620,11 @@ class TestGridContinuumWeightDensity(unittest.TestCase):
 class TestCheckImagingWeightsParams(unittest.TestCase):
     """Validation behaviour for ``check_imaging_weights_params``."""
 
-    def test_casa_implementation_defaults_to_false(self):
-        """When omitted, the checker writes ``casa_weighting_implementation=False``."""
+    def test_casa_implementation_default_does_not_change_config(self):
+        """Omitted defaults are read by consumers without changing the configuration."""
         params = {"weighting": "natural"}
         self.assertTrue(check_imaging_weights_params(params))
-        self.assertIn("casa_weighting_implementation", params)
-        self.assertFalse(params["casa_weighting_implementation"])
+        self.assertNotIn("casa_weighting_implementation", params)
 
     def test_casa_implementation_explicit_true_is_preserved(self):
         """An explicit ``True`` is not overwritten by the default."""
@@ -634,14 +632,14 @@ class TestCheckImagingWeightsParams(unittest.TestCase):
         self.assertTrue(check_imaging_weights_params(params))
         self.assertTrue(params["casa_weighting_implementation"])
 
-    def test_weighting_scope_defaults_to_local(self):
-        """The checker writes the local weighting scope when it is omitted."""
+    def test_omitted_weighting_scope_is_not_inserted(self):
+        """The checker leaves an omitted scope out of the configuration."""
         params = {"weighting": "briggs", "robust": 0.0}
         self.assertTrue(check_imaging_weights_params(params))
-        self.assertEqual(params["weighting_scope"], "local")
+        self.assertNotIn("weighting_scope", params)
 
-    def test_natural_global_scope_is_rewritten_to_local(self):
-        """Natural weighting warns and canonicalizes its irrelevant scope."""
+    def test_natural_global_scope_is_preserved(self):
+        """Natural weighting does not rewrite its supplied scope."""
         params = {"weighting": "natural", "weighting_scope": "global"}
         logger_path = (
             "astroviper.processing_functions.imaging.check_imaging_parameters."
@@ -650,13 +648,14 @@ class TestCheckImagingWeightsParams(unittest.TestCase):
         with mock.patch(logger_path) as warning:
             self.assertTrue(check_imaging_weights_params(params))
 
-        self.assertEqual(params["weighting_scope"], "local")
-        warning.assert_called_once()
+        self.assertEqual(params["weighting_scope"], "global")
+        warning.assert_not_called()
 
     def test_briggs_requires_robust_in_range(self):
         """``robust`` outside ``[-2, 2]`` fails the check."""
         params = {"weighting": "briggs", "robust": 5.0}
-        self.assertFalse(check_imaging_weights_params(params))
+        with self.assertRaises(ValueError):
+            check_imaging_weights_params(params)
 
     def test_uniform_is_accepted(self):
         """``weighting='uniform'`` is a valid input to the parameter checker

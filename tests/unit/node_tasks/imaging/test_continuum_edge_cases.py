@@ -46,8 +46,8 @@ def test_append_rejects_invalid_reduction_envelopes(data, error, message):
         ({"image_params": {"n_taylor_terms": 2}}, KeyError, "reference_frequency"),
         (
             {"image_params": {"n_taylor_terms": 2, "reference_frequency_hz": 100.0}},
-            KeyError,
-            "'reference_frequency'",
+            ValueError,
+            "reference_frequency_hz is not accepted",
         ),
         (
             {"image_params": {"n_taylor_terms": 2, "reference_frequency": np.nan}},

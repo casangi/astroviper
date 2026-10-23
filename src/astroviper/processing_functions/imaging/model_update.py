@@ -10,6 +10,8 @@ def model_update_cube_single_field(
     processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
+    *,
+    input_checked: bool = False,
 ):
     """Run one model update: build a mask and deconvolve.
 
@@ -64,6 +66,12 @@ def model_update_cube_single_field(
         Data group that the updated sky model is registered under.  Default
         ``"model"``.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     imaging_dict : ImagingDict
@@ -78,19 +86,46 @@ def model_update_cube_single_field(
         One-row timing frame with the ``T_make_mask`` and ``T_deconvolve``
         columns.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import pandas as pd
 
     from astroviper.processing_functions.image_analysis.make_mask import make_mask
+    from astroviper.processing_functions.imaging.config_check._common import (
+        CUBE_SINGLE_FIELD,
+    )
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_model_products,
+    )
     from astroviper.processing_functions.imaging.deconvolution import (
         _validate_deconvolve_params,
         deconvolve,
     )
 
+    product_diagnostics = check_model_products(
+        img_xds,
+        {"deconvolver": deconvolver, "deconvolve_params": deconvolve_params},
+        mode=CUBE_SINGLE_FIELD,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+    )
+    img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
+        product_diagnostics
+    )
+
     # Apply deconvolve-parameter defaults (e.g. ``primary_beam_limit``) up front
     # so both the mask step below and the deconvolver see a complete dict.
-    deconvolve_params = _validate_deconvolve_params(deconvolve_params)
+    deconvolve_params = _validate_deconvolve_params(
+        deconvolve_params, input_checked=True
+    )
 
     # Add a primary-beam mask to the input data group if one is not present yet.
     T_make_mask = 0.0
@@ -115,6 +150,7 @@ def model_update_cube_single_field(
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
         processing_function_threads=processing_function_threads,
+        input_checked=True,
     )
     T_deconvolve = time.time() - start
 

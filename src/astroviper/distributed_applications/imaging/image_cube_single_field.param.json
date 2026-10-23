@@ -1,5 +1,6 @@
 {
     "image_cube_single_field": {
+        "input_checked": { "type": "boolean" },
         "ps_store": { "required": true, "type": ["str"] },
         "image_store": { "required": true, "type": ["str"] },
         "image_params": { "required": true, "type": ["dict"] },
@@ -21,7 +22,7 @@
         "processing_set_data_group_name": { "type": ["str"] },
         "single_precision_image": { "type": "boolean" },
         "thread_info": { "type": ["dict"], "nullable": true },
-        "processing_function_threads": { "type": ["int"], "min": 1 },
+        "processing_function_threads": { "type": ["int"] },
         "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
         "image_chunking": { "type": ["dict"], "nullable": true },
         "overwrite": { "type": "boolean" },
@@ -47,11 +48,11 @@
             "type": ["str"],
             "allowed": ["tree", "single_node", "tree_n"]
         },
-        "reduce_n_batch": { "type": ["int"], "min": 2 },
+        "reduce_n_batch": { "type": ["int"] },
         "image_sharding": { "type": ["dict"], "nullable": true },
         "output_image_format": { "type": ["str"], "allowed": ["zarr", "fits"] },
-        "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
-        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
+        "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true },
+        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true },
         "msv2_open_options": { "type": ["dict"], "nullable": true },
         "parameters_file": { "type": ["str"], "nullable": true },
         "report": { "type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"] }

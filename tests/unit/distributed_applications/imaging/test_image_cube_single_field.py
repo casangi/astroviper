@@ -296,7 +296,9 @@ def test_msv2_without_the_engine(tmp_path, monkeypatch):
 )
 def test_msv2_refuses_writing_into_the_input(tmp_path, flag):
     ms_path = _measurement_set_like(tmp_path)
-    with pytest.raises(ValueError, match="never writes into its input"):
+    with pytest.raises(
+        ValueError, match="not implemented for the in-memory cube workflow"
+    ):
         _image_cube(ms_path, str(tmp_path / "cube.img.zarr"), [1e11], **{flag: True})
     _assert_nothing_written(tmp_path)
 

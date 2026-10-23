@@ -637,28 +637,21 @@ def _resolve_continuum_append_configuration(input_params):
 
     image_params = input_params["image_params"]
 
-    if "n_taylor_terms" not in image_params:
-        raise KeyError("image_params must contain 'n_taylor_terms'.")
-
-    n_taylor_terms = int(image_params["n_taylor_terms"])
-
-    if n_taylor_terms < 1:
-        raise ValueError(
-            f"image_params['n_taylor_terms'] must be positive; received {n_taylor_terms}."
+    if not input_params.get("input_checked", False):
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_model_update,
+            check_residual_update,
         )
 
-    if "reference_frequency" not in image_params:
-        raise KeyError("image_params must contain 'reference_frequency'.")
-
-    reference_frequency = float(image_params["reference_frequency"])
-
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "The continuum reference frequency must be finite and positive; "
-            f"received {reference_frequency}."
-        )
-
-    single_precision_image = bool(input_params.get("single_precision_image", True))
+        check_residual_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
+        check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
+    for name in ("n_taylor_terms", "reference_frequency"):
+        if name not in image_params:
+            raise KeyError(f"image_params must contain {name!r}.")
+    n_taylor_terms = image_params["n_taylor_terms"]
+    reference_frequency = image_params["reference_frequency"]
+    single_precision_image = input_params.get("single_precision_image", True)
 
     return {
         "image_params": image_params,
@@ -1080,6 +1073,8 @@ def residual_update_continuum_single_field(
     weight_cache_is_active=False,
     primary_beam_xds=None,
     observed_visibility_grid_xds=None,
+    *,
+    input_checked: bool = False,
 ):
     """Compute one frequency chunk's continuum products in memory.
 
@@ -1277,6 +1272,12 @@ def residual_update_continuum_single_field(
         Abort the distributed calculation if this task exceeds the specified wall
         time.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
@@ -1287,6 +1288,16 @@ def residual_update_continuum_single_field(
 
         ``"timing_node_tasks"``
             One-row dataframe summarizing task timing information."""
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
     import time
 
@@ -1315,25 +1326,6 @@ def residual_update_continuum_single_field(
         + " GB"
     )
 
-    assert memory_mode == "in_memory", (
-        "Currently only memory_mode='in_memory' is implemented."
-    )
-    if weight_memory_mode not in ("in_memory", "in_place"):
-        raise ValueError(
-            "weight_memory_mode must be 'in_memory' or 'in_place'; received "
-            f"{weight_memory_mode!r}."
-        )
-    if visibility_memory_mode not in ("in_memory", "in_place", "recompute"):
-        raise ValueError(
-            "visibility_memory_mode must be 'in_memory', 'in_place', or "
-            f"'recompute'; received {visibility_memory_mode!r}."
-        )
-    if wideband_primary_beam_memory_mode not in ("in_memory", "in_place", "recompute"):
-        raise ValueError(
-            "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
-            f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
-        )
-
     if image_data_variables_keep is None:
         image_data_variables_keep = [
             "sky_model",
@@ -1341,13 +1333,6 @@ def residual_update_continuum_single_field(
             "point_spread_function",
             "primary_beam",
         ]
-
-    continuum_mode = str(continuum_mode).lower()
-
-    if continuum_mode not in ("mfs", "mvc"):
-        raise ValueError(
-            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
-        )
 
     # Build the empty image in the correlation basis expected by the gridder.
     # The requested Stokes planes fix the correlations (the ones the driver
@@ -1466,13 +1451,6 @@ def residual_update_continuum_single_field(
     # Resolve the task-local MVC primary beam
     # =============================================================
 
-    continuum_mode = str(continuum_mode).lower()
-
-    if continuum_mode not in ("mfs", "mvc"):
-        raise ValueError(
-            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
-        )
-
     if continuum_mode == "mvc" and not is_first_cycle:
         task_id = int(task_id)
 
@@ -1581,6 +1559,7 @@ def residual_update_continuum_single_field(
         continuum_mode=continuum_mode,
         task_id=task_id,
         primary_beam_limit=primary_beam_limit,
+        input_checked=True,
     )
 
     # Retain the task-local frequency-dependent PB for MVC
@@ -1762,6 +1741,8 @@ def grid_imaging_weight_density_continuum_node(
     data_group=None,
     input_data=None,
     task_id=0,
+    *,
+    input_checked: bool = False,
 ):
     """Grid one visibility partition's contribution to the global weight density.
 
@@ -1837,6 +1818,12 @@ def grid_imaging_weight_density_continuum_node(
     task_id : int, optional
         Identifier of the parallel chunk being processed.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
@@ -1852,6 +1839,16 @@ def grid_imaging_weight_density_continuum_node(
         ``"task_id"``
             Integer task identifier.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import time
 
     import pandas as pd
@@ -1956,6 +1953,7 @@ def grid_imaging_weight_density_continuum_node(
         ms_data_group_in_name=processing_set_data_group_name,
         single_precision_gridding=single_precision_gridding,
         processing_function_threads=processing_function_threads,
+        input_checked=True,
     )
 
     T_grid_weight_density = time.time() - start
@@ -2042,6 +2040,8 @@ def degrid_imaging_weights_continuum_node(
     data_group=None,
     input_data=None,
     task_id=0,
+    *,
+    input_checked: bool = False,
 ):
     """Create final imaging weights for one visibility partition.
 
@@ -2131,12 +2131,28 @@ def degrid_imaging_weights_continuum_node(
     task_id : int, optional
         Identifier of the parallel chunk being processed.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
         Task identifier, task-local weight datasets or disk-cache references,
         and one-row node timing metadata.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import time
 
     import pandas as pd
@@ -2153,12 +2169,6 @@ def degrid_imaging_weights_continuum_node(
 
     task_id = int(task_id)
     task_start = time.time()
-
-    if weight_memory_mode not in ("in_memory", "in_place"):
-        raise ValueError(
-            "weight_memory_mode must be 'in_memory' or 'in_place'; received "
-            f"{weight_memory_mode!r}."
-        )
 
     if not isinstance(global_weighting_xds, xr.Dataset):
         raise TypeError(
@@ -2253,6 +2263,7 @@ def degrid_imaging_weights_continuum_node(
         },
         overwrite=True,
         processing_function_threads=processing_function_threads,
+        input_checked=True,
     )
 
     T_degrid_imaging_weights = time.time() - start
@@ -2432,12 +2443,9 @@ def _prepare_continuum_image(
     reference_frequency = config["reference_frequency"]
     image_data_group_name = config["image_data_group_in_name"]
 
-    continuum_mode = str(
-        input_params.get(
-            "continuum_mode",
-            image_params.get("continuum_mode", "mfs"),
-        )
-    ).lower()
+    continuum_mode = input_params.get(
+        "continuum_mode", image_params.get("continuum_mode", "mfs")
+    )
 
     if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
@@ -2842,7 +2850,7 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
             "Later continuum append nodes require input_params['model_xds']."
         )
 
-    continuum_mode = str(input_params.get("continuum_mode", "mfs")).lower()
+    continuum_mode = input_params.get("continuum_mode", "mfs")
     model_xds = accumulate_continuum_model(
         model_increment_xds,
         previous_model_xds=previous_model_xds,
@@ -2947,7 +2955,7 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
             f"'recompute'; received {visibility_memory_mode!r}."
         )
 
-    continuum_mode = str(input_params.get("continuum_mode", "mfs")).lower()
+    continuum_mode = input_params.get("continuum_mode", "mfs")
     if continuum_mode == "mvc":
         # MVC caches are task-local and have already been applied before each
         # map task's inverse FFT and Taylor construction.
@@ -3030,6 +3038,8 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
 def continuum_cycle_append_node(
     input_data,
     input_params,
+    *,
+    input_checked: bool = False,
 ):
     """Prepare the reduced residual and choose model update or finalization.
 
@@ -3070,12 +3080,26 @@ def continuum_cycle_append_node(
         Cycle state, image/deconvolution configuration, cached products, and
         output-product policy supplied by the distributed driver.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
         Updated continuum image, model state, static products, convergence
         state, caches, and timing metadata for the next driver cycle.
     """
+
+    if not (input_checked or input_params.get("input_checked", False)):
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
 
     import time
 
@@ -3149,6 +3173,7 @@ def continuum_cycle_append_node(
     return_dict = model_update_continuum_single_field(
         input_data,
         model_update_input_params,
+        input_checked=True,
     )
 
     # The append stage owns all numerical state preparation needed by the next
@@ -3320,6 +3345,8 @@ def continuum_finalize_node(
 def model_update_continuum_single_field(
     input_data,
     input_params,
+    *,
+    input_checked: bool = False,
 ):
     """Run one continuum model-update node entirely in memory.
 
@@ -3389,6 +3416,12 @@ def model_update_continuum_single_field(
         ``image_data_group_out_name``
             Model image data-group name. Defaults to ``"model"``.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
@@ -3407,6 +3440,14 @@ def model_update_continuum_single_field(
             True only when refreshed residual statistics confirm a stop,
             including exhausted budgets. A model-update stop is provisional.
     """
+    if not (input_checked or input_params.get("input_checked", False)):
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
+
     import time
 
     import pandas as pd
@@ -3470,6 +3511,28 @@ def model_update_continuum_single_field(
         "image_data_group_out_name",
         "model",
     )
+
+    from astroviper.processing_functions.imaging.config_check._common import (
+        CONTINUUM_SINGLE_FIELD,
+    )
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_model_products,
+    )
+
+    product_diagnostics = check_model_products(
+        img_xds,
+        input_params,
+        mode=CONTINUUM_SINGLE_FIELD,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+    )
+    img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
+        product_diagnostics
+    )
+    if "spectral_diagnostics" in input_params:
+        img_xds.attrs["input_validation"]["spectral_design"] = input_params[
+            "spectral_diagnostics"
+        ]
 
     # -------------------------------------------------------------
     # Obtain the cycle controller.
@@ -3545,6 +3608,9 @@ def model_update_continuum_single_field(
 
     deconvolve_params = {
         **cycle_control_params,
+        "primary_beam_limit": input_params.get(
+            "primary_beam_limit", cycle_control_params.get("primary_beam_limit", 0.0)
+        ),
         "max_iter_per_cycle_updated": max_iter_per_cycle_updated,
         "threshold_per_cycle": threshold_per_cycle,
     }
@@ -3567,6 +3633,7 @@ def model_update_continuum_single_field(
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
+        input_checked=True,
     )
     _add_previous_continuum_model_flux(
         deconvolve_dict,

@@ -13,11 +13,9 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
 )
 
 
-def test_public_api_resolves_single_term_mtmfs_to_hogbom():
-    with pytest.warns(UserWarning, match="n_taylor_terms=1.*falling back.*hogbom"):
-        resolved = _resolve_continuum_deconvolver("mtmfs", {"n_taylor_terms": 1})
-
-    assert resolved == "hogbom"
+def test_public_api_rejects_single_term_mtmfs_without_fallback():
+    with pytest.raises(ValueError, match="between 2 and 4"):
+        _resolve_continuum_deconvolver("mtmfs", {"n_taylor_terms": 1})
 
 
 @pytest.mark.parametrize("n_taylor_terms", [2, 3, 4])
@@ -33,7 +31,7 @@ def test_public_api_preserves_supported_mtmfs_taylor_orders(n_taylor_terms):
     [
         ({}, KeyError, "must contain 'n_taylor_terms'"),
         ({"n_taylor_terms": 1.0}, TypeError, "must be an integer"),
-        ({"n_taylor_terms": 0}, ValueError, "between 2 and 4"),
+        ({"n_taylor_terms": 0}, ValueError, "must be positive"),
         ({"n_taylor_terms": 5}, ValueError, "between 2 and 4"),
     ],
 )
@@ -57,9 +55,23 @@ def test_public_api_rejects_msv2_before_creating_output(monkeypatch, tmp_path):
                 "n_taylor_terms": 1,
                 "reference_frequency": 1.0e9,
                 "image_size": [8, 8],
+                "cell_size": [1.0e-5, 1.0e-5],
+                "phase_direction": [0.0, 0.0],
+                "frequency_coords": [1.0e9],
+                "time_coords": [0.0],
+                "polarization_coords": ["I", "Q"],
             },
             {"weighting": "natural"},
-            {},
+            dict(
+                max_iter=0,
+                max_cycles=0,
+                threshold=0.0,
+                gain=0.1,
+                max_iter_per_cycle=1,
+                psf_sidelobe_factor=1.0,
+                min_psf_fraction=0.05,
+                max_psf_fraction=0.8,
+            ),
         )
     assert not output.exists()
 
@@ -70,7 +82,7 @@ def test_public_api_rejects_msv2_before_creating_output(monkeypatch, tmp_path):
 def test_public_api_rejects_deconvolvers_the_continuum_model_update_lacks(
     deconvolver,
 ):
-    with pytest.raises(ValueError, match="must be 'hogbom' or 'mtmfs'"):
+    with pytest.raises(ValueError, match="deconvolver must be one of"):
         _resolve_continuum_deconvolver(deconvolver, {"n_taylor_terms": 2})
 
 
@@ -79,29 +91,13 @@ def test_non_mtmfs_deconvolver_does_not_require_nterms():
 
 
 @pytest.mark.parametrize("n_taylor_terms", [2, np.int64(2)])
-@pytest.mark.parametrize(
-    "keys",
-    [
-        {"reference_frequency": 100},
-        {"reference_frequency": np.float32(100.0)},
-        {"reference_frequency": xr.DataArray(100.0)},
-        {"reference_frequency": np.array([100.0])},
-        {"reference_frequency_hz": 100.0},
-        {"reference_frequency": 100.0, "reference_frequency_hz": np.float32(100.0)},
-    ],
-)
-def test_taylor_expansion_is_resolved_to_python_scalars(n_taylor_terms, keys):
-    """NumPy and xarray scalars are accepted; ``n_taylor_terms`` becomes an int and the
-    deprecated alias is replaced by ``reference_frequency``, a float in Hz."""
-    params = {"n_taylor_terms": n_taylor_terms, **keys}
-    if "reference_frequency_hz" in params:
-        with pytest.warns(FutureWarning, match="reference_frequency_hz"):
-            _resolve_continuum_taylor_expansion(params)
-    else:
-        _resolve_continuum_taylor_expansion(params)
-    assert params == {"n_taylor_terms": 2, "reference_frequency": 100.0}
-    assert type(params["n_taylor_terms"]) is int
-    assert type(params["reference_frequency"]) is float
+@pytest.mark.parametrize("reference", [100, np.float32(100.0), xr.DataArray(100.0)])
+def test_taylor_expansion_preserves_supplied_scalars(n_taylor_terms, reference):
+    """Validation preserves caller objects rather than rewriting scalar types."""
+    params = {"n_taylor_terms": n_taylor_terms, "reference_frequency": reference}
+    _resolve_continuum_taylor_expansion(params)
+    assert params["n_taylor_terms"] is n_taylor_terms
+    assert params["reference_frequency"] is reference
 
 
 @pytest.mark.filterwarnings("ignore::FutureWarning")
@@ -121,26 +117,26 @@ def test_taylor_expansion_is_resolved_to_python_scalars(n_taylor_terms, keys):
                 "reference_frequency_hz": 101.0,
             },
             ValueError,
-            "two different reference frequencies",
+            "reference_frequency_hz is not accepted",
         ),
         (
             {"n_taylor_terms": 2, "reference_frequency": 0.0},
             ValueError,
-            "finite and positive",
+            "positive",
         ),
         (
             {"n_taylor_terms": 2, "reference_frequency": np.nan},
             ValueError,
-            "finite and positive",
+            "finite",
         ),
         (
             {"n_taylor_terms": 2, "reference_frequency_hz": -1.0},
-            ValueError,
-            "finite and positive",
+            KeyError,
+            "reference_frequency",
         ),
         (
             {"n_taylor_terms": 2, "reference_frequency": [100.0, 200.0]},
-            ValueError,
+            TypeError,
             "scalar",
         ),
     ],

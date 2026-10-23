@@ -435,7 +435,7 @@ class TestDeconvolve:
 
     @pytest.mark.parametrize("value", [1, "yes", None])
     def test_parameter_must_be_a_bool(self, value):
-        with pytest.raises(ValueError, match="record_iteration_history must be a bool"):
+        with pytest.raises(TypeError, match="record_iteration_history must be a bool"):
             _validate_deconvolve_params({"record_iteration_history": value})
 
 

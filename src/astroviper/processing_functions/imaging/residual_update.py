@@ -25,6 +25,8 @@ def imaging_setup_single_field(
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
+    *,
+    input_checked: bool = False,
 ):
     """Perform the once-per-chunk imaging setup before the imaging cycle loop.
 
@@ -138,6 +140,12 @@ def imaging_setup_single_field(
         Zernike aperture models and Jones images are not supported: they are
         not azimuthally symmetric and depend on the parallactic angle.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -145,6 +153,14 @@ def imaging_setup_single_field(
     return_df : pandas.DataFrame
         One-row timing frame for the setup step.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CUBE_SINGLE_FIELD)
 
     import numpy as np
     import toolviper.utils.logger as logger
@@ -201,6 +217,7 @@ def imaging_setup_single_field(
         ms_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
         processing_function_threads=processing_function_threads,
         frequency_matching="nearest",
+        input_checked=True,
     )
     T_weights = time.time() - T_start_weight
 
@@ -292,6 +309,8 @@ def residual_update_cube_single_field(
     image_data_group_out_name="residual",
     last_residual_update=False,
     gridding_kernel_params=None,
+    *,
+    input_checked: bool = False,
 ):
     """Run one residual update.
 
@@ -383,6 +402,12 @@ def residual_update_cube_single_field(
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
         not ``"prolate_spheroidal"``.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -392,6 +417,14 @@ def residual_update_cube_single_field(
         ``T_residual_vis``, ``T_grid``, ``T_fft_norm``, ``T_transform_pol`` and
         the fine-grained gridding timings).
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CUBE_SINGLE_FIELD)
 
     import numpy as np
     import toolviper.utils.logger as logger

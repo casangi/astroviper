@@ -319,7 +319,7 @@ def test_asp_is_refused_before_any_imaging(monkeypatch):
     monkeypatch.setattr(pf, "imaging_preparation_single_field", no_imaging)
     with pytest.raises(ValueError, match="exact_psf_subtraction is supported"):
         _run({"exact_psf_subtraction": True}, deconvolver="asp")
-    with pytest.raises(ValueError, match="exact_psf_subtraction must be a bool"):
+    with pytest.raises(TypeError, match="exact_psf_subtraction must be a bool"):
         _run({"exact_psf_subtraction": "yes"})
 
 

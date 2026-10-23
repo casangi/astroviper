@@ -136,18 +136,18 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
 @pytest.mark.parametrize(
     ("cycle_control_params", "deconvolver", "match"),
     [
-        ({}, "asp", "record_iteration_history is supported by the Hogbom"),
-        ({"record_iteration_history": 1}, "hogbom", "must be a bool; got 1"),
-        ({"max_cycles": "Auto"}, "hogbom", 'integer >= -1 or "auto"'),
-        ({"max_cycles": 2.5}, "hogbom", 'integer >= -1 or "auto"'),
-        ({"max_psf_fraction": 1.0}, "hogbom", "max_psf_fraction below 1"),
+        ({}, "asp", "record_iteration_history is supported only by Hogbom"),
+        ({"record_iteration_history": 1}, "hogbom", "must be a bool"),
+        ({"max_cycles": "Auto"}, "hogbom", "must be an integer"),
+        ({"max_cycles": 2.5}, "hogbom", "must be an integer"),
+        ({"max_psf_fraction": 1.0}, "hogbom", "max_psf_fraction < 1"),
         ({"threshold_tolerance": -0.01}, "hogbom", "threshold_tolerance must be"),
         (
             {"record_iteration_history": False, "exact_psf_subtraction": True},
             "asp",
-            "exact_psf_subtraction is supported by the Hogbom",
+            "exact_psf_subtraction is supported only by Hogbom",
         ),
-        ({"exact_psf_subtraction": 1}, "hogbom", "must be a bool; got 1"),
+        ({"exact_psf_subtraction": 1}, "hogbom", "must be a bool"),
     ],
     ids=[
         "history_asp",
@@ -163,7 +163,7 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
 def test_refused_before_the_image_store_is_created(
     tmp_path, point_source_ps, cycle_control_params, deconvolver, match
 ):
-    with pytest.raises(ValueError, match=match):
+    with pytest.raises((TypeError, ValueError), match=match):
         _image_cube(
             point_source_ps,
             tmp_path / "cube.img.zarr",

@@ -541,6 +541,8 @@ def image_cube_single_field(
     output_image_format="zarr",
     task_time_kill_switch_seconds=None,
     report_statistics=False,
+    *,
+    input_checked: bool = False,
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
 
@@ -1008,6 +1010,12 @@ def image_cube_single_field(
         number for a plane whose peak is above ``entropy_max_snr`` times its
         RMS). Default ``False``.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
@@ -1041,6 +1049,14 @@ def image_cube_single_field(
           :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`.
           The reduce concatenates the chunks along ``frequency``.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import toolviper.utils.logger as logger
@@ -1055,10 +1071,6 @@ def image_cube_single_field(
         "Memory usage at start of image_cube_single_field_node_task: "
         + str(get_rss_gb())
         + " GB"
-    )
-
-    assert memory_mode == "in_memory", (
-        "Currently only memory_mode='in_memory' is implemented."
     )
 
     if image_data_variables_keep is None:
@@ -1261,6 +1273,7 @@ def image_cube_single_field(
             gridding_kernel_params=gridding_kernel_params,
             primary_beam_params=primary_beam_params,
             task_id=task_id,
+            input_checked=True,
         )
 
         start = time.time()

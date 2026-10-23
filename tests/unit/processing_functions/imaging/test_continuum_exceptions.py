@@ -95,7 +95,7 @@ def test_restore_rejects_missing_registered_or_fallback_products(
 @pytest.mark.parametrize(
     "fault,error,message",
     [
-        ("deconvolver", NotImplementedError, "hogbom"),
+        ("deconvolver", ValueError, "hogbom"),
         ("residual", KeyError, "SKY_RESIDUAL"),
         ("psf", KeyError, "POINT_SPREAD_FUNCTION"),
         ("group", KeyError, "Input data group"),
@@ -103,13 +103,13 @@ def test_restore_rejects_missing_registered_or_fallback_products(
         ("psf_dimension", ValueError, "psf_taylor_order"),
         ("empty_residual", ValueError, "no Taylor terms"),
         ("empty_psf", ValueError, "no PSF Taylor terms"),
-        ("control_dimensions", ValueError, "three dimensions"),
-        ("empty_controls", ValueError, "no image planes"),
+        ("control_dimensions", ValueError, "per-plane shape"),
+        ("empty_controls", ValueError, "nonempty"),
         ("sidelobe", KeyError, "MAX_SIDELOBE"),
     ],
 )
 def test_model_update_rejects_incomplete_images_and_controls(fault, error, message):
-    image = _image()
+    image = _image().isel(taylor_term=slice(0, 1), psf_taylor_order=slice(0, 1))
     controls = {}
     deconvolver = "hogbom"
     if fault == "deconvolver":
@@ -132,9 +132,14 @@ def test_model_update_rejects_incomplete_images_and_controls(fault, error, messa
             }
         )
     elif fault == "control_dimensions":
-        controls["max_iter_per_cycle_updated"] = np.ones((1, 2))
+        controls["max_iter_per_cycle_updated"] = np.ones((1, 2), dtype=int)
     elif fault == "empty_controls":
         controls["threshold_per_cycle"] = np.ones((1, 0, 1))
+    if fault != "sidelobe":
+        image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+            ("time", "polarization"),
+            [[0.1]],
+        )
     snapshot = image.copy(deep=True)
     with pytest.raises(error, match=message):
         model_update_mtmfs_single_field(image, deconvolver, controls)

@@ -17,6 +17,8 @@ def imaging_preparation_single_field(
     gridding_kernel_params=None,
     primary_beam_params=None,
     task_id=0,
+    *,
+    input_checked: bool = False,
 ):
     """Run the once-per-chunk imaging setup before the imaging cycle loop.
 
@@ -357,6 +359,12 @@ def imaging_preparation_single_field(
         not azimuthally symmetric and depend on the parallactic angle.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     controller : CycleController
@@ -370,6 +378,14 @@ def imaging_preparation_single_field(
     T_setup : float
         Wall-clock time of the setup step (seconds).
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import toolviper.utils.logger as logger
@@ -428,6 +444,7 @@ def imaging_preparation_single_field(
         psf_fitting_method=psf_fitting_method,
         gridding_kernel_params=gridding_kernel_params,
         primary_beam_params=primary_beam_params,
+        input_checked=True,
     )
     T_setup = time.time() - start
 
@@ -454,6 +471,8 @@ def image_cube_single_field(
     gridding_kernel_params=None,
     primary_beam_params=None,
     task_id=0,
+    *,
+    input_checked: bool = False,
 ):
     """Run the imaging cycle CLEAN loop for one single-field image chunk.
 
@@ -829,6 +848,12 @@ def image_cube_single_field(
         not azimuthally symmetric and depend on the parallactic angle.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -854,16 +879,20 @@ def image_cube_single_field(
         predicted for the plane (the channel's limit is the largest of its
         planes').
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import numpy as np
     import pandas as pd
     import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.imaging.deconvolution import (
-        validate_exact_psf_subtraction,
-        validate_record_iteration_history,
-    )
     from astroviper.processing_functions.imaging.make_point_spread_function import (
         make_subtraction_point_spread_function_single_field,
     )
@@ -884,13 +913,7 @@ def image_cube_single_field(
 
     if image_data_variables_keep is None:
         image_data_variables_keep = []
-    # Only the Hogbom deconvolvers record the iteration history: refused
-    # before any imaging work is done.
-    validate_record_iteration_history(
-        deconvolver, cycle_control_params.get("record_iteration_history", False)
-    )
     exact_psf_subtraction = cycle_control_params.get("exact_psf_subtraction", False)
-    validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction)
     # The polarization basis of the imaging weights, which the preparation
     # turns to Stokes on img_xds.
     correlation_coords = img_xds.polarization.values.copy()
@@ -920,6 +943,7 @@ def image_cube_single_field(
         gridding_kernel_params=gridding_kernel_params,
         primary_beam_params=primary_beam_params,
         task_id=task_id,
+        input_checked=True,
     )
 
     # Per-chunk timing accumulator, grouped by pipeline phase. The preparation
@@ -976,9 +1000,30 @@ def image_cube_single_field(
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
             gridding_kernel_params=gridding_kernel_params,
+            input_checked=True,
         )
         timing["T_residual_update"] += time.time() - start
         accumulate_timing(timing, residual_return_df)
+
+        from astroviper.processing_functions.imaging.config_check._common import (
+            CUBE_SINGLE_FIELD,
+        )
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_model_products,
+        )
+
+        product_diagnostics = check_model_products(
+            img_xds,
+            {
+                "deconvolver": deconvolver,
+                "cycle_control_params": cycle_control_params,
+                "single_precision_image": single_precision_image,
+            },
+            mode=CUBE_SINGLE_FIELD,
+        )
+        img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
+            product_diagnostics
+        )
 
         # ---- Stop-test phase ----
         # Cycle control: the stop test on the residual this residual update
@@ -1053,6 +1098,7 @@ def image_cube_single_field(
                 processing_function_threads=processing_function_threads,
                 image_data_group_in_name="residual",
                 image_data_group_out_name="model",
+                input_checked=True,
             )
             accumulate_timing(timing, model_update_return_df)
             # The entropy belongs to the residual this model update started

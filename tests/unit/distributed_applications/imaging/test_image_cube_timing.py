@@ -207,9 +207,7 @@ def test_add_lazy_input_data_is_a_driver_timing_leaf():
     graph mapping, and renders in the summary."""
     (_, _, leaves) = DISTRIBUTED_APPLICATION_TIMING_PHASES[0]
     keys = [key for _, key in leaves]
-    assert keys.index("T_add_lazy_input_data") == (
-        keys.index("T_interpolate_data_coords") + 1
-    )
+    assert keys.index("T_add_lazy_input_data") == (keys.index("T_input_preflight") + 1)
     summary = format_timing_summary(
         {"T_add_lazy_input_data": 0.25, "T_total": 1.0},
         DISTRIBUTED_APPLICATION_TIMING_PHASES,

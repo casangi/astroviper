@@ -104,12 +104,9 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
 )
 
 _CONTINUUM_DECONVOLVER_DOC = (
-    'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
-    'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
-    "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
-    'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
-    '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
-    "are refused before anything is written."
+    'Deconvolution algorithm: ``"hogbom"`` updates a one-term continuum model;\n'
+    '``"mtmfs"`` jointly updates two to four Taylor terms. Both use C++ kernels.\n'
+    "Unsupported algorithms and Taylor-order combinations raise without substitution."
 )
 
 _CONTINUUM_MODE_DOC = (
@@ -128,6 +125,12 @@ _CONTINUUM_MODE_DOC = (
 )
 
 IMAGING_PARAM_DOCS = {
+    "require_complete": """Require all coordinates and cycle controls needed by a distributed driver.
+Lower-level entry points check only the configuration they receive.""",
+    "input_checked": """Skip configuration checks already performed by the calling layer.
+Runtime checks on newly created data always remain active. For graph nodes
+using an input_params dictionary, its input_checked entry also carries this
+flag. Set it only for an unchanged configuration in the same imaging mode.""",
     "image_params": _IMAGE_PARAMS_DOC,
     "make_primary_beam_single_field.image_params": _PRIMARY_BEAM_IMAGE_PARAMS_DOC,
     "make_continuum_primary_beam_single_field.image_params": (

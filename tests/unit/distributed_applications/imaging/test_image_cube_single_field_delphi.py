@@ -176,7 +176,9 @@ def test_image_cube_single_field_signature_keeps_required_arguments():
     parameters = inspect.signature(image_cube_single_field).parameters
     assert parameters["parameters_file"].default is None
     assert parameters["ps_store"].default is inspect.Parameter.empty
-    assert list(parameters)[-1] == "parameters_file"
+    assert parameters["input_checked"].default is False
+    assert parameters["input_checked"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert list(parameters)[-2:] == ["parameters_file", "input_checked"]
 
 
 def test_read_parameters_file_json_round_trip(tmp_path):

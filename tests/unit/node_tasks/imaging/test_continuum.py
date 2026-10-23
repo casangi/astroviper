@@ -475,7 +475,7 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
     monkeypatch.setattr(
         continuum_node,
         "model_update_continuum_single_field",
-        lambda input_data, input_params: {"image": input_data["image"]},
+        lambda input_data, input_params, **kwargs: {"image": input_data["image"]},
     )
     monkeypatch.setattr(
         continuum_node,
@@ -515,7 +515,8 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
         lambda image, input_params, **kwargs: (image, xr.Dataset(), None),
     )
 
-    def fake_model_update(input_data, input_params):
+    def fake_model_update(input_data, input_params, *, input_checked=False):
+        assert input_checked is True
         captured["history"] = input_data["deconvolution"]
         return {"image": input_data["image"]}
 
@@ -781,11 +782,11 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
     dims = ("time", "taylor_term", "polarization", "l", "m")
     image = xr.Dataset(
         {
-            "SKY_RESIDUAL": (dims, np.ones((1, 2, 1, 3, 3))),
-            "SKY_MODEL": (dims, np.zeros((1, 2, 1, 3, 3))),
+            "SKY_RESIDUAL": (dims, np.ones((1, 1, 1, 3, 3))),
+            "SKY_MODEL": (dims, np.zeros((1, 1, 1, 3, 3))),
             "POINT_SPREAD_FUNCTION": (
                 ("time", "psf_taylor_order", "polarization", "l", "m"),
-                np.ones((1, 3, 1, 3, 3)),
+                np.ones((1, 1, 1, 3, 3)),
             ),
             "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
                 ("time", "polarization"),
@@ -906,6 +907,12 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
             }
         },
     )
+    # Each backend gets products for its supported Taylor order. The MT-MFS
+    # PSF moments have a positive definite Taylor Hessian.
+    image.POINT_SPREAD_FUNCTION.loc[{"psf_taylor_order": 1}] = 0.0
+    image.POINT_SPREAD_FUNCTION.loc[{"psf_taylor_order": 2}] = 0.25
+    if deconvolver == "hogbom":
+        image = image.isel(taylor_term=slice(1), psf_taylor_order=slice(1))
     params = {
         "max_iter": 10,
         "max_cycles": 3,
@@ -930,7 +937,8 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         assert controls["threshold_per_cycle"].shape == (1, 1, 2)
         image_arg["SKY_MODEL"] = xr.zeros_like(image_arg.SKY_RESIDUAL)
         image_arg.SKY_MODEL.loc[{"taylor_term": 0}] = 1.0
-        image_arg.SKY_MODEL.loc[{"taylor_term": 1}] = -0.25
+        if deconvolver == "mtmfs":
+            image_arg.SKY_MODEL.loc[{"taylor_term": 1}] = -0.25
         result = ImagingDict()
         for pol, iterations in enumerate((1, 2)):
             result.add(
@@ -1217,6 +1225,19 @@ def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch)
     assert model_uv is predicted
 
 
+def _with_single_term_psf(image):
+    """Supply the valid single-term products required even when CLEAN stops."""
+    image = image.isel(taylor_term=slice(1))
+    image["POINT_SPREAD_FUNCTION"] = image.SKY_RESIDUAL.rename(
+        {"taylor_term": "psf_taylor_order"}
+    ).copy(deep=True)
+    image["POINT_SPREAD_FUNCTION"].data[...] = 1.0
+    image.attrs["data_groups"]["residual"]["point_spread_function"] = (
+        "POINT_SPREAD_FUNCTION"
+    )
+    return image
+
+
 def test_zero_max_iter_uses_current_controller_fields():
     from astroviper.processing_functions.imaging.utils import CycleController
 
@@ -1224,6 +1245,7 @@ def test_zero_max_iter_uses_current_controller_fields():
     image.attrs["data_groups"]["residual"] = {"sky": "SKY_RESIDUAL"}
     image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (("time", "polarization"), [[0.1]])
     controller = CycleController(max_iter=0)
+    image = _with_single_term_psf(image)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {"cycle_control_params": {"max_iter": 0}, "controller": controller},
@@ -1275,6 +1297,7 @@ def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
     monkeypatch.setattr(
         continuum_processing, "model_update_mtmfs_single_field", unexpected_update
     )
+    image = _with_single_term_psf(image)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {
@@ -1384,6 +1407,7 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
     monkeypatch.setattr(
         continuum_processing, "model_update_mtmfs_single_field", unexpected_update
     )
+    image = _with_single_term_psf(image)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {
@@ -1445,6 +1469,7 @@ def test_model_update_constructs_controller_when_omitted():
         "max_iter_per_cycle": 1,
     }
 
+    image = _with_single_term_psf(image)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {"cycle_control_params": params},

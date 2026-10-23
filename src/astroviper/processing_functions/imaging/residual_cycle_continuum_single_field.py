@@ -22,6 +22,8 @@ def residual_cycle_continuum_single_field(
     image_data_group_in_name="model",
     image_data_group_out_name="residual",
     last_residual_cycle=False,
+    *,
+    input_checked: bool = False,
 ):
     """Grid residual products for one continuum visibility partition.
 
@@ -125,6 +127,12 @@ def residual_cycle_continuum_single_field(
         Indicates whether this is the final residual calculation after the last
         model update.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -134,6 +142,14 @@ def residual_cycle_continuum_single_field(
         Timing summary for the residual-update stage.
 
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import time
 
     import numpy as np
@@ -153,7 +169,6 @@ def residual_cycle_continuum_single_field(
     if image_data_variables_keep is None:
         image_data_variables_keep = []
 
-    continuum_mode = str(continuum_mode).lower()
     if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
             f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
