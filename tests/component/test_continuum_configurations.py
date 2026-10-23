@@ -86,7 +86,7 @@ def _run(
                 max_psf_fraction=0.8,
             ),
             gridder="anti_alias",
-            deconvolver="hogbom",
+            deconvolver="mtmfs",
             continuum_mode=continuum_mode,
             restore=True,
             primary_beam_correction=True,
@@ -135,9 +135,8 @@ def _circular_clean_beam_convolution(plane, beam_parameters, cell_size):
 
 
 def _assert_restoration_values(image, primary_beam_limit=0.2):
-    """Check ``M * B + R`` and model-first PB correction plane by plane."""
+    """Check ``M * B + H**(-1) R`` and model-first PB correction."""
     model = image.SKY_MODEL.isel(taylor_term=0, drop=True)
-    residual = image.SKY_RESIDUAL.isel(taylor_term=0, drop=True)
     primary_beam = image.PRIMARY_BEAM.isel(frequency=0, drop=True)
     fitted_beam = image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION
     for dimension in ("frequency", "taylor_term", "psf_taylor_order"):
@@ -149,7 +148,24 @@ def _assert_restoration_values(image, primary_beam_limit=0.2):
         for polarization in range(image.sizes["polarization"]):
             index = {"time": time, "polarization": polarization}
             model_plane = model.isel(index).values
-            residual_plane = residual.isel(index).values
+            # MT-MFS restores the principal-solution residual. Build the
+            # Hankel matrix directly from the PSF peak for an independent
+            # NumPy oracle rather than reusing the native restoration helper.
+            residual_terms = (
+                image.SKY_RESIDUAL.isel(index).transpose("taylor_term", "l", "m").values
+            )
+            psf_terms = (
+                image.POINT_SPREAD_FUNCTION.isel(index)
+                .transpose("psf_taylor_order", "l", "m")
+                .values
+            )
+            peak = np.unravel_index(np.argmax(np.abs(psf_terms[0])), psf_terms[0].shape)
+            nterms = residual_terms.shape[0]
+            orders = np.add.outer(np.arange(nterms), np.arange(nterms))
+            hessian = psf_terms[:, peak[0], peak[1]][orders]
+            residual_plane = np.linalg.solve(
+                hessian, residual_terms.reshape(nterms, -1)
+            )[0].reshape(model_plane.shape)
             beam_plane = primary_beam.isel(index).values
             beam_parameters = fitted_beam.isel(index).values
 

@@ -123,6 +123,7 @@ def _dirty_continuum_image(tmp_path, case, continuum_mode):
                 "min_psf_fraction": 0.05,
                 "max_psf_fraction": 0.8,
             },
+            deconvolver="mtmfs",
             continuum_mode=continuum_mode,
             primary_beam_limit=0.1,
             processing_set_data_group_name="base",

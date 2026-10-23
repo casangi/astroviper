@@ -1176,7 +1176,7 @@ def test_tw_hydra_refused_deconvolvers_write_nothing(
                 "weighting_scope": "global",
             },
             {"weight_memory_mode": "in_place"},
-            "Global weighting scope",
+            "briggs_abs requires weighting_scope='local'",
             id="briggs_abs-global",
         ),
         pytest.param(
@@ -1221,7 +1221,7 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
                 reference_frequency_hz=1.001 * params["reference_frequency"]
             ),
             ValueError,
-            "two different reference frequencies",
+            "reference_frequency_hz is not accepted",
             id="differing-reference-frequencies",
         ),
         pytest.param(
@@ -1233,7 +1233,7 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
         pytest.param(
             lambda params: params.update(reference_frequency=0.0),
             ValueError,
-            "finite and positive",
+            "strictly positive",
             id="zero-reference-frequency",
         ),
         pytest.param(
@@ -1244,8 +1244,8 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
         ),
         pytest.param(
             lambda params: params.update(n_taylor_terms=0),
-            AssertionError,
-            None,
+            ValueError,
+            "n_taylor_terms must be positive",
             id="zero-n_taylor_terms",
         ),
         pytest.param(
@@ -2483,7 +2483,7 @@ def test_continuum_rejects_output_layout_options_until_final_node_writes(
     """Continuum fails fast instead of discarding a requested output layout."""
     output = tmp_path / "unsupported_layout.img.zarr"
     processing_set = open_processing_set(str(tw_hydra_store))
-    with pytest.raises(NotImplementedError, match="not supported"):
+    with pytest.raises(ValueError, match="not implemented"):
         _run_tw_hydra_continuum(
             tw_hydra_store,
             output,
@@ -2676,6 +2676,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         2,
         continuum_mode,
         {"weighting": "natural", "weighting_scope": "local"},
+        deconvolver="hogbom",
         visibility_memory_mode=visibility_memory_mode,
         restore=True,
         image_param_overrides={"polarization_coords": ["I", "Q"], "n_taylor_terms": 1},

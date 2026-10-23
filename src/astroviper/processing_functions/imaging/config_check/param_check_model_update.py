@@ -673,14 +673,18 @@ def check_model_products(
         if deconvolver == "mtmfs"
         else []
     )
+    reference_frequency = config.get("image_params", {}).get(
+        "reference_frequency", img_xds.attrs.get("reference_frequency")
+    )
     diagnostics = {
         "deconvolver": deconvolver,
         "n_taylor_terms": nterms,
         "working_precision": residual.dtype.name,
         "image_geometry": [residual.sizes[dim] for dim in spatial_dims],
         "effective_scales": scales,
-        "reference_frequency": config.get("image_params", {}).get(
-            "reference_frequency", img_xds.attrs.get("reference_frequency")
+        # Persist plain scalars without changing the caller's configuration.
+        "reference_frequency": (
+            float(reference_frequency) if reference_frequency is not None else None
         ),
         "validated_deconvolution_inputs": {
             name: np.asarray(controls.get(name, default)).tolist()
@@ -716,11 +720,25 @@ def check_model_products(
                 raise ValueError(
                     f"Taylor-Hessian preflight failed ({context}): {error}"
                 ) from error
-            eigenvalues = np.linalg.eigvalsh(result["hessian"])
+            # Taylor orders have different scales, especially in narrow bands.
+            # A diagonal congruence preserves positive definiteness while testing
+            # independent constraints rather than the magnitude of each moment.
+            # The native Cholesky guard also tests pivots against their diagonals.
+            hessian = np.asarray(result["hessian"])
+            diagonal = np.diagonal(hessian, axis1=1, axis2=2)
+            if np.any(~np.isfinite(hessian)) or np.any(diagonal <= 0):
+                raise ValueError(
+                    f"Taylor-Hessian preflight: Hessians must be finite with positive diagonals ({context})."
+                )
+            diagonal_sqrt = np.sqrt(diagonal)
+            equilibrated = (
+                hessian / diagonal_sqrt[:, :, None] / diagonal_sqrt[:, None, :]
+            )
+            eigenvalues = np.linalg.eigvalsh(equilibrated)
             tolerance = nterms * epsilon * np.max(np.abs(eigenvalues), axis=1)
             if np.any(eigenvalues[:, 0] <= tolerance):
                 raise ValueError(
-                    f"Taylor-Hessian preflight: a per-scale Hessian is not positive definite and invertible at {residual.dtype} precision ({context}); eigenvalues={eigenvalues.tolist()}."
+                    f"Taylor-Hessian preflight: a per-scale Hessian is not positive definite and invertible at {residual.dtype} precision ({context}); equilibrated_eigenvalues={eigenvalues.tolist()}."
                 )
             if list(result["scales"]) != scales:
                 raise ValueError(

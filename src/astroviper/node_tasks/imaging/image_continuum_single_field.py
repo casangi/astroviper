@@ -2498,8 +2498,8 @@ def _prepare_continuum_image(
         residual.attrs.update(
             {
                 "description": "Continuum residual Taylor products.",
-                "n_taylor_terms": n_taylor_terms,
-                "reference_frequency": reference_frequency,
+                "n_taylor_terms": int(n_taylor_terms),
+                "reference_frequency": float(reference_frequency),
                 "placeholder": False,
             }
         )
@@ -2648,9 +2648,9 @@ def _prepare_continuum_image(
         img_xds[psf_name].attrs.update(
             {
                 "type": "point_spread_function",
-                "n_taylor_terms": n_taylor_terms,
-                "n_psf_taylor_terms": n_psf_taylor_terms,
-                "reference_frequency": reference_frequency,
+                "n_taylor_terms": int(n_taylor_terms),
+                "n_psf_taylor_terms": int(n_psf_taylor_terms),
+                "reference_frequency": float(reference_frequency),
             }
         )
 

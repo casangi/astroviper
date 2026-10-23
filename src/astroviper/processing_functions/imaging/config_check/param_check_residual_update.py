@@ -296,7 +296,7 @@ def check_spectral_sampling(
             "selected frequencies", frequencies, positive=True
         )
         weights = require_finite_real("effective imaging weights", effective_weights)
-        require_finite_real(
+        reference_value = require_finite_real(
             "reference_frequency", reference_frequency, positive=True, scalar=True
         )
         require_integer("n_taylor_terms", n_taylor_terms, minimum=1)
@@ -311,7 +311,11 @@ def check_spectral_sampling(
     if np.dtype(precision) not in (np.dtype("float32"), np.dtype("float64")):
         fail("working precision must be float32 or float64")
 
-    diagnostics["reference_frequency"] = float(reference_frequency)
+    # Use a scalar numerical value for arithmetic; an xarray scalar's ufunc
+    # dispatch would otherwise try to retain its zero-dimensional coordinates.
+    # The supplied reference object and caller configuration remain unchanged.
+    reference_value = float(reference_value)
+    diagnostics["reference_frequency"] = reference_value
     diagnostics["n_taylor_terms"] = int(n_taylor_terms)
 
     # --- Independent usable samples ---
@@ -330,9 +334,7 @@ def check_spectral_sampling(
     # --- Weighted Taylor design ---
     # A common weight scale cancels from the singular-value ratio and avoids
     # overflowing the square root for otherwise valid large imaging weights.
-    x = (
-        usable_frequencies.astype(np.float64) - reference_frequency
-    ) / reference_frequency
+    x = (usable_frequencies.astype(np.float64) - reference_value) / reference_value
     with np.errstate(over="ignore", invalid="ignore"):
         design = np.vander(x, N=n_taylor_terms, increasing=True)
         design *= np.sqrt(weights[usable] / weights[usable].max())[:, None]
@@ -375,8 +377,8 @@ def check_spectral_sampling(
     # --- Reference-frequency placement ---
     # Outside the usable frequency hull the Taylor model is extrapolating.
     if (
-        reference_frequency < usable_frequencies.min()
-        or reference_frequency > usable_frequencies.max()
+        reference_value < usable_frequencies.min()
+        or reference_value > usable_frequencies.max()
     ):
         warnings.warn(
             f"Reference frequency is outside the usable frequency range: {diagnostics}",

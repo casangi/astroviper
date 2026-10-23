@@ -351,3 +351,67 @@ def test_invertible_ill_conditioned_hessian_warns_and_records_metric():
         )
     condition = diagnostics["taylor_hessian_condition_number"][0]["per_scale"][0]
     assert condition == pytest.approx(1e12)
+
+
+@pytest.mark.parametrize("reference", [np.float32(100.0), xr.DataArray(100.0)])
+def test_model_product_metadata_uses_serializable_scalars(reference):
+    import json
+
+    config = {
+        "deconvolver": "mtmfs",
+        "image_params": {"reference_frequency": reference},
+    }
+    diagnostics = check_model_products(
+        make_runaway_taylor_image(), config, mode=CONTINUUM_SINGLE_FIELD
+    )
+    restored = json.loads(json.dumps(diagnostics))
+    assert restored["reference_frequency"] == 100.0
+    assert type(diagnostics["reference_frequency"]) is float
+    assert config["image_params"]["reference_frequency"] is reference
+
+
+@pytest.mark.parametrize("nterms", [2, 3])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_narrow_band_hessian_is_checked_independently_of_taylor_units(nterms, dtype):
+    # Narrow-band moments are small even when their constraints are independent.
+    # The three-term Hessian has equilibrated eigenvalues 1 and 1 +/- 1/sqrt(3).
+    moments = [1.0, 0.0, 1e-12] if nterms == 2 else [1.0, 0.0, 1e-12, 0.0, 3e-24]
+    psf = np.zeros((1, len(moments), 1, 8, 8), dtype=dtype)
+    psf[0, :, 0, 4, 4] = moments
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.ones((1, nterms, 1, 8, 8), dtype=dtype),
+            ),
+            "POINT_SPREAD_FUNCTION": (
+                ("time", "psf_taylor_order", "polarization", "l", "m"),
+                psf,
+            ),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                }
+            }
+        },
+    )
+    with pytest.warns(RuntimeWarning, match="Poorly conditioned Taylor Hessian"):
+        diagnostics = check_model_products(
+            image, {"deconvolver": "mtmfs"}, mode=CONTINUUM_SINGLE_FIELD
+        )
+    assert diagnostics["n_taylor_terms"] == nterms
+    assert diagnostics["taylor_hessian_condition_number"][0]["per_scale"][0] > 1e11
+
+
+def test_spectral_sampling_accepts_xarray_scalar_without_changing_it():
+    reference = xr.DataArray(1.1e9, attrs={"units": "Hz"})
+    original = reference.copy(deep=True)
+    diagnostics = check_spectral_sampling(
+        [1.0e9, 1.2e9], [1.0, 1.0], n_taylor_terms=2, reference_frequency=reference
+    )
+    assert diagnostics["spectral_design_rank"] == 2
+    assert diagnostics["reference_frequency"] == 1.1e9
+    xr.testing.assert_identical(reference, original)

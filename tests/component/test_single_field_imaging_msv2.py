@@ -1,9 +1,10 @@
 """Component tests: imaging a Measurement Set v2 directly (skunk_works).
 
-The real ALMA Measurement Set v2 ``Antennae_North.cal.lsrk.split.ms`` (4 MSv4s,
-8 channels of a spectral window with decreasing frequencies, XX and YY) is
-imaged by ``image_cube_single_field`` with ``ps_store`` set to the Measurement
-Set itself and ``skunk_works=True``: the driver opens it with XRADIO's
+One field of the real ALMA Measurement Set v2
+``Antennae_North.cal.lsrk.split.ms`` (8 channels of a spectral window with
+decreasing frequencies, XX and YY) is imaged by ``image_cube_single_field``
+with ``ps_store`` set to the Measurement Set itself and ``skunk_works=True``:
+the driver opens it with XRADIO's
 ``xradio_msv2`` engine and every node task reads its own selection through
 the engine. The tests check that
 
@@ -55,6 +56,11 @@ IMAGE_DATA_VARIABLES_KEEP = [
 N_FREQUENCY_CHUNKS = 4
 
 
+def _single_field_partition(partition):
+    """Image one actual pointing from the three-field Antennae observation."""
+    return partition["FIELD_ID"] == [0]
+
+
 def _file_state(path):
     """Every file under ``path``: its relative path, size and mtime."""
     state = {}
@@ -89,15 +95,20 @@ def antennae_ps(antennae_msv2, tmp_path_factory):
     ms_copy = str(directory / "copy" / MS_NAME)
     shutil.copytree(antennae_msv2, ms_copy)
     ps_store = str(directory / "Antennae_North.ps.zarr")
-    convert_msv2_to_processing_set(ms_copy, ps_store, partition_scheme=[])
+    convert_msv2_to_processing_set(
+        ms_copy,
+        ps_store,
+        partition_scheme=["FIELD_ID"],
+        partition_filter=_single_field_partition,
+    )
     shutil.rmtree(os.path.dirname(ms_copy))
     return ps_store
 
 
 @pytest.fixture(scope="module")
 def image_params(antennae_ps):
-    """A small image (64 x 64 pixels of 0.13 arcsec) of every channel, centred
-    on the central field (read from the converted processing set)."""
+    """A small image (64 x 64 pixels of 0.13 arcsec) of every channel,
+    centred on the selected field of the converted processing set."""
     from xradio.measurement_set import open_processing_set
 
     ps_xdt = open_processing_set(antennae_ps)
@@ -145,6 +156,10 @@ def _image_cube(ps_store, image_store, image_params, **overrides):
 
     arguments = dict(
         ps_store=ps_store,
+        msv2_open_options={
+            "partition_scheme": ["FIELD_ID"],
+            "partition_filter": _single_field_partition,
+        },
         image_store=image_store,
         image_params=image_params,
         imaging_weights_params={

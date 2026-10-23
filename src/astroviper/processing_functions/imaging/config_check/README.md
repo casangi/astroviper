@@ -103,8 +103,12 @@ Workflow results and persisted image metadata retain `input_validation`:
   `spectral_design_reciprocal_condition_number`.
 - `model_products` records the actual geometry, precision, reference, effective
   scales, controls, and `taylor_hessian_condition_number` per plane and scale
-  (the native infinity-norm estimate). It warns above `1/sqrt(eps)`; eigenvalues
-  at or below `nterms * eps * largest_absolute_eigenvalue` fail.
+  (the native infinity-norm estimate). It warns above `1/sqrt(eps)`. Numerical
+  rank is checked on the diagonally equilibrated Hessian
+  `D**(-1/2) H D**(-1/2)`, where `D=diag(H)`: eigenvalues at or below
+  `nterms * eps * largest_absolute_eigenvalue` fail. This preserves the
+  relative scale of each Taylor order in narrow bands; the original native
+  Cholesky checks remain active.
 
 These metrics describe different matrices and norms. They are deliberately
 stored under separate names. Derived controller limits, dataset selections, and
