@@ -256,7 +256,8 @@ def check_spectral_sampling(
     -------
     dict
         Channel counts, numerical rank, singular values, frequency range, and
-        explicitly named 2-norm spectral-design condition number and reciprocal.
+        explicitly named 2-norm spectral-design condition number and reciprocal,
+        plus order-zero noise amplification relative to a constant-only fit.
 
     Raises
     ------
@@ -334,13 +335,31 @@ def check_spectral_sampling(
     # --- Weighted Taylor design ---
     # A common weight scale cancels from the singular-value ratio and avoids
     # overflowing the square root for otherwise valid large imaging weights.
+    normalized_weights = weights[usable] / weights[usable].max()
+    sqrt_weights = np.sqrt(normalized_weights)
     x = (usable_frequencies.astype(np.float64) - reference_value) / reference_value
     with np.errstate(over="ignore", invalid="ignore"):
         design = np.vander(x, N=n_taylor_terms, increasing=True)
-        design *= np.sqrt(weights[usable] / weights[usable].max())[:, None]
+        design *= sqrt_weights[:, None]
     if not np.all(np.isfinite(design)):
         fail("the weighted Taylor design overflows at this reference frequency")
-    singular_values = np.linalg.svd(design, compute_uv=False)
+    left_vectors, singular_values, right_vectors_transposed = np.linalg.svd(
+        design, full_matrices=False
+    )
+
+    # --- Numerical-rank tolerance ---
+    # The smallest singular value is the spectral-norm distance to a matrix
+    # that loses column rank: removing sigma_min * u_min * v_min.T makes that
+    # direction unconstrained. If this distance is within numerical uncertainty,
+    # we cannot reliably distinguish the direction from zero and reject the fit.
+    # Model that uncertainty as C(N, p) * eps * ||design||_2, where N is the
+    # usable channel count, p is the Taylor order, and ||design||_2 = sigma_max.
+    # Choosing C(N, p) = max(N, p) gives NumPy's conventional matrix_rank
+    # threshold. This dimension factor is a heuristic, not a uniquely derived
+    # error bound (https://numpy.org/doc/stable/reference/generated/numpy.linalg.matrix_rank.html).
+    # Although the SVD runs in float64, eps uses the requested imaging precision:
+    # this is a downstream acceptance policy, not an error bound for this SVD
+    # or a proven accuracy guarantee for the complete imaging calculation.
     epsilon = np.finfo(precision).eps
     tolerance = max(design.shape) * epsilon * singular_values[0]
     rank = int(np.count_nonzero(singular_values > tolerance))
@@ -359,17 +378,48 @@ def check_spectral_sampling(
         working_precision=np.dtype(precision).name,
         spectral_design_rank_tolerance=float(tolerance),
     )
+    # --- Enough independent frequency constraints ---
+    # Fitting p Taylor coefficients requires at least p independent equations.
+    # Each distinct positive-weight frequency supplies at most one; repeated
+    # frequencies add weight but no independent constraint, and zero-weight
+    # channels supply none. With fewer than p, the coefficients are not unique
+    # even in exact arithmetic. Reject instead of silently lowering the order.
     if diagnostics["distinct_frequency_count"] < n_taylor_terms:
         fail("fewer distinct positive-weight frequencies than requested Taylor terms")
     if rank != n_taylor_terms:
         fail("the weighted Taylor design is numerically rank deficient")
 
-    # --- Conditioning warning ---
-    # A square-root-epsilon warning exposes loss of precision without imposing
-    # an arbitrary bandwidth cutoff on a design that is still full rank.
-    if reciprocal_condition < np.sqrt(epsilon):
+    # --- Order-zero noise amplification ---
+    # A small singular value may describe slope or curvature with little effect
+    # on intensity at the reference frequency. Target c_0 instead of bounding
+    # the error of the entire coefficient vector by 1 / sigma_min.
+    # With A_ik = sqrt(q_i) * x_i**k, the first pseudoinverse row h gives
+    # delta_c_0 = h @ delta_b. For independent, equal-noise unweighted channels
+    # (standard deviation sigma), delta_b_i = sqrt(q_i) * noise_i, so
+    # Var(c_0) = sigma**2 * sum(q_i * h_i**2).
+    # A constant-only fit has Var(reference) = sigma**2 * sum(q_i**2) / W**2,
+    # where W = sum(q_i). Their standard-deviation ratio is therefore
+    # G_0 = W * sqrt(sum(q_i * h_i**2)) / sqrt(sum(q_i**2)).
+    # Absolute flux and noise cancel. Compute h from the thin SVD, avoiding
+    # normal equations, which square the condition number.
+    order_zero_row = (right_vectors_transposed[:, 0] / singular_values) @ left_vectors.T
+    noise_amplification = float(
+        normalized_weights.sum()
+        * np.linalg.norm(order_zero_row * sqrt_weights)
+        / np.linalg.norm(normalized_weights)
+    )
+    # Three is an explicit noise-amplification policy motivated by a 3-sigma
+    # residual target, not a derived equivalence to CLEAN stopping depth. Warn
+    # rather than reject: unequal channel noise, correlations, model bias, and
+    # spatial imaging effects are not represented by this spectral diagnostic.
+    noise_amplification_limit = 3.0
+    diagnostics.update(
+        taylor_zero_noise_amplification=noise_amplification,
+        taylor_zero_noise_amplification_limit=noise_amplification_limit,
+    )
+    if noise_amplification > noise_amplification_limit:
         warnings.warn(
-            f"Poorly conditioned spectral design: {diagnostics}",
+            f"Taylor order-zero noise amplification exceeds {noise_amplification_limit}: {diagnostics}",
             RuntimeWarning,
             stacklevel=2,
         )

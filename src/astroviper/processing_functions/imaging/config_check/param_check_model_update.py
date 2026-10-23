@@ -428,6 +428,197 @@ def check_scales(scales, *, image_size=None):
     return effective.tolist()
 
 
+def check_taylor_hessian_approximation(
+    frequencies,
+    effective_weights,
+    *,
+    n_taylor_terms,
+    reference_frequency,
+    longest_projected_baselines,
+    image_size,
+    cell_size,
+    precision="float64",
+    context=None,
+):
+    """Check a frequency-moment approximation before PSF products exist.
+
+    Parameters
+    ----------
+    frequencies, effective_weights : array-like
+        Selected frequencies in Hz and summed effective imaging weights after
+        flags and correlation selection. No visibility values are required.
+    n_taylor_terms : int
+        Number of Taylor coefficients.
+    reference_frequency : float
+        Reference frequency in Hz.
+    longest_projected_baselines : array-like or float
+        Longest usable projected baselines in metres, one per frequency sample
+        or a common scalar. Used for Gaussian FWHM = wavelength / baseline.
+    image_size, cell_size : array-like
+        Two image dimensions and signed angular pixel sizes in radians.
+    precision : {"float32", "float64"}
+        Working precision for the approximate inversion-safety thresholds.
+    context : mapping, optional
+        Field, spectral-window, selection, and polarization identifiers.
+
+    Returns
+    -------
+    dict
+        Equilibrated approximate Hessian, pivot/eigenvalue diagnostics, and
+        assumption-based order-zero noise amplification. All values are JSON
+        serializable; caller inputs remain unchanged.
+
+    Notes
+    -----
+    Local spectral guards use H_hat = A.T @ A. Spatial delta-component
+    interactions are separately diagnosed with natural-resolution channel
+    Gaussian PSFs on a coarse Fourier grid. Sidelobes, actual sampling gaps,
+    gridding effects, and per-plane differences hidden by aggregated weights
+    are absent; this cannot certify the later actual-PSF checks.
+    """
+    import warnings
+
+    diagnostics = {
+        **(context or {}),
+        "approximation": "frequency_moment_gram",
+        "n_taylor_terms": n_taylor_terms,
+        "working_precision": np.dtype(precision).name,
+        "covariance_assumption": "proportional_to_approximate_hessian",
+    }
+
+    def fail(reason):
+        raise ValueError(
+            f"Approximate Taylor-Hessian preflight: {reason}; {diagnostics}"
+        )
+
+    # --- Selected spectral metadata ---
+    # Only positive-weight samples constrain the approximate Taylor system.
+    frequencies = require_finite_real(
+        "selected frequencies", frequencies, positive=True
+    )
+    weights = require_finite_real("effective imaging weights", effective_weights)
+    reference = float(
+        require_finite_real(
+            "reference_frequency", reference_frequency, positive=True, scalar=True
+        )
+    )
+    require_integer("n_taylor_terms", n_taylor_terms, minimum=1)
+    if (
+        frequencies.ndim != 1
+        or weights.shape != frequencies.shape
+        or np.any(weights < 0)
+    ):
+        fail(
+            "frequencies and non-negative weights must be matching one-dimensional arrays"
+        )
+    if np.dtype(precision) not in (np.dtype("float32"), np.dtype("float64")):
+        fail("working precision must be float32 or float64")
+    usable = weights > 0
+    if np.unique(frequencies[usable]).size < n_taylor_terms:
+        fail("fewer distinct positive-weight frequencies than Taylor terms")
+    diagnostics["reference_frequency"] = reference
+    diagnostics["n_taylor_terms"] = int(n_taylor_terms)
+    diagnostics["usable_channel_count"] = int(usable.sum())
+
+    # --- Frequency-moment Hessian ---
+    # At point scale, spectral curvature is approximated by H_hat_kl =
+    # sum(q_i * x_i**(k+l)), where x_i = (nu_i - nu_0) / nu_0.
+    # Reuse the effective weights already collected before graph construction.
+    # A common weight normalization does not affect any relative test below.
+    q = weights[usable] / weights[usable].max()
+    x = (frequencies[usable].astype(np.float64) - reference) / reference
+    with np.errstate(over="ignore", invalid="ignore"):
+        design = np.vander(x, N=n_taylor_terms, increasing=True) * np.sqrt(q)[:, None]
+    if not np.all(np.isfinite(design)):
+        fail("weighted Taylor moments overflow at this reference frequency")
+
+    # Form D**(-1/2) H_hat D**(-1/2) by normalizing columns of A first.
+    # This avoids squaring the raw Taylor dynamic range when forming A.T @ A.
+    # Preliminary max normalization also avoids overflow in column norms.
+    column_max = np.max(np.abs(design), axis=0)
+    if np.any(column_max == 0):
+        fail("a Taylor column has no representable spectral support")
+    columns = design / column_max
+    columns /= np.linalg.norm(columns, axis=0)
+    equilibrated = columns.T @ columns
+    epsilon = np.finfo(precision).eps
+
+    # --- 1. Approximate native inversion safety ---
+    # A Cholesky failure predicts that even this spectral approximation cannot
+    # support a safe full Taylor solve. Match the native diagonal-relative
+    # margin, pivot > 100 * eps * diagonal, on the equilibrated system.
+    # This early rejection is labelled approximate; a pass does not certify
+    # the later scale-dependent native factorization.
+    try:
+        cholesky = np.linalg.cholesky(equilibrated)
+    except np.linalg.LinAlgError as error:
+        fail(f"frequency-moment Hessian is not positive definite ({error})")
+    relative_pivots = np.diag(cholesky) ** 2 / np.diag(equilibrated)
+    diagnostics["relative_cholesky_pivots"] = relative_pivots.tolist()
+    diagnostics["relative_pivot_tolerance"] = float(100 * epsilon)
+    if np.any(relative_pivots <= 100 * epsilon):
+        fail(
+            "frequency-moment Hessian has unsafe relative Cholesky pivots at working precision"
+        )
+
+    # --- 2. Approximate positive definiteness and numerical rank ---
+    # Unit-diagonal equilibration separates narrow-band moment magnitudes from
+    # dependence. Unresolved curvature directions would make the full Taylor
+    # solution ambiguous; use the same dimension-scaled heuristic as for PSFs.
+    eigenvalues = np.linalg.eigvalsh(equilibrated)
+    tolerance = n_taylor_terms * epsilon * np.max(np.abs(eigenvalues))
+    diagnostics["equilibrated_hessian"] = equilibrated.tolist()
+    diagnostics["equilibrated_eigenvalues"] = eigenvalues.tolist()
+    diagnostics["eigenvalue_tolerance"] = float(tolerance)
+    if eigenvalues[0] <= tolerance:
+        fail(
+            "frequency-moment Hessian is numerically rank deficient at working precision"
+        )
+
+    # --- 3. Approximate order-zero noise amplification ---
+    # Under C_R proportional to H_hat, compare the order-zero variance with a
+    # constant-only fit: G_hat_0 = sqrt(H_hat_00 * inverse(H_hat)_00).
+    # With unit diagonals this equals sqrt(inverse(equilibrated)_00), or
+    # ||solve(L, e_0)||, so no explicit inverse is needed. This differs from
+    # the spectral G0's equal-unweighted-channel-noise assumption.
+    # As for actual Hessians, three is a permitted amplification factor, not
+    # an equivalence to CLEAN stopping depth. The covariance is assumed rather
+    # than measured, so exceeding the limit warns instead of rejecting.
+    order_zero = np.zeros(n_taylor_terms)
+    order_zero[0] = 1.0
+    amplification = float(np.linalg.norm(np.linalg.solve(cholesky, order_zero)))
+    diagnostics["order_zero_noise_amplification"] = amplification
+    diagnostics["order_zero_noise_amplification_limit"] = 3.0
+    if amplification > 3.0:
+        warnings.warn(
+            f"Approximate Taylor-Hessian order-zero noise amplification exceeds 3.0: {diagnostics}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # --- Spatial coupling between delta components ---
+    # The local Gram matrix above cannot diagnose coupling between positions.
+    # Build Gaussian channel PSF Fourier blocks with FWHM = lambda / Bmax;
+    # the same block diagnostic will inspect actual PSFs in the append node.
+    from astroviper.processing_functions.imaging.config_check._spatial_hessian import (
+        check_gaussian_spatial_hessian,
+    )
+
+    baselines = np.broadcast_to(longest_projected_baselines, frequencies.shape)
+    diagnostics["spatial_blocks"] = check_gaussian_spatial_hessian(
+        frequencies[usable],
+        weights[usable],
+        baselines[usable],
+        n_taylor_terms=n_taylor_terms,
+        reference_frequency=reference,
+        image_size=image_size,
+        cell_size=cell_size,
+        precision=precision,
+        context=context,
+    )
+    return diagnostics
+
+
 @shares_param_docs
 def check_model_products(
     img_xds,
@@ -697,12 +888,17 @@ def check_model_products(
             )
         },
         "taylor_hessian_condition_number": [],
+        "taylor_hessian_order_zero_noise_amplification": [],
+        "taylor_hessian_spatial_blocks": [],
     }
     if deconvolver != "mtmfs":
         return diagnostics
 
     # --- Every per-scale Taylor Hessian ---
     # Validate all planes before any kernel can modify a residual or model plane.
+    from astroviper.processing_functions.imaging.config_check._spatial_hessian import (
+        check_psf_spatial_hessian,
+    )
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
 
     psf_values = psf.transpose(*psf_dims).values
@@ -710,6 +906,16 @@ def check_model_products(
     for time_index in range(residual.sizes["time"]):
         for polarization_index in range(residual.sizes["polarization"]):
             context = f"time={time_index}, polarization={polarization_index}, nterms={nterms}, scales={scales}"
+
+            # --- 1. Native inversion safety ---
+            # The cleaner solves H * delta_c = R for each scale. Cholesky must
+            # succeed before any model plane is changed; an invalid inverse
+            # would corrupt the update regardless of its order-zero accuracy.
+            # mtmfs.hessian uses the same native setup as CLEAN and rejects
+            # pivots <= 100 * eps * H_ii. Comparing to each original diagonal
+            # avoids rejecting a higher Taylor moment merely for being small.
+            # The factor 100 is the existing native round-off safety margin,
+            # not a scientific accuracy target; native guards remain active.
             try:
                 result = mtmfs.hessian(
                     np.ascontiguousarray(psf_values[time_index, :, polarization_index]),
@@ -720,10 +926,19 @@ def check_model_products(
                 raise ValueError(
                     f"Taylor-Hessian preflight failed ({context}): {error}"
                 ) from error
-            # Taylor orders have different scales, especially in narrow bands.
-            # A diagonal congruence preserves positive definiteness while testing
-            # independent constraints rather than the magnitude of each moment.
-            # The native Cholesky guard also tests pivots against their diagonals.
+
+            # --- 2. Positive definiteness and numerical rank ---
+            # For a least-squares curvature matrix, every nonzero coefficient
+            # direction must have positive curvature. Nonpositive directions
+            # or numerical dependence make the full Taylor solve unsafe.
+            # Taylor moments can differ greatly in magnitude in narrow bands.
+            # With D = diag(H), the congruence D**(-1/2) H D**(-1/2) preserves
+            # positive definiteness and gives unit diagonals, separating that
+            # magnitude difference from dependence between coefficient columns.
+            # Eigenvalues within p * eps * max(abs(eigenvalues)) of zero are
+            # treated as unresolved. This is a dimension-scaled round-off
+            # heuristic for the equilibrated matrix, not a science tolerance
+            # or a bound on the forward error of the unscaled native solve.
             hessian = np.asarray(result["hessian"])
             diagonal = np.diagonal(hessian, axis1=1, axis2=2)
             if np.any(~np.isfinite(hessian)) or np.any(diagonal <= 0):
@@ -749,18 +964,82 @@ def check_model_products(
                 raise ValueError(
                     f"Taylor-Hessian preflight produced non-finite condition numbers ({context})."
                 )
-            if np.any(condition_numbers > 1 / np.sqrt(epsilon)):
-                warnings.warn(
-                    f"Poorly conditioned Taylor Hessian ({context}); taylor_hessian_condition_number={condition_numbers.tolist()}.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
             diagnostics["taylor_hessian_condition_number"].append(
                 {
                     "time_index": time_index,
                     "polarization_index": polarization_index,
                     "per_scale": condition_numbers.tolist(),
                     "norm": "infinity",
+                }
+            )
+
+            # --- 3. Order-zero noise amplification ---
+            # A large full-Hessian condition number can be caused by higher
+            # Taylor terms without compromising c_0. Target the first inverse
+            # row: delta_c_0 = e_0.T H**(-1) delta_R. For residual covariance C,
+            # Var(c_0) = (H**(-1) C H**(-T))_00. A constant-only update has
+            # variance C_00 / H_00**2. If C = tau**2 * H, their standard-
+            # deviation ratio simplifies to G_H0 = sqrt(H_00 * (H**(-1))_00).
+            # This covariance relation is an explicit diagnostic assumption:
+            # arbitrary imaging weights and scale filtering need not satisfy
+            # it. We do not estimate C here. Reuse the already computed inverse
+            # so this check needs no extra image passes or matrix inversion.
+            inverse_hessian = np.asarray(result["inverse_hessian"])
+            inverse_order_zero = inverse_hessian[:, 0, 0]
+            if np.any(~np.isfinite(inverse_order_zero)) or np.any(
+                inverse_order_zero <= 0
+            ):
+                raise ValueError(
+                    f"Taylor-Hessian preflight: inverse order-zero diagonals must be finite and positive ({context})."
+                )
+            noise_amplification = np.sqrt(hessian[:, 0, 0]) * np.sqrt(
+                inverse_order_zero
+            )
+            if np.any(~np.isfinite(noise_amplification)):
+                raise ValueError(
+                    f"Taylor-Hessian preflight produced non-finite order-zero noise amplification ({context})."
+                )
+            # As in spectral preflight, three is an allowed amplification
+            # factor motivated by a 3-sigma residual target. It is not an
+            # equivalence to CLEAN stopping depth or a prediction of final
+            # residual noise. Warn, rather than reject, under this assumption.
+            noise_amplification_limit = 3.0
+            if np.any(noise_amplification > noise_amplification_limit):
+                warnings.warn(
+                    f"Taylor-Hessian order-zero noise amplification exceeds {noise_amplification_limit} ({context}); covariance_assumption=proportional_to_hessian; per_scale={noise_amplification.tolist()}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            diagnostics["taylor_hessian_order_zero_noise_amplification"].append(
+                {
+                    "time_index": time_index,
+                    "polarization_index": polarization_index,
+                    "per_scale": noise_amplification.tolist(),
+                    "limit": noise_amplification_limit,
+                    "covariance_assumption": "proportional_to_hessian",
+                }
+            )
+
+            # --- Full spatial PSF blocks for delta components ---
+            # Local inverses above protect the actual component update, but do
+            # not retain interactions between different component positions.
+            # Fourier blocks of the full PSFs do. Diagnose all supported modes
+            # before any plane can change, using the same rules as Gaussian
+            # preflight; missing spatial modes are not required to be invertible.
+            spatial_diagnostics = check_psf_spatial_hessian(
+                psf_values[time_index, :, polarization_index],
+                precision=residual.dtype,
+                cell_size=config.get("image_params", {}).get("cell_size"),
+                context={
+                    "time_index": time_index,
+                    "polarization_index": polarization_index,
+                },
+            )
+            diagnostics["taylor_hessian_spatial_blocks"].append(
+                {
+                    "time_index": time_index,
+                    "polarization_index": polarization_index,
+                    **spatial_diagnostics,
                 }
             )
     return diagnostics

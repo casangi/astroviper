@@ -37,8 +37,19 @@ def test_generated_continuum_image_records_both_preflight_stages(
     )
     validation = image.attrs["input_validation"]
     assert validation["spectral_design"]["spectral_design_rank"] == 2
+    approximation = validation["spectral_design"]["taylor_hessian_approximation"]
+    assert approximation["approximation"] == "frequency_moment_gram"
+    assert approximation["order_zero_noise_amplification"] >= 1.0 - 1e-12
+    assert (
+        approximation["spatial_blocks"]["approximation"]
+        == "circular_gaussian_channel_psfs"
+    )
     assert validation["model_products"]["effective_scales"] == [0.0]
     assert validation["model_products"]["taylor_hessian_condition_number"]
+    assert (
+        validation["model_products"]["taylor_hessian_spatial_blocks"][0]["sampling"]
+        == "all_half_fourier_modes"
+    )
     assert result["input_validation"] == validation
 
 
@@ -92,6 +103,33 @@ def test_spectral_failure_leaves_no_output_or_graph(
     output = tmp_path / "rejected.img.zarr"
     processing_set = open_processing_set(str(generated_store))
     with pytest.raises(ValueError, match="Spectral-design preflight"):
+        continuum_tests._run_tw_hydra_continuum(
+            generated_store,
+            output,
+            processing_set,
+            2,
+            "mfs",
+            {"weighting": "natural"},
+            deconvolver="mtmfs",
+        )
+    assert not output.exists()
+
+
+def test_approximate_hessian_failure_precedes_psf_and_output(
+    monkeypatch, tmp_path, generated_store
+):
+    def reject(*args, **kwargs):
+        raise ValueError(
+            "Approximate Taylor-Hessian preflight: unsafe spectral moments"
+        )
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.config_check.param_check_model_update.check_taylor_hessian_approximation",
+        reject,
+    )
+    output = tmp_path / "rejected-hessian.img.zarr"
+    processing_set = open_processing_set(str(generated_store))
+    with pytest.raises(ValueError, match="Approximate Taylor-Hessian preflight"):
         continuum_tests._run_tw_hydra_continuum(
             generated_store,
             output,

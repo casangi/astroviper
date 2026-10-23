@@ -63,6 +63,11 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
     cell_size = np.asarray(image_params["cell_size"], dtype=np.float64)
     threads = config.get("processing_function_threads", 1)
     samples = {}
+    longest_projected_baselines = {}
+    needs_spatial_preflight = (
+        mode.imaging_kind == "continuum"
+        and config.get("deconvolver", "hogbom") == "mtmfs"
+    )
     fields = set()
     spectral_windows = set()
 
@@ -213,7 +218,7 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
     # --- Effective-weight accumulation ---
     # Flagged samples and auto-correlations do not contribute Taylor constraints.
     def accumulate(block, effective_weights):
-        ms_name, indices, frequencies, _, _, flagged, baselines = block
+        ms_name, indices, frequencies, uvw, _, flagged, baselines = block
         active = np.broadcast_to(~flagged, effective_weights.shape).copy()
         active[:, ~baselines, :, :] = False
         if np.any((~np.isfinite(effective_weights) | (effective_weights < 0)) & active):
@@ -223,6 +228,23 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
         channel_weights = np.where(active, effective_weights, 0).sum(
             axis=(0, 1, 3), dtype=np.float64
         )
+        # Gaussian preflight uses resolution lambda / Bmax at each frequency.
+        # Accumulate only usable projected baselines in the existing metadata
+        # pass; flagged, zero-weight, and autocorrelation samples cannot define
+        # the resolution. No visibility reads or additional pass are needed.
+        if needs_spatial_preflight:
+            positive_samples = np.any(active & (effective_weights > 0), axis=-1)
+            projected_lengths = np.hypot(uvw[:, :, 0], uvw[:, :, 1])
+            channel_baselines = np.where(
+                positive_samples, projected_lengths[:, :, None], 0
+            ).max(axis=(0, 1))
+            for frequency, longest_baseline in zip(
+                frequencies, channel_baselines, strict=True
+            ):
+                longest_projected_baselines[float(frequency)] = max(
+                    longest_projected_baselines.get(float(frequency), 0.0),
+                    float(longest_baseline),
+                )
         for index, frequency, weight in zip(
             indices, frequencies, channel_weights, strict=True
         ):
@@ -293,7 +315,7 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
     weights = np.array(list(samples.values()))
     precision = "float32" if config.get("single_precision_image", True) else "float64"
     if mode.imaging_kind == "continuum":
-        return check_spectral_sampling(
+        diagnostics = check_spectral_sampling(
             frequencies,
             weights,
             n_taylor_terms=image_params["n_taylor_terms"],
@@ -301,6 +323,33 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
             precision=precision,
             context=context,
         )
+        # The driver calls this before output creation or graph execution.
+        # Reuse the same selected metadata for Gaussian spatial PSF blocks;
+        # the append node will still validate the actual PSF-derived Hessians.
+        if config.get("deconvolver", "hogbom") == "mtmfs":
+            from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+                check_taylor_hessian_approximation,
+            )
+
+            diagnostics["taylor_hessian_approximation"] = (
+                check_taylor_hessian_approximation(
+                    frequencies,
+                    weights,
+                    n_taylor_terms=image_params["n_taylor_terms"],
+                    reference_frequency=image_params["reference_frequency"],
+                    longest_projected_baselines=np.array(
+                        [
+                            longest_projected_baselines[float(frequency)]
+                            for frequency in frequencies
+                        ]
+                    ),
+                    image_size=image_params["image_size"],
+                    cell_size=image_params["cell_size"],
+                    precision=precision,
+                    context=context,
+                )
+            )
+        return diagnostics
 
     # --- Cube channel usability ---
     # Each independently imaged channel needs at least one usable sample.

@@ -39,6 +39,7 @@ def inputs():
         },
     )
     config = {
+        "deconvolver": "mtmfs",
         "processing_set_data_group_name": "base",
         "instrument_polarization_basis": "linear",
         "single_precision_image": False,
@@ -80,7 +81,39 @@ def test_preflight_uses_actual_weighting_and_preserves_input(weighting, scope):
     )
     assert result["spectral_design_rank"] == 2
     assert result["distinct_frequency_count"] == 2
+    approximation = result["taylor_hessian_approximation"]
+    assert approximation["approximation"] == "frequency_moment_gram"
+    assert approximation["order_zero_noise_amplification"] == pytest.approx(1.0)
+    assert approximation["field"] == ["target"]
+    assert (
+        approximation["spatial_blocks"]["representation"]
+        == "periodic_spatial_fourier_blocks"
+    )
+    assert (
+        approximation["spatial_blocks"]["resolution_recipe"]
+        == "wavelength_over_longest_usable_projected_baseline"
+    )
     xr.testing.assert_identical(processing_set["ms"], snapshot)
+
+
+@pytest.mark.parametrize("excluded", ["flagged", "zero_weight"])
+def test_gaussian_resolution_ignores_unusable_long_baselines(excluded):
+    processing_set, config = inputs()
+    source = processing_set["ms"]
+    source.UVW.values[1, 0] = [1e9, 0, 0]
+    if excluded == "flagged":
+        source.FLAG.values[1] = True
+    else:
+        source.WEIGHT.values[1] = 0
+    result = preflight_imaging_inputs(
+        processing_set, config, mode=CONTINUUM_SINGLE_FIELD
+    )
+    widths = result["taylor_hessian_approximation"]["spatial_blocks"][
+        "gaussian_fwhm_radians"
+    ]
+    assert widths == pytest.approx(
+        [299792458 / (1.2e9 * np.hypot(10, 5)), 299792458 / (1e9 * np.hypot(10, 5))]
+    )
 
 
 def test_flagged_channel_does_not_count_toward_taylor_rank():
@@ -88,6 +121,17 @@ def test_flagged_channel_does_not_count_toward_taylor_rank():
     processing_set["ms"].FLAG.values[:, :, 1, 0] = True
     with pytest.raises(ValueError, match="distinct_frequency_count.*1"):
         preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
+
+
+@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
+def test_single_term_workflows_do_not_request_multiterm_hessian_approximation(mode):
+    processing_set, config = inputs()
+    config["deconvolver"] = "hogbom"
+    config["image_params"]["n_taylor_terms"] = 1
+    result = preflight_imaging_inputs(processing_set, config, mode=mode)
+    if mode == CUBE_SINGLE_FIELD:
+        assert len(result["cube_channel_sampling"]) == 2
+    assert "taylor_hessian_approximation" not in result
 
 
 def test_zero_weights_are_not_nan_samples():

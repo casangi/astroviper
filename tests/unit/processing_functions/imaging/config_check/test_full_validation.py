@@ -1,5 +1,6 @@
 """Numerical, product, partition, and full-configuration preflight checks."""
 
+import warnings
 from copy import deepcopy
 
 import numpy as np
@@ -224,10 +225,14 @@ def test_spectral_condition_is_invariant_to_common_weight_scale():
         first["spectral_design_condition_number"]
         == second["spectral_design_condition_number"]
     )
+    assert first["taylor_zero_noise_amplification"] == pytest.approx(
+        second["taylor_zero_noise_amplification"]
+    )
 
 
-def test_full_rank_poor_condition_and_extrapolation_warn():
-    with pytest.warns(RuntimeWarning, match="Poorly conditioned spectral design"):
+def test_weak_slope_does_not_warn_when_order_zero_noise_is_small():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         diagnostics = check_spectral_sampling(
             [1e9, 1e9 + 1e4],
             [1, 1],
@@ -236,10 +241,72 @@ def test_full_rank_poor_condition_and_extrapolation_warn():
             precision="float32",
         )
     assert diagnostics["spectral_design_rank"] == 2
+    assert diagnostics["spectral_design_reciprocal_condition_number"] < np.sqrt(
+        np.finfo(np.float32).eps
+    )
+    assert diagnostics["taylor_zero_noise_amplification"] == pytest.approx(np.sqrt(2))
+    assert not caught
+
+
+def test_reference_frequency_extrapolation_still_warns():
     with pytest.warns(RuntimeWarning, match="outside the usable frequency range"):
         check_spectral_sampling(
             [1e9, 1.2e9], [1, 1], n_taylor_terms=2, reference_frequency=1.3e9
         )
+
+
+@pytest.mark.parametrize("nterms", [1, 2, 3, 4])
+def test_order_zero_noise_matches_propagated_channel_covariance(nterms):
+    # Propagate unit channel perturbations through an independent least-squares
+    # solve, including unequal weights and a channel excluded by zero weight.
+    frequencies = np.linspace(1e9, 1.2e9, 7)
+    weights = np.array([1.0, 0.0, 2.0, 0.5, 4.0, 1.5, 3.0])
+    original_weights = weights.copy()
+    original_frequencies = frequencies.copy()
+    diagnostics = check_spectral_sampling(
+        frequencies,
+        weights,
+        n_taylor_terms=nterms,
+        reference_frequency=1.1e9,
+    )
+    selected = weights > 0
+    q = weights[selected] / weights.max()
+    x = (frequencies[selected] - 1.1e9) / 1.1e9
+    design = np.polynomial.polynomial.polyvander(x, nterms - 1) * np.sqrt(q)[:, None]
+    responses = np.linalg.lstsq(design, np.diag(np.sqrt(q)), rcond=None)[0]
+    order_zero_variance = np.sum(responses[0] ** 2)
+    constant_variance = np.sum(q**2) / np.sum(q) ** 2
+    assert diagnostics["taylor_zero_noise_amplification"] == pytest.approx(
+        np.sqrt(order_zero_variance / constant_variance)
+    )
+    assert diagnostics["taylor_zero_noise_amplification_limit"] == 3.0
+    np.testing.assert_array_equal(weights, original_weights)
+    np.testing.assert_array_equal(frequencies, original_frequencies)
+
+
+@pytest.mark.parametrize("nterms", [1, 2])
+def test_centered_constant_and_slope_do_not_amplify_order_zero_noise(nterms):
+    diagnostics = check_spectral_sampling(
+        [1e9 - 1e4, 1e9, 1e9 + 1e4],
+        [1, 1, 1],
+        n_taylor_terms=nterms,
+        reference_frequency=1e9,
+    )
+    assert diagnostics["taylor_zero_noise_amplification"] == pytest.approx(1.0)
+
+
+def test_curvature_coupling_warns_about_order_zero_noise_without_rejecting():
+    with pytest.warns(
+        RuntimeWarning, match="Taylor order-zero noise amplification exceeds 3.0"
+    ):
+        diagnostics = check_spectral_sampling(
+            [1e9, 1.001e9, 1.2e9],
+            [1, 1, 1],
+            n_taylor_terms=3,
+            reference_frequency=1.1e9,
+        )
+    assert diagnostics["spectral_design_rank"] == 3
+    assert diagnostics["taylor_zero_noise_amplification"] > 3
 
 
 def test_hessian_preflight_records_distinct_diagnostic_without_mutation():
@@ -252,6 +319,10 @@ def test_hessian_preflight_records_distinct_diagnostic_without_mutation():
     )
     assert result["effective_scales"] == [0.0]
     assert result["taylor_hessian_condition_number"][0]["per_scale"][0] > 0
+    amplification = result["taylor_hessian_order_zero_noise_amplification"][0]
+    assert amplification["per_scale"] == pytest.approx([1.0])
+    assert amplification["limit"] == 3.0
+    assert amplification["covariance_assumption"] == "proportional_to_hessian"
     xr.testing.assert_identical(image, snapshot)
 
 
@@ -342,15 +413,85 @@ def test_frequency_lookup_matches_dense_comparison_without_changing_coordinates(
     assert not selected_frequency_mask(frequencies, []).any()
 
 
-def test_invertible_ill_conditioned_hessian_warns_and_records_metric():
+def test_small_uncoupled_taylor_moment_does_not_warn_about_order_zero():
     image = make_runaway_taylor_image()
     image.POINT_SPREAD_FUNCTION.values[:, 2] *= 4e-12
-    with pytest.warns(RuntimeWarning, match="Poorly conditioned Taylor Hessian"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         diagnostics = check_model_products(
             image, {"deconvolver": "mtmfs"}, mode=CONTINUUM_SINGLE_FIELD
         )
     condition = diagnostics["taylor_hessian_condition_number"][0]["per_scale"][0]
     assert condition == pytest.approx(1e12)
+    assert diagnostics["taylor_hessian_order_zero_noise_amplification"][0][
+        "per_scale"
+    ] == pytest.approx([1.0])
+    # This deliberately nonphysical divergence fixture has negative spatial
+    # transfer modes, which are independent of local order-zero conditioning.
+    assert all(
+        "Spatial Taylor-Hessian diagnostic" in str(item.message) for item in caught
+    )
+    assert (
+        diagnostics["taylor_hessian_spatial_blocks"][0]["non_positive_mode_count"] > 0
+    )
+
+
+@pytest.mark.parametrize("rho", [0.0, 0.9, 0.95, 0.99])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_hessian_order_zero_warning_tracks_coupling_on_every_scale(rho, dtype):
+    # H = a * [[1, rho], [rho, 1]] has G_H0 = 1 / sqrt(1 - rho**2),
+    # independently of the common scale-filter amplitude a.
+    image = make_runaway_taylor_image(dtype=dtype)
+    image.POINT_SPREAD_FUNCTION.values[...] = 0
+    image.POINT_SPREAD_FUNCTION.values[0, :, 0, 16, 16] = [1, rho, 1]
+    later = image.copy(deep=True).assign_coords(time=[1.0])
+    image = xr.concat([image, later], dim="time")
+    snapshot = image.copy(deep=True)
+    expected = 1 / np.sqrt(1 - rho**2)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        diagnostics = check_model_products(
+            image,
+            {"deconvolver": "mtmfs", "cycle_control_params": {"scales": [0.0, 2.0]}},
+            mode=CONTINUUM_SINGLE_FIELD,
+        )
+    warnings_about_noise = [
+        warning
+        for warning in caught
+        if "Taylor-Hessian order-zero noise amplification exceeds 3.0"
+        in str(warning.message)
+    ]
+    assert len(warnings_about_noise) == (2 if expected > 3 else 0)
+    spatial_warnings = [
+        item
+        for item in caught
+        if "Spatial Taylor-Hessian diagnostic" in str(item.message)
+    ]
+    assert len(spatial_warnings) == (2 if expected > 3 else 0)
+    assert len(caught) == len(warnings_about_noise) + len(spatial_warnings)
+    entries = diagnostics["taylor_hessian_order_zero_noise_amplification"]
+    assert [entry["time_index"] for entry in entries] == [0, 1]
+    for entry in entries:
+        assert entry["per_scale"] == pytest.approx([expected, expected], rel=5e-5)
+        assert entry["polarization_index"] == 0
+    xr.testing.assert_identical(image, snapshot)
+
+
+@pytest.mark.parametrize("factor", [1e-6, 1.0, 1e6])
+def test_hessian_order_zero_noise_is_invariant_to_taylor_and_flux_units(factor):
+    image = make_runaway_taylor_image()
+    # H = factor * D [[1, .9], [.9, 1]] D with D = diag(1, 1e-6).
+    # Both common flux scaling and higher-order coefficient units must cancel.
+    image.POINT_SPREAD_FUNCTION.values[...] = 0
+    image.POINT_SPREAD_FUNCTION.values[0, :, 0, 16, 16] = factor * np.array(
+        [1.0, 0.9e-6, 1e-12]
+    )
+    diagnostics = check_model_products(
+        image, {"deconvolver": "mtmfs"}, mode=CONTINUUM_SINGLE_FIELD
+    )
+    assert diagnostics["taylor_hessian_order_zero_noise_amplification"][0][
+        "per_scale"
+    ] == pytest.approx([1 / np.sqrt(1 - 0.9**2)])
 
 
 @pytest.mark.parametrize("reference", [np.float32(100.0), xr.DataArray(100.0)])
@@ -398,12 +539,18 @@ def test_narrow_band_hessian_is_checked_independently_of_taylor_units(nterms, dt
             }
         },
     )
-    with pytest.warns(RuntimeWarning, match="Poorly conditioned Taylor Hessian"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         diagnostics = check_model_products(
             image, {"deconvolver": "mtmfs"}, mode=CONTINUUM_SINGLE_FIELD
         )
     assert diagnostics["n_taylor_terms"] == nterms
     assert diagnostics["taylor_hessian_condition_number"][0]["per_scale"][0] > 1e11
+    expected = 1.0 if nterms == 2 else np.sqrt(1.5)
+    assert diagnostics["taylor_hessian_order_zero_noise_amplification"][0][
+        "per_scale"
+    ] == pytest.approx([expected])
+    assert not caught
 
 
 def test_spectral_sampling_accepts_xarray_scalar_without_changing_it():
