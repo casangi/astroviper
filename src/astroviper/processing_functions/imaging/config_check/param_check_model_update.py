@@ -49,6 +49,45 @@ def check_model_update(config, *, mode, require_complete=False):
     deconvolver = config.get("deconvolver")
     image_params = require_mapping("image_params", config.get("image_params", {}))
 
+    # --- PSF fitting implementation ---
+    # A misspelled fitter must fail before constructing its input PSF.
+    if "psf_fitting_method" in config and config["psf_fitting_method"] not in (
+        "astroviper",
+        "casa",
+    ):
+        raise ValueError("psf_fitting_method must be 'astroviper' or 'casa'.")
+
+    # --- Direct Gaussian-fitting controls ---
+    # These are helper arguments, not additional top-level imaging options.
+    for name, minimum in (("npix_window", 1), ("sampling", 2)):
+        if name not in config:
+            continue
+        values = np.asarray(config[name])
+        if values.shape != (2,) or values.dtype.kind not in "iu":
+            raise TypeError(f"{name} must contain two integer counts.")
+        if np.any(values < minimum):
+            message = (
+                "sampling must contain at least two points per axis"
+                if name == "sampling"
+                else "npix_window must be positive"
+            )
+            raise ValueError(message)
+        if name == "npix_window" and np.any(values % 2 == 0):
+            raise ValueError("npix_window must contain odd counts.")
+    if "cutoff" in config:
+        cutoff = require_finite_real("cutoff", config["cutoff"], scalar=True)
+        if cutoff < 0:
+            raise ValueError("cutoff must be non-negative.")
+
+    # --- Paired MVC helper arguments ---
+    # A PSF cube cannot supply its weights without its normalization product.
+    if (
+        config.get("psf_cube") is not None
+        and config.get("psf_normalization") is None
+        and "psf_normalization" in config
+    ):
+        raise ValueError("psf_normalization is required when psf_cube is supplied.")
+
     # --- Deconvolver selection ---
     # Each imaging kind has its own set of implemented algorithms.
     if mode.imaging_kind == "continuum":
@@ -128,6 +167,10 @@ def check_model_update(config, *, mode, require_complete=False):
             values = require_finite_real(name, controls[name])
             if (values < 0).any():
                 raise ValueError(f"{name} must be non-negative.")
+
+    # --- Per-plane control geometry ---
+    # Valid values with the wrong number of planes cannot drive the controller.
+    _check_control_shapes(controls, image_params, mode=mode)
 
     # --- Per-channel absolute thresholds ---
     # A two-dimensional cube threshold has one row per requested channel.
@@ -378,6 +421,47 @@ def check_model_update(config, *, mode, require_complete=False):
         require_finite_real(
             "entropy_max_snr", controls["entropy_max_snr"], positive=True, scalar=True
         )
+
+
+def _check_control_shapes(controls, image_params, *, mode):
+    """Check caller control arrays against the geometry known at this boundary."""
+    if "threshold" in controls:
+        shape = np.shape(controls["threshold"])
+        allowed_ranks = (0, 1, 2) if mode.imaging_kind == "cube" else (0, 1)
+        if len(shape) not in allowed_ranks:
+            raise ValueError(
+                "threshold must be scalar, one value per polarization, or a cube (frequency, polarization) array."
+            )
+        if (
+            len(shape) == 1
+            and "polarization_coords" in image_params
+            and shape[0] != len(image_params["polarization_coords"])
+        ):
+            raise ValueError(
+                "threshold must have one value per requested polarization."
+            )
+
+    # Per-cycle arrays use native (time, frequency, polarization) order.
+    # Continuum's Taylor stack has one effective frequency plane.
+    for name in ("max_iter_per_cycle_updated", "threshold_per_cycle", "max_iter"):
+        if name not in controls or np.ndim(controls[name]) == 0:
+            continue
+        shape = np.shape(controls[name])
+        if len(shape) != 3:
+            raise ValueError(
+                f"{name} must be scalar or have per-plane shape (time, frequency, polarization)."
+            )
+        for axis, dim in enumerate(("time", "frequency", "polarization")):
+            if dim == "frequency" and mode.imaging_kind == "continuum":
+                expected = 1
+            elif f"{dim}_coords" in image_params:
+                expected = len(image_params[f"{dim}_coords"])
+            else:
+                continue
+            if shape[axis] != expected:
+                raise ValueError(
+                    f"{name} {dim} extent {shape[axis]} does not match {expected}."
+                )
 
 
 def check_scales(scales, *, image_size=None):

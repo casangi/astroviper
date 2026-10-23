@@ -185,6 +185,30 @@ def check_driver_workflow(config, *, mode, require_complete=False):
                 "FITS output does not support image_chunking or image_sharding."
             )
 
+    # --- Output representation ---
+    # Check known coordinates, variable roles and codecs before creating files.
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_fits_coordinates,
+        check_kept_variables,
+        check_output_codec,
+        check_output_layout,
+    )
+
+    image_params = require_mapping("image_params", config.get("image_params", {}))
+    if output_format == "fits":
+        check_fits_coordinates(image_params)
+    check_kept_variables(config, fits=output_format == "fits")
+    check_output_layout(config)
+    check_output_codec(config)
+
+    # --- Measurement Set opening options ---
+    # These keys are owned by the reader; an override would be ineffective.
+    if config.get("msv2_open_options") is not None:
+        options = require_mapping("msv2_open_options", config["msv2_open_options"])
+        reserved = set(options) & {"array_backend", "scan_intents"}
+        if reserved:
+            raise ValueError(f"msv2_open_options may not set {sorted(reserved)}.")
+
     # --- Graph partition count ---
     # Frequency is the only implemented distributed imaging dimension.
     if config.get("n_mapping_parallelism") is not None:

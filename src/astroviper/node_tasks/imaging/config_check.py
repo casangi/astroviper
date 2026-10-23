@@ -34,6 +34,7 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
         selected_frequency_mask,
     )
     from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_input_metadata,
         check_spectral_sampling,
     )
     from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
@@ -97,6 +98,9 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
         indices = np.flatnonzero(selected)
         if not indices.size:
             continue
+        # Inspect role targets and dimensions before reading any weight blocks.
+        # Existing guards here and in the processing functions remain active.
+        check_input_metadata(source, config, mode=mode, measurement_set=ms_name)
         pol_selection = correlation_selection(
             source.polarization.values, correlation_coords, ms_name
         )

@@ -74,7 +74,7 @@ def test_append_supports_reference_frequency_and_explicit_controls(
         "image_params": {"n_taylor_terms": 3, "reference_frequency": 100.0},
         "single_precision_image": single_precision,
         "processing_function_threads": 2,
-        "fft_backend": "numpy",
+        "fft_backend": "scipy",
         "image_data_variables_keep": ["sky_model"],
         "image_data_group_in_name": "custom",
     }

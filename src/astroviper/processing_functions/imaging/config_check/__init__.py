@@ -1,7 +1,7 @@
 """Non-mutating imaging configuration checks shared by all three layers.
 
-Only a first subset of issue #319 is implemented. Runtime array/native checks
-remain independent of configuration validation and must never be bypassed.
+Configuration, input-metadata and planned-output checks precede execution.
+Runtime array/native checks remain independent and must never be bypassed.
 """
 
 from astroviper.processing_functions.imaging.config_check._common import (

@@ -414,6 +414,8 @@ def point_spread_function_gaussian_fit_continuum(
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         processing_function_threads=processing_function_threads,
+        # This wrapper exposes no fitting options and uses the fixed defaults.
+        input_checked=True,
     )
 
     return_df = pd.DataFrame(
@@ -506,6 +508,8 @@ def prepare_model_uv_continuum_single_field(
     fft_backend="pyfftw",
     image_data_group_in_name="model",
     image_data_group_out_name="model",
+    *,
+    input_checked: bool = False,
 ):
     """Prepare the Fourier-domain continuum model for the next imaging cycle.
 
@@ -575,6 +579,12 @@ def prepare_model_uv_continuum_single_field(
     image_data_group_out_name : str, optional
         Data group receiving the Fourier-domain model visibility grids.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     model_uv_xds : xarray.Dataset
@@ -589,6 +599,15 @@ def prepare_model_uv_continuum_single_field(
     reused by every distributed map task, substantially reducing the computational
     cost of continuum degridding.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import copy
 
     import numpy as np
@@ -847,6 +866,8 @@ def prepare_model_uv_mvc_single_field(
     fft_backend="pyfftw",
     image_data_group_in_name="model",
     image_data_group_out_name="model",
+    *,
+    input_checked: bool = False,
 ):
     """Construct a local MVC model UV cube in the channel-PB convention.
 
@@ -906,11 +927,25 @@ def prepare_model_uv_mvc_single_field(
     image_data_group_out_name : str, optional
         Output data-group name for the channelized model grid.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     xarray.Dataset
         Frequency-resolved apparent model and its Fourier-domain grid.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
     import copy
 
@@ -1099,6 +1134,7 @@ def make_mvc_taylor_normal_equation_contributions(
     n_taylor_terms,
     reference_frequency,
     primary_beam_limit=0.2,
+    input_checked: bool = False,
 ):
     """Form additive MVC Taylor products for one map-task frequency chunk.
 
@@ -1139,6 +1175,10 @@ def make_mvc_taylor_normal_equation_contributions(
         the effective beam, and the residual is zero where the effective beam
         is at or below it. Where fewer than ``n_taylor_terms`` channel beams exceed it,
         only Taylor term zero of the spectrum is fitted.
+
+    input_checked : bool, optional
+        Skip shared configuration checks after validation by an upper layer.
+        Existing data/product checks always run.
 
     Returns
     -------
@@ -1183,6 +1223,17 @@ def make_mvc_taylor_normal_equation_contributions(
     stage; :func:`finalize_mvc_taylor_normal_equations` solves for ``b`` in
     the append node.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_model_update,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        check_model_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import numpy as np
     import xarray as xr
 
@@ -2138,6 +2189,7 @@ def residual_update_continuum_single_field(
             n_taylor_terms=image_params.get("n_taylor_terms", 2),
             reference_frequency=image_params["reference_frequency"],
             primary_beam_limit=primary_beam_limit,
+            input_checked=True,
         )
         for variable_name, data_array in contributions.data_vars.items():
             img_xds[variable_name] = data_array

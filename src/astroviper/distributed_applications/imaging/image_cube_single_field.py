@@ -954,6 +954,13 @@ def image_cube_single_field(
         + str(len(parallel_coords["frequency"]["data_chunks"]))
     )
 
+    # Recheck the shared layout rules now that automatic task sizes are known.
+    # Retain the original driver/writer validation while the checks coexist.
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_output_layout,
+    )
+
+    check_output_layout(locals(), parallel_coords=parallel_coords)
     validate_image_chunking_and_sharding(
         image_chunking, image_sharding, dict(img_xds.sizes), parallel_coords
     )

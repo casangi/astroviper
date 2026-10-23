@@ -3354,6 +3354,18 @@ def image_continuum_single_field(
         for ms_name, ms_xdt in ps_xdt.items()
     }
 
+    # Beam inference needs only antenna metadata and must fail before the first
+    # output write or weight scan. Keep the original later resolver and guards.
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_continuum_beam_metadata,
+    )
+
+    check_continuum_beam_metadata(
+        image_params,
+        ps_xdt.xr_ps.get_combined_antenna_xds(),
+        continuum_mode=continuum_mode,
+    )
+
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()
     img_xds = make_empty_sky_image(

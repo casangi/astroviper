@@ -6,6 +6,7 @@ from astroviper.processing_functions.imaging.config_check._common import (
     imaging_weighting_scope,
     require_boolean,
     require_finite_real,
+    require_integer,
     require_mapping,
 )
 from astroviper.utils.param_docs import shares_param_docs
@@ -42,9 +43,36 @@ def check_residual_update(config, *, mode, require_complete=False):
     mode.require_supported()
     require_mapping("config", config)
 
+    # --- FFT implementation ---
+    # Fail before allocating grids if the requested transform is unavailable.
+    if "fft_backend" in config:
+        from importlib import import_module
+
+        backend = config["fft_backend"]
+        if backend not in ("scipy", "pyfftw"):
+            raise ValueError("fft_backend must be 'scipy' or 'pyfftw'.")
+        import_module(
+            "scipy.fft" if backend == "scipy" else "pyfftw.interfaces.scipy_fft"
+        )
+
+    # --- Implemented gridder ---
+    # The single-field nodes implement anti-alias gridding only; no fallback.
+    if "gridder" in config and config["gridder"] != "anti_alias":
+        raise ValueError("Single-field imaging supports only gridder='anti_alias'.")
+
     # --- Required image coordinates ---
     # Full application calls need every coordinate before any output is created.
     image_params = require_mapping("image_params", config.get("image_params", {}))
+    # Leaf gridders receive these same settings as separate keyword arguments.
+    # A local view lets them reuse this validator without rewriting their inputs.
+    image_params = {
+        **image_params,
+        **{
+            name: config[name]
+            for name in ("reference_frequency", "n_taylor_terms", "fft_padding")
+            if config.get(name) is not None
+        },
+    }
     if require_complete:
         for name in (
             "image_size",
@@ -75,6 +103,34 @@ def check_residual_update(config, *, mode, require_complete=False):
             positive=True,
             scalar=True,
         )
+
+    # --- Direct Taylor-grid counts ---
+    # Gridding helpers need positive counts even without a deconvolver choice.
+    for name in ("n_taylor_terms", "n_psf_taylor_terms"):
+        value = image_params.get(name, config.get(name))
+        if value is not None:
+            if (
+                np.ndim(value) == 0
+                and np.asarray(value).dtype.kind in "iu"
+                and value < 1
+            ):
+                raise ValueError(f"{name} must be positive.")
+            require_integer(name, value, minimum=1)
+
+    # --- Explicit helper precision ---
+    # Native complex grids have exactly these two supported storage types.
+    if config.get("complex_dtype") is not None:
+        if np.dtype(config["complex_dtype"]) not in (
+            np.dtype("complex64"),
+            np.dtype("complex128"),
+        ):
+            raise TypeError("complex_dtype must be complex64 or complex128.")
+
+    # --- Direct frequency-mapping policy ---
+    # Helpers expose this policy; imaging drivers keep their existing choice.
+    for name in ("matching", "frequency_matching"):
+        if name in config and config[name] not in ("nearest", "exact"):
+            raise ValueError(f"{name} must be 'nearest' or 'exact'.")
 
     # --- Continuum construction ---
     # Continuum residuals can be formed by either the MFS or MVC path.
@@ -115,6 +171,11 @@ def check_residual_update(config, *, mode, require_complete=False):
             raise ValueError(
                 "image_size must contain two positive integer pixel counts."
             )
+        # PSF fitting reads a coordinate increment; MT-MFS needs two pixels too.
+        if np.any(size < 2):
+            raise ValueError(
+                "Single-field imaging/PSF fitting needs at least 2 pixels per spatial axis."
+            )
     # --- Angular cell size ---
     # Signed cells are allowed; both angular increments must be nonzero.
     if "cell_size" in image_params:
@@ -150,6 +211,13 @@ def check_residual_update(config, *, mode, require_complete=False):
         time_coords = require_finite_real("time_coords", image_params["time_coords"])
         if time_coords.ndim != 1:
             raise ValueError("time_coords must be one-dimensional.")
+        # The current MVC gridder accumulates all integrations into one plane.
+        if (
+            mode.imaging_kind == "continuum"
+            and config.get("continuum_mode") == "mvc"
+            and time_coords.size != 1
+        ):
+            raise ValueError("Single-field MVC requires exactly one image time plane.")
 
     # --- Requested Stokes planes ---
     # Validate supported feed/Stokes combinations when this boundary knows the feeds.
@@ -163,6 +231,30 @@ def check_residual_update(config, *, mode, require_complete=False):
 
         correlations_for_stokes(
             image_params["polarization_coords"], config["instrument_polarization_basis"]
+        )
+
+    # --- Primary-beam prescription ---
+    # Explicit choices and physical apertures are known without a PSF.
+    from astroviper.processing_functions.imaging.config_check._primary_beam import (
+        check_continuum_primary_beam,
+        check_cube_primary_beam,
+    )
+
+    if mode.imaging_kind == "continuum":
+        check_continuum_primary_beam(image_params)
+    elif "primary_beam_params" in config:
+        check_cube_primary_beam(config["primary_beam_params"])
+
+    # --- Kernel design ---
+    # Validate schema, padding and cached image-edge correction before gridding.
+    if "gridding_kernel_params" in config:
+        from astroviper.processing_functions.imaging.config_check._gridding import (
+            check_gridding_kernel,
+        )
+
+        check_gridding_kernel(
+            config["gridding_kernel_params"],
+            fft_padding=image_params.get("fft_padding"),
         )
 
     # --- Weighting method ---
@@ -224,6 +316,139 @@ def check_residual_update(config, *, mode, require_complete=False):
         require_boolean(
             "casa_weighting_implementation", weights["casa_weighting_implementation"]
         )
+
+
+def check_input_metadata(source, config, *, mode, measurement_set="input"):
+    """Check selected source structure without loading visibility samples.
+
+    Parameters
+    ----------
+    source : xarray.Dataset
+        Lazy Measurement Set dataset. Only coordinates, dimensions and dtypes
+        are inspected; visibility, flag, weight and UVW values are not read.
+    config : mapping
+        Image coordinates, input data-group name and continuum mode.
+    mode : ImagingMode
+        Explicit imaging kind and field layout.
+    measurement_set : str
+        Dataset name included in failures.
+    """
+    mode.require_supported()
+    group_name = config.get("processing_set_data_group_name", "corrected")
+    group = source.attrs.get("data_groups", {}).get(group_name)
+
+    # --- Role targets ---
+    # A registered role is insufficient if its variable is absent on disk.
+    if group is None:
+        raise KeyError(f"{measurement_set}: data group {group_name!r} is missing.")
+    for role in ("correlated_data", "weight", "flag", "uvw"):
+        if role not in group or group[role] not in source:
+            raise KeyError(
+                f"{measurement_set}: data group {group_name!r} lacks {role!r} or its variable."
+            )
+
+    # --- Sample axes ---
+    # These shapes are metadata, so mismatches need no visibility I/O to find.
+    sample_dims = ("time", "baseline_id", "frequency", "polarization")
+    reference = source[group["correlated_data"]]
+    for role in ("correlated_data", "weight", "flag"):
+        array = source[group[role]]
+        if set(array.dims) != set(sample_dims) or array.ndim != 4:
+            raise ValueError(
+                f"{measurement_set}: {role} must have dimensions {sample_dims}."
+            )
+        if dict(array.sizes) != dict(reference.sizes):
+            raise ValueError(
+                f"{measurement_set}: {role} shape differs from correlated_data."
+            )
+    uvw = source[group["uvw"]]
+    if uvw.dims != ("time", "baseline_id", "uvw_label") or uvw.sizes["uvw_label"] != 3:
+        raise ValueError(
+            f"{measurement_set}: uvw must have dimensions (time, baseline_id, uvw_label) with three components."
+        )
+    for dim in ("time", "baseline_id"):
+        if uvw.sizes[dim] != reference.sizes[dim]:
+            raise ValueError(
+                f"{measurement_set}: uvw {dim} extent differs from correlated_data."
+            )
+
+    # --- Numerical storage ---
+    # Inspect dtypes only; finite-value checks still run on selected blocks.
+    for role, kinds in (
+        ("correlated_data", "c"),
+        ("weight", "iuf"),
+        ("flag", "biu"),
+        ("uvw", "iuf"),
+    ):
+        if source[group[role]].dtype.kind not in kinds:
+            raise TypeError(
+                f"{measurement_set}: unsupported {role} dtype {source[group[role]].dtype}."
+            )
+    for dim in ("frequency", "polarization"):
+        if dim not in source.coords or source[dim].dims != (dim,):
+            raise ValueError(
+                f"{measurement_set}: {dim} must be a one-dimensional coordinate."
+            )
+
+    # --- Channel assignment ---
+    # Use the production nearest-channel rule, preserving averaging/shifted axes.
+    image = config.get("image_params", {})
+    if "frequency_coords" in image and (
+        mode.imaging_kind == "cube" or config.get("continuum_mode") == "mvc"
+    ):
+        from astroviper.processing_functions.imaging.config_check._common import (
+            selected_frequency_mask,
+        )
+        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            map_visibility_frequencies_to_image,
+        )
+
+        frequencies = np.asarray(source.frequency.values)
+        selected = selected_frequency_mask(frequencies, image["frequency_coords"])
+        if np.any(selected):
+            map_visibility_frequencies_to_image(
+                frequencies[selected], image["frequency_coords"]
+            )
+
+
+def check_continuum_beam_metadata(image_params, antenna_xds, *, continuum_mode):
+    """Check inferred continuum apertures before output creation.
+
+    Parameters
+    ----------
+    image_params : mapping
+        Unchanged caller configuration, including optional explicit apertures.
+    antenna_xds : xarray.Dataset
+        Small combined antenna metadata dataset.
+    continuum_mode : {"mfs", "mvc"}
+        Beam-selection context, shared by all frequency tasks.
+    """
+    from astroviper.processing_functions.imaging.config_check._primary_beam import (
+        check_continuum_primary_beam,
+    )
+    from astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam import (
+        resolve_continuum_primary_beam,
+    )
+
+    # --- Physical antenna metadata ---
+    # A missing/mixed aperture cannot be inferred from a single common dish.
+    if (
+        image_params.get("list_dish_diameters") is None
+        and "ANTENNA_DISH_DIAMETER" in antenna_xds
+    ):
+        require_finite_real(
+            "ANTENNA_DISH_DIAMETER",
+            antenna_xds.ANTENNA_DISH_DIAMETER.values,
+            positive=True,
+        )
+
+    # --- Inferred prescription ---
+    # The existing resolver checks common diameters and ALMA aperture support.
+    # It returns a copy; validate that copy without changing the caller config.
+    resolved = resolve_continuum_primary_beam(
+        image_params, antenna_xds, continuum_mode=continuum_mode
+    )
+    check_continuum_primary_beam(resolved)
 
 
 def check_spectral_sampling(

@@ -20,6 +20,8 @@ def add_visibility_grid_mvc_single_field(
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
     complex_dtype=None,
+    *,
+    input_checked: bool = False,
 ) -> None:
     """Grid visibilities into a frequency-resolved MVC UV cube.
 
@@ -80,6 +82,10 @@ def add_visibility_grid_mvc_single_field(
         Complex dtype used for the visibility grid. Defaults to
         ``numpy.complex128``.
 
+    input_checked : bool, optional
+        Skip shared configuration checks after validation by an upper layer.
+        Existing data/product checks always run.
+
     Returns
     -------
     None
@@ -95,6 +101,24 @@ def add_visibility_grid_mvc_single_field(
     3. reduce those contributions and normalize the global Taylor products.
 
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(
+            {
+                **locals(),
+                "continuum_mode": "mvc",
+                "image_params": {"time_coords": img_xds.time.values}
+                if "time" in img_xds.coords
+                else {},
+            },
+            mode=CONTINUUM_SINGLE_FIELD,
+        )
+
     from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
         anti_alias_grid,
     )

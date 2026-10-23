@@ -17,6 +17,8 @@ def make_undeconvolved_image_continuum_single_field(
     image_data_group_out_name="residual",
     processing_function_threads=1,
     complex_dtype=None,
+    *,
+    input_checked: bool = False,
 ):
     """Grid residual visibilities into MT-MFS residual Taylor uv grids.
 
@@ -74,6 +76,12 @@ def make_undeconvolved_image_continuum_single_field(
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the residual UV grids.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -81,6 +89,15 @@ def make_undeconvolved_image_continuum_single_field(
     return_df : pandas.DataFrame
         One-row timing dataframe for filtering and visibility gridding.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import numpy as np
     import pandas as pd
 
@@ -137,6 +154,7 @@ def make_undeconvolved_image_continuum_single_field(
             fft_padding=image_params["fft_padding"],
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
         T_vis_grid += time.time() - start
 

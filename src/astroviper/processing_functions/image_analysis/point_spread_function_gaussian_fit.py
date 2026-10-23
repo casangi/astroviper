@@ -29,6 +29,8 @@ def point_spread_function_gaussian_fit(
     interpolation_method: str = "splinef2d",
     processing_function_threads: int = 1,
     fitting_method: str = "astroviper",
+    *,
+    input_checked: bool = False,
 ):
     """
     fit 2D gaussian to psf
@@ -79,6 +81,10 @@ def point_spread_function_gaussian_fit(
         ``tclean``'s restoring beam), with ``cutoff`` as CASA ``psfcutoff``.
         The maximum-sidelobe computation is identical for both.
 
+    input_checked : bool, optional
+        Skip shared configuration checks when an upper layer already ran them.
+        The original fitter and product guards still execute.
+
     Returns
     -------
     xds : xarray.Dataset
@@ -107,6 +113,16 @@ def point_spread_function_gaussian_fit(
     - The maximum sidelobe level is a fraction of the PSF peak (dimensionless);
       it is ``0.0`` for an all-zero slice.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(
+            {**locals(), "psf_fitting_method": fitting_method}, mode=CUBE_SINGLE_FIELD
+        )
+
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
             "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",

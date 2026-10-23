@@ -480,7 +480,7 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda image, input_params: (xr.Dataset(), None),
+        lambda image, input_params, *, input_checked: (xr.Dataset(), None),
     )
     result = continuum_node.continuum_cycle_append_node(
         {
@@ -528,7 +528,7 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda image, input_params: (xr.Dataset(), None),
+        lambda image, input_params, *, input_checked: (xr.Dataset(), None),
     )
 
     continuum_node.continuum_cycle_append_node(

@@ -42,3 +42,24 @@ pre-commit install          # installs ruff + nbstripout git hooks
   ```
   `scikit-build-core` caches in `build/{wheel_tag}/`; if a build behaves oddly,
   delete `build/` and reinstall. The -e creates an editable Python installation.
+
+## Imaging input validation
+
+The cube and continuum workflows share three independent configuration checks
+in `processing_functions/imaging/config_check`: residual settings, model-update
+settings, and driver/output settings. They reject invalid explicit choices,
+physical beam parameters, kernel recipes, control-array shapes, and unsupported
+output representations before execution, without modifying caller parameters.
+FITS output requires uniformly spaced channel centres; use Zarr for irregular
+frequency axes.
+
+Input metadata and generated task boundaries are checked before output writes
+or graph execution when they become available. Continuum beam inference needs
+only antenna metadata and now runs before the first output write. Kernel-design
+preflight reuses the production kernel cache. Direct entry points use
+`input_checked=False`; validated callers pass `True` through the stack. Existing
+lower-level checks remain active, including actual-product and native-buffer
+guards. Both multifield modes remain explicitly unsupported.
+
+See [the configuration-check tutorial](docs/processing_functions_tutorials/imaging/demo_config_check.ipynb)
+for valid and invalid examples.

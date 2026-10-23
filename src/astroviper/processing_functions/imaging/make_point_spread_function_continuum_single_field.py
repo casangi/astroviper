@@ -78,6 +78,7 @@ def add_uv_sampling_grid_continuum_single_field(
     gcf_support: int = 7,
     gcf_oversampling: int = 100,
     complex_dtype=None,
+    input_checked: bool = False,
 ) -> None:
     """Accumulate Taylor-weighted UV-sampling grids for one measurement set.
 
@@ -134,6 +135,15 @@ def add_uv_sampling_grid_continuum_single_field(
     common normalization and avoids dividing odd Taylor orders by a signed sum
     that may be nearly zero.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
             "uv_sampling": "UV_SAMPLING",

@@ -285,6 +285,7 @@ def residual_cycle_continuum_single_field(
                 fft_backend=fft_backend,
                 image_data_group_in_name=image_data_group_in_name,
                 image_data_group_out_name=image_data_group_in_name,
+                input_checked=True,
             )
 
             make_visibility_model_single_field(
@@ -343,6 +344,7 @@ def residual_cycle_continuum_single_field(
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
 
     elif continuum_mode == "mvc":
@@ -362,6 +364,7 @@ def residual_cycle_continuum_single_field(
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
 
         if not is_first_cycle and visibility_memory_mode != "recompute":

@@ -157,10 +157,13 @@ def imaging_setup_single_field(
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
             CUBE_SINGLE_FIELD,
+            check_model_update,
             check_residual_update,
         )
 
         check_residual_update(locals(), mode=CUBE_SINGLE_FIELD)
+        # Setup also selects the Gaussian fitter used by model restoration.
+        check_model_update(locals(), mode=CUBE_SINGLE_FIELD)
 
     import numpy as np
     import toolviper.utils.logger as logger
@@ -270,6 +273,7 @@ def imaging_setup_single_field(
         overwrite=True,
         processing_function_threads=processing_function_threads,
         fitting_method=psf_fitting_method,
+        input_checked=True,
     )
     T_psf_fit = time.time() - start
 

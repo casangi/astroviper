@@ -2815,7 +2815,9 @@ def _prepare_continuum_image(
     return img_xds, static_xds, psf_fit_return_df
 
 
-def _prepare_post_update_continuum_model_state(model_increment_xds, input_params):
+def _prepare_post_update_continuum_model_state(
+    model_increment_xds, input_params, *, input_checked=False
+):
     """Accumulate the model and prepare MFS Fourier state inside the append node.
 
     The distributed application supplies the previous image-domain model as
@@ -2829,6 +2831,8 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
         Image dataset produced by the current model-update cycle.
     input_params : dict
         Append-node configuration. Later cycles must provide ``model_xds``.
+    input_checked : bool, optional
+        Pass the append node's checked configuration to Fourier preparation.
 
     Returns
     -------
@@ -2874,6 +2878,7 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
                 1,
             ),
             fft_backend=input_params.get("fft_backend", "pyfftw"),
+            input_checked=input_checked or input_params.get("input_checked", False),
         )
     elif continuum_mode == "mvc":
         model_uv_xds = None
@@ -3187,6 +3192,7 @@ def continuum_cycle_append_node(
         model_xds, model_uv_xds = _prepare_post_update_continuum_model_state(
             return_dict["image"],
             input_params,
+            input_checked=True,
         )
     T_prepare_model_state = time.time() - start
 

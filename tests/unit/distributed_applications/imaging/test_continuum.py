@@ -822,6 +822,36 @@ def _run_tw_hydra_continuum(
     return result, xr.open_zarr(output_store)
 
 
+def test_beam_metadata_rejection_precedes_weight_scan_and_output(
+    tmp_path, tw_hydra_store, monkeypatch
+):
+    """An unsupported inferred aperture must fail before expensive preflight."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    unsupported_antenna = xr.Dataset(
+        {"ANTENNA_DISH_DIAMETER": ("antenna_name", [15.0])},
+        attrs={"overall_telescope_name": "ALMA"},
+    )
+    monkeypatch.setattr(
+        type(processing_set.xr_ps),
+        "get_combined_antenna_xds",
+        lambda self: unsupported_antenna,
+    )
+
+    def unexpected_weight_scan(*args, **kwargs):
+        raise AssertionError("Weight preflight ran before the beam metadata check")
+
+    monkeypatch.setattr(
+        "astroviper.node_tasks.imaging.config_check.preflight_imaging_inputs",
+        unexpected_weight_scan,
+    )
+    output = tmp_path / "unsupported_beam.img.zarr"
+    with pytest.raises(ValueError, match="12-m or 7-m"):
+        _run_tw_hydra_continuum(
+            tw_hydra_store, output, processing_set, 1, "mfs", {"weighting": "natural"}
+        )
+    assert not output.exists()
+
+
 def test_tw_hydra_default_output_keeps_nonzero_model(tmp_path, tw_hydra_store):
     """A default deconvolution run persists its accumulated sky model."""
     processing_set = open_processing_set(str(tw_hydra_store))

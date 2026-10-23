@@ -9,6 +9,9 @@ from astroviper.processing_functions.imaging.config_check import (
     CONTINUUM_SINGLE_FIELD,
     CUBE_SINGLE_FIELD,
 )
+from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+    check_input_metadata,
+)
 
 
 def inputs():
@@ -16,6 +19,7 @@ def inputs():
     shape = (2, 1, 2, 2)
     dataset = xr.Dataset(
         {
+            "VISIBILITY": (dims, np.zeros(shape, dtype=np.complex128)),
             "WEIGHT": (dims, np.ones(shape, dtype=np.float64)),
             "FLAG": (dims, np.zeros(shape, dtype=bool)),
             "UVW": (
@@ -31,7 +35,14 @@ def inputs():
             "uvw_label": ["u", "v", "w"],
         },
         attrs={
-            "data_groups": {"base": {"weight": "WEIGHT", "flag": "FLAG", "uvw": "UVW"}},
+            "data_groups": {
+                "base": {
+                    "correlated_data": "VISIBILITY",
+                    "weight": "WEIGHT",
+                    "flag": "FLAG",
+                    "uvw": "UVW",
+                }
+            },
             "partition_info": {
                 "field_name": ["target"],
                 "spectral_window_name": "spw0",
@@ -54,6 +65,45 @@ def inputs():
         "imaging_weights_params": {"weighting": "natural"},
     }
     return {"ms": dataset}, config
+
+
+@pytest.mark.parametrize("role", ["correlated_data", "weight", "flag", "uvw"])
+def test_role_targets_are_checked_from_metadata(role):
+    processing_set, config = inputs()
+    source = processing_set["ms"]
+    source.attrs["data_groups"]["base"][role] = "MISSING_VARIABLE"
+    with pytest.raises(KeyError, match=role):
+        check_input_metadata(source, config, mode=CUBE_SINGLE_FIELD)
+
+
+@pytest.mark.parametrize("variable", ["VISIBILITY", "WEIGHT", "FLAG", "UVW"])
+def test_input_axes_are_checked_before_array_reads(variable):
+    processing_set, config = inputs()
+    source = processing_set["ms"]
+    source[variable] = source[variable].rename({"time": "wrong_time"})
+    with pytest.raises(ValueError, match="dimensions"):
+        check_input_metadata(source, config, mode=CUBE_SINGLE_FIELD)
+
+
+def test_structure_preflight_does_not_load_visibility_or_weight_arrays():
+    import dask.array as da
+    from dask import delayed
+
+    processing_set, config = inputs()
+    source = processing_set["ms"]
+
+    def forbidden_read():
+        raise AssertionError("Metadata check loaded a sample array")
+
+    for name in ("VISIBILITY", "WEIGHT", "FLAG", "UVW"):
+        variable = source[name]
+        source[name] = xr.DataArray(
+            da.from_delayed(
+                delayed(forbidden_read)(), shape=variable.shape, dtype=variable.dtype
+            ),
+            dims=variable.dims,
+        )
+    check_input_metadata(source, config, mode=CUBE_SINGLE_FIELD)
 
 
 @pytest.mark.parametrize(
