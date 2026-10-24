@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import copy
+from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
 
+if TYPE_CHECKING:
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        GriddingKernel,
+    )
+
 
 def add_visibility_grid_mvc_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: np.ndarray,
+    cgk_1D: GriddingKernel | np.ndarray,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -46,8 +52,12 @@ def add_visibility_grid_mvc_single_field(
         coordinates, imaging weights, and a one-dimensional frequency
         coordinate.
 
-    cgk_1D : numpy.ndarray
-        One-dimensional prolate-spheroidal gridding convolution kernel.
+    cgk_1D : GriddingKernel or numpy.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
+        whose table, support and oversampling go to the C++
+        ``anti_alias_grid`` kernel), or the bare table of the default
+        prolate spheroidal kernel of support 7.
 
     img_xds : xarray.Dataset
         Image dataset receiving the frequency-resolved MVC UV grids. Its
@@ -97,6 +107,9 @@ def add_visibility_grid_mvc_single_field(
     """
     from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
         anti_alias_grid,
+    )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        as_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -442,6 +455,7 @@ def add_visibility_grid_mvc_single_field(
     grid = img_xds[visibility_name].values
     normalization = img_xds[normalization_name].values
 
+    kernel = as_gridding_kernel(cgk_1D)
     anti_alias_grid(
         grid,
         normalization,
@@ -452,11 +466,12 @@ def add_visibility_grid_mvc_single_field(
         time_map,
         pol_map,
         weight_imaging,
-        cgk_1D,
+        kernel.table,
         n_uv,
         delta_lm,
-        support=7,
-        oversampling=100,
+        support=kernel.support,
+        oversampling=kernel.oversampling,
+        interpolation=kernel.interpolation_code,
         processing_function_threads=(processing_function_threads),
     )
 

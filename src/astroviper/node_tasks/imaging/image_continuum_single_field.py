@@ -678,6 +678,7 @@ def _resolve_continuum_append_configuration(input_params):
             "image_data_group_in_name",
             "residual",
         ),
+        "gridding_kernel_params": input_params.get("gridding_kernel_params"),
     }
 
 
@@ -1080,6 +1081,7 @@ def residual_update_continuum_single_field(
     weight_cache_is_active=False,
     primary_beam_xds=None,
     observed_visibility_grid_xds=None,
+    gridding_kernel_params=None,
 ):
     """Compute one frequency chunk's continuum products in memory.
 
@@ -1276,6 +1278,35 @@ def residual_update_continuum_single_field(
     task_time_kill_switch_seconds : float, optional
         Abort the distributed calculation if this task exceeds the specified wall
         time.
+
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
 
     Returns
     -------
@@ -1581,6 +1612,7 @@ def residual_update_continuum_single_field(
         continuum_mode=continuum_mode,
         task_id=task_id,
         primary_beam_limit=primary_beam_limit,
+        gridding_kernel_params=gridding_kernel_params,
     )
 
     # Retain the task-local frequency-dependent PB for MVC
@@ -2419,6 +2451,9 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         ifft_norm_img_xds,
     )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
+    )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         finalize_mvc_taylor_normal_equations,
         point_spread_function_gaussian_fit_continuum,
@@ -2449,6 +2484,9 @@ def _prepare_continuum_image(
     residual_output_name = "SKY_RESIDUAL"
 
     if continuum_mode == "mfs":
+        gridding_kernel = make_gridding_kernel(
+            config["gridding_kernel_params"], image_params["fft_padding"]
+        )
         img_xds = ifft_norm_img_xds(
             img_xds,
             image_params=image_params,
@@ -2461,6 +2499,7 @@ def _prepare_continuum_image(
             processing_function_threads=config["processing_function_threads"],
             fft_backend=config["fft_backend"],
             complex_dtype=config["complex_dtype"],
+            gridding_kernel=gridding_kernel,
         )
 
     if continuum_mode == "mfs" and residual_output_name not in img_xds:
@@ -2608,6 +2647,7 @@ def _prepare_continuum_image(
                 processing_function_threads=config["processing_function_threads"],
                 fft_backend=config["fft_backend"],
                 complex_dtype=config["complex_dtype"],
+                gridding_kernel=gridding_kernel,
             )
 
         # register name of data group
@@ -2866,6 +2906,7 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
                 1,
             ),
             fft_backend=input_params.get("fft_backend", "pyfftw"),
+            gridding_kernel_params=input_params.get("gridding_kernel_params"),
         )
     elif continuum_mode == "mvc":
         model_uv_xds = None

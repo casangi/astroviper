@@ -22,6 +22,7 @@ def residual_cycle_continuum_single_field(
     image_data_group_in_name="model",
     image_data_group_out_name="residual",
     last_residual_cycle=False,
+    gridding_kernel_params=None,
 ):
     """Grid residual products for one continuum visibility partition.
 
@@ -124,6 +125,34 @@ def residual_cycle_continuum_single_field(
     last_residual_cycle : bool, optional
         Indicates whether this is the final residual calculation after the last
         model update.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
 
     Returns
     -------
@@ -139,8 +168,8 @@ def residual_cycle_continuum_single_field(
     import numpy as np
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         prepare_model_uv_mvc_single_field,
@@ -181,7 +210,7 @@ def residual_cycle_continuum_single_field(
     ps_data_group_name = processing_set_data_group_name
 
     start = time.time()
-    cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
+    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
     T_gcf = time.time() - start
 
     T_degrid = 0.0
@@ -270,6 +299,7 @@ def residual_cycle_continuum_single_field(
                 fft_backend=fft_backend,
                 image_data_group_in_name=image_data_group_in_name,
                 image_data_group_out_name=image_data_group_in_name,
+                gridding_kernel_params=gridding_kernel_params,
             )
 
             make_visibility_model_single_field(
@@ -441,8 +471,10 @@ def make_visibility_model_continuum_single_field(
         Globally prepared Fourier-domain Taylor model. The selected image data
         group must register a visibility variable containing the Taylor
         coefficients.
-    cgk_1D : numpy.ndarray
-        One-dimensional prolate-spheroidal convolution kernel.
+    cgk_1D : GriddingKernel or numpy.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
+        or the bare table of the default prolate spheroidal kernel of support 7.
     n_taylor_terms : int
         Number of Taylor terms to reconstruct.
     reference_frequency : float

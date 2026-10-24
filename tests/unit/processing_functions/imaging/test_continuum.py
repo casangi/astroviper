@@ -17,6 +17,9 @@ from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc i
 from astroviper.processing_functions.imaging.degrid_visibility_grid import (
     degrid_visibility_grid_single_field,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    make_gridding_kernel,
+)
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     _convert_mvc_cubes_to_taylor_normal_equations,
     accumulate_continuum_model,
@@ -93,7 +96,7 @@ def test_psf_taylor_gridding_uses_output_views_and_reuses_order_zero_weights(
 
     add_uv_sampling_grid_continuum_single_field(
         measurement_set,
-        np.ones(1),
+        np.ones(400),  # support-7 half kernel table, oversampling 100
         image,
         n_psf_taylor_terms=3,
         reference_frequency=100.0,
@@ -1010,8 +1013,14 @@ def _taylor_model(value=1.0):
     )
 
 
-def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch):
-    """MFS prediction preparation validates and registers its Taylor UV model."""
+@pytest.mark.parametrize(
+    "gridding_kernel_params", [None, {"type": "exponential_semicircle", "support": 9}]
+)
+def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(
+    monkeypatch, gridding_kernel_params
+):
+    """MFS prediction preparation validates and registers its Taylor UV model,
+    and corrects the model by the kernel of gridding_kernel_params."""
     model = _taylor_model(0.0)
     model.SKY_MODEL.loc[{"taylor_term": 0}] = 2.0
     model.SKY_MODEL.loc[{"taylor_term": 1}] = 3.0
@@ -1038,10 +1047,14 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
     )
     result = prepare_model_uv_continuum_single_field(
         model,
-        {"n_taylor_terms": 2},
+        {"n_taylor_terms": 2, "fft_padding": 1.2},
         instrument_polarization_basis="linear",
         image_data_group_in_name="model",
         image_data_group_out_name="model_uv",
+        gridding_kernel_params=gridding_kernel_params,
+    )
+    assert fft_options["gridding_kernel"] is make_gridding_kernel(
+        gridding_kernel_params, 1.2
     )
     assert result.VISIBILITY_MODEL.sizes["taylor_term"] == 2
     assert result.VISIBILITY_MODEL.attrs["n_taylor_terms"] == 2
@@ -1056,8 +1069,14 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
     )
 
 
-def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch):
-    """MVC preparation is repeatable and does not rewrite the caller's group."""
+@pytest.mark.parametrize(
+    "gridding_kernel_params", [None, {"type": "least_misfit", "oversampling": 20}]
+)
+def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(
+    monkeypatch, gridding_kernel_params
+):
+    """MVC preparation is repeatable, does not rewrite the caller's group and
+    corrects the model by the kernel of gridding_kernel_params."""
     model = _taylor_model(0.0)
     model.SKY_MODEL.loc[{"taylor_term": 0}] = 2.0
     model.SKY_MODEL.loc[{"taylor_term": 1}] = 3.0
@@ -1097,21 +1116,31 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         "fft_norm_img_xds",
         fake_fft,
     )
+    image_params = {
+        "n_taylor_terms": 2,
+        "reference_frequency": 1.0e9,
+        "fft_padding": 1.2,
+    }
     result = prepare_model_uv_mvc_single_field(
         model,
         channel_pb,
         [0.9e9, 1.1e9],
-        {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
+        image_params,
         image_data_group_in_name="model",
         image_data_group_out_name="model_uv",
+        gridding_kernel_params=gridding_kernel_params,
+    )
+    assert fft_options["gridding_kernel"] is make_gridding_kernel(
+        gridding_kernel_params, 1.2
     )
     repeated = prepare_model_uv_mvc_single_field(
         model,
         channel_pb,
         [0.9e9, 1.1e9],
-        {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
+        image_params,
         image_data_group_in_name="model",
         image_data_group_out_name="model_uv",
+        gridding_kernel_params=gridding_kernel_params,
     )
     assert model.attrs["data_groups"]["model"] == {"sky": "SKY_MODEL"}
     assert result.attrs["data_groups"] is not model.attrs["data_groups"]
@@ -1157,18 +1186,28 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
             "data_groups": {"residual": {"primary_beam": "PRIMARY_BEAM"}},
         },
     )
+    kernel_params = {"type": "prolate_spheroidal", "support": 9, "oversampling": 300}
+    received = {"setup": [], "cycle": [], "ifft": []}
+
+    def fake_setup(*args, **kwargs):
+        received["setup"].append(kwargs["gridding_kernel_params"])
+        return args[1], pd.DataFrame({"T_setup": [1.0]}), 1.0
+
+    def fake_cycle(*args, **kwargs):
+        received["cycle"].append(kwargs["gridding_kernel_params"])
+        return args[1], pd.DataFrame({"T_grid": [1.0]})
+
     monkeypatch.setattr(
-        module,
-        "imaging_preparation_continuum_single_field",
-        lambda *args, **kwargs: (args[1], pd.DataFrame({"T_setup": [1.0]}), 1.0),
+        module, "imaging_preparation_continuum_single_field", fake_setup
     )
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.residual_cycle_continuum_single_field."
         "residual_cycle_continuum_single_field",
-        lambda *args, **kwargs: (args[1], pd.DataFrame({"T_grid": [1.0]})),
+        fake_cycle,
     )
 
     def fake_ifft(dataset, image_data_group_out_modified, **kwargs):
+        received["ifft"].append(kwargs["gridding_kernel"])
         name = next(iter(image_data_group_out_modified.values()))
         dataset[name] = xr.DataArray([0.0], dims=("frequency",))
         return dataset
@@ -1191,12 +1230,16 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
     result, timing = residual_update_continuum_single_field(
         {},
         image,
-        {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
+        {"n_taylor_terms": 2, "reference_frequency": 1.0e9, "fft_padding": 1.2},
         {},
         continuum_mode=continuum_mode,
         is_first_cycle=True,
+        gridding_kernel_params=kernel_params,
     )
     assert timing.iloc[0].n_taylor_terms == 2
+    assert received["setup"] == received["cycle"] == [kernel_params]
+    kernel = make_gridding_kernel(kernel_params, 1.2)
+    assert received["ifft"] == ([kernel, kernel] if continuum_mode == "mvc" else [])
     if continuum_mode == "mvc":
         assert "SKY_RESIDUAL_MVC_CUBE" in result
         assert "POINT_SPREAD_FUNCTION_MVC_CUBE" in result
@@ -1224,12 +1267,6 @@ def test_residual_cycle_times_prediction_stages_once(
         "fft_padding": 1.2,
     }
 
-    monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridding_convolution_functions."
-        "gcf_prolate_spheroidal."
-        "create_prolate_spheroidal_kernel_1D",
-        lambda *args: np.ones(1),
-    )
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.residual_cycle_continuum_single_field."
         "make_visibility_model_continuum_single_field",

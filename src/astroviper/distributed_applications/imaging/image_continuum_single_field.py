@@ -2760,6 +2760,7 @@ def image_continuum_single_field(
     disk_chunk_sizes: dict[str, int] | str | None = None,
     fft_backend: str = "pyfftw",
     restore: bool = False,
+    gridding_kernel_params: dict[str, Any] | None = None,
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -3193,9 +3194,39 @@ def image_continuum_single_field(
         for a plane the entropy or divergence stop has ended), where
         ``max_iter_remaining`` is what is left of ``max_iter``.
     gridder : str, optional
-        Currently ``"anti_alias"``, with the fixed prolate spheroidal kernel of
-        support 7 and oversampling 100. MFS and MVC dispatch visibility, PSF,
-        and prediction work to the shared C++ grid/degrid kernels.
+        Currently ``"anti_alias"``: convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``prolate_spheroidal_casa`` kernel of support 7 and oversampling 100).
+        MFS and MVC dispatch visibility, PSF, and prediction work to the shared
+        C++ grid/degrid kernels.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
     clean_mask : str or None, optional
         Path to a NumPy ``.npy`` file containing one two-dimensional CLEAN mask.
         Its shape must equal ``image_params["image_size"]``. Finite values greater
@@ -3313,6 +3344,9 @@ def image_continuum_single_field(
     from astroviper.processing_functions.imaging.check_imaging_parameters import (
         check_imaging_weights_params,
     )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        resolve_gridding_kernel_params,
+    )
     from astroviper.processing_functions.imaging.utils import (
         CONTINUUM_IMAGING_TIMING_PHASES,
         CONTINUUM_MODEL_UPDATE_TIMING_PHASES,
@@ -3386,6 +3420,10 @@ def image_continuum_single_field(
     image_params = dict(image_params)
     deconvolver = _resolve_continuum_deconvolver(deconvolver, image_params)
     _resolve_continuum_taylor_expansion(image_params)
+    # Checked here, before anything is written, as cube imaging checks them
+    # when it makes its kernel. Whether the padding can hold a kernel designed
+    # for it is checked where the kernel is made.
+    gridding_kernel_params = resolve_gridding_kernel_params(gridding_kernel_params)
 
     clean_mask_array = _load_continuum_clean_mask(
         clean_mask,
@@ -3581,6 +3619,7 @@ def image_continuum_single_field(
     input_params["processing_function_threads"] = processing_function_threads
     input_params["cycle_control_params"] = cycle_control_params
     input_params["gridder"] = gridder
+    input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["is_first_cycle"] = True
     input_params["deconvolver"] = deconvolver
     input_params["primary_beam_correction"] = bool(primary_beam_correction)
@@ -3905,6 +3944,7 @@ def image_continuum_single_field(
                 "image_data_group_in_name": "residual",
                 "image_data_group_out_name": "model",
                 "image_params": image_params,
+                "gridding_kernel_params": gridding_kernel_params,
                 "image_data_variables_keep": image_data_variables_keep,
                 "fft_backend": fft_backend,
                 "single_precision_image": single_precision_image,

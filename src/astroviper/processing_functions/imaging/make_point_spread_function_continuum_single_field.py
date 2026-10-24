@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import time
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,11 @@ from astroviper.utils.data_group_tools import (
     modify_data_groups_xds,
 )
 from astroviper.utils.param_docs import shares_param_docs
+
+if TYPE_CHECKING:
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        GriddingKernel,
+    )
 
 
 def _validate_mtmfs_parameters(
@@ -63,7 +69,7 @@ def _validate_mtmfs_parameters(
 
 def add_uv_sampling_grid_continuum_single_field(
     ms_xdt: xr.Dataset,
-    cgk_1D: np.ndarray,
+    cgk_1D: GriddingKernel | np.ndarray,
     img_xds: xr.Dataset,
     *,
     n_psf_taylor_terms: int,
@@ -75,8 +81,6 @@ def add_uv_sampling_grid_continuum_single_field(
     overwrite: bool = True,
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
-    gcf_support: int = 7,
-    gcf_oversampling: int = 100,
     complex_dtype=None,
 ) -> None:
     """Accumulate Taylor-weighted UV-sampling grids for one measurement set.
@@ -98,8 +102,12 @@ def add_uv_sampling_grid_continuum_single_field(
     ms_xdt : xarray.Dataset
         One Measurement Set partition with visibility coordinates and imaging
         weights.
-    cgk_1D : numpy.ndarray
-        Oversampled one-dimensional gridding convolution kernel.
+    cgk_1D : GriddingKernel or numpy.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
+        whose table, support and oversampling go to the C++
+        ``anti_alias_grid_uv_sampling`` kernel), or the bare table of the
+        default prolate spheroidal kernel of support 7.
     img_xds : xarray.Dataset
         Image dataset whose UV-sampling arrays are updated in place.
     n_psf_taylor_terms : int
@@ -120,10 +128,6 @@ def add_uv_sampling_grid_continuum_single_field(
         Image-to-UV-grid padding factor.
     processing_function_threads : int, optional
         Threads supplied to the C++ gridder.
-    gcf_support : int, optional
-        Convolution-kernel support in grid cells.
-    gcf_oversampling : int, optional
-        Convolution-kernel oversampling factor.
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the accumulated UV grids.
 
@@ -279,6 +283,11 @@ def add_uv_sampling_grid_continuum_single_field(
     from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
         anti_alias_grid_uv_sampling,
     )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        as_gridding_kernel,
+    )
+
+    kernel = as_gridding_kernel(cgk_1D)
 
     # Reuse the existing continuum channel map. With one image-time plane, each
     # Taylor-order view has the contiguous layout required by the C++ gridder.
@@ -311,11 +320,12 @@ def add_uv_sampling_grid_continuum_single_field(
             time_map,
             pol_map,
             effective_weight,
-            cgk_1D,
+            kernel.table,
             n_uv,
             delta_lm,
-            support=gcf_support,
-            oversampling=gcf_oversampling,
+            support=kernel.support,
+            oversampling=kernel.oversampling,
+            interpolation=kernel.interpolation_code,
             processing_function_threads=processing_function_threads,
         )
 
@@ -335,8 +345,7 @@ def make_point_spread_function_mvc_single_field(
     ms_data_group_in_name="base",
     image_data_group_in_name="residual",
     image_data_group_out_name="residual",
-    gcf_oversampling=100,
-    gcf_support=7,
+    gridding_kernel_params=None,
     processing_function_threads=1,
     complex_dtype=None,
 ):
@@ -377,10 +386,34 @@ def make_point_spread_function_mvc_single_field(
         data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Output image data-group name.
-    gcf_oversampling : int, optional
-        Convolution-kernel oversampling factor.
-    gcf_support : int, optional
-        Convolution-kernel support in grid cells.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -396,8 +429,8 @@ def make_point_spread_function_mvc_single_field(
         One-row timing dataframe for kernel creation, visibility filtering, and
         UV-sampling gridding.
     """
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.make_point_spread_function import (
         add_uv_sampling_grid_single_field,
@@ -417,10 +450,7 @@ def make_point_spread_function_mvc_single_field(
         complex_dtype = np.complex128
 
     start = time.time()
-    cgk_1D = create_prolate_spheroidal_kernel_1D(
-        gcf_oversampling,
-        gcf_support,
-    )
+    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
     T_gcf = time.time() - start
 
     T_vis_mask = 0.0
@@ -473,8 +503,7 @@ def make_point_spread_function_continuum_single_field(
     image_data_group_in_name="residual",
     image_data_group_out_name="residual",
     image_data_variables_keep=None,
-    gcf_oversampling=100,
-    gcf_support=7,
+    gridding_kernel_params=None,
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
@@ -528,10 +557,34 @@ def make_point_spread_function_continuum_single_field(
     image_data_variables_keep : list of str or None, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
-    gcf_oversampling : int, optional
-        Convolution-kernel oversampling factor.
-    gcf_support : int, optional
-        Convolution-kernel support in grid cells.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -551,8 +604,8 @@ def make_point_spread_function_continuum_single_field(
         One-row timing frame with ``T_gcf``, ``T_vis_mask``,
         and ``T_uv_sampling_grid``.
     """
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
 
@@ -577,10 +630,7 @@ def make_point_spread_function_continuum_single_field(
     )
 
     start = time.time()
-    cgk_1D = create_prolate_spheroidal_kernel_1D(
-        gcf_oversampling,
-        gcf_support,
-    )
+    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
     T_gcf = time.time() - start
 
     T_vis_mask = 0.0
@@ -608,8 +658,6 @@ def make_point_spread_function_continuum_single_field(
             overwrite=True,
             fft_padding=image_params["fft_padding"],
             processing_function_threads=processing_function_threads,
-            gcf_support=gcf_support,
-            gcf_oversampling=gcf_oversampling,
             complex_dtype=complex_dtype,
         )
         T_uv_sampling_grid += time.time() - start

@@ -41,7 +41,7 @@ def make_undeconvolved_image_mvc_single_field(
         ``primary_beam_ipower`` is the exponent applied to the voltage pattern
         (default 2, the power beam). These primary-beam keys override the inferred
         beam prescription.
-    cgk_1D : numpy.ndarray
+    cgk_1D : GriddingKernel or numpy.ndarray
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
         or the bare table of the default prolate spheroidal kernel of support 7.
