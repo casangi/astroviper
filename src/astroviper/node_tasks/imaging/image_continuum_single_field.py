@@ -1103,6 +1103,10 @@ def residual_update_continuum_single_field(
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
 
+    or, with the direct Fourier transform (``gridding_kernel_params={"type":
+    "dft"}``), the unnormalised Taylor images ``SKY_RESIDUAL`` and
+    ``POINT_SPREAD_FUNCTION`` in place of the two grids.
+
     MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
     ``MVC_RESIDUAL_WEIGHT_SUM`` and the additive moments of the per-pixel
     spectral fit (``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``,
@@ -1306,7 +1310,20 @@ def residual_update_continuum_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -2405,7 +2422,9 @@ def _prepare_continuum_image(
 
     For ``continuum_mode='mfs'``, the reduced visibility grids already represent
     Taylor residual terms. They are inverse Fourier-transformed directly into
-    ``SKY_RESIDUAL(taylor_term)``.
+    ``SKY_RESIDUAL(taylor_term)``. With the direct Fourier transform
+    (``gridding_kernel_params={"type": "dft"}``) the reduced residual and PSF
+    are already Taylor images and are only divided by their normalization.
 
     For ``continuum_mode='mvc'``, map tasks have already normalized and inverse
     Fourier-transformed their exclusively owned channels, applied the channel
@@ -2448,10 +2467,14 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
+    from astroviper.processing_functions.imaging.direct_fourier_transform import (
+        normalize_dft_image,
+    )
     from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         ifft_norm_img_xds,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
@@ -2481,9 +2504,16 @@ def _prepare_continuum_image(
 
     # MFS still reduces Taylor-weighted UV grids and therefore performs its
     # inverse FFT globally. MVC map tasks already returned Taylor products.
+    # With the direct Fourier transform the MFS map tasks returned the sums of
+    # the Taylor images themselves, which are only normalised here.
     residual_output_name = "SKY_RESIDUAL"
+    direct_fourier_transform = is_direct_fourier_transform(
+        config["gridding_kernel_params"]
+    )
 
-    if continuum_mode == "mfs":
+    if continuum_mode == "mfs" and direct_fourier_transform:
+        normalize_dft_image(img_xds, image_data_group_name, uv_sampling=False)
+    elif continuum_mode == "mfs":
         gridding_kernel = make_gridding_kernel(
             config["gridding_kernel_params"], image_params["fft_padding"]
         )
@@ -2634,7 +2664,9 @@ def _prepare_continuum_image(
     # ------------------------------------------------------------------
 
     if initialize_static_products:
-        if continuum_mode == "mfs":
+        if continuum_mode == "mfs" and direct_fourier_transform:
+            normalize_dft_image(img_xds, image_data_group_name, uv_sampling=True)
+        elif continuum_mode == "mfs":
             img_xds = ifft_norm_img_xds(
                 img_xds,
                 image_params=image_params,

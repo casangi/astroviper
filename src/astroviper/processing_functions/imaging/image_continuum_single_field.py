@@ -214,7 +214,20 @@ def imaging_preparation_continuum_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -588,7 +601,8 @@ def prepare_model_uv_continuum_single_field(
         ``"mask"``) roles name the input data variables.  Datasets without
         data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
-        Data group receiving the Fourier-domain model visibility grids.
+        Data group receiving the Fourier-domain model visibility grids (with
+        the direct Fourier transform, naming the Taylor model images).
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -616,14 +630,29 @@ def prepare_model_uv_continuum_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------
     model_uv_xds : xarray.Dataset
         Continuum model dataset in the instrumental correlation basis containing
         the Fourier-domain Taylor coefficients (``VISIBILITY_MODEL``), indexed by
-        ``taylor_term``.
+        ``taylor_term``. With ``gridding_kernel_params={"type": "dft"}`` it
+        holds the Taylor model images themselves (the ``sky`` variable, no
+        FFT), which the direct Fourier transform predicts from.
 
     Notes
     -----
@@ -644,6 +673,7 @@ def prepare_model_uv_continuum_single_field(
         fft_norm_continuum_img_xds,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
         make_gridding_kernel,
     )
 
@@ -712,6 +742,30 @@ def prepare_model_uv_continuum_single_field(
         new_polarization_basis=instrument_polarization_basis,
         overwrite=True,
     )
+
+    if is_direct_fourier_transform(gridding_kernel_params):
+        # The direct Fourier transform predicts from the Taylor model images
+        # themselves: no FFT, padding or kernel correction.
+        model_uv_xds[model_sky_name].attrs.update(
+            {
+                "description": (
+                    "Global continuum Taylor model in the correlation basis, "
+                    "predicted by the direct Fourier transform."
+                ),
+                "n_taylor_terms": n_taylor_terms,
+                "instrument_polarization_basis": (instrument_polarization_basis),
+            }
+        )
+        if image_data_group_out_name != image_data_group_in_name:
+            from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+            modify_data_groups_xds(
+                model_uv_xds,
+                image_data_group_out_name,
+                {"sky": model_sky_name},
+                description="Continuum Taylor model for the direct Fourier transform.",
+            )
+        return model_uv_xds
 
     model_uv_xds = fft_norm_continuum_img_xds(
         model_uv_xds,
@@ -982,7 +1036,20 @@ def prepare_model_uv_mvc_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -2028,7 +2095,20 @@ def residual_update_continuum_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------

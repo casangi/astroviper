@@ -1328,6 +1328,10 @@ def combine_continuum_chunks(input_data, input_params):
     ``UV_SAMPLING_NORMALIZATION``
         ``(time, psf_taylor_order, polarization)``.
 
+    MFS with the direct Fourier transform (``gridding_kernel_params={"type":
+    "dft"}``) supplies the unnormalised Taylor images ``SKY_RESIDUAL`` and
+    ``POINT_SPREAD_FUNCTION`` in place of the two grids.
+
     MVC supplies a mode-specific additive list. Every imaging cycle reduces
     ``MVC_RESIDUAL_TAYLOR_NUMERATOR``, ``MVC_RESIDUAL_WEIGHT_SUM``,
     ``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``, ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``,
@@ -2807,6 +2811,19 @@ def image_continuum_single_field(
     or at once when its peak exceeds ``(1 + gain)`` times its peak at the
     start of the model update.
 
+    With ``gridding_kernel_params={"type": "dft"}`` MFS makes its Taylor
+    residuals, its Taylor PSFs and its model visibilities by the exact
+    direct Fourier transform, w term included, over the unpadded image
+    (:mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`):
+    the map tasks return the sums of the Taylor images, which are reduced and
+    divided by the sum of the imaging weights, and the model is predicted
+    from its Taylor images without an FFT. Every residual Taylor term, PSF
+    order and model Taylor term costs one transform of the map task's
+    samples. ``continuum_mode="mvc"``,
+    ``visibility_memory_mode="in_memory"`` or ``"in_place"`` and a kept
+    ``visibility`` or ``uv_sampling`` grid are refused with it, before
+    anything is written, as they are made of uv grids.
+
     Parameters
     ----------
     ps_store : str
@@ -3198,7 +3215,9 @@ def image_continuum_single_field(
         anti-aliasing kernel of ``gridding_kernel_params`` (by default the
         ``prolate_spheroidal_casa`` kernel of support 7 and oversampling 100).
         MFS and MVC dispatch visibility, PSF, and prediction work to the shared
-        C++ grid/degrid kernels.
+        C++ grid/degrid kernels. With ``gridding_kernel_params={"type":
+        "dft"}`` MFS uses the exact direct Fourier transform with the w term
+        instead.
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -3226,7 +3245,20 @@ def image_continuum_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     clean_mask : str or None, optional
         Path to a NumPy ``.npy`` file containing one two-dimensional CLEAN mask.
         Its shape must equal ``image_params["image_size"]``. Finite values greater
@@ -3344,7 +3376,11 @@ def image_continuum_single_field(
     from astroviper.processing_functions.imaging.check_imaging_parameters import (
         check_imaging_weights_params,
     )
+    from astroviper.processing_functions.imaging.direct_fourier_transform import (
+        check_dft_continuum_parameters,
+    )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
         resolve_gridding_kernel_params,
     )
     from astroviper.processing_functions.imaging.utils import (
@@ -3424,6 +3460,11 @@ def image_continuum_single_field(
     # when it makes its kernel. Whether the padding can hold a kernel designed
     # for it is checked where the kernel is made.
     gridding_kernel_params = resolve_gridding_kernel_params(gridding_kernel_params)
+    direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
+    if direct_fourier_transform:
+        check_dft_continuum_parameters(
+            continuum_mode, visibility_memory_mode, image_data_variables_keep
+        )
 
     clean_mask_array = _load_continuum_clean_mask(
         clean_mask,
@@ -3894,7 +3935,22 @@ def image_continuum_single_field(
             # are reduced. Later cycles only produce new residual products; the
             # static PSF/PB products are supplied by
             # continuum_cycle_append_node.
-            if continuum_mode == "mfs":
+            if continuum_mode == "mfs" and direct_fourier_transform:
+                # The direct Fourier transform's map tasks return the sums of
+                # the Taylor images (and PSFs) instead of uv grids.
+                reduce_input_params = {
+                    "continuum_mode": "mfs",
+                    "additive_variables": (
+                        "SKY_RESIDUAL",
+                        "VISIBILITY_NORMALIZATION",
+                    )
+                    + (
+                        ("POINT_SPREAD_FUNCTION", "UV_SAMPLING_NORMALIZATION")
+                        if is_first_cycle
+                        else ()
+                    ),
+                }
+            elif continuum_mode == "mfs":
                 if is_first_cycle:
                     reduce_input_params = {"continuum_mode": "mfs"}
                 else:

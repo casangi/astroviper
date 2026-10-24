@@ -413,7 +413,20 @@ def make_point_spread_function_mvc_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -519,6 +532,12 @@ def make_point_spread_function_continuum_single_field(
     frequency ``nu0`` must be supplied globally in ``image_params`` and must be
     identical for every distributed frequency chunk.
 
+    With ``gridding_kernel_params={"type": "dft"}`` the orders are the exact
+    direct Fourier transforms of the weighted imaging weights, w term
+    included, over the unpadded image, still to be normalised
+    (:func:`~astroviper.processing_functions.imaging.direct_fourier_transform.make_dft_point_spread_function_continuum_single_field`);
+    no ``UV_SAMPLING`` grid is made.
+
     Parameters
     ----------
     ps_xdt : xarray.DataTree or mapping
@@ -584,7 +603,20 @@ def make_point_spread_function_continuum_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -605,6 +637,7 @@ def make_point_spread_function_continuum_single_field(
         and ``T_uv_sampling_grid``.
     """
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
@@ -628,6 +661,23 @@ def make_point_spread_function_continuum_single_field(
     _, n_psf_taylor_terms, reference_frequency = _validate_mtmfs_parameters(
         image_params
     )
+
+    if is_direct_fourier_transform(gridding_kernel_params):
+        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+            make_dft_point_spread_function_continuum_single_field,
+        )
+
+        return make_dft_point_spread_function_continuum_single_field(
+            ps_xdt,
+            img_xds,
+            n_psf_taylor_terms,
+            reference_frequency,
+            ms_data_group_in_name=ms_data_group_in_name,
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_out_name,
+            processing_function_threads=processing_function_threads,
+            complex_dtype=complex_dtype,
+        )
 
     start = time.time()
     cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])

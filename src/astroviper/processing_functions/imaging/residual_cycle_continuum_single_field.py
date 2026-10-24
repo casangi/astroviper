@@ -32,6 +32,15 @@ def residual_cycle_continuum_single_field(
     MVC produces frequency-resolved UV planes. FFT and normalization occur
     in the calling workflow.
 
+    With ``gridding_kernel_params={"type": "dft"}`` (MFS with
+    ``visibility_memory_mode="recompute"`` only) the model visibilities are
+    predicted from the correlation-basis Taylor model images that
+    ``model_uv_xds`` then holds, and the residual Taylor terms are imaged, by
+    the exact direct Fourier transforms over the unpadded image
+    (:mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`):
+    the products are the unnormalised Taylor images, which the calling
+    workflow normalises instead of transforming them.
+
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
@@ -61,8 +70,9 @@ def residual_cycle_continuum_single_field(
     img_xds : xarray.Dataset
         Continuum image dataset containing the partition-local static products.
     model_uv_xds : xarray.Dataset
-        Globally prepared Fourier-domain Taylor model. This is only used after the
-        first imaging cycle.
+        Globally prepared Fourier-domain Taylor model (with the direct Fourier
+        transform, the Taylor model images in the correlation basis). This is
+        only used after the first imaging cycle.
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
@@ -152,7 +162,20 @@ def residual_cycle_continuum_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -169,6 +192,7 @@ def residual_cycle_continuum_single_field(
     import pandas as pd
 
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
@@ -209,8 +233,21 @@ def residual_cycle_continuum_single_field(
 
     ps_data_group_name = processing_set_data_group_name
 
+    # The type "dft" replaces the degridding, the gridding and their FFTs by
+    # the exact direct Fourier transforms (no kernel, padding or correction).
+    direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
+    if direct_fourier_transform:
+        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+            check_dft_continuum_parameters,
+        )
+
+        check_dft_continuum_parameters(continuum_mode, visibility_memory_mode)
+
     start = time.time()
-    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
+    if not direct_fourier_transform:
+        cgk_1D = make_gridding_kernel(
+            gridding_kernel_params, image_params["fft_padding"]
+        )
     T_gcf = time.time() - start
 
     T_degrid = 0.0
@@ -235,21 +272,40 @@ def residual_cycle_continuum_single_field(
 
             degrid_start = time.time()
 
-            make_visibility_model_continuum_single_field(
-                ps_xdt,
-                model_uv_xds,
-                cgk_1D,
-                n_taylor_terms=n_taylor_terms,
-                reference_frequency=reference_frequency,
-                ms_data_group_in_name=ps_data_group_name,
-                ms_data_group_out_name="model",
-                ms_data_group_out_modified={
-                    "correlated_data": "VISIBILITY_MODEL",
-                },
-                image_data_group_in_name=image_data_group_in_name,
-                processing_function_threads=processing_function_threads,
-                fft_padding=image_params["fft_padding"],
-            )
+            if direct_fourier_transform:
+                from astroviper.processing_functions.imaging.direct_fourier_transform import (
+                    make_dft_visibility_model_continuum_single_field,
+                )
+
+                make_dft_visibility_model_continuum_single_field(
+                    ps_xdt,
+                    model_uv_xds,
+                    n_taylor_terms=n_taylor_terms,
+                    reference_frequency=reference_frequency,
+                    ms_data_group_in_name=ps_data_group_name,
+                    ms_data_group_out_name="model",
+                    ms_data_group_out_modified={
+                        "correlated_data": "VISIBILITY_MODEL",
+                    },
+                    image_data_group_in_name=image_data_group_in_name,
+                    processing_function_threads=processing_function_threads,
+                )
+            else:
+                make_visibility_model_continuum_single_field(
+                    ps_xdt,
+                    model_uv_xds,
+                    cgk_1D,
+                    n_taylor_terms=n_taylor_terms,
+                    reference_frequency=reference_frequency,
+                    ms_data_group_in_name=ps_data_group_name,
+                    ms_data_group_out_name="model",
+                    ms_data_group_out_modified={
+                        "correlated_data": "VISIBILITY_MODEL",
+                    },
+                    image_data_group_in_name=image_data_group_in_name,
+                    processing_function_threads=processing_function_threads,
+                    fft_padding=image_params["fft_padding"],
+                )
 
             T_degrid += time.time() - degrid_start
 
@@ -339,7 +395,26 @@ def residual_cycle_continuum_single_field(
 
     start = time.time()
 
-    if continuum_mode == "mfs":
+    if continuum_mode == "mfs" and direct_fourier_transform:
+        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+            make_dft_undeconvolved_image_continuum_single_field,
+        )
+
+        (
+            img_xds,
+            make_undeconvolved_image_return_df,
+        ) = make_dft_undeconvolved_image_continuum_single_field(
+            ps_xdt,
+            img_xds,
+            n_taylor_terms,
+            reference_frequency,
+            ms_data_group_in_name=ps_data_group_name,
+            image_data_group_out_name=image_data_group_out_name,
+            processing_function_threads=processing_function_threads,
+            complex_dtype=complex_dtype,
+        )
+
+    elif continuum_mode == "mfs":
         from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
             make_undeconvolved_image_continuum_single_field,
         )
