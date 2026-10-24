@@ -2337,7 +2337,7 @@ def test_wideband_uniform_and_briggs_weights_default_to_the_global_density(
     channel (``"local"``) can still be requested. With the local density the
     weights of a uv cell add up over the channels that sample it, which favours
     the inner uv plane, where the tracks of most channels overlap, so the PSF
-    is wider (measured: major axis 1.29 times for uniform, 1.03 times for
+    is wider (measured: major axis 1.32 times for uniform, 1.03 times for
     Briggs 0.5)."""
     images = _run_wideband_scopes(
         tmp_path,
