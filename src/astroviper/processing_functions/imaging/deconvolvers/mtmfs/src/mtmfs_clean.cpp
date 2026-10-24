@@ -23,6 +23,34 @@ namespace mtmfs {
 
 namespace {
 
+// Inclusive pixel box [i0, i1] x [j0, j1]; empty when i1 < i0.
+struct Box {
+    int i0 = 0, j0 = 0, i1 = -1, j1 = -1;
+};
+
+// As in Asp's find_max_abs_mask_box: scan array * weight inside the nonzero
+// mask box, preserving the whole-image extrema and their first positions.
+// Keep MT-MFS's working precision and PeakResult return convention.
+template <typename T>
+PeakResult<T> find_max_abs_mask_box(const T* a, const T* w, int nx, int ny, const Box& box) {
+    T mn = 0, mx = 0;
+    int mnI = 0, mnJ = 0, mxI = 0, mxJ = 0;
+    if (box.i0 == 0 && box.j0 == 0 && box.i1 == nx - 1 && box.j1 == ny - 1)
+        mn = mx = a[0] * w[0];
+    for (int j = box.j0; j <= box.j1; ++j) {
+        const T* arow = a + static_cast<std::size_t>(j) * nx;
+        const T* wrow = w + static_cast<std::size_t>(j) * nx;
+        for (int i = box.i0; i <= box.i1; ++i) {
+            const T v = arow[i] * wrow[i];
+            if (v > mx) { mx = v; mxI = i; mxJ = j; }
+            if (v < mn) { mn = v; mnI = i; mnJ = j; }
+        }
+    }
+    PeakResult<T> result{mx, mxI, mxJ};
+    if (std::abs(mn) > std::abs(mx)) result = {mn, mnI, mnJ};
+    return result;
+}
+
 int beam_patch_extent(float max_scale_size, float psf_beam, float nbeams) {
     int psupport = static_cast<int>(std::sqrt(psf_beam * psf_beam + max_scale_size * max_scale_size) * nbeams);
     if (psupport < psf_beam * nbeams) psupport = static_cast<int>(psf_beam * nbeams);
@@ -445,6 +473,22 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         zero_region(nx - border - 1, border, nx - 1, ny - border - 1);
     }
 
+    // Build once from the final (smoothed, optionally binarised, border-cut)
+    // scale masks. These search boxes are independent of the moving update
+    // patch: candidates outside the previous component's patch remain valid.
+    std::vector<Box> scale_mask_boxes(ns, Box{});
+    for (int s = 0; s < ns; ++s) {
+        const auto& scale_mask = vec_scale_masks[static_cast<std::size_t>(s)];
+        Box box{nx, ny, -1, -1};
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i)
+                if (scale_mask[static_cast<std::size_t>(j) * nx + i] != static_cast<T>(0)) {
+                    box.i0 = std::min(box.i0, i); box.j0 = std::min(box.j0, j);
+                    box.i1 = std::max(box.i1, i); box.j1 = std::max(box.j1, j);
+                }
+        scale_mask_boxes[static_cast<std::size_t>(s)] = box;
+    }
+
     std::vector<std::vector<T>> mat_r(static_cast<std::size_t>(nt) * ns, std::vector<T>(nimg, static_cast<T>(0)));
     {
         std::vector<typename Work<T>::complex_t> dirty_ft(nspec), work(nspec);
@@ -536,8 +580,9 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                             acc += coeff_at(scale, t1, k) * mat_r[static_cast<std::size_t>(w.ind2(t1, scale))][k];
                         work[k] = acc;
                     }
-                const PeakResult<T> pr = find_max_abs_mask<T>(
-                    work.data(), vec_scale_masks[static_cast<std::size_t>(scale)].data(), nx, ny);
+                const PeakResult<T> pr = find_max_abs_mask_box<T>(
+                    work.data(), vec_scale_masks[static_cast<std::size_t>(scale)].data(), nx, ny,
+                    scale_mask_boxes[static_cast<std::size_t>(scale)]);
                 max_scale_val[static_cast<std::size_t>(scale)] = pr.value;
                 max_scale_pos[static_cast<std::size_t>(scale)] = {pr.ix, pr.iy};
             }

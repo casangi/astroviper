@@ -1574,6 +1574,55 @@ def test_divergence_test_does_not_stop_a_multiscale_clean():
         assert result["stop_code"] == mtmfs.STOP_MAX_ITER
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("nterms", [1, 2, 3])
+@pytest.mark.parametrize("first_sign", [-1, 1])
+def test_mask_box_keeps_holes_and_separated_candidates(dtype, nterms, first_sign):
+    """Search the mask box, including candidates outside the last update patch."""
+    shape = (64, 64)
+    psf = _parity_psf_stack(nterms, shape, dtype)
+    sky = np.zeros((nterms, *shape), dtype=dtype)
+    first, second = (8, 16), (48, 40)
+    sky[0, *first] = first_sign * 2.0
+    sky[0, *second] = -first_sign * 1.75
+    residual = _parity_dirty_from_model(psf, sky)
+    # Larger peaks in a hole and outside the box must never be selected.
+    residual[0, 24, 32] = 100.0
+    residual[0, 56, 56] = 200.0
+    mask = np.zeros(shape, dtype=dtype)
+    mask[first] = mask[second] = 1.0
+    original = residual.copy()
+    model = np.zeros_like(residual)
+
+    result = mtmfs.clean(
+        residual, psf, model, mask=mask, max_iter_per_cycle_updated=1, gain=1.0
+    )
+    assert result["iterations_performed"] == 1
+    assert model[0, *first] == pytest.approx(first_sign * 2.0, abs=2e-5)
+    assert np.count_nonzero(model[0]) == 1
+
+    # Continue in a fresh call: the other island is still a candidate.
+    result = mtmfs.clean(
+        residual, psf, model, mask=mask, max_iter_per_cycle_updated=1, gain=1.0
+    )
+    assert result["iterations_performed"] == 1
+    assert model[0, *second] == pytest.approx(-first_sign * 1.75, abs=2e-5)
+    assert np.count_nonzero(model[0]) == 2
+    np.testing.assert_allclose(
+        residual, original - _parity_dirty_from_model(psf, model), atol=2e-5
+    )
+
+    # Both islands must also be found within one model update, after its
+    # moving subtraction patch has been centred on the first island.
+    residual = original.copy()
+    together = np.zeros_like(residual)
+    result = mtmfs.clean(
+        residual, psf, together, mask=mask, max_iter_per_cycle_updated=2, gain=1.0
+    )
+    assert result["iterations_performed"] == 2
+    np.testing.assert_allclose(together, model, atol=2e-5)
+
+
 def test_large_scale_component_is_not_truncated():
     """psf_support grows with the largest scale so a component keeps its footprint."""
     ny = nx = 200
