@@ -13,9 +13,11 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     CORRECTION_FLOOR,
     DEFAULT_GRIDDING_KERNEL_PARAMS,
+    DIRECT_FOURIER_TRANSFORM,
     KERNEL_TYPES,
     GriddingKernel,
     as_gridding_kernel,
+    is_direct_fourier_transform,
     kept_half_width,
     make_gridding_kernel,
     resolve_gridding_kernel_params,
@@ -52,6 +54,27 @@ class TestParams:
     def test_refusals(self, bad, match):
         with pytest.raises(ValueError, match=match):
             resolve_gridding_kernel_params(bad)
+
+    def test_direct_fourier_transform(self):
+        assert DIRECT_FOURIER_TRANSFORM == "dft"
+        assert resolve_gridding_kernel_params({"type": "dft"}) == {"type": "dft"}
+        assert is_direct_fourier_transform({"type": "dft"})
+        assert not is_direct_fourier_transform(None)
+        assert not is_direct_fourier_transform({"type": "prolate_spheroidal"})
+        # the kernel keys do not apply: refused, as is a kernel for it
+        for extra in (
+            {"support": 7},
+            {"oversampling": 100},
+            {"interpolation": "nearest"},
+        ):
+            with pytest.raises(ValueError, match="do not apply to the type 'dft'"):
+                resolve_gridding_kernel_params({"type": "dft", **extra})
+            with pytest.raises(ValueError, match="do not apply to the type 'dft'"):
+                is_direct_fourier_transform({"type": "dft", **extra})
+        with pytest.raises(ValueError, match="has no gridding kernel"):
+            make_gridding_kernel({"type": "dft"})
+        with pytest.raises(ValueError, match="'dft'"):  # listed among the types
+            resolve_gridding_kernel_params({"type": "boxcar"})
 
 
 class TestKernel:

@@ -236,7 +236,20 @@ IMAGING_PARAM_DOCS = {
         "of its centre value at the edge of the image kept (a support too large\n"
         "for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the\n"
         'former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,\n'
-        'not ``"prolate_spheroidal"``.'
+        'not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces\n'
+        "the gridding and the FFTs by the exact direct Fourier transform over the\n"
+        "unpadded image, w term included: with the phase\n"
+        "``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the\n"
+        "model visibilities are ``sum M exp(+i phase) / n`` over the model pixels\n"
+        "and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,\n"
+        "the measurement equation of ``simulate_processing_set``. Its cost is\n"
+        "proportional to the samples times the image pixels (30 to 40 s per\n"
+        "residual update of 451,500 samples, four correlations and 160 x 160\n"
+        "pixels on one core), so give it several\n"
+        "``processing_function_threads``; its results do not depend on their\n"
+        "number. Its ``VISIBILITY_NORMALIZATION`` and\n"
+        "``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the\n"
+        "gridders' that sum times the kernel's stencil sums."
     ),
     "cgk_1D": (
         "The gridding kernel\n"

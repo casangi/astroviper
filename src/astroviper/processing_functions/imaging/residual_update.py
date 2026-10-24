@@ -109,7 +109,20 @@ def imaging_setup_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
@@ -301,6 +314,13 @@ def residual_update_cube_single_field(
     :func:`imaging_setup_single_field`, so this function only performs the
     per-cycle work.
 
+    With ``gridding_kernel_params={"type": "dft"}`` the model visibilities and
+    the residual image are the exact direct Fourier transforms, w term
+    included, of the model and of the residual visibilities over the unpadded
+    image (no kernel, padding, FFT or correction; see
+    :mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`
+    for the convention); everything else is unchanged.
+
     Parameters
     ----------
     ps_xdt : xarray.DataTree
@@ -381,7 +401,20 @@ def residual_update_cube_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -390,7 +423,9 @@ def residual_update_cube_single_field(
     return_df : pandas.DataFrame
         One-row timing frame for this cycle (``T_gcf``, ``T_degrid``,
         ``T_residual_vis``, ``T_grid``, ``T_fft_norm``, ``T_transform_pol`` and
-        the fine-grained gridding timings).
+        the fine-grained gridding timings). With the direct Fourier transform
+        ``T_degrid`` and ``T_grid`` time the two transforms and the FFT
+        timings are zero.
     """
 
     import numpy as np
@@ -404,6 +439,7 @@ def residual_update_cube_single_field(
         ifft_norm_img_xds,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
         make_gridding_kernel,
     )
 
@@ -417,8 +453,14 @@ def residual_update_cube_single_field(
 
     ps_data_group_name = processing_set_data_group_name
 
+    # The type "dft" replaces the degridding, the gridding and their FFTs by
+    # the exact direct Fourier transforms (no kernel, padding or correction).
+    direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
     T_start_gcf = time.time()
-    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
+    if not direct_fourier_transform:
+        cgk_1D = make_gridding_kernel(
+            gridding_kernel_params, image_params["fft_padding"]
+        )
     T_gcf = time.time() - T_start_gcf
 
     T_transform_pol = 0.0
@@ -442,49 +484,68 @@ def residual_update_cube_single_field(
         )
         T_transform_pol += time.time() - start
 
-        start = time.time()
-        img_xds = fft_norm_img_xds(
-            img_xds,
-            image_params=image_params,
-            image_data_group_in_name=image_data_group_in_name,
-            image_data_group_out_name=image_data_group_in_name,
-            image_data_group_out_modified={
-                "visibility": "VISIBILITY_MODEL",
-            },
-            image_data_variables_keep=["sky"],
-            processing_function_threads=processing_function_threads,
-            fft_backend=fft_backend,
-            complex_dtype=complex_dtype,
-            gridding_kernel=cgk_1D,
-        )
-        T_fft_degrid += time.time() - start
+        if direct_fourier_transform:
+            from astroviper.processing_functions.imaging.direct_fourier_transform import (
+                make_dft_visibility_model_single_field,
+            )
 
-        start = time.time()
-        make_visibility_model_single_field(
-            ps_xdt,
-            img_xds,
-            cgk_1D,
-            ms_data_group_in_name=ps_data_group_name,
-            ms_data_group_out_name="model",
-            ms_data_group_out_modified={
-                "correlated_data": "VISIBILITY_MODEL",
-            },
-            image_data_group_in_name=image_data_group_in_name,
-            processing_function_threads=processing_function_threads,
-            fft_padding=image_params["fft_padding"],
-        )
-        T_degrid += time.time() - start
+            start = time.time()
+            make_dft_visibility_model_single_field(
+                ps_xdt,
+                img_xds,
+                ms_data_group_in_name=ps_data_group_name,
+                ms_data_group_out_name="model",
+                ms_data_group_out_modified={
+                    "correlated_data": "VISIBILITY_MODEL",
+                },
+                image_data_group_in_name=image_data_group_in_name,
+                processing_function_threads=processing_function_threads,
+            )
+            T_degrid += time.time() - start
+        else:
+            start = time.time()
+            img_xds = fft_norm_img_xds(
+                img_xds,
+                image_params=image_params,
+                image_data_group_in_name=image_data_group_in_name,
+                image_data_group_out_name=image_data_group_in_name,
+                image_data_group_out_modified={
+                    "visibility": "VISIBILITY_MODEL",
+                },
+                image_data_variables_keep=["sky"],
+                processing_function_threads=processing_function_threads,
+                fft_backend=fft_backend,
+                complex_dtype=complex_dtype,
+                gridding_kernel=cgk_1D,
+            )
+            T_fft_degrid += time.time() - start
 
-        # The model uv grid is fully consumed by the degridder above and is
-        # rebuilt from the sky model by fft_norm_img_xds next cycle, so free
-        # its ~2.9 GB (13 500² x 2 pol complex64) now. Otherwise it sits
-        # resident through the gridding phase below, coexisting with the
-        # equally sized VISIBILITY grid -- at 14 workers per node that
-        # doubled grid residency was part of the 2026-08-16 multi-cycle OOM.
-        model_uv_grid_name = img_xds.attrs["data_groups"][image_data_group_in_name][
-            "visibility"
-        ]
-        img_xds.xr_img.delete_data_variables(variables=[model_uv_grid_name])
+            start = time.time()
+            make_visibility_model_single_field(
+                ps_xdt,
+                img_xds,
+                cgk_1D,
+                ms_data_group_in_name=ps_data_group_name,
+                ms_data_group_out_name="model",
+                ms_data_group_out_modified={
+                    "correlated_data": "VISIBILITY_MODEL",
+                },
+                image_data_group_in_name=image_data_group_in_name,
+                processing_function_threads=processing_function_threads,
+                fft_padding=image_params["fft_padding"],
+            )
+            T_degrid += time.time() - start
+
+            # The model uv grid is fully consumed by the degridder above and is
+            # rebuilt from the sky model by fft_norm_img_xds next cycle, so free
+            # its ~2.9 GB (13 500² x 2 pol complex64) now. Otherwise it sits
+            # resident through the gridding phase below, coexisting with the
+            # equally sized VISIBILITY grid -- at 14 workers per node that
+            # doubled grid residency was part of the 2026-08-16 multi-cycle OOM.
+            model_uv_grid_name = img_xds.attrs["data_groups"][image_data_group_in_name][
+                "visibility"
+            ]
+            img_xds.xr_img.delete_data_variables(variables=[model_uv_grid_name])
 
         start = time.time()
         calculate_residual_visibilities(
@@ -519,35 +580,54 @@ def residual_update_cube_single_field(
     )
 
     T_start_grid = time.time()
-    img_xds, make_undeconvolved_image_return_df = make_undeconvolved_image_single_field(
-        ps_xdt,
-        img_xds,
-        image_params,
-        cgk_1D,
-        False,
-        ms_data_group_in_name=ps_data_group_name,
-        image_data_group_out_name=image_data_group_out_name,
-        processing_function_threads=processing_function_threads,
-        complex_dtype=complex_dtype,
-    )
-    T_grid = time.time() - T_start_grid
+    if direct_fourier_transform:
+        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+            make_dft_undeconvolved_image_single_field,
+        )
 
-    start = time.time()
-    img_xds = ifft_norm_img_xds(
-        img_xds,
-        image_params=image_params,
-        image_data_group_in_name=image_data_group_out_name,
-        image_data_group_out_name=image_data_group_out_name,
-        image_data_group_out_modified={
-            "sky": "SKY_RESIDUAL",
-        },
-        image_data_variables_keep=image_data_variables_keep,
-        processing_function_threads=processing_function_threads,
-        fft_backend=fft_backend,
-        complex_dtype=complex_dtype,
-        gridding_kernel=cgk_1D,
-    )
-    T_fft_grid += time.time() - start
+        img_xds, make_undeconvolved_image_return_df = (
+            make_dft_undeconvolved_image_single_field(
+                ps_xdt,
+                img_xds,
+                ms_data_group_in_name=ps_data_group_name,
+                image_data_group_out_name=image_data_group_out_name,
+                processing_function_threads=processing_function_threads,
+                complex_dtype=complex_dtype,
+            )
+        )
+        T_grid = time.time() - T_start_grid
+    else:
+        img_xds, make_undeconvolved_image_return_df = (
+            make_undeconvolved_image_single_field(
+                ps_xdt,
+                img_xds,
+                image_params,
+                cgk_1D,
+                False,
+                ms_data_group_in_name=ps_data_group_name,
+                image_data_group_out_name=image_data_group_out_name,
+                processing_function_threads=processing_function_threads,
+                complex_dtype=complex_dtype,
+            )
+        )
+        T_grid = time.time() - T_start_grid
+
+        start = time.time()
+        img_xds = ifft_norm_img_xds(
+            img_xds,
+            image_params=image_params,
+            image_data_group_in_name=image_data_group_out_name,
+            image_data_group_out_name=image_data_group_out_name,
+            image_data_group_out_modified={
+                "sky": "SKY_RESIDUAL",
+            },
+            image_data_variables_keep=image_data_variables_keep,
+            processing_function_threads=processing_function_threads,
+            fft_backend=fft_backend,
+            complex_dtype=complex_dtype,
+            gridding_kernel=cgk_1D,
+        )
+        T_fft_grid += time.time() - start
 
     from toolviper.utils.memory_management import get_rss_gb
 
