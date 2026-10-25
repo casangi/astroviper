@@ -156,8 +156,8 @@ def conjugate_gradient_model_step(
         Boolean over the plane dimensions. ``True`` planes take the plain
         increment and restart the search direction. The continuum node task
         lists the planes whose model update brought the residual below the
-        global threshold and the planes whose residual entropy the entropy
-        stop follows.
+        global threshold (within ``threshold_tolerance``) and the planes whose
+        residual entropy the entropy stop follows.
     cycle_acceleration_state_xds : xarray.Dataset, optional
         State returned by the preceding call, or ``None`` in the first
         imaging cycle.
@@ -360,9 +360,11 @@ def nesterov_momentum_model_step(
     plain_step_planes : xarray.DataArray, optional
         Boolean over the plane dimensions. ``True`` planes take the plain
         increment and reset the momentum. The continuum node task lists the
-        planes that the iteration controller expects to stop (residual below
-        the global threshold, or budgets used up) and the planes whose
-        residual entropy the entropy stop follows.
+        planes that the cycle controller's stop test would stop on the
+        residual the model update ended with (residual below the global
+        threshold within ``threshold_tolerance``, ``max_iter`` or
+        ``max_cycles`` used up, a zero mask, no progress or divergence) and
+        the planes whose residual entropy the entropy stop follows.
     cycle_acceleration_state_xds : xarray.Dataset, optional
         State returned by the preceding call, or ``None`` in the first
         imaging cycle.
@@ -376,7 +378,7 @@ def nesterov_momentum_model_step(
         A higher cap acts only on planes that run longer without a restart
         (0.9 at ``j = 28``). On simulated data with shallow MT-MFS model
         updates, caps of 0.7 and 0.9 needed 18 imaging cycles, 0.5 needed 22
-        and ``"none"`` 34; the paper found models oscillating with constant
+        and ``"none"`` 33; the paper found models oscillating with constant
         coefficients of 0.7 to 0.9.
 
     Returns

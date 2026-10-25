@@ -42,9 +42,19 @@ def _equal(a, b):
 # --------------------------------------------------------------------------- #
 # Low-level reader
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("fsel", [slice(0, 1), slice(1, 4), slice(0, 4), slice(2, 4)])
+@pytest.mark.parametrize(
+    "fsel",
+    [
+        slice(0, 1),
+        slice(1, 4),
+        slice(0, 4),
+        slice(2, 4),
+        np.array([3, 2]),
+        np.array([1, 3, 0]),
+    ],
+)
 def test_read_v3_sharded_multichannel(tmp_path, fsel):
-    """Sharded array, inner chunk = 1 channel: reader == zarr for any slice."""
+    """Sharded reader matches Zarr for contiguous and irregular selections."""
     shape = (3, 5, 4, 2)
     data = (np.random.default_rng(0).standard_normal(shape)).astype("<c8")
     path = str(tmp_path / "VIS")
@@ -61,6 +71,95 @@ def test_read_v3_sharded_multichannel(tmp_path, fsel):
     got, dims = read_array_region(path, {"frequency": fsel})
     assert dims == list(DIMS)
     assert _equal(got, zarr.open_array(path)[:, :, fsel, :])
+
+
+def _write_minimal_processing_set_child(store, ms_name, frequencies, offset=0):
+    """Write one tiny child used by direct-loader frequency-selection tests."""
+    frequencies = np.asarray(frequencies, dtype=np.float64)
+    shape = (1, 2, frequencies.size, 2)
+    values = np.arange(np.prod(shape), dtype=np.float64).reshape(shape) + offset
+    arrays = {
+        "VISIBILITY": values.astype(np.complex128),
+        "WEIGHT": values.astype(np.float64),
+        "FLAG": np.zeros(shape, dtype=np.int8),
+    }
+    for name, data in arrays.items():
+        array = zarr.create_array(
+            f"{store}/{ms_name}/{name}",
+            shape=data.shape,
+            dtype=data.dtype,
+            dimension_names=DIMS,
+            chunks=(1, 2, 1, 2),
+        )
+        array[:] = data
+    uvw = zarr.create_array(
+        f"{store}/{ms_name}/UVW",
+        shape=(1, 2, 3),
+        dtype=np.float64,
+        dimension_names=("time", "baseline_id", "uvw_label"),
+        chunks=(1, 2, 3),
+    )
+    uvw[:] = 0.0
+    frequency = zarr.create_array(
+        f"{store}/{ms_name}/frequency",
+        shape=frequencies.shape,
+        dtype=frequencies.dtype,
+        dimension_names=("frequency",),
+        chunks=frequencies.shape,
+    )
+    frequency[:] = frequencies
+    return arrays
+
+
+def _minimal_data_group():
+    return {
+        "correlated_data": "VISIBILITY",
+        "uvw": "UVW",
+        "weight": "WEIGHT",
+        "flag": "FLAG",
+    }
+
+
+def test_load_processing_set_supports_descending_frequency_selection(tmp_path):
+    """The direct loader bounds and reorders descending child channels."""
+    store = str(tmp_path / "descending.ps.zarr")
+    frequencies = np.array([4.0e9, 3.0e9, 2.0e9, 1.0e9])
+    arrays = _write_minimal_processing_set_child(store, "ms0", frequencies)
+
+    loaded = load_processing_set_skunk_works(
+        store,
+        {"ms0": {"frequency": np.array([3, 2])}},
+        _minimal_data_group(),
+        "base",
+        np.array([1.0e9, 2.0e9]),
+    )["ms0"]
+
+    np.testing.assert_array_equal(loaded.frequency, [1.0e9, 2.0e9])
+    np.testing.assert_array_equal(
+        loaded.VISIBILITY,
+        arrays["VISIBILITY"][:, :, [3, 2], :],
+    )
+
+
+def test_load_processing_set_labels_each_child_in_a_multi_child_task(tmp_path):
+    """Each child receives only its own frequencies when one task spans children."""
+    store = str(tmp_path / "multiple.ps.zarr")
+    _write_minimal_processing_set_child(store, "lower", [1.0e9, 2.0e9])
+    _write_minimal_processing_set_child(store, "upper", [3.0e9, 4.0e9], offset=100)
+
+    loaded = load_processing_set_skunk_works(
+        store,
+        {
+            "lower": {"frequency": slice(0, 2)},
+            "upper": {"frequency": slice(0, 2)},
+        },
+        _minimal_data_group(),
+        "base",
+        np.array([1.0e9, 2.0e9, 3.0e9, 4.0e9]),
+    )
+
+    np.testing.assert_array_equal(loaded["lower"].frequency, [1.0e9, 2.0e9])
+    np.testing.assert_array_equal(loaded["upper"].frequency, [3.0e9, 4.0e9])
 
 
 def test_read_v3_plain(tmp_path):

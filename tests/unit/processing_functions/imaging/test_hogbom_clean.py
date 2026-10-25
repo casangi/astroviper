@@ -77,8 +77,8 @@ class TestBasicCorrectness:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=10,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=10,
         )
 
         assert result["iterations_performed"] >= 1
@@ -101,8 +101,8 @@ class TestBasicCorrectness:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=50,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=50,
         )
 
         for iy, ix, amp in sources:
@@ -123,8 +123,8 @@ class TestBasicCorrectness:
             psf=psf,
             model=model,
             gain=0.1,
-            threshold=0.0,
-            max_iter_remaining=1,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=1,
         )
 
         assert result["iterations_performed"] == 1
@@ -155,8 +155,8 @@ class TestInPlaceContract:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         assert dirty.__array_interface__["data"][0] == ptr_before
@@ -178,8 +178,8 @@ class TestInPlaceContract:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         assert model.__array_interface__["data"][0] == ptr_before
@@ -200,8 +200,8 @@ class TestInPlaceContract:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         # Prior value is preserved, new component added.
@@ -220,8 +220,8 @@ class TestInPlaceContract:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         assert np.array_equal(psf, psf_before)
@@ -244,8 +244,8 @@ class TestDtypeHandling:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         assert dirty.dtype == np.float64
@@ -344,8 +344,8 @@ class TestIterationControls:
             psf=psf,
             model=model,
             gain=0.05,
-            threshold=0.0,
-            max_iter_remaining=7,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=7,
         )
 
         assert result["iterations_performed"] == 7
@@ -363,8 +363,8 @@ class TestIterationControls:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.01,
-            max_iter_remaining=100,
+            threshold_per_cycle=0.01,
+            max_iter_per_cycle_updated=100,
         )
 
         assert result["iterations_performed"] <= 5
@@ -386,8 +386,8 @@ class TestIterationControls:
             psf=psf,
             model=model,
             gain=0.1,
-            threshold=0.0,
-            max_iter_remaining=20,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=20,
             progress_callback=cb,
         )
 
@@ -413,8 +413,8 @@ class TestIterationControls:
             psf=psf,
             model=model,
             gain=0.01,
-            threshold=0.0,
-            max_iter_remaining=1000,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=1000,
             stop_callback=stop,
         )
 
@@ -440,8 +440,8 @@ class TestMaskAndCleanBox:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=10,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=10,
             clean_box=(15, 25, 15, 25),
         )
 
@@ -469,8 +469,8 @@ class TestMaskAndCleanBox:
             model=model,
             mask=mask,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=10,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=10,
         )
 
         # Masked source is untouched; the unmasked one is cleaned.
@@ -512,8 +512,8 @@ class TestImagingDict:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         for key in (
@@ -538,8 +538,8 @@ class TestImagingDict:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=20,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=20,
         )
 
         assert result["total_flux_cleaned"] == pytest.approx(
@@ -577,7 +577,7 @@ def _point_sources_cube(nt, nf, npol, ny, nx, per_plane_sources, dtype=np.float3
 def _plane_iters(residual_cube, value):
     """Per-plane ``max_iter`` array for ``clean_cube``.
 
-    Iteration control is independent per (time, frequency, polarization)
+    Cycle control is independent per (time, frequency, polarization)
     plane: ``max_iter`` is an int32 array of shape ``(nt, nf, np)``.
     """
     return np.full(residual_cube.shape[:3], value, dtype=np.int32)
@@ -607,8 +607,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=1,
         )
 
@@ -640,8 +640,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=4,
         )
 
@@ -672,8 +672,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=2,
         )
 
@@ -697,8 +697,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model_a,
             gain=0.1,
-            threshold=_plane_threshold(resid_a, 0.05),
-            max_iter_remaining=_plane_iters(resid_a, 30),
+            threshold_per_cycle=_plane_threshold(resid_a, 0.05),
+            max_iter_per_cycle_updated=_plane_iters(resid_a, 30),
             processing_function_threads=1,
         )
 
@@ -709,8 +709,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model_b,
             gain=0.1,
-            threshold=_plane_threshold(resid_b, 0.05),
-            max_iter_remaining=_plane_iters(resid_b, 30),
+            threshold_per_cycle=_plane_threshold(resid_b, 0.05),
+            max_iter_per_cycle_updated=_plane_iters(resid_b, 30),
             processing_function_threads=4,
         )
 
@@ -737,8 +737,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=2,
         )
 
@@ -773,8 +773,8 @@ class TestCubeInPlaceContract:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=2,
         )
 
@@ -797,8 +797,8 @@ class TestCubeInPlaceContract:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=1,
         )
 
@@ -818,8 +818,8 @@ class TestCubeInPlaceContract:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=1,
         )
 
@@ -931,8 +931,8 @@ class TestCubeMaskAndBox:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             clean_box=(15, 25, 15, 25),
             processing_function_threads=1,
         )
@@ -965,8 +965,8 @@ class TestCubeMaskAndBox:
             model_cube=model,
             mask_cube=mask,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=1,
         )
 
@@ -1000,8 +1000,8 @@ class TestCubeReturnShapes:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.01),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.01),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=2,
         )
 
@@ -1027,41 +1027,309 @@ class TestCubeReturnShapes:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=64,
         )
         assert model[0, 0, 0, 4, 4] == pytest.approx(1.0, abs=1e-6)
 
 
-if __name__ == "__main__":  # pragma: no cover
-    pytest.main([__file__, "-v"])
+# ---------------------------------------------------------------------------
+# A PSF of twice the image size: every component subtracted from every pixel
+# ---------------------------------------------------------------------------
+
+CUBE_KERNELS = ["clean_cube", "clean_cube_many_threads"]
 
 
-@pytest.mark.parametrize("casa_cap", [0, 1, 5])
+@pytest.mark.parametrize("kernel", CUBE_KERNELS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("threads", [1, 4])
+def test_per_plane_mask_boxes_preserve_clean_box_ties_and_history(
+    kernel, dtype, threads
+):
+    """Different mask islands, holes and empty intersections keep all kernels equal."""
+    shape = (1, 1, 4, 32, 48)
+    dirty = np.zeros(shape, dtype=dtype)
+    mask = np.zeros(shape, dtype=bool)
+    for plane, points in enumerate([[(4, 8), (6, 12)], [(20, 36), (22, 38)]]):
+        for (y, x), amplitude in zip(points, [4.0, -4.0], strict=True):
+            dirty[0, 0, plane, y, x] = amplitude
+            mask[0, 0, plane, y, x] = True
+    # A mask hole, a peak outside the box, an empty mask, and a mask whose
+    # only nonzero pixel is outside clean_box must all remain uncleaned.
+    dirty[0, 0, 0, 5, 10] = 100.0
+    dirty[..., 1, 1] = 200.0
+    mask[0, 0, 1, 1, 1] = True
+    mask[0, 0, 3, 1, 1] = True
+    psf = np.zeros((1, 1, 1, 32, 48), dtype=dtype)
+    psf[..., 16, 24] = 1.0
+    box = (4, 44, 3, 27)
+    residual = dirty.copy()
+    model = np.zeros_like(dirty)
+    out = getattr(hogbom, kernel)(
+        residual_cube=residual,
+        psf_cube=psf,
+        model_cube=model,
+        mask_cube=mask,
+        clean_box=box,
+        max_iter_per_cycle_updated=np.full(shape[:3], 3, np.int32),
+        threshold_per_cycle=np.zeros(shape[:3], dtype),
+        gain=1.0,
+        processing_function_threads=threads,
+        record_iteration_history=True,
+    )
+    np.testing.assert_array_equal(out["iterations_performed"].ravel(), [2, 2, 0, 0])
+    np.testing.assert_array_equal(out["stop_code"], 2)  # STOP_THRESHOLD
+    for plane in range(4):
+        single_residual = dirty[0, 0, plane].copy()
+        single_model = np.zeros_like(single_residual)
+        single = hogbom.clean(
+            single_residual,
+            psf[0, 0, 0],
+            single_model,
+            mask=mask[0, 0, plane],
+            clean_box=box,
+            max_iter_per_cycle_updated=3,
+            gain=1.0,
+            record_iteration_history=True,
+        )
+        np.testing.assert_array_equal(residual[0, 0, plane], single_residual)
+        np.testing.assert_array_equal(model[0, 0, plane], single_model)
+        for key in ["iteration_peak_residual", "iteration_residual_rms"]:
+            np.testing.assert_array_equal(out[key][0][0][plane], single[key])
+        np.testing.assert_array_equal(
+            single["iteration_peak_residual"], [4.0, -4.0] if plane < 2 else []
+        )
+        np.testing.assert_array_equal(
+            single["iteration_residual_rms"], [np.sqrt(8.0), 0.0] if plane < 2 else []
+        )
+    assert residual[0, 0, 0, 5, 10] == 100.0
+    np.testing.assert_array_equal(residual[..., 1, 1], 200.0)
+
+
+def _exact_inputs(ny, nx, np_psf, dtype, seed=0):
+    """Two residual planes of noise, a PSF of twice their size with seeded
+    sidelobes out to its edge (peak 1 at (ny, nx)), a disc mask and a box."""
+    rng = np.random.default_rng(seed)
+    residual = rng.standard_normal((1, 1, 2, ny, nx)).astype(dtype)
+    psf = (0.1 * rng.standard_normal((1, 1, np_psf, 2 * ny, 2 * nx))).astype(dtype)
+    psf[..., ny, nx] = 1.0
+    yy, xx = np.mgrid[:ny, :nx]
+    disc = (yy - ny // 2) ** 2 + (xx - nx // 2) ** 2 <= (0.45 * min(ny, nx)) ** 2
+    mask = np.broadcast_to(disc, residual.shape).copy()
+    return residual, psf, mask, (2, nx - 1, 1, ny - 2)
+
+
+def _run_kernel(kernel, residual, psf, model, mask, box, n_iter, gain, divergence):
+    return getattr(hogbom, kernel)(
+        residual_cube=residual,
+        psf_cube=psf,
+        model_cube=model,
+        mask_cube=mask,
+        clean_box=box,
+        max_iter_per_cycle_updated=np.full(residual.shape[:3], n_iter, np.int32),
+        gain=gain,
+        threshold_per_cycle=np.zeros(residual.shape[:3], residual.dtype),
+        processing_function_threads=2,
+        max_iter_divergence=divergence,
+        divergence_rms_factor=1.01,
+        divergence_peak_factor=1.1,
+        record_iteration_history=True,
+    )
+
+
+class TestCubeExactSubtraction:
+    @pytest.mark.parametrize("kernel", CUBE_KERNELS)
+    @pytest.mark.parametrize("np_psf", [1, 2])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("shape", [(24, 24), (23, 23), (20, 26)])
+    @pytest.mark.parametrize("divergence", [-1, 1])
+    def test_equals_the_image_sized_kernel_on_an_embedded_image(
+        self, kernel, np_psf, dtype, shape, divergence
+    ):
+        """The PSF of twice the image size gives, to the bit, what the
+        image-sized kernel gives on a 2n image holding the residual at
+        (ny // 2, nx // 2), searched only there, with that PSF as its own."""
+        ny, nx = shape
+        residual, psf, mask, box = _exact_inputs(ny, nx, np_psf, dtype)
+        oy, ox = ny // 2, nx // 2
+        region = (..., slice(oy, oy + ny), slice(ox, ox + nx))
+        residual_2n = np.zeros(residual.shape[:3] + (2 * ny, 2 * nx), dtype)
+        residual_2n[region] = residual
+        mask_2n = np.zeros(residual_2n.shape, bool)
+        mask_2n[region] = mask
+        box_2n = (box[0] + ox, box[1] + ox, box[2] + oy, box[3] + oy)
+        model, model_2n = np.zeros_like(residual), np.zeros_like(residual_2n)
+
+        out = _run_kernel(kernel, residual, psf, model, mask, box, 200, 0.1, divergence)
+        ref = _run_kernel(
+            kernel, residual_2n, psf, model_2n, mask_2n, box_2n, 200, 0.1, divergence
+        )
+
+        assert np.array_equal(residual, residual_2n[region])
+        assert np.array_equal(model, model_2n[region])
+        model_2n[region] = 0
+        assert not model_2n.any()
+        for key in ("iterations_performed", "stop_code"):
+            assert np.array_equal(out[key], ref[key])
+        assert out["iterations_performed"].min() > 0
+        for key in ("iteration_peak_residual", "iteration_residual_rms"):
+            for got, want in zip(out[key][0][0], ref[key][0][0], strict=True):
+                assert np.array_equal(got, want)
+
+    @pytest.mark.parametrize("kernel", CUBE_KERNELS)
+    def test_residual_is_the_dirty_image_less_the_model_times_the_psf(self, kernel):
+        """With the PSF of twice the image size the residual is the dirty image
+        less the model convolved with that PSF, at every pixel. The
+        image-sized PSF misses a sidelobe ring at 0.75 n."""
+        n = 32
+        yy, xx = np.mgrid[: 2 * n, : 2 * n] - n
+        r = np.hypot(yy, xx)
+        psf2d = np.exp(-(r**2) / 6.0) + 0.2 * np.exp(-((r - 0.75 * n) ** 2) / 2.0)
+        psf = np.broadcast_to(psf2d / psf2d[n, n], (1, 1, 1, 2 * n, 2 * n)).copy()
+
+        def shifted(y, x):
+            return psf[0, 0, 0, n - y : 2 * n - y, n - x : 2 * n - x]
+
+        dirty = np.zeros((1, 1, 1, n, n))
+        for y, x, flux in ((5, 7, 1.0), (24, 20, -0.6), (12, 28, 0.4)):
+            dirty[0, 0, 0] += flux * shifted(y, x)
+        crop = psf[..., n - n // 2 : n - n // 2 + n, n - n // 2 : n - n // 2 + n]
+        errors = {}
+        for name, used in (("2n", psf), ("n", np.ascontiguousarray(crop))):
+            residual, model = dirty.copy(), np.zeros_like(dirty)
+            _run_kernel(
+                kernel, residual, used, model, np.array([]), (-1,) * 4, 300, 0.1, -1
+            )
+            expected = dirty[0, 0, 0].copy()
+            for y, x in zip(*np.nonzero(model[0, 0, 0]), strict=True):
+                expected -= model[0, 0, 0, y, x] * shifted(y, x)
+            errors[name] = np.abs(residual[0, 0, 0] - expected).max()
+        assert errors["2n"] <= 1e-12 * np.abs(dirty).max()
+        assert errors["n"] > 1e-2 * np.abs(dirty).max()
+
+    @pytest.mark.parametrize("kernel", CUBE_KERNELS)
+    @pytest.mark.parametrize(
+        "psf_shape", [(17, 16), (32, 16), (33, 32)], ids=["n+1", "2n_y", "2n+1_y"]
+    )
+    def test_other_psf_sizes_are_refused(self, kernel, psf_shape):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, *psf_shape), dtype=np.float32)
+        with pytest.raises(RuntimeError, match="twice"):
+            getattr(hogbom, kernel)(
+                residual_cube=resid, psf_cube=psf, model_cube=np.zeros_like(resid)
+            )
+
+    def test_plane_clean_takes_an_image_sized_psf_only(self):
+        dirty = _point_source_residual(16, 16, [(8, 8, 1.0)])
+        with pytest.raises(RuntimeError, match="wrong shape"):
+            hogbom.clean(
+                dirty_image=dirty, psf=_delta_psf(32, 32), model=_zeros(16, 16)
+            )
+
+
+# ---------------------------------------------------------------------------
+# An image-sized PSF: every sample subtracted, odd sizes included
+# ---------------------------------------------------------------------------
+
+
+def _hogbom_every_psf_sample(residual, psf, n_iter, gain):
+    """Hogbom on one plane: the PSF centre (psf_ny // 2, psf_nx // 2) on the
+    component, every PSF sample that falls in the image subtracted."""
+    residual, model = residual.copy(), np.zeros_like(residual)
+    gain = residual.dtype.type(gain)
+    for _ in range(n_iter):
+        py, px = np.unravel_index(np.argmax(np.abs(residual)), residual.shape)
+        pv = gain * residual[py, px]
+        model[py, px] += pv
+        y0, x0 = py - psf.shape[0] // 2, px - psf.shape[1] // 2
+        ys = slice(max(y0, 0), min(y0 + psf.shape[0], residual.shape[0]))
+        xs = slice(max(x0, 0), min(x0 + psf.shape[1], residual.shape[1]))
+        residual[ys, xs] -= (
+            pv * psf[ys.start - y0 : ys.stop - y0, xs.start - x0 : xs.stop - x0]
+        )
+    return residual, model
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("shape", [(23, 23), (21, 25), (23, 24), (24, 23)])
+def test_odd_sizes_subtract_every_psf_sample_in_every_kernel(dtype, shape):
+    """An image-sized PSF peaked at (ny // 2, nx // 2) is subtracted over the
+    offsets -(n // 2) .. (n - 1) // 2 of each axis, the row and column at
+    +n // 2 of an odd axis included, by clean, clean_cube and
+    clean_cube_many_threads to the bit."""
+    ny, nx = shape
+    rng = np.random.default_rng(7)
+    residual0 = rng.standard_normal((1, 1, 2, ny, nx)).astype(dtype)
+    psf = (0.1 * rng.standard_normal((1, 1, 2, ny, nx))).astype(dtype)
+    psf[..., ny // 2, nx // 2] = 1.0
+    n_iter = 100
+    out = {}
+    for kernel in CUBE_KERNELS:
+        residual, model = residual0.copy(), np.zeros_like(residual0)
+        res = _run_kernel(
+            kernel, residual, psf, model, np.array([]), (-1,) * 4, n_iter, 0.1, -1
+        )
+        assert res["iterations_performed"].tolist() == [[[n_iter, n_iter]]]
+        out[kernel] = residual, model, res
+    (r1, m1, o1), (r2, m2, o2) = out["clean_cube"], out["clean_cube_many_threads"]
+    assert np.array_equal(r1, r2)
+    assert np.array_equal(m1, m2)
+    assert np.array_equal(o1["stop_code"], o2["stop_code"])
+    for key in ("iteration_peak_residual", "iteration_residual_rms"):
+        for got, want in zip(o1[key][0][0], o2[key][0][0], strict=True):
+            assert np.array_equal(got, want)
+
+    without_edge = psf[..., : ny - ny % 2, : nx - nx % 2]
+    for p in range(2):
+        want_r, want_m = _hogbom_every_psf_sample(
+            residual0[0, 0, p], psf[0, 0, p], n_iter, 0.1
+        )
+        assert np.array_equal(r1[0, 0, p], want_r)
+        assert np.array_equal(m1[0, 0, p], want_m)
+        edge_dropped, _ = _hogbom_every_psf_sample(
+            residual0[0, 0, p], without_edge[0, 0, p], n_iter, 0.1
+        )
+        assert not np.array_equal(r1[0, 0, p], edge_dropped)
+
+    residual, model = residual0[0, 0, 0].copy(), np.zeros_like(residual0[0, 0, 0])
+    hogbom.clean(
+        dirty_image=residual,
+        psf=np.ascontiguousarray(psf[0, 0, 0]),
+        model=model,
+        max_iter_per_cycle_updated=n_iter,
+        gain=0.1,
+        threshold_per_cycle=0.0,
+        max_iter_divergence=-1,
+    )
+    assert np.array_equal(residual, r1[0, 0, 0])
+    assert np.array_equal(model, m1[0, 0, 0])
+
+
+@pytest.mark.parametrize("iteration_budget", [0, 2, 6])
 @pytest.mark.parametrize("cycles", [1, 2])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_explicit_budget_matches_casa_capped_point_updates(casa_cap, cycles, dtype):
-    """Match CASA's inclusive cap by inputs, keeping the kernel exclusive.
-
-    An isolated unit point with gain 0.1 has residual 0.9**updates. This
-    checks physical model updates independently of either engine's counter.
-    Zero remains inactive; each positive capped CASA call needs cap+1 here.
-    """
+def test_explicit_iteration_budget_controls_point_updates(
+    iteration_budget, cycles, dtype
+):
+    """Each call performs exactly the requested number of point updates."""
     dirty = _point_source_residual(16, 16, [(8, 8, 1.0)], dtype=dtype)
     model = _zeros(16, 16, dtype=dtype)
     psf = _delta_psf(16, 16, dtype=dtype)
-    budget = casa_cap + 1 if casa_cap else 0
     for _ in range(cycles):
         result = hogbom.clean(
             dirty_image=dirty,
             psf=psf,
             model=model,
             gain=0.1,
-            threshold=0.0,
-            max_iter_remaining=budget,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=iteration_budget,
         )
-        assert result["iterations_performed"] == budget
-    expected_residual = 0.9 ** (cycles * budget)
+        assert result["iterations_performed"] == iteration_budget
+    expected_residual = 0.9 ** (cycles * iteration_budget)
     assert dirty[8, 8] == pytest.approx(expected_residual, abs=2e-7)
     assert model.sum() == pytest.approx(1 - expected_residual, abs=2e-7)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__, "-v"])

@@ -7,8 +7,8 @@ def residual_cycle_continuum_single_field(
     img_xds,
     model_uv_xds,
     image_params,
-    is_n_iter_0,
-    specmode="mfs",
+    is_first_cycle,
+    continuum_mode="mfs",
     model_xds=None,
     primary_beam_xds=None,
     processing_set_data_group_name="corrected",
@@ -33,14 +33,27 @@ def residual_cycle_continuum_single_field(
 
     Parameters
     ----------
-    specmode : {"mfs", "mvc"}
-        Select Taylor UV gridding or frequency-resolved MVC processing.
+    continuum_mode : {"mfs", "mvc"}
+        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
+        the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
+        both the intrinsic source spectral index and the primary-beam spectral
+        index. Its reference-frequency primary beam corrects the Taylor-zero
+        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        channel images and common-beam Taylor equations, and predicts
+        ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
+        the intrinsic spectrum under the common-beam convention, so
+        ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
+        match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
+        parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
     model_xds : xarray.Dataset, optional
         Accumulated image-domain Taylor model used for MVC prediction.
     primary_beam_xds : xarray.Dataset, optional
         Cached primary beam for this MVC partition.
     observed_visibility_grid_xds : xarray.Dataset, optional
-        Cached observed UV planes for this MVC partition.
+        Task-local cached observed visibility grid used by later residual-update
+        cycles. The distributed application supplies this only for in-memory MVC
+        caching; other modes and first cycles leave it unset.
     ps_xdt : xarray.DataTree or mapping
         Processing-set partition containing the observed (or residual)
         visibilities together with previously prepared imaging weights.
@@ -50,27 +63,62 @@ def residual_cycle_continuum_single_field(
         Globally prepared Fourier-domain Taylor model. This is only used after the
         first imaging cycle.
     image_params : dict
-        Image geometry and continuum imaging parameters.
-    is_n_iter_0 : bool
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+    is_first_cycle : bool
         True for the first imaging cycle, in which no model prediction is required.
     processing_set_data_group_name : str, optional
-        Processing-set data group containing the observed visibilities.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     instrument_polarization_basis : str, optional
-        Instrument correlation basis.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
     single_precision_image : bool, optional
-        Whether complex image-domain arrays use single precision.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
-        Number of threads supplied to the gridding kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
-        FFT backend used by the lower-level imaging functions.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
     image_data_variables_keep : list of str, optional
-        Image products retained in the returned dataset.
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        Cache observed UV grids in memory or the image store, or recompute
-        residual visibilities each cycle. MFS caches reduced Taylor grids;
-        MVC caches each map task's frequency planes.
+        Continuum residual-update storage policy for observed visibility grids.
+        ``"in_memory"`` retains the first-cycle grid in driver memory, while
+        ``"in_place"`` stores it temporarily in the image Zarr store. Later
+        cycles grid only the predicted-model contribution and subtract it from
+        the cached observed grid. ``"recompute"`` instead reloads the original
+        observed visibilities and grids their visibility-domain residual every
+        cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
+        map task's exclusively owned frequency-resolved UV planes.
     image_data_group_in_name : str, optional
-        Image data group containing the current Taylor model.
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Image data group receiving the residual Taylor products.
     last_residual_cycle : bool, optional
@@ -105,10 +153,10 @@ def residual_cycle_continuum_single_field(
     if image_data_variables_keep is None:
         image_data_variables_keep = []
 
-    specmode = str(specmode).lower()
-    if specmode not in ("mfs", "mvc"):
+    continuum_mode = str(continuum_mode).lower()
+    if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
     if visibility_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
@@ -116,11 +164,11 @@ def residual_cycle_continuum_single_field(
             f"'recompute'; received {visibility_memory_mode!r}."
         )
 
-    nterms = int(image_params.get("nterms", 2))
-    reference_frequency = float(image_params["reference_frequency_hz"])
+    n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
+    reference_frequency = float(image_params["reference_frequency"])
 
-    if nterms < 1:
-        raise ValueError("image_params['nterms'] must be at least 1.")
+    if n_taylor_terms < 1:
+        raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
@@ -143,10 +191,8 @@ def residual_cycle_continuum_single_field(
     # Later imaging cycles:
     # predict the current model and form residual visibilities.
     # ------------------------------------------------------------
-    if not is_n_iter_0:
-        start = time.time()
-
-        if specmode == "mfs":
+    if not is_first_cycle:
+        if continuum_mode == "mfs":
             # delete an old residual if present
             residual_data_group = img_xds.attrs.get("data_groups", {}).get(
                 image_data_group_out_name,
@@ -158,14 +204,15 @@ def residual_cycle_continuum_single_field(
             if residual_sky_name is not None and residual_sky_name in img_xds:
                 img_xds.xr_img.delete_data_variables(variables=[residual_sky_name])
 
-            start = time.time()
+            degrid_start = time.time()
 
             make_visibility_model_continuum_single_field(
                 ps_xdt,
                 model_uv_xds,
                 cgk_1D,
-                nterms=nterms,
+                n_taylor_terms=n_taylor_terms,
                 reference_frequency=reference_frequency,
+                ms_data_group_in_name=ps_data_group_name,
                 ms_data_group_out_name="model",
                 ms_data_group_out_modified={
                     "correlated_data": "VISIBILITY_MODEL",
@@ -175,10 +222,10 @@ def residual_cycle_continuum_single_field(
                 fft_padding=image_params["fft_padding"],
             )
 
-            T_degrid += time.time() - start
+            T_degrid += time.time() - degrid_start
 
             if visibility_memory_mode == "recompute":
-                start = time.time()
+                residual_vis_start = time.time()
 
                 calculate_residual_visibilities(
                     ps_xdt,
@@ -187,7 +234,7 @@ def residual_cycle_continuum_single_field(
                     ms_data_group_in_observed=ps_data_group_name,
                 )
 
-                T_residual_vis += time.time() - start
+                T_residual_vis += time.time() - residual_vis_start
                 ps_data_group_name = "residual"
             else:
                 # The globally reduced observed-data grid is retained by the
@@ -211,6 +258,7 @@ def residual_cycle_continuum_single_field(
                 dtype=np.float64,
             )
 
+            degrid_start = time.time()
             local_model_uv_xds = prepare_model_uv_mvc_single_field(
                 model_xds,
                 primary_beam_xds,
@@ -220,13 +268,15 @@ def residual_cycle_continuum_single_field(
                 single_precision_image=(single_precision_image),
                 processing_function_threads=(processing_function_threads),
                 fft_backend=fft_backend,
-                image_data_group_name=(image_data_group_in_name),
+                image_data_group_in_name=image_data_group_in_name,
+                image_data_group_out_name=image_data_group_in_name,
             )
 
             make_visibility_model_single_field(
                 ps_xdt,
                 local_model_uv_xds,
                 cgk_1D,
+                ms_data_group_in_name=ps_data_group_name,
                 ms_data_group_out_name="model",
                 ms_data_group_out_modified={
                     "correlated_data": "VISIBILITY_MODEL",
@@ -235,10 +285,12 @@ def residual_cycle_continuum_single_field(
                 processing_function_threads=(processing_function_threads),
                 fft_padding=image_params["fft_padding"],
             )
-
-            start = time.time()
+            # MVC prepares its channel-dependent UV model locally immediately
+            # before degridding, so report both prediction steps together.
+            T_degrid += time.time() - degrid_start
 
             if visibility_memory_mode == "recompute":
+                residual_vis_start = time.time()
                 calculate_residual_visibilities(
                     ps_xdt,
                     ms_data_group_out_residual="residual",
@@ -246,12 +298,10 @@ def residual_cycle_continuum_single_field(
                     ms_data_group_in_observed=ps_data_group_name,
                 )
 
-                T_residual_vis += time.time() - start
+                T_residual_vis += time.time() - residual_vis_start
                 ps_data_group_name = "residual"
             else:
                 ps_data_group_name = "model"
-
-        T_degrid += time.time() - start
 
     # ------------------------------------------------------------
     # Grid residual
@@ -259,7 +309,7 @@ def residual_cycle_continuum_single_field(
 
     start = time.time()
 
-    if specmode == "mfs":
+    if continuum_mode == "mfs":
         from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
             make_undeconvolved_image_continuum_single_field,
         )
@@ -272,7 +322,7 @@ def residual_cycle_continuum_single_field(
             img_xds,
             image_params,
             cgk_1D,
-            nterms=nterms,
+            n_taylor_terms=n_taylor_terms,
             reference_frequency=reference_frequency,
             ms_data_group_in_name=ps_data_group_name,
             image_data_group_out_name=image_data_group_out_name,
@@ -280,7 +330,7 @@ def residual_cycle_continuum_single_field(
             complex_dtype=complex_dtype,
         )
 
-    elif specmode == "mvc":
+    elif continuum_mode == "mvc":
         from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum_mvc import (
             make_undeconvolved_image_mvc_single_field,
         )
@@ -299,7 +349,7 @@ def residual_cycle_continuum_single_field(
             complex_dtype=complex_dtype,
         )
 
-        if not is_n_iter_0 and visibility_memory_mode != "recompute":
+        if not is_first_cycle and visibility_memory_mode != "recompute":
             if observed_visibility_grid_xds is None:
                 raise ValueError(
                     "Cached-grid MVC cycles require a task-local observed "
@@ -312,14 +362,15 @@ def residual_cycle_continuum_single_field(
             img_xds = form_residual_grid_from_cache(
                 observed_visibility_grid_xds,
                 img_xds,
-                image_data_group_name=image_data_group_out_name,
+                image_data_group_in_observed=image_data_group_out_name,
+                image_data_group_in_model=image_data_group_out_name,
                 grid_kind="MVC",
             )
-            img_xds.attrs["specmode"] = "mvc"
+            img_xds.attrs["continuum_mode"] = "mvc"
 
     else:
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
 
     T_grid = time.time() - start
@@ -330,8 +381,8 @@ def residual_cycle_continuum_single_field(
             "T_degrid": [T_degrid],
             "T_residual_vis": [T_residual_vis],
             "T_grid": [T_grid],
-            "nterms": [nterms],
-            "is_n_iter_0": [bool(is_n_iter_0)],
+            "n_taylor_terms": [n_taylor_terms],
+            "is_first_cycle": [bool(is_first_cycle)],
             "last_residual_cycle": [bool(last_residual_cycle)],
         }
     )
@@ -348,8 +399,9 @@ def make_visibility_model_continuum_single_field(
     ps_xdt,
     model_xds,
     cgk_1D,
-    nterms,
+    n_taylor_terms,
     reference_frequency,
+    ms_data_group_in_name="base",
     ms_data_group_out_name="model",
     ms_data_group_out_modified=None,
     image_data_group_in_name="model",
@@ -360,8 +412,9 @@ def make_visibility_model_continuum_single_field(
 
     The continuum imaging cycle maintains the sky model as Fourier-transformed Taylor
     coefficients rather than frequency images. This function reconstructs the model
-    visibility grid at the actual observing frequencies of one processing-set
-    partition and degrids that model into predicted visibilities.
+    visibility at the actual observing frequencies of one processing-set
+    partition. Each Taylor grid is degridded once and its channel-dependent
+    Taylor contribution is accumulated in visibility space.
 
     For each frequency channel ν, the model visibility grid is reconstructed as
 
@@ -372,9 +425,9 @@ def make_visibility_model_continuum_single_field(
     where ``M_t`` denotes the Fourier-domain Taylor coefficient and ``ν_ref`` is
     the common continuum reference frequency.
 
-    The reconstructed frequency grid is passed directly to the shared standard
-    degridding primitive, which produces predicted model visibilities in the
-    measurement set.
+    This avoids materializing a channel-sized UV-grid cube. The shared standard
+    degridding primitive samples each Taylor plane for every visibility channel,
+    after which the corresponding spectral weights are applied to its output.
 
     This reconstruction is repeated independently for every visibility partition,
     whereas the Fourier Taylor model itself is prepared only once after each global
@@ -390,10 +443,16 @@ def make_visibility_model_continuum_single_field(
         coefficients.
     cgk_1D : numpy.ndarray
         One-dimensional prolate-spheroidal convolution kernel.
-    nterms : int
+    n_taylor_terms : int
         Number of Taylor terms to reconstruct.
     reference_frequency : float
         Common MT-MFS reference frequency in Hz.
+    ms_data_group_in_name : str, optional
+        Processing-set data group being imaged (the caller's
+        ``processing_set_data_group_name``). The degridder reads its ``uvw``
+        and the shape of its ``correlated_data`` (or of its ``weight_imaging``
+        when the observed visibilities are not loaded), and the output group
+        inherits its remaining roles.
     ms_data_group_out_name : str, optional
         Processing-set data group receiving the predicted model visibilities.
     ms_data_group_out_modified : dict, optional
@@ -412,17 +471,16 @@ def make_visibility_model_continuum_single_field(
 
     Notes
     -----
-    For each processing-set partition this continuum implementation reconstructs
-    the frequency-dependent UV grid from the stored Taylor coefficients and calls
-    the shared standard degridding primitive directly. It does not route model
-    prediction through the cube processing API.
+    For each processing-set partition this continuum implementation degrids each
+    stored Fourier Taylor coefficient through the shared standard primitive. It
+    combines the results in visibility space and does not route model prediction
+    through the cube processing API.
 
     The Fourier-domain Taylor model is prepared only once after each global
     continuum model update. Consequently, this function performs only the spectral
     reconstruction and degridding required for the current visibility partition.
     """
     import numpy as np
-    import xarray as xr
 
     from astroviper.processing_functions.imaging.degrid_visibility_grid import (
         degrid_visibility_grid_single_field,
@@ -436,12 +494,13 @@ def make_visibility_model_continuum_single_field(
         ms_data_group_out_modified = {
             "correlated_data": "VISIBILITY_MODEL",
         }
+    output_visibility_name = ms_data_group_out_modified["correlated_data"]
 
-    nterms = int(nterms)
+    n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
 
-    if nterms < 1:
-        raise ValueError("nterms must be at least 1.")
+    if n_taylor_terms < 1:
+        raise ValueError("n_taylor_terms must be at least 1.")
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
@@ -481,14 +540,29 @@ def make_visibility_model_continuum_single_field(
 
     available_nterms = model_taylor_grid.sizes["taylor_term"]
 
-    if available_nterms < nterms:
+    if available_nterms < n_taylor_terms:
         raise ValueError(
             f"The model contains {available_nterms} Taylor terms, but "
-            f"nterms={nterms} was requested."
+            f"n_taylor_terms={n_taylor_terms} was requested."
         )
 
     # Ignore any extra Taylor terms that may be present.
-    model_taylor_grid = model_taylor_grid.isel(taylor_term=slice(0, nterms))
+    model_taylor_grid = model_taylor_grid.isel(taylor_term=slice(0, n_taylor_terms))
+    model_grid_dtype = np.dtype(model_taylor_grid.dtype)
+    if not np.issubdtype(model_grid_dtype, np.complexfloating):
+        raise TypeError(
+            "The Fourier Taylor model must use complex64 or complex128; "
+            f"received {model_grid_dtype}."
+        )
+    if model_grid_dtype.itemsize == np.dtype(np.complex64).itemsize:
+        native_grid_dtype = np.complex64
+    elif model_grid_dtype.itemsize == np.dtype(np.complex128).itemsize:
+        native_grid_dtype = np.complex128
+    else:
+        raise TypeError(
+            "The Fourier Taylor model must use complex64 or complex128; "
+            f"received {model_grid_dtype}."
+        )
 
     # ------------------------------------------------------------
     # Wrapper around cube implementation, may need refactoring into a native continuum implementation later
@@ -526,77 +600,73 @@ def make_visibility_model_continuum_single_field(
                 "The measurement-set frequency coordinate contains non-finite values."
             )
 
-        taylor_coordinate = np.arange(nterms, dtype=np.int64)
-
         spectral_coordinate = (
             frequency_values - reference_frequency
         ) / reference_frequency
+        frequency_map = np.zeros(frequency_values.size, dtype=np.int64)
+        accumulated_model = None
 
-        # dimensions:
-        #
-        #     frequency x taylor_term
-        #
-        taylor_weights = xr.DataArray(
-            spectral_coordinate[:, np.newaxis] ** taylor_coordinate[np.newaxis, :],
-            dims=("frequency", "taylor_term"),
-            coords={
-                "frequency": frequency_values,
-                "taylor_term": model_taylor_grid.coords.get(
-                    "taylor_term",
-                    taylor_coordinate,
-                ),
-            },
-        )
-
-        # Reconstruct the uv model for every actual visibility channel:
-        #
-        #     M(nu) = sum_t M_t x^t.
-        #
-        frequency_model_grid = (model_taylor_grid * taylor_weights).sum(
-            dim="taylor_term",
-            keep_attrs=True,
-        )
-
-        preferred_dimension_order = [
-            dimension
-            for dimension in (
-                "time",
-                "frequency",
-                "polarization",
-                "u",
-                "v",
+        for taylor_term in range(n_taylor_terms):
+            taylor_grid = model_taylor_grid.isel(
+                taylor_term=taylor_term,
+                drop=True,
             )
-            if dimension in frequency_model_grid.dims
-        ]
+            preferred_dimension_order = [
+                dimension
+                for dimension in ("time", "polarization", "u", "v")
+                if dimension in taylor_grid.dims
+            ]
+            remaining_dimensions = [
+                dimension
+                for dimension in taylor_grid.dims
+                if dimension not in preferred_dimension_order
+            ]
+            taylor_grid = taylor_grid.transpose(
+                *preferred_dimension_order,
+                *remaining_dimensions,
+            )
 
-        remaining_dimensions = [
-            dimension
-            for dimension in frequency_model_grid.dims
-            if dimension not in preferred_dimension_order
-        ]
+            # A single Taylor plane supplies every channel; the spectral
+            # dependence is applied afterward in the much smaller visibility
+            # domain instead of constructing a channel-sized UV-grid cube.
+            single_plane_grid = np.ascontiguousarray(
+                np.expand_dims(taylor_grid.values, axis=1),
+                dtype=native_grid_dtype,
+            )
+            degrid_visibility_grid_single_field(
+                ms_xdt,
+                cgk_1D,
+                model_xds,
+                single_plane_grid,
+                frequency_map,
+                ms_data_group_in_name=ms_data_group_in_name,
+                ms_data_group_out_name=ms_data_group_out_name,
+                ms_data_group_out_modified=ms_data_group_out_modified,
+                overwrite=True,
+                fft_padding=fft_padding,
+                processing_function_threads=processing_function_threads,
+                description=(
+                    "Continuum Taylor model sampled with the standard degridder."
+                ),
+            )
 
-        frequency_model_grid = frequency_model_grid.transpose(
-            *preferred_dimension_order,
-            *remaining_dimensions,
-        )
+            predicted_model = ms_xdt[output_visibility_name].values
+            if accumulated_model is None:
+                # The zeroth Taylor weight is one for every channel.
+                accumulated_model = predicted_model.copy()
+                continue
 
-        # Degrid the continuum-owned reconstructed grid through the common
-        # numerical primitive; no cube processing function is involved.
-        degrid_visibility_grid_single_field(
-            ms_xdt,
-            cgk_1D,
-            model_xds,
-            frequency_model_grid.values,
-            np.arange(frequency_values.size, dtype=np.int64),
-            ms_data_group_out_name=ms_data_group_out_name,
-            ms_data_group_out_modified=ms_data_group_out_modified,
-            overwrite=True,
-            fft_padding=fft_padding,
-            processing_function_threads=processing_function_threads,
-            description=(
-                "Continuum Taylor model reconstructed at visibility frequencies "
-                "and sampled with the standard degridder."
-            ),
-        )
+            weight_shape = [1] * predicted_model.ndim
+            weight_shape[ms_xdt[output_visibility_name].get_axis_num("frequency")] = (
+                frequency_values.size
+            )
+            np.multiply(
+                predicted_model,
+                (spectral_coordinate**taylor_term).reshape(weight_shape),
+                out=predicted_model,
+            )
+            accumulated_model += predicted_model
+
+        ms_xdt[output_visibility_name].data[...] = accumulated_model
 
     return

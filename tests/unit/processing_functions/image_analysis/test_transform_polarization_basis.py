@@ -69,6 +69,25 @@ def test_overwrite_false_preserves_skipped_passthrough_variables():
     np.testing.assert_allclose(out["POINT_SPREAD_FUNCTION"].values, np.ones((2, 3, 3)))
 
 
+@pytest.mark.parametrize("basis", ["linear", "circular"])
+def test_psf_sidelobe_metadata_is_not_mixed_into_stokes(basis):
+    """PSF sidelobes remain equal for every Stokes plane after conversion."""
+    xds = _make_four_correlation_image(_correlations(STOKES, basis), basis)
+    xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = xr.DataArray(
+        np.full(4, 0.248),
+        dims=("polarization",),
+        attrs={"unit": "", "type": "point_spread_function_metadata"},
+    )
+
+    out = transform_polarization_basis(xds, "stokes")
+
+    assert list(out.polarization.values) == ["I", "Q", "U", "V"]
+    np.testing.assert_allclose(
+        out["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"].values,
+        np.full(4, 0.248),
+    )
+
+
 def test_overwrite_true_mutates_in_place():
     xds = _make_linear_image()
     out = transform_polarization_basis(xds, "stokes", overwrite=True)

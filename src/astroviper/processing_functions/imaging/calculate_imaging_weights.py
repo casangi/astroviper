@@ -70,7 +70,19 @@ def _equalize_parallel_hand_weights(
 
 
 def normalize_imaging_weight_params(imaging_weights_params):
-    """Validate and normalize the imaging-weight configuration."""
+    """Validate and normalize the imaging-weight configuration.
+
+    Parameters
+    ----------
+    imaging_weights_params : dict
+        User imaging-weight configuration.
+
+    Returns
+    -------
+    dict
+        Validated copy in which uniform weighting is represented by Briggs
+        weighting with robust parameter ``-2``.
+    """
     import copy
 
     from astroviper.processing_functions.imaging.check_imaging_parameters import (
@@ -95,7 +107,24 @@ def prepare_local_data_weights(
     *,
     casa_weighting_implementation,
 ):
-    """Return flagged and parallel-hand-equalized data weights."""
+    """Return flagged and parallel-hand-equalized data weights.
+
+    Parameters
+    ----------
+    ms_xds : xarray.Dataset
+        Measurement Set partition containing statistical weights and flags.
+    ms_data_group : dict
+        Data-group mapping that registers the weight and flag variables.
+    casa_weighting_implementation : bool
+        Use CASA's arithmetic parallel-hand equalization when true; otherwise
+        use the harmonic prescription.
+
+    Returns
+    -------
+    numpy.ndarray
+        Copy of the data weights with flagged samples set to NaN and parallel
+        hands equalized.
+    """
     import numpy as np
 
     data_weight = np.array(
@@ -112,75 +141,7 @@ def prepare_local_data_weights(
     )
 
 
-def collapse_continuum_weight_density(weight_density_xds: xr.Dataset) -> xr.Dataset:
-    """Collapse channel-dependent density contributions for continuum Briggs.
-
-    CASA continuum weighting forms one common UV-density plane from every
-    selected channel before calculating a single Briggs factor. This function
-    performs that frequency collapse after distributed partitions have been
-    aligned and reduced.
-
-    Parameters
-    ----------
-    weight_density_xds : xarray.Dataset
-        Reduced dataset containing ``WEIGHT_DENSITY_GRID`` with dimensions
-        ``(frequency, weight_polarization, u, v)`` and ``SUM_WEIGHT`` with
-        dimensions ``(frequency, weight_polarization)``.
-
-    Returns
-    -------
-    xarray.Dataset
-        A copy containing one stored continuum density plane and one summed
-        weight plane. The ``continuum_frequency_collapsed`` attribute marks
-        that the singleton frequency coordinate represents all input channels.
-    """
-    required = ("WEIGHT_DENSITY_GRID", "SUM_WEIGHT")
-    missing = [name for name in required if name not in weight_density_xds]
-    if missing:
-        raise KeyError(f"Weight-density dataset is missing variables {missing}.")
-
-    density = weight_density_xds["WEIGHT_DENSITY_GRID"]
-    sum_weight = weight_density_xds["SUM_WEIGHT"]
-    expected_density_dims = ("frequency", "weight_polarization", "u", "v")
-    expected_sum_dims = ("frequency", "weight_polarization")
-    if density.dims != expected_density_dims:
-        raise ValueError(
-            f"WEIGHT_DENSITY_GRID dimensions are {density.dims}; expected "
-            f"{expected_density_dims}."
-        )
-    if sum_weight.dims != expected_sum_dims:
-        raise ValueError(
-            f"SUM_WEIGHT dimensions are {sum_weight.dims}; expected "
-            f"{expected_sum_dims}."
-        )
-    if density.sizes["frequency"] == 0:
-        raise ValueError("Cannot collapse an empty continuum frequency axis.")
-
-    n_input_frequency_channels = int(density.sizes["frequency"])
-    representative_frequency = float(
-        np.mean(np.asarray(weight_density_xds.frequency.values, dtype=np.float64))
-    )
-    collapsed_density = (
-        density.sum(dim="frequency")
-        .expand_dims(frequency=[representative_frequency])
-        .transpose(*expected_density_dims)
-    )
-    collapsed_sum_weight = (
-        sum_weight.sum(dim="frequency")
-        .expand_dims(frequency=[representative_frequency])
-        .transpose(*expected_sum_dims)
-    )
-
-    result = weight_density_xds.drop_vars(required).drop_dims("frequency")
-    result["WEIGHT_DENSITY_GRID"] = collapsed_density
-    result["SUM_WEIGHT"] = collapsed_sum_weight
-    result.attrs = weight_density_xds.attrs.copy()
-    result.attrs["continuum_frequency_collapsed"] = True
-    result.attrs["n_input_frequency_channels"] = n_input_frequency_channels
-    return result
-
-
-# @shares_param_docs
+@shares_param_docs
 def grid_imaging_weight_density_continuum(
     ps_xdt: xr.DataTree,
     img_xds: xr.Dataset,
@@ -188,15 +149,13 @@ def grid_imaging_weight_density_continuum(
     ms_data_group_in_name: str = "base",
     single_precision_gridding: bool = False,
     processing_function_threads: int = 1,
-    collapse_frequency: bool = False,
 ) -> xr.Dataset:
     """Grid one visibility partition's contribution to the weight density.
 
     This function implements the first, partition-local stage of distributed
     Briggs or uniform weighting. It masks flagged data weights, equalizes the
     parallel-hand correlation weights, and grids the resulting weights onto a
-    UV-density grid. The distributed global-weighting path requests direct
-    accumulation into one continuum frequency plane.
+    common continuum UV-density plane.
 
     No Briggs factors are calculated and no weights are degridded back to the
     visibility samples. The returned density and sum-of-weight products are
@@ -214,12 +173,12 @@ def grid_imaging_weight_density_continuum(
         angular cell size.
 
     imaging_weights_params : dict
-        Imaging-weight configuration. Only Briggs and uniform weighting require
-        this function. Uniform weighting is treated as Briggs weighting with
-        ``robust=-2``.
-
-        The entry ``casa_weighting_implementation`` selects the parallel-hand
-        equalization convention.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
 
     ms_data_group_in_name : str, optional
         Processing-set data group containing the raw weights, flags, and UVW
@@ -230,12 +189,8 @@ def grid_imaging_weight_density_continuum(
         ``float64``. ``SUM_WEIGHT`` is always accumulated in ``float64``.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the weight-density gridder.
-
-    collapse_frequency : bool, optional
-        If true, map every visibility channel directly into one common
-        continuum UV-density plane. If false, retain the channel-dependent
-        layout used by existing processing-function callers.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     Returns
     -------
@@ -250,11 +205,9 @@ def grid_imaging_weight_density_continuum(
             Partition-local sum of equalized data weights with dimensions
             ``(frequency, weight_polarization)``.
 
-        With ``collapse_frequency=True``, the singleton frequency coordinate is
-        the mean input frequency and the
+        The singleton frequency coordinate is the mean input frequency and the
         ``continuum_frequency_collapsed`` attribute records its continuum
-        meaning. Otherwise physical frequency coordinates are retained for
-        alignment by a later reducer.
+        meaning.
 
     Notes
     -----
@@ -370,11 +323,7 @@ def grid_imaging_weight_density_continuum(
     # correlations during the later degrid stage.
     n_weight_polarization = 1
 
-    output_frequency = (
-        np.asarray([np.mean(frequency)], dtype=np.float64)
-        if collapse_frequency
-        else frequency
-    )
+    output_frequency = np.asarray([np.mean(frequency)], dtype=np.float64)
 
     weight_density_grid = np.zeros(
         (
@@ -455,14 +404,6 @@ def grid_imaging_weight_density_continuum(
                 f"one-dimensional; received shape {ms_frequency.shape}."
             )
 
-        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-            map_visibility_frequencies_to_image,
-        )
-
-        image_frequency_indices = map_visibility_frequencies_to_image(
-            ms_frequency, frequency, matching="nearest"
-        )
-
         uvw = np.asarray(ms_xds[data_group["uvw"]].values)
 
         # Make a copy because applying the flags must not mutate the raw
@@ -494,31 +435,9 @@ def grid_imaging_weight_density_continuum(
                 f"child {ms_name!r}."
             )
 
-        uses_full_frequency_axis = not collapse_frequency and np.array_equal(
-            image_frequency_indices,
-            np.arange(frequency.size),
-        )
-        if collapse_frequency or uses_full_frequency_axis:
-            child_weight_density_grid = weight_density_grid
-            child_sum_weight = sum_weight
-        else:
-            child_weight_density_grid = np.zeros(
-                (
-                    ms_frequency.size,
-                    n_weight_polarization,
-                    n_uv[0],
-                    n_uv[1],
-                ),
-                dtype=density_dtype,
-            )
-            child_sum_weight = np.zeros(
-                (ms_frequency.size, n_weight_polarization),
-                dtype=np.float64,
-            )
-
         grid_imaging_weights(
-            child_weight_density_grid,
-            child_sum_weight,
+            weight_density_grid,
+            sum_weight,
             uvw,
             data_weight,
             ms_frequency,
@@ -526,28 +445,8 @@ def grid_imaging_weight_density_continuum(
             delta_lm,
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=True,
-            frequency_map=(
-                np.zeros(ms_frequency.size, dtype=np.int64)
-                if collapse_frequency
-                else None
-            ),
+            frequency_map=np.zeros(ms_frequency.size, dtype=np.int64),
         )
-
-        if not collapse_frequency and not uses_full_frequency_axis:
-            # Repeated target indices must accumulate every observed channel.
-            # Advanced-index += alone would lose contributions for many-to-one maps.
-            if np.unique(image_frequency_indices).size == image_frequency_indices.size:
-                weight_density_grid[image_frequency_indices, ...] += (
-                    child_weight_density_grid
-                )
-                sum_weight[image_frequency_indices, ...] += child_sum_weight
-            else:
-                np.add.at(
-                    weight_density_grid,
-                    image_frequency_indices,
-                    child_weight_density_grid,
-                )
-                np.add.at(sum_weight, image_frequency_indices, child_sum_weight)
 
         datasets_gridded += 1
 
@@ -614,7 +513,7 @@ def grid_imaging_weight_density_continuum(
             "n_processing_set_datasets_gridded": datasets_gridded,
             "cell_size_l": float(delta_lm[0]),
             "cell_size_m": float(delta_lm[1]),
-            "continuum_frequency_collapsed": bool(collapse_frequency),
+            "continuum_frequency_collapsed": True,
             "n_input_frequency_channels": int(frequency.size),
         },
     )
@@ -622,7 +521,7 @@ def grid_imaging_weight_density_continuum(
     return result_xds
 
 
-# @shares_param_docs
+@shares_param_docs
 def degrid_imaging_weights_continuum(
     ps_xdt: xr.DataTree,
     img_xds: xr.Dataset,
@@ -638,9 +537,8 @@ def degrid_imaging_weights_continuum(
 
     This function implements the partition-local numerical stage of the second
     distributed continuum weighting graph. It receives the globally accumulated
-    weight-density grid and globally calculated Briggs factors, selects the
-    frequency planes required by each local processing-set dataset, and degrids
-    the final imaging weights onto the corresponding visibility samples.
+    collapsed weight-density grid and globally calculated Briggs factors, and
+    degrids the common continuum plane onto each visibility channel.
 
     Parallel-hand data weights are flagged and equalized locally before
     degridding. The resulting single-polarization imaging weights are tiled over
@@ -670,8 +568,12 @@ def degrid_imaging_weights_continuum(
             ``(briggs_parameter, frequency, weight_polarization)``.
 
     imaging_weights_params : dict
-        Imaging-weight configuration. Uniform weighting is normalized to Briggs
-        weighting with ``robust=-2``.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
 
     ms_data_group_in_name : str, optional
         Name of the processing-set input data group containing UVW, raw weights,
@@ -690,7 +592,8 @@ def degrid_imaging_weights_continuum(
         Whether an existing output variable may be replaced.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the degridding kernel.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     Returns
     -------
@@ -703,9 +606,8 @@ def degrid_imaging_weights_continuum(
     This function does not calculate a density grid or Briggs factors. Those
     products must be calculated globally before this function is called.
 
-    Frequency planes are matched by physical frequency coordinate rather than
-    by local positional index. This allows the global weighting dataset to
-    contain channels contributed by multiple distributed partitions.
+    Global continuum weighting always uses a single density plane accumulated
+    from all selected visibility channels.
     """
     import copy
 
@@ -817,10 +719,6 @@ def degrid_imaging_weights_continuum(
         global_weighting_xds.coords["frequency"].values,
         dtype=np.float64,
     )
-    continuum_frequency_collapsed = bool(
-        global_weighting_xds.attrs.get("continuum_frequency_collapsed", False)
-    )
-
     if global_frequency.ndim != 1:
         raise ValueError(
             "The global frequency coordinate must be one-dimensional; "
@@ -833,8 +731,15 @@ def degrid_imaging_weights_continuum(
     if not np.all(np.isfinite(global_frequency)):
         raise ValueError("The global frequency coordinate contains non-finite values.")
 
-    if np.unique(global_frequency).size != global_frequency.size:
-        raise ValueError("The global frequency coordinate contains duplicate values.")
+    if not global_weighting_xds.attrs.get("continuum_frequency_collapsed", False):
+        raise ValueError(
+            "Global continuum weighting requires a frequency-collapsed density."
+        )
+    if global_frequency.size != 1:
+        raise ValueError(
+            "A frequency-collapsed continuum density must contain exactly one "
+            "stored density plane."
+        )
 
     # ------------------------------------------------------------------
     # Resolve the common image geometry used by the degridder.
@@ -934,42 +839,12 @@ def degrid_imaging_weights_continuum(
                 "contains non-finite values."
             )
 
-        if continuum_frequency_collapsed:
-            if global_frequency.size != 1:
-                raise ValueError(
-                    "A frequency-collapsed continuum density must contain "
-                    "exactly one stored density plane."
-                )
-            local_density_grid = np.repeat(
-                np.asarray(global_density_da.values),
-                local_frequency.size,
-                axis=0,
-            )
-            local_briggs_factors = np.repeat(
-                np.asarray(global_briggs_da.values),
-                local_frequency.size,
-                axis=1,
-            )
-        else:
-            from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-                map_visibility_frequencies_to_image,
-            )
-
-            global_indices = map_visibility_frequencies_to_image(
-                local_frequency, global_frequency, matching="nearest"
-            )
-
-            # Preserve the local channel order expected by the degridding kernel.
-            local_density_grid = np.asarray(
-                global_density_da.isel(frequency=global_indices).values
-            )
-
-            local_briggs_factors = np.asarray(
-                global_briggs_da.isel(frequency=global_indices).values
-            )
+        local_density_grid = np.asarray(global_density_da.values)
+        local_briggs_factors = np.asarray(global_briggs_da.values)
+        frequency_map = np.zeros(local_frequency.size, dtype=np.int64)
 
         expected_local_density_shape = (
-            local_frequency.size,
+            1,
             global_density_da.sizes["weight_polarization"],
             n_uv[0],
             n_uv[1],
@@ -984,7 +859,7 @@ def degrid_imaging_weights_continuum(
 
         expected_local_briggs_shape = (
             2,
-            local_frequency.size,
+            1,
             global_density_da.sizes["weight_polarization"],
         )
 
@@ -1038,6 +913,7 @@ def degrid_imaging_weights_continuum(
             n_uv,
             delta_lm,
             processing_function_threads=(processing_function_threads),
+            frequency_map=frequency_map,
             truncate_uv_cells=True,
         )
 
@@ -1156,8 +1032,12 @@ def calculate_imaging_weights(
         Image xarray Dataset containing image parameters (e.g., image size, cell
         size).
     imaging_weights_params : dict
-        Weighting scheme configuration: ``weighting`` (``"natural"`` or
-        ``"briggs"``) and the Briggs ``robust`` parameter.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
     ms_data_group_in_name : str, default ``"base"``
         Name of the input data group.
     ms_data_group_out_name : str, default ``"imaging"``

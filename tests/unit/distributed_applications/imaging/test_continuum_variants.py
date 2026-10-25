@@ -8,7 +8,7 @@ import pytest
 import xarray as xr
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
-    _make_continuum_iteration_controller,
+    _make_continuum_cycle_controller,
     combine_continuum_chunks,
     combine_continuum_weight_density_chunks,
 )
@@ -38,7 +38,7 @@ def test_continuum_controller_receives_entropy_parameters():
         "entropy_flux_bins": 8,
     }
 
-    controller = _make_continuum_iteration_controller(params)
+    controller = _make_continuum_cycle_controller(params)
 
     assert controller.entropy_stop is True
     assert controller.entropy_max_snr == 4.5
@@ -47,7 +47,7 @@ def test_continuum_controller_receives_entropy_parameters():
 
 
 def test_continuum_controller_uses_entropy_defaults():
-    controller = _make_continuum_iteration_controller(
+    controller = _make_continuum_cycle_controller(
         {
             "max_iter": 100,
             "max_cycles": 5,
@@ -103,7 +103,7 @@ def test_mvc_reduction_invariant_under_partition_order_tree_and_zero_chunk(
             pb.isel(frequency=selection),
             weights.isel(frequency=selection),
             weights.isel(frequency=selection),
-            nterms=3,
+            n_taylor_terms=3,
             reference_frequency=100.0,
         )
 
@@ -127,7 +127,7 @@ def test_mvc_reduction_invariant_under_partition_order_tree_and_zero_chunk(
     )
     if reverse:
         leaves.reverse()
-    params = {"specmode": "mvc", "additive_variables": list(whole.data_vars)}
+    params = {"continuum_mode": "mvc", "additive_variables": list(whole.data_vars)}
     flat = combine_continuum_chunks(leaves, params)
     tree = leaves[0]
     for leaf in leaves[1:]:  # Intentionally unbalanced reduction tree.

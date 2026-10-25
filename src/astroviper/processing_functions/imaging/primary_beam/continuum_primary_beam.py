@@ -4,6 +4,11 @@ These prescriptions are used only by continuum MFS/MVC callers. The shared
 ``airy_disk`` and ``make_primary_beam`` utilities used by cube imaging and
 simulation deliberately retain their existing behavior. This module reproduces
 CASA PBMath1DAiry's image-table rounding, support and telescope selection.
+Its ``casa_airy`` path also preserves CASA's inverted blockage argument
+``x * dish_diameter / blockage_diameter``, rather than the physical annular-
+aperture argument ``x * blockage_diameter / dish_diameter``. The resulting
+difference is illustrated in
+``docs/processing_functions_tutorials/imaging/cube_single_field_primary_beam.ipynb``.
 EVLA polynomial prescriptions are not implemented here.
 """
 
@@ -11,6 +16,8 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.special import j1
+
+from astroviper.utils.param_docs import shares_param_docs
 
 SPEED_OF_LIGHT = 299792458.0
 CASA_AIRY_TWIDDLE = (180 * 7.016 * SPEED_OF_LIGHT) / ((np.pi**2) * 1e9 * 1.566 * 24.5)
@@ -34,6 +41,13 @@ def casa_airy_disk_response(
     :data:`CASA_AIRY_TWIDDLE` reproduces its truncated constants.  Directions
     beyond ``max_rad_1GHz / (frequency / 1 GHz)`` are zeroed, matching the
     support of CASA's lookup table.
+
+    For tclean parity this function deliberately retains PBMath1DAiry's
+    inverted blockage argument ``x * dish_diameter / blockage_diameter``.
+    This differs from the obscured-Airy annular-aperture expression, which uses
+    ``x * blockage_diameter / dish_diameter``. See the discussion and numerical
+    comparison in
+    ``docs/processing_functions_tutorials/imaging/cube_single_field_primary_beam.ipynb``.
 
     Parameters
     ----------
@@ -96,21 +110,32 @@ def casa_airy_disk_response(
     return np.where(rho <= max_rad_1GHz / (frequency / 1e9), val**ipower, 0.0)
 
 
-def resolve_continuum_primary_beam(image_params, antenna_xds, *, specmode="mfs"):
+@shares_param_docs
+def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode="mfs"):
     """Resolve a beam prescription without changing user parameters or metadata.
+
+    Resolutions to ``casa_airy`` intentionally retain CASA PBMath1DAiry's
+    inverted blockage argument rather than the physical annular-aperture
+    expression. The distinction is documented and compared in
+    ``docs/processing_functions_tutorials/imaging/cube_single_field_primary_beam.ipynb``.
 
     Parameters
     ----------
     image_params : dict
-        Imaging parameters. ``primary_beam_model`` accepts ``auto`` (default),
-        ``airy`` (physical aperture), or ``casa_airy``. Explicit dish, blockage,
-        and ``primary_beam_max_radius_1ghz`` parameters take precedence.
+        Primary-beam configuration. ``primary_beam_model`` accepts ``"auto"``
+        (default), ``"airy"`` (physical annular aperture), or ``"casa_airy"``.
+        ``list_dish_diameters`` and ``list_blockage_diameters`` contain metres;
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz; and
+        ``primary_beam_ipower`` is the voltage-pattern exponent (default 2, the
+        power beam). Explicit values take precedence over telescope inference.
     antenna_xds : xarray.Dataset
         Antenna metadata with physical diameters and telescope identification.
-    specmode : {"mfs", "mvc"}
-        MFS selects the VLA band at the continuum reference frequency; MVC
-        uses the first image channel, matching CASA makePBImage. Resolve once
-        before partitioning so every task uses the same prescription.
+    continuum_mode : {"mfs", "mvc"}
+        Continuum mode used for beam selection. Both modes select a VLA band at
+        the Taylor reference frequency so channel order cannot change the
+        prescription; CASA ``makePBImage`` instead selects the MVC beam from the
+        first image channel. Resolve once before partitioning so every task uses
+        the same prescription.
 
     Returns
     -------
@@ -120,6 +145,18 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, specmode="mfs")
         Airy prescriptions for legacy VLA bands (including the NVSS fallback).
         EVLA retains the physical Airy model. Explicit aperture parameters
         remain authoritative.
+
+    Raises
+    ------
+    ValueError
+        If the beam model or continuum mode is invalid, or CASA-compatible
+        ALMA beam inference receives an unsupported physical dish diameter.
+    KeyError
+        If antenna dish-diameter metadata is absent and no explicit effective
+        diameter is supplied.
+    NotImplementedError
+        If automatic resolution finds multiple or nonpositive physical dish
+        diameters.
     """
     params = dict(image_params)
     model = params.get("primary_beam_model", "auto")
@@ -139,15 +176,11 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, specmode="mfs")
     # PBMath1DAiry(25 m, 2.36 m, 0.8564 deg at 1 GHz); EVLA instead uses
     # frequency-dependent polynomial beams. In band gaps CASA selects VLA_NVSS,
     # which instead uses a 24.5-m unobstructed aperture with the same support.
-    reference_frequency = params.get(
-        "reference_frequency", params.get("reference_frequency_hz")
-    )
+    reference_frequency = params.get("reference_frequency")
     frequencies = np.asarray(params.get("frequency_coords", []), dtype=float)
-    if specmode == "mvc":
-        reference_frequency = frequencies.flat[0] if frequencies.size else np.nan
-    elif specmode != "mfs":
-        raise ValueError("specmode must be 'mfs' or 'mvc'.")
-    elif reference_frequency is None:
+    if continuum_mode not in ("mfs", "mvc"):
+        raise ValueError("continuum_mode must be 'mfs' or 'mvc'.")
+    if reference_frequency is None:
         reference_frequency = np.mean(frequencies) if frequencies.size else np.nan
     frequency_ghz = float(reference_frequency) / 1e9
     is_vla = (
@@ -241,6 +274,15 @@ def evaluate_primary_beam(freq_chan, pol, pb_params, grid_params, dtype=None):
     -------
     numpy.ndarray
         Beam array with shape (dish, frequency, polarization, l, m).
+
+    Raises
+    ------
+    ValueError
+        If ``primary_beam_model`` was not resolved to ``"airy"`` or
+        ``"casa_airy"``.
+    KeyError
+        If required image geometry or dish, blockage, or power parameters are
+        absent.
     """
     from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
         airy_disk_rorder_v2,
@@ -277,6 +319,7 @@ def evaluate_primary_beam(freq_chan, pol, pb_params, grid_params, dtype=None):
     return np.broadcast_to(result, (len(dishes), len(frequencies), len(pol), *shape))
 
 
+@shares_param_docs
 def make_continuum_primary_beam_single_field(
     img_xds,
     image_params,
@@ -302,35 +345,42 @@ def make_continuum_primary_beam_single_field(
     so it is invariant to a later basis change.  If the data group already has a
     ``primary_beam`` entry the function is a no-op.
 
+    A direct call defaults to the textbook obscured-Airy equation with a
+    10.7 m diameter and 0.75 m blockage. This is neither CASA's ALMA
+    ``casa_airy`` prescription nor a physical 12 m aperture. The distributed
+    continuum driver resolves telescope metadata and passes an explicit
+    prescription before calling this function.
+
     Parameters
     ----------
     img_xds : xarray.Dataset
         Image dataset with ``time``, ``frequency``, ``polarization``, ``l`` and
-        ``m`` coordinates.  Modified in place.
+        ``m`` coordinates. Modified in place.
     image_params : dict
-        Image geometry.  Must contain ``"image_size"`` (``(nx, ny)``) and
-        ``"cell_size"`` (l, m cell size in radians).  The image centre is
-        derived internally as ``image_size // 2``; the supplied dictionary is
-        not mutated. ``primary_beam_model`` selects ``airy`` (the default for
-        direct calls) or ``casa_airy``. The continuum driver resolves ``auto``
-        from telescope metadata before calling this function.
+        Image geometry. Must contain ``"image_size"`` (``(nx, ny)``) and
+        ``"cell_size"`` (l, m cell sizes in radians). The image centre is derived
+        internally as ``image_size // 2``; the supplied dictionary is not mutated.
+        ``primary_beam_model`` selects ``"airy"`` (the default for direct
+        calls) or ``"casa_airy"``; the continuum driver resolves ``"auto"`` from
+        telescope metadata first. ``primary_beam_max_radius_1ghz`` is the support
+        radius in radians at 1 GHz and scales inversely with frequency.
     image_data_group_in_name : str, optional
         Image data group whose existing entries are carried into the output
-        group.  Default ``"residual"``.
+        group. Default ``"residual"``.
     image_data_group_out_name : str, optional
-        Name of the data group that the ``PRIMARY_BEAM`` variable is registered
-        under.  Default ``"residual"``.
+        Name of the data group under which ``PRIMARY_BEAM`` is registered.
+        Default ``"residual"``.
     list_dish_diameters : array-like of float, optional
-        Antenna dish diameters in metres.  Default ``numpy.array([10.7])``
-        (ALMA 12 m array effective value used by the reference imaging tests).
+        Antenna dish diameters in metres. Defaults to ``numpy.array([10.7])``,
+        the effective ALMA 12 m diameter used by the reference imaging tests.
     list_blockage_diameters : array-like of float, optional
-        Sub-reflector blockage diameters in metres.  Default
+        Sub-reflector blockage diameters in metres. Defaults to
         ``numpy.array([0.75])``.
     ipower : int, optional
-        ``1`` returns the voltage pattern, ``2`` returns the power beam.
-        Default ``2`` (power primary beam).
+        Voltage-pattern exponent: ``1`` returns voltage and ``2`` returns the
+        power primary beam. Defaults to ``2``.
     float_dtype : numpy.dtype, optional
-        Floating-point precision for the primary beam.  Defaults to
+        Floating-point precision for the primary beam. Defaults to
         ``numpy.float64``.
 
     Returns
@@ -366,9 +416,13 @@ def make_continuum_primary_beam_single_field(
 
     start = time.time()
 
+    # A single-field image uses one common antenna response. Select the first
+    # prescription before evaluation so unused dish beams are never computed.
+    selected_dish_diameters = np.asarray(list_dish_diameters).reshape(-1)[:1]
+    selected_blockage_diameters = np.asarray(list_blockage_diameters).reshape(-1)[:1]
     pb_params = {
-        "list_dish_diameters": np.asarray(list_dish_diameters),
-        "list_blockage_diameters": np.asarray(list_blockage_diameters),
+        "list_dish_diameters": selected_dish_diameters,
+        "list_blockage_diameters": selected_blockage_diameters,
         "ipower": ipower,
     }
 
@@ -391,23 +445,26 @@ def make_continuum_primary_beam_single_field(
         overwrite=False,
     )
 
+    primary_beam = evaluate_primary_beam(
+        img_xds.frequency.values,
+        img_xds.polarization.values,
+        pb_params,
+        pb_image_params,
+        dtype=float_dtype,
+    )[0, ...]
+    primary_beam = np.broadcast_to(
+        primary_beam, (img_xds.sizes["time"], *primary_beam.shape)
+    )
     img_xds["PRIMARY_BEAM"] = xr.DataArray(
-        # Select the first (only) dish diameter and add a leading time axis.
-        evaluate_primary_beam(
-            img_xds.frequency.values,
-            img_xds.polarization.values,
-            pb_params,
-            pb_image_params,
-            dtype=float_dtype,
-        )[0, ...][None, ...],
+        primary_beam,
         dims=("time", "frequency", "polarization", "l", "m"),
     )
     img_xds["PRIMARY_BEAM"].attrs["type"] = "primary_beam"
     img_xds["PRIMARY_BEAM"].attrs["method"] = "airy_disk"
     img_xds["PRIMARY_BEAM"].attrs.update(
         beam_model=image_params.get("primary_beam_model", "airy"),
-        dish_diameters_m=np.asarray(list_dish_diameters).tolist(),
-        blockage_diameters_m=np.asarray(list_blockage_diameters).tolist(),
+        dish_diameters_m=selected_dish_diameters.tolist(),
+        blockage_diameters_m=selected_blockage_diameters.tolist(),
     )
 
     modify_data_groups_xds(

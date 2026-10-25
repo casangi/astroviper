@@ -30,25 +30,32 @@ void grid_imaging_weights(
     const int uv_center_v = m_v / 2;
 
     // Strides for grid shape (n_chan_g, n_pol_g, m_u, m_v):
-    const int grid_pol_stride  = m_u * m_v;
-    const int grid_chan_stride = n_pol_g * grid_pol_stride;
+    const std::int64_t grid_pol_stride =
+        static_cast<std::int64_t>(m_u) * m_v;
+    const std::int64_t grid_chan_stride =
+        static_cast<std::int64_t>(n_pol_g) * grid_pol_stride;
 
     // Strides for data_weights shape (n_time, n_baseline, n_vis_chan, n_pol):
-    const int wt_chan_stride = n_pol;
-    const int wt_bl_stride   = n_vis_chan * wt_chan_stride;
-    const int wt_time_stride = n_baseline * wt_bl_stride;
+    const std::int64_t wt_chan_stride = n_pol;
+    const std::int64_t wt_bl_stride =
+        static_cast<std::int64_t>(n_vis_chan) * wt_chan_stride;
+    const std::int64_t wt_time_stride =
+        static_cast<std::int64_t>(n_baseline) * wt_bl_stride;
 
     // Strides for uvw shape (n_time, n_baseline, 3):
-    const int uvw_bl_stride   = 3;
-    const int uvw_time_stride = n_baseline * uvw_bl_stride;
+    const std::int64_t uvw_bl_stride = 3;
+    const std::int64_t uvw_time_stride =
+        static_cast<std::int64_t>(n_baseline) * uvw_bl_stride;
 
     for (int i_time = 0; i_time < n_time; ++i_time) {
         for (int i_baseline = 0; i_baseline < n_baseline; ++i_baseline) {
-            const int uvw_off = i_time * uvw_time_stride + i_baseline * uvw_bl_stride;
-            const int wt_off  = i_time * wt_time_stride + i_baseline * wt_bl_stride;
+            const std::int64_t uvw_off =
+                i_time * uvw_time_stride + i_baseline * uvw_bl_stride;
+            const std::int64_t wt_off =
+                i_time * wt_time_stride + i_baseline * wt_bl_stride;
 
             for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
-                const int a_chan = static_cast<int>(chan_map[i_chan]);
+                const std::int64_t a_chan = chan_map[i_chan];
 
                 const double uv_scale_u =
                     -(frequency_coord[i_chan] * delta_l * m_u) / kSpeedOfLight;
@@ -104,12 +111,12 @@ void grid_imaging_weights(
                 if (std::isnan(weight)) continue;
 
                 if (!truncate_uv_cells) {
-                    const int cell = a_chan * grid_chan_stride +
-                        static_cast<int>(u_center) * m_v +
-                        static_cast<int>(v_center);
-                    const int cell_conj = a_chan * grid_chan_stride +
-                        static_cast<int>(u_center_conj) * m_v +
-                        static_cast<int>(v_center_conj);
+                    const std::int64_t cell = a_chan * grid_chan_stride +
+                        static_cast<std::int64_t>(u_center) * m_v +
+                        static_cast<std::int64_t>(v_center);
+                    const std::int64_t cell_conj = a_chan * grid_chan_stride +
+                        static_cast<std::int64_t>(u_center_conj) * m_v +
+                        static_cast<std::int64_t>(v_center_conj);
                     grid[cell] = static_cast<GridT>(
                         static_cast<double>(grid[cell]) + weight);
                     grid[cell_conj] = static_cast<GridT>(
@@ -118,17 +125,17 @@ void grid_imaging_weights(
                     sum_weight[a_chan * n_pol_g + 0] += 2.0 * weight;
                 } else {
                     if (direct_in_bounds) {
-                        const int cell = a_chan * grid_chan_stride +
-                            static_cast<int>(u_center) * m_v +
-                            static_cast<int>(v_center);
+                        const std::int64_t cell = a_chan * grid_chan_stride +
+                            static_cast<std::int64_t>(u_center) * m_v +
+                            static_cast<std::int64_t>(v_center);
                         grid[cell] = static_cast<GridT>(
                             static_cast<double>(grid[cell]) + weight);
                         sum_weight[a_chan * n_pol_g + 0] += weight;
                     }
                     if (conjugate_in_bounds) {
-                        const int cell_conj = a_chan * grid_chan_stride +
-                            static_cast<int>(u_center_conj) * m_v +
-                            static_cast<int>(v_center_conj);
+                        const std::int64_t cell_conj = a_chan * grid_chan_stride +
+                            static_cast<std::int64_t>(u_center_conj) * m_v +
+                            static_cast<std::int64_t>(v_center_conj);
                         grid[cell_conj] = static_cast<GridT>(
                             static_cast<double>(grid[cell_conj]) + weight);
                         sum_weight[a_chan * n_pol_g + 0] += weight;
@@ -157,29 +164,37 @@ void degrid_imaging_weights(
     const int uv_center_v = m_v / 2;
 
     // Strides for grid shape (n_chan_g, n_pol_g, m_u, m_v):
-    const int grid_pol_stride  = m_u * m_v;
-    const int grid_chan_stride = n_pol_g * grid_pol_stride;
+    const std::int64_t grid_pol_stride =
+        static_cast<std::int64_t>(m_u) * m_v;
+    const std::int64_t grid_chan_stride =
+        static_cast<std::int64_t>(n_pol_g) * grid_pol_stride;
 
     // Strides for briggs_factors shape (2, n_chan_g, n_pol_g):
-    const int briggs_plane_stride = n_chan_g * n_pol_g;
+    const std::int64_t briggs_plane_stride =
+        static_cast<std::int64_t>(n_chan_g) * n_pol_g;
 
     // Strides for data_weight / imaging_weight shape
     // (n_time, n_baseline, n_vis_chan, n_pol):
-    const int wt_chan_stride = n_pol;
-    const int wt_bl_stride   = n_vis_chan * wt_chan_stride;
-    const int wt_time_stride = n_baseline * wt_bl_stride;
+    const std::int64_t wt_chan_stride = n_pol;
+    const std::int64_t wt_bl_stride =
+        static_cast<std::int64_t>(n_vis_chan) * wt_chan_stride;
+    const std::int64_t wt_time_stride =
+        static_cast<std::int64_t>(n_baseline) * wt_bl_stride;
 
     // Strides for uvw shape (n_time, n_baseline, 3):
-    const int uvw_bl_stride   = 3;
-    const int uvw_time_stride = n_baseline * uvw_bl_stride;
+    const std::int64_t uvw_bl_stride = 3;
+    const std::int64_t uvw_time_stride =
+        static_cast<std::int64_t>(n_baseline) * uvw_bl_stride;
 
     for (int i_time = 0; i_time < n_time; ++i_time) {
         for (int i_baseline = 0; i_baseline < n_baseline; ++i_baseline) {
-            const int uvw_off = i_time * uvw_time_stride + i_baseline * uvw_bl_stride;
-            const int wt_off  = i_time * wt_time_stride + i_baseline * wt_bl_stride;
+            const std::int64_t uvw_off =
+                i_time * uvw_time_stride + i_baseline * uvw_bl_stride;
+            const std::int64_t wt_off =
+                i_time * wt_time_stride + i_baseline * wt_bl_stride;
 
             for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
-                const int a_chan = static_cast<int>(chan_map[i_chan]);
+                const std::int64_t a_chan = chan_map[i_chan];
 
                 const double uv_scale_u =
                     -(frequency_coord[i_chan] * delta_l * m_u) / kSpeedOfLight;
@@ -206,12 +221,15 @@ void degrid_imaging_weights(
                     if (v_center < 0 || v_center >= m_v) continue;
                 }
 
-                const int u_center_indx = static_cast<int>(u_center);
-                const int v_center_indx = static_cast<int>(v_center);
+                const std::int64_t u_center_indx =
+                    static_cast<std::int64_t>(u_center);
+                const std::int64_t v_center_indx =
+                    static_cast<std::int64_t>(v_center);
 
                 for (int i_pol = 0; i_pol < n_pol_out; ++i_pol) {
-                    const int a_pol   = static_cast<int>(pol_map[i_pol]);
-                    const int wt_idx  = wt_off + i_chan * wt_chan_stride + i_pol;
+                    const std::int64_t a_pol = pol_map[i_pol];
+                    const std::int64_t wt_idx =
+                        wt_off + i_chan * wt_chan_stride + i_pol;
                     const double natural_weight = data_weight[wt_idx];
 
                     // Start from the natural weight; only reweight finite,

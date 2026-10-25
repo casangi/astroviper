@@ -10,7 +10,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     make_mvc_taylor_normal_equation_contributions,
     model_update_mtmfs_single_field,
     point_spread_function_gaussian_fit_continuum,
-    restore_image,
+    restore_continuum_image,
 )
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
@@ -70,7 +70,7 @@ def test_restore_rejects_invalid_model_or_residual(group, fault, message):
     with pytest.raises(
         ValueError if fault in ("dimension", "empty") else KeyError, match=message
     ):
-        restore_image(image)
+        restore_continuum_image(image)
     xr.testing.assert_identical(image, snapshot)
 
 
@@ -89,7 +89,7 @@ def test_restore_rejects_missing_registered_or_fallback_products(
     if not registered:
         del image.attrs["data_groups"]["residual"][role]
     with pytest.raises(KeyError, match="absent|missing"):
-        restore_image(image)
+        restore_continuum_image(image)
 
 
 @pytest.mark.parametrize(
@@ -132,7 +132,7 @@ def test_model_update_rejects_incomplete_images_and_controls(fault, error, messa
             }
         )
     elif fault == "control_dimensions":
-        controls["max_iter_per_cycle"] = np.ones((1, 2))
+        controls["max_iter_per_cycle_updated"] = np.ones((1, 2))
     elif fault == "empty_controls":
         controls["threshold_per_cycle"] = np.ones((1, 0, 1))
     snapshot = image.copy(deep=True)
@@ -175,7 +175,7 @@ def test_psf_fitter_rejects_incomplete_products(fault, error, message):
 @pytest.mark.parametrize(
     "fault,error,message",
     [
-        ("order", ValueError, "nterms"),
+        ("order", ValueError, "n_taylor_terms"),
         ("reference", ValueError, "reference_frequency"),
         ("group", KeyError, "data group"),
         ("role", KeyError, "visibility"),
@@ -198,9 +198,9 @@ def test_prediction_rejects_incomplete_models_and_frequencies(fault, error, mess
         attrs={"data_groups": {"model": {"visibility": "GRID"}}},
     )
     child = xr.Dataset(coords={"frequency": [100.0, 110.0]})
-    nterms, reference = 2, 100.0
+    n_taylor_terms, reference = 2, 100.0
     if fault == "order":
-        nterms = 0
+        n_taylor_terms = 0
     elif fault == "reference":
         reference = np.inf
     elif fault == "group":
@@ -212,7 +212,7 @@ def test_prediction_rejects_incomplete_models_and_frequencies(fault, error, mess
     elif fault == "dimension":
         model = model.rename({"taylor_term": "other"})
     elif fault == "terms":
-        nterms = 3
+        n_taylor_terms = 3
     elif fault == "frequency":
         child = xr.Dataset()
     elif fault == "nonfinite":
@@ -221,7 +221,7 @@ def test_prediction_rejects_incomplete_models_and_frequencies(fault, error, mess
         child = xr.Dataset({"frequency": (("a", "b"), [[100.0, 110.0]])})
     with pytest.raises(error, match=message):
         make_visibility_model_continuum_single_field(
-            {"child": child}, model, np.ones(8), nterms, reference
+            {"child": child}, model, np.ones(8), n_taylor_terms, reference
         )
 
 
@@ -282,7 +282,7 @@ def test_pb_prediction_rejects_coordinate_misalignment(index, coordinate):
     "fault,error,message",
     [
         ("increment_type", TypeError, "model_increment_xds"),
-        ("mode", ValueError, "specmode"),
+        ("mode", ValueError, "continuum_mode"),
         ("initial_pb", KeyError, "PRIMARY_BEAM"),
         ("previous_type", TypeError, "previous_model_xds"),
         ("previous_model", KeyError, "SKY_MODEL"),
@@ -303,7 +303,7 @@ def test_accumulation_rejects_invalid_initial_or_previous_state(fault, error, me
     else:
         previous = xr.Dataset()
     with pytest.raises(error, match=message):
-        accumulate_continuum_model(increment, previous, specmode=mode)
+        accumulate_continuum_model(increment, previous, continuum_mode=mode)
 
 
 @pytest.mark.parametrize(
@@ -333,5 +333,5 @@ def test_mvc_equations_reject_invalid_cube_and_weight_layouts(fault, message):
         inputs = [value.isel(frequency=slice(0, 0)) for value in inputs]
     with pytest.raises(ValueError, match=message):
         make_mvc_taylor_normal_equation_contributions(
-            *inputs, nterms=2, reference_frequency=100.0
+            *inputs, n_taylor_terms=2, reference_frequency=100.0
         )

@@ -96,26 +96,29 @@ def test_mvc_psf_accepts_shifted_frequency_with_cube_gridder():
     assert grid.call_args.kwargs["chan_mode"] == "cube"
 
 
-def test_global_weight_lookup_uses_nearest_channel_for_shifted_frequencies():
+def test_collapsed_global_weight_lookup_maps_channels_without_repeating_grid():
+    """Continuum weighting shares one density plane through a zero channel map."""
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
         degrid_imaging_weights_continuum,
     )
 
-    ps, image = _inputs([1.21e9, 1.22e9])
-    density = np.broadcast_to(np.arange(1, 4)[:, None, None, None], (3, 1, 8, 8)).copy()
+    ps, image = _inputs([1.0e9, 1.2e9])
+    density = np.ones((1, 1, 8, 8))
+    briggs_factors = np.arange(2, dtype=np.float64).reshape(2, 1, 1)
     global_weights = xr.Dataset(
         {
             "WEIGHT_DENSITY_GRID": (
                 ("frequency", "weight_polarization", "u", "v"),
                 density,
             ),
-            "SUM_WEIGHT": (("frequency", "weight_polarization"), np.ones((3, 1))),
+            "SUM_WEIGHT": (("frequency", "weight_polarization"), np.ones((1, 1))),
             "BRIGGS_FACTORS": (
                 ("briggs_parameter", "frequency", "weight_polarization"),
-                np.ones((2, 3, 1)),
+                briggs_factors,
             ),
         },
-        coords={"frequency": image.frequency.values},
+        coords={"frequency": [1.1e9]},
+        attrs={"continuum_frequency_collapsed": True},
     )
     module = (
         "astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights"
@@ -126,5 +129,9 @@ def test_global_weight_lookup_uses_nearest_channel_for_shifted_frequencies():
         degrid_imaging_weights_continuum(
             ps, image, global_weights, {"weighting": "briggs", "robust": 0.5}
         )
-    # Both shifted observations select the third global density plane.
-    np.testing.assert_array_equal(degrid.call_args.args[0], density[[2, 2]])
+
+    np.testing.assert_array_equal(degrid.call_args.args[0], density)
+    np.testing.assert_array_equal(degrid.call_args.args[3], briggs_factors)
+    np.testing.assert_array_equal(
+        degrid.call_args.kwargs["frequency_map"], np.zeros(2, dtype=np.int64)
+    )

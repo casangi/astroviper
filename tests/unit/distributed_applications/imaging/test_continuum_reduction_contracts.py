@@ -21,7 +21,7 @@ def _leaf(task_id):
         coords={"taylor_term": [0, 1], "u": [-1.0, 1.0]},
         attrs={
             "continuum_imaging": {
-                "nterms": 2,
+                "n_taylor_terms": 2,
                 "n_psf_taylor_terms": 3,
                 "reference_frequency_hz": 100.0,
             }
@@ -31,7 +31,7 @@ def _leaf(task_id):
     return {"image": image, "timing_node_tasks": pd.DataFrame({"task_id": [task_id]})}
 
 
-PARAMS = {"specmode": "mfs", "additive_variables": ["VISIBILITY"]}
+PARAMS = {"continuum_mode": "mfs", "additive_variables": ["VISIBILITY"]}
 
 
 @pytest.mark.parametrize("deep_copy", [True, False])
@@ -56,9 +56,29 @@ def test_reduction_is_associative_and_does_not_mutate_readonly_leaves(deep_copy)
         assert not np.shares_memory(leaf["image"].VISIBILITY, flat["image"].VISIBILITY)
 
 
+def test_reduction_accumulates_without_out_of_place_xarray_addition(monkeypatch):
+    """Reducer additions write into the single owned accumulator buffer."""
+    leaves = [_leaf(0), _leaf(1)]
+
+    def reject_out_of_place_addition(*args, **kwargs):
+        raise AssertionError("The reducer must not allocate through DataArray.__add__.")
+
+    def reject_redundant_copy(*args, **kwargs):
+        raise AssertionError("The deep Dataset copy already owns the accumulator.")
+
+    monkeypatch.setattr(xr.DataArray, "__add__", reject_out_of_place_addition)
+    monkeypatch.setattr(xr.DataArray, "copy", reject_redundant_copy)
+    result = combine_continuum_chunks(leaves, PARAMS)
+    np.testing.assert_array_equal(result["image"].VISIBILITY, 3.0)
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("nterms", 3), ("n_psf_taylor_terms", 5), ("reference_frequency_hz", 101.0)],
+    [
+        ("n_taylor_terms", 3),
+        ("n_psf_taylor_terms", 5),
+        ("reference_frequency_hz", 101.0),
+    ],
 )
 def test_reduction_rejects_incompatible_taylor_definitions(key, value):
     leaves = [_leaf(0), _leaf(1)]
@@ -100,7 +120,7 @@ def test_tree_reduction_preserves_task_local_observed_grids():
         leaf["observed_visibility_grid_xds"] = xr.Dataset(
             {"GRID": ("frequency", [complex(index + 1)])}
         )
-    params = dict(PARAMS, specmode="mvc")
+    params = dict(PARAMS, continuum_mode="mvc")
     result = combine_continuum_chunks(
         [combine_continuum_chunks(leaves[:2], params), leaves[2]], params
     )
@@ -120,4 +140,4 @@ def test_reducer_rejects_duplicate_observed_grid_ownership(partial):
             leaf["task_id"] = 0
             leaf["observed_visibility_grid_xds"] = xr.Dataset()
     with pytest.raises(ValueError, match="Duplicate MVC visibility-grid cache"):
-        combine_continuum_chunks(leaves, dict(PARAMS, specmode="mvc"))
+        combine_continuum_chunks(leaves, dict(PARAMS, continuum_mode="mvc"))

@@ -102,9 +102,9 @@ static py::buffer_info validate_inplace_cube(py::array& arr,
  * Validate a per-plane control array: dtype U, 3D with shape
  * (nt, nf, np_dim), and C-contiguous. Returns the buffer_info so the caller
  * can extract the raw pointer (length nt*nf*np_dim in (t, f, p) C-order)
- * without any copy. Used for the per-plane max_iter_remaining and threshold arrays so
- * that iteration control is independent for each (time, frequency,
- * polarization) plane.
+ * without any copy. Used for the per-plane max_iter_per_cycle_updated and
+ * threshold_per_cycle arrays so that iteration control is independent for
+ * each (time, frequency, polarization) plane.
  */
 template<typename U>
 static py::buffer_info validate_per_plane_array(py::array& arr,
@@ -133,6 +133,34 @@ static py::buffer_info validate_per_plane_array(py::array& arr,
             std::to_string(np_dim) + ")");
     }
     return info;
+}
+
+/**
+ * A per-plane iteration record (hclean::IterationHistory::peak or ::rms) as
+ * nested lists indexed [t][f][p] of 1-D float64 arrays, each with one value
+ * per iteration of its own plane (empty for a plane without iterations), so
+ * that the history takes the memory of the iterations done and no more.
+ */
+static py::list per_plane_iteration_history(
+        const std::vector<hclean::IterationHistory>& history,
+        std::vector<double> hclean::IterationHistory::*record,
+        int nt, int nf, int np_img) {
+    py::list per_time;
+    std::size_t pl = 0;
+    for (int tt = 0; tt < nt; ++tt) {
+        py::list per_frequency;
+        for (int nn = 0; nn < nf; ++nn) {
+            py::list per_polarization;
+            for (int pp = 0; pp < np_img; ++pp, ++pl) {
+                const std::vector<double>& values = history[pl].*record;
+                per_polarization.append(py::array_t<double>(
+                    static_cast<py::ssize_t>(values.size()), values.data()));
+            }
+            per_frequency.append(per_polarization);
+        }
+        per_time.append(per_frequency);
+    }
+    return per_time;
 }
 
 /**
@@ -208,13 +236,17 @@ py::dict hclean_impl(
     py::array model_image,
     py::array mask_array,
     py::tuple clean_box,
-    int max_iter_remaining,
+    int max_iter_per_cycle_updated,
     int start_iter,
     T gain,
-    T threshold,
+    T threshold_per_cycle,
     T speedup,
     py::object progress_callback,
-    py::object stop_callback
+    py::object stop_callback,
+    int max_iter_divergence,
+    double divergence_rms_factor,
+    T divergence_peak_factor,
+    bool record_iteration_history
 ) {
     // First, read dirty_image shape so we can cross-validate the others.
     if (!dirty_image.dtype().is(py::dtype::of<T>())) {
@@ -298,8 +330,14 @@ py::dict hclean_impl(
     // Run CLEAN directly on the Python-owned buffers, GIL released (the
     // buffers are owned by the caller's arrays, which outlive this call).
     int final_iter = start_iter;
+    int stop_reason = hclean::STOP_NONE;
+    hclean::DivergenceControl<T> divergence;
+    divergence.max_iter_divergence = max_iter_divergence;
+    divergence.rms_factor = divergence_rms_factor;
+    divergence.peak_factor = divergence_peak_factor;
     T total_flux = static_cast<T>(0);
     T final_min, final_max;
+    hclean::IterationHistory history;
     {
         py::gil_scoped_release release;
         hclean::clean<T>(
@@ -307,11 +345,13 @@ py::dict hclean_impl(
             static_cast<T*>(dirty_info.ptr),
             static_cast<const T*>(psf_info.ptr),
             domask, mask_ptr,
-            nx, ny,
+            nx, ny, nx, ny,
             xbeg, xend, ybeg, yend,
-            max_iter_remaining, start_iter, final_iter,
-            gain, threshold, speedup,
-            msgput_func, stopnow_func
+            max_iter_per_cycle_updated, start_iter, final_iter,
+            gain, threshold_per_cycle, speedup,
+            msgput_func, stopnow_func,
+            divergence, stop_reason,
+            record_iteration_history ? &history : nullptr
         );
 
         // Post-CLEAN diagnostics; arrays remain in place.
@@ -333,7 +373,15 @@ py::dict hclean_impl(
     results["iterations_performed"] = final_iter;
     results["final_peak"] = final_peak;
     results["total_flux_cleaned"] = total_flux;
-    results["converged"] = (final_peak <= threshold);
+    results["converged"] = (final_peak <= threshold_per_cycle);
+    results["stop_code"] = stop_reason;
+    results["diverged"] = (stop_reason == hclean::STOP_DIVERGED);
+    if (record_iteration_history) {
+        results["iteration_peak_residual"] = py::array_t<double>(
+            static_cast<py::ssize_t>(history.peak.size()), history.peak.data());
+        results["iteration_residual_rms"] = py::array_t<double>(
+            static_cast<py::ssize_t>(history.rms.size()), history.rms.data());
+    }
     return results;
 }
 
@@ -347,6 +395,19 @@ py::dict hclean_impl(
  * np_psf == 1 (broadcast across all image pols). Per-plane progress and
  * stop callbacks are not supported in cube mode; bulk logging should be
  * done Python-side from the returned per-plane iteration counts.
+ *
+ * Every plane stops when it has spent its max_iter_per_cycle_updated, when its
+ * peak is at or below its threshold_per_cycle, or when the divergence test fires
+ * (hclean::DivergenceControl: the RMS of the residual above
+ * divergence_rms_factor x the lowest RMS reached for max_iter_divergence
+ * consecutive iterations, or a peak above divergence_peak_factor x the
+ * starting peak, or a non-finite peak). The per-plane reason is returned as
+ * stop_code (hclean::StopReason).
+ *
+ * With record_iteration_history the record of every iteration of every plane
+ * (hclean::IterationHistory) is returned as well, as iteration_peak_residual
+ * and iteration_residual_rms: nested lists indexed [t][f][p] of 1-D float64
+ * arrays with one value per iteration of the plane.
  */
 template<typename T>
 py::dict hclean_cube_impl(
@@ -355,11 +416,15 @@ py::dict hclean_cube_impl(
     py::array model_cube,
     py::array mask_cube,
     py::tuple clean_box,
-    py::array max_iter_remaining,
+    py::array max_iter_per_cycle_updated,
     T gain,
-    py::array threshold,
+    py::array threshold_per_cycle,
     T speedup,
     int processing_function_threads,
+    int max_iter_divergence,
+    double divergence_rms_factor,
+    T divergence_peak_factor,
+    bool record_iteration_history,
     bool many_threads
 ) {
     if (!residual_cube.dtype().is(py::dtype::of<T>())) {
@@ -390,10 +455,13 @@ py::dict hclean_cube_impl(
         throw std::runtime_error(
             "psf_cube must be a 5D array [time, frequency, polarization, y, x]");
     }
+    const int psf_ny = static_cast<int>(psf_cube.shape(3));
+    const int psf_nx = static_cast<int>(psf_cube.shape(4));
     if (psf_cube.shape(0) != nt || psf_cube.shape(1) != nf ||
-        psf_cube.shape(3) != ny || psf_cube.shape(4) != nx) {
+        !((psf_ny == ny && psf_nx == nx) || (psf_ny == 2 * ny && psf_nx == 2 * nx))) {
         throw std::runtime_error(
-            "psf_cube must match residual_cube on (time, frequency, y, x)");
+            "psf_cube must match residual_cube on (time, frequency, y, x), or on "
+            "(time, frequency) with twice its (y, x) size");
     }
     const int np_psf = static_cast<int>(psf_cube.shape(2));
     if (np_psf != np_img && np_psf != 1) {
@@ -402,7 +470,7 @@ py::dict hclean_cube_impl(
             "axis or be 1 (Stokes I broadcast)");
     }
     py::buffer_info psf_info = validate_inplace_cube<T>(
-        psf_cube, "psf_cube", nt, nf, np_psf, ny, nx,
+        psf_cube, "psf_cube", nt, nf, np_psf, psf_ny, psf_nx,
         /*require_writable=*/false);
 
     int domask = 0;
@@ -433,18 +501,28 @@ py::dict hclean_cube_impl(
         yend = std::max(ybeg + 1, std::min(yend, ny));
     }
 
-    // Per-plane iteration control: max_iter_remaining (int32) and threshold (T) are
-    // (nt, nf, np_img) arrays so every (time, frequency, polarization) plane
-    // is cleaned with its own iteration limit and threshold.
+    // Per-plane iteration control: max_iter_per_cycle_updated (int32) and
+    // threshold_per_cycle (T) are (nt, nf, np_img) arrays so every (time,
+    // frequency, polarization) plane is cleaned with its own iteration limit
+    // and threshold.
     py::buffer_info max_iter_info = validate_per_plane_array<int>(
-        max_iter_remaining, "max_iter_remaining", nt, nf, np_img);
+        max_iter_per_cycle_updated, "max_iter_per_cycle_updated", nt, nf, np_img);
     py::buffer_info thres_info = validate_per_plane_array<T>(
-        threshold, "threshold", nt, nf, np_img);
+        threshold_per_cycle, "threshold_per_cycle", nt, nf, np_img);
     const int* max_iter_ptr = static_cast<const int*>(max_iter_info.ptr);
     const T* thres_ptr = static_cast<const T*>(thres_info.ptr);
 
     const int nplanes = nt * nf * np_img;
     std::vector<int> iter_out(nplanes, 0);
+    std::vector<int> stop_out(nplanes, hclean::STOP_NONE);
+    std::vector<hclean::IterationHistory> history(
+        record_iteration_history ? nplanes : 0);
+    hclean::IterationHistory* history_ptr =
+        record_iteration_history ? history.data() : nullptr;
+    hclean::DivergenceControl<T> divergence;
+    divergence.max_iter_divergence = max_iter_divergence;
+    divergence.rms_factor = divergence_rms_factor;
+    divergence.peak_factor = divergence_peak_factor;
 
     // Drop the GIL: workers do not touch Python objects.
     {
@@ -456,10 +534,11 @@ py::dict hclean_cube_impl(
                 static_cast<const T*>(psf_info.ptr),
                 domask, mask_ptr,
                 nt, nf, np_img, np_psf,
-                ny, nx,
+                ny, nx, psf_ny, psf_nx,
                 xbeg, xend, ybeg, yend,
                 max_iter_ptr, gain, thres_ptr, speedup,
-                processing_function_threads, iter_out.data());
+                processing_function_threads, iter_out.data(),
+                divergence, stop_out.data(), history_ptr);
         } else {
             hclean::clean_cube<T>(
                 static_cast<T*>(residual_info.ptr),
@@ -467,10 +546,11 @@ py::dict hclean_cube_impl(
                 static_cast<const T*>(psf_info.ptr),
                 domask, mask_ptr,
                 nt, nf, np_img, np_psf,
-                ny, nx,
+                ny, nx, psf_ny, psf_nx,
                 xbeg, xend, ybeg, yend,
                 max_iter_ptr, gain, thres_ptr, speedup,
-                processing_function_threads, iter_out.data());
+                processing_function_threads, iter_out.data(),
+                divergence, stop_out.data(), history_ptr);
         }
     }
 
@@ -486,6 +566,14 @@ py::dict hclean_cube_impl(
     py::array_t<T> final_peaks_arr({nt, nf, np_img});
     py::array_t<T> total_flux_arr({nt, nf, np_img});
     py::array_t<bool> converged_arr({nt, nf, np_img});
+    py::array_t<int> stop_code_arr({nt, nf, np_img});
+    py::array_t<bool> diverged_arr({nt, nf, np_img});
+    std::memcpy(stop_code_arr.mutable_data(), stop_out.data(),
+                sizeof(int) * nplanes);
+    bool* dv = diverged_arr.mutable_data();
+    for (int i = 0; i < nplanes; ++i) {
+        dv[i] = (stop_out[i] == hclean::STOP_DIVERGED);
+    }
     T* fp = final_peaks_arr.mutable_data();
     T* tf = total_flux_arr.mutable_data();
     bool* cv = converged_arr.mutable_data();
@@ -527,6 +615,14 @@ py::dict hclean_cube_impl(
     results["final_peak"] = final_peaks_arr;
     results["total_flux_cleaned"] = total_flux_arr;
     results["converged"] = converged_arr;
+    results["stop_code"] = stop_code_arr;
+    results["diverged"] = diverged_arr;
+    if (record_iteration_history) {
+        results["iteration_peak_residual"] = per_plane_iteration_history(
+            history, &hclean::IterationHistory::peak, nt, nf, np_img);
+        results["iteration_residual_rms"] = per_plane_iteration_history(
+            history, &hclean::IterationHistory::rms, nt, nf, np_img);
+    }
     return results;
 }
 
@@ -541,29 +637,39 @@ static py::dict clean_dispatch(
     py::array model_image,
     py::array mask_array,
     py::tuple clean_box,
-    int max_iter_remaining,
+    int max_iter_per_cycle_updated,
     int start_iter,
     double gain,
-    double threshold,
+    double threshold_per_cycle,
     double speedup,
     py::object progress_callback,
-    py::object stop_callback
+    py::object stop_callback,
+    int max_iter_divergence,
+    double divergence_rms_factor,
+    double divergence_peak_factor,
+    bool record_iteration_history
 ) {
     auto dt = dirty_image.dtype();
     if (dt.is(py::dtype::of<float>())) {
         return hclean_impl<float>(
             dirty_image, psf_array, model_image, mask_array,
-            clean_box, max_iter_remaining, start_iter,
+            clean_box, max_iter_per_cycle_updated, start_iter,
             static_cast<float>(gain),
-            static_cast<float>(threshold),
+            static_cast<float>(threshold_per_cycle),
             static_cast<float>(speedup),
-            progress_callback, stop_callback);
+            progress_callback, stop_callback,
+            max_iter_divergence,
+            divergence_rms_factor,
+            static_cast<float>(divergence_peak_factor),
+            record_iteration_history);
     } else if (dt.is(py::dtype::of<double>())) {
         return hclean_impl<double>(
             dirty_image, psf_array, model_image, mask_array,
-            clean_box, max_iter_remaining, start_iter,
-            gain, threshold, speedup,
-            progress_callback, stop_callback);
+            clean_box, max_iter_per_cycle_updated, start_iter,
+            gain, threshold_per_cycle, speedup,
+            progress_callback, stop_callback,
+            max_iter_divergence, divergence_rms_factor, divergence_peak_factor,
+            record_iteration_history);
     } else {
         throw std::runtime_error(
             "dirty_image must be float32 or float64");
@@ -579,27 +685,39 @@ static py::dict clean_cube_dispatch(
     py::array model_cube,
     py::array mask_cube,
     py::tuple clean_box,
-    py::array max_iter_remaining,
+    py::array max_iter_per_cycle_updated,
     double gain,
-    py::array threshold,
+    py::array threshold_per_cycle,
     double speedup,
-    int processing_function_threads
+    int processing_function_threads,
+    int max_iter_divergence,
+    double divergence_rms_factor,
+    double divergence_peak_factor,
+    bool record_iteration_history
 ) {
     auto dt = residual_cube.dtype();
     if (dt.is(py::dtype::of<float>())) {
         return hclean_cube_impl<float>(
             residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter_remaining,
+            clean_box, max_iter_per_cycle_updated,
             static_cast<float>(gain),
-            threshold,
+            threshold_per_cycle,
             static_cast<float>(speedup),
-            processing_function_threads, /*many_threads=*/false);
+            processing_function_threads,
+            max_iter_divergence,
+            divergence_rms_factor,
+            static_cast<float>(divergence_peak_factor),
+            record_iteration_history,
+            /*many_threads=*/false);
     } else if (dt.is(py::dtype::of<double>())) {
         return hclean_cube_impl<double>(
             residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter_remaining,
-            gain, threshold, speedup,
-            processing_function_threads, /*many_threads=*/false);
+            clean_box, max_iter_per_cycle_updated,
+            gain, threshold_per_cycle, speedup,
+            processing_function_threads,
+            max_iter_divergence, divergence_rms_factor, divergence_peak_factor,
+            record_iteration_history,
+            /*many_threads=*/false);
     } else {
         throw std::runtime_error(
             "residual_cube must be float32 or float64");
@@ -617,27 +735,39 @@ static py::dict clean_cube_many_threads_dispatch(
     py::array model_cube,
     py::array mask_cube,
     py::tuple clean_box,
-    py::array max_iter_remaining,
+    py::array max_iter_per_cycle_updated,
     double gain,
-    py::array threshold,
+    py::array threshold_per_cycle,
     double speedup,
-    int processing_function_threads
+    int processing_function_threads,
+    int max_iter_divergence,
+    double divergence_rms_factor,
+    double divergence_peak_factor,
+    bool record_iteration_history
 ) {
     auto dt = residual_cube.dtype();
     if (dt.is(py::dtype::of<float>())) {
         return hclean_cube_impl<float>(
             residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter_remaining,
+            clean_box, max_iter_per_cycle_updated,
             static_cast<float>(gain),
-            threshold,
+            threshold_per_cycle,
             static_cast<float>(speedup),
-            processing_function_threads, /*many_threads=*/true);
+            processing_function_threads,
+            max_iter_divergence,
+            divergence_rms_factor,
+            static_cast<float>(divergence_peak_factor),
+            record_iteration_history,
+            /*many_threads=*/true);
     } else if (dt.is(py::dtype::of<double>())) {
         return hclean_cube_impl<double>(
             residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter_remaining,
-            gain, threshold, speedup,
-            processing_function_threads, /*many_threads=*/true);
+            clean_box, max_iter_per_cycle_updated,
+            gain, threshold_per_cycle, speedup,
+            processing_function_threads,
+            max_iter_divergence, divergence_rms_factor, divergence_peak_factor,
+            record_iteration_history,
+            /*many_threads=*/true);
     } else {
         throw std::runtime_error(
             "residual_cube must be float32 or float64");
@@ -666,19 +796,31 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "Hogbom CLEAN (in-place). dirty_image and model are modified in "
           "place; the residual replaces dirty_image and CLEAN components "
           "are added into model. Both must be C-contiguous, writeable, and "
-          "share a dtype (float32 or float64) with psf and mask.",
+          "share a dtype (float32 or float64) with psf and mask. The clean "
+          "stops at max_iter_per_cycle_updated, when the peak is at or below "
+          "threshold_per_cycle, or when the divergence test fires (see "
+          "clean_cube); "
+          "stop_code and diverged report why. With record_iteration_history "
+          "also iteration_peak_residual and iteration_residual_rms, float64 "
+          "arrays with one entry per iteration: the signed peak residual the "
+          "iteration cleaned and the RMS of the residual (over the clean box "
+          "inside the mask) after its subtraction.",
           py::arg("dirty_image"),
           py::arg("psf"),
           py::arg("model"),
           py::arg("mask") = py::array(),
           py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
-          py::arg("max_iter_remaining") = 100,
+          py::arg("max_iter_per_cycle_updated") = 100,
           py::arg("start_iter") = 0,
           py::arg("gain") = 0.1,
-          py::arg("threshold") = 0.0,
+          py::arg("threshold_per_cycle") = 0.0,
           py::arg("speedup") = 0.0,
           py::arg("progress_callback") = py::none(),
-          py::arg("stop_callback") = py::none());
+          py::arg("stop_callback") = py::none(),
+          py::arg("max_iter_divergence") = -1,
+          py::arg("divergence_rms_factor") = 1.0,
+          py::arg("divergence_peak_factor") = 1.0,
+          py::arg("record_iteration_history") = false);
 
     // clean_cube: operate on a full (time, frequency, polarization, y, x)
     // cube in place. All (t, f, p) planes are dispatched to processing_function_threads
@@ -689,22 +831,47 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "cube, parallelized across planes with std::thread. The "
           "residual and model cubes are modified in place; the PSF cube "
           "may be single-polarization to broadcast across image pols. "
-          "Iteration control is independent per plane: max_iter_remaining and "
-          "threshold are (nt, nf, np) arrays (int32 and matching the image "
-          "dtype respectively) giving each (time, frequency, polarization) "
-          "plane its own iteration limit and threshold. Returns per-plane "
-          "arrays of iterations_performed, final_peak, total_flux_cleaned, "
-          "and converged with shape (nt, nf, np).",
+          "The PSF, peak at (psf_ny/2, psf_nx/2), has the (y, x) size of the "
+          "residual, which subtracts a component over the offsets "
+          "-n/2 .. (n - 1)/2 of each axis, or twice that size, which subtracts "
+          "it over the whole image. "
+          "Iteration control is independent per plane: "
+          "max_iter_per_cycle_updated and threshold_per_cycle are (nt, nf, np) "
+          "arrays (int32 and matching the image dtype respectively) giving "
+          "each (time, frequency, polarization) plane its own iteration limit "
+          "and threshold. A plane stops when it has spent "
+          "max_iter_per_cycle_updated, when its peak is at or below its "
+          "threshold_per_cycle, or when it diverges: the RMS of its residual (over "
+          "the clean box inside the mask) has been above "
+          "divergence_rms_factor x the lowest RMS it reached for "
+          "max_iter_divergence consecutive iterations, its peak exceeds "
+          "divergence_peak_factor x its starting peak, or its peak is not "
+          "finite (max_iter_divergence < 0 disables the first two tests). "
+          "Returns "
+          "per-plane arrays of iterations_performed, final_peak, "
+          "total_flux_cleaned, converged, stop_code (0 did not run, 1 spent "
+          "max_iter_per_cycle_updated, 2 reached threshold_per_cycle, 4 "
+          "diverged) and diverged with shape (nt, nf, np). With "
+          "record_iteration_history also iteration_peak_residual and "
+          "iteration_residual_rms, nested lists indexed [t][f][p] of 1-D "
+          "float64 arrays with one value per iteration of the plane: the "
+          "signed peak residual the iteration cleaned and the RMS of the "
+          "residual (over the clean box inside the mask) after its "
+          "subtraction.",
           py::arg("residual_cube"),
           py::arg("psf_cube"),
           py::arg("model_cube"),
           py::arg("mask_cube") = py::array(),
           py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
-          py::arg("max_iter_remaining") = py::array(),
+          py::arg("max_iter_per_cycle_updated") = py::array(),
           py::arg("gain") = 0.1,
-          py::arg("threshold") = py::array(),
+          py::arg("threshold_per_cycle") = py::array(),
           py::arg("speedup") = 0.0,
-          py::arg("processing_function_threads") = 1);
+          py::arg("processing_function_threads") = 1,
+          py::arg("max_iter_divergence") = -1,
+          py::arg("divergence_rms_factor") = 1.0,
+          py::arg("divergence_peak_factor") = 1.0,
+          py::arg("record_iteration_history") = false);
 
     // clean_cube_many_threads: same as clean_cube but the parallelism spans
     // both the (time, frequency, polarization) planes AND the rows within each
@@ -717,17 +884,24 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "parallelized across planes AND within each plane (rows) with "
           "std::thread, so all processing_function_threads workers are used regardless of the "
           "plane count. Residual and model are modified in place; same "
-          "per-plane max_iter_remaining / threshold arrays and outputs as clean_cube.",
+          "PSF sizes, "
+          "per-plane max_iter_per_cycle_updated / threshold_per_cycle arrays, "
+          "stop tests and outputs (record_iteration_history included) as "
+          "clean_cube.",
           py::arg("residual_cube"),
           py::arg("psf_cube"),
           py::arg("model_cube"),
           py::arg("mask_cube") = py::array(),
           py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
-          py::arg("max_iter_remaining") = py::array(),
+          py::arg("max_iter_per_cycle_updated") = py::array(),
           py::arg("gain") = 0.1,
-          py::arg("threshold") = py::array(),
+          py::arg("threshold_per_cycle") = py::array(),
           py::arg("speedup") = 0.0,
-          py::arg("processing_function_threads") = 1);
+          py::arg("processing_function_threads") = 1,
+          py::arg("max_iter_divergence") = -1,
+          py::arg("divergence_rms_factor") = 1.0,
+          py::arg("divergence_peak_factor") = 1.0,
+          py::arg("record_iteration_history") = false);
 
     m.def("get_dtype_name", [](py::array arr) {
         return arr.dtype().str();

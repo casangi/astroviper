@@ -15,7 +15,6 @@ from astroviper.processing_functions.imaging.restore import restore_image
 
 __all__ = [
     "image_cube_single_field",
-    "image_continuum_single_field",
     "accumulate_continuum_model",
     "model_update_mtmfs_single_field",
     "prepare_model_uv_continuum_single_field",

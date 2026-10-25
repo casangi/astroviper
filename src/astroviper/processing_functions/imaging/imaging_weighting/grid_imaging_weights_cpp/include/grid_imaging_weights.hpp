@@ -4,10 +4,13 @@
 
 namespace imaging_weighting {
 
-// Grid per-visibility data weights onto a UV grid (nearest-pixel scatter with
-// Hermitian-conjugate update), accumulating per-(channel, polarization) weight
-// sums. The kernel is deliberately SERIAL so the floating-point accumulation
-// order — and therefore the weight sums — are bit-reproducible across runs.
+// Grid per-visibility data weights onto a UV grid, accumulating
+// per-(channel, polarization) weight sums. Nearest-cell mode rounds the direct
+// and conjugate coordinates and requires both cells to be in bounds. CASA
+// continuum mode truncates the shifted coordinates, skips index 0 on either
+// axis, and accepts the direct and conjugate cells independently. The kernel is
+// deliberately SERIAL so the floating-point accumulation order — and therefore
+// the weight sums — are bit-reproducible across runs.
 //
 // grid            : (n_chan_g, n_pol_g, m_u, m_v)          GridT, updated in place
 // sum_weight      : (n_chan_g, n_pol_g)                    float64, updated in place

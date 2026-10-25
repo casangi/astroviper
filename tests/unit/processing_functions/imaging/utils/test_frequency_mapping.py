@@ -201,10 +201,6 @@ class TestCubePathsShareFrequencyMap(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestExplicitContinuumMatching(unittest.TestCase):
     def test_exact_reordered_subset(self):
         np.testing.assert_array_equal(
@@ -238,3 +234,7 @@ class TestExplicitContinuumMatching(unittest.TestCase):
     def test_unknown_policy_rejected(self):
         with self.assertRaisesRegex(ValueError, "matching"):
             map_visibility_frequencies_to_image([1e9], [1e9], matching="unknown")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,6 +1,7 @@
 """Unit tests for continuum processing algorithms and validation."""
 
 import sys
+import warnings
 from types import ModuleType
 
 import numpy as np
@@ -17,9 +18,9 @@ from astroviper.processing_functions.imaging.degrid_visibility_grid import (
     degrid_visibility_grid_single_field,
 )
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
+    _convert_mvc_cubes_to_taylor_normal_equations,
     accumulate_continuum_model,
     apply_mvc_primary_beam_convention,
-    convert_mvc_cubes_to_taylor_normal_equations,
     finalize_mvc_taylor_normal_equations,
     form_mfs_residual_grid_from_cache,
     form_residual_grid_from_cache,
@@ -27,19 +28,86 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     prepare_model_uv_continuum_single_field,
     prepare_model_uv_mvc_single_field,
     residual_update_continuum_single_field,
-    restore_image,
+    restore_continuum_image,
 )
 from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
     _convert_primary_beam_to_reference_frequency,
 )
+from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
+    add_uv_sampling_grid_continuum_single_field,
+)
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
+    residual_cycle_continuum_single_field,
 )
 from astroviper.processing_functions.imaging.utils import Key
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (
     map_visibility_frequencies_to_image,
 )
 from tests.utils.continuum_images import make_continuum_image
+
+
+def test_psf_taylor_gridding_uses_output_views_and_reuses_order_zero_weights(
+    monkeypatch,
+):
+    """Each Taylor order is gridded in place without a full temporary plane."""
+    weights = np.ones((1, 1, 2, 1), dtype=np.float64, order="C")
+    measurement_set = xr.Dataset(
+        {
+            "WEIGHT_IMAGING": (
+                ("time", "baseline", "frequency", "polarization"),
+                weights,
+            ),
+            "UVW": (
+                ("time", "baseline", "uvw_label"),
+                np.zeros((1, 1, 3), dtype=np.float64),
+            ),
+        },
+        coords={"frequency": [90.0, 110.0]},
+        attrs={
+            "data_groups": {
+                "base": {
+                    "weight_imaging": "WEIGHT_IMAGING",
+                    "uvw": "UVW",
+                }
+            }
+        },
+    )
+    image = xr.Dataset(
+        coords={"l": np.arange(4) * -1.0e-5, "m": np.arange(4) * 1.0e-5},
+        attrs={"type": "image_dataset", "data_groups": {"residual": {}}},
+    )
+    calls = []
+
+    def fake_grid(grid, normalization, *args, **kwargs):
+        order = len(calls)
+        calls.append((grid, args[5]))
+        grid[...] += order + 1
+        normalization[...] = 7.0 + order
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "anti_alias_grid_uv_sampling",
+        fake_grid,
+    )
+
+    add_uv_sampling_grid_continuum_single_field(
+        measurement_set,
+        np.ones(1),
+        image,
+        n_psf_taylor_terms=3,
+        reference_frequency=100.0,
+        fft_padding=1.0,
+    )
+
+    output_grid = image["UV_SAMPLING"].data
+    assert len(calls) == 3
+    assert all(np.shares_memory(grid, output_grid) for grid, _ in calls)
+    assert calls[0][1] is weights
+    np.testing.assert_array_equal(output_grid[:, 0], 1.0)
+    np.testing.assert_array_equal(output_grid[:, 1], 2.0)
+    np.testing.assert_array_equal(output_grid[:, 2], 3.0)
+    np.testing.assert_array_equal(image["UV_SAMPLING_NORMALIZATION"], 7.0)
 
 
 def _model_dataset(value, *, include_primary_beam=False):
@@ -64,7 +132,7 @@ def test_accumulate_continuum_model_copies_initial_mvc_state():
     """The initial MVC state retains its Taylor model and effective beam."""
     initial = _model_dataset(2.0, include_primary_beam=True)
 
-    actual = accumulate_continuum_model(initial, specmode="mvc")
+    actual = accumulate_continuum_model(initial, continuum_mode="mvc")
 
     assert set(actual.data_vars) == {"SKY_MODEL", "PRIMARY_BEAM"}
     np.testing.assert_array_equal(actual["SKY_MODEL"], initial["SKY_MODEL"])
@@ -166,6 +234,26 @@ def test_cached_mvc_frequency_grid_subtracts_model_plane_by_plane():
     )
 
 
+def test_cached_grid_accepts_distinct_observed_and_model_groups():
+    """Each cached-grid input resolves its explicitly named data group."""
+    observed = _mfs_grid_dataset(5.0)
+    model = _mfs_grid_dataset(1.5)
+    observed.attrs["data_groups"]["observed"] = observed.attrs["data_groups"].pop(
+        "residual"
+    )
+    model.attrs["data_groups"]["predicted"] = model.attrs["data_groups"].pop("residual")
+
+    residual = form_residual_grid_from_cache(
+        observed,
+        model,
+        image_data_group_in_observed="observed",
+        image_data_group_in_model="predicted",
+    )
+
+    np.testing.assert_array_equal(residual.VISIBILITY, 3.5)
+    np.testing.assert_array_equal(residual.VISIBILITY_NORMALIZATION, 4.0)
+
+
 def test_accumulate_continuum_model_adds_later_increment_positionally():
     """A later increment reproduces the former driver-side model addition."""
     previous = _model_dataset(0.0)
@@ -178,7 +266,7 @@ def test_accumulate_continuum_model_adds_later_increment_positionally():
     actual = accumulate_continuum_model(
         increment,
         previous_model_xds=previous,
-        specmode="mfs",
+        continuum_mode="mfs",
     )
 
     np.testing.assert_array_equal(actual.SKY_MODEL.isel(taylor_term=0), 2.5)
@@ -188,8 +276,8 @@ def test_accumulate_continuum_model_adds_later_increment_positionally():
     assert actual["SKY_MODEL"].attrs == previous["SKY_MODEL"].attrs
 
 
-def test_continuum_prediction_calls_shared_degridder_with_frequency_grid(monkeypatch):
-    """Taylor grids are evaluated per channel without calling the cube API."""
+def test_continuum_prediction_degrids_and_accumulates_each_taylor_plane(monkeypatch):
+    """Taylor planes are degridded separately and combined in visibility space."""
     frequencies = np.array([0.9e9, 1.1e9])
     ms_xds = xr.Dataset(coords={"frequency": frequencies})
     model_grid = np.empty((1, 2, 1, 2, 2), dtype=np.complex128)
@@ -205,15 +293,22 @@ def test_continuum_prediction_calls_shared_degridder_with_frequency_grid(monkeyp
         coords={"taylor_term": [0, 1], "l": [0.0, 1.0], "m": [0.0, 1.0]},
         attrs={"data_groups": {"model": {"visibility": "MODEL_UV"}}},
     )
-    captured = {}
+    captured = []
 
     def fake_degrid(ms_arg, kernel, geometry, grid, frequency_map, **kwargs):
-        captured.update(
-            ms_xds=ms_arg,
-            geometry=geometry,
-            grid=grid.copy(),
-            frequency_map=frequency_map.copy(),
-            kwargs=kwargs,
+        captured.append(
+            {
+                "ms_xds": ms_arg,
+                "geometry": geometry,
+                "grid": grid.copy(),
+                "frequency_map": frequency_map.copy(),
+                "kwargs": kwargs,
+            }
+        )
+        ms_arg["VISIBILITY_MODEL"] = xr.DataArray(
+            np.full(frequencies.size, grid[0, 0, 0, 0, 0], dtype=np.complex128),
+            dims=("frequency",),
+            coords={"frequency": frequencies},
         )
 
     monkeypatch.setattr(
@@ -225,16 +320,19 @@ def test_continuum_prediction_calls_shared_degridder_with_frequency_grid(monkeyp
         {"partition": ms_xds},
         model_xds,
         np.ones(351),
-        nterms=2,
+        n_taylor_terms=2,
         reference_frequency=1.0e9,
+        ms_data_group_in_name="corrected",
     )
-    expected = np.broadcast_to(
-        np.array([1.7, 2.3])[:, np.newaxis, np.newaxis], (2, 2, 2)
-    )
-    np.testing.assert_allclose(captured["grid"][0, :, 0, :, :], expected)
-    np.testing.assert_array_equal(captured["frequency_map"], [0, 1])
-    assert captured["ms_xds"] is ms_xds
-    assert captured["geometry"] is model_xds
+    assert len(captured) == 2
+    np.testing.assert_array_equal(captured[0]["grid"], model_grid[:, 0:1, ...])
+    np.testing.assert_array_equal(captured[1]["grid"], model_grid[:, 1:2, ...])
+    for call in captured:
+        np.testing.assert_array_equal(call["frequency_map"], [0, 0])
+        assert call["ms_xds"] is ms_xds
+        assert call["geometry"] is model_xds
+        assert call["kwargs"]["ms_data_group_in_name"] == "corrected"
+    np.testing.assert_allclose(ms_xds.VISIBILITY_MODEL, [1.7, 2.3])
 
 
 def test_primary_beam_correction_returns_restored_taylor_zero_only():
@@ -251,12 +349,12 @@ def test_primary_beam_correction_returns_restored_taylor_zero_only():
     residual = image.SKY_RESIDUAL.isel(taylor_term=0).values.copy()
     beam = image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
 
-    result, _ = restore_image(
+    result, _ = restore_continuum_image(
         image,
         primary_beam_correction=True,
         primary_beam_limit=0.2,
     )
-    corrected = result["SKY_RESTORED_PBCOR"]
+    corrected = result["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
     assert corrected.dims == ("time", "polarization", "l", "m")
 
     kernel_ft = _clean_beam_kernel_ft(beam[0, 0], 8, 8, 1.0e-5, model.dtype, 1)
@@ -268,9 +366,7 @@ def test_primary_beam_correction_returns_restored_taylor_zero_only():
         kernel_ft=kernel_ft,
     )
     np.testing.assert_allclose(corrected.values[0, 0], expected)
-    old_post_restore_division = (
-        result.SKY_RESTORED.isel(taylor_term=0).values[0, 0] / primary_beam[0, 0]
-    )
+    old_post_restore_division = result.SKY_RESTORED.values[0, 0] / primary_beam[0, 0]
     assert not np.allclose(corrected.values[0, 0], old_post_restore_division)
 
 
@@ -353,11 +449,9 @@ def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(
         grid[:, observed_frequency_map, ...] = 1.0
         normalization[:, observed_frequency_map, ...] = 1.0
 
-    module_name = (
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp"
-    )
+    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
     extension_module = ModuleType(module_name)
-    extension_module.prolate_spheroidal_grid = fake_grid
+    extension_module.anti_alias_grid = fake_grid
     monkeypatch.setitem(sys.modules, module_name, extension_module)
 
     add_visibility_grid_mvc_single_field(ms_xds, np.ones(8), image)
@@ -417,11 +511,9 @@ def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypat
         grid += weight_sum[..., None, None]
         normalization += weight_sum
 
-    module_name = (
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp"
-    )
+    module_name = "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
     extension_module = ModuleType(module_name)
-    extension_module.prolate_spheroidal_grid = fake_grid
+    extension_module.anti_alias_grid = fake_grid
     monkeypatch.setitem(sys.modules, module_name, extension_module)
 
     for child_weight in (2.0, 3.0):
@@ -429,7 +521,7 @@ def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypat
             make_child(child_weight),
             np.ones(8),
             image,
-            nterms=1,
+            n_taylor_terms=1,
             reference_frequency=1.0e9,
         )
 
@@ -473,31 +565,31 @@ def test_mvc_conversion_forms_weighted_taylor_normal_equations():
         residual_taylor,
         psf_taylor,
         effective_pb,
-    ) = convert_mvc_cubes_to_taylor_normal_equations(
+    ) = _convert_mvc_cubes_to_taylor_normal_equations(
         _frequency_cube(residual, frequency),
         _frequency_cube(psf, frequency),
         _frequency_cube(pb, frequency),
         _frequency_normalization(weight, frequency),
         _frequency_normalization(weight, frequency),
-        nterms=2,
+        n_taylor_terms=2,
         reference_frequency=1.0e9,
-        pblimit=0.2,
+        primary_beam_limit=0.2,
     )
     expected_pb = np.sum(weight * pb) / np.sum(weight)
     np.testing.assert_allclose(effective_pb.squeeze(), expected_pb)
-    np.testing.assert_allclose(
-        residual_taylor.squeeze(),
-        [
-            np.sum(weight * residual) / np.sum(weight),
-            np.sum(weight * x * residual) / np.sum(weight),
-        ],
+    # Fit of the PB-corrected channel residuals with weights w * pb**2,
+    # returned to the plain PSF moments and the common beam: the pair whose
+    # Hessian is the residual's response to the model.
+    basis = x[:, None] ** np.arange(2)
+    hessian = basis.T @ (weight[:, None] * basis) / np.sum(weight)
+    fit = np.linalg.solve(
+        basis.T @ ((weight * pb**2)[:, None] * basis),
+        basis.T @ (weight * pb * residual),
     )
+    np.testing.assert_allclose(residual_taylor.squeeze(), expected_pb * hessian @ fit)
     np.testing.assert_allclose(
         psf_taylor.squeeze(),
-        [
-            np.sum(weight * x**order * pb * psf) / (np.sum(weight) * expected_pb)
-            for order in range(3)
-        ],
+        [np.sum(weight * x**order * psf) / np.sum(weight) for order in range(3)],
     )
 
 
@@ -509,15 +601,15 @@ def test_mvc_conversion_uses_psf_weights_for_common_response():
     psf = np.array([1.0, 4.0])
     pb = np.array([0.5, 1.5])
 
-    _, psf_taylor, effective_pb = convert_mvc_cubes_to_taylor_normal_equations(
+    _, psf_taylor, effective_pb = _convert_mvc_cubes_to_taylor_normal_equations(
         _frequency_cube([2.0, 6.0], frequency),
         _frequency_cube(psf, frequency),
         _frequency_cube(pb, frequency),
         _frequency_normalization(residual_weight, frequency),
         _frequency_normalization(psf_weight, frequency),
-        nterms=1,
+        n_taylor_terms=1,
         reference_frequency=1.0e9,
-        pblimit=0.2,
+        primary_beam_limit=0.2,
     )
 
     np.testing.assert_allclose(
@@ -526,7 +618,7 @@ def test_mvc_conversion_uses_psf_weights_for_common_response():
     )
     np.testing.assert_allclose(
         psf_taylor.squeeze(),
-        np.sum(psf_weight * pb * psf) / (np.sum(psf_weight) * effective_pb.squeeze()),
+        np.sum(psf_weight * psf) / np.sum(psf_weight),
     )
 
 
@@ -536,13 +628,13 @@ def test_mvc_conversion_preserves_single_precision_image_products():
     cube = _frequency_cube([1.0, 2.0], frequency).astype(np.float32)
     normalization = _frequency_normalization([1.0, 1.0], frequency)
 
-    residual, psf, primary_beam = convert_mvc_cubes_to_taylor_normal_equations(
+    residual, psf, primary_beam = _convert_mvc_cubes_to_taylor_normal_equations(
         cube,
         cube,
         cube,
         normalization,
         normalization,
-        nterms=2,
+        n_taylor_terms=2,
         reference_frequency=1.0e9,
     )
 
@@ -559,13 +651,13 @@ def test_mvc_map_contributions_reduce_to_full_cube_result():
     primary_beam_cube = _frequency_cube([0.5, 0.7, 1.1, 1.3], frequency)
     normalization = _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency)
 
-    expected = convert_mvc_cubes_to_taylor_normal_equations(
+    expected = _convert_mvc_cubes_to_taylor_normal_equations(
         residual_cube,
         psf_cube,
         primary_beam_cube,
         normalization,
         normalization,
-        nterms=2,
+        n_taylor_terms=2,
         reference_frequency=1.0e9,
     )
     chunks = []
@@ -578,7 +670,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result():
                 primary_beam_cube.isel(selection),
                 normalization.isel(selection),
                 normalization.isel(selection),
-                nterms=2,
+                n_taylor_terms=2,
                 reference_frequency=1.0e9,
             )
         )
@@ -606,6 +698,267 @@ def test_mvc_prediction_applies_channel_over_effective_primary_beam():
     np.testing.assert_allclose(actual.squeeze(), [5.0, 30.0])
 
 
+def test_mvc_prediction_masks_zero_effective_beam_without_warning():
+    """Invalid PB support is zeroed without evaluating a masked division."""
+    frequency = np.array([0.9e9, 1.1e9])
+    model = _frequency_cube([10.0, 20.0], frequency)
+    channel_pb = _frequency_cube([0.5, 1.5], frequency, polarization="XX")
+    effective_pb = xr.DataArray(
+        np.zeros((1, 1, 1, 1)),
+        dims=("time", "polarization", "l", "m"),
+        coords={"time": [0], "polarization": ["I"], "l": [0.0], "m": [0.0]},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        actual = apply_mvc_primary_beam_convention(model, channel_pb, effective_pb)
+    np.testing.assert_array_equal(actual, 0.0)
+
+
+@pytest.mark.parametrize(
+    "channel_pb",
+    [
+        [1.0, 1.0, 1.0, 1.0],
+        [0.61, 0.54, 0.47, 0.40],
+        [0.55, 0.42, 0.31, 0.19],
+    ],
+    ids=["centre", "off_centre", "channel_below_pblimit"],
+)
+def test_mvc_residual_responds_to_model_through_psf_moments(channel_pb):
+    """The Taylor residual responds to a model change through the Hessian.
+
+    MT-MFS inverts the PSF Taylor planes read at their peak, the pointing
+    centre (pixel 0).  A model change ``dM`` at pixel 1 changes the predicted
+    channel images there by ``A_nu * dM_nu / Abar``.  With a delta-function
+    PSF the Taylor residual at pixel 1 must then change by
+    ``-sum_k B_(t+k)(0) * dM_k``, whatever the channel beams at pixel 1 are.
+    """
+    frequency = np.array([0.85e9, 0.95e9, 1.05e9, 1.15e9])
+    x = (frequency - 1.0e9) / 1.0e9
+    weight = _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency)
+    model_change = np.array([0.3, -0.2])
+    options = dict(n_taylor_terms=2, reference_frequency=1.0e9, primary_beam_limit=0.2)
+
+    def two_pixel_cube(centre, source):
+        values = np.stack(
+            [np.broadcast_to(centre, 4), np.broadcast_to(source, 4)], axis=-1
+        )
+        return xr.DataArray(
+            values[None, :, None, :, None],
+            dims=("time", "frequency", "polarization", "l", "m"),
+            coords={
+                "time": [0],
+                "frequency": frequency,
+                "polarization": ["I"],
+                "l": [0.0, 1.0],
+                "m": [0.0],
+            },
+        )
+
+    channel_beam = two_pixel_cube(1.0, channel_pb)
+    _, psf, effective_beam = _convert_mvc_cubes_to_taylor_normal_equations(
+        two_pixel_cube(0.0, 0.0),
+        two_pixel_cube(1.0, 0.0),
+        channel_beam,
+        weight,
+        weight,
+        **options,
+    )
+    prediction = apply_mvc_primary_beam_convention(
+        two_pixel_cube(0.0, model_change[0] + model_change[1] * x),
+        channel_beam,
+        effective_beam,
+    )
+    residual, _, _ = finalize_mvc_taylor_normal_equations(
+        make_mvc_taylor_normal_equation_contributions(
+            -prediction, None, channel_beam, weight, None, **options
+        ),
+        effective_primary_beam=effective_beam,
+    )
+
+    planes = psf.isel(l=0, m=0).squeeze().values
+    hessian = planes[np.add.outer(np.arange(2), np.arange(2))]
+    np.testing.assert_allclose(
+        residual.isel(l=1, m=0).squeeze(), -hessian @ model_change
+    )
+
+
+@pytest.mark.parametrize(
+    "channel_pb",
+    [[0.9, 0.7, 0.5, 1.0e-6], [0.9, 1.0e-6]],
+    ids=["three_channels_above_pblimit", "one_channel_above_pblimit"],
+)
+def test_mvc_channel_near_beam_null_adds_bounded_residual(channel_pb):
+    """A channel near a null of its beam does not amplify its residual.
+
+    The effective beam is above primary_beam_limit, but one channel beam is 1e-6.  A unit
+    image in any channel must change every Taylor residual by less than one;
+    dividing the channel residual by its beam changes them by up to
+    ``Abar * 1e6 / nchan``.  With one channel beam above primary_beam_limit, two Taylor
+    terms are not determined and only Taylor term zero is fitted.
+    """
+    nchan = len(channel_pb)
+    frequency = np.linspace(0.85e9, 1.15e9, nchan)
+    weight = _frequency_normalization(np.ones(nchan), frequency)
+    for channel in range(nchan):
+        residual, _, effective_beam = _convert_mvc_cubes_to_taylor_normal_equations(
+            _frequency_cube(np.eye(nchan)[channel], frequency),
+            _frequency_cube(np.ones(nchan), frequency),
+            _frequency_cube(channel_pb, frequency),
+            weight,
+            weight,
+            n_taylor_terms=2,
+            reference_frequency=1.0e9,
+            primary_beam_limit=0.2,
+        )
+        assert float(effective_beam.squeeze()) > 0.2
+        assert np.all(np.isfinite(residual.values))
+        assert np.max(np.abs(residual.values)) < 1.0
+
+
+def _mvc_image_point_sources(sources, threshold):
+    """Image point sources with the MVC Taylor products and native MT-MFS.
+
+    Channel residuals are formed in the image domain, without noise or
+    gridding error, as ``B_nu (*) (A_nu * I_nu - A_nu * M_nu / Abar)``.  The
+    power beam ``A_nu`` is a Gaussian of 40 pixels FWHM and the PSF ``B_nu``
+    a Gaussian of 1.5 pixels sigma at the reference frequency, both
+    narrowing as ``1 / nu``; 8 channels cover +-12.5 %.  Each model update
+    cleans to ``max(0.05 * peak, threshold)``, the controller's per-cycle
+    threshold for a PSF without sidelobes, and imaging stops when the
+    refreshed Taylor-zero peak in the beam support is below ``threshold``.
+    Returns the Taylor model and the effective beam.
+    """
+    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+
+    size, centre, n_taylor_terms = 64, 32, 2
+    x = (np.arange(8) - 3.5) / 32.0
+    frequency = 1.0e11 * (1.0 + x)
+    offsets = np.arange(size) - centre
+    radius = np.hypot(*np.meshgrid(offsets, offsets, indexing="ij"))
+    channel_beam = np.exp(
+        -4.0 * np.log(2.0) * (radius * (1.0 + x)[:, None, None] / 40.0) ** 2
+    )
+    # Channel PSFs on a doubled grid, for convolutions without wrap-around.
+    doubled = np.arange(2 * size) - size
+    doubled_radius = np.hypot(*np.meshgrid(doubled, doubled, indexing="ij"))
+    sigma = 1.5 / (1.0 + x)[:, None, None]
+    doubled_psf = np.exp(-0.5 * (doubled_radius / sigma) ** 2)
+    psf_ft = np.fft.rfft2(np.fft.ifftshift(doubled_psf, axes=(1, 2)))
+    window = slice(size - centre, 2 * size - centre)
+    psf = doubled_psf[:, window, window]
+
+    sky = np.zeros((8, size, size))
+    for pixel, spectrum in sources:
+        sky[(slice(None), *pixel)] += channel_beam[(slice(None), *pixel)] * spectrum
+
+    coords = {
+        "time": [0.0],
+        "frequency": frequency,
+        "polarization": ["I"],
+        "l": offsets * 1.0e-5,
+        "m": offsets * 1.0e-5,
+    }
+
+    def cube(values):
+        return xr.DataArray(
+            values[None, :, None],
+            dims=("time", "frequency", "polarization", "l", "m"),
+            coords=coords,
+        )
+
+    weight = xr.DataArray(
+        np.ones((1, 8, 1)),
+        dims=("time", "frequency", "polarization"),
+        coords={name: coords[name] for name in ("time", "frequency", "polarization")},
+    )
+    basis = x[:, None] ** np.arange(n_taylor_terms)
+    model = np.zeros((n_taylor_terms, size, size))
+    effective_beam = None
+    for _ in range(20):
+        apparent = sky.copy()
+        if effective_beam is not None:
+            apparent -= apply_mvc_primary_beam_convention(
+                cube(np.einsum("ct,tij->cij", basis, model)),
+                cube(channel_beam),
+                effective_beam,
+            ).values[0, :, 0]
+        padded = np.zeros((8, 2 * size, 2 * size))
+        padded[:, :size, :size] = apparent
+        residual_cube = np.fft.irfft2(np.fft.rfft2(padded) * psf_ft)[:, :size, :size]
+        first = effective_beam is None
+        residual, psf_taylor, beam = finalize_mvc_taylor_normal_equations(
+            make_mvc_taylor_normal_equation_contributions(
+                cube(residual_cube),
+                cube(psf) if first else None,
+                cube(channel_beam),
+                weight,
+                weight if first else None,
+                n_taylor_terms=n_taylor_terms,
+                reference_frequency=1.0e11,
+                primary_beam_limit=0.2,
+            ),
+            effective_primary_beam=effective_beam,
+        )
+        if first:
+            effective_beam = beam
+            support = (beam.values[0, 0] > 0.2).astype(np.float64)
+            hessian_planes = np.ascontiguousarray(
+                psf_taylor.transpose(
+                    "time", "psf_taylor_order", "polarization", "l", "m"
+                ).values[0, :, 0],
+                dtype=np.float64,
+            )
+        residual = np.ascontiguousarray(
+            residual.transpose("time", "taylor_term", "polarization", "l", "m").values[
+                0, :, 0
+            ],
+            dtype=np.float64,
+        )
+        peak = float(np.max(np.abs(residual[0]) * support))
+        if peak < threshold:
+            return model, effective_beam.values[0, 0]
+        increment = np.zeros_like(residual)
+        mtmfs.clean(
+            residual,
+            hessian_planes,
+            increment,
+            mask=support,
+            max_iter_per_cycle_updated=50000,
+            gain=0.1,
+            threshold_per_cycle=max(0.05 * peak, threshold),
+        )
+        model += increment
+    pytest.fail("MVC imaging did not reach the threshold in 20 imaging cycles.")
+
+
+@pytest.mark.parametrize("off_centre_index", [0.0, -0.7])
+def test_mvc_recovers_spectral_index_away_from_pointing_centre(off_centre_index):
+    """An off-centre spectral index is not biased when imaging stops early.
+
+    One source sits at the pointing centre and one where the beam is 0.5 at
+    the reference frequency. Imaging stops at 5 mJy, 2 % of the apparent
+    flux of the off-centre source.  With a Hessian that differs from the
+    residual's response away from the centre, the off-centre ``tt1 / tt0``
+    stopped at -0.27 (index 0) and -1.00 (index -0.7) in this setup.
+    """
+    x = (np.arange(8) - 3.5) / 32.0
+    sources = {
+        "centre": ((32, 32), 1.0 * (1.0 + x) ** -0.7),
+        "off_centre": ((52, 32), 0.5 * (1.0 + x) ** off_centre_index),
+    }
+    model, effective_beam = _mvc_image_point_sources(sources.values(), 5.0e-3)
+
+    basis = x[:, None] ** np.arange(2)
+    for (row, column), spectrum in sources.values():
+        expected = (
+            effective_beam[row, column]
+            * np.linalg.lstsq(basis, spectrum, rcond=None)[0]
+        )
+        tt0, tt1 = model[:, row - 2 : row + 3, column - 2 : column + 3].sum(axis=(1, 2))
+        np.testing.assert_allclose(tt0, expected[0], rtol=0.03)
+        assert abs(tt1 / tt0 - expected[1] / expected[0]) < 0.01
+
+
 def test_mfs_primary_beam_is_evaluated_at_reference_frequency():
     """MFS replaces channel accumulators with a reference-frequency PB."""
     image_params = {
@@ -630,6 +983,7 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency():
         image_params=image_params,
         reference_frequency_hz=1.5e9,
         float_dtype=np.float64,
+        image_data_group_in_name="residual",
     )
     assert "PRIMARY_BEAM_REFERENCE" in result
     assert "PRIMARY_BEAM" not in result
@@ -667,21 +1021,33 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
         lambda dataset, **kwargs: dataset,
     )
 
+    fft_options = {}
+
     def fake_fft(dataset, **kwargs):
+        fft_options.update(kwargs)
         dataset["VISIBILITY_MODEL"] = dataset.SKY_MODEL.astype(np.complex64)
-        dataset.attrs["data_groups"]["model"]["visibility"] = "VISIBILITY_MODEL"
+        dataset.attrs["data_groups"][kwargs["image_data_group_out_name"]] = {
+            "visibility": "VISIBILITY_MODEL"
+        }
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder."
+        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
         "fft_norm_continuum_img_xds",
         fake_fft,
     )
     result = prepare_model_uv_continuum_single_field(
-        model, {"nterms": 2}, instrument_polarization_basis="linear"
+        model,
+        {"n_taylor_terms": 2},
+        instrument_polarization_basis="linear",
+        image_data_group_in_name="model",
+        image_data_group_out_name="model_uv",
     )
     assert result.VISIBILITY_MODEL.sizes["taylor_term"] == 2
-    assert result.VISIBILITY_MODEL.attrs["nterms"] == 2
+    assert result.VISIBILITY_MODEL.attrs["n_taylor_terms"] == 2
+    assert fft_options["image_data_variables_keep"] == []
+    assert fft_options["image_data_group_in_name"] == "model"
+    assert fft_options["image_data_group_out_name"] == "model_uv"
     np.testing.assert_array_equal(
         result.VISIBILITY_MODEL.isel(taylor_term=0), 2.0 + 0.0j
     )
@@ -691,7 +1057,7 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
 
 
 def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch):
-    """MVC builds a channel cube, applies PB convention, and performs one FFT."""
+    """MVC preparation is repeatable and does not rewrite the caller's group."""
     model = _taylor_model(0.0)
     model.SKY_MODEL.loc[{"taylor_term": 0}] = 2.0
     model.SKY_MODEL.loc[{"taylor_term": 1}] = 3.0
@@ -720,17 +1086,38 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         "transform_polarization_basis",
         lambda dataset, **kwargs: dataset,
     )
+    fft_options = {}
+
+    def fake_fft(dataset, **kwargs):
+        fft_options.update(kwargs)
+        return dataset
+
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder."
+        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
         "fft_norm_img_xds",
-        lambda dataset, **kwargs: dataset,
+        fake_fft,
     )
     result = prepare_model_uv_mvc_single_field(
         model,
         channel_pb,
         [0.9e9, 1.1e9],
-        {"nterms": 2, "reference_frequency_hz": 1.0e9},
+        {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
+        image_data_group_in_name="model",
+        image_data_group_out_name="model_uv",
     )
+    repeated = prepare_model_uv_mvc_single_field(
+        model,
+        channel_pb,
+        [0.9e9, 1.1e9],
+        {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
+        image_data_group_in_name="model",
+        image_data_group_out_name="model_uv",
+    )
+    assert model.attrs["data_groups"]["model"] == {"sky": "SKY_MODEL"}
+    assert result.attrs["data_groups"] is not model.attrs["data_groups"]
+    assert result.attrs["data_groups"]["model_uv"]["sky"] == "SKY_MODEL_MVC"
+    assert fft_options["image_data_group_in_name"] == "model_uv"
+    assert fft_options["image_data_group_out_name"] == "model_uv"
     assert result.SKY_MODEL_MVC.dims == (
         "time",
         "frequency",
@@ -742,10 +1129,13 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         result.SKY_MODEL_MVC.isel(time=0, polarization=0, l=0, m=0),
         [1.7, 2.3],
     )
+    xr.testing.assert_identical(repeated.SKY_MODEL_MVC, result.SKY_MODEL_MVC)
 
 
-@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
-def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(monkeypatch, specmode):
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
+    monkeypatch, continuum_mode
+):
     """The processing entry point runs setup once and MVC image conversion locally."""
     import importlib
 
@@ -784,7 +1174,7 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(monkeypatch, specm
         return dataset
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder."
+        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder."
         "ifft_norm_img_xds",
         fake_ifft,
     )
@@ -799,12 +1189,114 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(monkeypatch, specm
         ),
     )
     result, timing = residual_update_continuum_single_field(
-        {}, image, {"nterms": 2}, {}, specmode=specmode, is_n_iter_0=True
+        {},
+        image,
+        {"n_taylor_terms": 2, "reference_frequency": 1.0e9},
+        {},
+        continuum_mode=continuum_mode,
+        is_first_cycle=True,
     )
-    assert timing.iloc[0].nterms == 2
-    if specmode == "mvc":
+    assert timing.iloc[0].n_taylor_terms == 2
+    if continuum_mode == "mvc":
         assert "SKY_RESIDUAL_MVC_CUBE" in result
         assert "POINT_SPREAD_FUNCTION_MVC_CUBE" in result
+        np.testing.assert_array_equal(result["MVC_RESIDUAL_TAYLOR_NUMERATOR"], [0.0])
+        np.testing.assert_array_equal(result["MVC_RESIDUAL_WEIGHT_SUM"], [1.0])
+
+
+@pytest.mark.parametrize("continuum_mode,degrid_time", [("mfs", 0.3), ("mvc", 0.5)])
+@pytest.mark.parametrize("visibility_memory_mode", ["recompute", "in_memory"])
+def test_residual_cycle_times_prediction_stages_once(
+    monkeypatch, continuum_mode, degrid_time, visibility_memory_mode
+):
+    """Prediction, residual formation, and gridding have independent timers."""
+    import time
+
+    import pandas as pd
+
+    image = xr.Dataset(
+        coords={"frequency": [1.0e9]},
+        attrs={"data_groups": {"residual": {}}},
+    )
+    image_params = {
+        "n_taylor_terms": 2,
+        "reference_frequency": 1.0e9,
+        "fft_padding": 1.2,
+    }
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.gridding_convolution_functions."
+        "gcf_prolate_spheroidal."
+        "create_prolate_spheroidal_kernel_1D",
+        lambda *args: np.ones(1),
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.residual_cycle_continuum_single_field."
+        "make_visibility_model_continuum_single_field",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.image_continuum_single_field."
+        "prepare_model_uv_mvc_single_field",
+        lambda *args, **kwargs: xr.Dataset(),
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.residual_update."
+        "make_visibility_model_single_field",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.residual_update."
+        "calculate_residual_visibilities",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_grid(*args, **kwargs):
+        return args[1], pd.DataFrame()
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.make_undeconvolved_image_continuum."
+        "make_undeconvolved_image_continuum_single_field",
+        fake_grid,
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.make_undeconvolved_image_continuum_mvc."
+        "make_undeconvolved_image_mvc_single_field",
+        fake_grid,
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.image_continuum_single_field."
+        "form_residual_grid_from_cache",
+        lambda observed, current, **kwargs: current,
+    )
+
+    times = [0.0, 0.1, 1.0, 1.0 + degrid_time]
+    if visibility_memory_mode == "recompute":
+        times.extend([2.0, 2.7])
+    times.extend([3.0, 3.4])
+    clock = iter(times)
+    monkeypatch.setattr(time, "time", lambda: next(clock))
+
+    _, timing = residual_cycle_continuum_single_field(
+        {},
+        image,
+        xr.Dataset(),
+        image_params,
+        is_first_cycle=False,
+        continuum_mode=continuum_mode,
+        model_xds=xr.Dataset(),
+        primary_beam_xds=xr.Dataset(),
+        visibility_memory_mode=visibility_memory_mode,
+        observed_visibility_grid_xds=(
+            xr.Dataset() if continuum_mode == "mvc" else None
+        ),
+    )
+
+    assert timing.T_degrid.iloc[0] == pytest.approx(degrid_time)
+    assert timing.T_residual_vis.iloc[0] == pytest.approx(
+        0.7 if visibility_memory_mode == "recompute" else 0.0
+    )
+    assert timing.T_grid.iloc[0] == pytest.approx(0.4)
 
 
 def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
@@ -834,13 +1326,13 @@ def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
         vis[...] = 3.0
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp."
-        "prolate_spheroidal_degrid",
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "anti_alias_degrid",
         fake_kernel,
     )
     degrid_visibility_grid_single_field(
         ms,
-        np.ones(351),
+        np.ones(400),  # support-7 half kernel table, oversampling 100
         geometry,
         np.ones((1, 2, 1, 2, 2), dtype=np.complex64),
         [0, 1],
@@ -879,14 +1371,14 @@ def test_shared_degridder_allocates_model_from_weights_without_observed_data(
     )
 
     monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp."
-        "prolate_spheroidal_degrid",
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp."
+        "anti_alias_degrid",
         lambda grid, vis, *args, **kwargs: vis.fill(2.0),
     )
 
     degrid_visibility_grid_single_field(
         ms,
-        np.ones(351),
+        np.ones(400),  # support-7 half kernel table, oversampling 100
         geometry,
         np.ones((1, 2, 1, 2, 2), dtype=np.complex64),
         [0, 1],
@@ -904,9 +1396,8 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
         build_continuum_residual_imaging_dict,
     )
     from astroviper.processing_functions.imaging.utils import (
-        ImagingDict,
-        IterationController,
-        get_calculate_cycle_controls,
+        CycleController,
+        get_per_cycle_limits,
     )
 
     residual = np.full((2, 3, 2, 3, 4), 1000.0)
@@ -935,15 +1426,8 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
         assert values["peakres"] == [peaks[key.time, key.pol]]
         assert values["masksum"] == [8 if with_mask else 12]
         assert values["max_psf_sidelobe"] == 0.2
-    controller = IterationController(max_iter=10, max_iter_per_cycle=3)
-    limits, thresholds = get_calculate_cycle_controls(
-        controller,
-        ImagingDict(),
-        image,
-        model_exists=False,
-        iteration_control_params=params,
-        residual_imaging_dict=stats,
-    )
+    controller = CycleController(max_iter=10, max_iter_per_cycle=3)
+    limits, thresholds = get_per_cycle_limits(controller, stats)
     assert limits.shape == (2, 1, 2)
     np.testing.assert_array_equal(limits, 3)
     np.testing.assert_allclose(thresholds[:, 0], 0.2 * peaks)
@@ -1001,6 +1485,7 @@ def test_continuum_statistics_record_taylor_zero_entropy_only_when_enabled():
 @pytest.mark.parametrize("explicit_mask", [False, True])
 def test_refreshed_statistics_respect_clean_support(explicit_mask):
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        _continuum_clean_support,
         build_continuum_residual_imaging_dict,
     )
 
@@ -1026,6 +1511,13 @@ def test_refreshed_statistics_respect_clean_support(explicit_mask):
     if explicit_mask:
         image["MASK"] = (("l", "m"), [[True, False], [True, True]])
         image.attrs["data_groups"]["residual"]["mask"] = "MASK"
+    support = _continuum_clean_support(
+        image,
+        "residual",
+        image.R.isel(taylor_term=0, drop=True),
+        {"primary_beam_limit": 0.2},
+    )
+    assert support.flags.c_contiguous
     stats = build_continuum_residual_imaging_dict(
         image, "residual", {"primary_beam_limit": 0.2}
     )
@@ -1037,19 +1529,29 @@ def test_refreshed_statistics_respect_clean_support(explicit_mask):
 
 
 @pytest.mark.parametrize("clipped_pb", [0.1, 0.2, np.nan, np.inf])
-def test_mvc_clips_channel_beams_before_effective_beam_and_psf_sum(clipped_pb):
-    """Clipped channels contribute no PB/PSF signal but retain their weights."""
+def test_mvc_clips_channel_beams_only_in_effective_beam(clipped_pb):
+    """Clipped channels add no PB signal but retain their weights.
+
+    The PSF keeps every channel, and the residual fits every channel whose
+    beam is finite, with weight ``w * pb**2``.
+    """
     frequency = np.array([0.9e9, 1.1e9])
-    residual, psf, pb = convert_mvc_cubes_to_taylor_normal_equations(
+    residual, psf, pb = _convert_mvc_cubes_to_taylor_normal_equations(
         _frequency_cube([5.0, 100.0], frequency),
         _frequency_cube([2.0, 10.0], frequency),
         _frequency_cube([1.0, clipped_pb], frequency),
         _frequency_normalization([1.0, 3.0], frequency),
         _frequency_normalization([1.0, 3.0], frequency),
-        nterms=1,
+        n_taylor_terms=1,
         reference_frequency=1e9,
-        pblimit=0.2,
+        primary_beam_limit=0.2,
     )
     np.testing.assert_allclose(pb.squeeze(), 0.25)
-    np.testing.assert_allclose(psf.squeeze(), 2.0)
-    np.testing.assert_allclose(residual.squeeze(), 1.25)
+    np.testing.assert_allclose(psf.squeeze(), (1.0 * 2.0 + 3.0 * 10.0) / 4.0)
+    channel_pb = np.array([1.0, clipped_pb if np.isfinite(clipped_pb) else 0.0])
+    np.testing.assert_allclose(
+        residual.squeeze(),
+        0.25
+        * np.sum([1.0, 3.0] * channel_pb * [5.0, 100.0])
+        / np.sum([1.0, 3.0] * channel_pb**2),
+    )

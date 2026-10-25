@@ -16,12 +16,12 @@ Layout: images are row-major ``(ny, nx)``; Taylor-term stacks are
 ``(nterms, ny, nx)`` and the PSF stack is ``(2 * nterms - 1, ny, nx)``.
 """
 
-from astroviper.processing_functions.imaging.utils.iteration_control import (
-    MODEL_UPDATE_DIVERGENCE,
-    MODEL_UPDATE_MAX_ITER_PER_CYCLE,
-    MODEL_UPDATE_NOTHING_TO_CLEAN,
-    MODEL_UPDATE_THRESHOLD_PER_CYCLE,
-)
+# Stop codes shared by the deconvolvers (deconvolvers/include/plane_stop_test.hpp);
+# nothing left to clean in the search region is STOP_THRESHOLD.
+STOP_NONE = 0
+STOP_MAX_ITER = 1
+STOP_THRESHOLD = 2
+STOP_DIVERGED = 4
 
 try:
     from astroviper.processing_functions.imaging.deconvolvers.mtmfs._mtmfs_ext import (
@@ -39,8 +39,8 @@ __all__ = [
     "clean",
     "hessian",
     "principal_solution",
-    "MODEL_UPDATE_MAX_ITER_PER_CYCLE",
-    "MODEL_UPDATE_THRESHOLD_PER_CYCLE",
-    "MODEL_UPDATE_NOTHING_TO_CLEAN",
-    "MODEL_UPDATE_DIVERGENCE",
+    "STOP_NONE",
+    "STOP_MAX_ITER",
+    "STOP_THRESHOLD",
+    "STOP_DIVERGED",
 ]

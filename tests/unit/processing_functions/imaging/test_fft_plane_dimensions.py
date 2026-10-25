@@ -5,7 +5,7 @@ import pytest
 import xarray as xr
 import xradio.image.image_xds  # noqa: F401
 
-from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
     ifft_norm_img_xds,
 )
 
@@ -28,14 +28,14 @@ def _image(axis, four):
     )
 
 
-def _transform(image, dtype, overwrite=True):
+def _transform(image, dtype, overwrite=True, keep_grid=True):
     return ifft_norm_img_xds(
         image,
         {"image_size": [16, 16]},
         image_data_group_in_name="input",
         image_data_group_out_name="output",
         image_data_group_out_modified={"sky": "RESULT"},
-        image_data_variables_keep=["visibility"],
+        image_data_variables_keep=["visibility"] if keep_grid else [],
         fft_backend="scipy",
         complex_dtype=dtype,
         overwrite=overwrite,
@@ -77,9 +77,18 @@ def test_incompatible_output_dimensions_respect_overwrite(overwrite):
         ):
             _transform(image, np.complex128, overwrite=False)
     else:
-        result = _transform(image, np.complex128)["RESULT"]
-        assert result.dims == ("time", "taylor_term", "polarization", "l", "m")
-        assert result.shape == (1, 2, 1, 16, 16)
+        result = _transform(image, np.complex128, keep_grid=False)
+        assert result is image
+        assert result.RESULT.dims == (
+            "time",
+            "taylor_term",
+            "polarization",
+            "l",
+            "m",
+        )
+        assert result.RESULT.shape == (1, 2, 1, 16, 16)
+        assert "GRID" not in image
+        assert image.attrs["data_groups"]["output"]["sky"] == "RESULT"
 
 
 def _sky_image(axis):
@@ -98,7 +107,7 @@ def _sky_image(axis):
 
 
 def _forward(image, axis, dtype, **kwargs):
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_continuum_img_xds,
         fft_norm_img_xds,
     )
@@ -211,7 +220,7 @@ def test_forward_uses_output_as_workspace_and_drops_unkept_sky(axis, monkeypatch
     import importlib
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder"
+        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder"
     )
     original_fft = module.fft_lm_to_uv
     image = _sky_image(axis)

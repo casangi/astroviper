@@ -179,18 +179,18 @@ def antennas(telescope, diameter):
 
 
 @pytest.mark.parametrize(
-    ("telescope", "diameter", "effective", "model"),
+    ("telescope", "diameter", "effective", "model", "support_degrees"),
     [
-        ("ALMA", 12, 10.7, "casa_airy"),
-        ("ALMA", 7, 6.25, "casa_airy"),
-        ("ACA", 7, 6.25, "casa_airy"),
-        ("VLA", 25, 25, "airy"),
-        ("EVLA", 25, 25, "airy"),
-        ("OTHER", 12, 12, "airy"),
+        ("ALMA", 12, 10.7, "casa_airy", 1.784),
+        ("ALMA", 7, 6.25, "casa_airy", 3.568),
+        ("ACA", 7, 6.25, "casa_airy", 3.568),
+        ("VLA", 25, 25, "airy", None),
+        ("EVLA", 25, 25, "airy", None),
+        ("OTHER", 12, 12, "airy", None),
     ],
 )
 def test_auto_prescription_requires_telescope_identity(
-    telescope, diameter, effective, model
+    telescope, diameter, effective, model, support_degrees
 ):
     source = antennas(telescope, diameter)
     original = source.copy(deep=True)
@@ -199,6 +199,8 @@ def test_auto_prescription_requires_telescope_identity(
     assert actual["primary_beam_model"] == model
     assert actual["list_dish_diameters"] == [effective]
     assert actual["list_blockage_diameters"] == [0.75]
+    if support_degrees is not None:
+        assert actual["primary_beam_max_radius_1ghz"] == np.deg2rad(support_degrees)
     assert params == {}
     xr.testing.assert_identical(source, original)
 
@@ -234,6 +236,51 @@ def test_mixed_apertures_require_explicit_selection():
     source.ANTENNA_DISH_DIAMETER.values[1] = 7
     with pytest.raises(NotImplementedError, match="one common"):
         resolve_continuum_primary_beam({}, source)
+
+
+@pytest.mark.parametrize(
+    ("params", "source", "error", "message", "kwargs"),
+    [
+        (
+            {"primary_beam_model": "invalid"},
+            antennas("ALMA", 12),
+            ValueError,
+            "primary_beam_model",
+            {},
+        ),
+        (
+            {},
+            antennas("ALMA", 12),
+            ValueError,
+            "continuum_mode",
+            {"continuum_mode": "cube"},
+        ),
+        ({}, xr.Dataset(), KeyError, "ANTENNA_DISH_DIAMETER", {}),
+        ({}, antennas("ALMA", 10), ValueError, "12-m or 7-m", {}),
+    ],
+)
+def test_invalid_primary_beam_prescriptions_raise(
+    params, source, error, message, kwargs
+):
+    """Reject invalid models, modes, and missing or unsupported apertures."""
+    with pytest.raises(error, match=message):
+        resolve_continuum_primary_beam(params, source, **kwargs)
+
+
+def test_evaluation_requires_a_resolved_model():
+    """Reject an unresolved primary-beam model before evaluating its image."""
+    with pytest.raises(ValueError, match="Resolve primary_beam_model"):
+        evaluate_primary_beam(
+            [100e9],
+            ["I"],
+            {"list_dish_diameters": [10.7], "list_blockage_diameters": [0.75]},
+            {
+                "primary_beam_model": "auto",
+                "image_size": [8, 8],
+                "image_center": [4, 4],
+                "cell_size": [-1e-5, 1e-5],
+            },
+        )
 
 
 def test_casa_reference_samples():
@@ -277,6 +324,52 @@ def test_channel_and_reference_paths_share_the_casa_prescription(diameter, dtype
     )
     np.testing.assert_array_equal(reference.PRIMARY_BEAM_REFERENCE.values, expected)
     assert reference.PRIMARY_BEAM_REFERENCE.dtype == np.dtype(dtype)
+
+
+def test_channel_beam_broadcasts_time_and_evaluates_only_selected_dish(monkeypatch):
+    """Channel beams cover every time plane without evaluating unused dishes."""
+    import astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam as continuum_beam
+
+    captured = {}
+
+    def evaluate(frequency, polarization, pb_params, image_params, dtype=None):
+        captured.update(pb_params)
+        return np.ones(
+            (
+                len(pb_params["list_dish_diameters"]),
+                len(frequency),
+                len(polarization),
+                *image_params["image_size"],
+            ),
+            dtype=dtype,
+        )
+
+    monkeypatch.setattr(continuum_beam, "evaluate_primary_beam", evaluate)
+    image = xr.Dataset(
+        coords={
+            "time": [0, 1],
+            "frequency": [90e9, 100e9],
+            "polarization": ["I"],
+            "l": np.arange(8),
+            "m": np.arange(8),
+        },
+        attrs={"data_groups": {"residual": {}}},
+    )
+    actual, _ = make_continuum_primary_beam_single_field(
+        image,
+        {"image_size": [8, 8], "cell_size": [-1e-5, 1e-5]},
+        list_dish_diameters=[12.0, 7.0],
+        list_blockage_diameters=[0.75, 0.5],
+    )
+
+    assert actual.PRIMARY_BEAM.shape == (2, 2, 1, 8, 8)
+    np.testing.assert_array_equal(
+        actual.PRIMARY_BEAM.isel(time=0), actual.PRIMARY_BEAM.isel(time=1)
+    )
+    np.testing.assert_array_equal(captured["list_dish_diameters"], [12.0])
+    np.testing.assert_array_equal(captured["list_blockage_diameters"], [0.75])
+    assert actual.PRIMARY_BEAM.attrs["dish_diameters_m"] == [12.0]
+    assert actual.PRIMARY_BEAM.attrs["blockage_diameters_m"] == [0.75]
 
 
 def test_vla_airy_evaluation_unchanged():

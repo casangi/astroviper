@@ -10,7 +10,7 @@ def add_visibility_grid_continuum_single_field(
     ms_xds: xr.Dataset,
     cgk_1D: np.ndarray,
     img_xds: xr.Dataset,
-    nterms: int,
+    n_taylor_terms: int,
     reference_frequency: float,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -52,7 +52,7 @@ def add_visibility_grid_continuum_single_field(
         One-dimensional prolate-spheroidal convolution kernel.
     img_xds : xr.Dataset
         Image dataset that receives the Taylor uv grids.
-    nterms : int
+    n_taylor_terms : int
         Number of residual Taylor terms.
     reference_frequency : float
         Common MT-MFS reference frequency in Hz.
@@ -79,8 +79,8 @@ def add_visibility_grid_continuum_single_field(
         ``img_xds`` is modified in place.
     """
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -91,11 +91,11 @@ def add_visibility_grid_continuum_single_field(
     )
 
     # Read input
-    nterms = int(nterms)
+    n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
 
-    if nterms < 1:
-        raise ValueError("nterms must be at least 1.")
+    if n_taylor_terms < 1:
+        raise ValueError("n_taylor_terms must be at least 1.")
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
@@ -153,13 +153,13 @@ def add_visibility_grid_continuum_single_field(
     # sanity check on naming of axes
     if "taylor_term" not in img_xds.coords:
         img_xds.coords["taylor_term"] = np.arange(
-            nterms,
+            n_taylor_terms,
             dtype=np.int32,
         )
-    elif img_xds.sizes["taylor_term"] != nterms:
+    elif img_xds.sizes["taylor_term"] != n_taylor_terms:
         raise ValueError(
             "Existing taylor_term coordinate has length "
-            f"{img_xds.sizes['taylor_term']}, but nterms={nterms}."
+            f"{img_xds.sizes['taylor_term']}, but n_taylor_terms={n_taylor_terms}."
         )
 
     visibility_name = image_data_group_out["visibility"]
@@ -167,14 +167,14 @@ def add_visibility_grid_continuum_single_field(
 
     expected_grid_shape = (
         n_imag_time,
-        nterms,
+        n_taylor_terms,
         n_imag_pol,
         n_uv[0],
         n_uv[1],
     )
     expected_normalization_shape = (
         n_imag_time,
-        nterms,
+        n_taylor_terms,
         n_imag_pol,
     )
 
@@ -257,7 +257,7 @@ def add_visibility_grid_continuum_single_field(
     )
 
     # Gridding per Taylor term
-    for taylor_term in range(nterms):
+    for taylor_term in range(n_taylor_terms):
         # taylor weight
         taylor_factor = x**taylor_term
 
@@ -274,7 +274,7 @@ def add_visibility_grid_continuum_single_field(
         )
 
         # gridding functionality
-        prolate_spheroidal_grid(
+        anti_alias_grid(
             grid_view,
             temporary_normalization,
             vis_data,
@@ -310,7 +310,7 @@ def add_visibility_grid_continuum_single_field(
     img_xds[visibility_name].attrs.update(
         {
             "description": "MT-MFS Taylor-weighted visibility uv grids.",
-            "nterms": nterms,
+            "n_taylor_terms": n_taylor_terms,
             "reference_frequency": reference_frequency,
         }
     )
@@ -319,7 +319,7 @@ def add_visibility_grid_continuum_single_field(
             "description": (
                 "Normalization sums for MT-MFS Taylor-weighted visibility uv grids."
             ),
-            "nterms": nterms,
+            "n_taylor_terms": n_taylor_terms,
             "reference_frequency": reference_frequency,
         }
     )

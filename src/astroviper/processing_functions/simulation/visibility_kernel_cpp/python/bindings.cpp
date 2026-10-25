@@ -74,6 +74,10 @@ BeamModel beam_model_from_dict(const py::dict& d, std::vector<py::buffer_info>& 
         }
         bm.poly_frequency = ptr_of<double>(fi);
         bm.poly_coefficients = ptr_of<double>(ci);
+        bm.poly_n_sample = py::cast<std::int64_t>(d["n_sample"]);
+        if (bm.poly_n_sample < 0 || bm.poly_n_sample == 1) {
+            throw std::runtime_error("beam polynomial n_sample must be 0 (exact radius) or at least 2");
+        }
     } else if (kind == "jones_image") {
         bm.kind = 2;
         py::array jones = py::cast<py::array>(d["jones"]);

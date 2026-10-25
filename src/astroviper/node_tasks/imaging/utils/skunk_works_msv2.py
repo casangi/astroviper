@@ -26,7 +26,8 @@ the same MSv4 names and data groups, and the same values, frequencies,
 correlations and baseline names. AstroVIPER has no MSv2 reader of its own.
 
 The engine is optional: it exists only in XRADIO releases that carry it and
-with a casacore backend (python-casacore or casatools).
+with XRADIO's casacore table backend (arcae from XRADIO 1.3.0,
+``pip install 'astroviper[casacore]'``).
 :func:`msv2_engine_available` tells whether it is there and
 :func:`require_msv2_engine` raises an ``ImportError`` that names what is
 missing. Module level imports only the standard library and the docstring
@@ -89,8 +90,8 @@ def msv2_engine_available():
 
     The check is a feature probe, not a version comparison:
     :func:`xradio.measurement_set.open_msv2` is exported only by the XRADIO
-    releases that carry the engine, and only when a casacore backend
-    (python-casacore or casatools) is installed.
+    releases that carry the engine, and only when XRADIO's casacore table
+    backend (arcae from XRADIO 1.3.0) is installed.
 
     Returns
     -------
@@ -111,8 +112,8 @@ def msv2_engine_available():
         return True, ""
     return False, (
         "XRADIO has no xradio.measurement_set.open_msv2 (the xradio_msv2 "
-        "engine: an XRADIO release that carries it, with python-casacore or "
-        "casatools)"
+        "engine: an XRADIO release that carries it, with its casacore table "
+        "backend, arcae from XRADIO 1.3.0)"
     )
 
 
@@ -141,8 +142,8 @@ def require_msv2_engine():
         raise ImportError(
             "Imaging a Measurement Set v2 directly needs XRADIO's xradio_msv2 "
             f"engine, but {reason}. Install an XRADIO release with the engine "
-            "(XRADIO 1.2.4 and older do not have it) and python-casacore (pip "
-            "install 'astroviper[python_casacore]'), or convert the Measurement Set "
+            "(XRADIO 1.2.4 and older do not have it) and its arcae backend (pip "
+            "install 'astroviper[casacore]'), or convert the Measurement Set "
             "with xradio.measurement_set.convert_msv2_to_processing_set and "
             "image the processing set."
         )

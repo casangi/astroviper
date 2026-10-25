@@ -1,8 +1,8 @@
 """Taylor-weighted point-spread-function creation for MT-MFS continuum imaging.
 
 This module mirrors the cube-imaging PSF path, but grids a stack of Taylor-weighted
-UV-sampling functions.  For ``nterms`` sky-model Taylor coefficients, the MT-MFS
-normal equations require ``2 * nterms - 1`` PSF/Hessian Taylor orders.
+UV-sampling functions.  For ``n_taylor_terms`` sky-model Taylor coefficients, the MT-MFS
+normal equations require ``2 * n_taylor_terms - 1`` PSF/Hessian Taylor orders.
 
 For a channel frequency ``nu`` and a shared reference frequency ``nu0``,
 
@@ -37,17 +37,19 @@ from astroviper.utils.param_docs import shares_param_docs
 def _validate_mtmfs_parameters(
     image_params: dict,
 ) -> tuple[int, int, float]:
-    """Return validated ``nterms``, number of PSF terms, and reference frequency."""
-    if "nterms" not in image_params:
-        raise KeyError("image_params must contain 'nterms' for MT-MFS imaging.")
+    """Return validated ``n_taylor_terms``, number of PSF terms, and reference frequency."""
+    if "n_taylor_terms" not in image_params:
+        raise KeyError("image_params must contain 'n_taylor_terms' for MT-MFS imaging.")
     if "reference_frequency" not in image_params:
         raise KeyError(
             "image_params must contain one globally shared 'reference_frequency'."
         )
 
-    nterms = int(image_params["nterms"])
-    if nterms < 1:
-        raise ValueError(f"nterms must be at least 1; received {nterms}.")
+    n_taylor_terms = int(image_params["n_taylor_terms"])
+    if n_taylor_terms < 1:
+        raise ValueError(
+            f"n_taylor_terms must be at least 1; received {n_taylor_terms}."
+        )
 
     reference_frequency = float(image_params["reference_frequency"])
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
@@ -56,7 +58,7 @@ def _validate_mtmfs_parameters(
             f"received {reference_frequency}."
         )
 
-    return nterms, 2 * nterms - 1, reference_frequency
+    return n_taylor_terms, 2 * n_taylor_terms - 1, reference_frequency
 
 
 def add_uv_sampling_grid_continuum_single_field(
@@ -87,9 +89,43 @@ def add_uv_sampling_grid_continuum_single_field(
 
     ``(time, psf_taylor_order, polarization)``.
 
-    The C++ cube gridder is reused one Taylor order at a time.  All channels map
-    into one temporary continuum plane, while their imaging weights are multiplied
-    by ``x**k`` for Taylor order ``k``.
+    The C++ cube gridder is reused one Taylor order at a time. All channels map
+    directly into one Taylor plane of the output grid, while their imaging weights
+    are multiplied by ``x**k`` for Taylor order ``k``.
+
+    Parameters
+    ----------
+    ms_xdt : xarray.Dataset
+        One Measurement Set partition with visibility coordinates and imaging
+        weights.
+    cgk_1D : numpy.ndarray
+        Oversampled one-dimensional gridding convolution kernel.
+    img_xds : xarray.Dataset
+        Image dataset whose UV-sampling arrays are updated in place.
+    n_psf_taylor_terms : int
+        Number of Taylor PSF/Hessian orders to grid.
+    reference_frequency : float
+        Taylor-expansion reference frequency in Hz.
+    ms_data_group_in_name : str, optional
+        Measurement Set data group registering the input weights.
+    image_data_group_in_name : str, optional
+        Existing image data group used as the output template.
+    image_data_group_out_name : str, optional
+        Image data group in which to register the UV-sampling arrays.
+    image_data_group_out_modified : dict or None, optional
+        Role-to-variable-name overrides for the output data group.
+    overwrite : bool, optional
+        Permit replacement of existing registered output variables.
+    fft_padding : float, optional
+        Image-to-UV-grid padding factor.
+    processing_function_threads : int, optional
+        Threads supplied to the C++ gridder.
+    gcf_support : int, optional
+        Convolution-kernel support in grid cells.
+    gcf_oversampling : int, optional
+        Convolution-kernel oversampling factor.
+    complex_dtype : numpy.dtype or None, optional
+        Complex dtype of the accumulated UV grids.
 
     Notes
     -----
@@ -240,32 +276,34 @@ def add_uv_sampling_grid_continuum_single_field(
 
     x_frequency = (frequency_coord - reference_frequency) / reference_frequency
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid_uv_sampling,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid_uv_sampling,
     )
 
-    # Reuse the existing continuum channel map.  A contiguous one-plane work
-    # array is used because a slice through the Taylor-order axis of the full
-    # target array is not guaranteed to satisfy the C++ gridder's memory-layout
-    # requirements.
+    # Reuse the existing continuum channel map. With one image-time plane, each
+    # Taylor-order view has the contiguous layout required by the C++ gridder.
     for taylor_order in range(n_psf_taylor_terms):
         taylor_factor = np.power(x_frequency, taylor_order)
 
-        effective_weight = np.ascontiguousarray(
-            weight_imaging * taylor_factor[np.newaxis, np.newaxis, :, np.newaxis]
-        )
+        if (
+            taylor_order == 0
+            and weight_imaging.dtype == np.float64
+            and weight_imaging.flags.c_contiguous
+        ):
+            effective_weight = weight_imaging
+        else:
+            effective_weight = np.ascontiguousarray(
+                weight_imaging * taylor_factor[np.newaxis, np.newaxis, :, np.newaxis]
+            )
 
-        temporary_grid = np.zeros(
-            (n_image_time, 1, n_pol, n_uv[0], n_uv[1]),
-            dtype=complex_dtype,
-        )
+        grid_view = target_grid[:, taylor_order : taylor_order + 1, ...]
         temporary_normalization = np.zeros(
             (n_image_time, 1, n_pol),
             dtype=np.float64,
         )
 
-        prolate_spheroidal_grid_uv_sampling(
-            temporary_grid,
+        anti_alias_grid_uv_sampling(
+            grid_view,
             temporary_normalization,
             uvw,
             frequency_coord,
@@ -280,8 +318,6 @@ def add_uv_sampling_grid_continuum_single_field(
             oversampling=gcf_oversampling,
             processing_function_threads=processing_function_threads,
         )
-
-        target_grid[:, taylor_order, ...] += temporary_grid[:, 0, ...]
 
         # Only order zero defines the common MT-MFS normalization.
         if taylor_order == 0:
@@ -307,8 +343,49 @@ def make_point_spread_function_mvc_single_field(
     """Grid a frequency-resolved PSF cube for an MVC map partition.
 
     Unlike direct MFS, MVC does not apply Taylor weights during gridding.  Channels use the shared cube nearest-channel policy. Map tasks subsequently
-    FFT these planes and form ``2*nterms-1`` Taylor Hessian contributions;
+    FFT these planes and form ``2*n_taylor_terms-1`` Taylor Hessian contributions;
     reduction combines the contributions before global normalization.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree or mapping
+        Processing Set partition containing prepared imaging weights.
+    img_xds : xarray.Dataset
+        Frequency-resolved MVC image dataset updated with UV-sampling grids.
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+    ms_data_group_in_name : str, optional
+        Measurement Set data group registering the imaging weights.
+    image_data_group_in_name : str, optional
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
+    image_data_group_out_name : str, optional
+        Output image data-group name.
+    gcf_oversampling : int, optional
+        Convolution-kernel oversampling factor.
+    gcf_support : int, optional
+        Convolution-kernel support in grid cells.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    complex_dtype : numpy.dtype or None, optional
+        Complex dtype of the UV-sampling grids.
 
     Returns
     -------
@@ -390,7 +467,7 @@ def make_point_spread_function_continuum_single_field(
     ps_xdt,
     img_xds,
     image_params,
-    nterms=None,
+    n_taylor_terms=None,
     reference_frequency=None,
     ms_data_group_in_name="base",
     image_data_group_in_name="residual",
@@ -404,14 +481,65 @@ def make_point_spread_function_continuum_single_field(
 ):
     """Build the MT-MFS Taylor UV-sampling stack for one continuum-imaging chunk.
 
-    For ``nterms`` sky-model Taylor coefficients, this function produces
+    For ``n_taylor_terms`` sky-model Taylor coefficients, this function produces
 
-    ``2 * nterms - 1``
+    ``2 * n_taylor_terms - 1``
 
     PSF/Hessian Taylor orders.  Each measurement-set channel is weighted by
     ``((nu - nu0) / nu0)**k`` before gridding order ``k``.  The reference
     frequency ``nu0`` must be supplied globally in ``image_params`` and must be
     identical for every distributed frequency chunk.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree or mapping
+        Processing Set partition containing prepared imaging weights.
+    img_xds : xarray.Dataset
+        Continuum image dataset updated with Taylor UV-sampling grids.
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+    n_taylor_terms : int or None, optional
+        Number of sky-model Taylor coefficients; defaults to ``image_params``.
+    reference_frequency : float or None, optional
+        Taylor reference frequency in Hz; defaults to ``image_params``.
+    ms_data_group_in_name : str, optional
+        Measurement Set data group registering the imaging weights.
+    image_data_group_in_name : str, optional
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
+    image_data_group_out_name : str, optional
+        Output image data-group name.
+    image_data_variables_keep : list of str or None, optional
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+    gcf_oversampling : int, optional
+        Convolution-kernel oversampling factor.
+    gcf_support : int, optional
+        Convolution-kernel support in grid cells.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    fft_backend : str, optional
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+    complex_dtype : numpy.dtype or None, optional
+        Complex dtype of the UV-sampling grids.
 
     Returns
     -------
@@ -438,8 +566,8 @@ def make_point_spread_function_continuum_single_field(
     image_params = copy.deepcopy(image_params)
 
     # Support both explicit keyword arguments and values stored in image_params.
-    if nterms is not None:
-        image_params["nterms"] = int(nterms)
+    if n_taylor_terms is not None:
+        image_params["n_taylor_terms"] = int(n_taylor_terms)
 
     if reference_frequency is not None:
         image_params["reference_frequency"] = float(reference_frequency)

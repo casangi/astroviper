@@ -69,11 +69,12 @@ IMAGING_TIMING_PHASES = [
             ("fft (grid)", "T_fft_grid"),
         ],
     ),
+    ("STOP TEST (summed over residual updates)", "T_stop_test", []),
     (
         "MODEL UPDATE (summed over imaging cycles)",
         "T_model_update",
         [
-            ("iteration control", "T_iteration_control"),
+            ("cycle control", "T_cycle_control"),
             ("make mask", "T_make_mask"),
             ("deconvolve", "T_deconvolve"),
             ("convergence / merge", "T_convergence"),
@@ -97,14 +98,73 @@ IMAGING_TIMING_PHASES = [
 IMAGING_TIMING_TOTAL_KEY = "T_image_cube_task"
 
 
+# Continuum map tasks use coarser processing-function totals than the cube
+# channel loop and perform an optional map-local inverse FFT for MVC.  Keep a
+# separate layout so their summaries do not silently omit those timings.
+CONTINUUM_IMAGING_TIMING_PHASES = [
+    (
+        "PREPARATION (once per chunk)",
+        "T_prep",
+        [
+            ("imaging weights", "T_prep_weights"),
+            ("point-spread function", "T_prep_make_point_spread_function"),
+            ("primary beam", "T_prep_primary_beam"),
+            ("psf gaussian fit", "T_prep_psf_fit"),
+        ],
+    ),
+    (
+        "RESIDUAL UPDATE",
+        "T_residual_cycle",
+        [
+            ("gcf kernel", "T_gcf"),
+            ("degrid (model->vis)", "T_degrid"),
+            ("residual vis (obs-model)", "T_residual_vis"),
+            ("grid residual", "T_grid"),
+        ],
+    ),
+    ("MVC LOCAL IMAGE FORMATION", None, [("inverse FFT", "T_local_ifft")]),
+    (
+        "GLOBAL WEIGHTING",
+        None,
+        [
+            ("grid weight density", "T_grid_weight_density"),
+            ("degrid imaging weights", "T_degrid_imaging_weights"),
+            ("extract imaging weights", "T_extract_imaging_weights"),
+        ],
+    ),
+    (
+        "NODE I/O",
+        None,
+        [
+            ("make empty image", "T_make_empty_image"),
+            ("load visibilities", "T_load"),
+            ("write/cache products", "T_write"),
+        ],
+    ),
+]
+
+
+CONTINUUM_MODEL_UPDATE_TIMING_PHASES = [
+    (
+        "MODEL UPDATE (summed over imaging cycles)",
+        "T_model_update_node_task",
+        [
+            ("cycle control", "T_cycle_control"),
+            ("deconvolution/model update", "T_model_update"),
+            ("convergence bookkeeping", "T_convergence"),
+        ],
+    ),
+]
+
+
 def format_timing_summary(timing, total_key=IMAGING_TIMING_TOTAL_KEY):
     """Return a phase-grouped, human-readable summary of an imaging timing dict.
 
     Thin imaging-specific wrapper over the generic
     :func:`astroviper.utils.timing.format_timing_summary`: it supplies the
     imaging phase layout (:data:`IMAGING_TIMING_PHASES`) so the per-chunk
-    ``T_*`` timings are grouped into the four pipeline phases (preparation,
-    residual update, model update, restore) plus node I/O.
+    ``T_*`` timings are grouped into the pipeline phases (preparation,
+    residual update, stop test, model update, restore) plus node I/O.
 
     Parameters
     ----------

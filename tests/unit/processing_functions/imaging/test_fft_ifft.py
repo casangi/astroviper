@@ -1,14 +1,13 @@
 # run using eg
 # python -m pytest ../astroviper/tests/domain/imaging/test_fft_ifft.py
 
-import sys
 import unittest
-from types import SimpleNamespace
 
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 
-from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
     fft_lm_to_uv,
     fft_norm_img_xds,
     ifft_uv_to_lm,
@@ -39,11 +38,7 @@ def test_forward_image_fft_does_not_open_a_matplotlib_window(monkeypatch):
     def fail_show():
         raise AssertionError("fft_norm_img_xds called matplotlib.pyplot.show()")
 
-    monkeypatch.setitem(
-        sys.modules,
-        "matplotlib.pyplot",
-        SimpleNamespace(show=fail_show),
-    )
+    monkeypatch.setattr(plt, "show", fail_show)
     image = xr.Dataset(
         {
             "SKY_MODEL": (
@@ -155,7 +150,7 @@ class FourCorrelationSkyTest(unittest.TestCase):
         return img_xds
 
     def _transform(self, labels):
-        from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
             ifft_norm_img_xds,
         )
 

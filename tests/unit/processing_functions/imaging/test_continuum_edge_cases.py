@@ -23,38 +23,24 @@ from astroviper.processing_functions.imaging.imaging_setup_continuum_single_fiel
 @pytest.mark.parametrize("value", [0.0, -1.0, np.nan, np.inf, [1.0, 2.0], []])
 def test_reference_frequency_rejects_invalid_scalars(value):
     with pytest.raises(ValueError, match="scalar|finite and positive"):
-        _get_reference_frequency_hz({"reference_frequency": value}, xr.Dataset())
+        _get_reference_frequency_hz({"reference_frequency": value})
 
 
-@pytest.mark.parametrize(
-    "params, expected",
-    [
-        ({}, 100.0),
-        ({"reference_frequency_hz": 120.0}, 120.0),
-        (
-            {"reference_frequency": np.array([130.0]), "reference_frequency_hz": 120.0},
-            130.0,
-        ),
-    ],
-)
-def test_reference_frequency_fallback_and_precedence(params, expected):
-    assert (
-        _get_reference_frequency_hz(
-            params, xr.Dataset(coords={"frequency": [80.0, 120.0]})
-        )
-        == expected
-    )
+def test_reference_frequency_accepts_a_one_element_array():
+    params = {"reference_frequency": np.array([130.0])}
+    assert _get_reference_frequency_hz(params) == 130.0
 
 
-@pytest.mark.parametrize("image", [xr.Dataset(), xr.Dataset(coords={"frequency": []})])
-def test_reference_frequency_cannot_be_inferred_without_channels(image):
-    with pytest.raises(ValueError, match="frequency"):
-        _get_reference_frequency_hz({}, image)
+@pytest.mark.parametrize("params", [{}, {"reference_frequency_hz": 120.0}])
+def test_reference_frequency_is_read_from_one_key_without_fallback(params):
+    """Only ``reference_frequency`` is read; the driver resolves the alias."""
+    with pytest.raises(KeyError, match="'reference_frequency'"):
+        _get_reference_frequency_hz(params)
 
 
 def test_invalid_taylor_order_is_rejected_before_setup():
-    with pytest.raises(ValueError, match="nterms"):
-        _validate_continuum_parameters({"nterms": 0}, xr.Dataset())
+    with pytest.raises(ValueError, match="n_taylor_terms"):
+        _validate_continuum_parameters({"n_taylor_terms": 0})
 
 
 @pytest.mark.parametrize("fault", ["empty", "group", "role", "variable", "none"])
@@ -121,9 +107,9 @@ def mvc_grid_inputs(monkeypatch):
         normalization += 3
 
     module = importlib.import_module(
-        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp"
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
     )
-    monkeypatch.setattr(module, "prolate_spheroidal_grid", kernel)
+    monkeypatch.setattr(module, "anti_alias_grid", kernel)
     return ms, image
 
 
@@ -133,7 +119,6 @@ def mvc_grid_inputs(monkeypatch):
         ("complex_dtype", np.float64, "complex"),
         ("fft_padding", 0.9, "fft_padding"),
         ("fft_padding", np.nan, "fft_padding"),
-        ("processing_function_threads", 0, "threads"),
     ],
 )
 def test_mvc_grid_rejects_invalid_execution_parameters(
@@ -145,6 +130,27 @@ def test_mvc_grid_rejects_invalid_execution_parameters(
     ):
         add_visibility_grid_mvc_single_field(ms, np.ones(8), image, **{keyword: value})
     assert not image.data_vars
+
+
+@pytest.mark.parametrize("threads", [0, -1])
+def test_mvc_grid_passes_nonpositive_thread_count_to_kernel(
+    mvc_grid_inputs, monkeypatch, threads
+):
+    """The C++ kernel owns the documented nonpositive thread fallback."""
+    ms, image = mvc_grid_inputs
+    received = []
+
+    def kernel(grid, normalization, *args, **kwargs):
+        received.append(kwargs["processing_function_threads"])
+
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp"
+    )
+    monkeypatch.setattr(module, "anti_alias_grid", kernel)
+    add_visibility_grid_mvc_single_field(
+        ms, np.ones(8), image, processing_function_threads=threads
+    )
+    assert received == [threads]
 
 
 @pytest.mark.parametrize(
@@ -261,7 +267,7 @@ def test_mvc_grid_rejects_incompatible_preallocated_buffers(
     [
         ("type", "Dataset"),
         ("basis", "polarization_basis"),
-        ("nterms", "nterms"),
+        ("n_taylor_terms", "n_taylor_terms"),
         ("group", "data group"),
         ("role", "sky"),
         ("variable", "not present"),
@@ -274,7 +280,7 @@ def test_model_fft_rejects_incompatible_models_before_transform(fault, message):
         {"SKY_MODEL": ("taylor_term", [1.0, 2.0])},
         attrs={"data_groups": {"model": {"sky": "SKY_MODEL"}}},
     )
-    params = {"nterms": 2}
+    params = {"n_taylor_terms": 2}
     basis = "linear"
     error = ValueError
     if fault == "type":
@@ -282,8 +288,8 @@ def test_model_fft_rejects_incompatible_models_before_transform(fault, message):
         error = TypeError
     elif fault == "basis":
         basis = "unknown"
-    elif fault == "nterms":
-        params["nterms"] = 0
+    elif fault == "n_taylor_terms":
+        params["n_taylor_terms"] = 0
     elif fault == "group":
         model.attrs["data_groups"] = {}
         error = KeyError
@@ -296,7 +302,7 @@ def test_model_fft_rejects_incompatible_models_before_transform(fault, message):
     elif fault == "dimensions":
         model = model.rename({"taylor_term": "frequency"})
     else:
-        params["nterms"] = 3
+        params["n_taylor_terms"] = 3
     with pytest.raises(error, match=message):
         prepare_model_uv_continuum_single_field(
             model, params, instrument_polarization_basis=basis

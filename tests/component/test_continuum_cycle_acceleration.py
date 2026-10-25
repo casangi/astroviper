@@ -4,8 +4,8 @@ Ten VLA D-configuration antennas, six times and four channels over 20 % of
 the band observe three point sources with spectral indices and one Gaussian.
 Every ``"none"`` run is the baseline of both accelerations. Comparisons are
 asserted only where the measured margin is large; the numbers in the test
-docstrings were measured on this data. The whole file took 76 s with a peak
-RSS of 0.38 GiB.
+docstrings were measured on this data. The whole file took 58 s with a peak
+RSS of 0.40 GiB.
 """
 
 import importlib
@@ -19,7 +19,7 @@ from xradio.measurement_set import open_processing_set
 import astroviper.distributed_applications as distributed_applications
 import astroviper.node_tasks.imaging.image_continuum_single_field as continuum_node
 from astroviper.distributed_applications.imaging import image_continuum_single_field
-from astroviper.processing_functions.imaging.utils.iteration_control import (
+from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_MAX_CYCLES,
     IMAGING_THRESHOLD,
 )
@@ -78,7 +78,7 @@ def simulated_store(tmp_path_factory):
         gaussian_source_ra_dec=directions([[38, 38]]),
         gaussian_source_shape=np.array([[60.0 * ARC, 40.0 * ARC, 0.3]]),
         phase_center_ra_dec=PHASE_CENTER,
-        beam_models=[airy_disk_model("vla")],
+        beam_models=[airy_disk_model("vla_nvss", func="casa_airy")],
         beam_model_map=np.zeros(n_antennas, int),
         n_time_chunks=1,
         n_frequency_chunks=2,
@@ -98,15 +98,15 @@ def run(simulated_store, tmp_path_factory):
 
     def run(
         deconvolver,
-        nterms,
-        specmode,
+        n_taylor_terms,
+        continuum_mode,
         controls,
         cycle_acceleration,
         momentum_coefficient=0.5,
     ):
         key = (
             deconvolver,
-            specmode,
+            continuum_mode,
             repr(sorted(controls.items())),
             cycle_acceleration,
             momentum_coefficient,
@@ -149,12 +149,11 @@ def run(simulated_store, tmp_path_factory):
                     "time_coords": [0],
                     "fft_padding": 1.2,
                     "cpp_gridder": True,
-                    "nterms": nterms,
+                    "n_taylor_terms": n_taylor_terms,
                     "reference_frequency": REFERENCE_FREQUENCY,
-                    "reference_frequency_hz": REFERENCE_FREQUENCY,
                 },
                 imaging_weights_params={"weighting": "natural"},
-                iteration_control_params={
+                cycle_control_params={
                     "max_iter": 1000,
                     "max_iter_per_cycle": 10,
                     "gain": 0.1,
@@ -164,12 +163,12 @@ def run(simulated_store, tmp_path_factory):
                     **controls,
                 },
                 deconvolver=deconvolver,
-                specmode=specmode,
+                continuum_mode=continuum_mode,
                 image_data_variables_keep=["sky_residual", "sky_model", "primary_beam"],
                 processing_set_data_group_name="base",
                 single_precision_image=False,
                 processing_function_threads=1,
-                n_chunks=2,
+                n_mapping_parallelism={"frequency": 2},
                 overwrite=True,
                 cycle_acceleration=cycle_acceleration,
                 momentum_coefficient=momentum_coefficient,
@@ -179,7 +178,7 @@ def run(simulated_store, tmp_path_factory):
         primary_beam = image.PRIMARY_BEAM.isel(time=0, frequency=0, polarization=0)
         residual = image.SKY_RESIDUAL.isel(time=0, taylor_term=0, polarization=0)
         results[key] = {
-            "cycles": result["n_major_cycles"],
+            "cycles": result["n_cycles"],
             "stop_codes": result["controller"].stop_code_imaging.ravel(),
             "rms": float(
                 np.sqrt(np.mean(residual.values[primary_beam.values >= 0.2] ** 2))
@@ -204,18 +203,20 @@ def _assert_state_forwarded(result, cycle_acceleration):
     assert states == [None] + (len(states) - 1) * [cycle_acceleration]
 
 
-@pytest.mark.parametrize("deconvolver,nterms,options", DECONVOLVERS)
+@pytest.mark.parametrize("deconvolver,n_taylor_terms,options", DECONVOLVERS)
 def test_shallow_threshold_runs_converge_and_conjugate_gradient_saves_cycles(
-    run, deconvolver, nterms, options
+    run, deconvolver, n_taylor_terms, options
 ):
     """Measured: none 11, conjugate gradient 8 and momentum 9 imaging cycles
     with both deconvolvers; neither the momentum cycles nor the final
     residual RMS are asserted."""
     controls = {"max_cycles": 12, "threshold": 0.02, **options}
-    plain = run(deconvolver, nterms, "mfs", controls, "none")
+    plain = run(deconvolver, n_taylor_terms, "mfs", controls, "none")
     cycles = {}
     for cycle_acceleration in ACCELERATIONS:
-        accelerated = run(deconvolver, nterms, "mfs", controls, cycle_acceleration)
+        accelerated = run(
+            deconvolver, n_taylor_terms, "mfs", controls, cycle_acceleration
+        )
         assert accelerated["finite"]
         np.testing.assert_array_equal(accelerated["stop_codes"], IMAGING_THRESHOLD)
         _assert_state_forwarded(accelerated, cycle_acceleration)
@@ -224,17 +225,19 @@ def test_shallow_threshold_runs_converge_and_conjugate_gradient_saves_cycles(
     assert cycles["conjugate_gradient"] < plain["cycles"]
 
 
-@pytest.mark.parametrize("deconvolver,nterms,options", DECONVOLVERS)
+@pytest.mark.parametrize("deconvolver,n_taylor_terms,options", DECONVOLVERS)
 def test_fixed_cycle_budget_leaves_a_smaller_residual(
-    run, deconvolver, nterms, options
+    run, deconvolver, n_taylor_terms, options
 ):
     """Four imaging cycles; measured residual RMS ratios (accelerated / none)
     0.32 and 0.30 (conjugate gradient) and 0.42 and 0.41 (momentum) for
     Högbom and MT-MFS."""
     controls = {"max_cycles": 4, "threshold": 0.0, **options}
-    plain = run(deconvolver, nterms, "mfs", controls, "none")
+    plain = run(deconvolver, n_taylor_terms, "mfs", controls, "none")
     for cycle_acceleration in ACCELERATIONS:
-        accelerated = run(deconvolver, nterms, "mfs", controls, cycle_acceleration)
+        accelerated = run(
+            deconvolver, n_taylor_terms, "mfs", controls, cycle_acceleration
+        )
         assert accelerated["finite"]
         np.testing.assert_array_equal(accelerated["stop_codes"], IMAGING_MAX_CYCLES)
         _assert_state_forwarded(accelerated, cycle_acceleration)
@@ -246,8 +249,8 @@ def test_adaptive_depth_hogbom_runs_reach_the_threshold(run, cycle_acceleration)
     """``max_iter_per_cycle=-1``; measured: none 7, conjugate gradient 8 and
     momentum 7 imaging cycles. The momentum's residual norm grows once, after
     its third step, which restarts it. With ``psf_sidelobe_factor=1.0``
-    instead of this file's 1.5, the conjugate gradient ran out of
-    ``max_iter`` at a residual peak of 13 Jy (measured, not asserted)."""
+    instead of this file's 1.5: none 6, conjugate gradient 7 and momentum 5
+    imaging cycles (measured, not asserted)."""
     result = run(
         "hogbom",
         1,

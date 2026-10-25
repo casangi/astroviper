@@ -1,7 +1,95 @@
+from astroviper.utils.continuum_cache import (
+    MVC_OBSERVED_NORMALIZATION_CACHE as _MVC_OBSERVED_NORMALIZATION_CACHE,
+)
+from astroviper.utils.continuum_cache import (
+    MVC_OBSERVED_VISIBILITY_CACHE as _MVC_OBSERVED_VISIBILITY_CACHE,
+)
 from astroviper.utils.param_docs import shares_param_docs
 
-_MVC_OBSERVED_VISIBILITY_CACHE = "_MVC_OBSERVED_VISIBILITY_CACHE"
-_MVC_OBSERVED_NORMALIZATION_CACHE = "_MVC_OBSERVED_NORMALIZATION_CACHE"
+
+def _continuum_frequency_coord(img_xds):
+    """Return the canonical singleton frequency coordinate for Taylor products."""
+    import numpy as np
+
+    continuum_metadata = img_xds.attrs.get("continuum_imaging", {})
+    reference_frequency = continuum_metadata.get("reference_frequency_hz")
+    if reference_frequency is None:
+        reference_frequency = img_xds.attrs.get("reference_frequency_hz")
+    if reference_frequency is None:
+        reference_frequency = img_xds.attrs.get("reference_frequency")
+    if reference_frequency is None and img_xds.sizes.get("frequency", 0) > 0:
+        reference_frequency = np.asarray(img_xds.frequency.values).reshape(-1)[0]
+    if reference_frequency is None:
+        reference_frequency = 0.0
+    return np.asarray([float(reference_frequency)], dtype=np.float64)
+
+
+def _continuum_plane_to_frequency(img_xds, data_array, plane_dimension):
+    """Project plane zero of a Taylor axis onto one canonical frequency plane."""
+    frequency_coord = _continuum_frequency_coord(img_xds)
+    plane = data_array.isel({plane_dimension: 0}, drop=True)
+    if "frequency" in plane.dims:
+        if plane.sizes["frequency"] != 1:
+            plane = plane.isel(frequency=0, drop=False)
+        return plane.assign_coords(frequency=frequency_coord)
+    axis = plane.dims.index("time") + 1 if "time" in plane.dims else 0
+    return plane.expand_dims(frequency=frequency_coord, axis=axis)
+
+
+def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
+    """Return a principal-solution residual copy for MT-MFS restoration."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+
+    residual_dims = ("time", "taylor_term", "polarization", "l", "m")
+    psf_dims = ("time", "psf_taylor_order", "polarization", "l", "m")
+    missing_residual_dims = [
+        dim for dim in residual_dims if dim not in residual_da.dims
+    ]
+    missing_psf_dims = [dim for dim in psf_dims if dim not in psf_da.dims]
+    if missing_residual_dims:
+        raise ValueError(
+            "MT-MFS restoration requires residual dimensions "
+            f"{residual_dims}; missing {missing_residual_dims}."
+        )
+    if missing_psf_dims:
+        raise ValueError(
+            "MT-MFS restoration requires PSF dimensions "
+            f"{psf_dims}; missing {missing_psf_dims}."
+        )
+
+    residual_ordered = residual_da.transpose(*residual_dims)
+    psf_ordered = psf_da.transpose(*psf_dims)
+    n_taylor_terms = residual_ordered.sizes["taylor_term"]
+    expected_psf_terms = 2 * n_taylor_terms - 1
+    if psf_ordered.sizes["psf_taylor_order"] != expected_psf_terms:
+        raise ValueError(
+            "MT-MFS restoration requires 2 * n_taylor_terms - 1 PSF Taylor "
+            f"orders; received {psf_ordered.sizes['psf_taylor_order']} for "
+            f"n_taylor_terms={n_taylor_terms}."
+        )
+
+    principal_values = np.array(residual_ordered.values, copy=True, order="C")
+    psf_values = psf_ordered.values
+    for time_index in range(residual_ordered.sizes["time"]):
+        for polarization_index in range(residual_ordered.sizes["polarization"]):
+            psf_stack = np.ascontiguousarray(
+                psf_values[time_index, :, polarization_index]
+            )
+            inverse_hessian = mtmfs.hessian(psf_stack)["inverse_hessian"][0]
+            residual_stack = np.ascontiguousarray(
+                principal_values[time_index, :, polarization_index]
+            )
+            finite_pixels = np.all(np.isfinite(residual_stack), axis=0)
+            residual_stack[:, ~finite_pixels] = 0
+            mtmfs.principal_solution(residual_stack, inverse_hessian)
+            residual_stack[:, ~finite_pixels] = np.nan
+            principal_values[time_index, :, polarization_index] = residual_stack
+
+    principal = residual_ordered.copy(data=principal_values)
+    return principal.transpose(*residual_da.dims)
+
 
 ###############################################################################
 # Imaging setup and PSF beam fitting
@@ -14,7 +102,7 @@ def imaging_preparation_continuum_single_field(
     img_xds,
     image_params,
     imaging_weights_params,
-    specmode="mfs",
+    continuum_mode="mfs",
     processing_set_data_group_name="corrected",
     single_precision_image=True,
     processing_function_threads=1,
@@ -29,8 +117,19 @@ def imaging_preparation_continuum_single_field(
 
     Parameters
     ----------
-    specmode : {"mfs", "mvc"}
-        Select Taylor UV gridding or frequency-resolved MVC processing.
+    continuum_mode : {"mfs", "mvc"}
+        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
+        the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
+        both the intrinsic source spectral index and the primary-beam spectral
+        index. Its reference-frequency primary beam corrects the Taylor-zero
+        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        channel images and common-beam Taylor equations, and predicts
+        ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
+        the intrinsic spectrum under the common-beam convention, so
+        ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
+        match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
+        parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
     ps_xdt : xarray.DataTree
         Visibility data for this frequency chunk.
 
@@ -38,30 +137,54 @@ def imaging_preparation_continuum_single_field(
         Empty image dataset carrying the geometry and coordinates for this chunk.
 
     image_params : dict
-        Image geometry and continuum configuration. This includes the image size,
-        cell size, reference frequency, number of Taylor terms, and gridding or FFT
-        configuration required by the setup processing functions.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
 
     imaging_weights_params : dict
-        Imaging-weight configuration.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
 
     processing_set_data_group_name : str, optional
-        Processing-set data group used as the input for imaging.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
 
     single_precision_image : bool, optional
-        Whether continuum image and grid products use single precision.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
 
     processing_function_threads : int, optional
-        Number of threads supplied to lower-level processing functions.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     fft_backend : str, optional
-        FFT backend supplied to setup functions that require Fourier transforms.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
 
     image_data_variables_keep : list of str, optional
-        Logical image products to retain in the returned dataset.
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
 
     task_id : int, optional
-        Identifier of the frequency-chunk task, used for logging.
+        Identifier of the parallel chunk being processed.
 
     Returns
     -------
@@ -95,7 +218,7 @@ def imaging_preparation_continuum_single_field(
         img_xds,
         image_params,
         imaging_weights_params,
-        specmode=specmode,
+        continuum_mode=continuum_mode,
         processing_set_data_group_name=processing_set_data_group_name,
         single_precision_image=single_precision_image,
         processing_function_threads=processing_function_threads,
@@ -182,7 +305,6 @@ def point_spread_function_gaussian_fit_continuum(
     import time
     from copy import deepcopy
 
-    import numpy as np
     import pandas as pd
     import xarray as xr
 
@@ -240,39 +362,7 @@ def point_spread_function_gaussian_fit_continuum(
             f"{sorted(missing_psf_dims)}. Found dimensions {psf_da.dims}."
         )
 
-    # ------------------------------------------------------------------
-    # Select the globally reduced zeroth-order PSF.
-    # ------------------------------------------------------------------
-    psf0_da = psf_da.isel(psf_taylor_order=0, drop=True)
-
-    # The numerical frequency value is not used by the fit itself, but the
-    # cube routine requires a one-element frequency coordinate.
-    continuum_metadata = img_xds.attrs.get("continuum_imaging", {})
-
-    if "reference_frequency_hz" in continuum_metadata:
-        reference_frequency_hz = float(continuum_metadata["reference_frequency_hz"])
-    elif "frequency" in img_xds.coords and img_xds.frequency.size > 0:
-        reference_frequency_hz = float(
-            np.asarray(img_xds.frequency.values).reshape(-1)[0]
-        )
-    else:
-        # This is only a coordinate label for the temporary cube.
-        reference_frequency_hz = 0.0
-
-    frequency_coord = np.asarray(
-        [reference_frequency_hz],
-        dtype=np.float64,
-    )
-
-    cube_psf_da = psf0_da.expand_dims(
-        frequency=frequency_coord,
-    ).transpose(
-        "time",
-        "frequency",
-        "polarization",
-        "l",
-        "m",
-    )
+    cube_psf_da = _continuum_plane_to_frequency(img_xds, psf_da, "psf_taylor_order")
 
     # ------------------------------------------------------------------
     # Build a minimal, one-frequency cube dataset.
@@ -397,7 +487,8 @@ def prepare_model_uv_continuum_single_field(
     single_precision_image=True,
     processing_function_threads=1,
     fft_backend="pyfftw",
-    image_data_group_name="model",
+    image_data_group_in_name="model",
+    image_data_group_out_name="model",
 ):
     """Prepare the Fourier-domain continuum model for the next imaging cycle.
 
@@ -415,31 +506,57 @@ def prepare_model_uv_continuum_single_field(
     ----------
     model_xds : xarray.Dataset
         Image-domain continuum model dataset. The data group selected by
-        ``image_data_group_name`` must contain a ``sky`` variable with a
+        ``image_data_group_in_name`` must contain a ``sky`` variable with a
         ``taylor_term`` dimension.
 
     image_params : dict
-        Continuum imaging configuration, including the image geometry, FFT
-        parameters, and the number of Taylor terms.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
 
     instrument_polarization_basis : {"linear", "circular"}, optional
-        Instrumental correlation basis into which the Stokes model is
-        transformed before the Fourier transform.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
 
     single_precision_image : bool, optional
-        If ``True``, create ``complex64`` Fourier grids; otherwise create
-        ``complex128`` grids.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the polarization transformation and FFT
-        routines.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     fft_backend : str, optional
-        FFT backend passed to ``fft_norm_continuum_img_xds``.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
 
-    image_data_group_name : str, optional
-        Data group containing the continuum sky model and receiving the Fourier-
-        domain model visibility grids.
+    image_data_group_in_name : str, optional
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
+    image_data_group_out_name : str, optional
+        Data group receiving the Fourier-domain model visibility grids.
 
     Returns
     -------
@@ -463,7 +580,7 @@ def prepare_model_uv_continuum_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_continuum_img_xds,
     )
 
@@ -478,25 +595,25 @@ def prepare_model_uv_continuum_single_field(
             f"'circular'; received {instrument_polarization_basis!r}."
         )
 
-    nterms = int(image_params.get("nterms", 0))
+    n_taylor_terms = int(image_params.get("n_taylor_terms", 0))
 
-    if nterms < 1:
-        raise ValueError("image_params['nterms'] must be at least 1.")
+    if n_taylor_terms < 1:
+        raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
 
     data_groups = model_xds.attrs.get("data_groups", {})
 
-    if image_data_group_name not in data_groups:
+    if image_data_group_in_name not in data_groups:
         raise KeyError(
-            f"Model data group {image_data_group_name!r} is not present in "
+            f"Model data group {image_data_group_in_name!r} is not present in "
             "model_xds.attrs['data_groups']."
         )
 
-    model_data_group = data_groups[image_data_group_name]
+    model_data_group = data_groups[image_data_group_in_name]
     model_sky_name = model_data_group.get("sky")
 
     if model_sky_name is None:
         raise KeyError(
-            f"Model data group {image_data_group_name!r} does not define "
+            f"Model data group {image_data_group_in_name!r} does not define "
             "a 'sky' variable."
         )
 
@@ -513,11 +630,11 @@ def prepare_model_uv_continuum_single_field(
             "'taylor_term' dimension."
         )
 
-    if model_sky.sizes["taylor_term"] != nterms:
+    if model_sky.sizes["taylor_term"] != n_taylor_terms:
         raise ValueError(
             "The number of model Taylor terms does not match "
-            "image_params['nterms']: "
-            f"{model_sky.sizes['taylor_term']} != {nterms}."
+            "image_params['n_taylor_terms']: "
+            f"{model_sky.sizes['taylor_term']} != {n_taylor_terms}."
         )
 
     complex_dtype = np.complex64 if single_precision_image else np.complex128
@@ -536,12 +653,14 @@ def prepare_model_uv_continuum_single_field(
     model_uv_xds = fft_norm_continuum_img_xds(
         model_uv_xds,
         image_params=image_params,
-        image_data_group_in_name=image_data_group_name,
-        image_data_group_out_name=image_data_group_name,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
         image_data_group_out_modified={
             "visibility": "VISIBILITY_MODEL",
         },
-        image_data_variables_keep=["sky"],
+        # The accumulated image-domain model is returned separately. Keeping
+        # it here would double the large state copied to each map task.
+        image_data_variables_keep=[],
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
@@ -549,13 +668,13 @@ def prepare_model_uv_continuum_single_field(
 
     output_data_groups = model_uv_xds.attrs.get("data_groups", {})
 
-    if image_data_group_name not in output_data_groups:
+    if image_data_group_out_name not in output_data_groups:
         raise RuntimeError(
             "The model FFT removed or failed to create data group "
-            f"{image_data_group_name!r}."
+            f"{image_data_group_out_name!r}."
         )
 
-    output_model_group = output_data_groups[image_data_group_name]
+    output_model_group = output_data_groups[image_data_group_out_name]
     model_visibility_name = output_model_group.get("visibility")
 
     if model_visibility_name is None:
@@ -577,10 +696,10 @@ def prepare_model_uv_continuum_single_field(
             "contain a 'taylor_term' dimension."
         )
 
-    if model_visibility.sizes["taylor_term"] != nterms:
+    if model_visibility.sizes["taylor_term"] != n_taylor_terms:
         raise RuntimeError(
             "The Fourier-domain model has the wrong number of Taylor terms: "
-            f"{model_visibility.sizes['taylor_term']} != {nterms}."
+            f"{model_visibility.sizes['taylor_term']} != {n_taylor_terms}."
         )
 
     model_visibility.attrs.update(
@@ -589,7 +708,7 @@ def prepare_model_uv_continuum_single_field(
                 "Global Fourier-domain continuum Taylor model used for "
                 "distributed degridding."
             ),
-            "nterms": nterms,
+            "n_taylor_terms": n_taylor_terms,
             "instrument_polarization_basis": (instrument_polarization_basis),
         }
     )
@@ -606,6 +725,21 @@ def apply_mvc_primary_beam_convention(
 
     This applies ``M'_nu = M_nu * A_nu / Abar`` and sets pixels with a
     non-finite or non-positive effective primary beam to zero.
+
+    Parameters
+    ----------
+    model_cube : xarray.DataArray
+        Frequency-resolved MVC sky model in the common effective-beam
+        convention.
+    primary_beam_cube : xarray.DataArray
+        Channel-dependent primary-beam power pattern ``A_nu``.
+    effective_primary_beam : xarray.DataArray
+        Imaging-weighted common primary beam ``Abar``.
+
+    Returns
+    -------
+    xarray.DataArray
+        Model cube transformed to the channel-primary-beam convention.
     """
     import numpy as np
 
@@ -670,15 +804,15 @@ def apply_mvc_primary_beam_convention(
 
     effective_pb_data = np.asarray(effective_primary_beam.data)[:, None, ...]
     valid_effective_pb = np.isfinite(effective_pb_data) & (effective_pb_data > 0.0)
-    result = model_cube.copy(
-        data=np.where(
-            valid_effective_pb,
-            np.asarray(model_cube.data)
-            * np.asarray(primary_beam_cube.data)
-            / effective_pb_data,
-            0.0,
-        )
+    numerator = np.asarray(model_cube.data) * np.asarray(primary_beam_cube.data)
+    corrected = np.zeros_like(numerator)
+    np.divide(
+        numerator,
+        effective_pb_data,
+        out=corrected,
+        where=valid_effective_pb,
     )
+    result = model_cube.copy(data=corrected)
     result.attrs = model_cube.attrs.copy()
     result.attrs["primary_beam_convention"] = "channel_pb_over_effective_pb"
     return result
@@ -694,14 +828,74 @@ def prepare_model_uv_mvc_single_field(
     single_precision_image=True,
     processing_function_threads=1,
     fft_backend="pyfftw",
-    image_data_group_name="model",
+    image_data_group_in_name="model",
+    image_data_group_out_name="model",
 ):
     """Construct a local MVC model UV cube in the channel-PB convention.
 
     The Taylor model uses the common effective primary-beam convention.  Before
     prediction this function evaluates the Taylor polynomial at each channel and
     applies ``A_nu / Abar``, matching CASA's MVC imaging-cycle convention.
+
+    Parameters
+    ----------
+    model_xds : xarray.Dataset
+        Taylor-coefficient sky model and effective primary beam.
+    primary_beam_xds : xarray.Dataset
+        Channel-dependent primary-beam cube for this frequency partition.
+    frequency_values : array-like
+        Channel frequencies in Hz at which to evaluate the Taylor model.
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+    instrument_polarization_basis : {"linear", "circular"}, optional
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
+    single_precision_image : bool, optional
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    fft_backend : str, optional
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+    image_data_group_in_name : str, optional
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
+    image_data_group_out_name : str, optional
+        Output data-group name for the channelized model grid.
+
+    Returns
+    -------
+    xarray.Dataset
+        Frequency-resolved apparent model and its Fourier-domain grid.
     """
+
+    import copy
 
     import numpy as np
     import xarray as xr
@@ -709,7 +903,7 @@ def prepare_model_uv_mvc_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_img_xds,
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
@@ -719,22 +913,17 @@ def prepare_model_uv_mvc_single_field(
         dtype=np.float64,
     )
 
-    reference_frequency = float(
-        image_params.get(
-            "reference_frequency",
-            image_params["reference_frequency_hz"],
-        )
-    )
-    nterms = int(image_params["nterms"])
+    reference_frequency = float(image_params["reference_frequency"])
+    n_taylor_terms = int(image_params["n_taylor_terms"])
 
-    model_name = model_xds.attrs["data_groups"][image_data_group_name]["sky"]
+    model_name = model_xds.attrs["data_groups"][image_data_group_in_name]["sky"]
 
-    model_taylor = model_xds[model_name].isel(taylor_term=slice(0, nterms))
+    model_taylor = model_xds[model_name].isel(taylor_term=slice(0, n_taylor_terms))
 
     x = (frequency_values - reference_frequency) / reference_frequency
 
     basis = xr.DataArray(
-        x[:, None] ** np.arange(nterms)[None, :],
+        x[:, None] ** np.arange(n_taylor_terms)[None, :],
         dims=("frequency", "taylor_term"),
         coords={
             "frequency": frequency_values,
@@ -811,6 +1000,9 @@ def prepare_model_uv_mvc_single_field(
         list(model_xds.data_vars),
         errors="ignore",
     ).copy(deep=False)
+    # Xarray's shallow dataset operations also share the nested attrs mapping.
+    # Isolate it before registering the temporary MVC sky and visibility roles.
+    mvc_xds.attrs = copy.deepcopy(model_xds.attrs)
 
     if "taylor_term" in mvc_xds.dims:
         mvc_xds = mvc_xds.drop_dims(
@@ -840,7 +1032,7 @@ def prepare_model_uv_mvc_single_field(
 
     modify_data_groups_xds(
         mvc_xds,
-        data_group_out_name=image_data_group_name,
+        data_group_out_name=image_data_group_out_name,
         data_group_out={
             "sky": "SKY_MODEL_MVC",
         },
@@ -861,8 +1053,8 @@ def prepare_model_uv_mvc_single_field(
     mvc_xds = fft_norm_img_xds(
         mvc_xds,
         image_params=image_params,
-        image_data_group_in_name=(image_data_group_name),
-        image_data_group_out_name=(image_data_group_name),
+        image_data_group_in_name=image_data_group_out_name,
+        image_data_group_out_name=image_data_group_out_name,
         image_data_group_out_modified={
             "visibility": "VISIBILITY_MODEL",
         },
@@ -887,23 +1079,23 @@ def make_mvc_taylor_normal_equation_contributions(
     residual_normalization,
     psf_normalization,
     *,
-    nterms,
+    n_taylor_terms,
     reference_frequency,
-    pblimit=0.2,
+    primary_beam_limit=0.2,
 ):
     """Form additive MVC Taylor products for one map-task frequency chunk.
 
     The returned dataset has no frequency dimension and can therefore be
     combined by element-wise addition in the distributed reduce stage.  The
-    primary-beam division and Taylor moment construction happen here; only the
-    normalization by globally accumulated weights and the construction of the
-    effective beam remain for the append node.
+    primary-beam weighting and Taylor moment construction happen here; only the
+    normalization by globally accumulated weights, the per-pixel spectral fit
+    and the construction of the effective beam remain for the append node.
 
-    Channel residuals are divided by their frequency-dependent primary beam,
-    then multiplied by that beam while forming the weighted Taylor moments.
-    This explicitly applies the PB convention in the map stage while retaining
-    the algebraically equivalent residual numerator.  The PSF cube is converted
-    with the same spectral basis into ``2 * nterms - 1`` Hessian numerators.
+    Channel residuals are multiplied by their frequency-dependent primary beam
+    before the weighted Taylor moments are formed, and the squared beam is
+    summed into the ``2 * n_taylor_terms - 1`` moments of the per-pixel spectral fit.
+    The PSF cube is converted with the same spectral basis, without a
+    primary-beam factor, into ``2 * n_taylor_terms - 1`` Hessian numerators.
 
     Parameters
     ----------
@@ -921,39 +1113,58 @@ def make_mvc_taylor_normal_equation_contributions(
     psf_normalization : xarray.DataArray or None
         Per-channel PSF sum of imaging weights with dimensions
         ``(time, frequency, polarization)``. Required with ``psf_cube``.
-    nterms : int
+    n_taylor_terms : int
         Number of sky-model Taylor coefficients.
     reference_frequency : float
         Taylor reference frequency in Hz.
-    pblimit : float, default 0.2
-        Primary-beam validity cutoff.
+    primary_beam_limit : float, default 0.2
+        Primary-beam cutoff. Channel beams at or below it do not contribute to
+        the effective beam, and the residual is zero where the effective beam
+        is at or below it. Where fewer than ``n_taylor_terms`` channel beams exceed it,
+        only Taylor term zero of the spectrum is fitted.
 
     Returns
     -------
     xarray.Dataset
-        Additive residual Taylor numerators and residual-weight sum.  When a
-        PSF cube is supplied, also contains PSF Taylor numerators, the PSF
-        weight sum, and the PSF-weighted primary-beam sum.
+        Additive residual Taylor numerators, squared-beam moments,
+        residual-weight moments, residual-weight sum, and the number of
+        channels whose beam exceeds ``primary_beam_limit``.  When a PSF cube is supplied,
+        also contains PSF Taylor numerators, the PSF weight sum, and the
+        PSF-weighted primary-beam sum.
 
     Notes
     -----
-    With ``x_nu = (nu - nu0) / nu0`` and common beam ``Abar``, this implements
+    With ``x_nu = (nu - nu0) / nu0``, channel beams ``A_nu`` and the common
+    beam ``Abar = sum(w_nu * A_nu) / sum(w_nu)`` (channel beams at or below
+    ``primary_beam_limit`` count as zero), the PSF planes are the plain weighted moments
+    of the channel PSFs,
 
-    ``R'_nu = Abar * R_nu / A_nu``
+    ``B_k = sum(w_nu * x_nu**k * B_nu) / sum(w_nu)``,
 
-    followed by chunk-local Taylor accumulation.  The factor ``Abar`` is not
-    known until all chunks have been reduced.  In the residual equation it
-    cancels algebraically; for the PSF and effective beam it is applied by
-    :func:`finalize_mvc_taylor_normal_equations` in the append node.
+    and the Taylor residuals are
 
-    ``b_t = sum(w_nu * x_nu**t * A_nu * R'_nu) / (sum(w_nu) * Abar)``
+    ``b = Abar * H @ inv(G) @ u``,
 
-    and
+    with ``u_k = sum(w_nu * x_nu**k * A_nu * R_nu)``,
+    ``G_tk = sum(w_nu * x_nu**(t+k) * A_nu**2)`` at each pixel, and
+    ``H_tk = sum(w_nu * x_nu**(t+k)) / sum(w_nu)``, the PSF planes at their
+    peak.  ``inv(G) @ u`` is the least-squares fit of a Taylor polynomial to
+    the primary-beam corrected channel residuals ``R_nu / A_nu`` with weights
+    ``w_nu * A_nu**2``, so a channel enters with a factor ``A_nu`` and a
+    channel whose beam goes to zero drops out.  The model is predicted as
+    ``M_nu * A_nu / Abar`` (:func:`apply_mvc_primary_beam_convention`), so a
+    model change ``dM_nu = sum_k x_nu**k dm_k`` at a pixel changes ``u`` there
+    by ``-G @ dm / Abar`` and ``b`` by ``-H @ dm``: the Hessian the
+    deconvolver inverts, ``B_(t+k)`` at the PSF peak, is the response of the
+    residual at every position, not only at the pointing centre.  Away from
+    the peak the response follows the channel PSFs weighted by
+    ``w_nu * A_nu**2`` instead of ``w_nu``.  Where fewer than ``n_taylor_terms``
+    channel beams exceed ``primary_beam_limit``, the fit is not determined by them;
+    there only Taylor term zero is fitted, ``u_0 / G_00``.
 
-    ``B_k = sum(w_nu * x_nu**k * A_nu * B_nu) / (sum(w_nu) * Abar)``.
-
-    The first expression reduces algebraically to the weighted residual moment,
-    while retaining CASA's primary-beam mask and common-beam convention.
+    The sums over all chunks and ``Abar`` are known only after the reduce
+    stage; :func:`finalize_mvc_taylor_normal_equations` solves for ``b`` in
+    the append node.
     """
     import numpy as np
     import xarray as xr
@@ -1008,16 +1219,16 @@ def make_mvc_taylor_normal_equation_contributions(
             "MVC cubes and normalizations are not coordinate-aligned."
         ) from exc
 
-    nterms = int(nterms)
+    n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
-    pblimit = float(pblimit)
+    primary_beam_limit = float(primary_beam_limit)
 
-    if nterms < 1:
-        raise ValueError(f"nterms must be positive; received {nterms}.")
+    if n_taylor_terms < 1:
+        raise ValueError(f"n_taylor_terms must be positive; received {n_taylor_terms}.")
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError("reference_frequency must be finite and positive.")
-    if not np.isfinite(pblimit) or pblimit < 0.0:
-        raise ValueError("pblimit must be finite and non-negative.")
+    if not np.isfinite(primary_beam_limit) or primary_beam_limit < 0.0:
+        raise ValueError("primary_beam_limit must be finite and non-negative.")
 
     frequency = np.asarray(residual_cube.frequency.values, dtype=np.float64)
     if frequency.size == 0:
@@ -1050,47 +1261,84 @@ def make_mvc_taylor_normal_equation_contributions(
     residual_weight = _clean_weights(residual_normalization)
     residual_weight_sum = residual_weight.sum(dim="frequency")
 
-    valid_channel_pb = np.isfinite(primary_beam_cube) & (primary_beam_cube > pblimit)
-    # CASA clips each channel PB before forming the effective PB and PSF Taylor
-    # terms. Keep all channel weights in the denominator, including clipped ones.
-    finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
-    residual_over_primary_beam = xr.where(
-        valid_channel_pb,
-        residual_cube / primary_beam_cube,
-        0.0,
+    valid_channel_pb = np.isfinite(primary_beam_cube) & (
+        primary_beam_cube > primary_beam_limit
     )
+    # CASA clips each channel PB before forming the effective PB. Keep all
+    # channel weights in the denominator, including clipped ones.
+    finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
+    # The spectral fit weights each channel by its beam as the prediction
+    # applies it, without the clip.
+    channel_primary_beam = xr.where(
+        np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
+    )
+    beam_weighted_residual = channel_primary_beam * residual_cube
+    channel_primary_beam_squared = channel_primary_beam**2
 
     residual_terms = []
-    for order in range(nterms):
-        numerator = (
-            residual_weight
-            * x_frequency**order
-            * finite_primary_beam
-            * residual_over_primary_beam
-        ).sum(dim="frequency")
+    for order in range(n_taylor_terms):
+        numerator = (residual_weight * x_frequency**order * beam_weighted_residual).sum(
+            dim="frequency"
+        )
         residual_terms.append(numerator)
 
     residual_numerator = xr.concat(
         residual_terms,
-        dim=xr.IndexVariable("taylor_term", np.arange(nterms, dtype=np.int64)),
+        dim=xr.IndexVariable("taylor_term", np.arange(n_taylor_terms, dtype=np.int64)),
     ).transpose("time", "taylor_term", "polarization", "l", "m")
     residual_numerator.attrs = {
         "description": "Additive MVC Taylor residual numerators.",
-        "specmode": "mvc",
+        "continuum_mode": "mvc",
         "reference_frequency": reference_frequency,
-        "nterms": nterms,
-        "pblimit": pblimit,
+        "n_taylor_terms": n_taylor_terms,
+        "primary_beam_limit": primary_beam_limit,
     }
+
+    n_psf_taylor_terms = 2 * n_taylor_terms - 1
+    psf_taylor_order = xr.IndexVariable(
+        "psf_taylor_order", np.arange(n_psf_taylor_terms, dtype=np.int64)
+    )
+    beam_squared_numerator = xr.concat(
+        [
+            (residual_weight * x_frequency**order * channel_primary_beam_squared).sum(
+                dim="frequency"
+            )
+            for order in range(n_psf_taylor_terms)
+        ],
+        dim=psf_taylor_order,
+    ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
+    beam_squared_numerator.attrs = {
+        "description": "Additive MVC squared-beam moments of the spectral fit.",
+        "continuum_mode": "mvc",
+        "reference_frequency": reference_frequency,
+        "n_taylor_terms": n_taylor_terms,
+        "primary_beam_limit": primary_beam_limit,
+    }
+    residual_weight_moments = xr.concat(
+        [
+            (residual_weight * x_frequency**order).sum(dim="frequency")
+            for order in range(n_psf_taylor_terms)
+        ],
+        dim=psf_taylor_order,
+    ).transpose("time", "psf_taylor_order", "polarization")
+
     contributions = xr.Dataset(
         {
             "MVC_RESIDUAL_TAYLOR_NUMERATOR": residual_numerator,
             "MVC_RESIDUAL_WEIGHT_SUM": residual_weight_sum,
+            "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM": beam_squared_numerator,
+            "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM": residual_weight_moments,
+            "MVC_RESIDUAL_BEAM_CHANNEL_COUNT": (
+                (valid_channel_pb & (residual_weight > 0.0))
+                .sum(dim="frequency")
+                .transpose("time", "polarization", "l", "m")
+            ),
         },
         attrs={
-            "specmode": "mvc",
-            "nterms": nterms,
+            "continuum_mode": "mvc",
+            "n_taylor_terms": n_taylor_terms,
             "reference_frequency": reference_frequency,
-            "pblimit": pblimit,
+            "primary_beam_limit": primary_beam_limit,
             "mvc_output_dtype": np.dtype(output_dtype).name,
         },
     )
@@ -1099,12 +1347,9 @@ def make_mvc_taylor_normal_equation_contributions(
         psf_weight = _clean_weights(psf_normalization)
         psf_weight_sum = psf_weight.sum(dim="frequency")
 
-        n_psf_taylor_terms = 2 * nterms - 1
         finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
         psf_terms = [
-            (psf_weight * x_frequency**order * finite_primary_beam * finite_psf).sum(
-                dim="frequency"
-            )
+            (psf_weight * x_frequency**order * finite_psf).sum(dim="frequency")
             for order in range(n_psf_taylor_terms)
         ]
         psf_numerator = xr.concat(
@@ -1116,11 +1361,11 @@ def make_mvc_taylor_normal_equation_contributions(
         ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
         psf_numerator.attrs = {
             "description": "Additive MVC Taylor PSF numerators.",
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
             "reference_frequency": reference_frequency,
-            "nterms": nterms,
+            "n_taylor_terms": n_taylor_terms,
             "n_psf_taylor_terms": n_psf_taylor_terms,
-            "pblimit": pblimit,
+            "primary_beam_limit": primary_beam_limit,
         }
         contributions["MVC_PSF_TAYLOR_NUMERATOR"] = psf_numerator
         contributions["MVC_PSF_WEIGHT_SUM"] = psf_weight_sum
@@ -1138,7 +1383,25 @@ def finalize_mvc_taylor_normal_equations(
     *,
     effective_primary_beam=None,
 ):
-    """Normalize globally reduced MVC map contributions in the append node."""
+    """Normalize globally reduced MVC map contributions in the append node.
+
+    Parameters
+    ----------
+    contributions : xarray.Dataset
+        Globally accumulated MVC residual, PSF, beam, and weight sums.
+    effective_primary_beam : xarray.DataArray or None, optional
+        Previously calculated common primary beam. When omitted, calculate it
+        from the supplied PSF-weighted beam sums.
+
+    Returns
+    -------
+    residual_taylor : xarray.DataArray
+        Normalized MVC Taylor residual planes.
+    psf_taylor : xarray.DataArray or None
+        Normalized Taylor PSF/Hessian planes when PSF contributions are present.
+    effective_primary_beam : xarray.DataArray
+        Imaging-weighted common primary beam.
+    """
     import numpy as np
     import xarray as xr
 
@@ -1157,25 +1420,55 @@ def finalize_mvc_taylor_normal_equations(
             contributions["MVC_PRIMARY_BEAM_WEIGHTED_SUM"] / psf_sum
         ).transpose("time", "polarization", "l", "m")
 
-    pblimit = float(contributions.attrs.get("pblimit", 0.2))
+    primary_beam_limit = float(contributions.attrs.get("primary_beam_limit", 0.2))
     valid_effective_pb = np.isfinite(effective_primary_beam) & (
-        effective_primary_beam > pblimit
+        effective_primary_beam > primary_beam_limit
+    )
+
+    # Fit the Taylor coefficients at each pixel, inv(G) @ u, and return them
+    # to the PSF moments and the common beam, Abar * H @ inv(G) @ u. Where
+    # fewer than n_taylor_terms channel beams exceed primary_beam_limit, fit Taylor term zero only.
+    pixel_dims = ("time", "polarization", "l", "m")
+    numerator = contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].transpose(
+        *pixel_dims, "taylor_term"
+    )
+    n_taylor_terms = numerator.sizes["taylor_term"]
+    hankel = np.add.outer(np.arange(n_taylor_terms), np.arange(n_taylor_terms))
+    beam_squared = (
+        contributions["MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM"]
+        .transpose(*pixel_dims, "psf_taylor_order")
+        .values
+    )
+    supported = valid_effective_pb.transpose(*pixel_dims).values
+    determined = supported & (
+        contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"].transpose(*pixel_dims).values
+        >= n_taylor_terms
+    )
+    gram = beam_squared[..., hankel]
+    gram[~determined] = np.eye(n_taylor_terms)
+    coefficients = np.linalg.solve(
+        gram, np.where(determined[..., None], numerator.values, 0.0)[..., None]
+    )[..., 0]
+    flat = supported & ~determined & (beam_squared[..., 0] > 0.0)
+    coefficients[flat, 0] = numerator.values[flat, 0] / beam_squared[flat, 0]
+    hessian = (
+        (contributions["MVC_RESIDUAL_WEIGHT_TAYLOR_SUM"] / residual_sum)
+        .transpose("time", "polarization", "psf_taylor_order")
+        .values[..., hankel]
     )
     residual_taylor = xr.where(
         valid_effective_pb,
-        contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"] / residual_sum,
+        effective_primary_beam
+        * contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].copy(
+            data=np.einsum("tpij,tplmj->tiplm", hessian, coefficients)
+        ),
         0.0,
     )
 
     psf_taylor = None
     if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
         psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
-        psf_taylor = xr.where(
-            valid_effective_pb,
-            contributions["MVC_PSF_TAYLOR_NUMERATOR"]
-            / (psf_sum * effective_primary_beam),
-            0.0,
-        )
+        psf_taylor = contributions["MVC_PSF_TAYLOR_NUMERATOR"] / psf_sum
 
     output_dtype = np.dtype(contributions.attrs.get("mvc_output_dtype", "float64"))
     residual_taylor = residual_taylor.astype(output_dtype, copy=False)
@@ -1185,50 +1478,78 @@ def finalize_mvc_taylor_normal_equations(
 
     residual_taylor.attrs = {
         "description": "MVC Taylor residual normal-equation right-hand sides.",
-        "specmode": "mvc",
+        "continuum_mode": "mvc",
         "reference_frequency": contributions.attrs.get("reference_frequency"),
-        "nterms": contributions.attrs.get("nterms"),
-        "pblimit": pblimit,
+        "n_taylor_terms": contributions.attrs.get("n_taylor_terms"),
+        "primary_beam_limit": primary_beam_limit,
     }
     effective_primary_beam.attrs = {
         "description": "Imaging-weighted effective primary beam for MVC.",
-        "specmode": "mvc",
-        "pblimit": pblimit,
+        "continuum_mode": "mvc",
+        "primary_beam_limit": primary_beam_limit,
     }
     if psf_taylor is not None:
         psf_taylor.attrs = {
             "description": "MVC Taylor PSF/Hessian planes formed in map tasks.",
             "type": "point_spread_function",
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
             "reference_frequency": contributions.attrs.get("reference_frequency"),
-            "nterms": contributions.attrs.get("nterms"),
+            "n_taylor_terms": contributions.attrs.get("n_taylor_terms"),
             "n_psf_taylor_terms": psf_taylor.sizes["psf_taylor_order"],
-            "pblimit": pblimit,
+            "primary_beam_limit": primary_beam_limit,
         }
 
     return residual_taylor, psf_taylor, effective_primary_beam
 
 
-def convert_mvc_cubes_to_taylor_normal_equations(
+def _convert_mvc_cubes_to_taylor_normal_equations(
     residual_cube,
     psf_cube,
     primary_beam_cube,
     residual_normalization,
     psf_normalization,
     *,
-    nterms,
+    n_taylor_terms,
     reference_frequency,
-    pblimit=0.2,
+    primary_beam_limit=0.2,
 ):
-    """Convert complete MVC channel cubes into Taylor normal equations.
+    """Convert complete MVC channel cubes into Taylor normal equations for tests.
 
-    This compatibility entry point composes the map-contribution and append
-    finalization helpers.  Distributed imaging calls those two stages
-    separately so channel cubes never enter the reduce stage.
+    This private test oracle composes the map-contribution and append
+    finalization helpers. Distributed imaging calls those two stages separately
+    so channel cubes never enter the reduce stage.
+
+    Parameters
+    ----------
+    residual_cube : xarray.DataArray
+        Frequency-resolved residual image cube.
+    psf_cube : xarray.DataArray
+        Frequency-resolved PSF image cube.
+    primary_beam_cube : xarray.DataArray
+        Frequency-resolved primary-beam cube.
+    residual_normalization : xarray.DataArray
+        Per-channel residual normalization weights.
+    psf_normalization : xarray.DataArray
+        Per-channel PSF normalization weights.
+    n_taylor_terms : int
+        Number of sky-model Taylor coefficients.
+    reference_frequency : float
+        Taylor-expansion reference frequency in Hz.
+    primary_beam_limit : float, optional
+        Minimum common primary-beam response used by the Taylor solution.
+
+    Returns
+    -------
+    residual_taylor : xarray.DataArray
+        Normalized MVC Taylor residual planes.
+    psf_taylor : xarray.DataArray or None
+        Normalized Taylor PSF/Hessian planes.
+    effective_primary_beam : xarray.DataArray
+        Imaging-weighted common primary beam.
     """
-    if residual_cube.sizes.get("frequency", 0) < int(nterms):
+    if residual_cube.sizes.get("frequency", 0) < int(n_taylor_terms):
         raise ValueError(
-            f"MVC requires at least nterms={int(nterms)} channels; received "
+            f"MVC requires at least n_taylor_terms={int(n_taylor_terms)} channels; received "
             f"{residual_cube.sizes.get('frequency', 0)}."
         )
     contributions = make_mvc_taylor_normal_equation_contributions(
@@ -1237,9 +1558,9 @@ def convert_mvc_cubes_to_taylor_normal_equations(
         primary_beam_cube,
         residual_normalization,
         psf_normalization,
-        nterms=nterms,
+        n_taylor_terms=n_taylor_terms,
         reference_frequency=reference_frequency,
-        pblimit=pblimit,
+        primary_beam_limit=primary_beam_limit,
     )
     return finalize_mvc_taylor_normal_equations(contributions)
 
@@ -1252,7 +1573,8 @@ def convert_mvc_cubes_to_taylor_normal_equations(
 def form_residual_grid_from_cache(
     observed_grid_xds,
     model_grid_xds,
-    image_data_group_name="residual",
+    image_data_group_in_observed="residual",
+    image_data_group_in_model="residual",
     grid_kind="continuum",
 ):
     """Form a residual UV grid from cached observed and model grids.
@@ -1272,9 +1594,12 @@ def form_residual_grid_from_cache(
         Cached observed-data UV grid.
     model_grid_xds : xarray.Dataset
         Predicted-model UV grid for the current cycle.
-    image_data_group_name : str, optional
-        Image data group registering ``visibility`` and
-        ``visibility_normalization`` in both datasets.
+    image_data_group_in_observed : str, optional
+        Observed-grid data group registering ``visibility`` and
+        ``visibility_normalization``.
+    image_data_group_in_model : str, optional
+        Model-grid data group registering ``visibility`` and
+        ``visibility_normalization``.
     grid_kind : str, optional
         Human-readable grid type used in diagnostics and metadata.
 
@@ -1290,17 +1615,17 @@ def form_residual_grid_from_cache(
     import numpy as np
     import xarray as xr
 
-    def _registered_arrays(dataset, label):
+    def _registered_arrays(dataset, label, data_group_name):
         if not isinstance(dataset, xr.Dataset):
             raise TypeError(
                 f"{label} must be an xarray.Dataset; received {type(dataset).__name__}."
             )
         data_groups = dataset.attrs.get("data_groups", {})
-        if image_data_group_name not in data_groups:
+        if data_group_name not in data_groups:
             raise KeyError(
-                f"{label} does not contain image data group {image_data_group_name!r}."
+                f"{label} does not contain image data group {data_group_name!r}."
             )
-        data_group = data_groups[image_data_group_name]
+        data_group = data_groups[data_group_name]
         variable_names = {
             role: data_group.get(role)
             for role in ("visibility", "visibility_normalization")
@@ -1308,7 +1633,7 @@ def form_residual_grid_from_cache(
         missing_roles = [role for role, name in variable_names.items() if name is None]
         if missing_roles:
             raise KeyError(
-                f"{label} data group {image_data_group_name!r} does not register "
+                f"{label} data group {data_group_name!r} does not register "
                 f"roles {missing_roles}."
             )
         missing_variables = [
@@ -1318,8 +1643,16 @@ def form_residual_grid_from_cache(
             raise KeyError(f"{label} is missing variables {missing_variables}.")
         return variable_names
 
-    observed_names = _registered_arrays(observed_grid_xds, "observed_grid_xds")
-    model_names = _registered_arrays(model_grid_xds, "model_grid_xds")
+    observed_names = _registered_arrays(
+        observed_grid_xds,
+        "observed_grid_xds",
+        image_data_group_in_observed,
+    )
+    model_names = _registered_arrays(
+        model_grid_xds,
+        "model_grid_xds",
+        image_data_group_in_model,
+    )
 
     observed_grid = observed_grid_xds[observed_names["visibility"]]
     model_grid = model_grid_xds[model_names["visibility"]]
@@ -1376,13 +1709,32 @@ def form_residual_grid_from_cache(
 def form_mfs_residual_grid_from_cache(
     observed_grid_xds,
     model_grid_xds,
-    image_data_group_name="residual",
+    image_data_group_in_observed="residual",
+    image_data_group_in_model="residual",
 ):
-    """Form an MFS Taylor residual grid using the generic cache operation."""
+    """Form an MFS Taylor residual grid using the generic cache operation.
+
+    Parameters
+    ----------
+    observed_grid_xds : xarray.Dataset
+        Cached observed-data Taylor UV grid.
+    model_grid_xds : xarray.Dataset
+        Predicted-model Taylor UV grid for the current cycle.
+    image_data_group_in_observed : str, optional
+        Observed-grid data group registering the visibility arrays.
+    image_data_group_in_model : str, optional
+        Model-grid data group registering the visibility arrays.
+
+    Returns
+    -------
+    xarray.Dataset
+        Residual Taylor UV grid formed as observed minus model.
+    """
     return form_residual_grid_from_cache(
         observed_grid_xds,
         model_grid_xds,
-        image_data_group_name=image_data_group_name,
+        image_data_group_in_observed=image_data_group_in_observed,
+        image_data_group_in_model=image_data_group_in_model,
         grid_kind="MFS",
     )
 
@@ -1393,7 +1745,7 @@ def residual_update_continuum_single_field(
     img_xds,
     image_params,
     imaging_weights_params,
-    specmode="mfs",
+    continuum_mode="mfs",
     primary_beam_xds=None,
     processing_set_data_group_name="corrected",
     deconvolver="hogbom",
@@ -1404,11 +1756,11 @@ def residual_update_continuum_single_field(
     image_data_variables_keep=None,
     visibility_memory_mode="recompute",
     observed_visibility_grid_xds=None,
-    is_n_iter_0=True,
+    is_first_cycle=True,
     model_xds=None,
     model_uv_xds=None,
     task_id=0,
-    pblimit=0.2,
+    primary_beam_limit=0.2,
 ):
     """Perform one continuum imaging-cycle update for a single frequency chunk.
 
@@ -1432,12 +1784,25 @@ def residual_update_continuum_single_field(
 
     Parameters
     ----------
-    specmode : {"mfs", "mvc"}
-        Select Taylor UV gridding or frequency-resolved MVC processing.
+    continuum_mode : {"mfs", "mvc"}
+        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
+        the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
+        both the intrinsic source spectral index and the primary-beam spectral
+        index. Its reference-frequency primary beam corrects the Taylor-zero
+        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        channel images and common-beam Taylor equations, and predicts
+        ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
+        the intrinsic spectrum under the common-beam convention, so
+        ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
+        match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
+        parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
     primary_beam_xds : xarray.Dataset, optional
         Cached primary beam for this MVC partition.
     observed_visibility_grid_xds : xarray.Dataset, optional
-        Cached observed UV planes for this MVC partition.
+        Task-local cached observed visibility grid used by later residual-update
+        cycles. The distributed application supplies this only for in-memory MVC
+        caching; other modes and first cycles leave it unset.
     model_xds : xarray.Dataset, optional
         Accumulated image-domain Taylor model used for MVC prediction.
     ps_xdt : xarray.DataTree
@@ -1448,37 +1813,80 @@ def residual_update_continuum_single_field(
         products.
 
     image_params : dict
-        Image geometry and continuum imaging configuration.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
+        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
 
     imaging_weights_params : dict
-        Imaging-weight configuration.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
 
     processing_set_data_group_name : str, optional
-        Processing-set data group to image.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
 
     deconvolver : str, optional
-        Reserved for future continuum deconvolution implementations.
+        Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
+        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
+        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
+        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
+        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
+        are refused before anything is written.
 
     instrument_polarization_basis : {"linear", "circular"}, optional
-        Instrument correlation basis used during gridding and degridding.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
 
     single_precision_image : bool, optional
-        Whether continuum products use single precision.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the lower-level processing functions.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     fft_backend : str, optional
-        FFT backend used by the underlying processing functions.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
 
     image_data_variables_keep : list of str, optional
-        Logical image products retained in the returned dataset.
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        Cache observed UV grids in memory or the image store, or recompute
-        residual visibilities each cycle. MFS caches reduced Taylor grids;
-        MVC caches each map task's frequency planes.
-    is_n_iter_0 : bool, optional
+        Continuum residual-update storage policy for observed visibility grids.
+        ``"in_memory"`` retains the first-cycle grid in driver memory, while
+        ``"in_place"`` stores it temporarily in the image Zarr store. Later
+        cycles grid only the predicted-model contribution and subtract it from
+        the cached observed grid. ``"recompute"`` instead reloads the original
+        observed visibilities and grids their visibility-domain residual every
+        cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
+        map task's exclusively owned frequency-resolved UV planes.
+    is_first_cycle : bool, optional
         Indicates whether this is the first imaging cycle.
 
     model_uv_xds : xarray.Dataset, optional
@@ -1486,9 +1894,9 @@ def residual_update_continuum_single_field(
         all imaging cycles after the first.
 
     task_id : int, optional
-        Identifier of the current frequency chunk.
+        Identifier of the parallel chunk being processed.
 
-    pblimit : float, optional
+    primary_beam_limit : float, optional
         Channel primary-beam cutoff used by MVC map-local Taylor construction.
 
     Returns
@@ -1524,7 +1932,7 @@ def residual_update_continuum_single_field(
     # Setup phase
     # -------------------------------------------------------------
 
-    if is_n_iter_0:
+    if is_first_cycle:
         (
             img_xds,
             setup_return_df,
@@ -1534,7 +1942,7 @@ def residual_update_continuum_single_field(
             img_xds,
             image_params,
             imaging_weights_params,
-            specmode=specmode,
+            continuum_mode=continuum_mode,
             processing_set_data_group_name=processing_set_data_group_name,
             single_precision_image=single_precision_image,
             processing_function_threads=processing_function_threads,
@@ -1566,31 +1974,11 @@ def residual_update_continuum_single_field(
                 new_data_group_name=image_data_group_out_name,
                 new_data_group={
                     "description": "Continuum residual products.",
-                    "date": "2026",
                 },
             )
 
-        # Needs to be refactored at a later point when decided what to do with weights
-        # start = time.time()
-
-        # calculate_imaging_weights(
-        #    ps_xdt,
-        #    img_xds,
-        #    imaging_weights_params=imaging_weights_params,
-        #    return_weight_density_grid=False,
-        #    ms_data_group_in_name=processing_set_data_group_name,
-        #    ms_data_group_out_name=processing_set_data_group_name,
-        #    ms_data_group_out_modified={
-        #        "weight_imaging": "WEIGHT_IMAGING",
-        #    },
-        #    processing_function_threads=processing_function_threads,
-        # )
-
-        # T_weights = time.time() - start
-
         setup_return_df = pd.DataFrame({})
 
-        # timing["T_prep"] = T_weights
         accumulate_timing(
             timing,
             setup_return_df,
@@ -1607,8 +1995,8 @@ def residual_update_continuum_single_field(
         img_xds,
         model_uv_xds,
         image_params,
-        is_n_iter_0,
-        specmode=specmode,
+        is_first_cycle,
+        continuum_mode=continuum_mode,
         model_xds=model_xds,
         primary_beam_xds=primary_beam_xds,
         processing_set_data_group_name=processing_set_data_group_name,
@@ -1633,8 +2021,8 @@ def residual_update_continuum_single_field(
 
     mvc_observed_grid_xds = None
     if (
-        str(specmode).lower() == "mvc"
-        and is_n_iter_0
+        str(continuum_mode).lower() == "mvc"
+        and is_first_cycle
         and visibility_memory_mode != "recompute"
     ):
         residual_group = img_xds.attrs["data_groups"]["residual"]
@@ -1646,8 +2034,8 @@ def residual_update_continuum_single_field(
         mvc_observed_grid_xds.attrs = img_xds.attrs.copy()
         mvc_observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
 
-    if str(specmode).lower() == "mvc":
-        from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    if str(continuum_mode).lower() == "mvc":
+        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
             ifft_norm_img_xds,
         )
 
@@ -1672,7 +2060,7 @@ def residual_update_continuum_single_field(
                 "The MVC map task did not create its channel residual image cube."
             )
 
-        if is_n_iter_0:
+        if is_first_cycle:
             img_xds = ifft_norm_img_xds(
                 img_xds,
                 image_params=image_params,
@@ -1711,19 +2099,13 @@ def residual_update_continuum_single_field(
 
         contributions = make_mvc_taylor_normal_equation_contributions(
             img_xds["SKY_RESIDUAL_MVC_CUBE"],
-            (img_xds["POINT_SPREAD_FUNCTION_MVC_CUBE"] if is_n_iter_0 else None),
+            (img_xds["POINT_SPREAD_FUNCTION_MVC_CUBE"] if is_first_cycle else None),
             primary_beam,
             img_xds["VISIBILITY_NORMALIZATION"],
-            img_xds["UV_SAMPLING_NORMALIZATION"] if is_n_iter_0 else None,
-            nterms=image_params.get("nterms", 2),
-            reference_frequency=image_params.get(
-                "reference_frequency",
-                image_params.get(
-                    "reference_frequency_hz",
-                    float(np.mean(img_xds.coords["frequency"].values)),
-                ),
-            ),
-            pblimit=pblimit,
+            img_xds["UV_SAMPLING_NORMALIZATION"] if is_first_cycle else None,
+            n_taylor_terms=image_params.get("n_taylor_terms", 2),
+            reference_frequency=image_params["reference_frequency"],
+            primary_beam_limit=primary_beam_limit,
         )
         for variable_name, data_array in contributions.data_vars.items():
             img_xds[variable_name] = data_array
@@ -1744,7 +2126,7 @@ def residual_update_continuum_single_field(
         "frequency",
         len(img_xds.coords.get("frequency", [])),
     )
-    timing["nterms"] = image_params.get("nterms", 2)
+    timing["n_taylor_terms"] = image_params.get("n_taylor_terms", 2)
 
     timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})
 
@@ -1756,8 +2138,83 @@ def residual_update_continuum_single_field(
 ###############################################################################
 
 
+def _continuum_clean_support(
+    img_xds, image_data_group_in_name, residual_plane, control_params
+):
+    """The pixels of Taylor term zero that may be cleaned, or ``None``.
+
+    One support for the stop test (:func:`build_continuum_residual_imaging_dict`)
+    and the native MT-MFS model update, so that a plane is never kept going
+    for a peak its model update may not clean. It is the clean mask of the
+    data group (values above 0.5) or, without one, the pixels where the
+    primary beam is at least ``primary_beam_limit`` times its peak and not 0.
+    When both are present, their intersection is used so an explicit mask
+    cannot re-enable pixels below the primary-beam cutoff.
+    ``primary_beam_limit`` defaults to 0, every pixel where the primary beam
+    is above 0, as for the continuum Högbom model update and cube imaging,
+    which make the same mask with the same default
+    (:func:`~astroviper.processing_functions.image_analysis.make_mask.make_mask`):
+    the residual holds the sky seen through the primary beam wherever that
+    is above 0, and a source there that is not cleaned leaves its sidelobes
+    across the image.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Continuum image dataset holding the residual data group.
+    image_data_group_in_name : str
+        Residual data group whose ``mask`` or ``primary_beam`` role gives the
+        support.
+    residual_plane : xarray.DataArray
+        Taylor term zero of the residual, dimensions
+        ``(time, polarization, l, m)``; the support is broadcast to it.
+    control_params : dict
+        Cycle control or model update parameters; ``primary_beam_limit``
+        (default 0) is read from it.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Boolean support, shape ``(time, polarization, l, m)``; ``None`` when
+        the data group has neither a mask nor a primary beam.
+    """
+    import numpy as np
+
+    group = img_xds.attrs["data_groups"][image_data_group_in_name]
+
+    def plane_zero(array):
+        selection = {
+            dim: 0
+            for dim in ("taylor_term", "psf_taylor_order", "frequency")
+            if dim in array.dims
+        }
+        return array.isel(selection, drop=True)
+
+    mask_name = group.get("mask")
+    primary_beam_name = group.get("primary_beam")
+    support = None
+    if mask_name is not None:
+        support = plane_zero(img_xds[mask_name]).broadcast_like(residual_plane) > 0.5
+    if primary_beam_name is not None:
+        primary_beam = plane_zero(img_xds[primary_beam_name])
+        primary_beam_limit = float(control_params.get("primary_beam_limit", 0.0))
+        primary_beam_support = (
+            (primary_beam >= primary_beam_limit * primary_beam.max(skipna=True))
+            & (primary_beam != 0)
+        ).broadcast_like(residual_plane)
+        support = (
+            primary_beam_support if support is None else support & primary_beam_support
+        )
+    if support is None:
+        return None
+    return np.ascontiguousarray(
+        support.transpose("time", "polarization", "l", "m").values,
+        dtype=bool,
+    )
+
+
 def build_continuum_residual_imaging_dict(
-    img_xds, image_data_group_in_name, iteration_control_params
+    img_xds, image_data_group_in_name, cycle_control_params
 ):
     """Present Taylor-zero residual statistics as one plane to the controller.
 
@@ -1770,6 +2227,22 @@ def build_continuum_residual_imaging_dict(
     history entries are advanced. When entropy stopping is enabled, residual
     entropy and SNR are measured on Taylor term zero using that same clean
     support. The cube workflow is unchanged.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Continuum image containing residual, PSF-sidelobe, mask, and optional
+        primary-beam products.
+    image_data_group_in_name : str
+        Image data group registering the residual products.
+    cycle_control_params : dict
+        CLEAN gain, mask/PB support, and optional entropy-stop configuration.
+
+    Returns
+    -------
+    astroviper.processing_functions.imaging.utils.ImagingDict
+        One synthetic frequency plane of residual statistics for the shared
+        iteration controller.
     """
     import numpy as np
     import xarray as xr
@@ -1783,7 +2256,7 @@ def build_continuum_residual_imaging_dict(
     )
 
     entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
-        validate_entropy_params(iteration_control_params)
+        validate_entropy_params(cycle_control_params)
     )
 
     group = img_xds.attrs["data_groups"][image_data_group_in_name]
@@ -1799,19 +2272,11 @@ def build_continuum_residual_imaging_dict(
     residual = plane_zero(img_xds[group["sky"]]).transpose(
         "time", "polarization", "l", "m"
     )
-    mask_name = group.get("mask")
-    if mask_name is not None:
-        support = plane_zero(img_xds[mask_name]).broadcast_like(residual) > 0.5
-    elif group.get("primary_beam") is not None:
-        pb = plane_zero(img_xds[group["primary_beam"]])
-        support = (
-            pb
-            >= iteration_control_params.get("primary_beam_limit", 0.0)
-            * pb.max(skipna=True)
-        ).broadcast_like(residual) & (pb != 0).broadcast_like(residual)
-    else:
-        support = xr.ones_like(residual, dtype=bool)
-    support = support.transpose(*residual.dims).values
+    support = _continuum_clean_support(
+        img_xds, image_data_group_in_name, residual, cycle_control_params
+    )
+    if support is None:
+        support = np.ones(residual.shape, dtype=bool)
     absolute = np.abs(residual.values)
     sidelobe = plane_zero(
         img_xds[
@@ -1826,13 +2291,13 @@ def build_continuum_residual_imaging_dict(
     if entropy_stop:
         entropy_residual = residual.expand_dims(frequency=[0], axis=1)
         entropy_image = entropy_residual.to_dataset(name="SKY_RESIDUAL")
-        entropy_image["CLEAN_MASK"] = xr.DataArray(
+        entropy_image["MASK"] = xr.DataArray(
             support[:, np.newaxis],
             dims=entropy_residual.dims,
             coords=entropy_residual.coords,
         )
         entropy_image.attrs["data_groups"] = {
-            "residual": {"sky": "SKY_RESIDUAL", "mask": "CLEAN_MASK"}
+            "residual": {"sky": "SKY_RESIDUAL", "mask": "MASK"}
         }
         entropy, residual_snr = imgstats.image_residual_entropy(
             entropy_image,
@@ -1852,7 +2317,7 @@ def build_continuum_residual_imaging_dict(
                 "masksum": int(np.count_nonzero(selected)),
                 "iter_done": 0,
                 "max_psf_sidelobe": float(sidelobe[tt, pp]),
-                "gain": iteration_control_params.get("gain", 0.1),
+                "gain": cycle_control_params.get("gain", 0.1),
             }
             if entropy_stop:
                 fields["entropy"] = float(entropy[tt, 0, pp])
@@ -1881,13 +2346,17 @@ def _model_update_native_mtmfs(
     import numpy as np
     import pandas as pd
 
+    from astroviper.processing_functions.imaging.deconvolution import (
+        _divergence_factors,
+    )
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
     from astroviper.processing_functions.imaging.utils import ImagingDict, StopCode
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
         MODEL_UPDATE_STOP_DESCRIPTIONS,
     )
 
+    stored_residual_dims = img_xds[residual_name].dims
     residual_da = img_xds[residual_name].transpose(
         "time", "taylor_term", "polarization", "l", "m"
     )
@@ -1896,19 +2365,19 @@ def _model_update_native_mtmfs(
     )
     residual = residual_da.values
     psf = psf_da.values
-    ntime, nterms, npol, nl, nm = residual.shape
+    ntime, n_taylor_terms, npol, nl, nm = residual.shape
 
-    if not 2 <= nterms <= 4:
+    if not 2 <= n_taylor_terms <= 4:
         raise ValueError(
             "Native MT-MFS continuum deconvolution requires 2 to 4 Taylor "
-            f"terms; received {nterms}."
+            f"terms; received {n_taylor_terms}."
         )
-    expected_psf_terms = 2 * nterms - 1
+    expected_psf_terms = 2 * n_taylor_terms - 1
     if psf.shape != (ntime, expected_psf_terms, npol, nl, nm):
         raise ValueError(
             "POINT_SPREAD_FUNCTION must have shape "
             f"(time, {expected_psf_terms}, polarization, l, m) for "
-            f"nterms={nterms}; received {psf.shape}."
+            f"n_taylor_terms={n_taylor_terms}; received {psf.shape}."
         )
     if residual.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
         raise TypeError(
@@ -1921,33 +2390,20 @@ def _model_update_native_mtmfs(
             f"received {residual.dtype} and {psf.dtype}."
         )
 
-    residual_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    # A read-only source cannot receive the native kernel's residual update.
+    # Give the dataset writable storage while preserving its current layout;
+    # individual non-canonical Taylor stacks are handled below.
+    if not residual.flags.writeable:
+        residual = np.array(residual, copy=True, order="K")
+        residual_da = residual_da.copy(data=residual)
+        img_xds[residual_name] = residual_da.transpose(*stored_residual_dims)
+
     reference_plane = residual_da.isel(taylor_term=0, drop=True)
-    mask_name = residual_group.get("mask")
-    if mask_name is not None:
-        mask_da = img_xds[mask_name]
-        selection = {
-            dim: 0
-            for dim in ("taylor_term", "frequency", "psf_taylor_order")
-            if dim in mask_da.dims
-        }
-        support_da = mask_da.isel(selection, drop=True).broadcast_like(reference_plane)
-        support_da = support_da > 0.5
-    elif residual_group.get("primary_beam") is not None:
-        primary_beam = img_xds[residual_group["primary_beam"]]
-        selection = {
-            dim: 0
-            for dim in ("taylor_term", "frequency", "psf_taylor_order")
-            if dim in primary_beam.dims
-        }
-        primary_beam = primary_beam.isel(selection, drop=True)
-        primary_beam_limit = float(deconvolve_params.get("primary_beam_limit", 0.2))
-        support_da = (
-            primary_beam >= primary_beam_limit * primary_beam.max(skipna=True)
-        ).broadcast_like(reference_plane)
-    else:
-        support_da = reference_plane.notnull()
-    support = support_da.transpose("time", "polarization", "l", "m").values
+    support = _continuum_clean_support(
+        img_xds, image_data_group_in_name, reference_plane, deconvolve_params
+    )
+    if support is None:
+        support = reference_plane.notnull().values
 
     max_sidelobe = img_xds[max_sidelobe_name]
     selection = {
@@ -1976,31 +2432,98 @@ def _model_update_native_mtmfs(
             )
         return values[tt, 0, pp]
 
+    # A call without the per-cycle limits (outside the imaging cycle loop) is
+    # one model update with all of max_iter left, as in deconvolve():
+    # min(max_iter_per_cycle, max_iter), a negative cap meaning no cap, and
+    # the absolute threshold.
+    max_iter_total = int(deconvolve_params.get("max_iter", 0))
+    cap = deconvolve_params.get("max_iter_per_cycle")
+    cap = max_iter_total if cap is None or int(cap) < 0 else int(cap)
+    default_max_iter = min(cap, max_iter_total)
+    default_threshold = deconvolve_params.get("threshold")
+    default_threshold = 0.0 if default_threshold is None else default_threshold
+    # The divergence test of the model update, made by the kernel on the
+    # Taylor-zero residual: a plane is stopped as diverged when the RMS of
+    # that residual has been above (1 + gain) times the lowest RMS of the
+    # model update for max_iter_divergence consecutive iterations, or at once
+    # when its peak exceeds (1 + gain) times its peak at the start of the
+    # model update. max_iter_divergence defaults to 1 as in deconvolve(), and
+    # -1 turns the test off. The RMS limit is that of Asp, not Hogbom's
+    # (1 + gain / 10): in healthy MT-MFS model updates the Taylor-zero RMS
+    # can rise by more than gain / 10 above its lowest value (a component
+    # subtracted where that residual is not shaped like the PSF raises it),
+    # and the tighter limit stopped such updates after a few components.
+    # The peak limit is Hogbom's; it stops a runaway. gain and
+    # max_iter_divergence are checked as deconvolve() checks them: the
+    # limits need 0 < gain <= 1, so the kernel's adaptive gain (gain <= 0)
+    # is refused as on the Hogbom path.
+    gain = deconvolve_params.get("gain", 0.1)
+    max_iter_divergence = deconvolve_params.get("max_iter_divergence", 1)
+    if not 0 < gain <= 1:
+        raise ValueError("CLEAN gain must be between 0 and 1.")
+    if (
+        isinstance(max_iter_divergence, bool)
+        or not isinstance(max_iter_divergence, int | np.integer)
+        or not (max_iter_divergence == -1 or max_iter_divergence >= 1)
+    ):
+        raise ValueError(
+            "max_iter_divergence must be a positive integer, or -1 to "
+            f"disable the divergence test; got {max_iter_divergence!r}."
+        )
+    _, limit = _divergence_factors(gain)
+    divergence = {
+        "max_iter_divergence": int(max_iter_divergence),
+        "divergence_rms_factor": limit,
+        "divergence_peak_factor": limit,
+    }
+
     model = np.zeros_like(residual)
     imaging_dict = ImagingDict()
     start = time.time()
     for tt in range(ntime):
         for pp in range(npol):
-            # Pass the writable Taylor-stack view directly. Its spatial planes
-            # are contiguous; the native binding honors the Taylor-term stride
-            # introduced by the polarization axis and updates SKY_RESIDUAL in
-            # place without allocating a second residual stack.
-            residual_work = residual[tt, :, pp, :, :]
-            psf_work = np.ascontiguousarray(psf[tt, :, pp, :, :])
-            model_work = np.zeros_like(residual_work)
+            residual_view = residual[tt, :, pp, :, :]
+            itemsize = residual_view.dtype.itemsize
+            plane_bytes = nl * nm * itemsize
+            native_layout = (
+                residual_view.flags.writeable
+                and residual_view.strides[2] == itemsize
+                and residual_view.strides[1] == nm * itemsize
+                and residual_view.strides[0] >= plane_bytes
+                and residual_view.strides[0] % itemsize == 0
+            )
+            # Preserve the zero-copy path for canonical image storage. MVC and
+            # external callers may instead place Taylor terms after the image
+            # axes; copy those stacks into the native layout and write them back.
+            residual_work = (
+                residual_view
+                if native_layout
+                else np.array(residual_view, copy=True, order="C")
+            )
+            psf_view = psf[tt, :, pp, :, :]
+            psf_work = (
+                psf_view
+                if psf_view.flags.c_contiguous
+                else np.ascontiguousarray(psf_view)
+            )
+            model_view = model[tt, :, pp, :, :]
+            model_native_layout = model_view.flags.c_contiguous
+            model_work = (
+                model_view if model_native_layout else np.zeros_like(residual_work)
+            )
             mask_work = np.ascontiguousarray(support[tt, pp], dtype=residual_work.dtype)
             selected = support[tt, pp] & np.isfinite(residual_work[0])
             start_peak = float(np.max(np.abs(residual_work[0][selected]), initial=0.0))
             start_peak_nomask = float(np.max(np.abs(residual_work[0]), initial=0.0))
             threshold_per_cycle = float(
-                plane_control("threshold_per_cycle", tt, pp, 0.0)
+                plane_control("threshold_per_cycle", tt, pp, default_threshold)
             )
             max_iter = int(
                 plane_control(
-                    "max_iter_per_cycle",
+                    "max_iter_per_cycle_updated",
                     tt,
                     pp,
-                    deconvolve_params.get("max_iter", 0),
+                    default_max_iter,
                 )
             )
             result = mtmfs.clean(
@@ -2010,18 +2533,22 @@ def _model_update_native_mtmfs(
                 mask=mask_work,
                 scales=deconvolve_params.get("scales", []),
                 small_scale_bias=deconvolve_params.get("small_scale_bias", 0.0),
-                max_iter_per_cycle=max_iter,
+                max_iter_per_cycle_updated=max_iter,
                 gain=deconvolve_params.get("gain", 0.1),
                 threshold_per_cycle=threshold_per_cycle,
                 mask_threshold=deconvolve_params.get("mask_threshold", 0.9),
+                **divergence,
             )
-            model[tt, :, pp, :, :] = model_work
+            if not native_layout:
+                residual_view[...] = residual_work
+            if not model_native_layout:
+                model_view[...] = model_work
             final_selected = support[tt, pp] & np.isfinite(residual_work[0])
             model_update_stop_code = int(result["stop_code"])
             fields = {
                 "max_iter": deconvolve_params.get("max_iter"),
                 "threshold_per_cycle": threshold_per_cycle,
-                "iter_done": int(result["iter_done"]),
+                "iter_done": int(result["iterations_performed"]),
                 "gain": deconvolve_params.get("gain", 0.1),
                 "max_psf_sidelobe": float(max_sidelobe[tt, pp]),
                 "stop_code": StopCode(
@@ -2032,13 +2559,13 @@ def _model_update_native_mtmfs(
                     model_update_stop_code
                 ],
                 "stokes": img_xds.coords["polarization"].values[pp],
-                "frequency": img_xds.attrs.get("reference_frequency", 0.0),
+                "frequency": float(_continuum_frequency_coord(img_xds)[0]),
                 "time": img_xds.coords["time"].values[tt],
                 "start_model_flux": 0.0,
                 "model_flux": float(result["model_flux"]),
                 "start_peakres": start_peak,
                 "start_peakres_nomask": start_peak_nomask,
-                "peakres": float(result["peakres"]),
+                "peakres": float(result["peak_residual"]),
                 "peakres_nomask": float(np.max(np.abs(residual_work[0]), initial=0.0)),
                 "masksum": int(np.count_nonzero(final_selected)),
                 "scales": result["scales"],
@@ -2061,7 +2588,7 @@ def model_update_mtmfs_single_field(
     img_xds,
     deconvolver,
     deconvolve_params,
-    is_n_iter_0=True,
+    is_first_cycle=True,
     processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
@@ -2071,7 +2598,7 @@ def model_update_mtmfs_single_field(
 
     Dispatch the continuum model update to native MT-MFS or to the compatibility
     Högbom path. Native MT-MFS receives each complete Taylor stack directly as
-    ``(nterms, l, m)``. Högbom temporarily projects Taylor term zero onto a
+    ``(n_taylor_terms, l, m)``. Högbom temporarily projects Taylor term zero onto a
     single-frequency cube representation.
 
     The procedure is
@@ -2110,34 +2637,54 @@ def model_update_mtmfs_single_field(
         function uses ``psf_taylor_order``.
 
     deconvolver : str
-        ``"mtmfs"`` uses the native Taylor-stack deconvolver for two to four
-        Taylor terms. ``"hogbom"`` cleans Taylor term zero. The public
-        continuum-imaging API resolves an MT-MFS request with one Taylor term
-        to Högbom before this processing-function boundary.
+        Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
+        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
+        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
+        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
+        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
+        are refused before anything is written.
 
     deconvolve_params : dict
-        Minor-cycle control parameters. These typically include entries such as
-        ``max_iter``, ``max_iter_per_cycle``, ``threshold_per_cycle``, ``gain``,
-        ``scales``, ``small_scale_bias``, and ``mask_threshold``.
+        Model-update control parameters. These typically include entries such as
+        ``max_iter``, ``max_iter_per_cycle_updated``, ``threshold_per_cycle``,
+        ``gain``, ``scales``, ``small_scale_bias``, and ``mask_threshold``.
         The per-cycle limits and thresholds accept scalars or per-plane arrays,
-        using the same keys as the cube deconvolver.
+        using the same keys as the cube deconvolver. Without them the limit is
+        ``min(max_iter_per_cycle, max_iter)`` (a negative
+        ``max_iter_per_cycle`` means no cap) and ``threshold_per_cycle`` is
+        ``threshold``, as in the cube deconvolver. ``max_iter_divergence``
+        (default 1, ``-1`` turns the test off) sets the divergence test of
+        the model update, made on the Taylor-zero residual: a plane stops
+        when its RMS has been above ``(1 + gain)`` times the lowest RMS of
+        the model update for that many iterations in a row (the limit of
+        Asp), or at once when its peak exceeds ``(1 + gain)`` times the
+        peak at the start of the model update. ``gain``
+        (``0 < gain <= 1``) and ``max_iter_divergence`` are checked as in
+        the cube deconvolver. Both deconvolvers restrict cleaning to pixels
+        where the primary beam is at least ``primary_beam_limit`` (default 0)
+        times its peak and not 0. When a clean mask is present, its intersection
+        with that PB support is used; the stop test measures the same pixels.
 
-    is_n_iter_0 : bool, optional
+    is_first_cycle : bool, optional
         Indicates whether this is the first model update.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the deconvolution backend.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     image_data_group_in_name : str, optional
-        Name of the residual image data group.
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
 
     image_data_group_out_name : str, optional
         Name of the output model data group.
 
     write_back_deconvolver_residual : bool, optional
         If ``True``, Högbom copies its updated residual back into Taylor term
-        zero of the residual, the only term it updates. Native MT-MFS always
-        updates the residual in place.
+        zero of the residual, the only term it updates. Where Högbom works on
+        a view of that term, it has updated it in place already, and the copy
+        changes nothing. Native MT-MFS always updates the residual in place.
 
     Returns
     -------
@@ -2161,6 +2708,11 @@ def model_update_mtmfs_single_field(
     import numpy as np
     import pandas as pd
     import xarray as xr
+
+    from astroviper.utils.data_group_tools import (
+        create_data_groups_in_and_out,
+        modify_data_groups_xds,
+    )
 
     deconvolver = deconvolver.lower()
     if deconvolver not in {"hogbom", "mtmfs"}:
@@ -2211,7 +2763,7 @@ def model_update_mtmfs_single_field(
     cube_deconvolve_params = copy.deepcopy(deconvolve_params)
 
     for parameter_name in (
-        "max_iter_per_cycle",
+        "max_iter_per_cycle_updated",
         "threshold_per_cycle",
     ):
         parameter_value = cube_deconvolve_params.get(parameter_name)
@@ -2286,16 +2838,9 @@ def model_update_mtmfs_single_field(
     # whereas the continuum products use Taylor dimensions.
     # ------------------------------------------------------------------
 
-    if "frequency" in img_xds.coords and img_xds.sizes.get("frequency", 0) > 0:
-        frequency_coord = np.atleast_1d(img_xds.coords["frequency"].values)[:1]
-    elif "reference_frequency" in img_xds.attrs:
-        frequency_coord = np.atleast_1d(img_xds.attrs["reference_frequency"])
-    else:
-        # The numerical value is irrelevant to Högbom CLEAN. The singleton
-        # dimension exists only to satisfy the cube image interface.
-        frequency_coord = np.asarray([0.0], dtype=np.float64)
+    frequency_coord = _continuum_frequency_coord(img_xds)
 
-    hogbom_xds = xr.Dataset(attrs=dict(img_xds.attrs))
+    hogbom_xds = xr.Dataset(attrs=copy.deepcopy(img_xds.attrs))
 
     # Preserve coordinates that do not depend on a Taylor-order dimension.
     for coord_name, coord in img_xds.coords.items():
@@ -2307,28 +2852,6 @@ def model_update_mtmfs_single_field(
             hogbom_xds = hogbom_xds.assign_coords({coord_name: coord.copy(deep=False)})
 
     hogbom_xds = hogbom_xds.assign_coords(frequency=("frequency", frequency_coord))
-
-    def _to_single_frequency(data_array, plane_dimension):
-        """Select plane zero and insert a singleton frequency dimension."""
-        plane = data_array.isel({plane_dimension: 0}, drop=True)
-
-        if "frequency" in plane.dims:
-            if plane.sizes["frequency"] != 1:
-                plane = plane.isel(frequency=0, drop=False)
-
-            return plane.assign_coords(frequency=frequency_coord)
-
-        # Insert frequency immediately after time to preserve the conventional
-        # image dimension ordering.
-        if "time" in plane.dims:
-            axis = plane.dims.index("time") + 1
-        else:
-            axis = 0
-
-        return plane.expand_dims(
-            frequency=frequency_coord,
-            axis=axis,
-        )
 
     # Copy Taylor-dependent variables into the temporary cube layout.
     max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
@@ -2352,9 +2875,8 @@ def model_update_mtmfs_single_field(
                 )
 
             elif "psf_taylor_order" in data_array.dims:
-                hogbom_xds[variable_name] = _to_single_frequency(
-                    data_array,
-                    "psf_taylor_order",
+                hogbom_xds[variable_name] = _continuum_plane_to_frequency(
+                    img_xds, data_array, "psf_taylor_order"
                 )
 
             elif "frequency" in data_array.dims:
@@ -2368,15 +2890,13 @@ def model_update_mtmfs_single_field(
                 )
 
         elif "taylor_term" in data_array.dims:
-            hogbom_xds[variable_name] = _to_single_frequency(
-                data_array,
-                "taylor_term",
+            hogbom_xds[variable_name] = _continuum_plane_to_frequency(
+                img_xds, data_array, "taylor_term"
             )
 
         elif "psf_taylor_order" in data_array.dims:
-            hogbom_xds[variable_name] = _to_single_frequency(
-                data_array,
-                "psf_taylor_order",
+            hogbom_xds[variable_name] = _continuum_plane_to_frequency(
+                img_xds, data_array, "psf_taylor_order"
             )
 
         elif "frequency" in data_array.dims:
@@ -2398,21 +2918,79 @@ def model_update_mtmfs_single_field(
     if "SKY_MODEL" not in hogbom_xds:
         hogbom_xds["SKY_MODEL"] = xr.zeros_like(hogbom_xds["SKY_RESIDUAL"])
 
+    # The Taylor-plane selection above can leave a strided view. Högbom's C++
+    # binding deliberately accepts only a C-contiguous bool mask, so make the
+    # one-plane adapter buffer explicit. The > 0.5 rule is the same mask
+    # interpretation used by continuum starting and stopping statistics; NaNs
+    # therefore remain outside the CLEAN support rather than becoming True.
+    hogbom_mask_name = hogbom_xds.attrs["data_groups"][image_data_group_in_name].get(
+        "mask"
+    )
+    hogbom_data_group = hogbom_xds.attrs["data_groups"][image_data_group_in_name]
+    primary_beam_name = hogbom_data_group.get("primary_beam")
+    if hogbom_mask_name is None and primary_beam_name in hogbom_xds:
+        from astroviper.processing_functions.image_analysis.make_mask import make_mask
+
+        make_mask(
+            hogbom_xds,
+            primary_beam_limit=cube_deconvolve_params.get("primary_beam_limit", 0.0),
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_in_name,
+            combine_mask=False,
+            overwrite=False,
+        )
+        hogbom_mask_name = hogbom_xds.attrs["data_groups"][image_data_group_in_name][
+            "mask"
+        ]
+
+    if hogbom_mask_name in hogbom_xds:
+        hogbom_mask = hogbom_xds[hogbom_mask_name].transpose(
+            "time", "frequency", "polarization", "l", "m", missing_dims="ignore"
+        )
+        if "frequency" not in hogbom_mask.dims:
+            hogbom_mask = hogbom_mask.expand_dims(
+                frequency=frequency_coord,
+                axis=1,
+            )
+        mask_values = np.asarray(hogbom_mask.values)
+        hogbom_xds[hogbom_mask_name] = hogbom_mask.copy(
+            data=np.ascontiguousarray(
+                np.isfinite(mask_values) & (mask_values > 0.5),
+                dtype=np.bool_,
+            )
+        )
+
     # Register the temporary model through the data-group interface expected by
     # deconvolve() and starting_statistics().
-    hogbom_xds.attrs.setdefault("data_groups", {})
-
-    hogbom_xds.attrs["data_groups"][image_data_group_out_name] = {
-        "sky": "SKY_MODEL",
-    }
-    model_name = hogbom_xds.attrs["data_groups"][image_data_group_out_name]["sky"]
+    _, hogbom_model_group = create_data_groups_in_and_out(
+        hogbom_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified={"sky": "SKY_MODEL"},
+        overwrite=True,
+    )
+    modify_data_groups_xds(
+        hogbom_xds,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out=hogbom_model_group,
+        description="Temporary single-plane Högbom continuum model.",
+    )
+    model_name = hogbom_model_group["sky"]
 
     T_make_hogbom_view = time.time() - start
 
-    # Convert to real numbers
-    hogbom_xds[residual_name] = hogbom_xds[residual_name].real.astype(np.float32)
-    hogbom_xds[psf_name] = hogbom_xds[psf_name].real.astype(np.float32)
-    hogbom_xds[model_name] = hogbom_xds[model_name].real.astype(np.float32)
+    # Högbom operates on real arrays but supports both image precisions. Match
+    # the residual precision throughout and avoid copying arrays already in the
+    # required real dtype.
+    float_dtype = hogbom_xds[residual_name].real.dtype
+    hogbom_xds[residual_name] = hogbom_xds[residual_name].real.astype(
+        float_dtype, copy=False
+    )
+    psf = hogbom_xds[psf_name].real
+    hogbom_xds[psf_name] = psf.copy(
+        data=np.ascontiguousarray(psf.values, dtype=float_dtype)
+    )
+    hogbom_xds[model_name] = hogbom_xds[model_name].real.astype(float_dtype, copy=False)
 
     # ------------------------------------------------------------------
     # Run the existing single-frequency Högbom model-update backend.
@@ -2427,7 +3005,7 @@ def model_update_mtmfs_single_field(
         hogbom_xds,
         deconvolver,
         cube_deconvolve_params,
-        model_exists=not is_n_iter_0,
+        model_exists=not is_first_cycle,
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
@@ -2465,6 +3043,20 @@ def model_update_mtmfs_single_field(
             hogbom_xds[residual_name].isel(frequency=0, drop=True).data
         )
 
+    _, continuum_model_group = create_data_groups_in_and_out(
+        img_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified={"sky": "SKY_MODEL"},
+        overwrite=True,
+    )
+    modify_data_groups_xds(
+        img_xds,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out=continuum_model_group,
+        description="Continuum model increment produced by Högbom CLEAN.",
+    )
+
     T_copy_model = time.time() - start
 
     return_df = pd.DataFrame(
@@ -2489,7 +3081,7 @@ def model_update_mtmfs_single_field(
 def accumulate_continuum_model(
     model_increment_xds,
     previous_model_xds=None,
-    specmode="mfs",
+    continuum_mode="mfs",
 ):
     """Create the accumulated continuum model for the next residual update.
 
@@ -2508,7 +3100,7 @@ def accumulate_continuum_model(
     previous_model_xds : xarray.Dataset, optional
         Accumulated model returned by the preceding append node. If omitted,
         the current model is copied as the initial accumulated state.
-    specmode : {"mfs", "mvc"}, default ``"mfs"``
+    continuum_mode : {"mfs", "mvc"}, default ``"mfs"``
         Continuum execution mode. MVC retains the effective primary beam with
         the accumulated Taylor model.
 
@@ -2536,10 +3128,10 @@ def accumulate_continuum_model(
             f"{type(model_increment_xds).__name__}."
         )
 
-    specmode = str(specmode).lower()
-    if specmode not in ("mfs", "mvc"):
+    continuum_mode = str(continuum_mode).lower()
+    if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
 
     if "SKY_MODEL" not in model_increment_xds:
@@ -2547,7 +3139,7 @@ def accumulate_continuum_model(
 
     if previous_model_xds is None:
         model_variable_names = ["SKY_MODEL"]
-        if specmode == "mvc":
+        if continuum_mode == "mvc":
             model_variable_names.append("PRIMARY_BEAM")
 
         missing = [
@@ -2598,7 +3190,7 @@ def accumulate_continuum_model(
 ###############################################################################
 
 
-def restore_image(
+def restore_continuum_image(
     img_xds,
     image_data_group_in_residual_name="residual",
     image_data_group_in_model_name="model",
@@ -2607,6 +3199,7 @@ def restore_image(
     primary_beam_correction=False,
     primary_beam_limit=0.2,
     primary_beam_key="primary_beam",
+    deconvolver="hogbom",
 ):
     """Restore the continuum image.
 
@@ -2672,6 +3265,11 @@ def restore_image(
     primary_beam_key : str, optional
         Role key of the primary beam in the residual data group.
 
+    deconvolver : {"hogbom", "mtmfs"}, optional
+        Deconvolver that produced the model. MT-MFS restoration applies the
+        Taylor Hessian's principal solution to a private residual copy before
+        selecting Taylor term zero. The stored residual remains unchanged.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -2692,7 +3290,6 @@ def restore_image(
 
     import copy
 
-    import numpy as np
     import xarray as xr
 
     # Alias the existing cube routine to avoid colliding with this wrapper.
@@ -2785,6 +3382,12 @@ def restore_image(
 
     psf_da = img_xds[psf_name]
 
+    restoration_residual_da = residual_da
+    if str(deconvolver).lower() == "mtmfs":
+        restoration_residual_da = _mtmfs_principal_residual_for_restoration(
+            residual_da, psf_da
+        )
+
     # ------------------------------------------------------------------
     # Resolve the fitted restoring beam.
     # ------------------------------------------------------------------
@@ -2828,48 +3431,27 @@ def restore_image(
 
         cube_xds = cube_xds.assign_coords({coord_name: coord.copy(deep=False)})
 
-    # The numerical frequency value is not used by restoration, but use the
-    # reference frequency when it is available to preserve meaningful metadata.
-    reference_frequency = img_xds.attrs.get("reference_frequency") or img_xds.attrs.get(
-        "reference_frequency_hz"
-    )
-
-    if reference_frequency is None:
-        frequency_value = np.asarray([0.0], dtype=np.float64)
-    else:
-        frequency_value = np.asarray(
-            [float(reference_frequency)],
-            dtype=np.float64,
-        )
-
+    frequency_value = _continuum_frequency_coord(img_xds)
     cube_xds = cube_xds.assign_coords(frequency=("frequency", frequency_value))
 
-    def _taylor_zero_to_frequency(data_array):
-        """Convert Taylor term zero into a singleton frequency plane."""
-        return (
-            data_array.isel(taylor_term=slice(0, 1))
-            .rename({"taylor_term": "frequency"})
-            .assign_coords(frequency=cube_xds.coords["frequency"])
-        )
-
-    cube_xds[residual_name] = _taylor_zero_to_frequency(residual_da)
-    cube_xds[model_name] = _taylor_zero_to_frequency(model_da)
+    cube_xds[residual_name] = _continuum_plane_to_frequency(
+        img_xds, restoration_residual_da, "taylor_term"
+    )
+    cube_xds[model_name] = _continuum_plane_to_frequency(
+        img_xds, model_da, "taylor_term"
+    )
 
     if "psf_taylor_order" in psf_da.dims:
         if psf_da.sizes["psf_taylor_order"] < 1:
             raise ValueError(f"PSF variable {psf_name!r} contains no Taylor orders.")
 
-        cube_xds[psf_name] = (
-            psf_da.isel(psf_taylor_order=slice(0, 1))
-            .rename({"psf_taylor_order": "frequency"})
-            .assign_coords(frequency=cube_xds.coords["frequency"])
+        cube_xds[psf_name] = _continuum_plane_to_frequency(
+            img_xds, psf_da, "psf_taylor_order"
         )
 
     elif "taylor_term" in psf_da.dims:
-        cube_xds[psf_name] = (
-            psf_da.isel(taylor_term=slice(0, 1))
-            .rename({"taylor_term": "frequency"})
-            .assign_coords(frequency=cube_xds.coords["frequency"])
+        cube_xds[psf_name] = _continuum_plane_to_frequency(
+            img_xds, psf_da, "taylor_term"
         )
 
     elif "frequency" in psf_da.dims:
@@ -3044,15 +3626,11 @@ def restore_image(
         )
 
     # ------------------------------------------------------------------
-    # Copy the restored reference-frequency plane back to Taylor layout.
+    # Store the restored reference-frequency plane without a spectral/Taylor
+    # axis. There is only one restored continuum plane; aligning it to the
+    # multi-term coordinate would otherwise create NaN-padded fake products.
     # ------------------------------------------------------------------
-    restored_da = (
-        cube_xds[restored_name]
-        .rename({"frequency": "taylor_term"})
-        .assign_coords(
-            taylor_term=img_xds.coords["taylor_term"].isel(taylor_term=slice(0, 1))
-        )
-    )
+    restored_da = cube_xds[restored_name].isel(frequency=0, drop=True)
 
     img_xds[restored_name] = restored_da
 
@@ -3064,16 +3642,13 @@ def restore_image(
                 "The cube restoration routine registered primary-beam-corrected "
                 f"variable {corrected_name!r}, but did not create it."
             )
-        continuum_corrected_name = "SKY_RESTORED_PBCOR"
+        continuum_corrected_name = "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
         img_xds[continuum_corrected_name] = cube_xds[corrected_name].isel(
             frequency=0, drop=True
         )
         continuum_restored_group["sky_primary_beam_corrected"] = (
             continuum_corrected_name
         )
-        img_xds.attrs.setdefault("data_groups", {})["restored_pbcor"] = {
-            "sky": continuum_corrected_name
-        }
 
     img_xds.attrs.setdefault("data_groups", {})[image_data_group_out_restore_name] = (
         continuum_restored_group

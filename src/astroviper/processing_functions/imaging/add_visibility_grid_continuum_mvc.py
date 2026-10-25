@@ -95,8 +95,8 @@ def add_visibility_grid_mvc_single_field(
     3. reduce those contributions and normalize the global Taylor products.
 
     """
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -131,14 +131,6 @@ def add_visibility_grid_mvc_single_field(
         raise ValueError(
             f"fft_padding must be finite and at least 1.0; received {fft_padding}."
         )
-
-    if int(processing_function_threads) < 1:
-        raise ValueError(
-            "processing_function_threads must be at least 1; "
-            f"received {processing_function_threads}."
-        )
-
-    processing_function_threads = int(processing_function_threads)
 
     # ------------------------------------------------------------------
     # Resolve input and output data groups.
@@ -450,7 +442,7 @@ def add_visibility_grid_mvc_single_field(
     grid = img_xds[visibility_name].values
     normalization = img_xds[normalization_name].values
 
-    prolate_spheroidal_grid(
+    anti_alias_grid(
         grid,
         normalization,
         visibility_data,
@@ -474,7 +466,7 @@ def add_visibility_grid_mvc_single_field(
     img_xds[visibility_name].attrs.update(
         {
             "description": ("Frequency-resolved MVC visibility UV grids."),
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
             "channel_mapping": "nearest",
             "n_frequency_planes": n_image_chan,
         }
@@ -483,7 +475,7 @@ def add_visibility_grid_mvc_single_field(
     img_xds[normalization_name].attrs.update(
         {
             "description": ("Per-frequency MVC visibility-grid normalization sums."),
-            "specmode": "mvc",
+            "continuum_mode": "mvc",
             "channel_mapping": "nearest",
             "n_frequency_planes": n_image_chan,
         }

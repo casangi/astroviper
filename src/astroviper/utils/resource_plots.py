@@ -10,7 +10,7 @@ is normal), ``memory_rss_bytes``, the cumulative syscall-level I/O counters
 ``write_bytes`` these count network filesystems such as Lustre), the scalar
 ``sample_interval_seconds`` and the wall-clock anchor ``start_unixtime``.
 
-Three complementary views:
+Four complementary views:
 
 * :func:`plot_task_resource_usage` -- tasks aligned at their OWN start
   (t=0 = task start): a subsample of individual task curves plus the average
@@ -47,7 +47,17 @@ __all__ = [
     "plot_task_stream",
     "plot_application_task_stream",
     "assign_task_stream_lanes",
+    "IMAGING_TASK_STREAM_COLUMNS",
 ]
+
+# The node task timing columns plot_task_stream draws by default, those of the
+# imaging node task: the task's total time, the columns of its load segment
+# and the column of its write segment.
+IMAGING_TASK_STREAM_COLUMNS = {
+    "task": "T_image_cube_task",
+    "load": ("T_make_empty_image", "T_load"),
+    "write": "T_write",
+}
 
 # Task-stream palette (colorblind-safe Okabe-Ito).
 _LOAD_COLOR, _SCIENCE_COLOR, _WRITE_COLOR = "#0072B2", "#009E73", "#E69F00"
@@ -161,6 +171,19 @@ def _driver_timeline(driver_timing, compute_start, compute_end, t0_abs):
             else:
                 color_of[lbl] = next(palette)
     return segments, app_start_rel, app_end_rel, color_of, setup_detail
+
+
+def _with_imaging_task_columns(tasks, task_columns):
+    """A copy of ``tasks`` with the ``task_columns`` timings under the imager's
+    column names, which the task stream draws."""
+    columns = {**IMAGING_TASK_STREAM_COLUMNS, **task_columns}
+    tasks = tasks.copy()
+    tasks["T_image_cube_task"] = tasks[columns["task"]]
+    tasks["T_make_empty_image"] = 0.0
+    load = list(columns["load"])
+    tasks["T_load"] = tasks[load].sum(axis=1) if load else 0.0
+    tasks["T_write"] = tasks[columns["write"]] if columns["write"] else 0.0
+    return tasks
 
 
 def _as_timing_frame(source):
@@ -550,13 +573,14 @@ def plot_application_task_stream(source, title=None, save_path=None):
     Unlike :func:`plot_task_stream`, which deliberately retains the historical
     final-graph view, this diagnostic consumes ``source["timing_graphs"]`` and
     gives each graph its own panel.  Panels are independently time-scaled so
-    short weighting graphs remain readable beside longer major-cycle graphs.
+    short weighting graphs remain readable beside longer imaging-cycle graphs.
 
     Parameters
     ----------
     source : dict
         Continuum application result containing ``timing_graphs``. Each record
-        supplies ``stage``, ``timing_node_tasks`` and compute-window anchors.
+        supplies ``stage``, structured ``stage_kind``,
+        ``timing_node_tasks`` and compute-window anchors.
     title : str, optional
         Overall figure title.
     save_path : str, optional
@@ -652,10 +676,13 @@ def plot_application_task_stream(source, title=None, save_path=None):
                     )
 
         stage = str(record.get("stage", f"graph {graph_index}"))
-        if "major loop" in stage:
-            post_label = "reduce + minor cycle"
-        elif "restoration" in stage:
+        stage_kind = record.get("stage_kind")
+        if stage_kind == "imaging_cycle":
+            post_label = "reduce + model update"
+        elif stage_kind == "final" and record.get("includes_restoration", False):
             post_label = "reduce + restoration"
+        elif stage_kind == "final":
+            post_label = "reduce + finalization"
         else:
             post_label = "reduce / gather"
         if graph_duration - task_end > 0.04 * graph_duration:
@@ -1047,6 +1074,7 @@ def plot_task_stream(
     title=None,
     save_path=None,
     html_path=None,
+    task_columns=None,
 ):
     """Dask-dashboard-style task stream: per-worker-process timeline of a run.
 
@@ -1125,6 +1153,14 @@ def plot_task_stream(
         time). Pure SVG + vanilla JavaScript -- no extra dependencies, works
         offline; one SVG element per task segment, so the file grows with the
         task count (~a few MB for a 15k-task run).
+    task_columns : dict, optional
+        The node task timing columns drawn, for node tasks other than the
+        imager's: ``"task"`` (the task's total time), ``"load"`` (the columns
+        summed into the load segment) and ``"write"`` (the write segment;
+        ``None`` for none), e.g. ``{"task": "T_simulate_task", "load": [],
+        "write": "T_write"}``. Missing keys keep the imager's columns
+        (:data:`IMAGING_TASK_STREAM_COLUMNS`); ``None`` (default) draws the
+        imager's.
 
     Returns
     -------
@@ -1143,6 +1179,8 @@ def plot_task_stream(
             "timeline -- skipping."
         )
         return None
+    if task_columns is not None:
+        tasks = _with_imaging_task_columns(tasks, task_columns)
     if isinstance(source, dict):
         if reduce_frame is None and source.get("timing_reduce_nodes"):
             reduce_frame = pd.DataFrame(source["timing_reduce_nodes"])
@@ -1286,7 +1324,7 @@ def plot_task_stream(
         _p(
             f"  application total          : {app_total:8.1f} s = "
             f"{setup:.1f} s driver setup + {compute_span:.1f} s compute + "
-            f"{finalize:.1f} s finalize (entire image_cube_single_field call)"
+            f"{finalize:.1f} s finalize (entire distributed application call)"
         )
         steps = " | ".join(
             [f"{lbl} {dur:.1f}" for lbl, dur in d_setup if dur >= 0.1]

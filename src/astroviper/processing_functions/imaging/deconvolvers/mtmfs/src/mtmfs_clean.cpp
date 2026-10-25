@@ -23,6 +23,34 @@ namespace mtmfs {
 
 namespace {
 
+// Inclusive pixel box [i0, i1] x [j0, j1]; empty when i1 < i0.
+struct Box {
+    int i0 = 0, j0 = 0, i1 = -1, j1 = -1;
+};
+
+// As in Asp's find_max_abs_mask_box: scan array * weight inside the nonzero
+// mask box, preserving the whole-image extrema and their first positions.
+// Keep MT-MFS's working precision and PeakResult return convention.
+template <typename T>
+PeakResult<T> find_max_abs_mask_box(const T* a, const T* w, int nx, int ny, const Box& box) {
+    T mn = 0, mx = 0;
+    int mnI = 0, mnJ = 0, mxI = 0, mxJ = 0;
+    if (box.i0 == 0 && box.j0 == 0 && box.i1 == nx - 1 && box.j1 == ny - 1)
+        mn = mx = a[0] * w[0];
+    for (int j = box.j0; j <= box.j1; ++j) {
+        const T* arow = a + static_cast<std::size_t>(j) * nx;
+        const T* wrow = w + static_cast<std::size_t>(j) * nx;
+        for (int i = box.i0; i <= box.i1; ++i) {
+            const T v = arow[i] * wrow[i];
+            if (v > mx) { mx = v; mxI = i; mxJ = j; }
+            if (v < mn) { mn = v; mnI = i; mnJ = j; }
+        }
+    }
+    PeakResult<T> result{mx, mxI, mxJ};
+    if (std::abs(mn) > std::abs(mx)) result = {mn, mnI, mnJ};
+    return result;
+}
+
 int beam_patch_extent(float max_scale_size, float psf_beam, float nbeams) {
     int psupport = static_cast<int>(std::sqrt(psf_beam * psf_beam + max_scale_size * max_scale_size) * nbeams);
     if (psupport < psf_beam * nbeams) psupport = static_cast<int>(psf_beam * nbeams);
@@ -373,9 +401,10 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
-                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle, T gain,
-                     T threshold_per_cycle, T mask_threshold, std::ptrdiff_t residual_term_stride) {
-    if (max_iter_per_cycle < 0) throw std::invalid_argument("max_iter_per_cycle must be >= 0");
+                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
+                     T threshold_per_cycle, T mask_threshold,
+                     const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride) {
+    if (max_iter_per_cycle_updated < 0) throw std::invalid_argument("max_iter_per_cycle_updated must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) ||
         !std::isfinite(static_cast<double>(threshold_per_cycle)) ||
         !std::isfinite(static_cast<double>(mask_threshold)))
@@ -444,6 +473,22 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         zero_region(nx - border - 1, border, nx - 1, ny - border - 1);
     }
 
+    // Build once from the final (smoothed, optionally binarised, border-cut)
+    // scale masks. These search boxes are independent of the moving update
+    // patch: candidates outside the previous component's patch remain valid.
+    std::vector<Box> scale_mask_boxes(ns, Box{});
+    for (int s = 0; s < ns; ++s) {
+        const auto& scale_mask = vec_scale_masks[static_cast<std::size_t>(s)];
+        Box box{nx, ny, -1, -1};
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i)
+                if (scale_mask[static_cast<std::size_t>(j) * nx + i] != static_cast<T>(0)) {
+                    box.i0 = std::min(box.i0, i); box.j0 = std::min(box.j0, j);
+                    box.i1 = std::max(box.i1, i); box.j1 = std::max(box.j1, j);
+                }
+        scale_mask_boxes[static_cast<std::size_t>(s)] = box;
+    }
+
     std::vector<std::vector<T>> mat_r(static_cast<std::size_t>(nt) * ns, std::vector<T>(nimg, static_cast<T>(0)));
     {
         std::vector<typename Work<T>::complex_t> dirty_ft(nspec), work(nspec);
@@ -473,6 +518,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     std::vector<T> max_scale_val(ns, static_cast<T>(0));
     std::vector<std::array<int, 2>> max_scale_pos(ns, {0, 0});
     std::vector<std::vector<T>> delta_model(nt, std::vector<T>(nimg, static_cast<T>(0)));
+    deconvolvers::PlaneStopTest<T> stop_test;
     auto coeff_at = [&](int scale, int t1, std::size_t k) -> T {
         T c = static_cast<T>(0);
         for (int t2 = 0; t2 < nt; ++t2)
@@ -482,12 +528,18 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     };
 
     auto check_convergence = [&](int itercount, bool component_selected) -> int {
-        const PeakResult<T> pr =
-            find_max_abs_mask<T>(mat_r[static_cast<std::size_t>(w.ind2(0, 0))].data(), vec_scale_masks[0].data(), nx, ny);
+        double sum_squares = 0.0;
+        const PeakResult<T> pr = find_max_abs_mask<T>(mat_r[static_cast<std::size_t>(w.ind2(0, 0))].data(),
+                                                      vec_scale_masks[0].data(), nx, ny, sum_squares);
         const T norma = static_cast<T>(1.0 / w.mat_a[0][0]);
         const T rmaxval = std::abs(pr.value * norma);
         int flag = 0;
-        if (std::abs(rmaxval) < threshold_per_cycle) flag = kStopThreshold;
+        if (std::abs(rmaxval) < threshold_per_cycle)
+            flag = kStopThreshold;
+        // Divergence test shared with the other deconvolvers, on the image and
+        // pixels of the threshold test.
+        else if (stop_test.check_divergence(rmaxval, sum_squares, divergence) != deconvolvers::STOP_NONE)
+            flag = kStopDiverged;
         if (component_selected && itercount > 1 && gain <= static_cast<T>(0)) {
             loopgain = (global_max_val < prev_max) ? loopgain * static_cast<T>(1.5) : loopgain / static_cast<T>(1.5);
             loopgain = std::min(static_cast<T>(0.6), loopgain);
@@ -507,11 +559,11 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
 
     int stop = check_convergence(0, false);
     int iterdone = 0;
-    if (stop == kStopThreshold) {
-        out.iter_done = 0;
-        out.stop_code = kStopThreshold;
+    if (stop != 0) {
+        out.iterations = 0;
+        out.stop_code = stop;
     } else {
-        for (int itercount = 0; itercount < max_iter_per_cycle; ++itercount) {
+        for (int itercount = 0; itercount < max_iter_per_cycle_updated; ++itercount) {
             global_max_val = static_cast<T>(-1e10);
             if (itercount == 0) {
                 blc = {0, 0};
@@ -528,8 +580,9 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                             acc += coeff_at(scale, t1, k) * mat_r[static_cast<std::size_t>(w.ind2(t1, scale))][k];
                         work[k] = acc;
                     }
-                const PeakResult<T> pr = find_max_abs_mask<T>(
-                    work.data(), vec_scale_masks[static_cast<std::size_t>(scale)].data(), nx, ny);
+                const PeakResult<T> pr = find_max_abs_mask_box<T>(
+                    work.data(), vec_scale_masks[static_cast<std::size_t>(scale)].data(), nx, ny,
+                    scale_mask_boxes[static_cast<std::size_t>(scale)]);
                 max_scale_val[static_cast<std::size_t>(scale)] = pr.value;
                 max_scale_pos[static_cast<std::size_t>(scale)] = {pr.ix, pr.iy};
             }
@@ -546,7 +599,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 static_cast<std::size_t>(global_max_pos[1]) * nx + static_cast<std::size_t>(global_max_pos[0]);
             const T mask_at_peak = vec_scale_masks[static_cast<std::size_t>(max_scale_index)][gpk];
             if (mask_at_peak == static_cast<T>(0) || global_max_val <= static_cast<T>(0)) {
-                stop = kStopNothingToClean;
+                stop = kStopThreshold;  // nothing left to clean
                 break;
             }
 
@@ -602,8 +655,8 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             stop = check_convergence(itercount, true);
             if (stop) break;
         }
-        if (stop == 0) stop = kStopMaxIter;
-        out.iter_done = iterdone;
+        if (stop == kStopNone && max_iter_per_cycle_updated > 0) stop = kStopMaxIter;
+        out.iterations = iterdone;
         out.stop_code = stop;
 
         // Free the search state before allocating the residual-update buffers.
@@ -627,9 +680,9 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     }
 
     if (mask != nullptr)
-        out.peakres = peak_abs_masked<T>(residual, mask, nimg);
+        out.peak_residual = peak_abs_masked<T>(residual, mask, nimg);
     else
-        out.peakres = peak_abs<T>(residual, nimg);
+        out.peak_residual = peak_abs<T>(residual, nimg);
     out.model_flux = sum_array<T>(model, nimg);
     return out;
 }
@@ -660,10 +713,10 @@ template int taylor_hessian<double>(const double*, int, int, int, std::vector<fl
                                     std::vector<double>&, std::vector<double>&, int&);
 template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
                                          const std::vector<float>&, float, int, float, float, float,
-                                         std::ptrdiff_t);
+                                         const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t);
 template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
                                            const std::vector<float>&, float, int, double, double, double,
-                                           std::ptrdiff_t);
+                                           const deconvolvers::DivergenceControl<double>&, std::ptrdiff_t);
 template void principal_solution<float>(float*, const double*, int, int, int);
 template void principal_solution<double>(double*, const double*, int, int, int);
 

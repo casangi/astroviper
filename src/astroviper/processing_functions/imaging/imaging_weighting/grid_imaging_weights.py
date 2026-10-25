@@ -53,12 +53,17 @@ def grid_imaging_weights(
     ----------
     grid : np.ndarray (float64/32), shape (n_chan, n_pol, n_u, n_v)
         Output UV-plane grid of *accumulated data weights*. Updated in-place.
-        For each (channel, polarization), the kernel adds the per-visibility
-        data weight at the nearest (u, v) pixel and its conjugate location.
+        For each (channel, polarization), nearest-cell mode adds the
+        per-visibility data weight at the rounded (u, v) pixel and its
+        conjugate location. CASA continuum mode truncates the shifted
+        coordinates, skips cell index 0 on either axis, and accepts the direct
+        and conjugate cells independently.
     sum_weight : np.ndarray (float64), shape (n_chan, n_pol)
         Per-(channel, polarization) sum of gridded data weights. Updated in-place.
-        The kernel adds ``2 * weight`` for each successfully gridded visibility
-        (accounting for the conjugate update).
+        Nearest-cell mode adds ``2 * weight`` when both Hermitian cells are in
+        bounds. CASA continuum mode adds ``weight`` for each independently
+        accepted direct or conjugate cell, hence either ``weight`` or
+        ``2 * weight``.
     uvw : np.ndarray (float64), shape (n_time, n_baseline, 3)
         UVW coordinates in meters for each time and baseline. Only the
         u and v components ([..., 0] and [..., 1]) are used here.
@@ -155,15 +160,16 @@ def degrid_imaging_weights(
         UVW coordinates in meters.
     data_weight : np.ndarray (float64), shape (n_time, n_baseline, n_vis_chan, n_pol)
         Used as the starting point before applying the UV-grid-based reweighting.
-    briggs_factors : np.ndarray (float64), shape (2, n_chan, n_pol)
+    briggs_factors : np.ndarray (float64), shape (2, n_grid_chan, n_pol)
         Pre-computed Briggs/robust factors. The per-sample denominator is:
-        ``briggs_factors[0, chan, pol] * grid_imaging_weight + briggs_factors[1, chan, pol]``.
+        ``briggs_factors[0, grid_chan, pol] * grid_imaging_weight + briggs_factors[1, grid_chan, pol]``.
     freq_chan : np.ndarray (float64), shape (n_chan,)
         Frequencies (Hz) of visibility channels.
     frequency_map : np.ndarray (int64), shape (n_vis_chan,), optional
-        Grid plane (image channel) each visibility channel samples; must be the
-        same map used to grid the weights. ``None`` (default) uses the
-        identity map.
+        Grid plane (image channel) each visibility channel samples for both the
+        density grid and Briggs factors; must be the same map used to grid the
+        weights. ``None`` (default) uses the identity map. An all-zero map lets
+        every visibility channel sample one collapsed continuum plane.
     grid_parms : dict
         Dictionary with required keys:
         - ``"image_size"`` : tuple(int, int), UV grid size.
@@ -182,28 +188,25 @@ def degrid_imaging_weights(
     -----
     * The polarization map is currently single-pol. If you have more
       polarizations, extend ``pol_map`` accordingly.
-    * The kernel checks bounds and NaNs and leaves samples unchanged if the UV
-      location falls outside the grid or if the corresponding grid value is 0/NaN.
+    * The output is initialized to zero. Out-of-grid samples therefore remain
+      zero; in CASA continuum mode, samples landing on cell index 0 on either
+      axis are also skipped. In-grid samples retain their natural weight when
+      the corresponding density-grid value is zero or NaN.
     """
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp import (
         degrid_imaging_weights as degrid_imaging_weights_cpp,
     )
 
-    # Distributed xarray reductions can preserve a non-native byte order (for
-    # example ``>f8`` from an on-disk MS).  Normalize the read-only density
-    # grid at the Python boundary so the C++ kernel receives native float32 or
-    # float64 storage without weakening its strict binding validation.
+    # Keep the Python-to-C++ boundary zero-copy: producers must supply the
+    # native, contiguous density grid expected by the kernel.
     grid_imaging_weight = np.asarray(grid_imaging_weight)
-    if grid_imaging_weight.dtype.kind != "f":
+    if grid_imaging_weight.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
         raise TypeError(
-            "grid_imaging_weight must have a floating-point dtype; received "
+            "grid_imaging_weight must have native float32 or float64 dtype; received "
             f"{grid_imaging_weight.dtype}."
         )
-    grid_dtype = np.float32 if grid_imaging_weight.dtype.itemsize <= 4 else np.float64
-    grid_imaging_weight = np.ascontiguousarray(
-        grid_imaging_weight,
-        dtype=grid_dtype,
-    )
+    if not grid_imaging_weight.flags.c_contiguous:
+        raise ValueError("grid_imaging_weight must be C-contiguous.")
 
     chan_map = _resolve_frequency_map(
         frequency_map, data_weight.shape[2], grid_imaging_weight
