@@ -335,8 +335,8 @@ def test_continuum_prediction_degrids_and_accumulates_each_taylor_plane(monkeypa
     np.testing.assert_allclose(ms_xds.VISIBILITY_MODEL, [1.7, 2.3])
 
 
-def test_primary_beam_correction_returns_restored_taylor_zero_only():
-    """PB correction uses the model-first convention and drops Taylor axes."""
+def test_primary_beam_correction_restores_every_taylor_term():
+    """PB correction uses the model-first convention for every Taylor term."""
     from astroviper.processing_functions.imaging.restore import (
         _clean_beam_kernel_ft,
         primary_beam_corrected_plane,
@@ -345,8 +345,8 @@ def test_primary_beam_correction_returns_restored_taylor_zero_only():
     image = make_continuum_image()
     primary_beam = np.linspace(0.25, 1.0, 64).reshape(1, 1, 8, 8)
     image["PRIMARY_BEAM"].data[...] = primary_beam
-    model = image.SKY_MODEL.isel(taylor_term=0).values.copy()
-    residual = image.SKY_RESIDUAL.isel(taylor_term=0).values.copy()
+    model = image.SKY_MODEL.values.copy()
+    residual = image.SKY_RESIDUAL.values.copy()
     beam = image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
 
     result, _ = restore_continuum_image(
@@ -355,19 +355,22 @@ def test_primary_beam_correction_returns_restored_taylor_zero_only():
         primary_beam_limit=0.2,
     )
     corrected = result["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
-    assert corrected.dims == ("time", "polarization", "l", "m")
+    assert corrected.dims == ("time", "taylor_term", "polarization", "l", "m")
 
     kernel_ft = _clean_beam_kernel_ft(beam[0, 0], 8, 8, 1.0e-5, model.dtype, 1)
-    expected = primary_beam_corrected_plane(
-        primary_beam[0, 0],
-        0.2,
-        model[0, 0],
-        residual[0, 0],
-        kernel_ft=kernel_ft,
-    )
-    np.testing.assert_allclose(corrected.values[0, 0], expected)
-    old_post_restore_division = result.SKY_RESTORED.values[0, 0] / primary_beam[0, 0]
-    assert not np.allclose(corrected.values[0, 0], old_post_restore_division)
+    for term in range(image.sizes["taylor_term"]):
+        expected = primary_beam_corrected_plane(
+            primary_beam[0, 0],
+            0.2,
+            model[0, term, 0],
+            residual[0, term, 0],
+            kernel_ft=kernel_ft,
+        )
+        np.testing.assert_allclose(corrected.values[0, term, 0], expected)
+        old_post_restore_division = (
+            result.SKY_RESTORED.values[0, term, 0] / primary_beam[0, 0]
+        )
+        assert not np.allclose(corrected.values[0, term, 0], old_post_restore_division)
 
 
 @pytest.mark.parametrize(
@@ -553,8 +556,11 @@ def _frequency_normalization(values, frequency):
     )
 
 
-def test_mvc_conversion_forms_weighted_taylor_normal_equations():
-    """MVC produces weighted residual, Hessian, and effective-PB terms."""
+@pytest.mark.parametrize("mvc_primary_beam_approach", ["casa", "preconditioned"])
+def test_mvc_conversion_matches_casa_memo_taylor_equations(
+    mvc_primary_beam_approach,
+):
+    """Both MVC approaches produce the CASA/Memo-I Taylor equations."""
     frequency = np.array([0.8e9, 1.0e9, 1.2e9])
     x = np.array([-0.2, 0.0, 0.2])
     residual = np.array([2.0, 4.0, 8.0])
@@ -574,22 +580,53 @@ def test_mvc_conversion_forms_weighted_taylor_normal_equations():
         n_taylor_terms=2,
         reference_frequency=1.0e9,
         primary_beam_limit=0.2,
+        mvc_primary_beam_approach=mvc_primary_beam_approach,
     )
     expected_pb = np.sum(weight * pb) / np.sum(weight)
     np.testing.assert_allclose(effective_pb.squeeze(), expected_pb)
-    # Fit of the PB-corrected channel residuals with weights w * pb**2,
-    # returned to the plain PSF moments and the common beam: the pair whose
-    # Hessian is the residual's response to the model.
-    basis = x[:, None] ** np.arange(2)
-    hessian = basis.T @ (weight[:, None] * basis) / np.sum(weight)
-    fit = np.linalg.solve(
-        basis.T @ ((weight * pb**2)[:, None] * basis),
-        basis.T @ (weight * pb * residual),
+    np.testing.assert_allclose(
+        residual_taylor.squeeze(),
+        [np.sum(weight * x**order * residual) / np.sum(weight) for order in range(2)],
     )
-    np.testing.assert_allclose(residual_taylor.squeeze(), expected_pb * hessian @ fit)
     np.testing.assert_allclose(
         psf_taylor.squeeze(),
-        [np.sum(weight * x**order * psf) / np.sum(weight) for order in range(3)],
+        [
+            np.sum(weight * x**order * pb * psf) / (np.sum(weight) * expected_pb)
+            for order in range(3)
+        ],
+    )
+    assert (
+        residual_taylor.attrs["mvc_primary_beam_approach"] == mvc_primary_beam_approach
+    )
+    assert psf_taylor.attrs["mvc_primary_beam_approach"] == mvc_primary_beam_approach
+    assert effective_pb.attrs["mvc_primary_beam_approach"] == mvc_primary_beam_approach
+
+
+def test_mvc_casa_and_preconditioned_approaches_use_distinct_evaluation_order():
+    """CASA divides then multiplies while Memo I uses the cancelled residual."""
+    frequency = np.array([1.0e9])
+    residual = _frequency_cube([14.305966], frequency).astype(np.float32)
+    psf = _frequency_cube([1.0], frequency).astype(np.float32)
+    primary_beam = _frequency_cube([0.7793717], frequency).astype(np.float32)
+    normalization = _frequency_normalization([1.0], frequency)
+
+    products = {}
+    for approach in ("casa", "preconditioned"):
+        products[approach] = _convert_mvc_cubes_to_taylor_normal_equations(
+            residual,
+            psf,
+            primary_beam,
+            normalization,
+            normalization,
+            n_taylor_terms=1,
+            reference_frequency=1.0e9,
+            primary_beam_limit=0.2,
+            mvc_primary_beam_approach=approach,
+        )[0]
+
+    np.testing.assert_allclose(products["casa"], products["preconditioned"], rtol=1e-6)
+    assert not np.array_equal(
+        products["casa"].values, products["preconditioned"].values
     )
 
 
@@ -618,7 +655,7 @@ def test_mvc_conversion_uses_psf_weights_for_common_response():
     )
     np.testing.assert_allclose(
         psf_taylor.squeeze(),
-        np.sum(psf_weight * psf) / np.sum(psf_weight),
+        np.sum(psf_weight * pb * psf) / (np.sum(psf_weight) * effective_pb.squeeze()),
     )
 
 
@@ -723,15 +760,8 @@ def test_mvc_prediction_masks_zero_effective_beam_without_warning():
     ],
     ids=["centre", "off_centre", "channel_below_pblimit"],
 )
-def test_mvc_residual_responds_to_model_through_psf_moments(channel_pb):
-    """The Taylor residual responds to a model change through the Hessian.
-
-    MT-MFS inverts the PSF Taylor planes read at their peak, the pointing
-    centre (pixel 0).  A model change ``dM`` at pixel 1 changes the predicted
-    channel images there by ``A_nu * dM_nu / Abar``.  With a delta-function
-    PSF the Taylor residual at pixel 1 must then change by
-    ``-sum_k B_(t+k)(0) * dM_k``, whatever the channel beams at pixel 1 are.
-    """
+def test_mvc_residual_uses_casa_cancelled_primary_beam_moments(channel_pb):
+    """MVC residuals match CASA's cancelled ``A_nu / A_nu`` expression."""
     frequency = np.array([0.85e9, 0.95e9, 1.05e9, 1.15e9])
     x = (frequency - 1.0e9) / 1.0e9
     weight = _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency)
@@ -755,7 +785,7 @@ def test_mvc_residual_responds_to_model_through_psf_moments(channel_pb):
         )
 
     channel_beam = two_pixel_cube(1.0, channel_pb)
-    _, psf, effective_beam = _convert_mvc_cubes_to_taylor_normal_equations(
+    _, _, effective_beam = _convert_mvc_cubes_to_taylor_normal_equations(
         two_pixel_cube(0.0, 0.0),
         two_pixel_cube(1.0, 0.0),
         channel_beam,
@@ -775,11 +805,16 @@ def test_mvc_residual_responds_to_model_through_psf_moments(channel_pb):
         effective_primary_beam=effective_beam,
     )
 
-    planes = psf.isel(l=0, m=0).squeeze().values
-    hessian = planes[np.add.outer(np.arange(2), np.arange(2))]
-    np.testing.assert_allclose(
-        residual.isel(l=1, m=0).squeeze(), -hessian @ model_change
+    valid = np.asarray(channel_pb) > options["primary_beam_limit"]
+    predicted_source = prediction.isel(l=1, m=0).squeeze().values
+    expected = np.asarray(
+        [
+            -np.sum(weight.squeeze().values * x**order * predicted_source * valid)
+            / np.sum(weight.squeeze().values)
+            for order in range(2)
+        ]
     )
+    np.testing.assert_allclose(residual.isel(l=1, m=0).squeeze(), expected)
 
 
 @pytest.mark.parametrize(
@@ -790,11 +825,10 @@ def test_mvc_residual_responds_to_model_through_psf_moments(channel_pb):
 def test_mvc_channel_near_beam_null_adds_bounded_residual(channel_pb):
     """A channel near a null of its beam does not amplify its residual.
 
-    The effective beam is above primary_beam_limit, but one channel beam is 1e-6.  A unit
-    image in any channel must change every Taylor residual by less than one;
-    dividing the channel residual by its beam changes them by up to
-    ``Abar * 1e6 / nchan``.  With one channel beam above primary_beam_limit, two Taylor
-    terms are not determined and only Taylor term zero is fitted.
+    CASA masks a channel beam below ``primary_beam_limit`` before its residual
+    correction. The later multiplication by that beam cancels the correction
+    for valid channels, so a near-null channel neither contributes nor causes
+    noise amplification.
     """
     nchan = len(channel_pb)
     frequency = np.linspace(0.85e9, 1.15e9, nchan)
@@ -931,15 +965,22 @@ def _mvc_image_point_sources(sources, threshold):
     pytest.fail("MVC imaging did not reach the threshold in 20 imaging cycles.")
 
 
-@pytest.mark.parametrize("off_centre_index", [0.0, -0.7])
-def test_mvc_recovers_spectral_index_away_from_pointing_centre(off_centre_index):
-    """An off-centre spectral index is not biased when imaging stops early.
+@pytest.mark.parametrize(
+    ("off_centre_index", "expected_casa_index"),
+    [(0.0, -0.27), (-0.7, -1.00)],
+)
+def test_mvc_characterizes_casa_off_axis_spectral_index_approximation(
+    off_centre_index, expected_casa_index
+):
+    """The exact CASA equations retain CASA's known off-axis index bias.
 
     One source sits at the pointing centre and one where the beam is 0.5 at
-    the reference frequency. Imaging stops at 5 mJy, 2 % of the apparent
-    flux of the off-centre source.  With a Hessian that differs from the
-    residual's response away from the centre, the off-centre ``tt1 / tt0``
-    stopped at -0.27 (index 0) and -1.00 (index -0.7) in this setup.
+    the reference frequency. Imaging stops at 5 mJy, 2 % of the apparent flux
+    of the off-centre source. CASA's common-beam approximation uses the
+    pointing-centre Hessian away from the centre; in this controlled setup the
+    off-centre ``tt1 / tt0`` therefore reaches about -0.27 for a flat source
+    and -1.00 for a source with index -0.7. This test deliberately records
+    that approximation while separately checking the on-axis source.
     """
     x = (np.arange(8) - 3.5) / 32.0
     sources = {
@@ -949,14 +990,38 @@ def test_mvc_recovers_spectral_index_away_from_pointing_centre(off_centre_index)
     model, effective_beam = _mvc_image_point_sources(sources.values(), 5.0e-3)
 
     basis = x[:, None] ** np.arange(2)
-    for (row, column), spectrum in sources.values():
-        expected = (
-            effective_beam[row, column]
-            * np.linalg.lstsq(basis, spectrum, rcond=None)[0]
-        )
-        tt0, tt1 = model[:, row - 2 : row + 3, column - 2 : column + 3].sum(axis=(1, 2))
-        np.testing.assert_allclose(tt0, expected[0], rtol=0.03)
-        assert abs(tt1 / tt0 - expected[1] / expected[0]) < 0.01
+    centre_pixel, centre_spectrum = sources["centre"]
+    centre_expected = np.linalg.lstsq(basis, centre_spectrum, rcond=None)[0]
+    row, column = centre_pixel
+    centre_tt0, centre_tt1 = model[:, row - 2 : row + 3, column - 2 : column + 3].sum(
+        axis=(1, 2)
+    )
+    np.testing.assert_allclose(
+        centre_tt0,
+        effective_beam[row, column] * centre_expected[0],
+        rtol=0.03,
+    )
+    np.testing.assert_allclose(
+        centre_tt1 / centre_tt0,
+        centre_expected[1] / centre_expected[0],
+        atol=0.01,
+    )
+
+    (row, column), off_centre_spectrum = sources["off_centre"]
+    off_centre_expected = np.linalg.lstsq(basis, off_centre_spectrum, rcond=None)[0]
+    off_centre_tt0, off_centre_tt1 = model[
+        :, row - 2 : row + 3, column - 2 : column + 3
+    ].sum(axis=(1, 2))
+    np.testing.assert_allclose(
+        off_centre_tt0,
+        effective_beam[row, column] * off_centre_expected[0],
+        rtol=0.03,
+    )
+    np.testing.assert_allclose(
+        off_centre_tt1 / off_centre_tt0,
+        expected_casa_index,
+        atol=0.02,
+    )
 
 
 def test_mfs_primary_beam_is_evaluated_at_reference_frequency():
@@ -1529,12 +1594,8 @@ def test_refreshed_statistics_respect_clean_support(explicit_mask):
 
 
 @pytest.mark.parametrize("clipped_pb", [0.1, 0.2, np.nan, np.inf])
-def test_mvc_clips_channel_beams_only_in_effective_beam(clipped_pb):
-    """Clipped channels add no PB signal but retain their weights.
-
-    The PSF keeps every channel, and the residual fits every channel whose
-    beam is finite, with weight ``w * pb**2``.
-    """
+def test_mvc_clips_channel_beams_in_casa_taylor_products(clipped_pb):
+    """A clipped channel contributes weight but no residual, PSF, or PB signal."""
     frequency = np.array([0.9e9, 1.1e9])
     residual, psf, pb = _convert_mvc_cubes_to_taylor_normal_equations(
         _frequency_cube([5.0, 100.0], frequency),
@@ -1547,11 +1608,5 @@ def test_mvc_clips_channel_beams_only_in_effective_beam(clipped_pb):
         primary_beam_limit=0.2,
     )
     np.testing.assert_allclose(pb.squeeze(), 0.25)
-    np.testing.assert_allclose(psf.squeeze(), (1.0 * 2.0 + 3.0 * 10.0) / 4.0)
-    channel_pb = np.array([1.0, clipped_pb if np.isfinite(clipped_pb) else 0.0])
-    np.testing.assert_allclose(
-        residual.squeeze(),
-        0.25
-        * np.sum([1.0, 3.0] * channel_pb * [5.0, 100.0])
-        / np.sum([1.0, 3.0] * channel_pb**2),
-    )
+    np.testing.assert_allclose(psf.squeeze(), 2.0)
+    np.testing.assert_allclose(residual.squeeze(), 1.25)

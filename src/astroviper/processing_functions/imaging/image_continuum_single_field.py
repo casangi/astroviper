@@ -91,6 +91,76 @@ def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
     return principal.transpose(*residual_da.dims)
 
 
+def _restored_spectral_products(restored_da, restoration_residual_da):
+    """Derive CASA-style alpha, alpha error, and beta image products.
+
+    The products use the restored Taylor coefficients and the residuals that
+    entered restoration. For MT-MFS these are the principal-solution
+    residuals, not the stored Taylor right-hand sides. As in CASA, pixels are
+    selected where restored Taylor term zero exceeds one tenth of the peak
+    Taylor-zero residual in that time/polarization plane. Invalid pixels are
+    represented by NaN because xarray does not attach CASA lattice masks.
+    """
+    import numpy as np
+    import xarray as xr
+
+    if restored_da.sizes.get("taylor_term", 0) < 2:
+        return {}
+
+    spatial_dims = tuple(dim for dim in ("l", "m") if dim in restored_da.dims)
+    restored_zero = restored_da.isel(taylor_term=0, drop=True)
+    restored_one = restored_da.isel(taylor_term=1, drop=True)
+    residual_zero = restoration_residual_da.isel(taylor_term=0, drop=True)
+    residual_one = restoration_residual_da.isel(taylor_term=1, drop=True)
+    spectral_threshold = residual_zero.max(dim=spatial_dims, skipna=True) / 10.0
+    valid = (
+        np.isfinite(restored_zero)
+        & np.isfinite(restored_one)
+        & (restored_zero > spectral_threshold)
+        & (restored_zero != 0.0)
+    )
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        alpha = xr.where(valid, restored_one / restored_zero, np.nan)
+        alpha_error = abs(alpha) * np.sqrt(
+            (residual_zero / restored_zero) ** 2 + (residual_one / restored_one) ** 2
+        )
+    alpha_error = xr.where(valid & np.isfinite(alpha_error), alpha_error, np.nan)
+
+    alpha = alpha.astype(restored_da.dtype, copy=False)
+    alpha_error = alpha_error.astype(restored_da.dtype, copy=False)
+    alpha.attrs = {
+        "type": "spectral_index",
+        "units": "dimensionless",
+        "description": "Spectral index alpha derived from restored tt1 / tt0.",
+        "spectral_product_threshold": "peak principal tt0 residual / 10",
+    }
+    alpha_error.attrs = {
+        "type": "spectral_index_error",
+        "units": "dimensionless",
+        "description": "CASA-style propagated spectral-index error.",
+        "spectral_product_threshold": "peak principal tt0 residual / 10",
+    }
+    products = {"ALPHA": alpha, "ALPHA_ERROR": alpha_error}
+
+    if restored_da.sizes["taylor_term"] >= 3:
+        restored_two = restored_da.isel(taylor_term=2, drop=True)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            beta = restored_two / restored_zero - 0.5 * alpha * (alpha - 1.0)
+        beta = xr.where(valid & np.isfinite(restored_two), beta, np.nan).astype(
+            restored_da.dtype, copy=False
+        )
+        beta.attrs = {
+            "type": "spectral_curvature",
+            "units": "dimensionless",
+            "description": "Spectral curvature beta derived from restored Taylor terms.",
+            "spectral_product_threshold": "peak principal tt0 residual / 10",
+        }
+        products["BETA"] = beta
+
+    return products
+
+
 ###############################################################################
 # Imaging setup and PSF beam fitting
 ###############################################################################
@@ -122,8 +192,10 @@ def imaging_preparation_continuum_single_field(
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
-        index. Its reference-frequency primary beam corrects the Taylor-zero
-        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        index. Primary-beam correction divides every restored Taylor
+        coefficient by the reference-frequency beam; this does not remove the
+        frequency-dependent beam contribution from ratios such as ``tt1 / tt0``.
+        ``"mvc"`` forms
         channel images and common-beam Taylor equations, and predicts
         ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
         the intrinsic spectrum under the common-beam convention, so
@@ -1082,20 +1154,24 @@ def make_mvc_taylor_normal_equation_contributions(
     n_taylor_terms,
     reference_frequency,
     primary_beam_limit=0.2,
+    mvc_primary_beam_approach="casa",
 ):
     """Form additive MVC Taylor products for one map-task frequency chunk.
 
     The returned dataset has no frequency dimension and can therefore be
     combined by element-wise addition in the distributed reduce stage.  The
-    primary-beam weighting and Taylor moment construction happen here; only the
-    normalization by globally accumulated weights, the per-pixel spectral fit
-    and the construction of the effective beam remain for the append node.
+    CASA's channel-primary-beam correction and Taylor moment construction are
+    evaluated either as CASA's explicit divide-then-multiply sequence or as the
+    algebraically cancelled Memo-I expression. Only normalization by globally
+    accumulated weights and construction of the effective beam remain for the
+    append node.
 
-    Channel residuals are multiplied by their frequency-dependent primary beam
-    before the weighted Taylor moments are formed, and the squared beam is
-    summed into the ``2 * n_taylor_terms - 1`` moments of the per-pixel spectral fit.
-    The PSF cube is converted with the same spectral basis, without a
-    primary-beam factor, into ``2 * n_taylor_terms - 1`` Hessian numerators.
+    CASA first replaces each valid channel residual by
+    ``R'_nu = Abar * R_nu / A_nu``.  Its cube-to-Taylor step then multiplies
+    residual and PSF channels by ``A_nu`` and divides the Taylor sums by
+    ``Abar``. The preconditioned option cancels these factors before evaluation; the
+    CASA option retains the channel divide and multiply. PSF Taylor numerators
+    retain one channel beam factor in both approaches.
 
     Parameters
     ----------
@@ -1119,52 +1195,40 @@ def make_mvc_taylor_normal_equation_contributions(
         Taylor reference frequency in Hz.
     primary_beam_limit : float, default 0.2
         Primary-beam cutoff. Channel beams at or below it do not contribute to
-        the effective beam, and the residual is zero where the effective beam
-        is at or below it. Where fewer than ``n_taylor_terms`` channel beams exceed it,
-        only Taylor term zero of the spectrum is fitted.
+        the residual, PSF or effective-beam numerators. Final products are zero
+        where the effective beam is at or below the same cutoff.
+    mvc_primary_beam_approach : {"casa", "preconditioned"}, default "casa"
+        Residual primary-beam evaluation. ``"casa"`` explicitly divides each
+        valid channel residual by its channel beam and multiplies by that beam
+        while forming Taylor products. ``"preconditioned"`` evaluates the analytically
+        cancelled Memo-I expression directly. The two are algebraically
+        equivalent on valid support; ``"preconditioned"`` avoids the intermediate
+        division.
 
     Returns
     -------
     xarray.Dataset
-        Additive residual Taylor numerators, squared-beam moments,
-        residual-weight moments, residual-weight sum, and the number of
-        channels whose beam exceeds ``primary_beam_limit``.  When a PSF cube is supplied,
-        also contains PSF Taylor numerators, the PSF weight sum, and the
-        PSF-weighted primary-beam sum.
+        Additive residual Taylor numerators and residual-weight sum. When a PSF
+        cube is supplied, also contains beam-weighted PSF Taylor numerators,
+        the PSF weight sum, and the PSF-weighted primary-beam sum.
 
     Notes
     -----
-    With ``x_nu = (nu - nu0) / nu0``, channel beams ``A_nu`` and the common
-    beam ``Abar = sum(w_nu * A_nu) / sum(w_nu)`` (channel beams at or below
-    ``primary_beam_limit`` count as zero), the PSF planes are the plain weighted moments
-    of the channel PSFs,
+    With ``x_nu = (nu - nu0) / nu0``, channel beams ``A_nu`` and common beam
+    ``Abar = sum(w_nu * A_nu) / sum(w_nu)``, this implements
 
-    ``B_k = sum(w_nu * x_nu**k * B_nu) / sum(w_nu)``,
+    ``R'_nu = Abar * R_nu / A_nu``,
 
-    and the Taylor residuals are
+    ``b_t = sum(w_nu * x_nu**t * A_nu * R'_nu) / (sum(w_nu) * Abar)``,
 
-    ``b = Abar * H @ inv(G) @ u``,
+    and
 
-    with ``u_k = sum(w_nu * x_nu**k * A_nu * R_nu)``,
-    ``G_tk = sum(w_nu * x_nu**(t+k) * A_nu**2)`` at each pixel, and
-    ``H_tk = sum(w_nu * x_nu**(t+k)) / sum(w_nu)``, the PSF planes at their
-    peak.  ``inv(G) @ u`` is the least-squares fit of a Taylor polynomial to
-    the primary-beam corrected channel residuals ``R_nu / A_nu`` with weights
-    ``w_nu * A_nu**2``, so a channel enters with a factor ``A_nu`` and a
-    channel whose beam goes to zero drops out.  The model is predicted as
-    ``M_nu * A_nu / Abar`` (:func:`apply_mvc_primary_beam_convention`), so a
-    model change ``dM_nu = sum_k x_nu**k dm_k`` at a pixel changes ``u`` there
-    by ``-G @ dm / Abar`` and ``b`` by ``-H @ dm``: the Hessian the
-    deconvolver inverts, ``B_(t+k)`` at the PSF peak, is the response of the
-    residual at every position, not only at the pointing centre.  Away from
-    the peak the response follows the channel PSFs weighted by
-    ``w_nu * A_nu**2`` instead of ``w_nu``.  Where fewer than ``n_taylor_terms``
-    channel beams exceed ``primary_beam_limit``, the fit is not determined by them;
-    there only Taylor term zero is fitted, ``u_0 / G_00``.
+    ``B_k = sum(w_nu * x_nu**k * A_nu * B_nu) / (sum(w_nu) * Abar)``.
 
-    The sums over all chunks and ``Abar`` are known only after the reduce
-    stage; :func:`finalize_mvc_taylor_normal_equations` solves for ``b`` in
-    the append node.
+    The first expression reduces exactly to the weighted residual moment
+    ``sum(w_nu * x_nu**t * R_nu) / sum(w_nu)`` on channel-PB support. The CASA
+    approach preserves the explicit operational sequence; the Memo-I approach
+    uses the reduced expression from equations (19)--(20).
     """
     import numpy as np
     import xarray as xr
@@ -1222,6 +1286,7 @@ def make_mvc_taylor_normal_equation_contributions(
     n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
     primary_beam_limit = float(primary_beam_limit)
+    mvc_primary_beam_approach = str(mvc_primary_beam_approach).lower()
 
     if n_taylor_terms < 1:
         raise ValueError(f"n_taylor_terms must be positive; received {n_taylor_terms}.")
@@ -1229,6 +1294,11 @@ def make_mvc_taylor_normal_equation_contributions(
         raise ValueError("reference_frequency must be finite and positive.")
     if not np.isfinite(primary_beam_limit) or primary_beam_limit < 0.0:
         raise ValueError("primary_beam_limit must be finite and non-negative.")
+    if mvc_primary_beam_approach not in ("casa", "preconditioned"):
+        raise ValueError(
+            "mvc_primary_beam_approach must be 'casa' or 'preconditioned'; received "
+            f"{mvc_primary_beam_approach!r}."
+        )
 
     frequency = np.asarray(residual_cube.frequency.values, dtype=np.float64)
     if frequency.size == 0:
@@ -1264,22 +1334,35 @@ def make_mvc_taylor_normal_equation_contributions(
     valid_channel_pb = np.isfinite(primary_beam_cube) & (
         primary_beam_cube > primary_beam_limit
     )
-    # CASA clips each channel PB before forming the effective PB. Keep all
-    # channel weights in the denominator, including clipped ones.
+    # CASA clips each channel PB before forming the effective PB and the
+    # residual/PSF Taylor numerators. Keep every channel weight in the scalar
+    # denominator, including weights from clipped channels.
     finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
-    # The spectral fit weights each channel by its beam as the prediction
-    # applies it, without the clip.
-    channel_primary_beam = xr.where(
-        np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
-    )
-    beam_weighted_residual = channel_primary_beam * residual_cube
-    channel_primary_beam_squared = channel_primary_beam**2
+
+    if mvc_primary_beam_approach == "casa":
+        # CASA first forms R'_nu = Abar * R_nu / A_nu and cubeToTaylor then
+        # multiplies by A_nu and divides by Abar. Abar is global and cancels,
+        # so preserve CASA's channel divide-then-multiply ordering here.
+        primary_beam_corrected_residual = xr.where(
+            valid_channel_pb,
+            residual_cube / xr.where(valid_channel_pb, primary_beam_cube, 1.0),
+            0.0,
+        )
+        residual_for_taylor_sum = finite_primary_beam * primary_beam_corrected_residual
+    else:
+        # Memo I, Eq. (19), cancels A_nu analytically on valid support and
+        # therefore never creates a primary-beam-divided residual image.
+        residual_for_taylor_sum = xr.where(
+            valid_channel_pb,
+            residual_cube,
+            0.0,
+        )
 
     residual_terms = []
     for order in range(n_taylor_terms):
-        numerator = (residual_weight * x_frequency**order * beam_weighted_residual).sum(
-            dim="frequency"
-        )
+        numerator = (
+            residual_weight * x_frequency**order * residual_for_taylor_sum
+        ).sum(dim="frequency")
         residual_terms.append(numerator)
 
     residual_numerator = xr.concat(
@@ -1287,69 +1370,116 @@ def make_mvc_taylor_normal_equation_contributions(
         dim=xr.IndexVariable("taylor_term", np.arange(n_taylor_terms, dtype=np.int64)),
     ).transpose("time", "taylor_term", "polarization", "l", "m")
     residual_numerator.attrs = {
-        "description": "Additive MVC Taylor residual numerators.",
+        "description": "Additive CASA-convention MVC Taylor residual numerators.",
         "continuum_mode": "mvc",
         "reference_frequency": reference_frequency,
         "n_taylor_terms": n_taylor_terms,
         "primary_beam_limit": primary_beam_limit,
+        "primary_beam_convention": "casa_mvc_common_beam",
+        "mvc_primary_beam_approach": mvc_primary_beam_approach,
     }
-
-    n_psf_taylor_terms = 2 * n_taylor_terms - 1
-    psf_taylor_order = xr.IndexVariable(
-        "psf_taylor_order", np.arange(n_psf_taylor_terms, dtype=np.int64)
-    )
-    beam_squared_numerator = xr.concat(
-        [
-            (residual_weight * x_frequency**order * channel_primary_beam_squared).sum(
-                dim="frequency"
-            )
-            for order in range(n_psf_taylor_terms)
-        ],
-        dim=psf_taylor_order,
-    ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
-    beam_squared_numerator.attrs = {
-        "description": "Additive MVC squared-beam moments of the spectral fit.",
-        "continuum_mode": "mvc",
-        "reference_frequency": reference_frequency,
-        "n_taylor_terms": n_taylor_terms,
-        "primary_beam_limit": primary_beam_limit,
-    }
-    residual_weight_moments = xr.concat(
-        [
-            (residual_weight * x_frequency**order).sum(dim="frequency")
-            for order in range(n_psf_taylor_terms)
-        ],
-        dim=psf_taylor_order,
-    ).transpose("time", "psf_taylor_order", "polarization")
 
     contributions = xr.Dataset(
         {
             "MVC_RESIDUAL_TAYLOR_NUMERATOR": residual_numerator,
             "MVC_RESIDUAL_WEIGHT_SUM": residual_weight_sum,
-            "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM": beam_squared_numerator,
-            "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM": residual_weight_moments,
-            "MVC_RESIDUAL_BEAM_CHANNEL_COUNT": (
-                (valid_channel_pb & (residual_weight > 0.0))
-                .sum(dim="frequency")
-                .transpose("time", "polarization", "l", "m")
-            ),
         },
         attrs={
             "continuum_mode": "mvc",
             "n_taylor_terms": n_taylor_terms,
             "reference_frequency": reference_frequency,
             "primary_beam_limit": primary_beam_limit,
+            "primary_beam_convention": "casa_mvc_common_beam",
+            "mvc_primary_beam_approach": mvc_primary_beam_approach,
             "mvc_output_dtype": np.dtype(output_dtype).name,
         },
     )
+
+    # Previous AstroVIPER G^-1 residual preconditioner, intentionally retained
+    # verbatim as commented code while the CASA/Memo-I convention is evaluated:
+    #
+    # channel_primary_beam = xr.where(
+    #     np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
+    # )
+    # beam_weighted_residual = channel_primary_beam * residual_cube
+    # channel_primary_beam_squared = channel_primary_beam**2
+    #
+    # residual_terms = []
+    # for order in range(n_taylor_terms):
+    #     numerator = (
+    #         residual_weight
+    #         * x_frequency**order
+    #         * beam_weighted_residual
+    #     ).sum(dim="frequency")
+    #     residual_terms.append(numerator)
+    #
+    # residual_numerator = xr.concat(
+    #     residual_terms,
+    #     dim=xr.IndexVariable(
+    #         "taylor_term", np.arange(n_taylor_terms, dtype=np.int64)
+    #     ),
+    # ).transpose("time", "taylor_term", "polarization", "l", "m")
+    #
+    # n_psf_taylor_terms = 2 * n_taylor_terms - 1
+    # psf_taylor_order = xr.IndexVariable(
+    #     "psf_taylor_order", np.arange(n_psf_taylor_terms, dtype=np.int64)
+    # )
+    # beam_squared_numerator = xr.concat(
+    #     [
+    #         (
+    #             residual_weight
+    #             * x_frequency**order
+    #             * channel_primary_beam_squared
+    #         ).sum(dim="frequency")
+    #         for order in range(n_psf_taylor_terms)
+    #     ],
+    #     dim=psf_taylor_order,
+    # ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
+    # residual_weight_moments = xr.concat(
+    #     [
+    #         (residual_weight * x_frequency**order).sum(dim="frequency")
+    #         for order in range(n_psf_taylor_terms)
+    #     ],
+    #     dim=psf_taylor_order,
+    # ).transpose("time", "psf_taylor_order", "polarization")
+    #
+    # contributions = xr.Dataset(
+    #     {
+    #         "MVC_RESIDUAL_TAYLOR_NUMERATOR": residual_numerator,
+    #         "MVC_RESIDUAL_WEIGHT_SUM": residual_weight_sum,
+    #         "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM": beam_squared_numerator,
+    #         "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM": residual_weight_moments,
+    #         "MVC_RESIDUAL_BEAM_CHANNEL_COUNT": (
+    #             (valid_channel_pb & (residual_weight > 0.0))
+    #             .sum(dim="frequency")
+    #             .transpose("time", "polarization", "l", "m")
+    #         ),
+    #     },
+    #     attrs={
+    #         "continuum_mode": "mvc",
+    #         "n_taylor_terms": n_taylor_terms,
+    #         "reference_frequency": reference_frequency,
+    #         "primary_beam_limit": primary_beam_limit,
+    #         "mvc_output_dtype": np.dtype(output_dtype).name,
+    #     },
+    # )
+    #
+    # The former PSF numerator did not contain a channel-primary-beam factor:
+    # psf_terms = [
+    #     (psf_weight * x_frequency**order * finite_psf).sum(dim="frequency")
+    #     for order in range(n_psf_taylor_terms)
+    # ]
 
     if psf_cube is not None:
         psf_weight = _clean_weights(psf_normalization)
         psf_weight_sum = psf_weight.sum(dim="frequency")
 
+        n_psf_taylor_terms = 2 * n_taylor_terms - 1
         finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
         psf_terms = [
-            (psf_weight * x_frequency**order * finite_psf).sum(dim="frequency")
+            (psf_weight * x_frequency**order * finite_primary_beam * finite_psf).sum(
+                dim="frequency"
+            )
             for order in range(n_psf_taylor_terms)
         ]
         psf_numerator = xr.concat(
@@ -1360,12 +1490,14 @@ def make_mvc_taylor_normal_equation_contributions(
             ),
         ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
         psf_numerator.attrs = {
-            "description": "Additive MVC Taylor PSF numerators.",
+            "description": "Additive CASA-convention MVC Taylor PSF numerators.",
             "continuum_mode": "mvc",
             "reference_frequency": reference_frequency,
             "n_taylor_terms": n_taylor_terms,
             "n_psf_taylor_terms": n_psf_taylor_terms,
             "primary_beam_limit": primary_beam_limit,
+            "primary_beam_convention": "casa_mvc_common_beam",
+            "mvc_primary_beam_approach": mvc_primary_beam_approach,
         }
         contributions["MVC_PSF_TAYLOR_NUMERATOR"] = psf_numerator
         contributions["MVC_PSF_WEIGHT_SUM"] = psf_weight_sum
@@ -1425,50 +1557,79 @@ def finalize_mvc_taylor_normal_equations(
         effective_primary_beam > primary_beam_limit
     )
 
-    # Fit the Taylor coefficients at each pixel, inv(G) @ u, and return them
-    # to the PSF moments and the common beam, Abar * H @ inv(G) @ u. Where
-    # fewer than n_taylor_terms channel beams exceed primary_beam_limit, fit Taylor term zero only.
-    pixel_dims = ("time", "polarization", "l", "m")
-    numerator = contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].transpose(
-        *pixel_dims, "taylor_term"
-    )
-    n_taylor_terms = numerator.sizes["taylor_term"]
-    hankel = np.add.outer(np.arange(n_taylor_terms), np.arange(n_taylor_terms))
-    beam_squared = (
-        contributions["MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM"]
-        .transpose(*pixel_dims, "psf_taylor_order")
-        .values
-    )
-    supported = valid_effective_pb.transpose(*pixel_dims).values
-    determined = supported & (
-        contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"].transpose(*pixel_dims).values
-        >= n_taylor_terms
-    )
-    gram = beam_squared[..., hankel]
-    gram[~determined] = np.eye(n_taylor_terms)
-    coefficients = np.linalg.solve(
-        gram, np.where(determined[..., None], numerator.values, 0.0)[..., None]
-    )[..., 0]
-    flat = supported & ~determined & (beam_squared[..., 0] > 0.0)
-    coefficients[flat, 0] = numerator.values[flat, 0] / beam_squared[flat, 0]
-    hessian = (
-        (contributions["MVC_RESIDUAL_WEIGHT_TAYLOR_SUM"] / residual_sum)
-        .transpose("time", "polarization", "psf_taylor_order")
-        .values[..., hankel]
-    )
+    # CASA's R'_nu = Abar * R_nu / A_nu correction cancels the A_nu and
+    # Abar factors introduced by its subsequent cube-to-Taylor residual sum.
+    # The map tasks accumulate that cancelled expression directly.
     residual_taylor = xr.where(
         valid_effective_pb,
-        effective_primary_beam
-        * contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].copy(
-            data=np.einsum("tpij,tplmj->tiplm", hessian, coefficients)
-        ),
+        contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"] / residual_sum,
         0.0,
     )
 
     psf_taylor = None
     if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
         psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
-        psf_taylor = contributions["MVC_PSF_TAYLOR_NUMERATOR"] / psf_sum
+        psf_taylor = xr.where(
+            valid_effective_pb,
+            contributions["MVC_PSF_TAYLOR_NUMERATOR"]
+            / (psf_sum * effective_primary_beam),
+            0.0,
+        )
+
+    # Previous AstroVIPER G^-1 finalization, intentionally retained verbatim as
+    # commented code while the CASA/Memo-I convention is evaluated:
+    #
+    # pixel_dims = ("time", "polarization", "l", "m")
+    # numerator = contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].transpose(
+    #     *pixel_dims, "taylor_term"
+    # )
+    # n_taylor_terms = numerator.sizes["taylor_term"]
+    # hankel = np.add.outer(
+    #     np.arange(n_taylor_terms), np.arange(n_taylor_terms)
+    # )
+    # beam_squared = (
+    #     contributions["MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM"]
+    #     .transpose(*pixel_dims, "psf_taylor_order")
+    #     .values
+    # )
+    # supported = valid_effective_pb.transpose(*pixel_dims).values
+    # determined = supported & (
+    #     contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"]
+    #     .transpose(*pixel_dims)
+    #     .values
+    #     >= n_taylor_terms
+    # )
+    # gram = beam_squared[..., hankel]
+    # gram[~determined] = np.eye(n_taylor_terms)
+    # coefficients = np.linalg.solve(
+    #     gram,
+    #     np.where(determined[..., None], numerator.values, 0.0)[..., None],
+    # )[..., 0]
+    # flat = supported & ~determined & (beam_squared[..., 0] > 0.0)
+    # coefficients[flat, 0] = (
+    #     numerator.values[flat, 0] / beam_squared[flat, 0]
+    # )
+    # hessian = (
+    #     (
+    #         contributions["MVC_RESIDUAL_WEIGHT_TAYLOR_SUM"]
+    #         / residual_sum
+    #     )
+    #     .transpose("time", "polarization", "psf_taylor_order")
+    #     .values[..., hankel]
+    # )
+    # residual_taylor = xr.where(
+    #     valid_effective_pb,
+    #     effective_primary_beam
+    #     * contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].copy(
+    #         data=np.einsum("tpij,tplmj->tiplm", hessian, coefficients)
+    #     ),
+    #     0.0,
+    # )
+    #
+    # psf_taylor = None
+    # if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
+    #     psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
+    #     psf_taylor = contributions["MVC_PSF_TAYLOR_NUMERATOR"] / psf_sum
 
     output_dtype = np.dtype(contributions.attrs.get("mvc_output_dtype", "float64"))
     residual_taylor = residual_taylor.astype(output_dtype, copy=False)
@@ -1482,11 +1643,17 @@ def finalize_mvc_taylor_normal_equations(
         "reference_frequency": contributions.attrs.get("reference_frequency"),
         "n_taylor_terms": contributions.attrs.get("n_taylor_terms"),
         "primary_beam_limit": primary_beam_limit,
+        "mvc_primary_beam_approach": contributions.attrs.get(
+            "mvc_primary_beam_approach", "casa"
+        ),
     }
     effective_primary_beam.attrs = {
         "description": "Imaging-weighted effective primary beam for MVC.",
         "continuum_mode": "mvc",
         "primary_beam_limit": primary_beam_limit,
+        "mvc_primary_beam_approach": contributions.attrs.get(
+            "mvc_primary_beam_approach", "casa"
+        ),
     }
     if psf_taylor is not None:
         psf_taylor.attrs = {
@@ -1497,6 +1664,9 @@ def finalize_mvc_taylor_normal_equations(
             "n_taylor_terms": contributions.attrs.get("n_taylor_terms"),
             "n_psf_taylor_terms": psf_taylor.sizes["psf_taylor_order"],
             "primary_beam_limit": primary_beam_limit,
+            "mvc_primary_beam_approach": contributions.attrs.get(
+                "mvc_primary_beam_approach", "casa"
+            ),
         }
 
     return residual_taylor, psf_taylor, effective_primary_beam
@@ -1512,6 +1682,7 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
     n_taylor_terms,
     reference_frequency,
     primary_beam_limit=0.2,
+    mvc_primary_beam_approach="casa",
 ):
     """Convert complete MVC channel cubes into Taylor normal equations for tests.
 
@@ -1537,6 +1708,8 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
         Taylor-expansion reference frequency in Hz.
     primary_beam_limit : float, optional
         Minimum common primary-beam response used by the Taylor solution.
+    mvc_primary_beam_approach : {"casa", "preconditioned"}, optional
+        MVC residual primary-beam evaluation approach.
 
     Returns
     -------
@@ -1561,6 +1734,7 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
         n_taylor_terms=n_taylor_terms,
         reference_frequency=reference_frequency,
         primary_beam_limit=primary_beam_limit,
+        mvc_primary_beam_approach=mvc_primary_beam_approach,
     )
     return finalize_mvc_taylor_normal_equations(contributions)
 
@@ -1761,6 +1935,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
+    mvc_primary_beam_approach="casa",
 ):
     """Perform one continuum imaging-cycle update for a single frequency chunk.
 
@@ -1789,8 +1964,10 @@ def residual_update_continuum_single_field(
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
-        index. Its reference-frequency primary beam corrects the Taylor-zero
-        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        index. Primary-beam correction divides every restored Taylor
+        coefficient by the reference-frequency beam; this does not remove the
+        frequency-dependent beam contribution from ratios such as ``tt1 / tt0``.
+        ``"mvc"`` forms
         channel images and common-beam Taylor equations, and predicts
         ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
         the intrinsic spectrum under the common-beam convention, so
@@ -1898,6 +2075,12 @@ def residual_update_continuum_single_field(
 
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used by MVC map-local Taylor construction.
+
+    mvc_primary_beam_approach : {"casa", "preconditioned"}, optional
+        MVC residual primary-beam evaluation. ``"casa"`` preserves CASA's
+        explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates
+        the algebraically cancelled Memo-I equation (19) directly and avoids
+        the intermediate primary-beam division. The setting is ignored by MFS.
 
     Returns
     -------
@@ -2106,6 +2289,7 @@ def residual_update_continuum_single_field(
             n_taylor_terms=image_params.get("n_taylor_terms", 2),
             reference_frequency=image_params["reference_frequency"],
             primary_beam_limit=primary_beam_limit,
+            mvc_primary_beam_approach=mvc_primary_beam_approach,
         )
         for variable_name, data_array in contributions.data_vars.items():
             img_xds[variable_name] = data_array
@@ -3200,14 +3384,14 @@ def restore_continuum_image(
 
     continuum image dataset
         │
-        ├── select residual Taylor term 0
-        ├── select model Taylor term 0
+        ├── map every residual Taylor term to a temporary cube plane
+        ├── map every model Taylor term to a temporary cube plane
         ├── select PSF Taylor order 0
         └── copy the fitted restoring-beam parameters
         │
         ▼
-    construct temporary one-channel cube dataset
-    (time, frequency=1, polarization, l, m)
+    construct temporary cube dataset
+    (time, frequency=n_taylor_terms, polarization, l, m)
         │
         ▼
     call existing cube restoration implementation
@@ -3219,11 +3403,13 @@ def restore_continuum_image(
         └── produce the restored image and PB-corrected image
         │
         ▼
-    copy the restored image back into the
-    continuum dataset
+    copy the restored Taylor images back and derive
+    alpha, alpha error, and (for three or more terms) beta
 
-    The restored image corresponds to the reference-frequency (Taylor-zero)
-    continuum image.
+    Every Taylor coefficient is restored independently with the same fitted
+    clean beam, matching CASA's MT-MFS restoration convention. Spectral
+    products follow CASA's restored-Taylor definitions and intensity cutoff;
+    invalid pixels are represented by NaN rather than a CASA lattice mask.
 
     Parameters
     ----------
@@ -3244,7 +3430,7 @@ def restore_continuum_image(
         Number of threads supplied to the cube restoration backend.
 
     primary_beam_correction : bool, optional
-        If ``True``, also produce the primary-beam-corrected Taylor-zero image
+        If ``True``, also produce primary-beam-corrected restored Taylor images
         using the shared cube-restoration convention
         ``(model / primary_beam) * clean_beam + residual / primary_beam``.
 
@@ -3256,14 +3442,16 @@ def restore_continuum_image(
 
     deconvolver : {"hogbom", "mtmfs"}, optional
         Deconvolver that produced the model. MT-MFS restoration applies the
-        Taylor Hessian's principal solution to a private residual copy before
-        selecting Taylor term zero. The stored residual remains unchanged.
+        Taylor Hessian's principal solution to a private copy of every residual
+        Taylor term before restoration. The stored residual remains unchanged.
 
     Returns
     -------
     img_xds : xarray.Dataset
-        Continuum dataset with the restored Taylor-zero image and, when
-        requested, its primary-beam-corrected counterpart added.
+        Continuum dataset with every restored Taylor coefficient and, when
+        requested, their primary-beam-corrected counterparts added. For at
+        least two Taylor terms it also contains ``ALPHA`` and ``ALPHA_ERROR``;
+        for at least three terms it additionally contains ``BETA``.
 
     timing_df : pandas.DataFrame
         Timing information returned by the restoration backend.
@@ -3271,11 +3459,13 @@ def restore_continuum_image(
     Notes
     -----
     This function is a compatibility layer around the existing cube restoration
-    routine. Although the surrounding imaging algorithm is MT-MFS, the current
-    restoration operates only on the zeroth Taylor coefficient and therefore
-    produces the restored reference-frequency continuum image. Primary-beam
-    correction follows the shared cube restoration convention from ``main``;
-    it is not a post-restoration division."""
+    routine. Taylor coefficients are temporarily represented as cube frequency
+    planes, restored independently, and converted back to ``taylor_term``.
+    Primary-beam correction follows the shared cube restoration convention from
+    ``main``; it is not a post-restoration division. The derived spectral
+    products use the uncorrected restored Taylor stack, as CASA's restoration
+    step does; the existing AstroVIPER PB-corrected Taylor products are left
+    unchanged."""
 
     import copy
 
@@ -3398,7 +3588,7 @@ def restore_continuum_image(
     beam_da = img_xds[beam_name]
 
     # ------------------------------------------------------------------
-    # Construct a one-channel cube view.
+    # Construct a temporary cube view with one plane per Taylor coefficient.
     # ------------------------------------------------------------------
     cube_xds = xr.Dataset(attrs=copy.deepcopy(img_xds.attrs))
 
@@ -3420,71 +3610,67 @@ def restore_continuum_image(
 
         cube_xds = cube_xds.assign_coords({coord_name: coord.copy(deep=False)})
 
-    frequency_value = _continuum_frequency_coord(img_xds)
-    cube_xds = cube_xds.assign_coords(frequency=("frequency", frequency_value))
+    taylor_coord = residual_da.coords["taylor_term"]
+    n_taylor_terms = residual_da.sizes["taylor_term"]
+    temporary_frequency = range(n_taylor_terms)
+    cube_xds = cube_xds.assign_coords(frequency=("frequency", temporary_frequency))
 
-    cube_xds[residual_name] = _continuum_plane_to_frequency(
-        img_xds, restoration_residual_da, "taylor_term"
+    cube_xds[residual_name] = restoration_residual_da.rename(
+        {"taylor_term": "frequency"}
+    ).assign_coords(frequency=cube_xds.coords["frequency"])
+    cube_xds[model_name] = model_da.rename({"taylor_term": "frequency"}).assign_coords(
+        frequency=cube_xds.coords["frequency"]
     )
-    cube_xds[model_name] = _continuum_plane_to_frequency(
-        img_xds, model_da, "taylor_term"
-    )
+
+    def _repeat_as_temporary_frequency(data_array):
+        """Repeat one continuum plane for every temporary Taylor plane."""
+        axis = data_array.dims.index("time") + 1 if "time" in data_array.dims else 0
+        return data_array.expand_dims(
+            frequency=cube_xds.coords["frequency"].values,
+            axis=axis,
+        )
 
     if "psf_taylor_order" in psf_da.dims:
         if psf_da.sizes["psf_taylor_order"] < 1:
             raise ValueError(f"PSF variable {psf_name!r} contains no Taylor orders.")
 
-        cube_xds[psf_name] = _continuum_plane_to_frequency(
-            img_xds, psf_da, "psf_taylor_order"
+        cube_xds[psf_name] = _repeat_as_temporary_frequency(
+            psf_da.isel(psf_taylor_order=0, drop=True)
         )
 
     elif "taylor_term" in psf_da.dims:
-        cube_xds[psf_name] = _continuum_plane_to_frequency(
-            img_xds, psf_da, "taylor_term"
+        cube_xds[psf_name] = _repeat_as_temporary_frequency(
+            psf_da.isel(taylor_term=0, drop=True)
         )
 
     elif "frequency" in psf_da.dims:
-        cube_xds[psf_name] = psf_da.isel(frequency=slice(0, 1)).assign_coords(
-            frequency=cube_xds.coords["frequency"]
+        cube_xds[psf_name] = _repeat_as_temporary_frequency(
+            psf_da.isel(frequency=0, drop=True)
         )
 
     else:
-        frequency_axis = psf_da.dims.index("time") + 1 if "time" in psf_da.dims else 0
-
-        cube_xds[psf_name] = psf_da.expand_dims(
-            frequency=cube_xds.coords["frequency"].values,
-            axis=frequency_axis,
-        )
+        cube_xds[psf_name] = _repeat_as_temporary_frequency(psf_da)
 
     # ------------------------------------------------------------------
     # Convert the beam parameters into cube layout.
     # ------------------------------------------------------------------
     if "frequency" in beam_da.dims:
-        cube_beam_da = beam_da.isel(frequency=slice(0, 1)).assign_coords(
-            frequency=cube_xds.coords["frequency"]
+        cube_beam_da = _repeat_as_temporary_frequency(
+            beam_da.isel(frequency=0, drop=True)
         )
 
     elif "taylor_term" in beam_da.dims:
-        cube_beam_da = (
-            beam_da.isel(taylor_term=slice(0, 1))
-            .rename({"taylor_term": "frequency"})
-            .assign_coords(frequency=cube_xds.coords["frequency"])
+        cube_beam_da = _repeat_as_temporary_frequency(
+            beam_da.isel(taylor_term=0, drop=True)
         )
 
     elif "psf_taylor_order" in beam_da.dims:
-        cube_beam_da = (
-            beam_da.isel(psf_taylor_order=slice(0, 1))
-            .rename({"psf_taylor_order": "frequency"})
-            .assign_coords(frequency=cube_xds.coords["frequency"])
+        cube_beam_da = _repeat_as_temporary_frequency(
+            beam_da.isel(psf_taylor_order=0, drop=True)
         )
 
     else:
-        frequency_axis = beam_da.dims.index("time") + 1 if "time" in beam_da.dims else 0
-
-        cube_beam_da = beam_da.expand_dims(
-            frequency=cube_xds.coords["frequency"].values,
-            axis=frequency_axis,
-        )
+        cube_beam_da = _repeat_as_temporary_frequency(beam_da)
 
     expected_beam_dims = (
         "time",
@@ -3508,7 +3694,8 @@ def restore_continuum_image(
     cube_xds[beam_name] = cube_beam_da.transpose(*expected_beam_dims)
 
     # The continuum primary beam is already reduced to the reference-frequency
-    # plane. Present it to the shared restoration backend as a one-channel cube.
+    # plane. Repeat it for every temporary Taylor plane expected by the shared
+    # restoration backend.
     if primary_beam_correction:
         primary_beam_name = residual_group.get(primary_beam_key)
         if primary_beam_name is None:
@@ -3528,25 +3715,15 @@ def restore_continuum_image(
                     "Continuum restoration requires one averaged primary-beam "
                     "plane, not a multi-channel primary-beam cube."
                 )
-            cube_primary_beam_da = primary_beam_da.isel(
-                frequency=slice(0, 1)
-            ).assign_coords(frequency=cube_xds.coords["frequency"])
+            cube_primary_beam_da = _repeat_as_temporary_frequency(
+                primary_beam_da.isel(frequency=0, drop=True)
+            )
         elif "taylor_term" in primary_beam_da.dims:
-            cube_primary_beam_da = (
-                primary_beam_da.isel(taylor_term=slice(0, 1))
-                .rename({"taylor_term": "frequency"})
-                .assign_coords(frequency=cube_xds.coords["frequency"])
+            cube_primary_beam_da = _repeat_as_temporary_frequency(
+                primary_beam_da.isel(taylor_term=0, drop=True)
             )
         else:
-            frequency_axis = (
-                primary_beam_da.dims.index("time") + 1
-                if "time" in primary_beam_da.dims
-                else 0
-            )
-            cube_primary_beam_da = primary_beam_da.expand_dims(
-                frequency=cube_xds.coords["frequency"].values,
-                axis=frequency_axis,
-            )
+            cube_primary_beam_da = _repeat_as_temporary_frequency(primary_beam_da)
 
         expected_primary_beam_dims = (
             "time",
@@ -3615,15 +3792,29 @@ def restore_continuum_image(
         )
 
     # ------------------------------------------------------------------
-    # Store the restored reference-frequency plane without a spectral/Taylor
-    # axis. There is only one restored continuum plane; aligning it to the
-    # multi-term coordinate would otherwise create NaN-padded fake products.
+    # Convert the temporary cube planes back to the original Taylor coordinate.
     # ------------------------------------------------------------------
-    restored_da = cube_xds[restored_name].isel(frequency=0, drop=True)
+    restored_da = (
+        cube_xds[restored_name]
+        .rename({"frequency": "taylor_term"})
+        .assign_coords(taylor_term=taylor_coord)
+        .transpose(*residual_da.dims)
+    )
 
     img_xds[restored_name] = restored_da
 
     continuum_restored_group = copy.deepcopy(restored_group)
+    spectral_products = _restored_spectral_products(
+        restored_da, restoration_residual_da
+    )
+    for product_name, product in spectral_products.items():
+        img_xds[product_name] = product
+    if "ALPHA" in spectral_products:
+        continuum_restored_group["alpha"] = "ALPHA"
+        continuum_restored_group["alpha_error"] = "ALPHA_ERROR"
+    if "BETA" in spectral_products:
+        continuum_restored_group["beta"] = "BETA"
+
     if primary_beam_correction:
         corrected_name = restored_group["sky_primary_beam_corrected"]
         if corrected_name not in cube_xds:
@@ -3632,8 +3823,11 @@ def restore_continuum_image(
                 f"variable {corrected_name!r}, but did not create it."
             )
         continuum_corrected_name = "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
-        img_xds[continuum_corrected_name] = cube_xds[corrected_name].isel(
-            frequency=0, drop=True
+        img_xds[continuum_corrected_name] = (
+            cube_xds[corrected_name]
+            .rename({"frequency": "taylor_term"})
+            .assign_coords(taylor_term=taylor_coord)
+            .transpose(*residual_da.dims)
         )
         continuum_restored_group["sky_primary_beam_corrected"] = (
             continuum_corrected_name

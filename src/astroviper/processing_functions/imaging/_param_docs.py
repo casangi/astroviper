@@ -117,8 +117,10 @@ _CONTINUUM_MODE_DOC = (
     "visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe\n"
     "the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains\n"
     "both the intrinsic source spectral index and the primary-beam spectral\n"
-    "index. Its reference-frequency primary beam corrects the Taylor-zero\n"
-    'restored product, but not the higher Taylor coefficients. ``"mvc"`` forms\n'
+    "index. Primary-beam correction divides every restored Taylor\n"
+    "coefficient by the reference-frequency beam; this does not remove the\n"
+    "frequency-dependent beam contribution from ratios such as ``tt1 / tt0``.\n"
+    '``"mvc"`` forms\n'
     "channel images and common-beam Taylor equations, and predicts\n"
     "``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe\n"
     "the intrinsic spectrum under the common-beam convention, so\n"
@@ -570,6 +572,12 @@ IMAGING_PARAM_DOCS = {
         "the driver but passes each map only its local beam. The setting is ignored\n"
         "for MFS."
     ),
+    "mvc_primary_beam_approach": (
+        'MVC residual primary-beam evaluation. ``"casa"`` preserves CASA\'s\n'
+        'explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates\n'
+        "the algebraically cancelled Memo-I equation (19) directly and avoids\n"
+        "the intermediate primary-beam division. The setting is ignored by MFS."
+    ),
     "processing_function_threads": (
         "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."
     ),
@@ -598,6 +606,19 @@ IMAGING_PARAM_DOCS = {
         "If ``True`` produce a restored image after deconvolution: the model\n"
         "convolved with the clean beam (the Gaussian fit to the PSF) plus the\n"
         "residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable."
+    ),
+    "image_continuum_single_field.image_data_variables_keep": (
+        'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
+        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``). '
+        "Restoration automatically retains its restored Taylor stack and the\n"
+        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.'
+    ),
+    "image_continuum_single_field.restore": (
+        "If ``True`` restore every Taylor coefficient after deconvolution: each\n"
+        "model Taylor term convolved with the clean beam plus its corresponding\n"
+        "principal residual, written as ``SKY_RESTORED``. With at least two\n"
+        "Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``; with at least\n"
+        "three, also write ``BETA``."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.

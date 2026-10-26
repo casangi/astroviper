@@ -38,8 +38,10 @@ def residual_cycle_continuum_single_field(
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
-        index. Its reference-frequency primary beam corrects the Taylor-zero
-        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        index. Primary-beam correction divides every restored Taylor
+        coefficient by the reference-frequency beam; this does not remove the
+        frequency-dependent beam contribution from ratios such as ``tt1 / tt0``.
+        ``"mvc"`` forms
         channel images and common-beam Taylor equations, and predicts
         ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
         the intrinsic spectrum under the common-beam convention, so

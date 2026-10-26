@@ -1073,6 +1073,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
+    mvc_primary_beam_approach="casa",
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
@@ -1101,12 +1102,10 @@ def residual_update_continuum_single_field(
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
 
-    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
-    ``MVC_RESIDUAL_WEIGHT_SUM`` and the additive moments of the per-pixel
-    spectral fit (``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``,
-    ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``, ``MVC_RESIDUAL_BEAM_CHANNEL_COUNT``).
-    During the first imaging cycle it also returns the additive Taylor PSF
-    numerator, PSF weight sum, and weighted PB sum.
+    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and
+    ``MVC_RESIDUAL_WEIGHT_SUM``. During the first imaging cycle it also returns
+    the additive beam-weighted Taylor PSF numerator, PSF weight sum, and
+    weighted PB sum.
 
     Parameters
     ----------
@@ -1115,8 +1114,10 @@ def residual_update_continuum_single_field(
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
-        index. Its reference-frequency primary beam corrects the Taylor-zero
-        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        index. Primary-beam correction divides every restored Taylor
+        coefficient by the reference-frequency beam; this does not remove the
+        frequency-dependent beam contribution from ratios such as ``tt1 / tt0``.
+        ``"mvc"`` forms
         channel images and common-beam Taylor equations, and predicts
         ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
         the intrinsic spectrum under the common-beam convention, so
@@ -1270,6 +1271,12 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used for MVC map-local Taylor products.
 
+    mvc_primary_beam_approach : {"casa", "preconditioned"}, optional
+        MVC residual primary-beam evaluation. ``"casa"`` preserves CASA's
+        explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates
+        the algebraically cancelled Memo-I equation (19) directly and avoids
+        the intermediate primary-beam division. The setting is ignored by MFS.
+
     input_data : dict, optional
         Preloaded visibility data for this chunk.
 
@@ -1332,6 +1339,12 @@ def residual_update_continuum_single_field(
         raise ValueError(
             "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
+        )
+    mvc_primary_beam_approach = str(mvc_primary_beam_approach).lower()
+    if mvc_primary_beam_approach not in ("casa", "preconditioned"):
+        raise ValueError(
+            "mvc_primary_beam_approach must be 'casa' or 'preconditioned'; received "
+            f"{mvc_primary_beam_approach!r}."
         )
 
     if image_data_variables_keep is None:
@@ -1581,6 +1594,7 @@ def residual_update_continuum_single_field(
         continuum_mode=continuum_mode,
         task_id=task_id,
         primary_beam_limit=primary_beam_limit,
+        mvc_primary_beam_approach=mvc_primary_beam_approach,
     )
 
     # Retain the task-local frequency-dependent PB for MVC

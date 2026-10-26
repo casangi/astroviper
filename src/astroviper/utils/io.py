@@ -2,6 +2,7 @@ full_dims_lm = ["time", "frequency", "polarization", "l", "m"]
 full_dims_uv = ["time", "frequency", "polarization", "u", "v"]
 norm_dims = ["time", "frequency", "polarization"]
 beam_params_dims = ["time", "frequency", "polarization", "beam_params_label"]
+continuum_spectral_product_dims = ["time", "polarization", "l", "m"]
 
 # Measurement Set v4 main-dataset variables written chunk-wise by the simulator
 # (see ``astroviper.utils.measurement_set_tools`` and the ``simulation`` subdomain).
@@ -81,6 +82,21 @@ imaging_data_variables_and_dims_double_precision = {
         "dtype": "<f8",
         "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
     },
+    "alpha": {
+        "dims": continuum_spectral_product_dims,
+        "dtype": "<f8",
+        "name": "ALPHA",
+    },
+    "alpha_error": {
+        "dims": continuum_spectral_product_dims,
+        "dtype": "<f8",
+        "name": "ALPHA_ERROR",
+    },
+    "beta": {
+        "dims": continuum_spectral_product_dims,
+        "dtype": "<f8",
+        "name": "BETA",
+    },
     "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
     "mask": {
         "dims": full_dims_lm,
@@ -149,6 +165,21 @@ imaging_data_variables_and_dims_single_precision = {
         "dtype": "<f4",
         "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
     },
+    "alpha": {
+        "dims": continuum_spectral_product_dims,
+        "dtype": "<f4",
+        "name": "ALPHA",
+    },
+    "alpha_error": {
+        "dims": continuum_spectral_product_dims,
+        "dtype": "<f4",
+        "name": "ALPHA_ERROR",
+    },
+    "beta": {
+        "dims": continuum_spectral_product_dims,
+        "dtype": "<f4",
+        "name": "BETA",
+    },
     "sky": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY"},
     "mask": {
         "dims": full_dims_lm,
@@ -204,6 +235,9 @@ imaging_data_variable_data_group_roles = {
         "restored",
         "sky_primary_beam_corrected",
     ),
+    "alpha": ("restored", "alpha"),
+    "alpha_error": ("restored", "alpha_error"),
+    "beta": ("restored", "beta"),
 }
 
 

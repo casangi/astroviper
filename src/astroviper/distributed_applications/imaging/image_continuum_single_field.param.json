@@ -25,6 +25,10 @@
             "type": ["str"],
             "allowed": ["mfs", "mvc"]
         },
+        "mvc_primary_beam_approach": {
+            "type": ["str"],
+            "allowed": ["casa", "preconditioned"]
+        },
         "instrument_polarization_basis": {
             "type": ["str"],
             "allowed": ["linear", "circular"]

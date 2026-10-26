@@ -278,6 +278,7 @@ def test_continuum_public_api_matches_shared_imaging_names_and_defaults():
     assert "primary_beam_correction" in parameters
     assert "primary_beam_limit" in parameters
     assert "continuum_mode" in parameters
+    assert parameters["mvc_primary_beam_approach"].default == "casa"
     assert "wideband_primary_beam_memory_mode" in parameters
 
 
@@ -345,6 +346,28 @@ def test_continuum_image_for_disk_keeps_registry_mask_and_role():
 
     assert set(output.data_vars) == {"MASK"}
     assert output.attrs["data_groups"]["residual"]["mask"] == "MASK"
+
+
+def test_continuum_image_for_disk_keeps_restored_spectral_products():
+    """Alpha, its error, and beta survive finalized-image filtering."""
+    image = _final_continuum_image()
+    dims = ("time", "polarization", "l", "m")
+    shape = (1, 1, 2, 3)
+    image["ALPHA"] = (dims, np.full(shape, -0.7))
+    image["ALPHA_ERROR"] = (dims, np.full(shape, 0.1))
+    image["BETA"] = (dims, np.full(shape, 0.05))
+    image.attrs["data_groups"]["restored"].update(
+        alpha="ALPHA", alpha_error="ALPHA_ERROR", beta="BETA"
+    )
+
+    output = _continuum_image_for_disk(image, ["alpha", "alpha_error", "beta"])
+
+    assert set(output.data_vars) == {"ALPHA", "ALPHA_ERROR", "BETA"}
+    assert output.attrs["data_groups"]["restored"] == {
+        "alpha": "ALPHA",
+        "alpha_error": "ALPHA_ERROR",
+        "beta": "BETA",
+    }
 
 
 def _mfs_map_result(task_id, value=1.0):
@@ -2076,7 +2099,13 @@ def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(
 
     assert "SKY_RESTORED" in image
     assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in image
-    assert image.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
+    assert image.SKY_RESTORED.dims == (
+        "time",
+        "taylor_term",
+        "polarization",
+        "l",
+        "m",
+    )
     assert np.isfinite(image.SKY_RESTORED.values).all()
     pbcor_finite = np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values)
     assert np.any(pbcor_finite)
@@ -2200,7 +2229,13 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     assert result["timing_graphs"][-1]["includes_restoration"] is True
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert image.SKY_RESIDUAL.dtype == np.dtype(np.float32)
-    assert image.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
+    assert image.SKY_RESTORED.dims == (
+        "time",
+        "taylor_term",
+        "polarization",
+        "l",
+        "m",
+    )
     assert np.isfinite(image.SKY_RESTORED.values).all()
     assert np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).any()
     assert not np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).all()
