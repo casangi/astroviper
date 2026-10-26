@@ -94,7 +94,7 @@ def ifft_norm_img_xds(
     3. Divides in-place by the gridding kernel's correction function along
        each image axis (``gridding_kernel``, a
        :class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`;
-       ``None`` is the default prolate spheroidal kernel).
+       ``None`` is CASA's kernel, that of a bare kernel table).
     4. Crops the zero-padded margins to the requested ``image_size``.
     5. Normalises by the corresponding grid-weight sum, replacing zero weights
        with 1 to avoid division by zero.
@@ -193,11 +193,12 @@ def ifft_norm_img_xds(
     )
 
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        CASA_GRIDDING_KERNEL_PARAMS,
         make_gridding_kernel,
     )
 
     if gridding_kernel is None:
-        gridding_kernel = make_gridding_kernel()
+        gridding_kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
     kernel_image_1D_l = gridding_kernel.correction_1D(img_xds.sizes["u"])
     kernel_image_1D_m = gridding_kernel.correction_1D(img_xds.sizes["v"])
 
@@ -386,7 +387,7 @@ def fft_norm_img_xds(
     The image is divided by the gridding kernel's correction function before
     the transform (``gridding_kernel``, a
     :class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`;
-    ``None`` is the default prolate spheroidal kernel).
+    ``None`` is CASA's kernel, that of a bare kernel table).
 
     ``complex_dtype`` sets the precision of the output model UV grid
     (``complex64`` for a single-precision image, ``complex128`` otherwise). The
@@ -746,7 +747,7 @@ def fft_norm_continuum_img_xds(
         The gridding kernel whose correction function the image is divided by
         before the transform
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`);
-        ``None`` is the default prolate spheroidal kernel.
+        ``None`` is CASA's kernel, that of a bare kernel table.
 
     Returns
     -------
@@ -792,7 +793,8 @@ def _fft_norm_image_planes(
     Each output plane doubles as its padded FFT workspace; input sky planes
     remain unchanged until optionally removed from the returned dataset. The
     image is divided by the correction function of ``gridding_kernel``
-    (``None`` is the default prolate spheroidal kernel) before the transform.
+    (``None`` is CASA's kernel, that of a bare kernel table) before the
+    transform.
     """
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
@@ -924,10 +926,11 @@ def _fft_norm_image_planes(
 
         if gridding_kernel is None:
             from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+                CASA_GRIDDING_KERNEL_PARAMS,
                 make_gridding_kernel,
             )
 
-            gridding_kernel = make_gridding_kernel()
+            gridding_kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
         kernel_image_1D_l = gridding_kernel.correction_1D(n_uv[0])
         kernel_image_1D_m = gridding_kernel.correction_1D(n_uv[1])
 

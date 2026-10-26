@@ -900,12 +900,18 @@ def image_cube_single_field(
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
-        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
-        ``least_misfit`` kernel whose image plane correction falls below 1e-6
-        of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. CASA's kernel needs all four keys,
+        ``{"type": "prolate_spheroidal_casa", "support": 7, "oversampling":
+        100, "interpolation": "nearest"}``. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
         not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
         the gridding and the FFTs by the exact direct Fourier transform over the

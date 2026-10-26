@@ -1014,7 +1014,16 @@ def _taylor_model(value=1.0):
 
 
 @pytest.mark.parametrize(
-    "gridding_kernel_params", [None, {"type": "exponential_semicircle", "support": 9}]
+    "gridding_kernel_params",
+    [
+        None,
+        {
+            "type": "exponential_semicircle",
+            "support": 9,
+            "oversampling": 100,
+            "interpolation": "nearest",
+        },
+    ],
 )
 def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(
     monkeypatch, gridding_kernel_params
@@ -1070,7 +1079,16 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(
 
 
 @pytest.mark.parametrize(
-    "gridding_kernel_params", [None, {"type": "least_misfit", "oversampling": 20}]
+    "gridding_kernel_params",
+    [
+        None,
+        {
+            "type": "least_misfit",
+            "support": 7,
+            "oversampling": 20,
+            "interpolation": "nearest",
+        },
+    ],
 )
 def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(
     monkeypatch, gridding_kernel_params
@@ -1186,7 +1204,12 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(
             "data_groups": {"residual": {"primary_beam": "PRIMARY_BEAM"}},
         },
     )
-    kernel_params = {"type": "prolate_spheroidal", "support": 9, "oversampling": 300}
+    kernel_params = {
+        "type": "prolate_spheroidal",
+        "support": 9,
+        "oversampling": 300,
+        "interpolation": "nearest",
+    }
     received = {"setup": [], "cycle": [], "ifft": []}
 
     def fake_setup(*args, **kwargs):

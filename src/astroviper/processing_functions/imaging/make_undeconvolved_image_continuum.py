@@ -59,7 +59,7 @@ def make_undeconvolved_image_continuum_single_field(
     cgk_1D : GriddingKernel or numpy.ndarray
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or the bare table of the default prolate spheroidal kernel of support 7.
+        or a bare table of CASA's prolate spheroidal kernel of support 7.
     n_taylor_terms : int or None, optional
         Number of residual Taylor orders; defaults to ``image_params``.
     reference_frequency : float or None, optional

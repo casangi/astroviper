@@ -56,7 +56,7 @@ def add_visibility_grid_mvc_single_field(
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
         whose table, support and oversampling go to the C++
-        ``anti_alias_grid`` kernel), or the bare table of the default
+        ``anti_alias_grid`` kernel), or a bare table of CASA's
         prolate spheroidal kernel of support 7.
 
     img_xds : xarray.Dataset

@@ -102,12 +102,18 @@ def imaging_setup_single_field(
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
-        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
-        ``least_misfit`` kernel whose image plane correction falls below 1e-6
-        of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. CASA's kernel needs all four keys,
+        ``{"type": "prolate_spheroidal_casa", "support": 7, "oversampling":
+        100, "interpolation": "nearest"}``. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
         not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
         the gridding and the FFTs by the exact direct Fourier transform over the
@@ -394,12 +400,18 @@ def residual_update_cube_single_field(
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
-        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
-        ``least_misfit`` kernel whose image plane correction falls below 1e-6
-        of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. CASA's kernel needs all four keys,
+        ``{"type": "prolate_spheroidal_casa", "support": 7, "oversampling":
+        100, "interpolation": "nearest"}``. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
         not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
         the gridding and the FFTs by the exact direct Fourier transform over the
@@ -693,7 +705,7 @@ def make_visibility_model_single_field(
     cgk_1D : GriddingKernel or numpy.ndarray
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or the bare table of the default prolate spheroidal kernel of support 7.
+        or a bare table of CASA's prolate spheroidal kernel of support 7.
     ms_data_group_in_name : str, optional
         Measurement-set data group being imaged (the caller's
         ``processing_set_data_group_name``).  The degridder reads its ``uvw``

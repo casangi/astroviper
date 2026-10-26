@@ -44,7 +44,7 @@ def make_undeconvolved_image_mvc_single_field(
     cgk_1D : GriddingKernel or numpy.ndarray
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or the bare table of the default prolate spheroidal kernel of support 7.
+        or a bare table of CASA's prolate spheroidal kernel of support 7.
     ms_data_group_in_name : str, optional
         Measurement Set data group registering residual visibilities and weights.
     image_data_group_out_name : str, optional

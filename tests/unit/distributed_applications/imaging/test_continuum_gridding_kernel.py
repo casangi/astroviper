@@ -177,7 +177,7 @@ def test_kernel_parameter_matches_the_cube_api():
         {"type": "boxcar"},
         {"support": 6},
         {"support": 1, "type": "exponential_semicircle"},
-        {"support": 9},
+        {"type": "prolate_spheroidal_casa"},
         {"oversampling": 0},
         {"oversampling": 2.5},
         {"interpolation": "cubic"},
@@ -271,7 +271,8 @@ def test_mfs_with_a_designed_kernel_equals_the_cube_on_one_channel(
     "As the cube" is to rounding: within 1e-11 of the peak of each product (on
     Linux x86-64 the PSF is identical, the model differs by 2e-16 and the
     residual by 2e-13). The CASA kernel in any one of the four stages moves a
-    product by more than 1e-2, and the default kernel moves the residual by 1e-2.
+    product by more than 1e-2, and the default kernel (least misfit
+    9/300/linear) moves the residual by 2e-5.
     """
     store = processing_sets["four"]
     stokes = ["I", "Q", "U", "V"]
@@ -318,7 +319,7 @@ def test_mfs_with_a_designed_kernel_equals_the_cube_on_one_channel(
         assert _relative_difference(continuum, cube) <= 1e-11, cube_name
     residual = _planes(continuum_store, "SKY_RESIDUAL")
     default_residual = _planes(default_store, "SKY_RESIDUAL")
-    assert _relative_difference(default_residual, residual) > 1e-3
+    assert _relative_difference(default_residual, residual) > 1e-6
 
 
 def _spy_kernels(monkeypatch):

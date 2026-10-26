@@ -13,8 +13,9 @@ Four kernel types exist:
 
 ``prolate_spheroidal_casa``
     Schwab's rational approximation of the ``m = 6``, ``alpha = 1``
-    spheroidal function (support 7 only); the kernel CASA uses. The default
-    sampling (oversampling 100, nearest lookup) keeps Schwab's analytic
+    spheroidal function (support 7 only); the kernel CASA uses. CASA's
+    sampling (oversampling 100, nearest lookup,
+    :data:`CASA_GRIDDING_KERNEL_PARAMS`) keeps Schwab's analytic
     correction; any other sampling or lookup is corrected by the transform of
     the table applied. It concentrates the kernel's transform within the
     unpadded image, so it does not profit from the FFT padding.
@@ -37,6 +38,13 @@ Four kernel types exist:
 The corrections of the last three are the transforms of the kernels the
 gridders apply, the sampled tables with their lookup
 (:func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.kernel_lookup.table_transform`).
+
+The default (:data:`DEFAULT_GRIDDING_KERNEL_PARAMS`) is the ``least_misfit``
+kernel of support 9, oversampling 300 and linear lookup, the kernel RADPS
+Memo 13a selects. It is designed for the padding, so it needs ``fft_padding``;
+for 1.2 its solved table ships with the package. A bare kernel table
+(:func:`as_gridding_kernel`) and the image correction the FFT normalization
+makes without a kernel are CASA's (:data:`CASA_GRIDDING_KERNEL_PARAMS`).
 
 The type ``"dft"`` (:data:`DIRECT_FOURIER_TRANSFORM`) selects no kernel: the
 imaging functions then replace gridding and FFT by the exact direct Fourier
@@ -76,11 +84,23 @@ DIRECT_FOURIER_TRANSFORM = "dft"
 PROLATE_SPHEROIDAL_SUPPORT = 7
 MIN_SUPPORT = 3
 MIN_DESIGN_PADDING = 1.05
-DEFAULT_GRIDDING_KERNEL_PARAMS = {
+# CASA's kernel and sampling, the only one with Schwab's analytic correction; a bare
+# kernel table is this kernel
+CASA_GRIDDING_KERNEL_PARAMS = {
     "type": "prolate_spheroidal_casa",
     "support": PROLATE_SPHEROIDAL_SUPPORT,
     "oversampling": 100,
     "interpolation": "nearest",
+}
+# The kernel RADPS Memo 13a selects by its dynamic range rule (kernel errors at most
+# 0.1 sigma at a dynamic range of 1e4) at the grid memory of fft_padding 1.2, the
+# kernel delphi uses (GRIDDING_KERNEL_PARAMS of utils/imaging_parameter_heuristics.py,
+# which gives the measurements); CASA's kernel misses that rule by a factor 13.
+DEFAULT_GRIDDING_KERNEL_PARAMS = {
+    "type": "least_misfit",
+    "support": 9,
+    "oversampling": 300,
+    "interpolation": "linear",
 }
 # the numerical corrections are kept above this fraction of their centre
 # value, so that the division of the padded image stays finite; a sensible
@@ -88,6 +108,7 @@ DEFAULT_GRIDDING_KERNEL_PARAMS = {
 CORRECTION_FLOOR = 1e-6
 
 __all__ = [
+    "CASA_GRIDDING_KERNEL_PARAMS",
     "DEFAULT_GRIDDING_KERNEL_PARAMS",
     "DIRECT_FOURIER_TRANSFORM",
     "INTERPOLATIONS",
@@ -117,8 +138,9 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
         ``interpolation`` (how the gridders read the table at a stencil
         point: ``"nearest"`` takes the nearest sample, ``"linear"``
         interpolates the two neighbouring samples). Missing keys take the
-        defaults of :data:`DEFAULT_GRIDDING_KERNEL_PARAMS`. The type
-        ``"dft"`` takes no other key.
+        defaults of :data:`DEFAULT_GRIDDING_KERNEL_PARAMS` (CASA's kernel is
+        :data:`CASA_GRIDDING_KERNEL_PARAMS`). The type ``"dft"`` takes no
+        other key.
 
     Returns
     -------
@@ -172,11 +194,17 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
         params["type"] == "prolate_spheroidal_casa"
         and support != PROLATE_SPHEROIDAL_SUPPORT
     ):
+        given = "support" in (gridding_kernel_params or {})
         raise ValueError(
             "the prolate_spheroidal_casa kernel is Schwab's rational approximation "
             f"of the m = 6, alpha = 1 function and spans {PROLATE_SPHEROIDAL_SUPPORT} "
-            f"grid points; got support {support} (the prolate_spheroidal kernel "
-            "takes any odd support)"
+            f"grid points; got support {support}"
+            + (
+                " (the prolate_spheroidal kernel takes any odd support)"
+                if given
+                else " from DEFAULT_GRIDDING_KERNEL_PARAMS: pass "
+                "CASA_GRIDDING_KERNEL_PARAMS for CASA's kernel and sampling"
+            )
         )
     oversampling = params["oversampling"]
     if not isinstance(oversampling, int | np.integer) or oversampling < 1:
@@ -278,7 +306,8 @@ class GriddingKernel:
         The numbers that define the kernel beyond the four parameters (the
         shape parameters of the prolate spheroidal function or of the
         exponential of a semicircle, the aliasing error or misfit, the
-        padding designed for), for the record.
+        padding designed for, the file of a shipped least misfit table), for
+        the record.
     """
 
     def __init__(
@@ -479,8 +508,9 @@ def make_gridding_kernel(gridding_kernel_params=None, fft_padding=None):
     fft_padding : float, optional
         The padding factor of the FFT grid, which sets the image region the
         ``prolate_spheroidal``, ``exponential_semicircle`` and
-        ``least_misfit`` kernels are designed for (:func:`kept_half_width`);
-        the ``prolate_spheroidal_casa`` kernel does not depend on it.
+        ``least_misfit`` kernels (the default among them) are designed for
+        (:func:`kept_half_width`); the ``prolate_spheroidal_casa`` kernel does
+        not depend on it.
 
     Returns
     -------
@@ -527,10 +557,10 @@ def _make_gridding_kernel(
     }
     if params["type"] == "prolate_spheroidal_casa":
         table = create_prolate_spheroidal_kernel_1D(oversampling, support)
-        correction = None  # Schwab's analytic correction, the default bit for bit
+        correction = None  # Schwab's analytic correction, CASA's bit for bit
         if (oversampling, interpolation) != (
-            DEFAULT_GRIDDING_KERNEL_PARAMS["oversampling"],
-            DEFAULT_GRIDDING_KERNEL_PARAMS["interpolation"],
+            CASA_GRIDDING_KERNEL_PARAMS["oversampling"],
+            CASA_GRIDDING_KERNEL_PARAMS["interpolation"],
         ):
             correction = _table_correction(table, oversampling, interpolation)
         kernel = GriddingKernel(
@@ -567,6 +597,8 @@ def _make_gridding_kernel(
             oversampling, support, interpolation, x0
         )
         shape = {"misfit": info["misfit"], "fft_padding": float(fft_padding)}
+        if "shipped_table" in info:
+            shape["shipped_table"] = info["shipped_table"]
     elif params["type"] == "prolate_spheroidal":
         from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_generalized_prolate_spheroidal import (
             create_generalized_prolate_spheroidal_kernel_1D,
@@ -618,7 +650,7 @@ def as_gridding_kernel(cgk_1D):
     Parameters
     ----------
     cgk_1D : GriddingKernel or numpy.ndarray
-        The kernel, or the table of the default prolate spheroidal kernel.
+        The kernel, or a table of the ``prolate_spheroidal_casa`` kernel.
 
     Returns
     -------

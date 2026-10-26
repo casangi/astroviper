@@ -102,12 +102,13 @@ def image_cube_single_field_delphi(
     * Imaging weights: ``weighting`` with ``robust`` (``None``: 0.5 for ALMA
       and ACA, 2.0 for the VLA, the CASA pipeline values of a cube; the ngVLA
       has none, so Briggs weighting needs ``robust``, 0.5 in RADPS Memo 13).
-    * Gridding kernel: prolate spheroidal, support 9, oversampling 300,
-      linear interpolation, with ``fft_padding`` 1.2, the only tested
-      kernel at that padding whose floor is at most a third of the w term
-      floor on all five zenith track cases of the RADPS Memo 13 K set; on the
-      most demanding of them by ``B_max lambda / D**2`` (derived), the 7 m
-      array at 950 GHz, it reaches 91 percent of that limit
+    * Gridding kernel: the imager's default, least misfit, support 9,
+      oversampling 300, linear interpolation, with ``fft_padding`` 1.2, the
+      kernel of the dynamic range rule of RADPS Memo 13a: kernel errors of at
+      most 0.1 sigma at a dynamic range of 1e4, that is a residual floor of at
+      most 1e-5 of the peak with a source near the edge of the image, worst
+      case over the memo's ALMA 12 m and 7 m array cases. Measured 2.7e-7, a
+      margin of 36; it replaces requirement (a) of RADPS Memo 13
       (``GRIDDING_KERNEL_PARAMS`` of
       :mod:`~astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics`).
     * Cycle controls for noisy data

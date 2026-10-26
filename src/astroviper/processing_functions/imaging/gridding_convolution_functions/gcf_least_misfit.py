@@ -33,11 +33,18 @@ point spread function. The misfit is the mean of the two,
 offset and makes the gridder many times worse), minimised over the table by
 damped Gauss-Newton iterations with :math:`A`, :math:`S` and :math:`h` (the
 transform of the kernel applied) all linear in the table.
+
+The solved table of the default kernel (support 9, oversampling 300, linear
+lookup, ``fft_padding`` 1.2) ships with the package (:data:`SHIPPED_TABLES`);
+every other table is solved at run time.
 """
 
 from __future__ import annotations
 
 import functools
+import hashlib
+import importlib.resources
+import io
 import threading
 
 import numpy as np
@@ -113,6 +120,49 @@ MAX_SOLVED_TABLE = 2400
 # run makes the model updates inconsistent. The lock plus the cache give
 # every thread of a process the same table.
 _SOLVE_LOCK = threading.Lock()
+# The tables that ship with the package, by the arguments of the solve
+# (oversampling, support, interpolation, x0, offsets_per_cell, n_x,
+# max_iterations, tolerance): the file next to this module and its sha256,
+# checked at every load. A solve depends on the BLAS rounding (its build and
+# threads): on one machine the default table solved in two processes is the same
+# bit for bit, solved with one BLAS thread it differs by up to 7e-12 (measured).
+# The default kernel (gridding_kernel.DEFAULT_GRIDDING_KERNEL_PARAMS at
+# fft_padding 1.2) therefore reads its table, so that every process and platform
+# grids with the same kernel: numpy.save of
+# _solve_least_misfit_kernel_1D(300, 9, "linear", 0.5 / 1.2, 4, 96, 30, 1e-5)[0]
+# on Linux x86-64, the table of the measurements of RADPS Memo 13a.
+SHIPPED_TABLES = {
+    (300, 9, "linear", 0.5 / 1.2, 4, 96, 30, 1e-5): (
+        "gcf_least_misfit_9_300_linear_p1.2.npy",
+        "75bd366ae5ef28b4e1b9eff03e654b2787eee969d2b2aef8f92a65282dfb1d0d",
+    ),
+}
+
+
+def _load_shipped_table(name, sha256):
+    """A shipped table, after its file is checked against its sha256."""
+    try:
+        data = (
+            importlib.resources.files("astroviper")
+            .joinpath(
+                "processing_functions",
+                "imaging",
+                "gridding_convolution_functions",
+                name,
+            )
+            .read_bytes()
+        )
+    except OSError as error:
+        raise RuntimeError(
+            f"the least misfit kernel table {name} of the astroviper package cannot "
+            f"be read ({error}): the installation is damaged"
+        ) from error
+    if hashlib.sha256(data).hexdigest() != sha256:
+        raise RuntimeError(
+            f"the least misfit kernel table {name} of the astroviper package does "
+            f"not have its sha256 {sha256}: the installation is damaged"
+        )
+    return np.load(io.BytesIO(data), allow_pickle=False)
 
 
 class _MisfitProblem:
@@ -329,7 +379,9 @@ def create_least_misfit_kernel_1D(
     constraint that the transform is 1 at the image centre. Tables beyond
     :data:`MAX_SOLVED_TABLE` entries are cubic spline resamplings of the
     table solved at the largest oversampling within the limit (the lookup
-    error is then negligible and the kernel is a smooth function).
+    error is then negligible and the kernel is a smooth function). A table of
+    :data:`SHIPPED_TABLES` (the default kernel's) is read from the package,
+    its sha256 checked, instead of solved.
 
     Parameters
     ----------
@@ -358,7 +410,15 @@ def create_least_misfit_kernel_1D(
         so that the transform of the kernel applied is 1 at the image centre.
     info : dict
         ``misfit`` (the final rms map error), ``iterations``, the
-        ``history`` of the misfit and ``solved_oversampling``.
+        ``history`` of the misfit and ``solved_oversampling``; for a shipped
+        table ``shipped_table`` (its file name) in place of ``iterations``
+        and ``history``.
+
+    Raises
+    ------
+    RuntimeError
+        For a shipped table whose file is missing, cannot be read or does not
+        have its sha256.
     """
     with _SOLVE_LOCK:
         return _create_least_misfit_kernel_1D(
@@ -384,11 +444,25 @@ def _create_least_misfit_kernel_1D(
     max_iterations,
     tolerance,
 ):
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_exponential_semicircle import (
-        create_exponential_semicircle_kernel_1D,
-        optimize_exponential_semicircle,
+    shipped = SHIPPED_TABLES.get(
+        (
+            oversampling,
+            support,
+            interpolation,
+            x0,
+            offsets_per_cell,
+            n_x,
+            max_iterations,
+            tolerance,
+        )
     )
-
+    if shipped is not None:
+        table = _load_shipped_table(*shipped)
+        return table, {
+            "misfit": misfit(table, support, oversampling, interpolation, x0, n_x=n_x),
+            "solved_oversampling": oversampling,
+            "shipped_table": shipped[0],
+        }
     cells = support // 2 + 1
     if table_size(support, oversampling) > MAX_SOLVED_TABLE:
         from scipy.interpolate import CubicSpline
@@ -414,6 +488,34 @@ def _create_least_misfit_kernel_1D(
             table, support, oversampling, interpolation, x0, n_x=n_x
         )
         return table, info
+    return _solve_least_misfit_kernel_1D(
+        oversampling,
+        support,
+        interpolation,
+        x0,
+        offsets_per_cell,
+        n_x,
+        max_iterations,
+        tolerance,
+    )
+
+
+def _solve_least_misfit_kernel_1D(
+    oversampling,
+    support,
+    interpolation,
+    x0,
+    offsets_per_cell,
+    n_x,
+    max_iterations,
+    tolerance,
+):
+    """The solve of a table of at most :data:`MAX_SOLVED_TABLE` entries
+    (no shipped table, not cached)."""
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_exponential_semicircle import (
+        create_exponential_semicircle_kernel_1D,
+        optimize_exponential_semicircle,
+    )
 
     problem = _MisfitProblem(
         support, oversampling, interpolation, x0, offsets_per_cell, n_x

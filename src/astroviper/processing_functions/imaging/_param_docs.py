@@ -229,12 +229,18 @@ IMAGING_PARAM_DOCS = {
         "and with it the floor the imaging cycle converges to, falls as 1 over\n"
         'the oversampling; ``"linear"`` interpolates the two neighbouring\n'
         "samples and the error falls as 1 over its square). Missing keys take\n"
-        'the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,\n'
-        '"oversampling": 100, "interpolation": "nearest"}``; ``None`` is all\n'
-        "defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or\n"
-        "``least_misfit`` kernel whose image plane correction falls below 1e-6\n"
-        "of its centre value at the edge of the image kept (a support too large\n"
-        "for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the\n"
+        'the defaults ``{"type": "least_misfit", "support": 9,\n'
+        '"oversampling": 300, "interpolation": "linear"}``, the kernel RADPS\n'
+        "Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic\n"
+        "range of 1e4 (its table for ``fft_padding`` 1.2 ships with the\n"
+        "package, other paddings solve it at run time); ``None`` is all\n"
+        "defaults. CASA's kernel needs all four keys,\n"
+        '``{"type": "prolate_spheroidal_casa", "support": 7, "oversampling":\n'
+        '100, "interpolation": "nearest"}``. A ``prolate_spheroidal``,\n'
+        "``exponential_semicircle`` or ``least_misfit`` kernel whose image\n"
+        "plane correction falls below 1e-6 of its centre value at the edge of\n"
+        "the image kept (a support too large for the ``fft_padding``, e.g. 17\n"
+        "at 1.05) is refused. The kernel of the\n"
         'former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,\n'
         'not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces\n'
         "the gridding and the FFTs by the exact direct Fourier transform over the\n"
@@ -254,7 +260,7 @@ IMAGING_PARAM_DOCS = {
     "cgk_1D": (
         "The gridding kernel\n"
         "(:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),\n"
-        "or the bare table of the default prolate spheroidal kernel of support 7."
+        "or a bare table of CASA's prolate spheroidal kernel of support 7."
     ),
     "primary_beam_params": (
         "The primary beam of the imager, the power pattern that gives the clean\n"

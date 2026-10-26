@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    DEFAULT_GRIDDING_KERNEL_PARAMS,
     make_gridding_kernel,
 )
 from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
@@ -292,12 +293,13 @@ def test_max_cell_size_for_uv_coverage():
 
 
 def test_gridding_kernel_is_made_for_its_padding():
-    """Prolate spheroidal 9/300/linear designed for padding 1.2; its
-    correction at the edge of the image kept is above the floor the imager
+    """Least misfit 9/300/linear designed for padding 1.2, the imager's default;
+    its correction at the edge of the image kept is above the floor the imager
     refuses."""
     kernel = make_gridding_kernel(GRIDDING_KERNEL_PARAMS, FFT_PADDING)
+    assert GRIDDING_KERNEL_PARAMS == DEFAULT_GRIDDING_KERNEL_PARAMS
     assert kernel.params == {
-        "type": "prolate_spheroidal",
+        "type": "least_misfit",
         "support": 9,
         "oversampling": 300,
         "interpolation": "linear",
