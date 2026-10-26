@@ -239,7 +239,9 @@ extents of `img_xds`, so it cannot share its coordinates and is kept outside
 `make_subtraction_point_spread_function_single_field` makes it once per
 channel, in the correlation basis, from the `WEIGHT_IMAGING` of the setup (not
 recomputed: Briggs weights depend on the uv cell, which the larger grid
-halves), and it reaches `deconvolve` as
+halves); with imaging weights equal in every correlation, as the imager's
+are, it is made once, for the first correlation on one uv grid, and copied to
+the others. It reaches `deconvolve` as
 `deconvolve_params["subtraction_psf_cube"]`. It is used only for the
 subtraction: the beam fit, `max_psf_sidelobe` and the restore keep the
 image-sized PSF.

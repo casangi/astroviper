@@ -653,6 +653,13 @@ def make_subtraction_point_spread_function_single_field(
     Fourier transform (``gridding_kernel_params={"type": "dft"}``) those
     pixels are the image-sized PSF to rounding.
 
+    Imaging weights equal in every correlation (``NaN`` at the same samples),
+    as the imaging weights of the single-field imager are, give every
+    correlation the same uv sampling grid and so the same PSF, to the bit.
+    The PSF is then made once, for the first correlation, and copied to the
+    others: the uv grid of the ``2 n_l x 2 n_m`` image, the largest array
+    while the PSF is made, holds one correlation instead of all.
+
     Parameters
     ----------
     ps_xdt : xarray.DataTree
@@ -743,6 +750,18 @@ def make_subtraction_point_spread_function_single_field(
     """
     from xradio.image import make_empty_sky_image
 
+    from astroviper.processing_functions.imaging.utils import drop_auto_correlations
+
+    for ms_xdt in ps_xdt.values():
+        drop_auto_correlations(ms_xdt)
+    n_correlation = len(correlation_coords)
+    made_once = n_correlation > 1 and _correlation_weights_equal(
+        ps_xdt, ms_data_group_in_name
+    )
+    if made_once:
+        ps_xdt = _first_correlation(ps_xdt, ms_data_group_in_name)
+        correlation_coords = correlation_coords[:1]
+
     image_size = [2 * img_xds.sizes["l"], 2 * img_xds.sizes["m"]]
     psf_xds = make_empty_sky_image(
         phase_center=image_params["phase_direction"],
@@ -770,4 +789,36 @@ def make_subtraction_point_spread_function_single_field(
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
     )
-    return psf_xds["POINT_SPREAD_FUNCTION"].values, return_df
+    point_spread_function = psf_xds["POINT_SPREAD_FUNCTION"].values
+    if made_once:
+        point_spread_function = np.repeat(point_spread_function, n_correlation, axis=2)
+    return point_spread_function, return_df
+
+
+def _correlation_weights_equal(ps_xdt, ms_data_group_in_name):
+    """Whether the imaging weights of every measurement set in ``ps_xdt`` are
+    equal in every correlation (``NaN`` at the same samples), so that one uv
+    sampling grid serves all correlations."""
+    for ms_xdt in ps_xdt.values():
+        name = ms_xdt.attrs["data_groups"][ms_data_group_in_name]["weight_imaging"]
+        weight = ms_xdt[name].values
+        for p in range(1, weight.shape[-1]):
+            if not np.array_equal(weight[..., p], weight[..., 0], equal_nan=True):
+                return False
+    return True
+
+
+def _first_correlation(ps_xdt, ms_data_group_in_name):
+    """``{ms_name: measurement set}`` of ``ps_xdt`` (a processing set or, as
+    the node task hands it over, a dict of measurement sets) with the first
+    correlation alone: views of its arrays, except the imaging weights, a
+    C-contiguous copy for the gridders."""
+    first = {}
+    for ms_name, ms_xdt in ps_xdt.items():
+        ms_first = ms_xdt.isel(polarization=slice(0, 1))
+        name = ms_first.attrs["data_groups"][ms_data_group_in_name]["weight_imaging"]
+        ms_first[name] = ms_first[name].copy(
+            data=np.ascontiguousarray(ms_first[name].values)
+        )
+        first[ms_name] = ms_first
+    return first
