@@ -464,16 +464,19 @@ read/write Python-owned NumPy buffers in place. No unnecessary copies are ever
 made.** Concretely, the bindings (`.../python/bindings.cpp`) follow these rules —
 match them in any new kernel:
 
-1. **Arrays: typed without `forcecast`.** Declared as
-   `py::array_t<T, py::array::c_style>` (e.g. `complex128`, `float64`,
-   `int64`). With no `forcecast`, a wrong dtype/layout raises immediately
-   instead of silently allocating a converted copy. **Never add `forcecast` to a
+1. **Arrays: explicit zero-copy validation.** Read-only inputs may use
+   `py::array_t<T, py::array::c_style>` when the corresponding argument is
+   declared with `.noconvert()`. Writable arrays use untyped `py::array` plus
+   explicit dtype, layout and writeability checks, preventing pybind11 from
+   silently allocating a converted temporary. **Never add `forcecast` to a
    large array.**
 2. **Explicit checks before compute**: verify `ndim`/shape, require
    C-contiguity (`require_c_contiguous(...)` — tells the caller to use
    `np.ascontiguousarray()` if needed), and for outputs require writeability
    (raise if `info.readonly` / `!arr.writeable()` — message: "modified in
-   place").
+   place"). The MT-MFS residual is the documented exception: its spatial
+   planes must be contiguous, but its outer Taylor-term stride may exceed one
+   plane so a polarization slice can still be updated in place.
 3. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
    (residual/model cubes) are written through `mutable_data()` pointers; they
    are *not* returned. Repeated calls accumulate (e.g. summing over MSes).

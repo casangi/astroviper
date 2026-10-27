@@ -643,6 +643,33 @@ def validate_entropy_params(cycle_control_params):
     return bool(entropy_stop), float(max_snr), bins[0], bins[1]
 
 
+def make_continuum_cycle_controller(cycle_control_params):
+    """Build a cycle controller from the complete continuum control mapping."""
+    entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
+        validate_entropy_params(cycle_control_params)
+    )
+    return CycleController(
+        max_iter=cycle_control_params["max_iter"],
+        max_cycles=cycle_control_params["max_cycles"],
+        threshold_sigma=cycle_control_params.get("threshold_sigma", 0.0),
+        threshold=cycle_control_params["threshold"],
+        gain=cycle_control_params["gain"],
+        psf_sidelobe_factor=cycle_control_params["psf_sidelobe_factor"],
+        min_psf_fraction=cycle_control_params["min_psf_fraction"],
+        max_psf_fraction=cycle_control_params["max_psf_fraction"],
+        max_iter_per_cycle=cycle_control_params["max_iter_per_cycle"],
+        entropy_stop=entropy_stop,
+        entropy_max_snr=entropy_max_snr,
+        entropy_spatial_bins=entropy_spatial_bins,
+        entropy_flux_bins=entropy_flux_bins,
+        max_cycles_divergence=cycle_control_params.get("max_cycles_divergence", -1),
+        threshold_tolerance=cycle_control_params.get(
+            "threshold_tolerance",
+            THRESHOLD_TOLERANCE,
+        ),
+    )
+
+
 def _is_auto_max_cycles(max_cycles):
     """True for a ``max_cycles`` that is still ``"auto"`` (not resolved)."""
     return isinstance(max_cycles, str) and max_cycles == AUTO_MAX_CYCLES
@@ -1609,6 +1636,12 @@ class CycleController:
             Result of the model update (``iter_done`` and ``stop_code``).
         time, pol, chan : int, optional
             Restrict the booking to a selection (otherwise all planes).
+
+        Raises
+        ------
+        ValueError
+            If a plane reports a model update stop code that is not in
+            ``MODEL_UPDATE_STOP_DESCRIPTIONS``.
         """
         self._ensure_state(imaging_dict)
         for key, fields in imaging_dict.data.items():
@@ -1625,6 +1658,10 @@ class CycleController:
                 if isinstance(placeholder, StopCode)
                 else MODEL_UPDATE_CONTINUE
             )
+            if reported not in MODEL_UPDATE_STOP_DESCRIPTIONS:
+                raise ValueError(
+                    f"Unknown model-update stop code {reported} for plane {key}."
+                )
             if reported == MODEL_UPDATE_CONTINUE:
                 continue
             self.stop_code_model_update[idx] = reported

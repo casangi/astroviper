@@ -59,9 +59,6 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
 
 PS_STORE = "twhya_selfcal_lsrk_5chans.ps.zarr"
 
-# Google Drive file id for the zipped input processing set (``PS_STORE``).
-_PS_STORE_DRIVE_ID = "1BRe3cD6YAWkn-jSPbClGGM9VlbxHP_yn"
-
 # Astroviper truth (reference) images. niter0 and niter100 each have a single
 # double-precision truth; multi_cycle has both a double- and a single-precision
 # truth because its deep CLEAN is precision-sensitive. All are regenerated at
@@ -306,13 +303,13 @@ def _import_gdown():
 def _download_zarr(zarr_name, file_id):
     """Download and extract one zipped ``.zarr`` directory from Google Drive.
 
-    Used for both the input processing set (``PS_STORE``) and the astroviper
-    truth images. The archives are uploaded as zipped ``.zarr``
-    directories, but may arrive *double-zipped* (a ``.zip`` whose only member is
-    another ``.zip``). This helper extracts into a scratch directory, recursively
-    unpacks any nested ``.zip`` it finds, locates the ``<zarr_name>`` directory
-    wherever it lands and moves it into place. It is a no-op when the directory
-    already exists locally, so it never re-downloads or clobbers a local copy.
+    Used for astroviper truth images. The archives are uploaded as zipped
+    ``.zarr`` directories, but may arrive *double-zipped* (a ``.zip`` whose only
+    member is another ``.zip``). This helper extracts into a scratch directory,
+    recursively unpacks any nested ``.zip`` it finds, locates the
+    ``<zarr_name>`` directory wherever it lands and moves it into place. It is a
+    no-op when the directory already exists locally, so it never re-downloads or
+    clobbers a local copy.
     """
     import glob
     import shutil
@@ -361,8 +358,15 @@ def _download_zarr(zarr_name, file_id):
 
 
 def _ensure_ps_store():
-    """Ensure the input processing set (``PS_STORE``) is present, downloading once."""
-    _download_zarr(PS_STORE, _PS_STORE_DRIVE_ID)
+    """Ensure the ToolVIPER-managed input processing set is present."""
+    if os.path.isdir(PS_STORE):
+        return
+
+    from toolviper.utils.data import download
+
+    download(file=PS_STORE, folder=".")
+    if not os.path.isdir(PS_STORE):
+        raise RuntimeError(f"Could not download the '{PS_STORE}' processing set")
 
 
 def _ensure_truth_image(zarr_name):

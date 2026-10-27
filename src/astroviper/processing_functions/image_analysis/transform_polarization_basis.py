@@ -275,11 +275,14 @@ def transform_polarization_basis(
     to_stokes = new_polarization_basis == "stokes"
 
     for var_name in list(img_xds.data_vars):
-        if (
-            "type" in img_xds[var_name].attrs
-            and img_xds[var_name].attrs["type"] == "point_spread_function"
-        ):
-            # Skip PSF variables
+        variable_type = img_xds[var_name].attrs.get("type")
+        if variable_type in {
+            "point_spread_function",
+            "point_spread_function_metadata",
+        }:
+            # A PSF and its fitted beam/sidelobe metadata describe the same uv
+            # coverage in every polarization plane; they are not sky signals
+            # to be linearly mixed into Stokes parameters.
             continue
 
         if (

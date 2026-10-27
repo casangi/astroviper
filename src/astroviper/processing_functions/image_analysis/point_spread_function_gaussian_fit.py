@@ -230,14 +230,14 @@ def point_spread_function_gaussian_fit(
         xr.DataArray(
             ellipse_params,
             dims=["time", "frequency", "polarization", "beam_params"],
-            attrs={"unit": "rad"},
+            attrs={"unit": "rad", "type": "point_spread_function_metadata"},
         )
     )
 
     img_xds[image_data_group_out["max_sidelobe_point_spread_function"]] = xr.DataArray(
         max_sidelobe,
         dims=["time", "frequency", "polarization"],
-        attrs={"unit": ""},
+        attrs={"unit": "", "type": "point_spread_function_metadata"},
     )
 
     modify_data_groups_xds(

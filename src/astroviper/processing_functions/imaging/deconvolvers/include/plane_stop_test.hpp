@@ -39,7 +39,10 @@ enum StopReason : int {
  * the factors from the loop gain: rms_factor = 1 + gain / 10 and
  * peak_factor = 1 + gain. For Asp, whose least-squares components can raise
  * the peak of a healthy residual and its RMS by more than gain / 10, the
- * caller passes rms_factor = 1 + gain and an infinite peak_factor.
+ * caller passes rms_factor = 1 + gain and an infinite peak_factor. For
+ * MT-MFS (continuum imaging), whose Taylor-zero residual RMS can also rise
+ * by more than gain / 10 in a healthy model update, the caller passes
+ * rms_factor = peak_factor = 1 + gain.
  *
  * The kernels hand the stop test the sum of the squares and not the RMS. The
  * number of pixels of a plane does not change during a model update, so
