@@ -111,6 +111,25 @@ class TestFrequencyMapping(unittest.TestCase):
         result = map_visibility_frequencies_to_image([1.7e9], [1.0e9])
         np.testing.assert_array_equal(result, [0])
 
+    def test_same_map_as_graphviper(self):
+        """The map is graphviper's ``map_to_nearest_coordinate``, by which the
+        graph selects the visibility channels of a task, also on an irregular
+        image axis, where a visibility channel between two image channels
+        always maps onto the nearer one."""
+        from graphviper.graph_tools.coordinate_utils import (
+            map_to_nearest_coordinate,
+        )
+
+        image = np.array([1.0e9, 1.01e9, 1.1e9, 1.4e9])
+        visibility = np.array([0.996e9, 1.004e9, 1.05e9, 1.06e9, 1.3e9, 1.5e9])
+        expected = [0, 0, 1, 2, 3, 3]
+        np.testing.assert_array_equal(
+            map_visibility_frequencies_to_image(visibility, image), expected
+        )
+        np.testing.assert_array_equal(
+            map_to_nearest_coordinate(visibility, image), expected
+        )
+
     def test_rejects_invalid_frequency_coordinates(self):
         """Non-1-D, empty, and non-finite coordinates fail."""
         cases = (
