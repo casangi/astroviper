@@ -278,4 +278,5 @@ def test_pb_correction_rejects_invalid_final_products(fault):
             image,
             primary_beam_correction=True,
             primary_beam_limit=primary_beam_limit,
+            continuum_mode="mvc",
         )

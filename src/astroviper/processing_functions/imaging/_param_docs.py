@@ -117,9 +117,10 @@ _CONTINUUM_MODE_DOC = (
     "visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe\n"
     "the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains\n"
     "both the intrinsic source spectral index and the primary-beam spectral\n"
-    "index. Primary-beam correction divides every restored Taylor\n"
-    "coefficient by the reference-frequency beam; this does not remove the\n"
-    "frequency-dependent beam contribution from ratios such as ``tt1 / tt0``.\n"
+    "index. Wideband primary-beam correction fits the beam in the same Taylor\n"
+    "basis and divides the apparent-sky polynomial by the beam polynomial\n"
+    "before restoration, removing that contribution from corrected spectral\n"
+    "products.\n"
     '``"mvc"`` forms\n'
     "channel images and common-beam Taylor equations, and predicts\n"
     "``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe\n"
@@ -593,9 +594,11 @@ IMAGING_PARAM_DOCS = {
     "primary_beam_correction": (
         "If ``True`` write the primary beam corrected restored sky to the\n"
         "``sky_restored_primary_beam_corrected``\n"
-        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided\n"
-        "by the (power) primary beam and convolved with the clean beam, plus\n"
-        "the residual divided by the primary beam; pixels below the primary\n"
+        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable. Cube imaging and\n"
+        "MVC divide the model and residual by their channel or common (power)\n"
+        "primary beam before restoration. MFS instead divides the apparent\n"
+        "Taylor polynomials by the fitted primary-beam Taylor polynomial.\n"
+        "Pixels below the zeroth-order primary-\n"
         "beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires\n"
         "``restore``."
     ),
@@ -611,16 +614,19 @@ IMAGING_PARAM_DOCS = {
     ),
     "image_continuum_single_field.image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
-        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``). '
-        "Restoration automatically retains its restored Taylor stack and the\n"
+        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
+        "Restoration automatically retains its mode-specific restored Taylor\n"
+        "product and the "
         'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.'
     ),
     "image_continuum_single_field.restore": (
-        "If ``True`` restore every Taylor coefficient after deconvolution: each\n"
-        "model Taylor term convolved with the clean beam plus its corresponding\n"
-        "principal residual, written as ``SKY_RESTORED``. With at least two\n"
-        "Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``; with at least\n"
-        "three, also write ``BETA``."
+        "If ``True`` restore every Taylor coefficient after deconvolution and\n"
+        "always produce the intrinsic, primary-beam-corrected Taylor image in\n"
+        "``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``. MVC exposes this as its sole\n"
+        "restored sky product; MFS additionally retains the apparent\n"
+        "``SKY_RESTORED`` image. Pixels below ``primary_beam_limit`` are blanked\n"
+        "with NaN. With at least two Taylor terms, also write ``ALPHA`` and\n"
+        "``ALPHA_ERROR``; with at least three, also write ``BETA``."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.

@@ -22,6 +22,8 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     accumulate_continuum_model,
     apply_mvc_primary_beam_convention,
     finalize_mvc_taylor_normal_equations,
+    fit_mfs_primary_beam_taylor,
+    fit_mvc_primary_beam_taylor,
     form_mfs_residual_grid_from_cache,
     form_residual_grid_from_cache,
     make_mvc_taylor_normal_equation_contributions,
@@ -40,6 +42,7 @@ from astroviper.processing_functions.imaging.residual_cycle_continuum_single_fie
     make_visibility_model_continuum_single_field,
     residual_cycle_continuum_single_field,
 )
+from astroviper.processing_functions.imaging.restore import _divide_taylor_polynomials
 from astroviper.processing_functions.imaging.utils import Key
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (
     map_visibility_frequencies_to_image,
@@ -353,6 +356,7 @@ def test_primary_beam_correction_restores_every_taylor_term():
         image,
         primary_beam_correction=True,
         primary_beam_limit=0.2,
+        continuum_mode="mvc",
     )
     corrected = result["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
     assert corrected.dims == ("time", "taylor_term", "polarization", "l", "m")
@@ -371,6 +375,138 @@ def test_primary_beam_correction_restores_every_taylor_term():
             result.SKY_RESTORED.values[0, term, 0] / primary_beam[0, 0]
         )
         assert not np.allclose(corrected.values[0, term, 0], old_post_restore_division)
+
+
+def test_corrected_only_continuum_restoration_matches_the_both_product_path():
+    """Corrected-only and dual-output restoration use corrected spectral terms."""
+    both_image = make_continuum_image()
+    both_image = both_image.drop_dims("taylor_term").assign_coords(
+        taylor_term=np.arange(3)
+    )
+    image_dims = ("time", "taylor_term", "polarization", "l", "m")
+    model = np.zeros((1, 3, 1, 8, 8))
+    model[0, :, 0, 4, 4] = (2.0, 17.0, 4.0)
+    residual = np.empty_like(model)
+    residual[:, 0] = 0.25
+    residual[:, 1] = 0.50
+    residual[:, 2] = 0.75
+    both_image["SKY_MODEL"] = (image_dims, model)
+    both_image["SKY_RESIDUAL"] = (image_dims, residual)
+    primary_beam = np.linspace(0.25, 1.0, 64).reshape(1, 1, 8, 8)
+    both_image["PRIMARY_BEAM"].data[...] = primary_beam
+    corrected_only_image = both_image.copy(deep=True)
+
+    both, _ = restore_continuum_image(
+        both_image,
+        primary_beam_correction=True,
+        primary_beam_limit=0.2,
+        restoration_output="both",
+        continuum_mode="mvc",
+    )
+    corrected_only, _ = restore_continuum_image(
+        corrected_only_image,
+        primary_beam_correction=True,
+        primary_beam_limit=0.2,
+        restoration_output="primary_beam_corrected",
+        continuum_mode="mvc",
+    )
+
+    assert "SKY_RESTORED" in both
+    assert "SKY_RESTORED" not in corrected_only
+    np.testing.assert_array_equal(
+        corrected_only.SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
+        both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
+    )
+    np.testing.assert_array_equal(corrected_only.ALPHA, both.ALPHA)
+    np.testing.assert_array_equal(corrected_only.ALPHA_ERROR, both.ALPHA_ERROR)
+    np.testing.assert_array_equal(corrected_only.BETA, both.BETA)
+    expected_alpha = both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(
+        taylor_term=1
+    ) / both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(taylor_term=0)
+    np.testing.assert_array_equal(corrected_only.ALPHA, expected_alpha)
+    expected_beta = both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(
+        taylor_term=2
+    ) / both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(
+        taylor_term=0
+    ) - 0.5 * expected_alpha * (expected_alpha - 1.0)
+    np.testing.assert_array_equal(corrected_only.BETA, expected_beta)
+    assert not np.allclose(
+        corrected_only.ALPHA,
+        both.SKY_RESTORED.isel(taylor_term=1) / both.SKY_RESTORED.isel(taylor_term=0),
+    )
+    assert corrected_only.attrs["data_groups"]["restored"]["sky"] == (
+        "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+    )
+
+
+def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore():
+    """MFS restores intrinsic coefficients obtained from J(x) = A(x) I(x)."""
+    from astroviper.processing_functions.imaging.restore import _restore_image_arrays
+
+    image = make_continuum_image()
+    image = image.drop_dims("taylor_term").assign_coords(taylor_term=np.arange(3))
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    beam_coefficients = np.empty((1, 3, 1, 8, 8), dtype=np.float64)
+    beam_coefficients[:, 0] = np.linspace(0.3, 1.0, 64).reshape(1, 1, 8, 8)
+    beam_coefficients[:, 1] = -0.15 * beam_coefficients[:, 0]
+    beam_coefficients[:, 2] = 0.04 * beam_coefficients[:, 0]
+    intrinsic_model = np.zeros_like(beam_coefficients)
+    intrinsic_model[0, :, 0, 4, 4] = (2.0, -0.6, 0.25)
+    intrinsic_residual = np.empty_like(beam_coefficients)
+    intrinsic_residual[:, 0] = 0.10
+    intrinsic_residual[:, 1] = -0.02
+    intrinsic_residual[:, 2] = 0.01
+
+    def multiply_taylor(left, right):
+        product = np.zeros_like(right)
+        for order in range(right.shape[1]):
+            for beam_order in range(order + 1):
+                product[:, order] += left[:, beam_order] * right[:, order - beam_order]
+        return product
+
+    image["SKY_MODEL"] = (dims, multiply_taylor(beam_coefficients, intrinsic_model))
+    image["SKY_RESIDUAL"] = (
+        dims,
+        multiply_taylor(beam_coefficients, intrinsic_residual),
+    )
+    image["PRIMARY_BEAM_TAYLOR"] = (dims, beam_coefficients)
+    image.attrs["data_groups"]["residual"]["primary_beam_taylor"] = (
+        "PRIMARY_BEAM_TAYLOR"
+    )
+
+    result, _ = restore_continuum_image(
+        image,
+        primary_beam_correction=True,
+        primary_beam_limit=0.2,
+        restoration_output="both",
+        continuum_mode="mfs",
+    )
+
+    expected_products, _ = _restore_image_arrays(
+        intrinsic_residual,
+        intrinsic_model,
+        np.repeat(
+            image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[:, None],
+            3,
+            axis=1,
+        ),
+        1.0e-5,
+        output="apparent",
+    )
+    np.testing.assert_allclose(
+        result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
+        expected_products["apparent"],
+    )
+    expected_residual = _divide_taylor_polynomials(
+        image.SKY_RESIDUAL,
+        image.PRIMARY_BEAM_TAYLOR,
+        0.2,
+    )
+    np.testing.assert_allclose(expected_residual, intrinsic_residual)
+    expected_alpha = result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(
+        taylor_term=1
+    ) / result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(taylor_term=0)
+    np.testing.assert_allclose(result.ALPHA, expected_alpha, equal_nan=True)
 
 
 @pytest.mark.parametrize(
@@ -753,6 +889,76 @@ def test_mvc_prediction_applies_channel_over_effective_primary_beam():
     np.testing.assert_allclose(actual.squeeze(), [5.0, 30.0])
 
 
+def test_mvc_primary_beam_taylor_fit_survives_chunk_reduction():
+    """Reduced PB moments recover the channel beam's Taylor polynomial."""
+    frequency = np.array([0.8e9, 0.9e9, 1.1e9, 1.2e9])
+    x = (frequency - 1.0e9) / 1.0e9
+    expected = np.array([0.8, -0.1, 0.05])
+    primary_beam = expected[0] + expected[1] * x + expected[2] * x**2
+    normalization = _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency)
+    chunks = []
+    for channel_indices in ([0, 1], [2, 3]):
+        selection = {"frequency": channel_indices}
+        chunks.append(
+            make_mvc_taylor_normal_equation_contributions(
+                _frequency_cube(np.ones(4), frequency).isel(selection),
+                _frequency_cube(np.ones(4), frequency).isel(selection),
+                _frequency_cube(primary_beam, frequency).isel(selection),
+                normalization.isel(selection),
+                normalization.isel(selection),
+                n_taylor_terms=3,
+                reference_frequency=1.0e9,
+            )
+        )
+
+    reduced = chunks[0].copy(deep=True)
+    for variable_name in reduced.data_vars:
+        reduced[variable_name] = reduced[variable_name] + chunks[1][variable_name]
+
+    fitted = fit_mvc_primary_beam_taylor(reduced)
+    assert fitted.dims == ("time", "taylor_term", "polarization", "l", "m")
+    assert fitted.attrs["usage"] == "diagnostic_only_already_incorporated_by_mvc"
+    np.testing.assert_allclose(fitted.values.squeeze(), expected, rtol=1.0e-12)
+
+
+def test_mfs_primary_beam_taylor_fit_survives_chunk_reduction():
+    """Additive MFS PB projections recover one global Taylor polynomial."""
+    frequency = np.array([0.8e9, 0.9e9, 1.1e9, 1.2e9])
+    x = (frequency - 1.0e9) / 1.0e9
+    expected = np.array([0.8, -0.1, 0.05])
+    primary_beam = expected[0] + expected[1] * x + expected[2] * x**2
+    chunks = []
+    for channel_indices in ([0, 1], [2, 3]):
+        local_x = x[channel_indices]
+        local_beam = primary_beam[channel_indices]
+        numerator = np.asarray(
+            [np.sum(local_x**order * local_beam) for order in range(3)]
+        ).reshape(1, 3, 1, 1, 1)
+        moments = np.asarray([np.sum(local_x**order) for order in range(5)]).reshape(
+            1, 5, 1
+        )
+        chunks.append(
+            xr.Dataset(
+                {
+                    "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR": (
+                        ("time", "taylor_term", "polarization", "l", "m"),
+                        numerator,
+                    ),
+                    "MFS_PRIMARY_BEAM_FIT_MOMENTS": (
+                        ("time", "psf_taylor_order", "polarization"),
+                        moments,
+                    ),
+                }
+            )
+        )
+
+    reduced = chunks[0] + chunks[1]
+    fitted = fit_mfs_primary_beam_taylor(reduced, primary_beam_limit=0.2)
+
+    assert fitted.attrs["usage"] == "wideband_primary_beam_correction"
+    np.testing.assert_allclose(fitted.values.squeeze(), expected, rtol=1.0e-12)
+
+
 def test_mvc_prediction_masks_zero_effective_beam_without_warning():
     """Invalid PB support is zeroed without evaluating a masked division."""
     frequency = np.array([0.9e9, 1.1e9])
@@ -1043,13 +1249,14 @@ def test_mvc_characterizes_casa_off_axis_spectral_index_approximation(
 
 
 def test_mfs_primary_beam_is_evaluated_at_reference_frequency():
-    """MFS replaces channel accumulators with a reference-frequency PB."""
+    """MFS emits a reference PB plus additive wideband-fit contributions."""
     image_params = {
         "image_size": [8, 8],
         "cell_size": np.asarray([-2.0e-4, 2.0e-4]),
         "list_dish_diameters": np.asarray([10.7]),
         "list_blockage_diameters": np.asarray([0.75]),
         "primary_beam_ipower": 2,
+        "n_taylor_terms": 2,
     }
     image = xr.Dataset(
         coords={
@@ -1069,8 +1276,12 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency():
         image_data_group_in_name="residual",
     )
     assert "PRIMARY_BEAM_REFERENCE" in result
+    assert "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR" in result
+    assert "MFS_PRIMARY_BEAM_FIT_MOMENTS" in result
     assert "PRIMARY_BEAM" not in result
     assert result["PRIMARY_BEAM_REFERENCE"].attrs["reference_frequency_hz"] == 1.5e9
+    assert result.MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR.shape == (1, 2, 1, 8, 8)
+    assert result.MFS_PRIMARY_BEAM_FIT_MOMENTS.shape == (1, 3, 1)
 
 
 def _taylor_model(value=1.0):

@@ -259,6 +259,250 @@ def elliptical_gaussian_uv_taper(u, v, major, minor, pa):
     )
 
 
+def _divide_taylor_polynomials(
+    apparent_da,
+    primary_beam_taylor_da,
+    limit=0.2,
+    outside_value=None,
+):
+    """Recover intrinsic Taylor coefficients from ``J(x) = A(x) I(x)``.
+
+    Coefficients are solved recursively,
+
+    ``I_t = (J_t - sum(A_p I_(t-p), p=1..t)) / A_0``.
+
+    Pixels whose zeroth-order beam is non-finite or below ``limit`` receive
+    ``outside_value`` in every output coefficient. Restored residuals use NaN;
+    models use zero so masked model pixels do not contaminate the clean-beam
+    FFT.
+    """
+    if outside_value is None:
+        outside_value = np.nan
+
+    image_dims = ("time", "taylor_term", "polarization", "l", "m")
+    missing_image_dims = [dim for dim in image_dims if dim not in apparent_da.dims]
+    missing_beam_dims = [
+        dim for dim in image_dims if dim not in primary_beam_taylor_da.dims
+    ]
+    if missing_image_dims or missing_beam_dims:
+        raise ValueError(
+            "Taylor polynomial division requires dimensions "
+            f"{image_dims}; image missing {missing_image_dims}, beam missing "
+            f"{missing_beam_dims}."
+        )
+
+    apparent = apparent_da.transpose(*image_dims)
+    primary_beam = primary_beam_taylor_da.transpose(*image_dims)
+    if primary_beam.sizes["taylor_term"] < apparent.sizes["taylor_term"]:
+        raise ValueError(
+            "PRIMARY_BEAM_TAYLOR must contain at least as many coefficients as "
+            "the apparent-sky Taylor stack."
+        )
+    for dimension in ("time", "polarization", "l", "m"):
+        if primary_beam.sizes[dimension] != apparent.sizes[dimension]:
+            raise ValueError(
+                f"PRIMARY_BEAM_TAYLOR {dimension!r} size does not match the image."
+            )
+
+    apparent_values = np.asarray(apparent.values)
+    beam_values = np.asarray(primary_beam.values)
+    intrinsic = np.empty_like(apparent_values)
+    beam_zero = beam_values[:, 0]
+    supported = np.isfinite(beam_zero) & (beam_zero >= float(limit))
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        for order in range(apparent.sizes["taylor_term"]):
+            coefficient = apparent_values[:, order].copy()
+            for beam_order in range(1, order + 1):
+                coefficient -= (
+                    beam_values[:, beam_order] * intrinsic[:, order - beam_order]
+                )
+            intrinsic[:, order] = np.where(
+                supported,
+                coefficient / beam_zero,
+                outside_value,
+            )
+    intrinsic[~np.isfinite(intrinsic)] = outside_value
+    result = apparent.copy(data=intrinsic).transpose(*apparent_da.dims)
+    result.attrs = apparent_da.attrs.copy()
+    result.attrs.update(
+        {
+            "primary_beam_correction": "taylor_polynomial_division",
+            "primary_beam_limit": float(limit),
+        }
+    )
+    return result
+
+
+def _restore_image_arrays(
+    residual,
+    model,
+    beam,
+    pixel_size,
+    processing_function_threads=1,
+    primary_beam=None,
+    primary_beam_limit=0.2,
+    output="apparent",
+    consume_model=False,
+):
+    """Restore generic image planes without assuming an axis coordinate name.
+
+    Cube and continuum restoration both have arrays shaped as ``(time, plane,
+    polarization, l, m)``; only the meaning of ``plane`` differs (frequency or
+    Taylor term). This core owns their common clean-beam convolution, safe
+    primary-beam division, cutoff masking, and output allocation.
+
+    Parameters
+    ----------
+    residual, model : numpy.ndarray
+        Five-dimensional image arrays with identical shape.
+    beam : numpy.ndarray
+        Restoring-beam parameters with shape
+        ``(time, plane, polarization, beam_params)``.
+    pixel_size : float
+        Absolute image-cell size in radians.
+    processing_function_threads : int, optional
+        Number of workers supplied to SciPy FFT operations. Values ``<= 0``
+        use all available cores.
+    primary_beam : numpy.ndarray, optional
+        Primary-beam power with the same image-plane layout as ``residual``.
+        Required for a primary-beam-corrected output.
+    primary_beam_limit : float, optional
+        Beam cutoff below which corrected pixels are set to NaN.
+    output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to calculate.
+    consume_model : bool, optional
+        Reuse the model buffer for the apparent restored output when possible.
+
+    Returns
+    -------
+    products : dict[str, numpy.ndarray]
+        Requested arrays keyed by ``"apparent"`` and/or
+        ``"primary_beam_corrected"``.
+    timing : dict[str, float]
+        Wall-clock seconds spent on the apparent and corrected calculations.
+    """
+    import time
+
+    allowed_outputs = {"apparent", "primary_beam_corrected", "both"}
+    if output not in allowed_outputs:
+        raise ValueError(
+            f"output must be one of {sorted(allowed_outputs)}; received {output!r}."
+        )
+    if residual.ndim != 5 or model.shape != residual.shape:
+        raise ValueError(
+            "residual and model must be identically shaped five-dimensional arrays."
+        )
+    expected_beam_shape = residual.shape[:3] + (3,)
+    if beam.shape != expected_beam_shape:
+        raise ValueError(
+            "beam must have shape (time, plane, polarization, 3); received "
+            f"{beam.shape}, expected {expected_beam_shape}."
+        )
+
+    make_apparent = output in {"apparent", "both"}
+    make_corrected = output in {"primary_beam_corrected", "both"}
+    if make_corrected:
+        if primary_beam is None:
+            raise ValueError(
+                "primary_beam is required for a primary-beam-corrected output."
+            )
+        if primary_beam.ndim != 5 or primary_beam.shape[:2] != residual.shape[:2]:
+            raise ValueError(
+                "primary_beam must have time and plane axes matching the image."
+            )
+        if primary_beam.shape[-2:] != residual.shape[-2:]:
+            raise ValueError(
+                "primary_beam spatial axes must match the image spatial axes."
+            )
+        if primary_beam.shape[2] not in (1, residual.shape[2]):
+            raise ValueError(
+                "primary_beam polarization must be singleton or match the image."
+            )
+
+    workers = (
+        processing_function_threads
+        if processing_function_threads and processing_function_threads > 0
+        else -1
+    )
+    nt, nplane, npol, ny, nx = residual.shape
+    consume = (
+        make_apparent
+        and consume_model
+        and model.dtype == residual.dtype
+        and model is not residual
+    )
+    apparent = model if consume else np.empty_like(residual) if make_apparent else None
+    corrected = np.empty_like(residual) if make_corrected else None
+    apparent_seconds = 0.0
+    corrected_seconds = 0.0
+    total_start = time.time()
+
+    for time_index in range(nt):
+        for plane_index in range(nplane):
+            kernel_ft = _clean_beam_kernel_ft(
+                beam[time_index, plane_index, 0],
+                ny,
+                nx,
+                pixel_size,
+                residual.dtype,
+                workers,
+            )
+            for polarization_index in range(npol):
+                model_plane = model[time_index, plane_index, polarization_index]
+                residual_plane = residual[time_index, plane_index, polarization_index]
+                # Corrected restoration must precede an apparent restoration
+                # that consumes the model buffer.
+                if make_corrected:
+                    start = time.time()
+                    beam_polarization = (
+                        polarization_index if primary_beam.shape[2] == npol else 0
+                    )
+                    primary_beam_corrected_plane(
+                        primary_beam[time_index, plane_index, beam_polarization],
+                        primary_beam_limit,
+                        model_plane,
+                        residual_plane,
+                        kernel_ft=kernel_ft,
+                        workers=workers,
+                        out=corrected[time_index, plane_index, polarization_index],
+                    )
+                    corrected_seconds += time.time() - start
+
+                if make_apparent:
+                    start = time.time()
+                    apparent_plane = apparent[
+                        time_index, plane_index, polarization_index
+                    ]
+                    if kernel_ft is None or not model_plane.any():
+                        apparent_plane[...] = residual_plane
+                    else:
+                        apparent_plane[...] = _convolve_with_clean_beam(
+                            model_plane, kernel_ft, workers
+                        )
+                        apparent_plane += residual_plane
+                    apparent_seconds += time.time() - start
+
+    total_seconds = time.time() - total_start
+    if make_apparent:
+        # Match the historical timing split: shared setup (notably the clean
+        # beam FFT) belongs to restoration, while corrected plane work is
+        # reported separately.
+        apparent_seconds = total_seconds - corrected_seconds
+    elif make_corrected:
+        corrected_seconds = total_seconds
+
+    products = {}
+    if make_apparent:
+        products["apparent"] = apparent
+    if make_corrected:
+        products["primary_beam_corrected"] = corrected
+    return products, {
+        "apparent": apparent_seconds,
+        "primary_beam_corrected": corrected_seconds,
+        "consumed_model": consume,
+    }
+
+
 def restore_image(
     img_xds: xr.Dataset,
     image_data_group_in_residual_name: str = "residual",
@@ -393,14 +637,10 @@ def restore_image(
     non-positive have no defined clean beam; their restored plane falls back to
     the residual (the model cannot be restored without a beam).
     """
-    import time
-
     import pandas as pd
 
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {"sky": "SKY_RESTORED"}
-
-    start = time.time()
 
     # Resolve the residual group as the "input" and build the restored output
     # group from it (so the restored group inherits the residual roles and just
@@ -447,7 +687,6 @@ def restore_image(
         primary_beam = img_xds[residual_group[primary_beam_key]].values
         corrected_sky_name = "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
         restored_group["sky_primary_beam_corrected"] = corrected_sky_name
-        T_correct = 0.0
 
     residual_da = img_xds[residual_sky_name]
     # ``.values`` are views into the dataset; only written to when the model
@@ -458,82 +697,27 @@ def restore_image(
     # = [major, minor, pa] FWHM/angle in radians.
     beam = img_xds[beam_name].values
 
-    nt, nf, npol, ny, nx = residual.shape
-
     # Pixel size in radians (square pixels assumed, as in the PSF fit).
     l = img_xds["l"].values
     delta = abs(float(l[1] - l[0]))
-
-    # scipy.fft uses one worker by default; <= 0 means "all cores".
-    workers = (
-        processing_function_threads
-        if (processing_function_threads and processing_function_threads > 0)
-        else -1
+    products, array_timing = _restore_image_arrays(
+        residual,
+        model,
+        beam[:, :, beam_polarization_index : beam_polarization_index + 1].repeat(
+            residual.shape[2], axis=2
+        ),
+        delta,
+        processing_function_threads=processing_function_threads,
+        primary_beam=primary_beam if correct else None,
+        primary_beam_limit=primary_beam_limit,
+        output="both" if correct else "apparent",
+        consume_model=(consume_model and model_sky_name != residual_sky_name),
     )
-
-    # Output cube, filled plane by plane below. With ``consume_model`` the
-    # model cube's buffer is reused (safe: every model plane is fully read
-    # into its forward FFT, or found empty, before its slot is overwritten);
-    # otherwise a single fresh cube is allocated.
-    consume = (
-        consume_model
-        and model.dtype == residual.dtype
-        and model_sky_name != residual_sky_name
-    )
-    restored = model if consume else np.empty_like(residual)
+    restored = products["apparent"]
+    consume = bool(array_timing["consumed_model"])
     if correct:
-        corrected = np.empty_like(residual)
-
-    for tt in range(nt):
-        for ff in range(nf):
-            # FFT of the centred clean beam, computed once and reused for every
-            # polarization; None when the fit gives no clean beam, in which
-            # case the model cannot be restored and the restored plane is the
-            # residual.
-            kernel_ft = _clean_beam_kernel_ft(
-                beam[tt, ff, beam_polarization_index],
-                ny,
-                nx,
-                delta,
-                residual.dtype,
-                workers,
-            )
-
-            for pp in range(npol):
-                model_plane = model[tt, ff, pp]
-                residual_plane = residual[tt, ff, pp]
-                # With ``consume_model`` the restored plane overwrites the
-                # model slot, so the corrected plane, which needs the model,
-                # comes first.
-                if correct:
-                    start_correct = time.time()
-                    pb_pol = pp if primary_beam.shape[2] == npol else 0
-                    primary_beam_corrected_plane(
-                        primary_beam[tt, ff, pb_pol],
-                        primary_beam_limit,
-                        model_plane,
-                        residual_plane,
-                        kernel_ft=kernel_ft,
-                        workers=workers,
-                        out=corrected[tt, ff, pp],
-                    )
-                    T_correct += time.time() - start_correct
-                if kernel_ft is None or not model_plane.any():
-                    # No clean beam, or nothing cleaned in this plane:
-                    # restored == residual.
-                    restored[tt, ff, pp] = residual_plane
-                else:
-                    # At most two extra planes are live at any point: the
-                    # model spectrum (beam applied in place, then inverse
-                    # transformed in place along l) and the convolved model;
-                    # the residual is added into the restored cube without a
-                    # temporary.
-                    convolved_model = _convolve_with_clean_beam(
-                        model_plane, kernel_ft, workers
-                    )
-                    restored[tt, ff, pp] = convolved_model
-                    del convolved_model
-                    restored[tt, ff, pp] += residual_plane
+        corrected = products["primary_beam_corrected"]
+        T_correct = float(array_timing["primary_beam_corrected"])
 
     # Store the restored sky, preserving the residual's dims, coords and attrs.
     img_xds[restored_sky_name] = residual_da.copy(data=restored)
@@ -559,7 +743,7 @@ def restore_image(
         description=description,
     )
 
-    timing = {"T_restore": [time.time() - start - (T_correct if correct else 0.0)]}
+    timing = {"T_restore": [float(array_timing["apparent"])]}
     if correct:
         timing["T_correct_sky_by_primary_beam"] = [T_correct]
     return_df = pd.DataFrame(timing)

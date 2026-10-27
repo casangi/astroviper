@@ -70,7 +70,16 @@ def make_continuum_image(
     image["POINT_SPREAD_FUNCTION"] = psf
     image["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = beam
     image["PRIMARY_BEAM"] = plane * 0.5
-    residual = {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+    primary_beam_taylor = xr.zeros_like(image.SKY_MODEL)
+    primary_beam_taylor.loc[{"taylor_term": 0}] = image.PRIMARY_BEAM.isel(
+        polarization=0
+    )
+    image["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
+    residual = {
+        "sky": "SKY_RESIDUAL",
+        "primary_beam": "PRIMARY_BEAM",
+        "primary_beam_taylor": "PRIMARY_BEAM_TAYLOR",
+    }
     if not legacy:
         residual.update(
             point_spread_function="POINT_SPREAD_FUNCTION",

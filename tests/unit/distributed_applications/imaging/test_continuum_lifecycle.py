@@ -88,6 +88,33 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
             assert "T_correct_sky_by_primary_beam" not in result["timing_restore"]
 
 
+def test_mvc_finalization_exposes_only_the_corrected_restored_sky():
+    """MVC drops its temporary apparent Taylor cube after restoration."""
+    image = make_continuum_image()
+    model = image[["SKY_MODEL"]].copy(deep=True)
+
+    result = node.continuum_finalize_node(
+        {"image": image, "residual_converged": True},
+        {
+            "prepared_continuum_image": True,
+            "static_xds": xr.Dataset(),
+            "model_xds": model,
+            "restore": True,
+            "primary_beam_correction": True,
+            "continuum_mode": "mvc",
+        },
+    )
+
+    restored = result["image"]
+    assert "SKY_RESTORED" not in restored
+    assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in restored
+    assert (
+        restored.attrs["data_groups"]["restored"]["sky"]
+        == "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+    )
+    assert "sky_primary_beam_corrected" not in restored.attrs["data_groups"]["restored"]
+
+
 @pytest.mark.parametrize("zarr_format", [2, 3])
 @pytest.mark.parametrize("kind", ["mfs", "mvc", "pb"])
 @pytest.mark.parametrize("single_precision", [False, True])

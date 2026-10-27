@@ -398,18 +398,6 @@ def test_single_task_visibility_cache_modes_match_driver_default(
         assert cache_name not in zarr.open_group(stores[mode])
 
 
-def test_primary_beam_correction_requires_restoration(tmp_path, processing_sets):
-    """The public driver rejects PB correction without a restored image."""
-    with pytest.raises(ValueError, match="requires restore=True"):
-        _image(
-            tmp_path,
-            processing_sets["two_hands"],
-            ["I", "Q"],
-            primary_beam_correction=True,
-        )
-    assert [path.name for path in tmp_path.iterdir()] == ["input.ps.zarr"]
-
-
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 def test_one_flagged_parallel_hand_drops_the_whole_sample(
     tmp_path, processing_sets, continuum_mode

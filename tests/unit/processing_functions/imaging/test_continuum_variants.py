@@ -829,11 +829,10 @@ def test_hogbom_adapter_canonicalizes_generated_primary_beam_mask(monkeypatch):
 def test_restoration_reports_incomplete_backend_result(monkeypatch):
     module = importlib.import_module("astroviper.processing_functions.imaging.restore")
 
-    def broken_restore(image, **kwargs):
-        image.attrs["data_groups"]["restored"] = {"sky": "ABSENT"}
-        return image, pd.DataFrame()
+    def broken_restore(*args, **kwargs):
+        return {}, {"apparent": 0.0, "primary_beam_corrected": 0.0}
 
-    monkeypatch.setattr(module, "restore_image", broken_restore)
+    monkeypatch.setattr(module, "_restore_image_arrays", broken_restore)
     with pytest.raises(RuntimeError, match="did not create"):
         restore_continuum_image(make_continuum_image())
 
@@ -875,6 +874,7 @@ def test_pb_correction_cutoff_includes_exact_boundary(dtype):
         image,
         primary_beam_correction=True,
         primary_beam_limit=float(limit),
+        continuum_mode="mvc",
     )
     finite = np.isfinite(
         result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(time=0, polarization=0).values

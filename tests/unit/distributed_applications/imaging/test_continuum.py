@@ -275,7 +275,7 @@ def test_continuum_public_api_matches_shared_imaging_names_and_defaults():
     assert parameters["single_precision_image"].default is True
     assert parameters["n_mapping_parallelism"].default is None
     assert "n_chunks" not in parameters
-    assert "primary_beam_correction" in parameters
+    assert "primary_beam_correction" not in parameters
     assert "primary_beam_limit" in parameters
     assert "continuum_mode" in parameters
     assert parameters["mvc_minor_cycle_approximation"].default == "channel_psf"
@@ -751,7 +751,6 @@ def _run_tw_hydra_continuum(
     image_param_overrides=None,
     image_params=None,
     restore=False,
-    primary_beam_correction=False,
     primary_beam_limit=0.2,
     single_precision_image=False,
     skunk_works=False,
@@ -804,7 +803,6 @@ def _run_tw_hydra_continuum(
             gridder="anti_alias",
             deconvolver=deconvolver,
             restore=restore,
-            primary_beam_correction=primary_beam_correction,
             primary_beam_limit=primary_beam_limit,
             continuum_mode=continuum_mode,
             scan_intents=["OBSERVE_TARGET#ON_SOURCE"],
@@ -1711,7 +1709,18 @@ def test_tw_hydra_distributed_continuum_is_partition_invariant(
     assert five_chunks.SKY_RESIDUAL.sizes["taylor_term"] == 2
     assert five_chunks.POINT_SPREAD_FUNCTION.sizes["psf_taylor_order"] == 3
     assert five_chunks.PRIMARY_BEAM.sizes["frequency"] == 1
-    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
+    variables = ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"]
+    if continuum_mode == "mvc":
+        assert five_chunks.PRIMARY_BEAM_TAYLOR.dims == (
+            "time",
+            "taylor_term",
+            "polarization",
+            "l",
+            "m",
+        )
+        assert five_chunks.PRIMARY_BEAM_TAYLOR.sizes["taylor_term"] == 2
+        variables.append("PRIMARY_BEAM_TAYLOR")
+    for variable in variables:
         actual = np.asarray(five_chunks[variable].values)
         reference = np.asarray(one_chunk[variable].values)
         assert actual.shape == reference.shape
@@ -2093,7 +2102,6 @@ def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(
             "cell_size": np.array([-1.0, 1.0]) * np.pi / (180 * 3600),
         },
         restore=True,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
     )
 
@@ -2111,6 +2119,10 @@ def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(
     assert np.any(pbcor_finite)
     assert np.any(~pbcor_finite)
     primary_beam = np.squeeze(np.asarray(image.PRIMARY_BEAM.values), axis=1)
+    primary_beam = np.broadcast_to(
+        primary_beam[:, None, ...],
+        pbcor_finite.shape,
+    )
     assert primary_beam.shape == pbcor_finite.shape
     assert not np.any(pbcor_finite[primary_beam < 0.2])
 
@@ -2180,7 +2192,7 @@ def test_tw_hydra_auto_chunked_single_precision_skunk_works_path(
 
 
 def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_store):
-    """MVC reuses global weights and PBs through cleaning and restoration."""
+    """MVC restores only its intrinsic PB-corrected Taylor image by default."""
     processing_set = open_processing_set(str(tw_hydra_store))
     result, image = _run_tw_hydra_continuum(
         tw_hydra_store,
@@ -2209,7 +2221,6 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
             "cell_size": np.array([-1.0, 1.0]) * np.pi / (180 * 3600),
         },
         restore=True,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         single_precision_image=True,
     )
@@ -2229,14 +2240,29 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     assert result["timing_graphs"][-1]["includes_restoration"] is True
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert image.SKY_RESIDUAL.dtype == np.dtype(np.float32)
-    assert image.SKY_RESTORED.dims == (
+    assert image.PRIMARY_BEAM_TAYLOR.dims == (
         "time",
         "taylor_term",
         "polarization",
         "l",
         "m",
     )
-    assert np.isfinite(image.SKY_RESTORED.values).all()
+    assert image.PRIMARY_BEAM_TAYLOR.dtype == np.dtype(np.float32)
+    assert image.attrs["data_groups"]["restored"]["primary_beam_taylor"] == (
+        "PRIMARY_BEAM_TAYLOR"
+    )
+    assert "SKY_RESTORED" not in image
+    assert image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.dims == (
+        "time",
+        "taylor_term",
+        "polarization",
+        "l",
+        "m",
+    )
+    assert image.attrs["data_groups"]["restored"]["sky"] == (
+        "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+    )
+    assert "sky_primary_beam_corrected" not in image.attrs["data_groups"]["restored"]
     assert np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).any()
     assert not np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).all()
 
