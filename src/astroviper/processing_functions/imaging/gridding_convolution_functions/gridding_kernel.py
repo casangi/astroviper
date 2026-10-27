@@ -17,8 +17,10 @@ Four kernel types exist:
     sampling (oversampling 100, nearest lookup,
     :data:`CASA_GRIDDING_KERNEL_PARAMS`) keeps Schwab's analytic
     correction; any other sampling or lookup is corrected by the transform of
-    the table applied. It concentrates the kernel's transform within the
-    unpadded image, so it does not profit from the FFT padding.
+    the table applied. Keys left out with this type take CASA's values, so
+    ``{"type": "prolate_spheroidal_casa"}`` alone is CASA's kernel and
+    sampling. It concentrates the kernel's transform within the unpadded
+    image, so it does not profit from the FFT padding.
 ``prolate_spheroidal``
     The generalised prolate spheroidal function of Schwab (1984), any odd
     support, with its bandwidth and weight exponent chosen for the image
@@ -138,9 +140,11 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
         ``interpolation`` (how the gridders read the table at a stencil
         point: ``"nearest"`` takes the nearest sample, ``"linear"``
         interpolates the two neighbouring samples). Missing keys take the
-        defaults of :data:`DEFAULT_GRIDDING_KERNEL_PARAMS` (CASA's kernel is
-        :data:`CASA_GRIDDING_KERNEL_PARAMS`). The type ``"dft"`` takes no
-        other key.
+        defaults of :data:`DEFAULT_GRIDDING_KERNEL_PARAMS`, or, for the type
+        ``"prolate_spheroidal_casa"``, those of
+        :data:`CASA_GRIDDING_KERNEL_PARAMS` (support 7, oversampling 100,
+        nearest lookup), so that type alone is CASA's kernel and sampling. The
+        type ``"dft"`` takes no other key.
 
     Returns
     -------
@@ -164,6 +168,9 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
                 f"unknown gridding_kernel_params key(s) {sorted(unknown)}; "
                 f"expected {sorted(params)}"
             )
+        if gridding_kernel_params.get("type") == "prolate_spheroidal_casa":
+            # CASA's kernel takes CASA's sampling for the keys not given
+            params = dict(CASA_GRIDDING_KERNEL_PARAMS)
         params.update(gridding_kernel_params)
     if params["type"] == DIRECT_FOURIER_TRANSFORM:
         given = sorted(set(gridding_kernel_params) - {"type"})
@@ -194,17 +201,11 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
         params["type"] == "prolate_spheroidal_casa"
         and support != PROLATE_SPHEROIDAL_SUPPORT
     ):
-        given = "support" in (gridding_kernel_params or {})
         raise ValueError(
             "the prolate_spheroidal_casa kernel is Schwab's rational approximation "
             f"of the m = 6, alpha = 1 function and spans {PROLATE_SPHEROIDAL_SUPPORT} "
-            f"grid points; got support {support}"
-            + (
-                " (the prolate_spheroidal kernel takes any odd support)"
-                if given
-                else " from DEFAULT_GRIDDING_KERNEL_PARAMS: pass "
-                "CASA_GRIDDING_KERNEL_PARAMS for CASA's kernel and sampling"
-            )
+            f"grid points; got support {support} (the prolate_spheroidal kernel "
+            "takes any odd support)"
         )
     oversampling = params["oversampling"]
     if not isinstance(oversampling, int | np.integer) or oversampling < 1:

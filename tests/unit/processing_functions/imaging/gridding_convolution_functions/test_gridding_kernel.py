@@ -63,11 +63,15 @@ class TestParams:
             ({"support": 6}, "odd integer"),
             ({"support": 1, "type": "exponential_semicircle"}, "odd integer"),
             ({"type": "prolate_spheroidal_casa", "support": 9}, "spans 7 grid points"),
-            # missing keys take the default's support 9
+            # CASA's values fill only the keys left out
+            ({"type": "prolate_spheroidal_casa", "support": 5}, "spans 7 grid points"),
             (
-                {"type": "prolate_spheroidal_casa"},
-                "support 9 from DEFAULT_GRIDDING_KERNEL_PARAMS: pass "
-                "CASA_GRIDDING_KERNEL_PARAMS",
+                {"type": "prolate_spheroidal_casa", "oversampling": 0},
+                "positive integer",
+            ),
+            (
+                {"type": "prolate_spheroidal_casa", "interpolation": "cubic"},
+                "not one of",
             ),
             ({"oversampling": 0}, "positive integer"),
             ({"oversampling": 2.5}, "positive integer"),
@@ -76,6 +80,34 @@ class TestParams:
     def test_refusals(self, bad, match):
         with pytest.raises(ValueError, match=match):
             resolve_gridding_kernel_params(bad)
+
+    def test_casa_type_takes_casas_values_for_the_keys_left_out(self):
+        """The type prolate_spheroidal_casa alone is CASA's kernel and sampling,
+        and a partial dict of that type takes CASA's values, not the
+        default's, for the keys it leaves out; other types still take the
+        default's."""
+        casa = {"type": "prolate_spheroidal_casa"}
+        assert resolve_gridding_kernel_params(casa) == CASA_GRIDDING_KERNEL_PARAMS
+        assert (
+            resolve_gridding_kernel_params({**casa, "support": 7})
+            == CASA_GRIDDING_KERNEL_PARAMS
+        )
+        for given in ({"oversampling": 1000}, {"interpolation": "linear"}):
+            assert resolve_gridding_kernel_params({**casa, **given}) == {
+                **CASA_GRIDDING_KERNEL_PARAMS,
+                **given,
+            }
+        # the kernel of the full dict, Schwab's analytic correction included
+        kernel = make_gridding_kernel(casa)
+        assert kernel is make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
+        assert kernel.params == CASA_GRIDDING_KERNEL_PARAMS
+        assert resolve_gridding_kernel_params({"type": "prolate_spheroidal"}) == {
+            **DEFAULT_GRIDDING_KERNEL_PARAMS,
+            "type": "prolate_spheroidal",
+        }
+        # a new dict every time, CASA's values untouched
+        resolve_gridding_kernel_params(casa)["oversampling"] = 5
+        assert CASA_GRIDDING_KERNEL_PARAMS["oversampling"] == 100
 
     def test_direct_fourier_transform(self):
         assert DIRECT_FOURIER_TRANSFORM == "dft"

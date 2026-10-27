@@ -3244,9 +3244,11 @@ def image_continuum_single_field(
         Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
         range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
         package, other paddings solve it at run time); ``None`` is all
-        defaults. CASA's kernel needs all four keys,
-        ``{"type": "prolate_spheroidal_casa", "support": 7, "oversampling":
-        100, "interpolation": "nearest"}``. A ``prolate_spheroidal``,
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
         ``exponential_semicircle`` or ``least_misfit`` kernel whose image
         plane correction falls below 1e-6 of its centre value at the edge of
         the image kept (a support too large for the ``fft_padding``, e.g. 17

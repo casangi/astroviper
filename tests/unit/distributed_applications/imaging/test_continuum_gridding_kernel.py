@@ -19,6 +19,7 @@ from xradio.measurement_set import open_processing_set
 import astroviper.distributed_applications as distributed_applications
 from astroviper.processing_functions.imaging._param_docs import IMAGING_PARAM_DOCS
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    CASA_GRIDDING_KERNEL_PARAMS,
     DEFAULT_GRIDDING_KERNEL_PARAMS,
     GriddingKernel,
     make_gridding_kernel,
@@ -177,7 +178,7 @@ def test_kernel_parameter_matches_the_cube_api():
         {"type": "boxcar"},
         {"support": 6},
         {"support": 1, "type": "exponential_semicircle"},
-        {"type": "prolate_spheroidal_casa"},
+        {"type": "prolate_spheroidal_casa", "support": 9},
         {"oversampling": 0},
         {"oversampling": 2.5},
         {"interpolation": "cubic"},
@@ -368,8 +369,8 @@ def _spy_kernels(monkeypatch):
 )
 @pytest.mark.parametrize(
     "gridding_kernel_params",
-    [KERNEL, None],
-    ids=["prolate_spheroidal_9_300_linear", "default"],
+    [KERNEL, None, {"type": "prolate_spheroidal_casa"}],
+    ids=["prolate_spheroidal_9_300_linear", "default", "casa_type_alone"],
 )
 def test_every_continuum_stage_uses_the_requested_kernel(
     monkeypatch,
@@ -383,7 +384,8 @@ def test_every_continuum_stage_uses_the_requested_kernel(
 ):
     """The PSF, the gridding, the degridding of the model and every image
     correction (the residual and PSF transforms and the model transform before
-    degridding) use the kernel of gridding_kernel_params, in MFS and MVC."""
+    degridding) use the kernel of gridding_kernel_params, in MFS and MVC; the
+    type prolate_spheroidal_casa alone is CASA's kernel and sampling."""
     calls = _spy_kernels(monkeypatch)
     ps_store = processing_sets[store]
     _continuum(
@@ -411,3 +413,5 @@ def test_every_continuum_stage_uses_the_requested_kernel(
     assert all(params == expected.params for params in calls["correction"])
     if gridding_kernel_params is None:
         assert expected.params == DEFAULT_GRIDDING_KERNEL_PARAMS
+    elif gridding_kernel_params == {"type": "prolate_spheroidal_casa"}:
+        assert expected.params == CASA_GRIDDING_KERNEL_PARAMS
