@@ -89,7 +89,7 @@ imaging, by the NumPy transform: errors of the Stokes conversion, the cross
 hand conjugation, the normalization, the sign of w and the n factor (in the
 imaging only, w of the opposite sign moves the dirty image by 4.8e-6 of the
 brightest flux and the PSF by 5.1e-6 of its peak, a missing n by 4.1e-10 and
-3.3e-10, 330 times ``REFERENCE_RTOL``). In its prediction, by the residual of
+3.3e-10, 165 times ``REFERENCE_RTOL``). In its prediction, by the residual of
 the true model: errors of the Stokes conversion, the cross hand conjugation,
 the normalization and the sign of w (in the prediction only, w of the
 opposite sign gives a residual of 1.8e-6 of the brightest flux, 180 times
@@ -227,8 +227,8 @@ EXACT_PRIMARY_BEAM_ATOL = 1e-12
 # term, 8.1e-14 and 1.8e-14 without, the kernel's rounding (the NumPy
 # transform is within 3.2e-16 of one in extended precision); with the source
 # directions moved by up to four units in the last place (ten draws) up to
-# 8.7e-14 and 1.8e-14.
-REFERENCE_RTOL = 1e-12
+# 8.7e-14 and 1.8e-14 (a margin of 23).
+REFERENCE_RTOL = 2e-12
 # The peak in the mask of the DFT residual of the true model over the brightest
 # apparent Stokes I flux, every plane: 1.9e-11; with the simulated source
 # directions moved by one unit in the last place (ten draws) up to 1.9e-10,
