@@ -2757,6 +2757,40 @@ def _resolve_continuum_taylor_expansion(image_params):
     image_params["reference_frequency"] = _get_reference_frequency_hz(image_params)
 
 
+def _refuse_unsupported_continuum_cycle_options(deconvolver, cycle_control_params):
+    """Refuse cycle control options the resolved continuum deconvolver lacks.
+
+    The continuum Högbom path runs the cube Högbom kernel on Taylor term zero,
+    which records ``record_iteration_history``; Asp and native MT-MFS do not
+    record it, and the cube check
+    (:func:`~astroviper.processing_functions.imaging.deconvolution.validate_record_iteration_history`)
+    refuses them. No continuum deconvolver does ``exact_psf_subtraction``: the
+    continuum graph makes no PSF of twice the image size. Called before
+    anything is written.
+    """
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.deconvolution import (
+        validate_record_iteration_history,
+    )
+
+    validate_record_iteration_history(
+        deconvolver, cycle_control_params.get("record_iteration_history", False)
+    )
+    exact_psf_subtraction = cycle_control_params.get("exact_psf_subtraction", False)
+    if not isinstance(exact_psf_subtraction, bool | np.bool_):
+        raise ValueError(
+            f"exact_psf_subtraction must be a bool; got {exact_psf_subtraction!r}."
+        )
+    if exact_psf_subtraction:
+        raise ValueError(
+            "exact_psf_subtraction is not supported by continuum imaging "
+            f"(deconvolver={deconvolver!r}): the continuum graph makes no PSF "
+            "of twice the image size. Cube imaging supports it with "
+            "deconvolver='hogbom' or 'hogbom_many_threads'."
+        )
+
+
 ###############################################################################
 # Main distributed layer level function call
 ###############################################################################
@@ -2855,6 +2889,13 @@ def image_continuum_single_field(
     of the model update for ``max_iter_divergence`` consecutive iterations,
     or at once when its peak exceeds ``(1 + gain)`` times its peak at the
     start of the model update.
+
+    Of the continuum deconvolvers only Högbom records
+    ``record_iteration_history``, and continuum imaging has no
+    ``exact_psf_subtraction`` (it makes no PSF of twice the image size).
+    ``record_iteration_history=True`` with Asp or MT-MFS, and
+    ``exact_psf_subtraction=True`` with any deconvolver, raise ``ValueError``
+    before anything is written.
 
     Parameters
     ----------
@@ -3185,8 +3226,8 @@ def image_continuum_single_field(
           to the bit with and without it, and the RMS is the sum of squares
           the peak search of the next iteration makes anyway, so it costs no
           extra pass over the image per iteration. Hogbom deconvolvers only:
-          ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
-          No CASA equivalent.
+          ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise
+          ``ValueError``. Default ``False``. No CASA equivalent.
         - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
           subtracts the PSF of every component it finds from the whole residual
           image, with a PSF of twice the image size made once per channel from
@@ -3199,8 +3240,9 @@ def image_continuum_single_field(
           image-sized PSF either way. Costs a second PSF per channel (four
           times the pixels, kept through the channel's cycles) and a
           subtraction over the whole image at every iteration. Hogbom
-          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
-          Default ``False``. No CASA equivalent.
+          deconvolvers of cube imaging only: ``deconvolver="asp"`` and
+          continuum imaging raise ``ValueError``. Default ``False``. No CASA
+          equivalent.
         - ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends
           after each of its Hogbom runs (51 or 510 point components) unless
           the RMS of the residual has fallen, by less than a factor 1.5, since
@@ -3443,6 +3485,7 @@ def image_continuum_single_field(
     # image parameters with metadata derived from the Processing Set.
     image_params = dict(image_params)
     deconvolver = _resolve_continuum_deconvolver(deconvolver, image_params)
+    _refuse_unsupported_continuum_cycle_options(deconvolver, cycle_control_params)
     _resolve_continuum_taylor_expansion(image_params)
 
     clean_mask_array = _load_continuum_clean_mask(

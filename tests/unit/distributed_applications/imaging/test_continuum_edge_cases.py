@@ -5,6 +5,7 @@ import pytest
 import xarray as xr
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+    _refuse_unsupported_continuum_cycle_options,
     _resolve_continuum_deconvolver,
     _resolve_continuum_taylor_expansion,
     _warn_on_mvc_asp_significance_without_clean_mask,
@@ -168,6 +169,99 @@ def test_public_api_refuses_multi_term_asp_before_writing(tmp_path):
         )
     assert not image_store.exists()
     assert list(ps_store.iterdir()) == []
+
+
+def _assert_refused_before_writing(tmp_path, match, **kwargs):
+    """Call the public continuum API on an empty input directory and check that
+    it raises ValueError before the input is opened or the image store is
+    created."""
+    ps_store = tmp_path / "input.ps.zarr"
+    ps_store.mkdir()
+    image_store = tmp_path / "output.img.zarr"
+    arguments = {
+        "ps_store": str(ps_store),
+        "image_store": str(image_store),
+        "image_params": {"n_taylor_terms": 1, "image_size": [8, 8]},
+        "imaging_weights_params": {"weighting": "natural"},
+        "cycle_control_params": {"max_iter": 1},
+        **kwargs,
+    }
+    with pytest.raises(ValueError, match=match):
+        image_continuum_single_field(**arguments)
+    assert not image_store.exists()
+    assert list(ps_store.iterdir()) == []
+
+
+@pytest.mark.parametrize("deconvolver", ["hogbom", "asp", "mtmfs"])
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"record_iteration_history": False, "exact_psf_subtraction": False}],
+    ids=["unset", "false"],
+)
+def test_continuum_accepts_the_cycle_options_off(deconvolver, options):
+    _refuse_unsupported_continuum_cycle_options(deconvolver, options)
+
+
+@pytest.mark.parametrize("value", [True, np.True_])
+def test_continuum_hogbom_may_record_the_iteration_history(value):
+    """The continuum Hogbom path runs the cube Hogbom kernel, which records it."""
+    _refuse_unsupported_continuum_cycle_options(
+        "hogbom", {"record_iteration_history": value}
+    )
+
+
+@pytest.mark.parametrize("deconvolver", ["asp", "mtmfs"])
+def test_continuum_refuses_the_iteration_history_without_hogbom(deconvolver):
+    with pytest.raises(
+        ValueError,
+        match="record_iteration_history is supported by the Hogbom deconvolvers "
+        f".* only; got deconvolver '{deconvolver}'\\.",
+    ):
+        _refuse_unsupported_continuum_cycle_options(
+            deconvolver, {"record_iteration_history": True}
+        )
+
+
+@pytest.mark.parametrize("deconvolver", ["hogbom", "asp", "mtmfs"])
+def test_continuum_refuses_exact_psf_subtraction(deconvolver):
+    with pytest.raises(
+        ValueError,
+        match="exact_psf_subtraction is not supported by continuum imaging "
+        f"\\(deconvolver='{deconvolver}'\\): the continuum graph makes no PSF",
+    ):
+        _refuse_unsupported_continuum_cycle_options(
+            deconvolver, {"exact_psf_subtraction": True}
+        )
+
+
+@pytest.mark.parametrize("name", ["record_iteration_history", "exact_psf_subtraction"])
+@pytest.mark.parametrize("value", [1, "yes", None])
+def test_continuum_refuses_a_cycle_option_that_is_not_a_bool(name, value):
+    with pytest.raises(ValueError, match=f"{name} must be a bool; got {value!r}."):
+        _refuse_unsupported_continuum_cycle_options("hogbom", {name: value})
+
+
+@pytest.mark.parametrize(
+    "deconvolver,n_taylor_terms,option,message",
+    [
+        ("asp", 1, "record_iteration_history", "the Hogbom deconvolvers"),
+        ("asp", 1, "exact_psf_subtraction", "not supported by continuum imaging"),
+        ("mtmfs", 2, "record_iteration_history", "the Hogbom deconvolvers"),
+        ("mtmfs", 2, "exact_psf_subtraction", "not supported by continuum imaging"),
+        ("hogbom", 1, "exact_psf_subtraction", "not supported by continuum imaging"),
+    ],
+)
+def test_public_api_refuses_unsupported_cycle_options_before_writing(
+    tmp_path, deconvolver, n_taylor_terms, option, message
+):
+    """Refused at the graph layer, not after the first residual update."""
+    _assert_refused_before_writing(
+        tmp_path,
+        message,
+        deconvolver=deconvolver,
+        image_params={"n_taylor_terms": n_taylor_terms, "image_size": [8, 8]},
+        cycle_control_params={"max_iter": 1, option: True},
+    )
 
 
 @pytest.mark.parametrize("n_taylor_terms", [2, np.int64(2)])
