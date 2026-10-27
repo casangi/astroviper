@@ -90,8 +90,7 @@ _TRUTH_IMAGE_DRIVE_IDS = {
     # its peak (6.7e-5 in the inner half of the image) and the niter0 residual
     # by up to 5.4e-3 of its peak (1.5e-3), which changes the CLEAN of
     # niter100 and multi_cycle. (v7, made for threshold_tolerance, was never
-    # uploaded.) Upload pending: until the ids are filled in, the test fails
-    # wherever the v8 directories are not present locally, CI included.
+    # uploaded.) Uploaded 2026-10-27.
     # v6, for the stop test on the fresh residual (issue 290): every
     # threshold_per_cycle is based on the peak residual inside the clean mask
     # after the residual update of its imaging cycle, which changes the CLEAN
@@ -103,10 +102,10 @@ _TRUTH_IMAGE_DRIVE_IDS = {
     # primary_beam_limit mask shrinks and the CLEAN of niter100 and multi_cycle
     # changes. A new version keeps main's truths (the unversioned names)
     # untouched.
-    TRUTH_IMAGE_NITER0: None,  # upload pending
-    TRUTH_IMAGE_NITER100: None,  # upload pending
-    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: None,  # upload pending
-    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: None,  # upload pending
+    TRUTH_IMAGE_NITER0: "1XZcfXiSs8n_dRmVrElOxiupCo5fd96Hd",
+    TRUTH_IMAGE_NITER100: "16TDgMucqAFMINkX0PxnKbH6Qy92YQVxJ",
+    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: "1vDINEZ5cewer7p0ncitmBFGdC6ej1WdD",
+    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "1D_0KyA-2PlqOOSg-9JD40uMkYd0-ZtcI",
 }
 
 # Default (tight) per-channel relative-difference ceiling for the reproducible
