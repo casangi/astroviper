@@ -45,8 +45,10 @@ The default (:data:`DEFAULT_GRIDDING_KERNEL_PARAMS`) is the ``least_misfit``
 kernel of support 9, oversampling 300 and linear lookup, the kernel RADPS
 Memo 13a selects. It is designed for the padding, so it needs ``fft_padding``;
 for 1.2 its solved table ships with the package. A bare kernel table
-(:func:`as_gridding_kernel`) and the image correction the FFT normalization
-makes without a kernel are CASA's (:data:`CASA_GRIDDING_KERNEL_PARAMS`).
+(:func:`as_gridding_kernel`) is CASA's kernel
+(:data:`CASA_GRIDDING_KERNEL_PARAMS`). The FFT normalization has no default
+kernel: it is given the kernel the visibilities are gridded or degridded
+with.
 
 The type ``"dft"`` (:data:`DIRECT_FOURIER_TRANSFORM`) selects no kernel: the
 imaging functions then replace gridding and FFT by the exact direct Fourier

@@ -68,6 +68,18 @@ def _fft_module(backend):
     )
 
 
+def _require_gridding_kernel(gridding_kernel, function_name):
+    """Refuse a missing gridding kernel: the image correction is its transform."""
+    if gridding_kernel is None:
+        raise ValueError(
+            f"{function_name} needs gridding_kernel, the GriddingKernel the "
+            "visibilities are gridded or degridded with: the image is divided by "
+            "its correction, and there is no default kernel "
+            "(make_gridding_kernel(gridding_kernel_params, fft_padding) makes it, "
+            "as_gridding_kernel(cgk_1D) that of a bare kernel table)"
+        )
+
+
 # @profile(precision=1)
 def ifft_norm_img_xds(
     img_xds,
@@ -92,9 +104,7 @@ def ifft_norm_img_xds(
        ``(time, plane, polarization)`` slice so that only one 2-D plane
        is in memory during the transform.
     3. Divides in-place by the gridding kernel's correction function along
-       each image axis (``gridding_kernel``, a
-       :class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`;
-       ``None`` is CASA's kernel, that of a bare kernel table).
+       each image axis (``gridding_kernel``).
     4. Crops the zero-padded margins to the requested ``image_size``.
     5. Normalises by the corresponding grid-weight sum, replacing zero weights
        with 1 to avoid division by zero.
@@ -154,6 +164,14 @@ def ifft_norm_img_xds(
         potentially faster transforms when pyfftw is installed; plan caching
         is especially beneficial when the same grid shape is transformed
         repeatedly across imaging cycles.
+    gridding_kernel : GriddingKernel
+        The kernel the grids were made with
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
+        from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare kernel table). Required: there is no default kernel.
 
     Returns
     -------
@@ -165,6 +183,11 @@ def ifft_norm_img_xds(
         sky in a four-correlation basis (``XX, XY, YX, YY`` or
         ``RR, RL, LR, LL``), which is complex until it is transformed to Stokes.
 
+    Raises
+    ------
+    ValueError
+        If ``gridding_kernel`` is not given (before ``img_xds`` is changed).
+
     Notes
     -----
     Peak memory is dominated by the raw UV grid
@@ -174,6 +197,7 @@ def ifft_norm_img_xds(
     grid adds one extra 2-D complex plane per iteration for the defensive
     copy, ≈ 1.15 GB for a 12 000 × 12 000 complex128 grid.
     """
+    _require_gridding_kernel(gridding_kernel, "ifft_norm_img_xds")
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
             "sky": "SKY_RESIDUAL",
@@ -192,13 +216,6 @@ def ifft_norm_img_xds(
         overwrite=overwrite,
     )
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        CASA_GRIDDING_KERNEL_PARAMS,
-        make_gridding_kernel,
-    )
-
-    if gridding_kernel is None:
-        gridding_kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
     kernel_image_1D_l = gridding_kernel.correction_1D(img_xds.sizes["u"])
     kernel_image_1D_m = gridding_kernel.correction_1D(img_xds.sizes["v"])
 
@@ -385,9 +402,10 @@ def fft_norm_img_xds(
     Options are data_variables_to_process = ["primary_beam", "point_spread_function", "sky"]
 
     The image is divided by the gridding kernel's correction function before
-    the transform (``gridding_kernel``, a
-    :class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`;
-    ``None`` is CASA's kernel, that of a bare kernel table).
+    the transform (``gridding_kernel``, the
+    :class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`
+    the model visibilities are degridded with). The kernel is required: without
+    it a ValueError is raised before ``img_xds`` is changed.
 
     ``complex_dtype`` sets the precision of the output model UV grid
     (``complex64`` for a single-precision image, ``complex128`` otherwise). The
@@ -395,6 +413,7 @@ def fft_norm_img_xds(
     (the degridder widens each grid cell to ``complex128`` for the
     accumulation), so only the image-domain grid is affected here.
     """
+    _require_gridding_kernel(gridding_kernel, "fft_norm_img_xds")
     return _fft_norm_image_planes(
         img_xds,
         image_params,
@@ -743,17 +762,23 @@ def fft_norm_continuum_img_xds(
         Logical variables to transform. Defaults to ``["sky"]``.
     complex_dtype : numpy dtype, optional
         Complex precision of the UV grid.
-    gridding_kernel : GriddingKernel, optional
+    gridding_kernel : GriddingKernel
         The gridding kernel whose correction function the image is divided by
-        before the transform
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`);
-        ``None`` is CASA's kernel, that of a bare kernel table.
+        before the transform, the one the model visibilities are degridded with
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`).
+        Required: there is no default kernel.
 
     Returns
     -------
     xarray.Dataset
         Dataset containing the Taylor-term visibility grid.
+
+    Raises
+    ------
+    ValueError
+        If ``gridding_kernel`` is not given (before ``img_xds`` is changed).
     """
+    _require_gridding_kernel(gridding_kernel, "fft_norm_continuum_img_xds")
     return _fft_norm_image_planes(
         img_xds,
         image_params,
@@ -785,16 +810,15 @@ def _fft_norm_image_planes(
     fft_backend,
     data_variables_to_process,
     complex_dtype,
-    gridding_kernel=None,
+    gridding_kernel,
 ):
     """Transform frequency or Taylor planes with shared allocation and FFT rules.
 
     Output buffers are reused only when dimensions, shape and dtype match.
     Each output plane doubles as its padded FFT workspace; input sky planes
     remain unchanged until optionally removed from the returned dataset. The
-    image is divided by the correction function of ``gridding_kernel``
-    (``None`` is CASA's kernel, that of a bare kernel table) before the
-    transform.
+    image is divided by the correction function of ``gridding_kernel`` before
+    the transform.
     """
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
@@ -924,13 +948,6 @@ def _fft_norm_image_planes(
         out_arr = img_xds[out_name].values
         img_xds[out_name].attrs["type"] = data_variable
 
-        if gridding_kernel is None:
-            from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-                CASA_GRIDDING_KERNEL_PARAMS,
-                make_gridding_kernel,
-            )
-
-            gridding_kernel = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
         kernel_image_1D_l = gridding_kernel.correction_1D(n_uv[0])
         kernel_image_1D_m = gridding_kernel.correction_1D(n_uv[1])
 
