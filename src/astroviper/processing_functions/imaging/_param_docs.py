@@ -572,13 +572,13 @@ IMAGING_PARAM_DOCS = {
         "the driver but passes each map only its local beam. The setting is ignored\n"
         "for MFS."
     ),
-    "mvc_primary_beam_approach": (
-        'MVC residual primary-beam evaluation. ``"casa"`` preserves CASA\'s\n'
-        'explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates\n'
-        "the algebraically cancelled Memo-I equation (19) directly and avoids\n"
-        'the intermediate primary-beam division. ``"legacy"`` restores the former\n'
-        "AstroVIPER spatially varying G-inverse residual preconditioner with\n"
-        "beam-free Taylor PSFs. The setting is ignored by MFS."
+    "mvc_minor_cycle_approximation": (
+        "MVC approximation used to construct the Taylor residuals and PSFs.\n"
+        '``"channel_psf"`` retains the frequency-dependent channel PSFs while\n'
+        "approximating the channel-to-common-beam ratio as one.\n"
+        '``"local_beam_moments"`` retains local frequency-dependent primary-beam\n'
+        "moments while approximating the channel PSFs by a common response. The\n"
+        "setting is ignored by MFS."
     ),
     "processing_function_threads": (
         "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."

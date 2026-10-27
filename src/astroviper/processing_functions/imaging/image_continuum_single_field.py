@@ -1154,27 +1154,18 @@ def make_mvc_taylor_normal_equation_contributions(
     n_taylor_terms,
     reference_frequency,
     primary_beam_limit=0.2,
-    mvc_primary_beam_approach="casa",
+    mvc_minor_cycle_approximation="channel_psf",
 ):
     """Form additive MVC Taylor products for one map-task frequency chunk.
 
     The returned dataset has no frequency dimension and can therefore be
-    combined by element-wise addition in the distributed reduce stage.  The
-    CASA's channel-primary-beam correction and Taylor moment construction are
-    evaluated either as CASA's explicit divide-then-multiply sequence or as the
-    algebraically cancelled Memo-I expression. The legacy option instead
-    accumulates the former AstroVIPER beam-weighted residual and local
-    squared-beam moments. Only globally coupled normalization and, for the
-    legacy path, application of its spatial preconditioner remain for the
-    append node.
-
-    CASA first replaces each valid channel residual by
-    ``R'_nu = Abar * R_nu / A_nu``.  Its cube-to-Taylor step then multiplies
-    residual and PSF channels by ``A_nu`` and divides the Taylor sums by
-    ``Abar``. The preconditioned option cancels these factors before evaluation; the
-    CASA option retains the channel divide and multiply. PSF Taylor numerators
-    retain one channel beam factor in both approaches. The legacy path uses
-    beam-free Taylor PSFs.
+    combined by element-wise addition in the distributed reduce stage. The
+    ``"channel_psf"`` approximation retains the frequency-dependent channel
+    PSFs while approximating the channel-to-common-beam ratio as one. The
+    ``"local_beam_moments"`` approximation instead retains local
+    frequency-dependent squared-primary-beam moments and uses beam-free Taylor
+    PSFs. Only globally coupled normalization and, for the local-beam-moment
+    path, application of its spatial preconditioner remain for the append node.
 
     Parameters
     ----------
@@ -1197,28 +1188,26 @@ def make_mvc_taylor_normal_equation_contributions(
     reference_frequency : float
         Taylor reference frequency in Hz.
     primary_beam_limit : float, default 0.2
-        Primary-beam cutoff. For the CASA and preconditioned paths, channel
-        beams at or below it do not contribute to residual, PSF, or
-        effective-beam numerators. The legacy path retains every finite channel
-        in its residual and Gram moments but uses the cutoff to determine local
-        Taylor support. Final products are zero where the effective beam is at
-        or below the cutoff.
-    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, default "casa"
-        Residual primary-beam evaluation. ``"casa"`` explicitly divides each
-        valid channel residual by its channel beam and multiplies by that beam
-        while forming Taylor products. ``"preconditioned"`` evaluates the analytically
-        cancelled Memo-I expression directly. The two are algebraically
-        equivalent on valid support; ``"preconditioned"`` avoids the intermediate
-        division. ``"legacy"`` restores AstroVIPER's former spatially varying
-        :math:`G^{-1}` residual preconditioner and beam-free Taylor PSFs.
+        Primary-beam cutoff. For ``"channel_psf"``, channel beams at or below
+        it do not contribute to residual, PSF, or effective-beam numerators.
+        ``"local_beam_moments"`` retains every finite channel in its residual
+        and Gram moments but uses the cutoff to determine local Taylor support.
+        Final products are zero where the effective beam is at or below the
+        cutoff.
+    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, default "channel_psf"
+        MVC approximation used to construct the Taylor residuals and PSFs.
+        ``"channel_psf"`` retains channel-dependent PSFs while approximating
+        :math:`A_\\nu/A \\simeq 1`. ``"local_beam_moments"`` retains local
+        frequency-dependent primary-beam moments through :math:`G` while
+        approximating the channel PSFs by a common beam-free Taylor response.
 
     Returns
     -------
     xarray.Dataset
-        Additive residual Taylor numerators and residual-weight sum. The legacy
-        path additionally contains squared-beam and beam-free spectral moments.
-        When a PSF cube is supplied, also contains Taylor PSF numerators, the
-        PSF weight sum, and the PSF-weighted primary-beam sum.
+        Additive residual Taylor numerators and residual-weight sum. The
+        local-beam-moment path additionally contains squared-beam and beam-free
+        spectral moments. When a PSF cube is supplied, also contains Taylor PSF
+        numerators, the PSF weight sum, and the PSF-weighted primary-beam sum.
 
     Notes
     -----
@@ -1234,11 +1223,11 @@ def make_mvc_taylor_normal_equation_contributions(
     ``B_k = sum(w_nu * x_nu**k * A_nu * B_nu) / (sum(w_nu) * Abar)``.
 
     The first expression reduces exactly to the weighted residual moment
-    ``sum(w_nu * x_nu**t * R_nu) / sum(w_nu)`` on channel-PB support. The CASA
-    approach preserves the explicit operational sequence; the Memo-I approach
-    uses the reduced expression from equations (19)--(20).
+    ``sum(w_nu * x_nu**t * R_nu) / sum(w_nu)`` on channel-PB support. The
+    ``"channel_psf"`` path evaluates this reduced expression directly.
 
-    The legacy path accumulates ``u_t = sum(w_nu * x_nu**t * A_nu * R_nu)``
+    The ``"local_beam_moments"`` path accumulates
+    ``u_t = sum(w_nu * x_nu**t * A_nu * R_nu)``
     and ``G_tq = sum(w_nu * x_nu**(t+q) * A_nu**2)``. Finalization returns
     ``Abar * C @ inv(G) @ u``, where
     ``C_tq = sum(w_nu * x_nu**(t+q)) / sum(w_nu)``, together with the beam-free
@@ -1300,7 +1289,7 @@ def make_mvc_taylor_normal_equation_contributions(
     n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
     primary_beam_limit = float(primary_beam_limit)
-    mvc_primary_beam_approach = str(mvc_primary_beam_approach).lower()
+    mvc_minor_cycle_approximation = str(mvc_minor_cycle_approximation).lower()
 
     if n_taylor_terms < 1:
         raise ValueError(f"n_taylor_terms must be positive; received {n_taylor_terms}.")
@@ -1308,11 +1297,14 @@ def make_mvc_taylor_normal_equation_contributions(
         raise ValueError("reference_frequency must be finite and positive.")
     if not np.isfinite(primary_beam_limit) or primary_beam_limit < 0.0:
         raise ValueError("primary_beam_limit must be finite and non-negative.")
-    if mvc_primary_beam_approach not in ("casa", "preconditioned", "legacy"):
+    if mvc_minor_cycle_approximation not in (
+        "channel_psf",
+        "local_beam_moments",
+    ):
         raise ValueError(
-            "mvc_primary_beam_approach must be 'casa', 'preconditioned', or "
-            "'legacy'; received "
-            f"{mvc_primary_beam_approach!r}."
+            "mvc_minor_cycle_approximation must be 'channel_psf' or "
+            "'local_beam_moments'; received "
+            f"{mvc_minor_cycle_approximation!r}."
         )
 
     frequency = np.asarray(residual_cube.frequency.values, dtype=np.float64)
@@ -1354,27 +1346,16 @@ def make_mvc_taylor_normal_equation_contributions(
     # denominator, including weights from clipped channels.
     finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
 
-    if mvc_primary_beam_approach == "legacy":
-        # Former AstroVIPER path: form the exact-gradient numerator u from
-        # A_nu R_nu and collect the A_nu^2 moments needed by the spatially
-        # varying G^-1 preconditioner in the append node.
+    if mvc_minor_cycle_approximation == "local_beam_moments":
+        # Form the exact-gradient numerator u from A_nu R_nu and collect the
+        # A_nu^2 moments needed by the spatially varying G^-1 preconditioner in
+        # the append node.
         channel_primary_beam = xr.where(
             np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
         )
         residual_for_taylor_sum = channel_primary_beam * residual_cube
-    elif mvc_primary_beam_approach == "casa":
-        # CASA first forms R'_nu = Abar * R_nu / A_nu and cubeToTaylor then
-        # multiplies by A_nu and divides by Abar. Abar is global and cancels,
-        # so preserve CASA's channel divide-then-multiply ordering here.
-        primary_beam_corrected_residual = xr.where(
-            valid_channel_pb,
-            residual_cube / xr.where(valid_channel_pb, primary_beam_cube, 1.0),
-            0.0,
-        )
-        residual_for_taylor_sum = finite_primary_beam * primary_beam_corrected_residual
     else:
-        # Memo I, Eq. (19), cancels A_nu analytically on valid support and
-        # therefore never creates a primary-beam-divided residual image.
+        # Approximate A_nu / A as one while retaining the channel-dependent PSF.
         residual_for_taylor_sum = xr.where(
             valid_channel_pb,
             residual_cube,
@@ -1394,16 +1375,16 @@ def make_mvc_taylor_normal_equation_contributions(
     ).transpose("time", "taylor_term", "polarization", "l", "m")
     residual_numerator.attrs = {
         "description": (
-            "Additive legacy AstroVIPER MVC Taylor residual numerators."
-            if mvc_primary_beam_approach == "legacy"
-            else "Additive CASA-convention MVC Taylor residual numerators."
+            "Additive local-beam-moment MVC Taylor residual numerators."
+            if mvc_minor_cycle_approximation == "local_beam_moments"
+            else "Additive channel-PSF MVC Taylor residual numerators."
         ),
         "continuum_mode": "mvc",
         "reference_frequency": reference_frequency,
         "n_taylor_terms": n_taylor_terms,
         "primary_beam_limit": primary_beam_limit,
         "primary_beam_convention": "casa_mvc_common_beam",
-        "mvc_primary_beam_approach": mvc_primary_beam_approach,
+        "mvc_minor_cycle_approximation": mvc_minor_cycle_approximation,
     }
 
     contributions = xr.Dataset(
@@ -1417,13 +1398,13 @@ def make_mvc_taylor_normal_equation_contributions(
             "reference_frequency": reference_frequency,
             "primary_beam_limit": primary_beam_limit,
             "primary_beam_convention": "casa_mvc_common_beam",
-            "mvc_primary_beam_approach": mvc_primary_beam_approach,
+            "mvc_minor_cycle_approximation": mvc_minor_cycle_approximation,
             "mvc_output_dtype": np.dtype(output_dtype).name,
         },
     )
 
     n_psf_taylor_terms = 2 * n_taylor_terms - 1
-    if mvc_primary_beam_approach == "legacy":
+    if mvc_minor_cycle_approximation == "local_beam_moments":
         psf_taylor_order = xr.IndexVariable(
             "psf_taylor_order", np.arange(n_psf_taylor_terms, dtype=np.int64)
         )
@@ -1454,7 +1435,7 @@ def make_mvc_taylor_normal_equation_contributions(
         psf_weight_sum = psf_weight.sum(dim="frequency")
 
         finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
-        if mvc_primary_beam_approach == "legacy":
+        if mvc_minor_cycle_approximation == "local_beam_moments":
             psf_terms = [
                 (psf_weight * x_frequency**order * finite_psf).sum(dim="frequency")
                 for order in range(n_psf_taylor_terms)
@@ -1475,9 +1456,9 @@ def make_mvc_taylor_normal_equation_contributions(
         ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
         psf_numerator.attrs = {
             "description": (
-                "Additive beam-free legacy AstroVIPER MVC Taylor PSF numerators."
-                if mvc_primary_beam_approach == "legacy"
-                else "Additive CASA-convention MVC Taylor PSF numerators."
+                "Additive beam-free local-beam-moment MVC Taylor PSF numerators."
+                if mvc_minor_cycle_approximation == "local_beam_moments"
+                else "Additive channel-PSF MVC Taylor PSF numerators."
             ),
             "continuum_mode": "mvc",
             "reference_frequency": reference_frequency,
@@ -1485,7 +1466,7 @@ def make_mvc_taylor_normal_equation_contributions(
             "n_psf_taylor_terms": n_psf_taylor_terms,
             "primary_beam_limit": primary_beam_limit,
             "primary_beam_convention": "casa_mvc_common_beam",
-            "mvc_primary_beam_approach": mvc_primary_beam_approach,
+            "mvc_minor_cycle_approximation": mvc_minor_cycle_approximation,
         }
         contributions["MVC_PSF_TAYLOR_NUMERATOR"] = psf_numerator
         contributions["MVC_PSF_WEIGHT_SUM"] = psf_weight_sum
@@ -1545,13 +1526,13 @@ def finalize_mvc_taylor_normal_equations(
         effective_primary_beam > primary_beam_limit
     )
 
-    mvc_primary_beam_approach = contributions.attrs.get(
-        "mvc_primary_beam_approach", "casa"
+    mvc_minor_cycle_approximation = contributions.attrs.get(
+        "mvc_minor_cycle_approximation", "channel_psf"
     )
-    if mvc_primary_beam_approach == "legacy":
-        # Apply the former spatially varying preconditioner
-        # Abar C G^-1 to the exact-gradient numerator u. Pixels with too few
-        # supported channels retain only the scalar Taylor-zero solution.
+    if mvc_minor_cycle_approximation == "local_beam_moments":
+        # Apply the spatially varying preconditioner Abar C G^-1 to the
+        # exact-gradient numerator u. Pixels with too few supported channels
+        # retain only the scalar Taylor-zero solution.
         pixel_dims = ("time", "polarization", "l", "m")
         numerator = contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].transpose(
             *pixel_dims, "taylor_term"
@@ -1628,16 +1609,16 @@ def finalize_mvc_taylor_normal_equations(
         "reference_frequency": contributions.attrs.get("reference_frequency"),
         "n_taylor_terms": contributions.attrs.get("n_taylor_terms"),
         "primary_beam_limit": primary_beam_limit,
-        "mvc_primary_beam_approach": contributions.attrs.get(
-            "mvc_primary_beam_approach", "casa"
+        "mvc_minor_cycle_approximation": contributions.attrs.get(
+            "mvc_minor_cycle_approximation", "channel_psf"
         ),
     }
     effective_primary_beam.attrs = {
         "description": "Imaging-weighted effective primary beam for MVC.",
         "continuum_mode": "mvc",
         "primary_beam_limit": primary_beam_limit,
-        "mvc_primary_beam_approach": contributions.attrs.get(
-            "mvc_primary_beam_approach", "casa"
+        "mvc_minor_cycle_approximation": contributions.attrs.get(
+            "mvc_minor_cycle_approximation", "channel_psf"
         ),
     }
     if psf_taylor is not None:
@@ -1649,8 +1630,8 @@ def finalize_mvc_taylor_normal_equations(
             "n_taylor_terms": contributions.attrs.get("n_taylor_terms"),
             "n_psf_taylor_terms": psf_taylor.sizes["psf_taylor_order"],
             "primary_beam_limit": primary_beam_limit,
-            "mvc_primary_beam_approach": contributions.attrs.get(
-                "mvc_primary_beam_approach", "casa"
+            "mvc_minor_cycle_approximation": contributions.attrs.get(
+                "mvc_minor_cycle_approximation", "channel_psf"
             ),
         }
 
@@ -1667,7 +1648,7 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
     n_taylor_terms,
     reference_frequency,
     primary_beam_limit=0.2,
-    mvc_primary_beam_approach="casa",
+    mvc_minor_cycle_approximation="channel_psf",
 ):
     """Convert complete MVC channel cubes into Taylor normal equations for tests.
 
@@ -1693,8 +1674,8 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
         Taylor-expansion reference frequency in Hz.
     primary_beam_limit : float, optional
         Minimum common primary-beam response used by the Taylor solution.
-    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, optional
-        MVC residual primary-beam evaluation approach.
+    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, optional
+        MVC approximation used to construct the Taylor residuals and PSFs.
 
     Returns
     -------
@@ -1719,7 +1700,7 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
         n_taylor_terms=n_taylor_terms,
         reference_frequency=reference_frequency,
         primary_beam_limit=primary_beam_limit,
-        mvc_primary_beam_approach=mvc_primary_beam_approach,
+        mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
     )
     return finalize_mvc_taylor_normal_equations(contributions)
 
@@ -1920,7 +1901,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
-    mvc_primary_beam_approach="casa",
+    mvc_minor_cycle_approximation="channel_psf",
 ):
     """Perform one continuum imaging-cycle update for a single frequency chunk.
 
@@ -2061,13 +2042,13 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used by MVC map-local Taylor construction.
 
-    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, optional
-        MVC residual primary-beam evaluation. ``"casa"`` preserves CASA's
-        explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates
-        the algebraically cancelled Memo-I equation (19) directly and avoids
-        the intermediate primary-beam division. ``"legacy"`` restores the former
-        AstroVIPER spatially varying G-inverse residual preconditioner with
-        beam-free Taylor PSFs. The setting is ignored by MFS.
+    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, optional
+        MVC approximation used to construct the Taylor residuals and PSFs.
+        ``"channel_psf"`` retains the frequency-dependent channel PSFs while
+        approximating the channel-to-common-beam ratio as one.
+        ``"local_beam_moments"`` retains local frequency-dependent primary-beam
+        moments while approximating the channel PSFs by a common response. The
+        setting is ignored by MFS.
 
     Returns
     -------
@@ -2276,7 +2257,7 @@ def residual_update_continuum_single_field(
             n_taylor_terms=image_params.get("n_taylor_terms", 2),
             reference_frequency=image_params["reference_frequency"],
             primary_beam_limit=primary_beam_limit,
-            mvc_primary_beam_approach=mvc_primary_beam_approach,
+            mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
         )
         for variable_name, data_array in contributions.data_vars.items():
             img_xds[variable_name] = data_array

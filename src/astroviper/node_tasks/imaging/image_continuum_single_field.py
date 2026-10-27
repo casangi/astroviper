@@ -1073,7 +1073,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
-    mvc_primary_beam_approach="casa",
+    mvc_minor_cycle_approximation="channel_psf",
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
@@ -1271,13 +1271,13 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used for MVC map-local Taylor products.
 
-    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, optional
-        MVC residual primary-beam evaluation. ``"casa"`` preserves CASA's
-        explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates
-        the algebraically cancelled Memo-I equation (19) directly and avoids
-        the intermediate primary-beam division. ``"legacy"`` restores the former
-        AstroVIPER spatially varying G-inverse residual preconditioner with
-        beam-free Taylor PSFs. The setting is ignored by MFS.
+    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, optional
+        MVC approximation used to construct the Taylor residuals and PSFs.
+        ``"channel_psf"`` retains the frequency-dependent channel PSFs while
+        approximating the channel-to-common-beam ratio as one.
+        ``"local_beam_moments"`` retains local frequency-dependent primary-beam
+        moments while approximating the channel PSFs by a common response. The
+        setting is ignored by MFS.
 
     input_data : dict, optional
         Preloaded visibility data for this chunk.
@@ -1342,12 +1342,15 @@ def residual_update_continuum_single_field(
             "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
         )
-    mvc_primary_beam_approach = str(mvc_primary_beam_approach).lower()
-    if mvc_primary_beam_approach not in ("casa", "preconditioned", "legacy"):
+    mvc_minor_cycle_approximation = str(mvc_minor_cycle_approximation).lower()
+    if mvc_minor_cycle_approximation not in (
+        "channel_psf",
+        "local_beam_moments",
+    ):
         raise ValueError(
-            "mvc_primary_beam_approach must be 'casa', 'preconditioned', or "
-            "'legacy'; received "
-            f"{mvc_primary_beam_approach!r}."
+            "mvc_minor_cycle_approximation must be 'channel_psf' or "
+            "'local_beam_moments'; received "
+            f"{mvc_minor_cycle_approximation!r}."
         )
 
     if image_data_variables_keep is None:
@@ -1597,7 +1600,7 @@ def residual_update_continuum_single_field(
         continuum_mode=continuum_mode,
         task_id=task_id,
         primary_beam_limit=primary_beam_limit,
-        mvc_primary_beam_approach=mvc_primary_beam_approach,
+        mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
     )
 
     # Retain the task-local frequency-dependent PB for MVC

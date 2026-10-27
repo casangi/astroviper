@@ -556,11 +556,8 @@ def _frequency_normalization(values, frequency):
     )
 
 
-@pytest.mark.parametrize("mvc_primary_beam_approach", ["casa", "preconditioned"])
-def test_mvc_conversion_matches_casa_memo_taylor_equations(
-    mvc_primary_beam_approach,
-):
-    """Both MVC approaches produce the CASA/Memo-I Taylor equations."""
+def test_mvc_channel_psf_conversion_matches_taylor_equations():
+    """The channel-PSF approximation produces its expected Taylor equations."""
     frequency = np.array([0.8e9, 1.0e9, 1.2e9])
     x = np.array([-0.2, 0.0, 0.2])
     residual = np.array([2.0, 4.0, 8.0])
@@ -580,7 +577,7 @@ def test_mvc_conversion_matches_casa_memo_taylor_equations(
         n_taylor_terms=2,
         reference_frequency=1.0e9,
         primary_beam_limit=0.2,
-        mvc_primary_beam_approach=mvc_primary_beam_approach,
+        mvc_minor_cycle_approximation="channel_psf",
     )
     expected_pb = np.sum(weight * pb) / np.sum(weight)
     np.testing.assert_allclose(effective_pb.squeeze(), expected_pb)
@@ -595,43 +592,13 @@ def test_mvc_conversion_matches_casa_memo_taylor_equations(
             for order in range(3)
         ],
     )
-    assert (
-        residual_taylor.attrs["mvc_primary_beam_approach"] == mvc_primary_beam_approach
-    )
-    assert psf_taylor.attrs["mvc_primary_beam_approach"] == mvc_primary_beam_approach
-    assert effective_pb.attrs["mvc_primary_beam_approach"] == mvc_primary_beam_approach
+    assert residual_taylor.attrs["mvc_minor_cycle_approximation"] == "channel_psf"
+    assert psf_taylor.attrs["mvc_minor_cycle_approximation"] == "channel_psf"
+    assert effective_pb.attrs["mvc_minor_cycle_approximation"] == "channel_psf"
 
 
-def test_mvc_casa_and_preconditioned_approaches_use_distinct_evaluation_order():
-    """CASA divides then multiplies while Memo I uses the cancelled residual."""
-    frequency = np.array([1.0e9])
-    residual = _frequency_cube([14.305966], frequency).astype(np.float32)
-    psf = _frequency_cube([1.0], frequency).astype(np.float32)
-    primary_beam = _frequency_cube([0.7793717], frequency).astype(np.float32)
-    normalization = _frequency_normalization([1.0], frequency)
-
-    products = {}
-    for approach in ("casa", "preconditioned"):
-        products[approach] = _convert_mvc_cubes_to_taylor_normal_equations(
-            residual,
-            psf,
-            primary_beam,
-            normalization,
-            normalization,
-            n_taylor_terms=1,
-            reference_frequency=1.0e9,
-            primary_beam_limit=0.2,
-            mvc_primary_beam_approach=approach,
-        )[0]
-
-    np.testing.assert_allclose(products["casa"], products["preconditioned"], rtol=1e-6)
-    assert not np.array_equal(
-        products["casa"].values, products["preconditioned"].values
-    )
-
-
-def test_mvc_legacy_approach_restores_spatial_g_inverse_preconditioner():
-    """Legacy MVC returns ``Abar C G^-1 u`` and beam-free Taylor PSFs."""
+def test_mvc_local_beam_moments_apply_spatial_g_inverse_preconditioner():
+    """Local beam moments return ``Abar C G^-1 u`` and common Taylor PSFs."""
     frequency = np.array([0.8e9, 1.0e9, 1.2e9])
     x = np.array([-0.2, 0.0, 0.2])
     residual = np.array([2.0, 4.0, 8.0])
@@ -649,7 +616,7 @@ def test_mvc_legacy_approach_restores_spatial_g_inverse_preconditioner():
             n_taylor_terms=2,
             reference_frequency=1.0e9,
             primary_beam_limit=0.2,
-            mvc_primary_beam_approach="legacy",
+            mvc_minor_cycle_approximation="local_beam_moments",
         )
     )
 
@@ -668,8 +635,10 @@ def test_mvc_legacy_approach_restores_spatial_g_inverse_preconditioner():
     np.testing.assert_allclose(effective_pb.squeeze(), expected_pb)
     np.testing.assert_allclose(residual_taylor.squeeze(), expected_residual)
     np.testing.assert_allclose(psf_taylor.squeeze(), expected_psf)
-    assert residual_taylor.attrs["mvc_primary_beam_approach"] == "legacy"
-    assert psf_taylor.attrs["mvc_primary_beam_approach"] == "legacy"
+    assert (
+        residual_taylor.attrs["mvc_minor_cycle_approximation"] == "local_beam_moments"
+    )
+    assert psf_taylor.attrs["mvc_minor_cycle_approximation"] == "local_beam_moments"
 
 
 def test_mvc_conversion_uses_psf_weights_for_common_response():
@@ -723,10 +692,10 @@ def test_mvc_conversion_preserves_single_precision_image_products():
 
 
 @pytest.mark.parametrize(
-    "mvc_primary_beam_approach", ["casa", "preconditioned", "legacy"]
+    "mvc_minor_cycle_approximation", ["channel_psf", "local_beam_moments"]
 )
 def test_mvc_map_contributions_reduce_to_full_cube_result(
-    mvc_primary_beam_approach,
+    mvc_minor_cycle_approximation,
 ):
     """Summed map Taylor products reproduce the former global cube conversion."""
     frequency = np.array([0.8e9, 0.9e9, 1.1e9, 1.2e9])
@@ -743,7 +712,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result(
         normalization,
         n_taylor_terms=2,
         reference_frequency=1.0e9,
-        mvc_primary_beam_approach=mvc_primary_beam_approach,
+        mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
     )
     chunks = []
     for channel_indices in ([0, 1], [2, 3]):
@@ -757,7 +726,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result(
                 normalization.isel(selection),
                 n_taylor_terms=2,
                 reference_frequency=1.0e9,
-                mvc_primary_beam_approach=mvc_primary_beam_approach,
+                mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
             )
         )
 

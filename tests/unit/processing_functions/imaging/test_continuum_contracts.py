@@ -135,7 +135,7 @@ def test_mvc_rejects_empty_psf_plane_independently_of_residual_weights():
         ("reference_frequency", np.inf),
         ("primary_beam_limit", -0.1),
         ("primary_beam_limit", np.nan),
-        ("mvc_primary_beam_approach", "invalid"),
+        ("mvc_minor_cycle_approximation", "invalid"),
     ],
 )
 def test_mvc_rejects_invalid_equation_parameters(parameter, value):

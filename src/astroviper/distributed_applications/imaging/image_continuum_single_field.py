@@ -2728,7 +2728,7 @@ def image_continuum_single_field(
     primary_beam_correction: bool = False,
     primary_beam_limit: float = 0.2,
     continuum_mode: str = "mfs",
-    mvc_primary_beam_approach: str = "casa",
+    mvc_minor_cycle_approximation: str = "channel_psf",
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json requires list/str (not nullable); never mutated
     field_name: str | None = None,
@@ -2908,13 +2908,13 @@ def image_continuum_single_field(
         ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
         match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
         parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
-    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, optional
-        MVC residual primary-beam evaluation. ``"casa"`` preserves CASA's
-        explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates
-        the algebraically cancelled Memo-I equation (19) directly and avoids
-        the intermediate primary-beam division. ``"legacy"`` restores the former
-        AstroVIPER spatially varying G-inverse residual preconditioner with
-        beam-free Taylor PSFs. The setting is ignored by MFS.
+    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, optional
+        MVC approximation used to construct the Taylor residuals and PSFs.
+        ``"channel_psf"`` retains the frequency-dependent channel PSFs while
+        approximating the channel-to-common-beam ratio as one.
+        ``"local_beam_moments"`` retains local frequency-dependent primary-beam
+        moments while approximating the channel PSFs by a common response. The
+        setting is ignored by MFS.
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
@@ -3376,12 +3376,15 @@ def image_continuum_single_field(
             "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
         )
-    mvc_primary_beam_approach = str(mvc_primary_beam_approach).lower()
-    if mvc_primary_beam_approach not in ("casa", "preconditioned", "legacy"):
+    mvc_minor_cycle_approximation = str(mvc_minor_cycle_approximation).lower()
+    if mvc_minor_cycle_approximation not in (
+        "channel_psf",
+        "local_beam_moments",
+    ):
         raise ValueError(
-            "mvc_primary_beam_approach must be 'casa', 'preconditioned', or "
-            "'legacy'; received "
-            f"{mvc_primary_beam_approach!r}."
+            "mvc_minor_cycle_approximation must be 'channel_psf' or "
+            "'local_beam_moments'; received "
+            f"{mvc_minor_cycle_approximation!r}."
         )
     if weight_memory_mode == "in_place" and skunk_works:
         raise NotImplementedError(
@@ -3611,7 +3614,7 @@ def image_continuum_single_field(
     input_params["primary_beam_correction"] = bool(primary_beam_correction)
     input_params["primary_beam_limit"] = float(primary_beam_limit)
     input_params["continuum_mode"] = continuum_mode
-    input_params["mvc_primary_beam_approach"] = mvc_primary_beam_approach
+    input_params["mvc_minor_cycle_approximation"] = mvc_minor_cycle_approximation
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend

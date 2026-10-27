@@ -615,7 +615,7 @@ def test_first_cycle_does_not_rewrite_loaded_global_weights(monkeypatch):
         weight_memory_mode="in_place",
         weight_cache_is_active=True,
         continuum_mode="mfs",
-        mvc_primary_beam_approach="preconditioned",
+        mvc_minor_cycle_approximation="local_beam_moments",
         data_group={"correlated_data": "VISIBILITY"},
         input_data=processing_set,
     )
@@ -623,7 +623,7 @@ def test_first_cycle_does_not_rewrite_loaded_global_weights(monkeypatch):
     result = continuum_node.residual_update_continuum_single_field(**params)
 
     assert calls == {"load": 1, "write": 0}
-    assert processing_kwargs["mvc_primary_beam_approach"] == "preconditioned"
+    assert processing_kwargs["mvc_minor_cycle_approximation"] == "local_beam_moments"
     assert "weight_datasets" not in result
 
 

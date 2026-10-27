@@ -25,9 +25,9 @@
             "type": ["str"],
             "allowed": ["mfs", "mvc"]
         },
-        "mvc_primary_beam_approach": {
+        "mvc_minor_cycle_approximation": {
             "type": ["str"],
-            "allowed": ["casa", "preconditioned", "legacy"]
+            "allowed": ["channel_psf", "local_beam_moments"]
         },
         "instrument_polarization_basis": {
             "type": ["str"],

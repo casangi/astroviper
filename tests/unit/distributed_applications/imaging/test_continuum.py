@@ -278,7 +278,7 @@ def test_continuum_public_api_matches_shared_imaging_names_and_defaults():
     assert "primary_beam_correction" in parameters
     assert "primary_beam_limit" in parameters
     assert "continuum_mode" in parameters
-    assert parameters["mvc_primary_beam_approach"].default == "casa"
+    assert parameters["mvc_minor_cycle_approximation"].default == "channel_psf"
     assert "wideband_primary_beam_memory_mode" in parameters
 
 
