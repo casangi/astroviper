@@ -162,6 +162,49 @@ def test_load_processing_set_labels_each_child_in_a_multi_child_task(tmp_path):
     np.testing.assert_array_equal(loaded["upper"].frequency, [3.0e9, 4.0e9])
 
 
+def test_load_processing_set_maps_children_onto_the_nearest_task_frequency(tmp_path):
+    """Children whose channel centres differ slightly from the task frequencies,
+    as execution blocks converted to LSRK do (a few kHz on 488 kHz channels),
+    load with their own frequencies: each selected channel maps onto its
+    nearest task frequency within half a channel, the rule the gridders and the
+    graph's channel selection use."""
+    store = str(tmp_path / "offset.ps.zarr")
+    task_frequencies = np.array([231.6224e9, 231.6229e9])
+    shifted = task_frequencies - np.array([1709.5, -2968.8])
+    _write_minimal_processing_set_child(store, "eb0", task_frequencies)
+    arrays = _write_minimal_processing_set_child(store, "eb1", shifted, offset=100)
+
+    loaded = load_processing_set_skunk_works(
+        store,
+        {"eb0": {"frequency": slice(0, 2)}, "eb1": {"frequency": slice(0, 2)}},
+        _minimal_data_group(),
+        "base",
+        task_frequencies,
+    )
+
+    np.testing.assert_array_equal(loaded["eb0"].frequency, task_frequencies)
+    np.testing.assert_array_equal(loaded["eb1"].frequency, shifted)
+    np.testing.assert_array_equal(loaded["eb1"].VISIBILITY, arrays["VISIBILITY"])
+
+
+def test_load_processing_set_refuses_a_channel_far_from_every_task_frequency(
+    tmp_path,
+):
+    """A selected channel more than half a channel from every task frequency
+    is not imaged onto any of them."""
+    store = str(tmp_path / "far.ps.zarr")
+    _write_minimal_processing_set_child(store, "ms0", [1.0e9, 2.6e9])
+
+    with pytest.raises(ValueError, match="half an image channel width"):
+        load_processing_set_skunk_works(
+            store,
+            {"ms0": {"frequency": slice(0, 2)}},
+            _minimal_data_group(),
+            "base",
+            np.array([1.0e9, 2.0e9]),
+        )
+
+
 def test_read_v3_plain(tmp_path):
     shape = (3, 5, 3)
     data = np.random.default_rng(1).standard_normal(shape).astype("<f8")

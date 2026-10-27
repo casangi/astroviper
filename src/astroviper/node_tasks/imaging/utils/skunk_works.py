@@ -473,8 +473,12 @@ def load_processing_set_skunk_works(
     flag) are read, straight from the Zarr chunk files for this task's frequency
     selection. Coordinates are reconstructed from the node-task inputs:
 
-    * ``frequency`` from ``frequency_coords`` (the image and the processing set
-      share the same frequency coordinate);
+    * ``frequency`` from each measurement set's own on-disk ``frequency``
+      coordinate (from ``frequency_coords`` for a single measurement set
+      without one); every selected channel must lie within half a channel of
+      a task frequency, onto the nearest of which it is imaged (see
+      :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`),
+      and every task frequency must receive at least one channel;
     * ``polarization`` from ``instrument_polarization_basis`` and the data's
       correlation count;
     * ``time`` / ``baseline_id`` / ``uvw_label`` as plain index ranges (the
@@ -513,6 +517,10 @@ def load_processing_set_skunk_works(
         imaging weights to predict and grid the model contribution.
     """
     import xarray as xr
+
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
+    )
 
     task_frequency_values = np.asarray(frequency_coords)
     task_frequency_match_counts = np.zeros(
@@ -590,18 +598,22 @@ def load_processing_set_skunk_works(
                 f"{expected_frequency_size}."
             )
 
-        frequency_matches = np.isclose(
-            child_frequency_values[:, np.newaxis],
-            task_frequency_values[np.newaxis, :],
-            rtol=1.0e-12,
-            atol=0.0,
-        )
-        if np.any(frequency_matches.sum(axis=1) != 1):
-            raise ValueError(
-                f"Selected frequencies for {ms_name!r} do not each match "
-                "exactly one task frequency."
+        # Each selected channel maps onto its nearest task frequency within half
+        # a channel, the rule the gridders and the graph's channel selection
+        # use: execution blocks converted to LSRK have channel centres a few
+        # kHz apart, so their frequencies never equal the image's exactly.
+        try:
+            frequency_map = map_visibility_frequencies_to_image(
+                child_frequency_values, task_frequency_values
             )
-        task_frequency_match_counts += frequency_matches.sum(axis=0)
+        except ValueError as exc:
+            raise ValueError(
+                f"Selected frequencies for {ms_name!r} do not map onto the task "
+                f"frequencies: {exc}"
+            ) from exc
+        task_frequency_match_counts += np.bincount(
+            frequency_map, minlength=task_frequency_values.size
+        )
 
         # Select the requested correlations even when cached-grid cycles omit
         # observed visibilities. Weights and flags are always loaded.
