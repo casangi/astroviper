@@ -630,6 +630,48 @@ def test_mvc_casa_and_preconditioned_approaches_use_distinct_evaluation_order():
     )
 
 
+def test_mvc_legacy_approach_restores_spatial_g_inverse_preconditioner():
+    """Legacy MVC returns ``Abar C G^-1 u`` and beam-free Taylor PSFs."""
+    frequency = np.array([0.8e9, 1.0e9, 1.2e9])
+    x = np.array([-0.2, 0.0, 0.2])
+    residual = np.array([2.0, 4.0, 8.0])
+    psf = np.array([1.0, 2.0, 4.0])
+    primary_beam = np.array([0.5, 1.0, 1.5])
+    weight = np.array([1.0, 2.0, 3.0])
+
+    residual_taylor, psf_taylor, effective_pb = (
+        _convert_mvc_cubes_to_taylor_normal_equations(
+            _frequency_cube(residual, frequency),
+            _frequency_cube(psf, frequency),
+            _frequency_cube(primary_beam, frequency),
+            _frequency_normalization(weight, frequency),
+            _frequency_normalization(weight, frequency),
+            n_taylor_terms=2,
+            reference_frequency=1.0e9,
+            primary_beam_limit=0.2,
+            mvc_primary_beam_approach="legacy",
+        )
+    )
+
+    basis = x[:, None] ** np.arange(2)
+    spectral_moments = basis.T @ (weight[:, None] * basis) / np.sum(weight)
+    gram = basis.T @ ((weight * primary_beam**2)[:, None] * basis)
+    numerator = basis.T @ (weight * primary_beam * residual)
+    expected_pb = np.sum(weight * primary_beam) / np.sum(weight)
+    expected_residual = (
+        expected_pb * spectral_moments @ np.linalg.solve(gram, numerator)
+    )
+    expected_psf = [
+        np.sum(weight * x**order * psf) / np.sum(weight) for order in range(3)
+    ]
+
+    np.testing.assert_allclose(effective_pb.squeeze(), expected_pb)
+    np.testing.assert_allclose(residual_taylor.squeeze(), expected_residual)
+    np.testing.assert_allclose(psf_taylor.squeeze(), expected_psf)
+    assert residual_taylor.attrs["mvc_primary_beam_approach"] == "legacy"
+    assert psf_taylor.attrs["mvc_primary_beam_approach"] == "legacy"
+
+
 def test_mvc_conversion_uses_psf_weights_for_common_response():
     """MVC PSF and effective PB follow CASA's PSF-weight normalization."""
     frequency = np.array([0.9e9, 1.1e9])
@@ -680,7 +722,12 @@ def test_mvc_conversion_preserves_single_precision_image_products():
     assert primary_beam.dtype == np.dtype(np.float32)
 
 
-def test_mvc_map_contributions_reduce_to_full_cube_result():
+@pytest.mark.parametrize(
+    "mvc_primary_beam_approach", ["casa", "preconditioned", "legacy"]
+)
+def test_mvc_map_contributions_reduce_to_full_cube_result(
+    mvc_primary_beam_approach,
+):
     """Summed map Taylor products reproduce the former global cube conversion."""
     frequency = np.array([0.8e9, 0.9e9, 1.1e9, 1.2e9])
     residual_cube = _frequency_cube([2.0, 3.0, 7.0, 11.0], frequency)
@@ -696,6 +743,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result():
         normalization,
         n_taylor_terms=2,
         reference_frequency=1.0e9,
+        mvc_primary_beam_approach=mvc_primary_beam_approach,
     )
     chunks = []
     for channel_indices in ([0, 1], [2, 3]):
@@ -709,6 +757,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result():
                 normalization.isel(selection),
                 n_taylor_terms=2,
                 reference_frequency=1.0e9,
+                mvc_primary_beam_approach=mvc_primary_beam_approach,
             )
         )
 

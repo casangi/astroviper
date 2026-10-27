@@ -1162,8 +1162,10 @@ def make_mvc_taylor_normal_equation_contributions(
     combined by element-wise addition in the distributed reduce stage.  The
     CASA's channel-primary-beam correction and Taylor moment construction are
     evaluated either as CASA's explicit divide-then-multiply sequence or as the
-    algebraically cancelled Memo-I expression. Only normalization by globally
-    accumulated weights and construction of the effective beam remain for the
+    algebraically cancelled Memo-I expression. The legacy option instead
+    accumulates the former AstroVIPER beam-weighted residual and local
+    squared-beam moments. Only globally coupled normalization and, for the
+    legacy path, application of its spatial preconditioner remain for the
     append node.
 
     CASA first replaces each valid channel residual by
@@ -1171,7 +1173,8 @@ def make_mvc_taylor_normal_equation_contributions(
     residual and PSF channels by ``A_nu`` and divides the Taylor sums by
     ``Abar``. The preconditioned option cancels these factors before evaluation; the
     CASA option retains the channel divide and multiply. PSF Taylor numerators
-    retain one channel beam factor in both approaches.
+    retain one channel beam factor in both approaches. The legacy path uses
+    beam-free Taylor PSFs.
 
     Parameters
     ----------
@@ -1194,23 +1197,28 @@ def make_mvc_taylor_normal_equation_contributions(
     reference_frequency : float
         Taylor reference frequency in Hz.
     primary_beam_limit : float, default 0.2
-        Primary-beam cutoff. Channel beams at or below it do not contribute to
-        the residual, PSF or effective-beam numerators. Final products are zero
-        where the effective beam is at or below the same cutoff.
-    mvc_primary_beam_approach : {"casa", "preconditioned"}, default "casa"
+        Primary-beam cutoff. For the CASA and preconditioned paths, channel
+        beams at or below it do not contribute to residual, PSF, or
+        effective-beam numerators. The legacy path retains every finite channel
+        in its residual and Gram moments but uses the cutoff to determine local
+        Taylor support. Final products are zero where the effective beam is at
+        or below the cutoff.
+    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, default "casa"
         Residual primary-beam evaluation. ``"casa"`` explicitly divides each
         valid channel residual by its channel beam and multiplies by that beam
         while forming Taylor products. ``"preconditioned"`` evaluates the analytically
         cancelled Memo-I expression directly. The two are algebraically
         equivalent on valid support; ``"preconditioned"`` avoids the intermediate
-        division.
+        division. ``"legacy"`` restores AstroVIPER's former spatially varying
+        :math:`G^{-1}` residual preconditioner and beam-free Taylor PSFs.
 
     Returns
     -------
     xarray.Dataset
-        Additive residual Taylor numerators and residual-weight sum. When a PSF
-        cube is supplied, also contains beam-weighted PSF Taylor numerators,
-        the PSF weight sum, and the PSF-weighted primary-beam sum.
+        Additive residual Taylor numerators and residual-weight sum. The legacy
+        path additionally contains squared-beam and beam-free spectral moments.
+        When a PSF cube is supplied, also contains Taylor PSF numerators, the
+        PSF weight sum, and the PSF-weighted primary-beam sum.
 
     Notes
     -----
@@ -1229,6 +1237,12 @@ def make_mvc_taylor_normal_equation_contributions(
     ``sum(w_nu * x_nu**t * R_nu) / sum(w_nu)`` on channel-PB support. The CASA
     approach preserves the explicit operational sequence; the Memo-I approach
     uses the reduced expression from equations (19)--(20).
+
+    The legacy path accumulates ``u_t = sum(w_nu * x_nu**t * A_nu * R_nu)``
+    and ``G_tq = sum(w_nu * x_nu**(t+q) * A_nu**2)``. Finalization returns
+    ``Abar * C @ inv(G) @ u``, where
+    ``C_tq = sum(w_nu * x_nu**(t+q)) / sum(w_nu)``, together with the beam-free
+    Taylor PSFs ``sum(w_nu * x_nu**k * B_nu) / sum(w_nu)``.
     """
     import numpy as np
     import xarray as xr
@@ -1294,9 +1308,10 @@ def make_mvc_taylor_normal_equation_contributions(
         raise ValueError("reference_frequency must be finite and positive.")
     if not np.isfinite(primary_beam_limit) or primary_beam_limit < 0.0:
         raise ValueError("primary_beam_limit must be finite and non-negative.")
-    if mvc_primary_beam_approach not in ("casa", "preconditioned"):
+    if mvc_primary_beam_approach not in ("casa", "preconditioned", "legacy"):
         raise ValueError(
-            "mvc_primary_beam_approach must be 'casa' or 'preconditioned'; received "
+            "mvc_primary_beam_approach must be 'casa', 'preconditioned', or "
+            "'legacy'; received "
             f"{mvc_primary_beam_approach!r}."
         )
 
@@ -1339,7 +1354,15 @@ def make_mvc_taylor_normal_equation_contributions(
     # denominator, including weights from clipped channels.
     finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
 
-    if mvc_primary_beam_approach == "casa":
+    if mvc_primary_beam_approach == "legacy":
+        # Former AstroVIPER path: form the exact-gradient numerator u from
+        # A_nu R_nu and collect the A_nu^2 moments needed by the spatially
+        # varying G^-1 preconditioner in the append node.
+        channel_primary_beam = xr.where(
+            np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
+        )
+        residual_for_taylor_sum = channel_primary_beam * residual_cube
+    elif mvc_primary_beam_approach == "casa":
         # CASA first forms R'_nu = Abar * R_nu / A_nu and cubeToTaylor then
         # multiplies by A_nu and divides by Abar. Abar is global and cancels,
         # so preserve CASA's channel divide-then-multiply ordering here.
@@ -1370,7 +1393,11 @@ def make_mvc_taylor_normal_equation_contributions(
         dim=xr.IndexVariable("taylor_term", np.arange(n_taylor_terms, dtype=np.int64)),
     ).transpose("time", "taylor_term", "polarization", "l", "m")
     residual_numerator.attrs = {
-        "description": "Additive CASA-convention MVC Taylor residual numerators.",
+        "description": (
+            "Additive legacy AstroVIPER MVC Taylor residual numerators."
+            if mvc_primary_beam_approach == "legacy"
+            else "Additive CASA-convention MVC Taylor residual numerators."
+        ),
         "continuum_mode": "mvc",
         "reference_frequency": reference_frequency,
         "n_taylor_terms": n_taylor_terms,
@@ -1395,93 +1422,50 @@ def make_mvc_taylor_normal_equation_contributions(
         },
     )
 
-    # Previous AstroVIPER G^-1 residual preconditioner, intentionally retained
-    # verbatim as commented code while the CASA/Memo-I convention is evaluated:
-    #
-    # channel_primary_beam = xr.where(
-    #     np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
-    # )
-    # beam_weighted_residual = channel_primary_beam * residual_cube
-    # channel_primary_beam_squared = channel_primary_beam**2
-    #
-    # residual_terms = []
-    # for order in range(n_taylor_terms):
-    #     numerator = (
-    #         residual_weight
-    #         * x_frequency**order
-    #         * beam_weighted_residual
-    #     ).sum(dim="frequency")
-    #     residual_terms.append(numerator)
-    #
-    # residual_numerator = xr.concat(
-    #     residual_terms,
-    #     dim=xr.IndexVariable(
-    #         "taylor_term", np.arange(n_taylor_terms, dtype=np.int64)
-    #     ),
-    # ).transpose("time", "taylor_term", "polarization", "l", "m")
-    #
-    # n_psf_taylor_terms = 2 * n_taylor_terms - 1
-    # psf_taylor_order = xr.IndexVariable(
-    #     "psf_taylor_order", np.arange(n_psf_taylor_terms, dtype=np.int64)
-    # )
-    # beam_squared_numerator = xr.concat(
-    #     [
-    #         (
-    #             residual_weight
-    #             * x_frequency**order
-    #             * channel_primary_beam_squared
-    #         ).sum(dim="frequency")
-    #         for order in range(n_psf_taylor_terms)
-    #     ],
-    #     dim=psf_taylor_order,
-    # ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
-    # residual_weight_moments = xr.concat(
-    #     [
-    #         (residual_weight * x_frequency**order).sum(dim="frequency")
-    #         for order in range(n_psf_taylor_terms)
-    #     ],
-    #     dim=psf_taylor_order,
-    # ).transpose("time", "psf_taylor_order", "polarization")
-    #
-    # contributions = xr.Dataset(
-    #     {
-    #         "MVC_RESIDUAL_TAYLOR_NUMERATOR": residual_numerator,
-    #         "MVC_RESIDUAL_WEIGHT_SUM": residual_weight_sum,
-    #         "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM": beam_squared_numerator,
-    #         "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM": residual_weight_moments,
-    #         "MVC_RESIDUAL_BEAM_CHANNEL_COUNT": (
-    #             (valid_channel_pb & (residual_weight > 0.0))
-    #             .sum(dim="frequency")
-    #             .transpose("time", "polarization", "l", "m")
-    #         ),
-    #     },
-    #     attrs={
-    #         "continuum_mode": "mvc",
-    #         "n_taylor_terms": n_taylor_terms,
-    #         "reference_frequency": reference_frequency,
-    #         "primary_beam_limit": primary_beam_limit,
-    #         "mvc_output_dtype": np.dtype(output_dtype).name,
-    #     },
-    # )
-    #
-    # The former PSF numerator did not contain a channel-primary-beam factor:
-    # psf_terms = [
-    #     (psf_weight * x_frequency**order * finite_psf).sum(dim="frequency")
-    #     for order in range(n_psf_taylor_terms)
-    # ]
+    n_psf_taylor_terms = 2 * n_taylor_terms - 1
+    if mvc_primary_beam_approach == "legacy":
+        psf_taylor_order = xr.IndexVariable(
+            "psf_taylor_order", np.arange(n_psf_taylor_terms, dtype=np.int64)
+        )
+        contributions["MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM"] = xr.concat(
+            [
+                (residual_weight * x_frequency**order * channel_primary_beam**2).sum(
+                    dim="frequency"
+                )
+                for order in range(n_psf_taylor_terms)
+            ],
+            dim=psf_taylor_order,
+        ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
+        contributions["MVC_RESIDUAL_WEIGHT_TAYLOR_SUM"] = xr.concat(
+            [
+                (residual_weight * x_frequency**order).sum(dim="frequency")
+                for order in range(n_psf_taylor_terms)
+            ],
+            dim=psf_taylor_order,
+        ).transpose("time", "psf_taylor_order", "polarization")
+        contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"] = (
+            (valid_channel_pb & (residual_weight > 0.0))
+            .sum(dim="frequency")
+            .transpose("time", "polarization", "l", "m")
+        )
 
     if psf_cube is not None:
         psf_weight = _clean_weights(psf_normalization)
         psf_weight_sum = psf_weight.sum(dim="frequency")
 
-        n_psf_taylor_terms = 2 * n_taylor_terms - 1
         finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
-        psf_terms = [
-            (psf_weight * x_frequency**order * finite_primary_beam * finite_psf).sum(
-                dim="frequency"
-            )
-            for order in range(n_psf_taylor_terms)
-        ]
+        if mvc_primary_beam_approach == "legacy":
+            psf_terms = [
+                (psf_weight * x_frequency**order * finite_psf).sum(dim="frequency")
+                for order in range(n_psf_taylor_terms)
+            ]
+        else:
+            psf_terms = [
+                (
+                    psf_weight * x_frequency**order * finite_primary_beam * finite_psf
+                ).sum(dim="frequency")
+                for order in range(n_psf_taylor_terms)
+            ]
         psf_numerator = xr.concat(
             psf_terms,
             dim=xr.IndexVariable(
@@ -1490,7 +1474,11 @@ def make_mvc_taylor_normal_equation_contributions(
             ),
         ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
         psf_numerator.attrs = {
-            "description": "Additive CASA-convention MVC Taylor PSF numerators.",
+            "description": (
+                "Additive beam-free legacy AstroVIPER MVC Taylor PSF numerators."
+                if mvc_primary_beam_approach == "legacy"
+                else "Additive CASA-convention MVC Taylor PSF numerators."
+            ),
             "continuum_mode": "mvc",
             "reference_frequency": reference_frequency,
             "n_taylor_terms": n_taylor_terms,
@@ -1557,79 +1545,76 @@ def finalize_mvc_taylor_normal_equations(
         effective_primary_beam > primary_beam_limit
     )
 
-    # CASA's R'_nu = Abar * R_nu / A_nu correction cancels the A_nu and
-    # Abar factors introduced by its subsequent cube-to-Taylor residual sum.
-    # The map tasks accumulate that cancelled expression directly.
-    residual_taylor = xr.where(
-        valid_effective_pb,
-        contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"] / residual_sum,
-        0.0,
+    mvc_primary_beam_approach = contributions.attrs.get(
+        "mvc_primary_beam_approach", "casa"
     )
-
-    psf_taylor = None
-    if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
-        psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
-        psf_taylor = xr.where(
+    if mvc_primary_beam_approach == "legacy":
+        # Apply the former spatially varying preconditioner
+        # Abar C G^-1 to the exact-gradient numerator u. Pixels with too few
+        # supported channels retain only the scalar Taylor-zero solution.
+        pixel_dims = ("time", "polarization", "l", "m")
+        numerator = contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].transpose(
+            *pixel_dims, "taylor_term"
+        )
+        n_taylor_terms = numerator.sizes["taylor_term"]
+        hankel = np.add.outer(np.arange(n_taylor_terms), np.arange(n_taylor_terms))
+        beam_squared = (
+            contributions["MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM"]
+            .transpose(*pixel_dims, "psf_taylor_order")
+            .values
+        )
+        supported = valid_effective_pb.transpose(*pixel_dims).values
+        determined = supported & (
+            contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"]
+            .transpose(*pixel_dims)
+            .values
+            >= n_taylor_terms
+        )
+        gram = beam_squared[..., hankel]
+        gram[~determined] = np.eye(n_taylor_terms)
+        coefficients = np.linalg.solve(
+            gram,
+            np.where(determined[..., None], numerator.values, 0.0)[..., None],
+        )[..., 0]
+        flat = supported & ~determined & (beam_squared[..., 0] > 0.0)
+        coefficients[flat, 0] = numerator.values[flat, 0] / beam_squared[flat, 0]
+        spectral_moments = (
+            (contributions["MVC_RESIDUAL_WEIGHT_TAYLOR_SUM"] / residual_sum)
+            .transpose("time", "polarization", "psf_taylor_order")
+            .values[..., hankel]
+        )
+        residual_taylor = xr.where(
             valid_effective_pb,
-            contributions["MVC_PSF_TAYLOR_NUMERATOR"]
-            / (psf_sum * effective_primary_beam),
+            effective_primary_beam
+            * contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].copy(
+                data=np.einsum("tpij,tplmj->tiplm", spectral_moments, coefficients)
+            ),
+            0.0,
+        )
+        psf_taylor = None
+        if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
+            psf_taylor = (
+                contributions["MVC_PSF_TAYLOR_NUMERATOR"]
+                / contributions["MVC_PSF_WEIGHT_SUM"]
+            )
+    else:
+        # CASA's R'_nu = Abar * R_nu / A_nu correction cancels the A_nu and
+        # Abar factors introduced by its subsequent cube-to-Taylor residual sum.
+        residual_taylor = xr.where(
+            valid_effective_pb,
+            contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"] / residual_sum,
             0.0,
         )
 
-    # Previous AstroVIPER G^-1 finalization, intentionally retained verbatim as
-    # commented code while the CASA/Memo-I convention is evaluated:
-    #
-    # pixel_dims = ("time", "polarization", "l", "m")
-    # numerator = contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].transpose(
-    #     *pixel_dims, "taylor_term"
-    # )
-    # n_taylor_terms = numerator.sizes["taylor_term"]
-    # hankel = np.add.outer(
-    #     np.arange(n_taylor_terms), np.arange(n_taylor_terms)
-    # )
-    # beam_squared = (
-    #     contributions["MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM"]
-    #     .transpose(*pixel_dims, "psf_taylor_order")
-    #     .values
-    # )
-    # supported = valid_effective_pb.transpose(*pixel_dims).values
-    # determined = supported & (
-    #     contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"]
-    #     .transpose(*pixel_dims)
-    #     .values
-    #     >= n_taylor_terms
-    # )
-    # gram = beam_squared[..., hankel]
-    # gram[~determined] = np.eye(n_taylor_terms)
-    # coefficients = np.linalg.solve(
-    #     gram,
-    #     np.where(determined[..., None], numerator.values, 0.0)[..., None],
-    # )[..., 0]
-    # flat = supported & ~determined & (beam_squared[..., 0] > 0.0)
-    # coefficients[flat, 0] = (
-    #     numerator.values[flat, 0] / beam_squared[flat, 0]
-    # )
-    # hessian = (
-    #     (
-    #         contributions["MVC_RESIDUAL_WEIGHT_TAYLOR_SUM"]
-    #         / residual_sum
-    #     )
-    #     .transpose("time", "polarization", "psf_taylor_order")
-    #     .values[..., hankel]
-    # )
-    # residual_taylor = xr.where(
-    #     valid_effective_pb,
-    #     effective_primary_beam
-    #     * contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].copy(
-    #         data=np.einsum("tpij,tplmj->tiplm", hessian, coefficients)
-    #     ),
-    #     0.0,
-    # )
-    #
-    # psf_taylor = None
-    # if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
-    #     psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
-    #     psf_taylor = contributions["MVC_PSF_TAYLOR_NUMERATOR"] / psf_sum
+        psf_taylor = None
+        if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
+            psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
+            psf_taylor = xr.where(
+                valid_effective_pb,
+                contributions["MVC_PSF_TAYLOR_NUMERATOR"]
+                / (psf_sum * effective_primary_beam),
+                0.0,
+            )
 
     output_dtype = np.dtype(contributions.attrs.get("mvc_output_dtype", "float64"))
     residual_taylor = residual_taylor.astype(output_dtype, copy=False)
@@ -1708,7 +1693,7 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
         Taylor-expansion reference frequency in Hz.
     primary_beam_limit : float, optional
         Minimum common primary-beam response used by the Taylor solution.
-    mvc_primary_beam_approach : {"casa", "preconditioned"}, optional
+    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, optional
         MVC residual primary-beam evaluation approach.
 
     Returns
@@ -2076,11 +2061,13 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used by MVC map-local Taylor construction.
 
-    mvc_primary_beam_approach : {"casa", "preconditioned"}, optional
+    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, optional
         MVC residual primary-beam evaluation. ``"casa"`` preserves CASA's
         explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates
         the algebraically cancelled Memo-I equation (19) directly and avoids
-        the intermediate primary-beam division. The setting is ignored by MFS.
+        the intermediate primary-beam division. ``"legacy"`` restores the former
+        AstroVIPER spatially varying G-inverse residual preconditioner with
+        beam-free Taylor PSFs. The setting is ignored by MFS.
 
     Returns
     -------

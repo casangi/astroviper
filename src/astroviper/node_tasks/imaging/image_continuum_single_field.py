@@ -1271,11 +1271,13 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used for MVC map-local Taylor products.
 
-    mvc_primary_beam_approach : {"casa", "preconditioned"}, optional
+    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, optional
         MVC residual primary-beam evaluation. ``"casa"`` preserves CASA's
         explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates
         the algebraically cancelled Memo-I equation (19) directly and avoids
-        the intermediate primary-beam division. The setting is ignored by MFS.
+        the intermediate primary-beam division. ``"legacy"`` restores the former
+        AstroVIPER spatially varying G-inverse residual preconditioner with
+        beam-free Taylor PSFs. The setting is ignored by MFS.
 
     input_data : dict, optional
         Preloaded visibility data for this chunk.
@@ -1341,9 +1343,10 @@ def residual_update_continuum_single_field(
             f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
         )
     mvc_primary_beam_approach = str(mvc_primary_beam_approach).lower()
-    if mvc_primary_beam_approach not in ("casa", "preconditioned"):
+    if mvc_primary_beam_approach not in ("casa", "preconditioned", "legacy"):
         raise ValueError(
-            "mvc_primary_beam_approach must be 'casa' or 'preconditioned'; received "
+            "mvc_primary_beam_approach must be 'casa', 'preconditioned', or "
+            "'legacy'; received "
             f"{mvc_primary_beam_approach!r}."
         )
 

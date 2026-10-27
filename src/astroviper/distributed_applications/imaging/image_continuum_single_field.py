@@ -2908,11 +2908,13 @@ def image_continuum_single_field(
         ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
         match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
         parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
-    mvc_primary_beam_approach : {"casa", "preconditioned"}, optional
+    mvc_primary_beam_approach : {"casa", "preconditioned", "legacy"}, optional
         MVC residual primary-beam evaluation. ``"casa"`` preserves CASA's
         explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates
         the algebraically cancelled Memo-I equation (19) directly and avoids
-        the intermediate primary-beam division. The setting is ignored by MFS.
+        the intermediate primary-beam division. ``"legacy"`` restores the former
+        AstroVIPER spatially varying G-inverse residual preconditioner with
+        beam-free Taylor PSFs. The setting is ignored by MFS.
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
@@ -3375,9 +3377,10 @@ def image_continuum_single_field(
             f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
         )
     mvc_primary_beam_approach = str(mvc_primary_beam_approach).lower()
-    if mvc_primary_beam_approach not in ("casa", "preconditioned"):
+    if mvc_primary_beam_approach not in ("casa", "preconditioned", "legacy"):
         raise ValueError(
-            "mvc_primary_beam_approach must be 'casa' or 'preconditioned'; received "
+            "mvc_primary_beam_approach must be 'casa', 'preconditioned', or "
+            "'legacy'; received "
             f"{mvc_primary_beam_approach!r}."
         )
     if weight_memory_mode == "in_place" and skunk_works:

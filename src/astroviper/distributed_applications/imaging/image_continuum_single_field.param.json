@@ -27,7 +27,7 @@
         },
         "mvc_primary_beam_approach": {
             "type": ["str"],
-            "allowed": ["casa", "preconditioned"]
+            "allowed": ["casa", "preconditioned", "legacy"]
         },
         "instrument_polarization_basis": {
             "type": ["str"],

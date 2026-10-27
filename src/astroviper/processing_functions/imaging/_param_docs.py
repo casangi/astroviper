@@ -576,7 +576,9 @@ IMAGING_PARAM_DOCS = {
         'MVC residual primary-beam evaluation. ``"casa"`` preserves CASA\'s\n'
         'explicit channel divide-then-multiply sequence. ``"preconditioned"`` evaluates\n'
         "the algebraically cancelled Memo-I equation (19) directly and avoids\n"
-        "the intermediate primary-beam division. The setting is ignored by MFS."
+        'the intermediate primary-beam division. ``"legacy"`` restores the former\n'
+        "AstroVIPER spatially varying G-inverse residual preconditioner with\n"
+        "beam-free Taylor PSFs. The setting is ignored by MFS."
     ),
     "processing_function_threads": (
         "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."
