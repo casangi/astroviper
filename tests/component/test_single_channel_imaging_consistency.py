@@ -72,6 +72,20 @@ residual written is the residual of the true model.
   their measured values (``DECONVOLUTION_ERRORS``, 0.1 to 4.4 percent: errors
   of Hogbom on the PSF of the 7 m array, which fall with the threshold, far
   above the kernel floor).
+* ``test_hogbom_divergence_stop``: the divergence test of the model update and
+  the divergence stop of the cycle control, in the cube imager. On the store
+  without the w term it cleans with Hogbom, the default kernel and the
+  image-sized PSF under ``DIVERGENCE_CONTROLS``: model updates that clean to
+  their iteration limit, which run away on the image-sized PSF. The divergence
+  test ends the first two model updates of every plane (model update stop
+  code 4) at the first iteration whose RMS of the residual in the mask passes
+  the soft limit, ``1 + gain / 10`` times the lowest RMS the model update has
+  reached, and their peak stays within the hard limit, ``1 + gain`` times the
+  peak they start from (``record_iteration_history``); the cycles go on after
+  the first, and the cycle control stops the plane after the second (imaging
+  stop code 5). With the divergence test off the first model update makes the
+  same iterations up to the stop and then spends its budget, its RMS ending at
+  least ``DIVERGENCE_GROWTH`` times its lowest.
 
 The direct Fourier transform's residual is subtracted because it holds the
 rounding of the input, which can differ between platforms: the source
@@ -104,10 +118,18 @@ continuum model increment scaled by 1 + 1e-6 or a threshold tolerance of 0.5
 in the cube only (other iterations or cycles in the two imagers), a threshold
 stop at 1.5 times the threshold (a residual written 1.29 times it) and a PSF
 fraction of half the largest sidelobe (model flux error 3.5 times, spurious
-flux 5.5 times). Not caught: several channels or Taylor terms, MVC, exact PSF
+flux 5.5 times). By the divergence case (the installed package patched in
+memory): a soft limit of ``1 + gain / 5`` or a count of two iterations above
+it (iterations above the soft limit before the last), the divergence test
+switched off in the imager or a diverged model update reported as one that
+spent its budget (stop code (9, 1) after ten cycles), and the divergence stop
+of the cycle control switched off (stop code (9, 4)) or after one diverged
+model update. Not caught: several channels or Taylor terms, MVC, exact PSF
 subtraction, the other deconvolvers, single precision, noise and the weights
-it sets, and the 1 / n factor of the prediction (3e-10 of the brightest flux
-here, below ``TRUTH_RESIDUAL_RTOL``; its unit tests cover it).
+it sets, the hard limit of the divergence test (the peak of these model
+updates never rises above the one they start from; its unit tests cover it)
+and the 1 / n factor of the prediction (3e-10 of the brightest flux here,
+below ``TRUTH_RESIDUAL_RTOL``; its unit tests cover it).
 
 The builders and the analysis are plain functions so that the memo scripts can
 call the same code.
@@ -136,7 +158,12 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
     DEFAULT_GRIDDING_KERNEL_PARAMS,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control import (
+    IMAGING_DIVERGENCE,
+    IMAGING_MAX_CYCLES,
     IMAGING_THRESHOLD,
+    MODEL_UPDATE_DIVERGENCE,
+    MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+    StopCode,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
     THRESHOLD_TOLERANCE,
@@ -301,6 +328,35 @@ DECONVOLUTION_ERRORS = {
 # The errors may rise by these factors (design G.2 of Memo 13a: 3 for the
 # largest values, 2 for sums).
 DECONVOLUTION_MARGINS = {"model_flux": 3.0, "spurious_flux": 2.0, "restored": 3.0}
+# The divergence case of test_hogbom_divergence_stop: Hogbom with the
+# image-sized PSF, the default gain (0.1) and divergence test
+# (max_iter_divergence 1), and model updates that clean to their iteration
+# limit (threshold and PSF fraction 0). With the image-sized PSF such a model
+# update runs away: with the divergence test off, the RMS of the residual in the
+# mask passes the soft limit, 1 + gain / 10 times the lowest RMS the model
+# update has reached, after 156 to 197 iterations of the first model update and
+# is 24 to 27 times that lowest RMS after 3000 (with the PSF of twice the image
+# size the RMS stays within 1.5 percent of the lowest it has reached).
+# max_cycles_divergence 2 lets the cycles go on after one diverged model update
+# and stops the plane after two in a row.
+DIVERGENCE_CONTROLS = {
+    "max_iter": 100000,
+    "max_cycles": 10,
+    "threshold": 0.0,
+    "gain": 0.1,
+    "psf_sidelobe_factor": 1.0,
+    "min_psf_fraction": 0.0,
+    "max_psf_fraction": 0.0,
+    "max_iter_per_cycle": 3000,
+    "max_iter_divergence": 1,
+    "max_cycles_divergence": 2,
+    "exact_psf_subtraction": False,
+    "record_iteration_history": True,
+}
+# The RMS of the residual at the end of the first model update with the
+# divergence test off, over its lowest value in that model update: at least
+# this (measured 24.4 to 26.5).
+DIVERGENCE_GROWTH = 10.0
 
 
 def primary_beam_power(l, m):
@@ -464,7 +520,8 @@ def image(
     the one channel or Taylor term, with the DFT the imaging weights the PSF is
     made of, and the number of model updates; with ``controls`` also, per
     Stokes plane, the imaging stop code and the iterations of every model
-    update. ``overrides`` replace arguments of the imager call.
+    update, and the convergence record of the model updates (``record``).
+    ``overrides`` replace arguments of the imager call.
     """
     deconvolve = controls is not None
     controls = dict(controls if deconvolve else ORACLE_CONTROLS)
@@ -569,6 +626,7 @@ def image(
     final = result["residual_statistics" if imager == "continuum" else "deconvolution"]
     n_model_updates = captured["n_model_updates"]
     captured.update(
+        record=result["deconvolution"],
         restored=planes("SKY_RESTORED"),
         stop_code={
             STOKES[key.pol]: int(fields["stop_code"].imaging)
@@ -870,3 +928,70 @@ def test_deconvolution_cube_against_continuum(tmp_path, field):
             for metric, margin in DECONVOLUTION_MARGINS.items():
                 bound = margin * DECONVOLUTION_ERRORS[p][metric]
                 assert errors[p][metric] <= bound, (name, p, metric, errors[p])
+
+
+def test_hogbom_divergence_stop(tmp_path, field):
+    gain = DIVERGENCE_CONTROLS["gain"]
+    budget = DIVERGENCE_CONTROLS["max_iter_per_cycle"]
+    records = {
+        name: image(
+            str(tmp_path),
+            field["stores"][False],
+            "cube",
+            field["sky"],
+            DEFAULT_GRIDDING_KERNEL_PARAMS,
+            f"divergence_{name}",
+            controls={**DIVERGENCE_CONTROLS, **change},
+        )["record"].data
+        for name, change in (
+            ("on", {}),
+            ("off", {"max_iter_divergence": -1, "max_cycles": 1}),
+        )
+    }
+    # the limits of the divergence test (hogbom_clean): the RMS of the residual
+    # in the mask at most 1 + gain / 10 times the lowest RMS of the model update
+    # (soft), its peak at most 1 + gain times the peak the model update starts
+    # from (hard); a relative slack of 1e-12 for the rounding of the RMS
+    rms_limit, peak_limit = 1.0 + gain / 10.0, 1.0 + gain
+    for key, fields in records["on"].items():
+        p, off = STOKES[key.pol], records["off"][key]
+        iterations = list(fields["iter_done"])
+        rms_history = fields["iteration_residual_rms"]
+        peak_history = fields["iteration_peak_residual"]
+        off_rms = off["iteration_residual_rms"][0]
+        growth = float(off_rms[-1] / off_rms.min())
+        print(
+            f"divergence, {p}: stop code {fields['stop_code']}, model update stop "
+            f"codes {fields['model_update_stop_code']}, iterations {iterations}; "
+            f"test off: RMS at the end over its lowest {growth}"
+        )
+        # the divergence test ended both model updates; after the first the
+        # cycles went on from the recomputed residual, after the second the
+        # cycle control stopped the plane (max_cycles_divergence 2)
+        assert fields["stop_code"] == StopCode(
+            IMAGING_DIVERGENCE, MODEL_UPDATE_DIVERGENCE
+        ), (p, fields["stop_code"])
+        assert fields["model_update_stop_code"] == [MODEL_UPDATE_DIVERGENCE] * 2, p
+        assert len(iterations) == 3 and iterations[2] == 0, (p, iterations)
+        history = zip(iterations[:2], rms_history[:2], peak_history[:2], strict=True)
+        for n, rms, peaks in history:
+            assert 1 < n < budget and len(rms) == len(peaks) == n, (p, n)
+            # the model update ended at the first iteration whose RMS passed the
+            # soft limit, and its peak stayed within the hard limit
+            ratio = rms[1:] / np.minimum.accumulate(rms)[:-1]
+            assert np.all(ratio[:-1] <= rms_limit * (1 + 1e-12)), (p, ratio.max())
+            assert ratio[-1] > rms_limit * (1 - 1e-12), (p, ratio[-1])
+            assert np.abs(peaks).max() <= peak_limit * abs(peaks[0]), p
+        # without the divergence test the first model update makes the same
+        # iterations up to the stop (measured: the same bit for bit; at 4 and 12
+        # threads to 7.2e-13) and then runs away: it spends its budget and ends
+        # far past the soft limit
+        assert off["stop_code"] == StopCode(
+            IMAGING_MAX_CYCLES, MODEL_UPDATE_MAX_ITER_PER_CYCLE
+        ), (p, off["stop_code"])
+        assert list(off["iter_done"]) == [budget, 0], p
+        n = iterations[0]
+        off_peaks = off["iteration_peak_residual"][0][:n]
+        np.testing.assert_allclose(off_rms[:n], rms_history[0], rtol=1e-10)
+        np.testing.assert_allclose(off_peaks, peak_history[0], rtol=1e-10)
+        assert growth >= DIVERGENCE_GROWTH, (p, growth)
