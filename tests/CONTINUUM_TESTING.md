@@ -43,7 +43,11 @@ Paths below are relative to `tests/`.
   the dirty image and the PSF are those of a NumPy direct Fourier transform,
   and the residual of the true model is at the rounding of the input; with the
   default kernel its floors (less the direct Fourier transform's residual) are
-  pinned and at most 1e-5 of the brightest flux.
+  pinned and at most 1e-5 of the brightest flux. A third test deconvolves
+  instead (Hogbom, the image-sized PSF, to 1e-4 of every plane's brightest
+  flux): every plane stops on its threshold, both imagers take the same
+  iterations and agree in model, residual and restored image to 1e-12, and
+  the errors against the truth stay within margins of their measured values.
 
 The component comparisons are within each algorithm configuration. They do
 **not** require MFS and MVC, local and global weighting, or native and CASA

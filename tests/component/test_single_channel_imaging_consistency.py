@@ -57,6 +57,21 @@ residual written is the residual of the true model.
   ``DYNAMIC_RANGE_GATE`` of the brightest apparent Stokes I flux in every
   Stokes plane: kernel errors of at most 0.1 sigma at a dynamic range of 1e4,
   the rule by which Memo 13a chose the default kernel.
+* ``test_deconvolution_cube_against_continuum``: the deconvolution, whose
+  model update the tests above replace. On the store without the w term both
+  imagers clean with Hogbom, the default kernel and the image-sized PSF (the
+  continuum has no other PSF subtraction) under ``DECONVOLUTION_CONTROLS``,
+  every Stokes plane to ``DECONVOLUTION_THRESHOLD`` of its brightest apparent
+  flux, and restore. Every plane stops on its threshold and the residual
+  written is below it; both imagers make the same iterations in every model
+  update, and their model, residual and restored image agree to
+  ``DECONVOLUTION_RTOL`` of the brightest apparent Stokes I flux. Against the
+  truth (:func:`deconvolution_errors`): the model flux at the sources, the
+  model elsewhere and the restored image against the truth convolved with the
+  fitted beam, computed here, are at most ``DECONVOLUTION_MARGINS`` times
+  their measured values (``DECONVOLUTION_ERRORS``, 0.1 to 4.4 percent: errors
+  of Hogbom on the PSF of the 7 m array, which fall with the threshold, far
+  above the kernel floor).
 
 The direct Fourier transform's residual is subtracted because it holds the
 rounding of the input, which can differ between platforms: the source
@@ -82,10 +97,17 @@ opposite sign gives a residual of 1.8e-6 of the brightest flux, 180 times
 hands 0.49). Any change of the kernel, its table, its lookup or the padding
 (the smallest one Memo 13a lists, oversampling 300 to 1000, moves the floors
 by up to 0.84 percent without the w term and 0.15 percent with it, at least
-1.5e3 times ``FLOOR_RTOL``). Not caught: the deconvolution (the model update
-is replaced), several channels or Taylor terms, MVC, single precision, noise
-and the weights it sets, and the 1 / n factor of the prediction (3e-10 of the
-brightest flux here, below ``TRUTH_RESIDUAL_RTOL``; its unit tests cover it).
+1.5e3 times ``FLOOR_RTOL``). By the deconvolution (in mutated copies of the
+package): a restoring beam 2 percent wider (a restored error 4.3 times its
+measured value) or with a position angle of the opposite sign (32 times), a
+continuum model increment scaled by 1 + 1e-6 or a threshold tolerance of 0.5
+in the cube only (other iterations or cycles in the two imagers), a threshold
+stop at 1.5 times the threshold (a residual written 1.29 times it) and a PSF
+fraction of half the largest sidelobe (model flux error 3.5 times, spurious
+flux 5.5 times). Not caught: several channels or Taylor terms, MVC, exact PSF
+subtraction, the other deconvolvers, single precision, noise and the weights
+it sets, and the 1 / n factor of the prediction (3e-10 of the brightest flux
+here, below ``TRUTH_RESIDUAL_RTOL``; its unit tests cover it).
 
 The builders and the analysis are plain functions so that the memo scripts can
 call the same code.
@@ -112,6 +134,12 @@ from astroviper.processing_functions.imaging.gridders import (
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     DEFAULT_GRIDDING_KERNEL_PARAMS,
+)
+from astroviper.processing_functions.imaging.utils.cycle_control import (
+    IMAGING_THRESHOLD,
+)
+from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+    THRESHOLD_TOLERANCE,
 )
 from astroviper.processing_functions.simulation.antenna_beams import (
     pack_beam_models,
@@ -232,6 +260,47 @@ KERNEL_FLOORS = {
         "V": {"rms_mask": 2.129672565e-07, "rms_far": 2.111950436e-07},
     },
 }
+# The deconvolution of test_deconvolution_cube_against_continuum: Hogbom with
+# the image-sized PSF (exact_psf_subtraction False, the continuum's only PSF
+# subtraction), every plane down to DECONVOLUTION_THRESHOLD of its brightest
+# apparent flux. With psf_sidelobe_factor 1 a model update cleans down to the
+# PSF's largest sidelobe, 0.41 of the peak residual (min_psf_fraction 0.2 does
+# not act: 0.05 gives the same iterations). Measured: a PSF fraction of 0.2
+# (0.1) leaves 2.6 to 26 (8.9 to 24) times the spurious flux (below) in 64 (89)
+# cycles, and gain 0.3 1.3 to 3.7 times the errors in 41. The threshold 1e-4
+# takes 36 cycles (2.0 s in the cube, 7.3 s in the continuum, one thread), 1e-5
+# 131 cycles (6.3 s and 26 s); at 1e-6 I, U and V reach the 200th.
+DECONVOLUTION_THRESHOLD = 1e-4
+DECONVOLUTION_CONTROLS = {
+    "max_iter": 100000,
+    "max_cycles": 72,
+    "gain": 0.1,
+    "psf_sidelobe_factor": 1.0,
+    "min_psf_fraction": 0.2,
+    "max_psf_fraction": 0.8,
+    "max_iter_per_cycle": -1,
+}
+# The model, residual and restored image of the two imagers, over the brightest
+# apparent Stokes I flux: 5.3e-16 (their iterations are the same).
+DECONVOLUTION_RTOL = 1e-12
+# Errors of the deconvolution against the truth, per Stokes plane (measured in
+# both imagers; :func:`deconvolution_errors`): the model in the 3 x 3 pixels of
+# a source minus its apparent flux (largest over the sources) and the restored
+# image minus the truth convolved with the fitted beam (largest in the mask),
+# over the brightest apparent flux of the plane, and the model outside the
+# sources' pixels over their apparent flux. The data with the w term (another
+# sequence of iterations, 35 cycles) move them by at most 1.3 percent, source
+# directions moved by up to four units in the last place by at most 1.9e-7 (ten
+# draws, the same iterations), scipy's FFT in place of pyfftw's by 5.6e-11.
+DECONVOLUTION_ERRORS = {
+    "I": {"model_flux": 2.910e-3, "spurious_flux": 3.859e-2, "restored": 3.394e-3},
+    "Q": {"model_flux": 1.154e-3, "spurious_flux": 7.548e-3, "restored": 1.138e-3},
+    "U": {"model_flux": 2.229e-3, "spurious_flux": 2.575e-2, "restored": 2.267e-3},
+    "V": {"model_flux": 3.094e-3, "spurious_flux": 4.381e-2, "restored": 2.877e-3},
+}
+# The errors may rise by these factors (design G.2 of Memo 13a: 3 for the
+# largest values, 2 for sums).
+DECONVOLUTION_MARGINS = {"model_flux": 3.0, "spurious_flux": 2.0, "restored": 3.0}
 
 
 def primary_beam_power(l, m):
@@ -320,8 +389,10 @@ def oracle_model_update(true_model, captured):
     """A ``model_update_cube_single_field`` that leaves the true model.
 
     It runs the model update (which makes the clean mask), records the residual
-    it starts from (the dirty image), the PSF, the primary beam and the mask,
-    and then replaces the model by ``true_model`` (Stokes, l, m).
+    the first model update starts from (the dirty image), the PSF, the primary
+    beam and the mask, and counts the model updates; then it replaces the model
+    by ``true_model`` (Stokes, l, m), or with ``true_model`` None keeps the
+    model the update made.
     """
     real = model_update.model_update_cube_single_field
 
@@ -340,13 +411,16 @@ def oracle_model_update(true_model, captured):
         def plane(role, dtype=np.float64):
             return img_xds[roles[role]].values[0, 0].astype(dtype)
 
-        captured.update(
-            dirty=dirty,
-            point_spread_function=plane("point_spread_function"),
-            primary_beam=np.nan_to_num(plane("primary_beam")),
-            mask=plane("mask", bool),
-            n_model_updates=captured.get("n_model_updates", 0) + 1,
-        )
+        if "mask" not in captured:
+            captured.update(
+                dirty=dirty,
+                point_spread_function=plane("point_spread_function"),
+                primary_beam=np.nan_to_num(plane("primary_beam")),
+                mask=plane("mask", bool),
+            )
+        captured["n_model_updates"] = captured.get("n_model_updates", 0) + 1
+        if true_model is None:
+            return result
         model_name = img_xds.attrs["data_groups"][group_out]["sky"]
         model = img_xds[model_name]
         assert model.dims == ("time", "frequency", "polarization", "l", "m"), model.dims
@@ -370,15 +444,30 @@ def psf_weights_spy(captured):
     return dft_image_uv_sampling
 
 
-def image(work_dir, ps_store, imager, sky, gridding_kernel_params, tag, **overrides):
-    """One cube or continuum run whose one model update leaves the true model.
+def image(
+    work_dir,
+    ps_store,
+    imager,
+    sky,
+    gridding_kernel_params,
+    tag,
+    controls=None,
+    **overrides,
+):
+    """One cube or continuum run.
 
-    Returns the products the model update got (dirty image, PSF, primary beam,
-    mask), the written residual, model, PSF, primary beam and fitted beam, all
-    as (Stokes, ...) arrays of the one channel or Taylor term, and with the DFT
-    the imaging weights the PSF is made of. ``overrides`` replace arguments of
-    the imager call.
+    With ``controls`` None its one model update leaves the true model; otherwise
+    the imager deconvolves under the cycle controls ``controls`` and restores.
+    Returns the products the first model update got (dirty image, PSF, primary
+    beam, mask), the written residual, model, PSF, primary beam and fitted beam
+    (and with ``controls`` the restored image), all as (Stokes, ...) arrays of
+    the one channel or Taylor term, with the DFT the imaging weights the PSF is
+    made of, and the number of model updates; with ``controls`` also, per
+    Stokes plane, the imaging stop code and the iterations of every model
+    update. ``overrides`` replace arguments of the imager call.
     """
+    deconvolve = controls is not None
+    controls = dict(controls if deconvolve else ORACLE_CONTROLS)
     image_store = f"{work_dir}/{tag}_{imager}.img.zarr"
     image_params = {
         "image_size": IMAGE_SIZE,
@@ -396,12 +485,12 @@ def image(work_dir, ps_store, imager, sky, gridding_kernel_params, tag, **overri
         "deconvolver": "hogbom",
         "instrument_polarization_basis": "linear",
         "scan_intents": ["OBSERVE_TARGET#ON_SOURCE"],
-        "image_data_variables_keep": KEEP,
+        "image_data_variables_keep": KEEP + ["sky_restored"] if deconvolve else KEEP,
         "processing_set_data_group_name": "base",
         "single_precision_image": False,
         "processing_function_threads": 1,
         "n_mapping_parallelism": {"frequency": 1},
-        "restore": False,
+        "restore": deconvolve,
         "primary_beam_correction": False,
         "gridding_kernel_params": dict(gridding_kernel_params),
         "overwrite": True,
@@ -411,10 +500,7 @@ def image(work_dir, ps_store, imager, sky, gridding_kernel_params, tag, **overri
         arguments.update(
             image_params=image_params,
             imaging_weights_params=dict(IMAGING_WEIGHTS_PARAMS),
-            cycle_control_params={
-                **ORACLE_CONTROLS,
-                "primary_beam_limit": PRIMARY_BEAM_LIMIT,
-            },
+            cycle_control_params={**controls, "primary_beam_limit": PRIMARY_BEAM_LIMIT},
             primary_beam_params={"telescope": TELESCOPE},
         )
     else:
@@ -432,7 +518,7 @@ def image(work_dir, ps_store, imager, sky, gridding_kernel_params, tag, **overri
                 **IMAGING_WEIGHTS_PARAMS,
                 "weighting_scope": "local",
             },
-            cycle_control_params=dict(ORACLE_CONTROLS),
+            cycle_control_params=controls,
             continuum_mode="mfs",
             primary_beam_limit=PRIMARY_BEAM_LIMIT,
             visibility_memory_mode="recompute",
@@ -444,7 +530,7 @@ def image(work_dir, ps_store, imager, sky, gridding_kernel_params, tag, **overri
         mock.patch.object(
             model_update,
             "model_update_cube_single_field",
-            oracle_model_update(sky["true_model"], captured),
+            oracle_model_update(None if deconvolve else sky["true_model"], captured),
         ),
         mock.patch.object(
             direct_fourier_transform_cpp,
@@ -452,8 +538,9 @@ def image(work_dir, ps_store, imager, sky, gridding_kernel_params, tag, **overri
             psf_weights_spy(captured),
         ),
     ):
-        driver(**arguments)
-    assert captured.get("n_model_updates") == 1, captured.get("n_model_updates")
+        result = driver(**arguments)
+    if not deconvolve:
+        assert captured.get("n_model_updates") == 1, captured.get("n_model_updates")
     img = load_image(image_store)
 
     def planes(name):
@@ -474,6 +561,25 @@ def image(work_dir, ps_store, imager, sky, gridding_kernel_params, tag, **overri
         written_point_spread_function=planes("POINT_SPREAD_FUNCTION"),
         written_primary_beam=np.nan_to_num(planes("PRIMARY_BEAM")),
         beam=beam.isel(other).transpose("polarization", label_dim).values,
+    )
+    if not deconvolve:
+        return captured
+    # the cube's stop codes are in its convergence record, the continuum's in the
+    # statistics of the residual its last stop test checked
+    final = result["residual_statistics" if imager == "continuum" else "deconvolution"]
+    n_model_updates = captured["n_model_updates"]
+    captured.update(
+        restored=planes("SKY_RESTORED"),
+        stop_code={
+            STOKES[key.pol]: int(fields["stop_code"].imaging)
+            for key, fields in final.data.items()
+        },
+        iterations={
+            STOKES[key.pol]: np.atleast_1d(fields["iter_done"])[
+                :n_model_updates
+            ].tolist()
+            for key, fields in result["deconvolution"].data.items()
+        },
     )
     return captured
 
@@ -563,6 +669,67 @@ def reference_image(ps_store, weights, sky, pixels):
     # the inverse of XX = I + Q, XY = U + iV, YX = U - iV, YY = I - Q
     dirty = np.stack([(xx + yy) / 2, (xx - yy) / 2, (xy + yx) / 2, (xy - yx) / 2j])
     return dirty.real, point_spread_function
+
+
+def clean_beam_truth(sky, beam):
+    """The true model (Stokes, l, m) convolved with the clean beam of every plane.
+
+    The clean beam of plane ``k`` is the elliptical Gaussian of peak 1 with the
+    fitted beam ``beam[k]``, ``[major, minor, position angle]`` (FWHM and
+    angle in radians, the angle from the m axis towards the l axis), computed
+    here at the pixel offsets from every source, wrapped around the image as
+    in the restore's circular convolution (offsets ``-n // 2`` to
+    ``n // 2 - 1``).
+    """
+    out = np.zeros_like(sky["true_model"])
+    for k, (major, minor, position_angle) in enumerate(beam):
+        major, minor = major / abs(CELL_SIZE[0]), minor / abs(CELL_SIZE[1])
+        for i, j in sky["pixels"]:
+            di, dj = (
+                (np.arange(n) - centre + n // 2) % n - n // 2
+                for n, centre in zip(IMAGE_SIZE, (i, j), strict=True)
+            )
+            along = di[:, None] * np.sin(position_angle) - dj * np.cos(position_angle)
+            across = di[:, None] * np.cos(position_angle) + dj * np.sin(position_angle)
+            exponent = (along / major) ** 2 + (across / minor) ** 2
+            out[k] += sky["true_model"][k, i, j] * np.exp(-4 * np.log(2) * exponent)
+    return out
+
+
+def deconvolution_errors(run, sky, threshold):
+    """Per Stokes plane, the errors of a deconvolved run against the truth.
+
+    ``peak_residual``: the peak of the written residual in the mask over the
+    plane's threshold; ``model_flux``: the largest difference over the sources
+    between the model in the 3 x 3 pixels of a source and its apparent flux;
+    ``restored``: the largest difference in the mask between the restored image
+    and :func:`clean_beam_truth`, both over the brightest apparent flux of the
+    plane; ``spurious_flux``: the absolute model outside the sources' pixels
+    over the absolute apparent flux of the sources.
+    """
+    pixels = sky["pixels"]
+    boxes = [(slice(i - 1, i + 2), slice(j - 1, j + 2)) for i, j in pixels]
+    outside = np.ones(IMAGE_SIZE, bool)
+    for box in boxes:
+        outside[box] = False
+    restored_truth = clean_beam_truth(sky, run["beam"])
+    out = {}
+    for k, name in enumerate(STOKES):
+        mask, model, f_ref = run["mask"][k], run["model"][k], sky["f_ref"][name]
+        apparent = sky["true_model"][k][pixels[:, 0], pixels[:, 1]]
+        model_flux = np.array([model[box].sum() for box in boxes])
+        restored = run["restored"][k] - restored_truth[k]
+        out[name] = {
+            "peak_residual": float(
+                np.abs(run["residual"][k][mask]).max() / threshold[k]
+            ),
+            "model_flux": float(np.abs(model_flux - apparent).max() / f_ref),
+            "restored": float(np.abs(restored[mask]).max() / f_ref),
+            "spurious_flux": float(
+                np.abs(model[outside]).sum() / np.abs(apparent).sum()
+            ),
+        }
+    return out
 
 
 def run_pair(work_dir, field, w_term, gridding_kernel_params, tag):
@@ -665,3 +832,41 @@ def test_default_kernel_floor(tmp_path, field, dft_pair):
                 assert abs(change) <= FLOOR_RTOL, (name, p, metric, value, change)
             gate = measured[p]["rms_far_over_i"]
             assert gate <= DYNAMIC_RANGE_GATE, (name, p, gate)
+
+
+def test_deconvolution_cube_against_continuum(tmp_path, field):
+    sky = field["sky"]
+    threshold = [DECONVOLUTION_THRESHOLD * sky["f_ref"][p] for p in STOKES]
+    controls = {**DECONVOLUTION_CONTROLS, "threshold": threshold}
+    runs = {
+        imager: image(
+            str(tmp_path),
+            field["stores"][False],
+            imager,
+            sky,
+            DEFAULT_GRIDDING_KERNEL_PARAMS,
+            "deconvolution",
+            controls=controls,
+        )
+        for imager in ("cube", "continuum")
+    }
+    cube, continuum = runs["cube"], runs["continuum"]
+    # the same cycles: the same iterations in every model update of every plane
+    assert continuum["n_model_updates"] == cube["n_model_updates"]
+    assert continuum["iterations"] == cube["iterations"]
+    for name in ("model", "residual", "restored"):
+        difference = np.abs(continuum[name] - cube[name]).max() / sky["f_ref"]["I"]
+        assert difference <= DECONVOLUTION_RTOL, (name, difference)
+    for name, run in runs.items():
+        errors = deconvolution_errors(run, sky, threshold)
+        print(
+            f"deconvolution, {name}: {run['n_model_updates']} model updates, "
+            f"stop codes {run['stop_code']}, errors {errors}"
+        )
+        # every plane stops on its threshold, and the residual written is below it
+        assert run["stop_code"] == dict.fromkeys(STOKES, IMAGING_THRESHOLD), name
+        for p in STOKES:
+            assert errors[p]["peak_residual"] <= 1.0 + THRESHOLD_TOLERANCE, (name, p)
+            for metric, margin in DECONVOLUTION_MARGINS.items():
+                bound = margin * DECONVOLUTION_ERRORS[p][metric]
+                assert errors[p][metric] <= bound, (name, p, metric, errors[p])
