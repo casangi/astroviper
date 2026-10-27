@@ -180,6 +180,7 @@ def test_distributed_application_timing_summary_formats():
         "T_create_empty_data_variables": 0.4,
         "T_open_processing_set": 0.5,
         "T_interpolate_data_coords": 0.6,
+        "T_add_lazy_input_data": 0.25,
         "T_create_map_reduce_graph": 0.7,
         "T_generate_dask_graph": 0.8,
         "T_compute_dask_graph": 5.0,
@@ -198,3 +199,22 @@ def test_distributed_application_timing_summary_formats():
     assert "compute dask graph" in summary
     # Grand total line uses T_total.
     assert "9.500" in summary
+
+
+def test_add_lazy_input_data_is_a_driver_timing_leaf():
+    """The Measurement Set v2 step (``add_lazy_input_data``; ``0.0`` for a
+    processing set) is a leaf of the driver's timing layout, right after the
+    graph mapping, and renders in the summary."""
+    (_, _, leaves) = DISTRIBUTED_APPLICATION_TIMING_PHASES[0]
+    keys = [key for _, key in leaves]
+    assert keys.index("T_add_lazy_input_data") == (
+        keys.index("T_interpolate_data_coords") + 1
+    )
+    summary = format_timing_summary(
+        {"T_add_lazy_input_data": 0.25, "T_total": 1.0},
+        DISTRIBUTED_APPLICATION_TIMING_PHASES,
+        total_key=DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY,
+        title="distributed application",
+    )
+    assert "add lazy input data" in summary
+    assert "0.250" in summary

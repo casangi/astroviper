@@ -42,9 +42,19 @@ def _equal(a, b):
 # --------------------------------------------------------------------------- #
 # Low-level reader
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("fsel", [slice(0, 1), slice(1, 4), slice(0, 4), slice(2, 4)])
+@pytest.mark.parametrize(
+    "fsel",
+    [
+        slice(0, 1),
+        slice(1, 4),
+        slice(0, 4),
+        slice(2, 4),
+        np.array([3, 2]),
+        np.array([1, 3, 0]),
+    ],
+)
 def test_read_v3_sharded_multichannel(tmp_path, fsel):
-    """Sharded array, inner chunk = 1 channel: reader == zarr for any slice."""
+    """Sharded reader matches Zarr for contiguous and irregular selections."""
     shape = (3, 5, 4, 2)
     data = (np.random.default_rng(0).standard_normal(shape)).astype("<c8")
     path = str(tmp_path / "VIS")
@@ -61,6 +71,95 @@ def test_read_v3_sharded_multichannel(tmp_path, fsel):
     got, dims = read_array_region(path, {"frequency": fsel})
     assert dims == list(DIMS)
     assert _equal(got, zarr.open_array(path)[:, :, fsel, :])
+
+
+def _write_minimal_processing_set_child(store, ms_name, frequencies, offset=0):
+    """Write one tiny child used by direct-loader frequency-selection tests."""
+    frequencies = np.asarray(frequencies, dtype=np.float64)
+    shape = (1, 2, frequencies.size, 2)
+    values = np.arange(np.prod(shape), dtype=np.float64).reshape(shape) + offset
+    arrays = {
+        "VISIBILITY": values.astype(np.complex128),
+        "WEIGHT": values.astype(np.float64),
+        "FLAG": np.zeros(shape, dtype=np.int8),
+    }
+    for name, data in arrays.items():
+        array = zarr.create_array(
+            f"{store}/{ms_name}/{name}",
+            shape=data.shape,
+            dtype=data.dtype,
+            dimension_names=DIMS,
+            chunks=(1, 2, 1, 2),
+        )
+        array[:] = data
+    uvw = zarr.create_array(
+        f"{store}/{ms_name}/UVW",
+        shape=(1, 2, 3),
+        dtype=np.float64,
+        dimension_names=("time", "baseline_id", "uvw_label"),
+        chunks=(1, 2, 3),
+    )
+    uvw[:] = 0.0
+    frequency = zarr.create_array(
+        f"{store}/{ms_name}/frequency",
+        shape=frequencies.shape,
+        dtype=frequencies.dtype,
+        dimension_names=("frequency",),
+        chunks=frequencies.shape,
+    )
+    frequency[:] = frequencies
+    return arrays
+
+
+def _minimal_data_group():
+    return {
+        "correlated_data": "VISIBILITY",
+        "uvw": "UVW",
+        "weight": "WEIGHT",
+        "flag": "FLAG",
+    }
+
+
+def test_load_processing_set_supports_descending_frequency_selection(tmp_path):
+    """The direct loader bounds and reorders descending child channels."""
+    store = str(tmp_path / "descending.ps.zarr")
+    frequencies = np.array([4.0e9, 3.0e9, 2.0e9, 1.0e9])
+    arrays = _write_minimal_processing_set_child(store, "ms0", frequencies)
+
+    loaded = load_processing_set_skunk_works(
+        store,
+        {"ms0": {"frequency": np.array([3, 2])}},
+        _minimal_data_group(),
+        "base",
+        np.array([1.0e9, 2.0e9]),
+    )["ms0"]
+
+    np.testing.assert_array_equal(loaded.frequency, [1.0e9, 2.0e9])
+    np.testing.assert_array_equal(
+        loaded.VISIBILITY,
+        arrays["VISIBILITY"][:, :, [3, 2], :],
+    )
+
+
+def test_load_processing_set_labels_each_child_in_a_multi_child_task(tmp_path):
+    """Each child receives only its own frequencies when one task spans children."""
+    store = str(tmp_path / "multiple.ps.zarr")
+    _write_minimal_processing_set_child(store, "lower", [1.0e9, 2.0e9])
+    _write_minimal_processing_set_child(store, "upper", [3.0e9, 4.0e9], offset=100)
+
+    loaded = load_processing_set_skunk_works(
+        store,
+        {
+            "lower": {"frequency": slice(0, 2)},
+            "upper": {"frequency": slice(0, 2)},
+        },
+        _minimal_data_group(),
+        "base",
+        np.array([1.0e9, 2.0e9, 3.0e9, 4.0e9]),
+    )
+
+    np.testing.assert_array_equal(loaded["lower"].frequency, [1.0e9, 2.0e9])
+    np.testing.assert_array_equal(loaded["upper"].frequency, [3.0e9, 4.0e9])
 
 
 def test_read_v3_plain(tmp_path):
@@ -520,7 +619,12 @@ def test_sharded_slot_overflow_raises(tmp_path):
 # Full processing-set reconstruction
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("processing_function_threads", [1, 4])
-def test_load_processing_set_reconstruction(tmp_path, processing_function_threads):
+@pytest.mark.parametrize("load_correlated_data", [True, False])
+def test_load_processing_set_reconstruction(
+    tmp_path,
+    processing_function_threads,
+    load_correlated_data,
+):
     ntime, nbl, nfreq, npol = 2, 6, 4, 2
     rng = np.random.default_rng(6)
     store = str(tmp_path / "ps.zarr")
@@ -568,9 +672,13 @@ def test_load_processing_set_reconstruction(tmp_path, processing_function_thread
         freq_values,
         "linear",
         processing_function_threads=processing_function_threads,
+        load_correlated_data=load_correlated_data,
     )
     ms = ps[ms_name]
-    assert _equal(ms["VISIBILITY"].values, vis[:, :, 1:3, :])
+    if load_correlated_data:
+        assert _equal(ms["VISIBILITY"].values, vis[:, :, 1:3, :])
+    else:
+        assert "VISIBILITY" not in ms
     assert _equal(ms["UVW"].values, uvw)
     assert _equal(ms["WEIGHT"].values, weight[:, :, 1:3, :])
     assert _equal(ms["FLAG"].values, flag[:, :, 1:3, :])
@@ -588,7 +696,10 @@ def test_load_processing_set_reconstruction(tmp_path, processing_function_thread
     assert int(mask.sum()) == 3
 
 
-def test_load_processing_set_selects_the_needed_correlations(tmp_path):
+@pytest.mark.parametrize("load_correlated_data", [True, False])
+def test_load_processing_set_selects_the_needed_correlations(
+    tmp_path, load_correlated_data
+):
     """A ``polarization`` entry in the selection keeps only those correlations
     (the parallel hands of four-correlation data for Stokes I, Q)."""
     ntime, nbl, nfreq, npol = 2, 3, 4, 4
@@ -602,6 +713,9 @@ def test_load_processing_set_selects_the_needed_correlations(tmp_path):
     }
     uvw = rng.standard_normal((ntime, nbl, 3)).astype("<f8")
     for name, data in arrays.items():
+        # Cached-grid loading must succeed without an observed visibility store.
+        if name == "VISIBILITY" and not load_correlated_data:
+            continue
         array = zarr.create_array(
             f"{store}/{ms_name}/{name}",
             shape=data.shape,
@@ -627,16 +741,30 @@ def test_load_processing_set_selects_the_needed_correlations(tmp_path):
     freq_values = np.linspace(1.0e9, 1.3e9, nfreq)[1:3]
 
     everything = load_processing_set_skunk_works(
-        store, {ms_name: {"frequency": slice(1, 3)}}, data_group, "base", freq_values
+        store,
+        {ms_name: {"frequency": slice(1, 3)}},
+        data_group,
+        "base",
+        freq_values,
+        load_correlated_data=load_correlated_data,
     )[ms_name]
     assert list(everything.polarization.values) == ["XX", "XY", "YX", "YY"]
 
     selection = {ms_name: {"frequency": slice(1, 3), "polarization": [0, 3]}}
     ms = load_processing_set_skunk_works(
-        store, selection, data_group, "base", freq_values
+        store,
+        selection,
+        data_group,
+        "base",
+        freq_values,
+        load_correlated_data=load_correlated_data,
     )[ms_name]
     assert list(ms.polarization.values) == ["XX", "YY"]
+    assert ("VISIBILITY" in everything) == load_correlated_data
+    assert ("VISIBILITY" in ms) == load_correlated_data
     for name, data in arrays.items():
+        if name == "VISIBILITY" and not load_correlated_data:
+            continue
         assert _equal(ms[name].values, data[:, :, 1:3, :][..., [0, 3]]), name
         assert ms[name].values.flags["C_CONTIGUOUS"]
     assert _equal(ms["UVW"].values, uvw)

@@ -4,8 +4,8 @@
         "image_store": { "required": true, "type": ["str"] },
         "image_params": { "required": true, "type": ["dict"] },
         "imaging_weights_params": { "required": true, "type": ["dict"] },
-        "iteration_control_params": { "required": true, "type": ["dict"] },
-        "gridder": { "type": ["str"], "allowed": ["prolate_spheroidal"] },
+        "cycle_control_params": { "required": true, "type": ["dict"] },
+        "gridder": { "type": ["str"], "allowed": ["anti_alias"] },
         "deconvolver": {
             "type": ["str"],
             "allowed": ["hogbom", "hogbom_many_threads", "asp", "aspclean", "asp_clean"]
@@ -14,7 +14,7 @@
             "type": ["str"],
             "allowed": ["linear", "circular"]
         },
-        "scan_intents": { "type": ["list", "str"] },
+        "scan_intents": { "type": ["list", "str"], "nullable": true },
         "field_name": { "type": ["str"], "nullable": true },
         "image_data_variables_keep": { "type": ["list"], "struct type": ["str"] },
         "compressor": { "nullable": true },
@@ -38,6 +38,8 @@
         "restore": { "type": "boolean" },
         "primary_beam_correction": { "type": "boolean" },
         "psf_fitting_method": { "type": "string", "allowed": ["astroviper", "casa"] },
+        "gridding_kernel_params": { "type": ["dict"], "nullable": true },
+        "primary_beam_params": { "type": ["dict"], "nullable": true },
         "skunk_works": { "type": "boolean" },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
@@ -49,6 +51,9 @@
         "image_sharding": { "type": ["dict"], "nullable": true },
         "output_image_format": { "type": ["str"], "allowed": ["zarr", "fits"] },
         "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
-        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 }
+        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
+        "msv2_open_options": { "type": ["dict"], "nullable": true },
+        "parameters_file": { "type": ["str"], "nullable": true },
+        "report": { "type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"] }
     }
 }

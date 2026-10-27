@@ -5,8 +5,11 @@ Three kinds of **antenna (voltage) beam models** are understood by the simulator
 
 1. **Analytic** — a dict ``{"func": "casa_airy" | "airy" | "none",
    "dish_diameter": m, "blockage_diameter": m, "max_rad_1GHz": rad}``.
-   ``max_rad_1GHz`` is the radius (at 1 GHz) beyond which the beam is zero; the
-   values in :data:`AIRY_DISK_MODELS` are CASA's ``PBMath`` defaults.
+   ``max_rad_1GHz`` is the radius (at 1 GHz) beyond which the beam is zero;
+   ``None`` is no cut (only for ``"airy"``; ``"casa_airy"`` needs its table radius).
+   :data:`AIRY_DISK_MODELS` are textbook obscured Airy disks without a cut;
+   :func:`airy_disk_model` with ``func="casa_airy"`` gives CASA's
+   ``PBMath1DAiry`` with the ``PBMath`` table radius.
 2. **Aperture (Zernike) polynomial coefficients** — an ``xr.Dataset`` with
    ``ZPC[frequency, polarization, coefficient]`` (complex) and
    ``ETA[frequency, polarization, coefficient]`` and attrs ``dish_diameter``,
@@ -14,7 +17,11 @@ Three kinds of **antenna (voltage) beam models** are understood by the simulator
    simulator (Sekhar et al. 2022 models for the EVLA and MeerKAT ship as CSV).
 3. **Beam polynomial coefficients** — an ``xr.Dataset`` with
    ``BPC[frequency, polarization, coefficient]``: CASA ``PBMath1DPoly``-style
-   1-D power-beam polynomials in ``r`` (arcmin at 1 GHz), e.g. the EVLA models.
+   1-D power-beam polynomials in ``r`` (arcmin at 1 GHz), e.g. the EVLA models;
+   :func:`beam_polynomial_coefficient_index` picks the row CASA uses at a
+   frequency.  They are evaluated at the exact radius ``|lm|``, or, with an
+   ``n_sample`` attr, at the radius of CASA's lookup table of ``n_sample``
+   radii out to ``max_rad_1GHz``.
 
 The legacy SIRIUS coordinate names (``chan``, ``pol``, ``coef_indx``,
 ``dish_diam``) are translated by :func:`normalize_beam_model_xds`.
@@ -31,42 +38,48 @@ import xarray as xr
 
 DEG_TO_RAD = np.pi / 180.0
 
-# CASA PBMath.cc max radii (degrees at 1 GHz) converted to radians.
+# Effective dish and blockage diameters (metres) of the textbook Airy disk; no cut.
 AIRY_DISK_MODELS: dict[str, dict] = {
-    "vla": {
-        "func": "casa_airy",
+    "vla_nvss": {
+        "func": "airy",
         "dish_diameter": 24.5,
         "blockage_diameter": 0.0,
-        "max_rad_1GHz": 0.8564 * DEG_TO_RAD,
+        "max_rad_1GHz": None,
     },
     "aca": {
-        "func": "casa_airy",
+        "func": "airy",
         "dish_diameter": 6.25,
         "blockage_diameter": 0.75,
-        "max_rad_1GHz": 3.568 * DEG_TO_RAD,
+        "max_rad_1GHz": None,
     },
     "alma": {
-        "func": "casa_airy",
+        "func": "airy",
         "dish_diameter": 10.7,
         "blockage_diameter": 0.75,
-        "max_rad_1GHz": 1.784 * DEG_TO_RAD,
+        "max_rad_1GHz": None,
     },
     "ngvla": {
-        "func": "casa_airy",
+        "func": "airy",
         "dish_diameter": 18.0,
         "blockage_diameter": 0.0,
-        "max_rad_1GHz": 1.5 * DEG_TO_RAD,
+        "max_rad_1GHz": None,
     },
 }
 
+# CASA PBMath.cc max radii (degrees at 1 GHz) converted to radians.
 _MAX_RAD_1GHZ_BY_TELESCOPE = {
     "evla": 0.8564 * DEG_TO_RAD,
     "vla": 0.8564 * DEG_TO_RAD,
+    "vla_nvss": 0.8564 * DEG_TO_RAD,
     "ngvla": 1.5 * DEG_TO_RAD,
     "alma": 1.784 * DEG_TO_RAD,
     "aca": 3.568 * DEG_TO_RAD,
     "meerkat": 1.5 * DEG_TO_RAD,
 }
+
+# CASA PBMath.cc builds its EVLA beam polynomial (PBMath1DEVLA) with a 58 arcmin
+# table at 1 GHz.
+EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ = 58.0 / 60.0 * DEG_TO_RAD
 
 _LEGACY_ATTR_NAMES = {
     "dish_diam": "dish_diameter",
@@ -113,17 +126,20 @@ def list_beam_polynomial_coefficient_models() -> list[str]:
 
 
 def airy_disk_model(name: str, func: str | None = None) -> dict:
-    """Copy of one of :data:`AIRY_DISK_MODELS` (``"vla"``, ``"aca"``, ``"alma"``, ``"ngvla"``).
+    """Copy of one of :data:`AIRY_DISK_MODELS` (``"vla_nvss"``, ``"aca"``, ``"alma"``, ``"ngvla"``).
 
     Parameters
     ----------
     name : str
     func : str, optional
-        Override the beam function (``"casa_airy"``, ``"airy"`` or ``"none"``).
+        Override the beam function (``"casa_airy"``, ``"airy"`` or ``"none"``);
+        any but ``"airy"`` is zero beyond CASA's ``PBMath`` table radius.
     """
     model = dict(AIRY_DISK_MODELS[name.lower()])
     if func is not None:
         model["func"] = func
+    if model["func"] != "airy":
+        model["max_rad_1GHz"] = _MAX_RAD_1GHZ_BY_TELESCOPE[name.lower()]
     return model
 
 
@@ -137,6 +153,8 @@ def normalize_beam_model_dict(model: dict) -> dict:
     for required in ("dish_diameter", "max_rad_1GHz"):
         if required not in out:
             raise ValueError(f"Analytic beam model is missing '{required}': {model}")
+    if out["func"] in ("casa_airy", "none") and out["max_rad_1GHz"] is None:
+        raise ValueError(f"A {out['func']!r} beam model needs max_rad_1GHz: {model}")
     return out
 
 
@@ -266,6 +284,7 @@ def read_beam_polynomial_coefficients(
     telescope_name: str | None = None,
     max_coefficients: int = 5,
     polarization: str = "RR",
+    n_sample: int | None = None,
 ) -> xr.Dataset:
     """Read a CASA ``PBMath1DPoly`` style coefficient text file (e.g. the EVLA bands).
 
@@ -280,18 +299,30 @@ def read_beam_polynomial_coefficients(
         e.g. ``"EVLA_"``) or a path.
     dish_diameter : float
     max_rad_1GHz : float, optional
+        Radians; default :data:`EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ` (CASA's
+        ``PBMath1DEVLA``) for EVLA, else from the telescope name (CASA PBMath
+        values).
     telescope_name : str, optional
     max_coefficients : int
     polarization : str
         Label of the single (unpolarised) polarization axis entry.
+    n_sample : int, optional
+        Evaluate the polynomial at the radius of CASA's lookup table of
+        ``n_sample`` (at least 2) radii out to ``max_rad_1GHz`` (10000 in CASA), stored
+        as the ``n_sample`` attr; ``None`` evaluates it at the exact radius.
 
     Returns
     -------
     xr.Dataset
         ``BPC[frequency, polarization, coefficient]`` (float64) with a ``band``
-        coordinate along ``frequency`` and the same attrs as
-        :func:`read_aperture_polynomial_coefficients`.
+        coordinate along ``frequency``, the same attrs as
+        :func:`read_aperture_polynomial_coefficients` and ``band_definitions``
+        (``[name, start_Hz, end_Hz]`` per band, in file order).
     """
+    if n_sample is not None and int(n_sample) < 2:
+        raise ValueError(
+            f"n_sample must be None (exact radius) or at least 2; got {n_sample!r}"
+        )
     path = model
     if not os.path.isfile(path):
         path = os.path.join(
@@ -303,9 +334,14 @@ def read_beam_polynomial_coefficients(
     if telescope_name is None:
         telescope_name = base.partition("_")[0]
     if max_rad_1GHz is None:
-        max_rad_1GHz = _max_rad_for_telescope(telescope_name)
+        max_rad_1GHz = (
+            EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ
+            if telescope_name.lower() == "evla"
+            else _max_rad_for_telescope(telescope_name)
+        )
 
     band_names: list[str] = []
+    band_definitions: list[list] = []
     frequency, coefficients, bands = [], [], []
     mode = None
     band = None
@@ -325,6 +361,7 @@ def read_beam_polynomial_coefficients(
             if mode == "band":
                 parts = line.split()
                 band_names.append(parts[0])
+                band_definitions.append([parts[0], float(parts[1]), float(parts[2])])
             elif mode == "coef":
                 if line[0] in band_names and "{" not in line:
                     band = line[0]
@@ -361,7 +398,61 @@ def read_beam_polynomial_coefficients(
             "conversion_date": str(date.today()),
             "dish_diameter": float(dish_diameter),
             "max_rad_1GHz": float(max_rad_1GHz),
+            "band_definitions": band_definitions,
         },
     )
+    if n_sample is not None:
+        xds.attrs["n_sample"] = int(n_sample)
     xds.frequency.attrs.update({"units": "Hz", "type": "spectral_coord"})
     return xds
+
+
+def beam_polynomial_coefficient_index(
+    bpc_xds: xr.Dataset, frequency: np.ndarray
+) -> np.ndarray:
+    """Row of ``BPC`` that CASA ``PBMath1DEVLA`` uses at each frequency.
+
+    The band of a frequency is the first of ``attrs["band_definitions"]`` (file
+    order) with ``start < frequency < end``; the frequency is clamped to the
+    first and last tabulated frequency of that band, and the nearest tabulated
+    frequency is taken, an exact tie going to the higher one.  Without
+    ``band_definitions``, or outside every band, the frequency is not clamped.
+    Frequencies are compared in MHz, as in CASA.
+
+    Parameters
+    ----------
+    bpc_xds : xr.Dataset
+        Beam-polynomial model with ascending ``frequency``
+        (:func:`read_beam_polynomial_coefficients`).
+    frequency : np.ndarray, Hz
+
+    Returns
+    -------
+    np.ndarray of int
+        Index along ``frequency`` of ``bpc_xds``, shaped as ``frequency``.
+    """
+    table = np.asarray(bpc_xds.frequency.values, dtype=np.float64)
+    frequency = np.asarray(frequency, dtype=np.float64)
+    selection = frequency.copy()
+    in_a_band = np.zeros(frequency.shape, dtype=bool)
+    band_definitions = bpc_xds.attrs.get("band_definitions", [])
+    band = bpc_xds.band.values if band_definitions else None
+    for name, start, end in band_definitions:
+        in_band = ~in_a_band & (start < frequency) & (frequency < end)
+        tabulated = table[band == name]
+        if tabulated.size:
+            selection[in_band] = np.clip(
+                frequency[in_band], tabulated.min(), tabulated.max()
+            )
+        in_a_band |= in_band
+    table_mhz = table * 1e-6
+    selection_mhz = selection * 1e-6
+    upper = np.searchsorted(table_mhz, selection_mhz, side="left")
+    lower = np.maximum(upper - 1, 0)
+    upper = np.minimum(upper, table_mhz.size - 1)
+    return np.where(
+        np.abs(selection_mhz - table_mhz[lower])
+        < np.abs(table_mhz[upper] - selection_mhz),
+        lower,
+        upper,
+    )

@@ -1,4 +1,5 @@
 import copy
+from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -8,6 +9,11 @@ from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
+
+if TYPE_CHECKING:
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        GriddingKernel,
+    )
 
 
 def add_visibility_grid_mosaic(
@@ -90,7 +96,7 @@ def add_visibility_grid_mosaic(
 
     See Also
     --------
-    add_visibility_grid_single_field : Non-mosaic (prolate spheroidal gridder) variant.
+    add_visibility_grid_single_field : Non-mosaic (anti-aliasing gridder) variant.
     mosaic_grid_jit : Mosaic gridding kernel (pure Python; currently unmaintained).
     """
     if image_data_group_out_modified is None:
@@ -192,7 +198,7 @@ def add_visibility_grid_mosaic(
 
 def add_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: np.ndarray,
+    cgk_1D: "GriddingKernel | np.ndarray",
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -215,8 +221,7 @@ def add_visibility_grid_single_field(
     :func:`~astroviper.utils.data_group_tools.modify_data_groups_xds`.
 
     This function is the non-mosaic counterpart of
-    :func:`add_visibility_grid_mosaic`.  It uses the separable prolate
-    spheroidal gridder (the C++ ``prolate_spheroidal_grid`` kernel, the
+    :func:`add_visibility_grid_mosaic`.  It uses the separable anti-aliasing gridder (the C++ ``anti_alias_grid`` kernel, the
     standard gridder in CASA) rather than the direction-dependent mosaic
     gridder, so no GCF dataset is required.
 
@@ -226,10 +231,12 @@ def add_visibility_grid_single_field(
         Measurement set dataset.  Must contain the data variables referenced
         by ``ms_data_group_in_name`` (``correlated_data``, ``uvw``,
         ``weight_imaging``) and a ``frequency`` coordinate.
-    cgk_1D : np.ndarray
-        1-D convolutional gridding kernel used by the prolate spheroidal
-        gridder.  Shape ``(oversampling * support,)``; passed directly to the
-        C++ ``prolate_spheroidal_grid`` kernel.
+    cgk_1D : GriddingKernel or np.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
+        whose table, support and oversampling go to the C++
+        ``anti_alias_grid`` kernel), or the bare table of the default
+        prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset that accumulates the gridded visibilities.  The arrays
         named by ``image_data_group_out_modified`` are created on the first call
@@ -276,8 +283,8 @@ def add_visibility_grid_single_field(
     See Also
     --------
     add_visibility_grid_mosaic : Mosaic (direction-dependent GCF) variant.
-    astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp.prolate_spheroidal_grid :
-        C++ separable prolate spheroidal gridding kernel.
+    astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp.anti_alias_grid :
+        C++ separable anti-aliasing gridder.
     """
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
@@ -363,11 +370,15 @@ def add_visibility_grid_single_field(
     frequency_coord = ms_xds.frequency.values
     imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid,
+    )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        as_gridding_kernel,
     )
 
-    prolate_spheroidal_grid(
+    kernel = as_gridding_kernel(cgk_1D)
+    anti_alias_grid(
         grid,
         normalization,
         vis_data,
@@ -377,10 +388,11 @@ def add_visibility_grid_single_field(
         time_map,
         pol_map,
         imaging_weight,
-        cgk_1D,
+        kernel.table,
         n_uv,
         delta_lm,
-        support=7,
-        oversampling=100,
+        support=kernel.support,
+        oversampling=kernel.oversampling,
+        interpolation=kernel.interpolation_code,
         processing_function_threads=processing_function_threads,
     )

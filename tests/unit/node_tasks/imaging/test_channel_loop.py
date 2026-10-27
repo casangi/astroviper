@@ -16,6 +16,7 @@ import pytest
 import xarray as xr
 
 from astroviper.node_tasks.imaging.image_cube_single_field import (
+    _channel_cycle_control_params,
     _chunk_task_coords,
     _combine_channel_timing_frames,
     _ImageChunkAccumulator,
@@ -82,7 +83,7 @@ def _task_inputs(tmp_path, n_chan=3, data_selection=None, **overrides):
     inputs = dict(
         image_params=image_params,
         imaging_weights_params={"weighting": "natural"},
-        iteration_control_params={"max_iter": 10, "max_cycles": 3},
+        cycle_control_params={"max_iter": 10, "max_cycles": 3},
         task_coords={"frequency": {"data": VIS_FREQUENCIES[:n_chan]}},
         data_selection=data_selection or {"ms_a": {"frequency": slice(0, n_chan)}},
         image_store=str(tmp_path / "img.zarr"),
@@ -109,7 +110,7 @@ class _FakeScience:
         img_xds,
         image_params,
         imaging_weights_params,
-        iteration_control_params,
+        cycle_control_params,
         **kwargs,
     ):
         vis_frequencies = {
@@ -181,7 +182,16 @@ def test_node_task_images_one_channel_at_a_time(tmp_path, fake_science):
     ms_a = ps_xdt["ms_a"]
     original_groups = copy.deepcopy(ms_a.attrs["data_groups"])
 
-    result = image_cube_single_field(**_task_inputs(tmp_path), input_data=ps_xdt)
+    gridding_kernel_params = {"type": "exponential_semicircle", "oversampling": 300}
+    primary_beam_params = {"telescope": "vla"}
+    result = image_cube_single_field(
+        **_task_inputs(
+            tmp_path,
+            gridding_kernel_params=gridding_kernel_params,
+            primary_beam_params=primary_beam_params,
+        ),
+        input_data=ps_xdt,
+    )
 
     # One science call per image channel, in order, each with exactly the
     # visibility channel that maps onto it.
@@ -190,6 +200,8 @@ def test_node_task_images_one_channel_at_a_time(tmp_path, fake_science):
     for call, freq in zip(fake_science.calls, VIS_FREQUENCIES, strict=True):
         assert call["vis_frequencies"] == {"ms_a": pytest.approx([freq])}
         assert call["kwargs"]["task_id"] == 3
+        assert call["kwargs"]["gridding_kernel_params"] == gridding_kernel_params
+        assert call["kwargs"]["primary_beam_params"] == primary_beam_params
     # Data groups registered by the science function never reach the chunk.
     assert ms_a.attrs["data_groups"] == original_groups
 
@@ -240,6 +252,118 @@ def test_imaging_dict_channels_shift_onto_global_numbers(tmp_path, fake_science)
         input_data=ps_xdt,
     )
     assert sorted(key.chan for key in result["deconvolution"].data) == [5, 6, 7]
+
+
+@pytest.mark.parametrize("image_chunking", [{"frequency": 1}, None])
+def test_channel_measurement_sets_die_before_the_statistics(
+    tmp_path, monkeypatch, fake_science, image_chunking
+):
+    """The measurement sets the science function was handed for a channel
+    (which then hold its model and residual visibilities and imaging
+    weights) are freed by reference counting as soon as the channel is
+    imaged, before the chunk's statistics and write."""
+    import gc
+    import weakref
+
+    import astroviper.processing_functions.image_analysis.plane_statistics as ps_mod
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+
+    handed = []
+
+    def science_keeping_weakrefs(ps_xdt, *args, **kwargs):
+        handed.extend(weakref.ref(ms_xdt) for ms_xdt in ps_xdt.values())
+        return fake_science(ps_xdt, *args, **kwargs)
+
+    monkeypatch.setattr(pf_imaging, "image_cube_single_field", science_keeping_weakrefs)
+    statistics = ps_mod.calculate_plane_statistics
+    alive_at_statistics = []
+
+    def statistics_checking(*args, **kwargs):
+        alive_at_statistics.append(sum(ref() is not None for ref in handed))
+        return statistics(*args, **kwargs)
+
+    monkeypatch.setattr(ps_mod, "calculate_plane_statistics", statistics_checking)
+    overrides = {}
+    if image_chunking is not None:
+        overrides = dict(
+            image_store=_make_store(tmp_path, 3, [[0, 1, 2]], image_chunking),
+            graph_mode=True,
+            image_chunking=image_chunking,
+        )
+    inputs = _task_inputs(tmp_path, **overrides)
+    ps_xdt = _fake_processing_set({"ms_a": VIS_FREQUENCIES})
+    gc_was_enabled = gc.isenabled()
+    gc.disable()  # reference counting alone
+    try:
+        image_cube_single_field(**inputs, input_data=ps_xdt)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+    assert len(handed) == 3
+    assert alive_at_statistics == [0] * len(alive_at_statistics)
+    assert len(alive_at_statistics) == (3 if image_chunking else 1)
+
+
+def test_channel_without_visibilities_leaves_the_loaded_chunk_untouched(
+    tmp_path, monkeypatch, fake_science
+):
+    """An image channel no visibility channel maps onto is imaged from the
+    whole loaded chunk, handed over as views with their own attrs: the
+    variables and data groups the science function registers stay off the
+    loaded tree, and die by reference counting before the statistics."""
+    import gc
+    import weakref
+
+    import astroviper.processing_functions.image_analysis.plane_statistics as ps_mod
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+
+    handed = []
+
+    def science_registering(ps_xdt, *args, **kwargs):
+        for ms_xdt in ps_xdt.values():
+            # what the residual update does: register model visibilities
+            ms_xdt["VISIBILITY_MODEL"] = ms_xdt["VISIBILITY"] * 0
+            handed.append(weakref.ref(ms_xdt))
+        return fake_science(ps_xdt, *args, **kwargs)
+
+    monkeypatch.setattr(pf_imaging, "image_cube_single_field", science_registering)
+    statistics = ps_mod.calculate_plane_statistics
+    alive_at_statistics = []
+
+    def statistics_checking(*args, **kwargs):
+        alive_at_statistics.append(sum(ref() is not None for ref in handed))
+        return statistics(*args, **kwargs)
+
+    monkeypatch.setattr(ps_mod, "calculate_plane_statistics", statistics_checking)
+    # visibility channels on the first and the last image channel only
+    ps_xdt = _fake_processing_set({"ms_a": VIS_FREQUENCIES[[0, 2]]})
+    ms_a = ps_xdt["ms_a"]
+    original_groups = copy.deepcopy(ms_a.attrs["data_groups"])
+    gc_was_enabled = gc.isenabled()
+    gc.disable()  # reference counting alone
+    try:
+        image_cube_single_field(**_task_inputs(tmp_path), input_data=ps_xdt)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+    # channel 1 was imaged from the whole chunk, the others from their own
+    assert [c["vis_frequencies"]["ms_a"].tolist() for c in fake_science.calls] == [
+        [VIS_FREQUENCIES[0]],
+        VIS_FREQUENCIES[[0, 2]].tolist(),
+        [VIS_FREQUENCIES[2]],
+    ]
+    assert "VISIBILITY_MODEL" not in ms_a
+    assert ms_a.attrs["data_groups"] == original_groups
+    assert len(handed) == 3
+    assert alive_at_statistics == [0]
 
 
 # --------------------------------------------------------------------------- #
@@ -568,3 +692,23 @@ def test_shift_imaging_dict_channels():
     shifted = _shift_imaging_dict_channels(imaging_dict, 4)
     assert list(shifted.data) == [Key(time=0, pol=1, chan=4)]
     assert shifted.data[Key(0, 1, 4)]["iter_done"] == [3]
+
+
+def test_channel_cycle_control_params_takes_the_global_row():
+    """A per channel threshold: every channel gets its row of the cube."""
+    threshold = [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]]
+    params = {"threshold": threshold, "gain": 0.1}
+    task_coords = {"frequency": {"data": [0.0, 0.0], "slice": slice(2, 4)}}
+    assert _channel_cycle_control_params(params, task_coords, {}, 1)["threshold"] == [
+        4.0,
+        40.0,
+    ]
+    # The offset from data_selection when the task carries no slice.
+    no_slice = {"frequency": {"data": [0.0, 0.0]}}
+    selection = {"ms": {"frequency": slice(1, 3)}}
+    channel = _channel_cycle_control_params(params, no_slice, selection, 0)
+    assert channel == {"threshold": [2.0, 20.0], "gain": 0.1}
+    assert params["threshold"] is threshold  # not mutated
+    for scalar_or_per_plane in (0.5, [0.5, 0.6]):
+        plain = {"threshold": scalar_or_per_plane}
+        assert _channel_cycle_control_params(plain, task_coords, {}, 0) is plain

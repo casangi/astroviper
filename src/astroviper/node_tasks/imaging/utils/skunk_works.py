@@ -28,6 +28,11 @@ owns a disjoint set of chunks, so reads and writes are embarrassingly parallel.
 The functions deliberately do not remove or replace the production
 :func:`astroviper.utils.io.write_result_chunk_to_disk_using_zarr` /
 ``load_processing_set`` paths; they are selected by the ``skunk_works`` flag.
+
+A Measurement Set v2 input of this path (``ps_store`` a Measurement Set v2,
+``skunk_works=True``) is read by the sibling module
+:mod:`astroviper.node_tasks.imaging.utils.skunk_works_msv2` instead, through
+XRADIO's ``xradio_msv2`` engine; the writers here serve both inputs.
 """
 
 from __future__ import annotations
@@ -278,10 +283,11 @@ def _axis_overlaps(start, stop, csize):
 def read_array_region(array_path, sel):
     """Read ``array[sel]`` for one Zarr array via direct chunk-blob reads.
 
-    ``sel`` maps dimension names to slices; missing dims select the full axis.
-    Handles Zarr v3 (sharded and plain) and v2; supports selections spanning
-    several chunks / inner chunks (e.g. multiple frequency channels). Returns
-    ``(ndarray, dims)``.
+    ``sel`` maps dimension names to slices or one-dimensional integer arrays;
+    missing dims select the full axis. Integer arrays are read through their
+    contiguous bounding range and reordered in memory. Handles Zarr v3
+    (sharded and plain) and v2; supports selections spanning several chunks /
+    inner chunks (e.g. multiple frequency channels). Returns ``(ndarray, dims)``.
 
     Every filesystem unit (metadata, one shard's index + inner chunks, one
     plain chunk file) runs under :func:`_retry_transient_io`, so a Lustre
@@ -297,12 +303,40 @@ def read_array_region(array_path, sel):
     nd = len(shape)
 
     ranges = []
+    relative_indices = {}
     for ax, dim in enumerate(dims):
-        s = sel.get(dim, slice(None))
-        a, b, _ = s.indices(shape[ax])
+        selection = sel.get(dim, slice(None))
+        if isinstance(selection, slice):
+            a, b, step = selection.indices(shape[ax])
+            if step != 1:
+                indices = np.arange(a, b, step, dtype=np.int64)
+                if indices.size == 0:
+                    raise ValueError(f"Empty selection for dimension {dim!r}.")
+                a, b = int(indices.min()), int(indices.max()) + 1
+                relative_indices[ax] = indices - a
+        else:
+            indices = np.asarray(selection)
+            if indices.ndim != 1 or indices.dtype.kind not in "iu":
+                raise TypeError(
+                    f"Selection for dimension {dim!r} must be a slice or a "
+                    "one-dimensional integer array."
+                )
+            indices = indices.astype(np.int64, copy=True)
+            indices[indices < 0] += shape[ax]
+            if indices.size == 0:
+                raise ValueError(f"Empty selection for dimension {dim!r}.")
+            if np.any((indices < 0) | (indices >= shape[ax])):
+                raise IndexError(f"Selection for dimension {dim!r} is out of bounds.")
+            a, b = int(indices.min()), int(indices.max()) + 1
+            relative_indices[ax] = indices - a
         ranges.append((a, b))
     out = np.empty(tuple(b - a for a, b in ranges), dtype=dtype)
     fill = meta["fill_value"] if meta["fill_value"] is not None else 0
+
+    def _apply_relative_indices(data):
+        for axis, indices in relative_indices.items():
+            data = np.take(data, indices, axis=axis)
+        return data
 
     if meta["sharding"] is not None:
         inner = tuple(meta["sharding"]["chunk_shape"])
@@ -354,7 +388,7 @@ def read_array_region(array_path, sel):
                     os.close(fd)
 
             _retry_transient_io(f"shard {path}", _read_shard)
-        return out, dims
+        return _apply_relative_indices(out), dims
 
     per_axis = [
         _axis_overlaps(ranges[ax][0], ranges[ax][1], oc[ax]) for ax in range(nd)
@@ -389,7 +423,7 @@ def read_array_region(array_path, sel):
             out[out_sl] = fill
             continue
         out[out_sl] = arr[tuple(slice(c[1], c[2]) for c in combo)]
-    return out, dims
+    return _apply_relative_indices(out), dims
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +465,7 @@ def load_processing_set_skunk_works(
     frequency_coords,
     instrument_polarization_basis="linear",
     processing_function_threads=1,
+    load_correlated_data=True,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -454,9 +489,10 @@ def load_processing_set_skunk_works(
     input_data_store : str
         Path to the processing-set Zarr store.
     sel_parms : dict
-        ``{ms_name: {dim: slice}}`` selection for this task (from the graph).
-        The ``frequency`` slice gives the channel range to read and an optional
-        ``polarization`` list the index positions of the correlations to keep.
+        ``{ms_name: {dim: selector}}`` selection for this task (from the graph).
+        The ``frequency`` selector is a slice or one-dimensional integer array,
+        and an optional ``polarization`` list gives the index positions of the
+        correlations to keep.
     data_group : dict
         Resolved role->variable mapping for ``processing_set_data_group_name``
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), passed
@@ -471,10 +507,18 @@ def load_processing_set_skunk_works(
         Maximum number of threads used to read this MS's arrays concurrently.
         Default ``1`` (serial).  File reads and the numcodecs decode both
         release the GIL, so threading overlaps the per-array I/O latency.
+    load_correlated_data : bool, optional
+        If false, omit the observed correlated-data array. This is used by
+        cached-grid MFS residual updates, which require only UVW, flags, and
+        imaging weights to predict and grid the model contribution.
     """
     import xarray as xr
 
-    freq_values = np.asarray(frequency_coords)
+    task_frequency_values = np.asarray(frequency_coords)
+    task_frequency_match_counts = np.zeros(
+        task_frequency_values.size,
+        dtype=np.int64,
+    )
     nodes = {}
     for ms_name, ms_sel in sel_parms.items():
         ms_path = os.path.join(input_data_store, ms_name)
@@ -491,10 +535,6 @@ def load_processing_set_skunk_works(
         # GIL, so threads overlap the per-array read latency instead of paying
         # it one array at a time.
         reads = {
-            "correlated_data": (
-                os.path.join(ms_path, data_group["correlated_data"]),
-                {"frequency": freq_sel},
-            ),
             "uvw": (os.path.join(ms_path, data_group["uvw"]), {}),
             "weight": (
                 os.path.join(ms_path, data_group["weight"]),
@@ -505,38 +545,88 @@ def load_processing_set_skunk_works(
                 {"frequency": freq_sel},
             ),
         }
+        frequency_path = os.path.join(ms_path, "frequency")
+        if os.path.isdir(frequency_path):
+            reads["frequency_coordinate"] = (
+                frequency_path,
+                {"frequency": freq_sel},
+            )
+        if load_correlated_data:
+            reads["correlated_data"] = (
+                os.path.join(ms_path, data_group["correlated_data"]),
+                {"frequency": freq_sel},
+            )
         for coord_name in ("baseline_antenna1_name", "baseline_antenna2_name"):
             if os.path.isdir(os.path.join(ms_path, coord_name)):
                 reads[coord_name] = (os.path.join(ms_path, coord_name), {})
 
         results = _read_arrays_concurrently(reads, processing_function_threads)
 
-        vis, vis_dims = results["correlated_data"]
         uvw, uvw_dims = results["uvw"]
         weight, w_dims = results["weight"]
         flag, f_dims = results["flag"]
 
-        # Keep only the correlations the imager grids (the chunk blobs hold
-        # every correlation, so the selection happens after the decode).
+        if "frequency_coordinate" in results:
+            child_frequency_values, frequency_dims = results["frequency_coordinate"]
+            if frequency_dims != ["frequency"]:
+                raise ValueError(
+                    f"Frequency coordinate for {ms_name!r} has dimensions "
+                    f"{frequency_dims}; expected ['frequency']."
+                )
+            child_frequency_values = np.asarray(child_frequency_values)
+        elif len(sel_parms) == 1:
+            child_frequency_values = task_frequency_values
+        else:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} has no on-disk frequency "
+                "coordinate, so a multi-child task cannot label it safely."
+            )
+
+        expected_frequency_size = weight.shape[w_dims.index("frequency")]
+        if child_frequency_values.size != expected_frequency_size:
+            raise ValueError(
+                f"Frequency coordinate for {ms_name!r} has length "
+                f"{child_frequency_values.size}; selected data have length "
+                f"{expected_frequency_size}."
+            )
+
+        frequency_matches = np.isclose(
+            child_frequency_values[:, np.newaxis],
+            task_frequency_values[np.newaxis, :],
+            rtol=1.0e-12,
+            atol=0.0,
+        )
+        if np.any(frequency_matches.sum(axis=1) != 1):
+            raise ValueError(
+                f"Selected frequencies for {ms_name!r} do not each match "
+                "exactly one task frequency."
+            )
+        task_frequency_match_counts += frequency_matches.sum(axis=0)
+
+        # Select the requested correlations even when cached-grid cycles omit
+        # observed visibilities. Weights and flags are always loaded.
         pol_sel = ms_sel.get("polarization") if isinstance(ms_sel, dict) else None
         if pol_sel is not None:
-            vis = np.take(vis, pol_sel, axis=vis_dims.index("polarization"))
             weight = np.take(weight, pol_sel, axis=w_dims.index("polarization"))
             flag = np.take(flag, pol_sel, axis=f_dims.index("polarization"))
 
-        npol = vis.shape[vis_dims.index("polarization")]
+        npol = weight.shape[w_dims.index("polarization")]
         pol_labels = _POL_LABELS[instrument_polarization_basis].get(
             npol, [f"P{i}" for i in range(npol)]
         )
 
         data_vars = {
-            data_group["correlated_data"]: (vis_dims, vis),
             data_group["uvw"]: (uvw_dims, uvw),
             data_group["weight"]: (w_dims, weight),
             data_group["flag"]: (f_dims, flag),
         }
+        if load_correlated_data:
+            vis, vis_dims = results["correlated_data"]
+            if pol_sel is not None:
+                vis = np.take(vis, pol_sel, axis=vis_dims.index("polarization"))
+            data_vars[data_group["correlated_data"]] = (vis_dims, vis)
         coords = {
-            "frequency": ("frequency", freq_values),
+            "frequency": ("frequency", child_frequency_values),
             "polarization": ("polarization", pol_labels),
         }
         # The per-baseline antenna names cannot be reconstructed from the imaging
@@ -549,6 +639,11 @@ def load_processing_set_skunk_works(
         ds = xr.Dataset(data_vars=data_vars, coords=coords)
         ds.attrs["data_groups"] = {processing_set_data_group_name: dict(data_group)}
         nodes[ms_name] = ds
+
+    if np.any(task_frequency_match_counts == 0):
+        raise ValueError(
+            "Selected processing-set children do not cover every task frequency."
+        )
 
     return xr.DataTree.from_dict(nodes)
 

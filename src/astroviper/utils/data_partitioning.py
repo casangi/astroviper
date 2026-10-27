@@ -157,6 +157,15 @@ def calculate_data_chunking(
     import numpy as np
 
     n_total_dims = np.prod(np.array(list(chunking_dims_sizes.values())))
+    assert thread_info["memory_per_thread"] >= (
+        constant_memory + memory_singleton_chunk
+    ), (
+        "Not enough cluster memory per thread. Need at least "
+        + str(constant_memory + memory_singleton_chunk)
+        + " GiB but only "
+        + str(thread_info["memory_per_thread"])
+        + " GiB available."
+    )
 
     n_mem_chunks = int(
         np.ceil(
@@ -234,3 +243,46 @@ def calculate_data_chunking(
             zip(dims_names_arr, dims_n_chunks_arr.tolist(), strict=False)
         )
         return n_chunks_dict
+
+
+def calculate_frequency_chunking(
+    n_frequency,
+    memory_per_frequency,
+    constant_memory,
+    n_chunks,
+    thread_info=None,
+    tasks_per_thread=4,
+):
+    """Choose frequency mapping parallelism from a shared memory model.
+
+    Parameters
+    ----------
+    n_frequency : int
+        Total number of input frequency channels.
+    memory_per_frequency : float
+        GiB whose allocation scales with the channels assigned to a task.
+    constant_memory : float
+        GiB allocated once per task, independent of its channel count.
+    n_chunks : int or None
+        Explicit task count, returned unchanged when supplied.
+    thread_info : dict or None
+        Thread count and memory per thread. Queried when omitted.
+    tasks_per_thread : int, optional
+        Target number of queued tasks per worker thread.
+
+    Returns
+    -------
+    int
+        Number of frequency chunks.
+    """
+    if n_chunks is not None:
+        return n_chunks
+    if thread_info is None:
+        thread_info = get_thread_info()
+    return calculate_data_chunking(
+        memory_per_frequency,
+        {"frequency": int(n_frequency)},
+        thread_info,
+        constant_memory=constant_memory,
+        tasks_per_thread=tasks_per_thread,
+    )["frequency"]

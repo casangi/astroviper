@@ -470,3 +470,74 @@ class TestMomentsTiling:
                 moments_image_store=str(tmp_path / "x.img.zarr"),
                 moments=["bogus"],
             )
+
+
+class TestMomentsInput:
+    def test_role_of_the_data_group(self, tmp_path):
+        """image_data_group_in_role collapses another role of the data group
+        (as the imager's restored group holds sky_primary_beam_corrected)."""
+        img_xds = make_test_image_xds(with_nans=False, with_mask=False)
+        img_xds["SKY_CORRECTED"] = 2.0 * img_xds["SKY"] + 1.0
+        img_xds.attrs["data_groups"] = {
+            "restored": {"sky": "SKY", "sky_primary_beam_corrected": "SKY_CORRECTED"}
+        }
+        path = tmp_path / "input.img.zarr"
+        write_test_image(img_xds, path)
+        out = str(tmp_path / "corrected_maximum.img.zarr")
+        moments(
+            input_image_store=str(path),
+            moments_image_store=out,
+            moments=["maximum"],
+            moment_axis="frequency",
+            image_data_group_in_name="restored",
+            image_data_group_in_role="sky_primary_beam_corrected",
+        )
+        np.testing.assert_allclose(
+            load_image(out)["SKY_MOMENT_MAXIMUM"].values,
+            img_xds["SKY_CORRECTED"].max(dim="frequency", keepdims=True).values,
+            rtol=1e-6,
+        )
+        with pytest.raises(AssertionError, match="Role mask not found"):
+            moments(
+                input_image_store=str(path),
+                moments_image_store=str(tmp_path / "x.img.zarr"),
+                moments=["maximum"],
+                image_data_group_in_name="restored",
+                image_data_group_in_role="mask",
+            )
+
+    def test_input_without_chunk_encoding_is_tiled_by_its_lazy_chunks(
+        self, input_image, tmp_path, monkeypatch
+    ):
+        """An input image without an on-disk chunk encoding (a FITS file read
+        by XRADIO) is tiled as its lazy array is chunked, not pixel by pixel."""
+        import importlib
+
+        import xarray as xr
+
+        # The package attribute "moments" is the function; take the module.
+        driver = importlib.import_module(
+            "astroviper.distributed_applications.image_analysis.moments"
+        )
+
+        path, img_xds = input_image
+
+        def open_without_encoding(input_image_store, selection):
+            opened = xr.open_zarr(input_image_store).isel(selection)
+            for name in opened.variables:
+                opened[name].encoding = {}
+            return opened.chunk({"l": -1, "m": -1})
+
+        monkeypatch.setattr(driver, "_open_input_image", open_without_encoding)
+        out = str(tmp_path / "maximum.img.zarr")
+        timing = moments(
+            input_image_store=path,
+            moments_image_store=out,
+            moments=["maximum"],
+            moment_axis="frequency",
+        )
+        assert len(timing) == 1  # one tile: the whole (l, m) plane
+        reference = reference_moments(
+            img_xds.SKY.values, axis=1, coord_values=img_xds.frequency.values
+        )
+        assert_moments_match(load_image(out), reference, axis=1)

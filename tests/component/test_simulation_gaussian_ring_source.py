@@ -131,7 +131,7 @@ def test_gaussian_disk_is_simulated_and_recovered(tmp_path):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 5000,
             "max_cycles": -1,
             "threshold": 1e-4,
@@ -142,7 +142,7 @@ def test_gaussian_disk_is_simulated_and_recovered(tmp_path):
             "max_psf_fraction": 0.8,
             "primary_beam_limit": 0.2,
         },
-        gridder="prolate_spheroidal",
+        gridder="anti_alias",
         deconvolver="hogbom_many_threads",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=[

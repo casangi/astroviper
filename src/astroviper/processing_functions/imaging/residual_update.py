@@ -23,6 +23,8 @@ def imaging_setup_single_field(
     image_data_variables_keep=None,
     image_data_group_out_name="residual",
     psf_fitting_method="astroviper",
+    gridding_kernel_params=None,
+    primary_beam_params=None,
 ):
     """Perform the once-per-chunk imaging setup before the imaging cycle loop.
 
@@ -55,8 +57,12 @@ def imaging_setup_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
     imaging_weights_params : dict
-        Weighting scheme configuration: ``weighting`` (``"natural"`` or
-        ``"briggs"``) and the Briggs ``robust`` parameter.
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
+        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool, optional
@@ -76,6 +82,61 @@ def imaging_setup_single_field(
     image_data_group_out_name : str, optional
         Image data group that the PSF, primary beam and residual image are
         registered under.  Default ``"residual"``.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
+    primary_beam_params : dict, optional
+        The primary beam of the imager, the power pattern that gives the clean
+        mask and the primary beam correction: ``telescope`` (``"alma"``,
+        ``"aca"`` or ``"ngvla"``, the textbook obscured Airy disk with the
+        diameters of :func:`~astroviper.utils.beam_models.airy_disk_model`, no
+        cut; ``"vla"``, the EVLA beam polynomial of CASA's ``PBMath1DEVLA``,
+        with the coefficients CASA picks for each channel (of its two 10052 MHz
+        rows, the first), at the exact radius and zero beyond 58 arcmin at
+        1 GHz, past the 5 percent power level its polynomials were fitted
+        to), ``effective_dish_diameter`` and
+        ``blockage_diameter`` (metres; refused for ``"vla"``) and
+        ``max_rad_1GHz`` (radians at 1 GHz, scaled as 1 / frequency, beyond
+        which the beam is zero; ``None`` is no cut for an Airy disk). Numbers
+        given with a telescope override that telescope's values;
+        no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
+        0.75 m, no cut). Or ``beam_model`` alone: an analytic dict
+        or a beam-polynomial dataset as ``simulate_processing_set`` takes it in
+        ``beam_models`` (``"vla"`` is
+        ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
+        of the voltage pattern the simulator applies for the model, computed by
+        the same function
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
+        models: ``airy_disk_model(telescope, func="casa_airy")`` and
+        ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
+        Zernike aperture models and Jones images are not supported: they are
+        not azimuthally symmetric and depend on the parallactic angle.
 
     Returns
     -------
@@ -102,6 +163,7 @@ def imaging_setup_single_field(
     )
     from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
         make_primary_beam_single_field,
+        resolve_primary_beam_params,
     )
 
     if image_data_variables_keep is None:
@@ -138,6 +200,7 @@ def imaging_setup_single_field(
         ms_data_group_out_name=ps_data_group_name,
         ms_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
         processing_function_threads=processing_function_threads,
+        frequency_matching="nearest",
     )
     T_weights = time.time() - T_start_weight
 
@@ -152,20 +215,23 @@ def imaging_setup_single_field(
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         image_data_variables_keep=image_data_variables_keep,
+        gridding_kernel_params=gridding_kernel_params,
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
     )
     T_make_point_spread_function = time.time() - T_start_psf
 
-    # Primary beam (azimuthally-symmetric obscured Airy disk).  It is independent
-    # of the PSF and is created before the transform to the Stokes basis.
+    # Primary beam (azimuthally-symmetric Airy disk or beam polynomial).  It is
+    # independent of the PSF and is created before the transform to the Stokes
+    # basis.
     img_xds, primary_beam_return_df = make_primary_beam_single_field(
         img_xds,
         image_params,
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         float_dtype=float_dtype,
+        **resolve_primary_beam_params(primary_beam_params),
     )
     T_primary_beam = float(primary_beam_return_df["T_primary_beam"].iloc[0])
 
@@ -225,6 +291,7 @@ def residual_update_cube_single_field(
     image_data_group_in_name="model",
     image_data_group_out_name="residual",
     last_residual_update=False,
+    gridding_kernel_params=None,
 ):
     """Run one residual update.
 
@@ -287,6 +354,34 @@ def residual_update_cube_single_field(
         ``"residual"``.
     last_residual_update : bool, optional
         Unused placeholder retained for call-site compatibility.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
 
     Returns
     -------
@@ -304,12 +399,12 @@ def residual_update_cube_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_img_xds,
         ifft_norm_img_xds,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
     )
 
     if image_data_variables_keep is None:
@@ -323,7 +418,7 @@ def residual_update_cube_single_field(
     ps_data_group_name = processing_set_data_group_name
 
     T_start_gcf = time.time()
-    cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
+    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
     T_gcf = time.time() - T_start_gcf
 
     T_transform_pol = 0.0
@@ -360,6 +455,7 @@ def residual_update_cube_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=complex_dtype,
+            gridding_kernel=cgk_1D,
         )
         T_fft_degrid += time.time() - start
 
@@ -368,6 +464,7 @@ def residual_update_cube_single_field(
             ps_xdt,
             img_xds,
             cgk_1D,
+            ms_data_group_in_name=ps_data_group_name,
             ms_data_group_out_name="model",
             ms_data_group_out_modified={
                 "correlated_data": "VISIBILITY_MODEL",
@@ -448,6 +545,7 @@ def residual_update_cube_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
+        gridding_kernel=cgk_1D,
     )
     T_fft_grid += time.time() - start
 
@@ -491,6 +589,7 @@ def make_visibility_model_single_field(
     ps_xdt,
     img_xds,
     cgk_1D,
+    ms_data_group_in_name="base",
     ms_data_group_out_name="model",
     ms_data_group_out_modified=None,
     image_data_group_in_name="model",
@@ -511,8 +610,16 @@ def make_visibility_model_single_field(
         in place.
     img_xds : xarray.Dataset
         Image dataset holding the model uv-grid to degrid from.
-    cgk_1D : numpy.ndarray
-        1-D prolate-spheroidal gridding convolution kernel.
+    cgk_1D : GriddingKernel or numpy.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
+        or the bare table of the default prolate spheroidal kernel of support 7.
+    ms_data_group_in_name : str, optional
+        Measurement-set data group being imaged (the caller's
+        ``processing_set_data_group_name``).  The degridder reads its ``uvw``
+        and the shape of its ``correlated_data``, and the output group inherits
+        its remaining roles (``flag``, ``weight``, ...).  Must exist in every
+        measurement set.  Default ``"base"``.
     ms_data_group_out_name : str, optional
         Measurement-set data group for the model visibilities.  Default
         ``"model"``.
@@ -535,6 +642,7 @@ def make_visibility_model_single_field(
             ms_xdt,
             cgk_1D,
             img_xds,
+            ms_data_group_in_name=ms_data_group_in_name,
             ms_data_group_out_name=ms_data_group_out_name,
             ms_data_group_out_modified=ms_data_group_out_modified,
             image_data_group_in_name=image_data_group_in_name,

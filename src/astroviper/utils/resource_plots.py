@@ -10,7 +10,7 @@ is normal), ``memory_rss_bytes``, the cumulative syscall-level I/O counters
 ``write_bytes`` these count network filesystems such as Lustre), the scalar
 ``sample_interval_seconds`` and the wall-clock anchor ``start_unixtime``.
 
-Three complementary views:
+Four complementary views:
 
 * :func:`plot_task_resource_usage` -- tasks aligned at their OWN start
   (t=0 = task start): a subsample of individual task curves plus the average
@@ -45,8 +45,19 @@ __all__ = [
     "plot_task_resource_usage",
     "plot_cluster_resource_usage",
     "plot_task_stream",
+    "plot_application_task_stream",
     "assign_task_stream_lanes",
+    "IMAGING_TASK_STREAM_COLUMNS",
 ]
+
+# The node task timing columns plot_task_stream draws by default, those of the
+# imaging node task: the task's total time, the columns of its load segment
+# and the column of its write segment.
+IMAGING_TASK_STREAM_COLUMNS = {
+    "task": "T_image_cube_task",
+    "load": ("T_make_empty_image", "T_load"),
+    "write": "T_write",
+}
 
 # Task-stream palette (colorblind-safe Okabe-Ito).
 _LOAD_COLOR, _SCIENCE_COLOR, _WRITE_COLOR = "#0072B2", "#009E73", "#E69F00"
@@ -160,6 +171,19 @@ def _driver_timeline(driver_timing, compute_start, compute_end, t0_abs):
             else:
                 color_of[lbl] = next(palette)
     return segments, app_start_rel, app_end_rel, color_of, setup_detail
+
+
+def _with_imaging_task_columns(tasks, task_columns):
+    """A copy of ``tasks`` with the ``task_columns`` timings under the imager's
+    column names, which the task stream draws."""
+    columns = {**IMAGING_TASK_STREAM_COLUMNS, **task_columns}
+    tasks = tasks.copy()
+    tasks["T_image_cube_task"] = tasks[columns["task"]]
+    tasks["T_make_empty_image"] = 0.0
+    load = list(columns["load"])
+    tasks["T_load"] = tasks[load].sum(axis=1) if load else 0.0
+    tasks["T_write"] = tasks[columns["write"]] if columns["write"] else 0.0
+    return tasks
 
 
 def _as_timing_frame(source):
@@ -543,6 +567,169 @@ def assign_task_stream_lanes(tasks):
     return t, hosts, offsets
 
 
+def plot_application_task_stream(source, title=None, save_path=None):
+    """Plot every distributed graph in one vertically stacked task stream.
+
+    Unlike :func:`plot_task_stream`, which deliberately retains the historical
+    final-graph view, this diagnostic consumes ``source["timing_graphs"]`` and
+    gives each graph its own panel.  Panels are independently time-scaled so
+    short weighting graphs remain readable beside longer imaging-cycle graphs.
+
+    Parameters
+    ----------
+    source : dict
+        Continuum application result containing ``timing_graphs``. Each record
+        supplies ``stage``, structured ``stage_kind``,
+        ``timing_node_tasks`` and compute-window anchors.
+    title : str, optional
+        Overall figure title.
+    save_path : str, optional
+        PNG path. The figure is returned whether or not it is saved.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        Stacked task-stream figure, or ``None`` when no graph records can be
+        plotted.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    if not isinstance(source, dict):
+        raise TypeError(
+            "plot_application_task_stream expects an application result dict"
+        )
+    graph_records = source.get("timing_graphs")
+    if not graph_records:
+        print("plot_application_task_stream: no timing_graphs records; skipping.")
+        return None
+
+    prepared = []
+    required = {"hostname", "start_unixtime", "T_image_cube_task"}
+    for record in graph_records:
+        tasks = record.get("timing_node_tasks")
+        if not isinstance(tasks, pd.DataFrame) or tasks.empty:
+            continue
+        if not required.issubset(tasks.columns):
+            print(
+                "plot_application_task_stream: graph "
+                f"{record.get('stage', '<unnamed>')!r} lacks "
+                f"{sorted(required - set(tasks.columns))}; skipping."
+            )
+            continue
+        tasks = tasks.copy()
+        for column in ("T_make_empty_image", "T_load", "T_write"):
+            if column not in tasks:
+                tasks[column] = 0.0
+        stream, hosts, n_lanes = assign_task_stream_lanes(tasks)
+        prepared.append((record, stream, hosts, n_lanes))
+
+    if not prepared:
+        return None
+
+    heights = [max(2.2, 0.42 * n_lanes + 1.2) for _, _, _, n_lanes in prepared]
+    fig, axes = plt.subplots(
+        len(prepared),
+        1,
+        figsize=(16, sum(heights)),
+        squeeze=False,
+        gridspec_kw={"height_ratios": heights, "hspace": 0.55},
+    )
+    axes = axes[:, 0]
+
+    for graph_index, (record, stream, _hosts, n_lanes) in enumerate(prepared, start=1):
+        ax = axes[graph_index - 1]
+        first_task = float(stream["start_unixtime"].min())
+        compute_start = record.get("compute_start_unixtime")
+        compute_end = record.get("compute_end_unixtime")
+        offset = max(0.0, first_task - float(compute_start or first_task))
+        stream = stream.copy()
+        stream["start"] += offset
+        stream["end"] += offset
+        task_end = float(stream["end"].max())
+        graph_duration = record.get("T_compute")
+        if (
+            graph_duration is None
+            and compute_start is not None
+            and compute_end is not None
+        ):
+            graph_duration = float(compute_end) - float(compute_start)
+        graph_duration = max(float(graph_duration or task_end), task_end)
+
+        if offset > 0:
+            ax.axvspan(0, offset, color=_PRE_COLOR, alpha=0.18, lw=0)
+        if graph_duration > task_end:
+            ax.axvspan(task_end, graph_duration, color=_POST_COLOR, alpha=0.20, lw=0)
+
+        for _, row in stream.iterrows():
+            y = row["row"] - 0.42
+            load_end = row["start"] + row["T_make_empty_image"] + row["T_load"]
+            write_start = max(load_end, row["end"] - row["T_write"])
+            for start, end, color in (
+                (row["start"], load_end, _LOAD_COLOR),
+                (load_end, write_start, _SCIENCE_COLOR),
+                (write_start, row["end"], _WRITE_COLOR),
+            ):
+                if end > start:
+                    ax.add_patch(
+                        plt.Rectangle((start, y), end - start, 0.84, color=color, lw=0)
+                    )
+
+        stage = str(record.get("stage", f"graph {graph_index}"))
+        stage_kind = record.get("stage_kind")
+        if stage_kind == "imaging_cycle":
+            post_label = "reduce + model update"
+        elif stage_kind == "final" and record.get("includes_restoration", False):
+            post_label = "reduce + restoration"
+        elif stage_kind == "final":
+            post_label = "reduce + finalization"
+        else:
+            post_label = "reduce / gather"
+        if graph_duration - task_end > 0.04 * graph_duration:
+            ax.text(
+                0.5 * (task_end + graph_duration),
+                max(n_lanes - 0.5, 0),
+                post_label,
+                ha="center",
+                va="top",
+                fontsize=8,
+                color="#8a4a6d",
+            )
+
+        bounds = stream.groupby("host_idx")["row"].max().sort_index()
+        for bound in bounds.values[:-1]:
+            ax.axhline(bound + 0.5, color="#dddddd", lw=0.4)
+        ax.set_yticks(range(n_lanes), [f"worker {i + 1}" for i in range(n_lanes)])
+        ax.set_ylim(-0.6, n_lanes - 0.4)
+        ax.set_xlim(0, graph_duration * 1.005 if graph_duration else 1)
+        ax.set_title(
+            f"Graph {graph_index}: {stage} — {len(stream)} tasks, "
+            f"{graph_duration:.1f} s",
+            loc="left",
+            fontsize=10,
+        )
+        ax.set_xlabel("time since this graph's compute started (s)")
+        ax.grid(axis="x", color="lightgray", alpha=0.4)
+
+    axes[0].legend(
+        handles=[
+            Patch(color=_LOAD_COLOR, label="load"),
+            Patch(color=_SCIENCE_COLOR, label="science"),
+            Patch(color=_WRITE_COLOR, label="write"),
+            Patch(color=_PRE_COLOR, alpha=0.3, label="before first map task"),
+            Patch(color=_POST_COLOR, alpha=0.3, label="reduce / append / gather"),
+        ],
+        loc="upper right",
+        fontsize=8,
+        ncols=5,
+    )
+    fig.suptitle(title or "Continuum application task streams by graph", fontsize=14)
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print("wrote", save_path)
+    return fig
+
+
 def _write_task_stream_html(
     t,
     hosts,
@@ -887,6 +1074,7 @@ def plot_task_stream(
     title=None,
     save_path=None,
     html_path=None,
+    task_columns=None,
 ):
     """Dask-dashboard-style task stream: per-worker-process timeline of a run.
 
@@ -965,6 +1153,14 @@ def plot_task_stream(
         time). Pure SVG + vanilla JavaScript -- no extra dependencies, works
         offline; one SVG element per task segment, so the file grows with the
         task count (~a few MB for a 15k-task run).
+    task_columns : dict, optional
+        The node task timing columns drawn, for node tasks other than the
+        imager's: ``"task"`` (the task's total time), ``"load"`` (the columns
+        summed into the load segment) and ``"write"`` (the write segment;
+        ``None`` for none), e.g. ``{"task": "T_simulate_task", "load": [],
+        "write": "T_write"}``. Missing keys keep the imager's columns
+        (:data:`IMAGING_TASK_STREAM_COLUMNS`); ``None`` (default) draws the
+        imager's.
 
     Returns
     -------
@@ -983,6 +1179,8 @@ def plot_task_stream(
             "timeline -- skipping."
         )
         return None
+    if task_columns is not None:
+        tasks = _with_imaging_task_columns(tasks, task_columns)
     if isinstance(source, dict):
         if reduce_frame is None and source.get("timing_reduce_nodes"):
             reduce_frame = pd.DataFrame(source["timing_reduce_nodes"])
@@ -1126,7 +1324,7 @@ def plot_task_stream(
         _p(
             f"  application total          : {app_total:8.1f} s = "
             f"{setup:.1f} s driver setup + {compute_span:.1f} s compute + "
-            f"{finalize:.1f} s finalize (entire image_cube_single_field call)"
+            f"{finalize:.1f} s finalize (entire distributed application call)"
         )
         steps = " | ".join(
             [f"{lbl} {dur:.1f}" for lbl, dur in d_setup if dur >= 0.1]
