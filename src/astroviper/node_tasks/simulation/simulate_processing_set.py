@@ -60,6 +60,8 @@ def simulate_processing_set(
     gaussian_ring_source_ra_dec: np.ndarray | None = None,
     gaussian_ring_source_shape: np.ndarray | None = None,
     sky_components: list | None = None,
+    sky_model_image: str | None = None,
+    sky_model_image_predict: dict | None = None,
 ):
     """Simulate the visibilities of one time/frequency chunk and write them to disk.
 
@@ -134,6 +136,23 @@ def simulate_processing_set(
         m_ring, crescent, annulus, exponential_disk, tapered_power_law,
         shapelet): ``{"kind", "flux", "ra_dec", <shape parameters>}`` as
         described in :mod:`~astroviper.processing_functions.simulation.sky_components`.
+    sky_model_image : str, optional
+        A sky image added to the components: an XRADIO image (the path of a
+        FITS, CASA or Zarr image for the distributed application and the node
+        task, the opened dataset for the processing function) with ``SKY`` in Jy
+        per pixel, Stokes ``I`` (or the two Stokes planes of the parallel hands,
+        or ``I, Q, U, V``) and ``l, m`` about the phase centre. Every channel
+        takes the image channel nearest in frequency. It is seen through the
+        power beam of the one beam model of every antenna, which must point at
+        the phase centre (``pointing_ra_dec`` None). It is not part of the sky
+        image written with ``sky_image_params``.
+    sky_model_image_predict : dict, optional
+        How ``sky_model_image`` is predicted: ``{"predict": "dft"}`` (default),
+        the exact direct Fourier transform over the non-zero pixels, the w term
+        included unless ``uvw_params["w_term"]`` is False; or
+        ``{"predict": "gridded", "gridding_kernel_params": ...,
+        "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
+        which has no w term and so needs ``uvw_params["w_term"]`` False.
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -244,6 +263,11 @@ def simulate_processing_set(
         components_chunk = slice_sky_components(
             normalize_sky_components(sky_components), time_slice, frequency_slice
         )
+    model_image = None
+    if sky_model_image is not None:
+        from xradio.image import open_image
+
+        model_image = open_image(sky_model_image).load()
     phase_center_chunk = _slice_time_axis(phase_center_ra_dec, 0, time_slice)
     pointing_chunk = _slice_time_axis(pointing_ra_dec, 0, time_slice)
 
@@ -292,6 +316,8 @@ def simulate_processing_set(
         gaussian_ring_source_ra_dec=ring_source_chunk,
         gaussian_ring_source_shape=gaussian_ring_source_shape,
         sky_components=components_chunk,
+        sky_model_image=model_image,
+        sky_model_image_predict=sky_model_image_predict,
     )
     if not graph_mode:
         return xds

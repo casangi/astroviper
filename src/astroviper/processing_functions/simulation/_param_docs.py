@@ -19,6 +19,25 @@ SIMULATION_PARAM_DOCS = {
         'shapelet): ``{"kind", "flux", "ra_dec", <shape parameters>}`` as\n'
         "described in :mod:`~astroviper.processing_functions.simulation.sky_components`."
     ),
+    "sky_model_image": (
+        "A sky image added to the components: an XRADIO image (the path of a\n"
+        "FITS, CASA or Zarr image for the distributed application and the node\n"
+        "task, the opened dataset for the processing function) with ``SKY`` in Jy\n"
+        "per pixel, Stokes ``I`` (or the two Stokes planes of the parallel hands,\n"
+        "or ``I, Q, U, V``) and ``l, m`` about the phase centre. Every channel\n"
+        "takes the image channel nearest in frequency. It is seen through the\n"
+        "power beam of the one beam model of every antenna, which must point at\n"
+        "the phase centre (``pointing_ra_dec`` None). It is not part of the sky\n"
+        "image written with ``sky_image_params``."
+    ),
+    "sky_model_image_predict": (
+        'How ``sky_model_image`` is predicted: ``{"predict": "dft"}`` (default),\n'
+        "the exact direct Fourier transform over the non-zero pixels, the w term\n"
+        'included unless ``uvw_params["w_term"]`` is False; or\n'
+        '``{"predict": "gridded", "gridding_kernel_params": ...,\n'
+        '"fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,\n'
+        'which has no w term and so needs ``uvw_params["w_term"]`` False.'
+    ),
     "point_source_flux": (
         "Flux of every point source in the four instrumental correlations\n"
         "(``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes\n"
