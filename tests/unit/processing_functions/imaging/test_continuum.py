@@ -1196,7 +1196,9 @@ def test_mvc_channel_near_beam_null_adds_bounded_residual(channel_pb):
         assert np.max(np.abs(residual.values)) < 1.0
 
 
-def _mvc_image_point_sources(sources, threshold):
+def _mvc_image_point_sources(
+    sources, threshold, mvc_minor_cycle_approximation="channel_psf"
+):
     """Image point sources with the MVC Taylor products and native MT-MFS.
 
     Channel residuals are formed in the image domain, without noise or
@@ -1207,7 +1209,8 @@ def _mvc_image_point_sources(sources, threshold):
     cleans to ``max(0.05 * peak, threshold)``, the controller's per-cycle
     threshold for a PSF without sidelobes, and imaging stops when the
     refreshed Taylor-zero peak in the beam support is below ``threshold``.
-    Returns the Taylor model and the effective beam.
+    Returns the Taylor model, effective beam, and final Taylor-zero residual
+    peak.
     """
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
 
@@ -1277,6 +1280,7 @@ def _mvc_image_point_sources(sources, threshold):
                 n_taylor_terms=n_taylor_terms,
                 reference_frequency=1.0e11,
                 primary_beam_limit=0.2,
+                mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
             ),
             effective_primary_beam=effective_beam,
         )
@@ -1297,7 +1301,7 @@ def _mvc_image_point_sources(sources, threshold):
         )
         peak = float(np.max(np.abs(residual[0]) * support))
         if peak < threshold:
-            return model, effective_beam.values[0, 0]
+            return model, effective_beam.values[0, 0], peak
         increment = np.zeros_like(residual)
         mtmfs.clean(
             residual,
@@ -1334,7 +1338,10 @@ def test_mvc_characterizes_casa_off_axis_spectral_index_approximation(
         "centre": ((32, 32), 1.0 * (1.0 + x) ** -0.7),
         "off_centre": ((52, 32), 0.5 * (1.0 + x) ** off_centre_index),
     }
-    model, effective_beam = _mvc_image_point_sources(sources.values(), 5.0e-3)
+    model, effective_beam, final_peak = _mvc_image_point_sources(
+        sources.values(), 5.0e-3, mvc_minor_cycle_approximation="channel_psf"
+    )
+    assert final_peak < 5.0e-3
 
     basis = x[:, None] ** np.arange(2)
     centre_pixel, centre_spectrum = sources["centre"]
@@ -1368,6 +1375,44 @@ def test_mvc_characterizes_casa_off_axis_spectral_index_approximation(
         off_centre_tt1 / off_centre_tt0,
         expected_casa_index,
         atol=0.02,
+    )
+
+
+@pytest.mark.parametrize("off_centre_index", [0.0, -0.7])
+def test_mvc_local_beam_moments_recovers_off_axis_spectral_index_after_stopping(
+    off_centre_index,
+):
+    """The local-beam approximation preserves an off-axis compact spectrum.
+
+    Imaging uses the same 5 mJy Taylor-zero stopping threshold as the CASA
+    characterization above. The refreshed Taylor-zero residual must satisfy
+    that threshold without leaving a significantly biased Taylor-one model.
+    """
+    x = (np.arange(8) - 3.5) / 32.0
+    sources = {
+        "centre": ((32, 32), 1.0 * (1.0 + x) ** -0.7),
+        "off_centre": ((52, 32), 0.5 * (1.0 + x) ** off_centre_index),
+    }
+    threshold = 5.0e-3
+    model, effective_beam, final_peak = _mvc_image_point_sources(
+        sources.values(),
+        threshold,
+        mvc_minor_cycle_approximation="local_beam_moments",
+    )
+
+    assert final_peak < threshold
+    (row, column), off_centre_spectrum = sources["off_centre"]
+    expected = np.linalg.lstsq(
+        x[:, None] ** np.arange(2), off_centre_spectrum, rcond=None
+    )[0]
+    recovered = model[:, row - 2 : row + 3, column - 2 : column + 3].sum(axis=(1, 2))
+    np.testing.assert_allclose(
+        recovered[0],
+        effective_beam[row, column] * expected[0],
+        rtol=0.03,
+    )
+    np.testing.assert_allclose(
+        recovered[1] / recovered[0], expected[1] / expected[0], atol=0.02
     )
 
 

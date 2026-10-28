@@ -92,7 +92,12 @@ def known_truth_processing_sets(tmp_path_factory):
     return cases
 
 
-def _dirty_continuum_image(tmp_path, case, continuum_mode):
+def _dirty_continuum_image(
+    tmp_path,
+    case,
+    continuum_mode,
+    mvc_minor_cycle_approximation="channel_psf",
+):
     """Run the harness case through the public two-term continuum application."""
     with dask.config.set(scheduler="synchronous"):
         result = image_continuum_single_field(
@@ -124,6 +129,7 @@ def _dirty_continuum_image(tmp_path, case, continuum_mode):
                 "max_psf_fraction": 0.8,
             },
             continuum_mode=continuum_mode,
+            mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
             primary_beam_limit=0.1,
             processing_set_data_group_name="base",
             image_data_variables_keep=[
@@ -191,3 +197,26 @@ def test_off_axis_primary_beam_corrected_flux_matches_known_truth(
 
     assert 0.1 < primary_beam < 0.95
     assert coefficients[0] / primary_beam == pytest.approx(1.0, rel=0.05)
+
+
+def test_off_axis_mvc_local_beam_moments_recovers_known_spectral_index(
+    tmp_path, known_truth_processing_sets
+):
+    """MVC local beam moments recover the off-axis source's flat spectrum."""
+    case = known_truth_processing_sets["off_axis"]
+    image = _dirty_continuum_image(
+        tmp_path,
+        case,
+        "mvc",
+        mvc_minor_cycle_approximation="local_beam_moments",
+    )
+    coefficients, source_pixel = _source_taylor_coefficients(image)
+    primary_beam = image.PRIMARY_BEAM.isel(time=0, frequency=0, polarization=0).values[
+        source_pixel
+    ]
+
+    assert 0.1 < primary_beam < 0.95
+    assert coefficients[0] / primary_beam == pytest.approx(1.0, rel=0.05)
+    assert coefficients[1] / coefficients[0] == pytest.approx(
+        case["spectral_index"], abs=0.03
+    )
