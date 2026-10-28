@@ -672,7 +672,8 @@ private:
             for (std::size_t k = 0; k < nb; ++k) {
                 if (inMask[k] == 0.0) continue;
                 sumSquares += R[k] * R[k];
-                if (std::fabs(R[k]) > A) { A = std::fabs(R[k]); peak = R[k]; }
+                const double v = options_.rc_positive_only ? R[k] : std::fabs(R[k]);
+                if (v > A) { A = v; peak = R[k]; }
             }
             if (A <= options_.rc_switch_factor * threshold_) break;
             if (stopTest_.check_divergence(A, sumSquares, divergence_) != deconvolvers::STOP_NONE) {

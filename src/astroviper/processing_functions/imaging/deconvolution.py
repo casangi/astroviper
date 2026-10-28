@@ -1518,6 +1518,10 @@ def asp_clean(
           ``threshold_per_cycle``; without it a component takes residual
           below the threshold (down to ``asp_rc_noise_floor``), which takes
           up noise. Default ``True``.
+        - ``asp_rc_positive_only`` : bool, the residual-shaped components
+          take only positive residual (their peak is the largest positive
+          residual in the mask); the Asp iterations clean the negative
+          residual. Default ``False``.
 
         Note: ``clean_box`` is ignored by the Asp algorithm (use a mask
         instead).
@@ -1669,6 +1673,7 @@ def asp_clean(
         rc_floor_at_threshold=bool(
             deconvolve_params.get("asp_rc_floor_at_threshold", True)
         ),
+        rc_positive_only=bool(deconvolve_params.get("asp_rc_positive_only", False)),
         significance_gain=float(deconvolve_params.get("asp_significance_gain", 0.3)),
         **_divergence_kwargs(deconvolve_params, asp=True),
     )

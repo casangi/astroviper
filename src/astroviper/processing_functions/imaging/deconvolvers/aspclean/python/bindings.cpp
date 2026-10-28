@@ -130,7 +130,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                bool record_components, bool residual_components,
                                double rc_noise_floor, double rc_frac_min, double rc_eps_max,
                                double rc_switch_factor, bool rc_floor_at_threshold,
-                               double significance_gain) {
+                               bool rc_positive_only, double significance_gain) {
     aspclean::AspOptions options;
     options.scale_significance = scale_significance;
     options.significance = significance;
@@ -141,6 +141,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
     options.rc_eps_max = rc_eps_max;
     options.rc_switch_factor = rc_switch_factor;
     options.rc_floor_at_threshold = rc_floor_at_threshold;
+    options.rc_positive_only = rc_positive_only;
     options.significance_gain = significance_gain;
     if (residual.ndim() != 2)
         throw std::runtime_error("residual must be a 2D array [ny, nx]");
@@ -273,7 +274,8 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     bool scale_significance, double significance,
                                     bool residual_components, double rc_noise_floor,
                                     double rc_frac_min, double rc_eps_max, double rc_switch_factor,
-                                    bool rc_floor_at_threshold, double significance_gain) {
+                                    bool rc_floor_at_threshold, bool rc_positive_only,
+                                    double significance_gain) {
     aspclean::AspOptions options;
     options.scale_significance = scale_significance;
     options.significance = significance;
@@ -283,6 +285,7 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
     options.rc_eps_max = rc_eps_max;
     options.rc_switch_factor = rc_switch_factor;
     options.rc_floor_at_threshold = rc_floor_at_threshold;
+    options.rc_positive_only = rc_positive_only;
     options.significance_gain = significance_gain;
     if (residual.ndim() != 5)
         throw std::runtime_error(
@@ -413,7 +416,7 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
           py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
           py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true,
-          py::arg("significance_gain") = 0.0);
+          py::arg("rc_positive_only") = false, py::arg("significance_gain") = 0.0);
 
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp model update independently on every (time, frequency, "
@@ -439,7 +442,7 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
           py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
           py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true,
-          py::arg("significance_gain") = 0.0);
+          py::arg("rc_positive_only") = false, py::arg("significance_gain") = 0.0);
 
     m.def("psf_gaussian_width", &psf_width_helper,
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "

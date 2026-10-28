@@ -121,7 +121,10 @@ struct AspResult {
 //     rc_floor_at_threshold, the default]), eps = eps_frac |R_peak|,
 //     s = sign R_peak; (frac, eps_frac) fitted within their bounds by least
 //     squares of the masked residual, down to rc_switch_factor times the
-//     threshold; the Asp iterations take it on to the threshold.
+//     threshold; the Asp iterations take it on to the threshold. With
+//     rc_positive_only the components take only positive residual: R_peak is
+//     the largest positive residual and s = +1, so the Asp iterations clean
+//     the negative residual.
 struct AspOptions {
     bool scale_significance = false;
     double significance = 0.0;
@@ -132,6 +135,7 @@ struct AspOptions {
     double rc_noise_floor = 2.0;
     double rc_switch_factor = 1.0;
     bool rc_floor_at_threshold = true;
+    bool rc_positive_only = false;
     double significance_gain = 0.0;
     int rc_fit_iterations = 10;
 };
