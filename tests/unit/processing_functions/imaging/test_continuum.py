@@ -959,6 +959,129 @@ def test_mfs_primary_beam_taylor_fit_survives_chunk_reduction():
     np.testing.assert_allclose(fitted.values.squeeze(), expected, rtol=1.0e-12)
 
 
+def test_mfs_primary_beam_taylor_fit_handles_narrow_frequency_span():
+    """Distinct nearby channels remain numerically resolvable Taylor samples."""
+    x = np.array([-2.0e-4, -1.0e-4, 0.0, 1.0e-4, 2.0e-4])
+    expected = np.array([0.8, -0.1, 0.05])
+    primary_beam = sum(
+        coefficient * x**order for order, coefficient in enumerate(expected)
+    )
+    numerator = np.asarray(
+        [np.sum(x**order * primary_beam) for order in range(3)]
+    ).reshape(1, 3, 1, 1, 1)
+    moments = np.asarray([np.sum(x**order) for order in range(5)]).reshape(1, 5, 1)
+    contributions = xr.Dataset(
+        {
+            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                numerator,
+            ),
+            "MFS_PRIMARY_BEAM_FIT_MOMENTS": (
+                ("time", "psf_taylor_order", "polarization"),
+                moments,
+            ),
+        }
+    )
+
+    fitted = fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2)
+
+    np.testing.assert_allclose(fitted.values.squeeze(), expected, rtol=1.0e-6)
+
+
+def test_mfs_primary_beam_taylor_fit_rejects_zero_frequency_span():
+    """Scaling does not disguise a genuinely underdetermined frequency fit."""
+    contributions = xr.Dataset(
+        {
+            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.ones((1, 2, 1, 1, 1)),
+            ),
+            "MFS_PRIMARY_BEAM_FIT_MOMENTS": (
+                ("time", "psf_taylor_order", "polarization"),
+                np.array([1.0, 0.0, 0.0]).reshape(1, 3, 1),
+            ),
+        }
+    )
+
+    with pytest.raises(ValueError, match="underdetermined"):
+        fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2)
+
+
+@pytest.mark.parametrize(
+    ("numerator", "moments"),
+    [
+        (np.ones((1, 2, 1, 1, 1)), np.array([1.0, np.inf, 1.0])),
+        (np.array([np.nan, 1.0]).reshape(1, 2, 1, 1, 1), np.array([2.0, 0.0, 0.5])),
+    ],
+    ids=["matrix", "right_hand_side"],
+)
+def test_mfs_primary_beam_taylor_fit_rejects_nonfinite_scaled_system(
+    numerator, moments
+):
+    """The local fit rejects non-finite scaled normal equations."""
+    contributions = xr.Dataset(
+        {
+            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                numerator,
+            ),
+            "MFS_PRIMARY_BEAM_FIT_MOMENTS": (
+                ("time", "psf_taylor_order", "polarization"),
+                moments.reshape(1, 3, 1),
+            ),
+        }
+    )
+
+    with pytest.raises(ValueError, match="non-finite scaled normal equations"):
+        fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2)
+
+
+def test_mfs_primary_beam_taylor_fit_reports_solver_failure(monkeypatch):
+    """Linear-algebra failures become contextual primary-beam fit errors."""
+    contributions = xr.Dataset(
+        {
+            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.ones((1, 2, 1, 1, 1)),
+            ),
+            "MFS_PRIMARY_BEAM_FIT_MOMENTS": (
+                ("time", "psf_taylor_order", "polarization"),
+                np.array([2.0, 0.0, 0.5]).reshape(1, 3, 1),
+            ),
+        }
+    )
+
+    def fail_solve(*args, **kwargs):
+        raise np.linalg.LinAlgError("synthetic solver failure")
+
+    monkeypatch.setattr(np.linalg, "solve", fail_solve)
+    with pytest.raises(ValueError, match="could not be solved"):
+        fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2)
+
+
+def test_mfs_primary_beam_taylor_fit_rejects_nonfinite_coefficients(monkeypatch):
+    """The local fit rejects non-finite coefficients returned by the solver."""
+    contributions = xr.Dataset(
+        {
+            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.ones((1, 2, 1, 1, 1)),
+            ),
+            "MFS_PRIMARY_BEAM_FIT_MOMENTS": (
+                ("time", "psf_taylor_order", "polarization"),
+                np.array([2.0, 0.0, 0.5]).reshape(1, 3, 1),
+            ),
+        }
+    )
+
+    def nonfinite_solve(matrix, right_hand_side):
+        return np.full_like(right_hand_side, np.inf)
+
+    monkeypatch.setattr(np.linalg, "solve", nonfinite_solve)
+    with pytest.raises(ValueError, match="produced non-finite coefficients"):
+        fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2)
+
+
 def test_mvc_prediction_masks_zero_effective_beam_without_warning():
     """Invalid PB support is zeroed without evaluating a masked division."""
     frequency = np.array([0.9e9, 1.1e9])

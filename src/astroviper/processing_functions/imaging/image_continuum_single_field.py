@@ -1518,7 +1518,20 @@ def _fit_primary_beam_taylor(
     primary_beam_limit,
     usage,
 ):
-    """Solve a globally reduced primary-beam polynomial fit."""
+    """Solve a globally reduced primary-beam polynomial fit.
+
+    The reduced normal equations are expressed in the fractional-frequency
+    coordinate ``x = (nu - nu_0) / nu_0``. For ``nterms > 1``, solve them in
+    the numerically scaled coordinate ``z = x / s``, where
+    ``s = sqrt(sum(w * x**2) / sum(w))`` is obtained from the zeroth and second
+    reduced moments. This prevents a narrow but nonzero frequency span from
+    appearing rank deficient. Dividing the fitted coefficient of order ``q``
+    by ``s**q`` returns it to the original ``x`` basis, so the scaling changes
+    only the conditioning of the solve, not the fitted primary-beam polynomial.
+    A zero span or a rank-deficient scaled system remains an error. The local
+    numerical boundary also rejects non-finite scaled equations, solver
+    failures, and non-finite coefficients after conversion back to ``x``.
+    """
     import numpy as np
 
     missing = [
@@ -1543,7 +1556,8 @@ def _fit_primary_beam_taylor(
             f"{moments.sizes['psf_taylor_order']} for nterms={nterms}."
         )
 
-    hankel = np.add.outer(np.arange(nterms), np.arange(nterms))
+    taylor_orders = np.arange(nterms)
+    hankel = np.add.outer(taylor_orders, taylor_orders)
     gram = np.asarray(
         moments.transpose("time", "polarization", "psf_taylor_order").values[
             ..., hankel
@@ -1558,16 +1572,72 @@ def _fit_primary_beam_taylor(
     for time_index in range(rhs.shape[0]):
         for polarization_index in range(rhs.shape[1]):
             matrix = gram[time_index, polarization_index]
-            if np.linalg.matrix_rank(matrix) < nterms:
+            if nterms == 1:
+                frequency_scale = 1.0
+            else:
+                zeroth_moment = matrix[0, 0]
+                second_moment = matrix[1, 1]
+                if (
+                    not np.isfinite(zeroth_moment)
+                    or not np.isfinite(second_moment)
+                    or zeroth_moment <= 0.0
+                    or second_moment <= 0.0
+                ):
+                    raise ValueError(
+                        f"{continuum_mode.upper()} primary-beam Taylor fit is "
+                        "underdetermined for "
+                        f"time={time_index}, polarization={polarization_index}."
+                    )
+                frequency_scale = np.sqrt(second_moment / zeroth_moment)
+                if not np.isfinite(frequency_scale) or frequency_scale <= 0.0:
+                    raise ValueError(
+                        f"{continuum_mode.upper()} primary-beam Taylor fit has "
+                        "an invalid frequency scale for "
+                        f"time={time_index}, polarization={polarization_index}."
+                    )
+
+            # Solve in z = x / frequency_scale so narrowly spaced channels do
+            # not make otherwise independent polynomial columns appear singular.
+            coefficient_scale = frequency_scale**taylor_orders
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                scaled_matrix = matrix / frequency_scale**hankel
+                scaled_rhs = (
+                    rhs[time_index, polarization_index].reshape(nterms, -1)
+                    / coefficient_scale[:, None]
+                )
+            if not np.all(np.isfinite(scaled_matrix)) or not np.all(
+                np.isfinite(scaled_rhs)
+            ):
+                raise ValueError(
+                    f"{continuum_mode.upper()} primary-beam Taylor fit has "
+                    "non-finite scaled normal equations for "
+                    f"time={time_index}, polarization={polarization_index}."
+                )
+            if np.linalg.matrix_rank(scaled_matrix) < nterms:
                 raise ValueError(
                     f"{continuum_mode.upper()} primary-beam Taylor fit is "
                     "underdetermined for "
                     f"time={time_index}, polarization={polarization_index}."
                 )
-            coefficients[time_index, polarization_index] = np.linalg.solve(
-                matrix,
-                rhs[time_index, polarization_index].reshape(nterms, -1),
-            ).reshape(rhs.shape[2:])
+            try:
+                scaled_coefficients = np.linalg.solve(scaled_matrix, scaled_rhs)
+            except np.linalg.LinAlgError as error:
+                raise ValueError(
+                    f"{continuum_mode.upper()} primary-beam Taylor fit could "
+                    "not be solved for "
+                    f"time={time_index}, polarization={polarization_index}."
+                ) from error
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                fitted_coefficients = scaled_coefficients / coefficient_scale[:, None]
+            if not np.all(np.isfinite(fitted_coefficients)):
+                raise ValueError(
+                    f"{continuum_mode.upper()} primary-beam Taylor fit produced "
+                    "non-finite coefficients for "
+                    f"time={time_index}, polarization={polarization_index}."
+                )
+            coefficients[time_index, polarization_index] = fitted_coefficients.reshape(
+                rhs.shape[2:]
+            )
 
     supported = np.isfinite(coefficients[:, :, 0]) & (
         coefficients[:, :, 0] >= primary_beam_limit
