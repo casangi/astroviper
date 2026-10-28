@@ -6,11 +6,11 @@ import xarray as xr
 
 from astroviper.node_tasks.imaging.image_continuum_single_field import (
     _finalize_reference_primary_beam,
-    _install_continuum_clean_mask,
     _prepare_cached_mfs_residual_grid,
     continuum_finalize_node,
     model_update_continuum_single_field,
 )
+from astroviper.utils.clean_mask import install_clean_mask
 
 
 @pytest.mark.parametrize(
@@ -117,7 +117,7 @@ def test_clean_mask_installation_rejects_incompatible_image(fault, error, messag
     else:
         image.attrs["data_groups"] = {}
     with pytest.raises(error, match=message):
-        _install_continuum_clean_mask(image, mask)
+        install_clean_mask(image, mask)
 
 
 @pytest.mark.parametrize("dependent_cube", [False, True])

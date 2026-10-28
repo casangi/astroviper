@@ -454,6 +454,7 @@ def image_cube_single_field(
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
+    clean_mask=None,
     task_id=0,
 ):
     """Run the imaging cycle CLEAN loop for one single-field image chunk.
@@ -829,6 +830,16 @@ def image_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
         Zernike aperture models and Jones images are not supported: they are
         not azimuthally symmetric and depend on the parallactic angle.
+    clean_mask : numpy.ndarray or None, optional
+        Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:
+        the path of a NumPy ``.npy`` file for the distributed applications and
+        the bool plane loaded from it
+        (:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values
+        greater than 0.5) for the layers below. It selects the pixels of every
+        residual plane that the model update cleans, in place of the
+        primary-beam mask of ``primary_beam_limit``; Asp measures the noise of
+        its significance test (``asp_scale_significance``) outside it.
+        ``None`` keeps the primary-beam mask.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     Returns
@@ -883,6 +894,7 @@ def image_cube_single_field(
         merge_imaging_dicts,
         resolve_auto_max_cycles,
     )
+    from astroviper.utils.clean_mask import install_clean_mask
 
     if image_data_variables_keep is None:
         image_data_variables_keep = []
@@ -981,6 +993,8 @@ def image_cube_single_field(
         )
         timing["T_residual_update"] += time.time() - start
         accumulate_timing(timing, residual_return_df)
+        if not model_exists:
+            install_clean_mask(img_xds, clean_mask)
 
         # ---- Stop-test phase ----
         # Cycle control: the stop test on the residual this residual update

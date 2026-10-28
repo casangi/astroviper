@@ -608,6 +608,17 @@ IMAGING_PARAM_DOCS = {
         "convolved with the clean beam (the Gaussian fit to the PSF) plus the\n"
         "residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable."
     ),
+    "clean_mask": (
+        'Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:\n'
+        "the path of a NumPy ``.npy`` file for the distributed applications and\n"
+        "the bool plane loaded from it\n"
+        "(:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values\n"
+        "greater than 0.5) for the layers below. It selects the pixels of every\n"
+        "residual plane that the model update cleans, in place of the\n"
+        "primary-beam mask of ``primary_beam_limit``; Asp measures the noise of\n"
+        "its significance test (``asp_scale_significance``) outside it.\n"
+        "``None`` keeps the primary-beam mask."
+    ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.
     "report": (
