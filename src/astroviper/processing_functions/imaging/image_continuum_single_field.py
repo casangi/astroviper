@@ -418,7 +418,9 @@ def point_spread_function_gaussian_fit_continuum(
     psf_da = img_xds[psf_name]
     for plane_dimension in ("psf_taylor_order", "taylor_term", "frequency"):
         if plane_dimension in psf_da.dims and psf_da.sizes[plane_dimension] < 1:
-            raise ValueError(f"PSF variable {psf_name!r} contains no Taylor orders.")
+            raise ValueError(
+                f"PSF variable {psf_name!r} contains no Taylor-order planes."
+            )
 
     if "psf_taylor_order" not in psf_da.dims:
         raise ValueError(
@@ -3700,7 +3702,9 @@ def restore_continuum_image(
     psf_da = img_xds[psf_name]
     for plane_dimension in ("psf_taylor_order", "taylor_term", "frequency"):
         if plane_dimension in psf_da.dims and psf_da.sizes[plane_dimension] < 1:
-            raise ValueError(f"PSF variable {psf_name!r} contains no Taylor orders.")
+            raise ValueError(
+                f"PSF variable {psf_name!r} contains no Taylor-order planes."
+            )
 
     restoration_residual_da = residual_da
     if str(deconvolver).lower() == "mtmfs":
