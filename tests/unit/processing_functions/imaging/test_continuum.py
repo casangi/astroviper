@@ -1494,7 +1494,7 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
     xr.testing.assert_identical(image, original)
 
 
-def test_continuum_statistics_record_taylor_zero_entropy_only_when_enabled():
+def test_continuum_statistics_record_taylor_zero_entropy():
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         build_continuum_residual_imaging_dict,
     )
@@ -1520,8 +1520,9 @@ def test_continuum_statistics_record_taylor_zero_entropy_only_when_enabled():
 
     disabled = build_continuum_residual_imaging_dict(image, "residual", {"gain": 0.1})
     for fields in disabled.data.values():
-        assert "entropy" not in fields
-        assert "residual_snr" not in fields
+        assert len(fields["entropy"]) == len(fields["residual_snr"]) == 1
+        # the residual statistics are those of Taylor term zero
+        assert fields["rms_in_mask"][0] < 100
 
     enabled = build_continuum_residual_imaging_dict(
         image,

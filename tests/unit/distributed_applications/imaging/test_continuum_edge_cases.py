@@ -202,24 +202,12 @@ def test_continuum_accepts_the_cycle_options_off(deconvolver, options):
     _refuse_unsupported_continuum_cycle_options(deconvolver, options)
 
 
+@pytest.mark.parametrize("deconvolver", ["hogbom", "asp", "mtmfs"])
 @pytest.mark.parametrize("value", [True, np.True_])
-def test_continuum_hogbom_may_record_the_iteration_history(value):
-    """The continuum Hogbom path runs the cube Hogbom kernel, which records it."""
+def test_continuum_deconvolvers_may_record_the_iteration_history(deconvolver, value):
     _refuse_unsupported_continuum_cycle_options(
-        "hogbom", {"record_iteration_history": value}
+        deconvolver, {"record_iteration_history": value}
     )
-
-
-@pytest.mark.parametrize("deconvolver", ["asp", "mtmfs"])
-def test_continuum_refuses_the_iteration_history_without_hogbom(deconvolver):
-    with pytest.raises(
-        ValueError,
-        match="record_iteration_history is supported by the Hogbom deconvolvers "
-        f".* only; got deconvolver '{deconvolver}'\\.",
-    ):
-        _refuse_unsupported_continuum_cycle_options(
-            deconvolver, {"record_iteration_history": True}
-        )
 
 
 @pytest.mark.parametrize("deconvolver", ["hogbom", "asp", "mtmfs"])
@@ -244,9 +232,7 @@ def test_continuum_refuses_a_cycle_option_that_is_not_a_bool(name, value):
 @pytest.mark.parametrize(
     "deconvolver,n_taylor_terms,option,message",
     [
-        ("asp", 1, "record_iteration_history", "the Hogbom deconvolvers"),
         ("asp", 1, "exact_psf_subtraction", "not supported by continuum imaging"),
-        ("mtmfs", 2, "record_iteration_history", "the Hogbom deconvolvers"),
         ("mtmfs", 2, "exact_psf_subtraction", "not supported by continuum imaging"),
         ("hogbom", 1, "exact_psf_subtraction", "not supported by continuum imaging"),
     ],

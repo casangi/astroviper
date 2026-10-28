@@ -38,9 +38,9 @@ def model_update_cube_single_field(
         at once when the peak exceeds ``(1 + gain)`` times the peak at the
         start of the model update (Asp has no peak limit and allows
         ``(1 + gain)`` times the lowest RMS). An infinite peak always stops
-        it.  ``record_iteration_history`` (default ``False``; Hogbom only)
-        records the peak residual and the residual RMS of every iteration
-        (see
+        it.  ``record_iteration_history`` (default ``False``) records every
+        component, with the peak residual before it, the residual RMS and the
+        model flux after it (see
         :func:`~astroviper.processing_functions.imaging.deconvolution.hogbom_clean`).
         ``exact_psf_subtraction`` (default ``False``; Hogbom only) subtracts
         with ``subtraction_psf_cube``, the PSF of twice the image size (see

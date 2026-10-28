@@ -90,6 +90,20 @@ struct AspResult {
     // (AspOptions::scale_significance) and their time, search and fit included.
     int n_significance_components = 0;
     double t_significance = 0.0;
+    // Hogbom runs: switches from the Asp iterations to point components, and
+    // the switches of each test: two iterations without change of the peak
+    // residual, 5 of the last 10 Aspens of scale 0, the peak residual or the
+    // optimum strength below fusedthreshold.
+    int n_hogbom_runs = 0;
+    int n_switch_no_change = 0;
+    int n_switch_point_scales = 0;
+    int n_switch_fused = 0;
+    // The record of every component (AspOptions::record_history): the
+    // signed peak of the masked residual before it, the RMS of the masked
+    // residual after it, its pixel (row, column), its scale in pixels (0 a
+    // point, -1 residual shaped) and its flux.
+    std::vector<double> history_peak, history_rms, history_l, history_m, history_scale,
+        history_flux;
     // Per residual-shaped component fit (peak, frac, eps_frac, 0, 0, the
     // objective at the end of the fit), when record_components.
     std::vector<double> residual_fits;
@@ -125,6 +139,12 @@ struct AspResult {
 //     rc_positive_only the components take only positive residual: R_peak is
 //     the largest positive residual and s = +1, so the Asp iterations clean
 //     the negative residual.
+//   record_history: record every component (AspResult::history_*).
+//   no_change_tolerance: an Asp iteration that changes the peak residual by
+//     less than this fraction of the previous peak counts as no change (two
+//     switch to a Hogbom run); 0 keeps CASA's and LibRA's absolute 1e-4, in
+//     the units of the image, which counts every iteration once the peak
+//     residual is below about a mJy.
 struct AspOptions {
     bool scale_significance = false;
     double significance = 0.0;
@@ -138,6 +158,8 @@ struct AspOptions {
     bool rc_positive_only = false;
     double significance_gain = 0.0;
     int rc_fit_iterations = 10;
+    double no_change_tolerance = 0.0;
+    bool record_history = false;
 };
 
 // Estimate the PSF Gaussian width (mean FWHM in pixels) that seeds the Asp

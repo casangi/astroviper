@@ -54,6 +54,15 @@ struct CleanResult {
     std::vector<double> hessian;
     std::vector<double> inverse_hessian;
     std::vector<double> hessian_condition_number;
+    // Components of scale 0 (points) and of a larger scale.
+    int n_point_components = 0;
+    int n_scale_components = 0;
+    // The record of every component (record_history): the signed peak of the
+    // Taylor-0 residual in the mask before it (as the threshold test sees
+    // it), the RMS of that residual in the mask after it, its pixel (row,
+    // column), its scale in pixels and its Taylor-0 flux.
+    std::vector<double> history_peak, history_rms, history_l, history_m, history_scale,
+        history_flux;
 };
 
 // Empty -> {0}; otherwise 0 must be present and is the smallest effective
@@ -86,7 +95,8 @@ template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
                      const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
                      T threshold_per_cycle, T mask_threshold,
-                     const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride = 0);
+                     const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride = 0,
+                     bool record_history = false);
 
 // residual[t1] = sum_t2 inverse_hessian[t1, t2] * residual[t2] in place
 // (MultiTermMatrixCleaner::computeprincipalsolution). inverse_hessian is
@@ -102,10 +112,10 @@ extern template int taylor_hessian<double>(const double*, int, int, int, std::ve
                                            std::vector<double>&, int&);
 extern template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
                                                 const std::vector<float>&, float, int, float, float, float,
-                                                const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t);
+                                                const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t, bool);
 extern template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
                                                   const std::vector<float>&, float, int, double, double, double,
-                                                  const deconvolvers::DivergenceControl<double>&, std::ptrdiff_t);
+                                                  const deconvolvers::DivergenceControl<double>&, std::ptrdiff_t, bool);
 extern template void principal_solution<float>(float*, const double*, int, int, int);
 extern template void principal_solution<double>(double*, const double*, int, int, int);
 

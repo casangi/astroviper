@@ -365,20 +365,26 @@ def image_cube_single_field(
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
         - ``record_iteration_history`` : If ``True``, every model update
-          records, for every plane and every deconvolution iteration, the peak
-          residual the iteration cleaned (signed, in the units of the residual
-          image) and the RMS of the residual inside the clean mask after its
-          subtraction, to follow the deconvolution in detail. The returned
-          convergence record holds them as ``iteration_peak_residual`` and
-          ``iteration_residual_rms``: per plane one array per cycle, with one
-          value per iteration of that cycle's model update (empty for a cycle
-          without one), so the record grows by two float64 values per
-          iteration done. A debugging and tuning tool: the images are the same
-          to the bit with and without it, and the RMS is the sum of squares
-          the peak search of the next iteration makes anyway, so it costs no
-          extra pass over the image per iteration. Hogbom deconvolvers only:
-          ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise
-          ``ValueError``. Default ``False``. No CASA equivalent.
+          records, for every plane and every component it subtracts, the
+          signed peak of the residual inside the clean mask before the
+          component (the peak the threshold test sees; for MT-MFS that of
+          Taylor term zero), the RMS of that residual inside the clean mask
+          after it, the model flux after it, and the component: its pixel
+          along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an
+          Asp residual-shaped component) and its flux, to follow the
+          deconvolution in detail. The returned convergence record holds them
+          as ``iteration_peak_residual``, ``iteration_residual_rms``,
+          ``iteration_model_flux``, ``iteration_component_l``,
+          ``iteration_component_m``, ``iteration_component_scale`` and
+          ``iteration_component_flux``: per plane one array per cycle, with one
+          value per component of that cycle's model update (empty for a cycle
+          without one), so the record grows by seven float64 values per
+          component. Asp counts in ``iter_done`` the iteration that ends a
+          model update on one of its tests, which subtracts nothing. A
+          debugging and tuning tool for every deconvolver: the images are the
+          same to the bit with and without it, and the RMS comes from the sum
+          of squares the peak search makes anyway, so it costs no extra pass
+          over the image per component. Default ``False``. No CASA equivalent.
         - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
           subtracts the PSF of every component it finds from the whole residual
           image, with a PSF of twice the image size made once per channel from

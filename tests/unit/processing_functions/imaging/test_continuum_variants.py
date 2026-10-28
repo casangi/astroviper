@@ -228,6 +228,8 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
             "stop_code": mtmfs.STOP_MAX_ITER,
             "scales": np.asarray([0.0]),
             "hessian_condition_number": np.asarray([2.0]),
+            "n_point_components": 0,
+            "n_scale_components": 0,
         }
 
     monkeypatch.setattr(
@@ -315,6 +317,8 @@ def test_native_mtmfs_copies_and_writes_back_mvc_four_polarization_layout(
             "stop_code": mtmfs.STOP_MAX_ITER,
             "scales": np.asarray([0.0]),
             "hessian_condition_number": np.asarray([1.0]),
+            "n_point_components": 0,
+            "n_scale_components": 0,
         }
 
     monkeypatch.setattr(mtmfs, "clean", native_clean)
@@ -366,6 +370,8 @@ def test_native_mtmfs_default_per_cycle_limits_follow_deconvolve(
             "stop_code": mtmfs.STOP_THRESHOLD,
             "scales": np.asarray([0.0]),
             "hessian_condition_number": np.asarray([1.0]),
+            "n_point_components": 0,
+            "n_scale_components": 0,
         }
 
     monkeypatch.setattr(
@@ -506,6 +512,8 @@ def test_native_mtmfs_cleans_the_support_the_stop_test_measures(
             "stop_code": mtmfs.STOP_THRESHOLD,
             "scales": np.asarray([0.0]),
             "hessian_condition_number": np.asarray([1.0]),
+            "n_point_components": 0,
+            "n_scale_components": 0,
         }
 
     monkeypatch.setattr(
