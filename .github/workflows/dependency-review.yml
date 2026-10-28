@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   call-dependency-review:
-    uses: nrao/gh-actions-templates-public/.github/workflows/dependency-review-template.yml@dependency-review-template
+    uses: nrao/gh-actions-templates-public/.github/workflows/dependency-review-template.yml@main
     with:
       license-exceptions: |
         scanpydoc: GPL-3.0-or-later; docs build only, not imported by astroviper
