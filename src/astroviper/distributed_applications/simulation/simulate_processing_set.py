@@ -522,7 +522,15 @@ def simulate_processing_set(
     normalized_components = normalize_sky_components(
         all_components, n_time, n_frequency, direction_frame
     )
-    described = describe_sky_components(normalized_components)
+    described = ", ".join(
+        filter(
+            None,
+            [
+                describe_sky_components(normalized_components),
+                sky_model_image and "a sky image",
+            ],
+        )
+    )
     sky_image = _resolve_sky_image_params(
         sky_image_params, phase_center_ra_dec, polarization, n_time
     )
