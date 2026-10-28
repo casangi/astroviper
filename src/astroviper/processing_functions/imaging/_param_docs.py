@@ -105,11 +105,19 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
 
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
-    'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
-    "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
-    'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
-    '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
-    "are refused before anything is written."
+    'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
+    '(C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)\n'
+    "cleans Taylor term zero only and needs\n"
+    '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
+    "(``asp_scale_significance``) needs an explicit ``clean_mask``: Asp\n"
+    "measures the noise on the pixels outside its mask, which without a\n"
+    "clean mask lie outside the primary-beam support, where MVC sets the\n"
+    "residual to 0, so the test cleans nothing below ``threshold_per_cycle``\n"
+    '(a warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
+    "synthesis) cleans the Taylor terms together and needs\n"
+    '``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``\n'
+    'it falls back to ``"hogbom"`` with a warning. Other values are refused\n'
+    "before anything is written."
 )
 
 _CONTINUUM_MODE_DOC = (
@@ -461,8 +469,8 @@ IMAGING_PARAM_DOCS = {
         "  to the bit with and without it, and the RMS is the sum of squares\n"
         "  the peak search of the next iteration makes anyway, so it costs no\n"
         "  extra pass over the image per iteration. Hogbom deconvolvers only:\n"
-        '  ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.\n'
-        "  No CASA equivalent.\n"
+        '  ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise\n'
+        "  ``ValueError``. Default ``False``. No CASA equivalent.\n"
         "- ``exact_psf_subtraction`` : If ``True``, a Hogbom model update\n"
         "  subtracts the PSF of every component it finds from the whole residual\n"
         "  image, with a PSF of twice the image size made once per channel from\n"
@@ -475,8 +483,9 @@ IMAGING_PARAM_DOCS = {
         "  image-sized PSF either way. Costs a second PSF per channel (four\n"
         "  times the pixels, kept through the channel's cycles) and a\n"
         "  subtraction over the whole image at every iteration. Hogbom\n"
-        '  deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.\n'
-        "  Default ``False``. No CASA equivalent.\n"
+        '  deconvolvers of cube imaging only: ``deconvolver="asp"`` and\n'
+        "  continuum imaging raise ``ValueError``. Default ``False``. No CASA\n"
+        "  equivalent.\n"
         "- ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends\n"
         "  after each of its Hogbom runs (51 or 510 point components) unless\n"
         "  the RMS of the residual has fallen, by less than a factor 1.5, since\n"
@@ -619,6 +628,17 @@ IMAGING_PARAM_DOCS = {
         "If ``True`` produce a restored image after deconvolution: the model\n"
         "convolved with the clean beam (the Gaussian fit to the PSF) plus the\n"
         "residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable."
+    ),
+    "clean_mask": (
+        'Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:\n'
+        "the path of a NumPy ``.npy`` file for the distributed applications and\n"
+        "the bool plane loaded from it\n"
+        "(:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values\n"
+        "greater than 0.5) for the layers below. It selects the pixels of every\n"
+        "residual plane that the model update cleans, in place of the\n"
+        "primary-beam mask of ``primary_beam_limit``; Asp measures the noise of\n"
+        "its significance test (``asp_scale_significance``) outside it.\n"
+        "``None`` keeps the primary-beam mask."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.

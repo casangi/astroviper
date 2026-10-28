@@ -529,6 +529,7 @@ def image_cube_single_field(
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
+    clean_mask=None,
     memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
@@ -755,8 +756,8 @@ def image_cube_single_field(
           to the bit with and without it, and the RMS is the sum of squares
           the peak search of the next iteration makes anyway, so it costs no
           extra pass over the image per iteration. Hogbom deconvolvers only:
-          ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
-          No CASA equivalent.
+          ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise
+          ``ValueError``. Default ``False``. No CASA equivalent.
         - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
           subtracts the PSF of every component it finds from the whole residual
           image, with a PSF of twice the image size made once per channel from
@@ -769,8 +770,9 @@ def image_cube_single_field(
           image-sized PSF either way. Costs a second PSF per channel (four
           times the pixels, kept through the channel's cycles) and a
           subtraction over the whole image at every iteration. Hogbom
-          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
-          Default ``False``. No CASA equivalent.
+          deconvolvers of cube imaging only: ``deconvolver="asp"`` and
+          continuum imaging raise ``ValueError``. Default ``False``. No CASA
+          equivalent.
         - ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends
           after each of its Hogbom runs (51 or 510 point components) unless
           the RMS of the residual has fallen, by less than a factor 1.5, since
@@ -956,6 +958,16 @@ def image_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
         Zernike aperture models and Jones images are not supported: they are
         not azimuthally symmetric and depend on the parallactic angle.
+    clean_mask : numpy.ndarray or None, optional
+        Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:
+        the path of a NumPy ``.npy`` file for the distributed applications and
+        the bool plane loaded from it
+        (:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values
+        greater than 0.5) for the layers below. It selects the pixels of every
+        residual plane that the model update cleans, in place of the
+        primary-beam mask of ``primary_beam_limit``; Asp measures the noise of
+        its significance test (``asp_scale_significance``) outside it.
+        ``None`` keeps the primary-beam mask.
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
     skunk_works : bool, optional
@@ -1281,6 +1293,7 @@ def image_cube_single_field(
             psf_fitting_method=psf_fitting_method,
             gridding_kernel_params=gridding_kernel_params,
             primary_beam_params=primary_beam_params,
+            clean_mask=clean_mask,
             task_id=task_id,
         )
 

@@ -14,7 +14,12 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _create_mfs_visibility_grid_cache_store,
 )
 from astroviper.processing_functions.imaging.utils import ImagingDict
-from tests.utils.continuum_images import make_runaway_taylor_image
+from astroviper.utils.clean_mask import install_clean_mask
+from tests.utils.continuum_images import (
+    make_runaway_taylor_image,
+    make_single_term_continuum_image,
+    make_single_term_runaway_image,
+)
 
 
 def _model_dataset(value):
@@ -53,7 +58,7 @@ def _mfs_uv_grid(value):
     )
 
 
-def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
+def test_install_clean_mask_broadcasts_and_registers_data_group():
     """A 2-D user mask is broadcast across all Taylor residual planes."""
     residual = xr.DataArray(
         np.zeros((1, 2, 1, 2, 3)),
@@ -72,7 +77,7 @@ def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
     )
     mask = np.array([[True, False, True], [False, True, False]])
 
-    continuum_node._install_continuum_clean_mask(image, mask)
+    install_clean_mask(image, mask)
 
     assert image["MASK"].dims == residual.dims
     np.testing.assert_array_equal(
@@ -83,12 +88,12 @@ def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
     )
     assert image.attrs["data_groups"]["residual"]["mask"] == "MASK"
     assert (
-        "User-supplied continuum deconvolution mask installed"
+        "User-supplied deconvolution mask installed"
         in (image.attrs["data_groups"]["residual"]["description"])
     )
 
 
-def test_install_continuum_clean_mask_rejects_wrong_shape():
+def test_install_clean_mask_rejects_wrong_shape():
     """Node-level validation protects direct callers from mismatched masks."""
     image = xr.Dataset(
         {
@@ -101,7 +106,7 @@ def test_install_continuum_clean_mask_rejects_wrong_shape():
     )
 
     with pytest.raises(ValueError, match="expected"):
-        continuum_node._install_continuum_clean_mask(
+        install_clean_mask(
             image,
             np.ones((3, 2), dtype=bool),
         )
@@ -1221,6 +1226,142 @@ def test_native_mtmfs_imaging_cycles_clean_what_the_stop_test_measures(
         assert residual[0][outer] == pytest.approx(0.5, abs=0.01)
         np.testing.assert_array_equal(model[:, primary_beam < 0.2], 0.0)
     assert model[0][centre, centre] == pytest.approx(1.0, abs=level)
+
+
+@pytest.mark.parametrize(
+    "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
+)
+def test_asp_node_books_the_model_update_of_every_plane(asp_options):
+    """The append node runs continuum Asp (real kernel) under the shared cycle
+    control: the iterations and stop code of every (time, polarization) plane
+    are booked with record_model_update, and the node stop code is that of
+    the check on the refreshed residual."""
+    from astroviper.processing_functions.imaging.utils import (
+        CycleController,
+        StopCode,
+    )
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        IMAGING_CONTINUE,
+        MODEL_UPDATE_CONTINUE,
+        MODEL_UPDATE_DIVERGENCE,
+    )
+
+    image, _, _ = make_single_term_continuum_image()
+    params = {
+        "max_iter": 100,
+        "max_cycles": 3,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "max_iter_per_cycle": 40,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    controller = CycleController(**params)
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": image},
+        {
+            "controller": controller,
+            "deconvolver": "asp",
+            "cycle_control_params": {
+                **params,
+                "asp_residual_components": asp_options,
+                "asp_scale_significance": asp_options,
+            },
+        },
+    )
+
+    records = {
+        (key.time, key.pol): fields
+        for key, fields in result["deconvolution"].data.items()
+    }
+    assert sorted(records) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    iterations = np.array(
+        [[records[(time, pol)]["iter_done"][-1] for pol in (0, 1)] for time in (0, 1)]
+    )
+    stop_codes = np.array(
+        [
+            [records[(time, pol)]["stop_code"].model_update for pol in (0, 1)]
+            for time in (0, 1)
+        ]
+    )
+    # Measured: every plane spends its 40 iterations (stop code 1).
+    np.testing.assert_array_equal(iterations, 40)
+    assert controller.total_iter_done == iterations.sum()
+    assert controller.cycles_done == 1
+    np.testing.assert_array_equal(controller.max_iter_remaining[:, 0], 100 - iterations)
+    np.testing.assert_array_equal(controller.stop_code_model_update[:, 0], stop_codes)
+    np.testing.assert_array_equal(
+        controller.diverged_model_updates[:, 0],
+        (stop_codes == MODEL_UPDATE_DIVERGENCE).astype(int),
+    )
+    assert result["stopcode"] == StopCode(
+        imaging=IMAGING_CONTINUE,
+        model_update=MODEL_UPDATE_CONTINUE,
+    )
+    assert not result["residual_converged"]
+    assert image.SKY_MODEL.dims == image.SKY_RESIDUAL.dims
+    assert (image.SKY_MODEL.values.sum(axis=(-2, -1)) > 0).all()
+
+
+@pytest.mark.parametrize(
+    "max_iter_divergence,iterations,diverged_model_updates",
+    [(1, 30, 1), (-1, 50, 0)],
+)
+def test_asp_node_books_a_diverged_model_update(
+    max_iter_divergence, iterations, diverged_model_updates
+):
+    """A plane the Asp divergence test stops is booked as diverged."""
+    from astroviper.processing_functions.imaging.utils import (
+        CycleController,
+        StopCode,
+    )
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        IMAGING_CONTINUE,
+        MODEL_UPDATE_CONTINUE,
+        MODEL_UPDATE_DIVERGENCE,
+        MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+    )
+
+    params = {
+        "max_iter": 100,
+        "max_cycles": 3,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "max_iter_per_cycle": 50,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    controller = CycleController(**params)
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": make_single_term_runaway_image()},
+        {
+            "controller": controller,
+            "deconvolver": "asp",
+            "cycle_control_params": {
+                **params,
+                "max_iter_divergence": max_iter_divergence,
+            },
+        },
+    )
+
+    stop_code = (
+        MODEL_UPDATE_DIVERGENCE
+        if diverged_model_updates
+        else MODEL_UPDATE_MAX_ITER_PER_CYCLE
+    )
+    (fields,) = result["deconvolution"].data.values()
+    assert fields["iter_done"] == [iterations]
+    assert fields["stop_code"].model_update == stop_code
+    assert result["stopcode"] == StopCode(
+        imaging=IMAGING_CONTINUE,
+        model_update=MODEL_UPDATE_CONTINUE,
+    )
+    assert not result["residual_converged"]
+    assert controller.total_iter_done == iterations
+    assert controller.stop_code_model_update[0, 0, 0] == stop_code
+    assert controller.diverged_model_updates[0, 0, 0] == diverged_model_updates
 
 
 def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch):

@@ -19,6 +19,9 @@ from astroviper.processing_functions.imaging.utils import ImagingDict
 from tests.utils.continuum_images import (
     make_continuum_image,
     make_runaway_taylor_image,
+    make_single_term_continuum_image,
+    make_single_term_faint_source_image,
+    make_single_term_runaway_image,
 )
 
 
@@ -739,6 +742,223 @@ def test_hogbom_adapter_canonicalizes_generated_primary_beam_mask(monkeypatch):
     )
 
     model_update_mtmfs_single_field(image, "hogbom", {"max_iter": 1})
+
+
+@pytest.mark.parametrize("deconvolver", ["asp", "ASP", "aspclean", "asp_clean"])
+@pytest.mark.parametrize(
+    "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
+)
+def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(
+    monkeypatch, asp_options, deconvolver
+):
+    """The adapter runs the cube Asp path on Taylor term zero of every
+    (time, polarization) plane, with the per-plane limits, the divergence
+    limits of Asp and the Asp options, and copies the model back. The aliases
+    of ``"asp"`` take the same path."""
+    import astroviper.processing_functions.imaging.deconvolution as deconvolution
+
+    image, _, _ = make_single_term_continuum_image()
+    limits = np.array([[[3, 4]], [[5, 6]]])  # (time, plane, polarization)
+    thresholds = np.array([[[0.05, 0.06]], [[0.07, 0.08]]])
+    stop_codes = np.array([[[1, 5]], [[4, 2]]])
+    calls = []
+
+    def clean_cube(**kwargs):
+        calls.append(kwargs)
+        kwargs["model"][..., 8, 7] += 0.5
+        kwargs["residual"][...] *= 0.5
+        return {
+            "iterations_performed": limits.copy(),
+            "retval": np.zeros_like(limits),
+            "stop_code": stop_codes.copy(),
+            "converged": stop_codes == 2,
+            "diverged": stop_codes == 4,
+            "peak_residual": np.zeros(limits.shape),
+            "model_flux": np.full(limits.shape, 0.5),
+        }
+
+    monkeypatch.setattr(deconvolution.aspclean, "clean_cube", clean_cube)
+    statistics, timing = model_update_mtmfs_single_field(
+        image,
+        deconvolver,
+        {
+            "max_iter": 10,
+            "max_iter_per_cycle_updated": limits,
+            "threshold_per_cycle": thresholds,
+            "gain": 0.2,
+            "max_iter_divergence": 3,
+            "largestscale": 4,
+            "asp_residual_components": asp_options,
+            "asp_scale_significance": asp_options,
+        },
+    )
+
+    (kwargs,) = calls
+    cube_shape = (2, 1, 2, 25, 21)  # (time, frequency, polarization, l, m)
+    assert kwargs["residual"].shape == cube_shape
+    assert kwargs["psf"].shape == cube_shape
+    assert kwargs["mask"].shape == cube_shape
+    np.testing.assert_array_equal(kwargs["max_iter_per_cycle_updated"], limits)
+    np.testing.assert_array_equal(kwargs["threshold_per_cycle"], thresholds)
+    assert kwargs["gain"] == 0.2
+    # The divergence test as Asp takes it: the RMS limit at 1 + gain, no peak limit.
+    assert kwargs["max_iter_divergence"] == 3
+    assert kwargs["divergence_rms_factor"] == pytest.approx(1.2)
+    assert kwargs["divergence_peak_factor"] == np.inf
+    assert kwargs["residual_components"] is asp_options
+    assert kwargs["scale_significance"] is asp_options
+    assert kwargs["largestscale"] == 4
+
+    expected_model = np.zeros(image.SKY_RESIDUAL.shape)
+    expected_model[..., 8, 7] = 0.5
+    assert image.SKY_MODEL.dims == image.SKY_RESIDUAL.dims
+    np.testing.assert_array_equal(image.SKY_MODEL.values, expected_model)
+    description = image.attrs["data_groups"]["model"]["description"]
+    assert description.endswith("Continuum model increment produced by Asp CLEAN.")
+    records = {(key.time, key.pol): fields for key, fields in statistics.data.items()}
+    assert sorted(records) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    for (time, pol), fields in records.items():
+        assert fields["iter_done"] == [limits[time, 0, pol]]
+        assert fields["stop_code"].model_update == stop_codes[time, 0, pol]
+    assert "T_model_update_cycle" in timing
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
+)
+def test_asp_cleans_every_plane_of_taylor_term_zero(dtype, asp_options):
+    """The real Asp kernel cleans all four (time, polarization) planes. With
+    threshold_per_cycle 0 each spends its 200 iterations (stop code 1); the
+    residual peak falls to about 2 % of its start (measured: at most 2.1 %)
+    and the model holds the flux of the plane (measured: within 3.6 %)."""
+    image, sky, scale = make_single_term_continuum_image(dtype)
+
+    statistics, _ = model_update_mtmfs_single_field(
+        image,
+        "asp",
+        {
+            "max_iter": 200,
+            "max_iter_per_cycle_updated": 200,
+            "threshold_per_cycle": 0.0,
+            "gain": 0.1,
+            "asp_residual_components": asp_options,
+            "asp_scale_significance": asp_options,
+        },
+    )
+
+    assert image.SKY_MODEL.dims == image.SKY_RESIDUAL.dims
+    assert image.SKY_MODEL.dtype == dtype
+    model_flux = image.SKY_MODEL.values.sum(axis=(-2, -1))[:, 0]  # (time, pol)
+    records = {(key.time, key.pol): fields for key, fields in statistics.data.items()}
+    assert sorted(records) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    for (time, pol), fields in records.items():
+        assert fields["iter_done"] == [200]
+        assert fields["stop_code"].model_update == 1
+        assert abs(fields["peakres"][0]) < 0.05 * abs(fields["start_peakres"][0])
+        np.testing.assert_allclose(
+            model_flux[time, pol], scale[time, pol] * sky.sum(), rtol=0.1
+        )
+
+
+@pytest.mark.parametrize(
+    "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
+)
+@pytest.mark.parametrize(
+    "max_iter_divergence,iterations,stop_code", [(1, 30, 4), (-1, 50, 1)]
+)
+def test_asp_divergence_test_stops_a_runaway(
+    asp_options, max_iter_divergence, iterations, stop_code
+):
+    """The real adapter runs the divergence test as Asp takes it (gain 0.1:
+    the RMS limit at 1.1 times the lowest RMS, no peak limit); -1 turns it
+    off. The counts are measured; both option settings give them."""
+    image = make_single_term_runaway_image()
+
+    statistics, _ = model_update_mtmfs_single_field(
+        image,
+        "asp",
+        {
+            "max_iter": 50,
+            "max_iter_per_cycle_updated": 50,
+            "gain": 0.1,
+            "max_iter_divergence": max_iter_divergence,
+            "asp_residual_components": asp_options,
+            "asp_scale_significance": asp_options,
+        },
+    )
+
+    (fields,) = statistics.data.values()
+    assert fields["iter_done"] == [iterations]
+    assert fields["stop_code"].model_update == stop_code
+    assert abs(fields["peakres"][0]) > abs(fields["start_peakres"][0])
+
+
+def _clean_faint_source(image, residual_components, scale_significance):
+    """One model update of the real Asp kernel through the continuum adapter
+    with threshold_per_cycle 5 (5 times the noise); return the Taylor term
+    zero model and the plane's record."""
+    statistics, _ = model_update_mtmfs_single_field(
+        image,
+        "asp",
+        {
+            "max_iter": 3000,
+            "max_iter_per_cycle_updated": 3000,
+            "threshold_per_cycle": 5.0,
+            "gain": 0.1,
+            "asp_residual_components": residual_components,
+            "asp_scale_significance": scale_significance,
+        },
+    )
+    (fields,) = statistics.data.values()
+    return image.SKY_MODEL.values[0, 0, 0], fields
+
+
+def test_coral_cleans_a_faint_source_by_its_significance_with_a_clean_mask():
+    """Coral (Asp with asp_residual_components and asp_scale_significance) on
+    the real kernel, with an explicit clean mask and noise outside it. The
+    dirty peak of the broad source (2) is below threshold_per_cycle (5), so
+    Asp alone cleans nothing and the residual-shaped components take nothing.
+    The test of significance per scale measures the robust noise of the
+    residual smoothed with each initial scale on the pixels outside the mask,
+    and cleans the source at the scales where it stands out of that noise
+    (measured: 34 % of its flux, the model peak 1 pixel from its centre).
+    Replacing the noise outside the mask by white noise of the same standard
+    deviation, with every pixel in the mask unchanged, lowers the noise of the
+    smoothed residual, and more is cleaned (measured: 116 % of the flux)."""
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+    )
+
+    image, sky, mask = make_single_term_faint_source_image()
+    dirty = image.SKY_RESIDUAL.values[0, 0, 0].copy()
+    assert (~mask).any()
+    assert np.abs(dirty[mask]).max() < 5.0
+
+    coral, fields = _clean_faint_source(image, True, True)
+    assert fields["stop_code"].model_update == MODEL_UPDATE_THRESHOLD_PER_CYCLE
+    assert fields["iter_done"][0] > 1
+    assert 0.2 * sky.sum() < coral.sum() < 0.5 * sky.sum()
+    peak = np.unravel_index(np.argmax(coral), coral.shape)
+    assert np.hypot(peak[0] - 64, peak[1] - 64) <= 3
+
+    # The residual-shaped components take nothing below the threshold.
+    image, _, _ = make_single_term_faint_source_image()
+    significance_only, _ = _clean_faint_source(image, False, True)
+    np.testing.assert_array_equal(significance_only, coral)
+
+    # Without the test of significance nothing is cleaned.
+    image, _, _ = make_single_term_faint_source_image()
+    no_significance, fields = _clean_faint_source(image, True, False)
+    assert fields["stop_code"].model_update == MODEL_UPDATE_THRESHOLD_PER_CYCLE
+    assert not no_significance.any()
+
+    # The noise is that of the pixels outside the mask.
+    image, _, _ = make_single_term_faint_source_image(white_noise_outside_mask=True)
+    np.testing.assert_array_equal(image.SKY_RESIDUAL.values[0, 0, 0][mask], dirty[mask])
+    white, fields = _clean_faint_source(image, True, True)
+    assert fields["stop_code"].model_update == MODEL_UPDATE_THRESHOLD_PER_CYCLE
+    assert white.sum() > 2 * coral.sum()
 
 
 def test_restoration_reports_incomplete_backend_result(monkeypatch):
