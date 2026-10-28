@@ -23,6 +23,8 @@ The aspclean C++ binding takes the per-plane iteration cap as
 ``max_iter_per_cycle_updated`` (aspclean/python/bindings.cpp).
 """
 
+import pickle
+
 import numpy as np
 import pytest
 
@@ -312,6 +314,33 @@ class TestMask:
 
 
 class TestInPlaceContract:
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_pickle_roundtrip_preserves_zero_copy_dtype_compatibility(self, dtype):
+        """Dask-like serialization must preserve equivalent array dtypes."""
+        nx = ny = 32
+        arrays = (
+            _gauss(nx, ny, 16, 16, 3.0, 4.0, dtype=dtype),
+            _centered_psf(nx, ny, dtype=dtype),
+            np.zeros((ny, nx), dtype=dtype),
+        )
+        residual, psf, model = pickle.loads(pickle.dumps(arrays))
+        residual_ptr = residual.__array_interface__["data"][0]
+        model_ptr = model.__array_interface__["data"][0]
+
+        aspclean.clean(
+            residual,
+            psf,
+            model,
+            gain=0.2,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=1,
+            fusedthreshold=0.1,
+        )
+
+        assert residual.__array_interface__["data"][0] == residual_ptr
+        assert model.__array_interface__["data"][0] == model_ptr
+        assert np.any(model != 0)
+
     def test_modifies_buffers_in_place(self):
         nx = ny = 64
         psf = _centered_psf(nx, ny, 2.0)
