@@ -360,8 +360,8 @@ def make_point_spread_function_mvc_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -504,8 +504,8 @@ def make_point_spread_function_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,

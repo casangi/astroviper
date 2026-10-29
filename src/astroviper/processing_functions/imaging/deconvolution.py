@@ -249,7 +249,7 @@ def validate_record_iteration_history(deconvolver, record_iteration_history):
     Parameters
     ----------
     deconvolver : str
-        Deconvolution algorithm (case insensitive).
+        Deconvolution algorithm.
     record_iteration_history : bool
         Whether the iteration history is requested.
 
@@ -265,9 +265,7 @@ def validate_record_iteration_history(deconvolver, record_iteration_history):
             "record_iteration_history must be a bool; got "
             f"{record_iteration_history!r}."
         )
-    if record_iteration_history and (
-        deconvolver.lower() not in ITERATION_HISTORY_ALGORITHMS
-    ):
+    if record_iteration_history and deconvolver not in ITERATION_HISTORY_ALGORITHMS:
         raise ValueError(
             "record_iteration_history is supported by the Hogbom deconvolvers "
             f"{ITERATION_HISTORY_ALGORITHMS} only; got deconvolver {deconvolver!r}."
@@ -285,7 +283,7 @@ def validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction):
     Parameters
     ----------
     deconvolver : str
-        Deconvolution algorithm (case insensitive).
+        Deconvolution algorithm.
     exact_psf_subtraction : bool
         Whether the subtraction with the PSF of twice the image size is
         requested.
@@ -300,9 +298,7 @@ def validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction):
         raise ValueError(
             f"exact_psf_subtraction must be a bool; got {exact_psf_subtraction!r}."
         )
-    if exact_psf_subtraction and (
-        deconvolver.lower() not in EXACT_PSF_SUBTRACTION_ALGORITHMS
-    ):
+    if exact_psf_subtraction and deconvolver not in EXACT_PSF_SUBTRACTION_ALGORITHMS:
         raise ValueError(
             "exact_psf_subtraction is supported by the Hogbom deconvolvers "
             f"{EXACT_PSF_SUBTRACTION_ALGORITHMS} only; got deconvolver "
@@ -735,15 +731,12 @@ def deconvolve(
         model variables are updated in place.
     algorithm : str, optional
         Deconvolution algorithm to use. ``"hogbom"`` (default) for Hogbom
-        CLEAN or ``"asp"`` (aliases ``"aspclean"``, ``"asp_clean"``) for
-        Adaptive Scale Pixel CLEAN.
+        CLEAN or ``"asp"`` for Adaptive Scale Pixel CLEAN.
     deconvolve_params : dict, optional
         Algorithm-specific parameters. See
         :func:`_validate_deconvolve_params` for the common keys and
-        defaults. The ``"asp"`` algorithm additionally honours
-        ``fusedthreshold``, ``psf_width``, ``largestscale``,
-        ``stoppointmode``, ``norm_method`` and
-        ``asp_stop_after_hogbom_run`` (see :func:`asp_clean`).
+        defaults. The ``"asp"`` algorithm additionally honours the
+        ``asp_*`` keys (see :func:`asp_clean`).
     processing_function_threads : int, optional
         Number of ``std::thread`` workers to use for per-plane CLEAN
         execution. Values ``<= 1`` disable threading and run in the
@@ -812,23 +805,16 @@ def deconvolve(
       writes are lost, and the model stays zero. ``deconvolve`` raises a
       ``ValueError`` if handed lazy residual/model variables.
     """
-    algorithm_l = algorithm.lower()
-    if algorithm_l not in (
-        "hogbom",
-        "hogbom_many_threads",
-        "asp",
-        "aspclean",
-        "asp_clean",
-    ):
+    if algorithm not in ("hogbom", "hogbom_many_threads", "asp"):
         raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
     # Refused before the model is created on img_xds.
     validate_record_iteration_history(
-        algorithm_l, (deconvolve_params or {}).get("record_iteration_history", False)
+        algorithm, (deconvolve_params or {}).get("record_iteration_history", False)
     )
     exact_psf_subtraction = (deconvolve_params or {}).get(
         "exact_psf_subtraction", False
     )
-    validate_exact_psf_subtraction(algorithm_l, exact_psf_subtraction)
+    validate_exact_psf_subtraction(algorithm, exact_psf_subtraction)
 
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {"sky": "SKY_MODEL"}
@@ -972,7 +958,7 @@ def deconvolve(
 
     # plt.show()
 
-    if algorithm_l == "hogbom":
+    if algorithm == "hogbom":
         results = hogbom_clean(
             residual_cube=residual_arr,
             psf_cube=psf_arr,
@@ -981,7 +967,7 @@ def deconvolve(
             processing_function_threads=processing_function_threads,
             mask_cube=mask_arr,
         )
-    elif algorithm_l == "hogbom_many_threads":
+    elif algorithm == "hogbom_many_threads":
         results = hogbom_clean_many_threads(
             residual_cube=residual_arr,
             psf_cube=psf_arr,
@@ -990,7 +976,7 @@ def deconvolve(
             processing_function_threads=processing_function_threads,
             mask_cube=mask_arr,
         )
-    else:  # asp / aspclean / asp_clean
+    else:  # asp
         results = asp_clean(
             residual_cube=residual_arr,
             psf_cube=psf_arr,
@@ -1447,20 +1433,20 @@ def asp_clean(
         :func:`_validate_deconvolve_params`. The following Asp-specific
         keys are read with sensible defaults if present:
 
-        - ``fusedthreshold`` : float, residual/strength level below which
+        - ``asp_fused_threshold`` : float, residual/strength level below which
           the algorithm fuses to Hogbom-style point cleaning for speed.
           A negative value disables the switch. Default 0.0.
-        - ``psf_width`` : float, PSF Gaussian width in pixels used to
-          seed the initial scales. ``<= 0`` estimates it internally.
-          Default 0.0.
-        - ``largestscale`` : int, largest initial scale in pixels.
+        - ``asp_psf_width`` : float, PSF Gaussian width in pixels used to
+          seed the initial scales. ``-1`` estimates it internally.
+          Default -1.
+        - ``asp_largest_scale`` : int, largest initial scale in pixels.
           ``-1`` uses the default (0, w, 2w, 4w, 8w); a value between 0 and
-          the PSF width ``w`` gives the scales 0, ``largestscale`` and ``w``
-          (as LibRA), and 0 the point scale only. Default -1.
-        - ``stoppointmode`` : int, stop after this many consecutive
+          the PSF width ``w`` gives the scales 0, ``asp_largest_scale`` and
+          ``w`` (as LibRA), and 0 the point scale only. Default -1.
+        - ``asp_stop_point_mode`` : int, stop after this many consecutive
           smallest-scale (point) components. ``-1`` disables. Default -1.
-        - ``norm_method`` : int, scale-normalization method (1 is the
-          preferred CASA default). Default 1.
+        - ``asp_scale_normalization_method`` : int, scale-normalization method,
+          1 or 2 (1 is the preferred CASA default). Default 1.
         - ``asp_stop_after_hogbom_run`` : bool, end the model update after a
           Hogbom run of Asp (51 or 510 point components) unless the RMS of
           the residual has fallen, by less than a factor 1.5, since the model
@@ -1503,21 +1489,22 @@ def asp_clean(
           error (within 3 % on four test skies), 0.5 is worse on
           crescent-like emission.
           ``<= 0`` uses ``gain``. Default 0.3.
-        - ``asp_rc_frac_min``, ``asp_rc_eps_max`` : float, lower bound of
-          ``frac`` (upper 0.99) and upper bound of ``eps_frac`` (lower 1e-3)
+        - ``asp_residual_component_min_fraction``,
+          ``asp_residual_component_max_epsilon_fraction`` : float, lower bound
+          of ``frac`` (upper 0.99) and upper bound of ``eps_frac`` (lower 1e-3)
           in the fit of the residual-shaped components. Defaults 0.3 and
           10.0; a lower ``frac`` or a larger ``eps_frac`` makes broad weak
           components that fail on crescent-like emission.
-        - ``asp_rc_noise_floor`` : float, ``T`` is also at least this many
-          times the robust noise of the residual outside the mask. Default
-          2.0.
-        - ``asp_rc_switch_factor`` : float, hand over to the Asp iterations at
-          this multiple of ``threshold_per_cycle``. Default 1.0 (handing over
-          earlier brings the rings back).
-        - ``asp_rc_floor_at_threshold`` : bool, keep ``T`` at least
-          ``threshold_per_cycle``; without it a component takes residual
-          below the threshold (down to ``asp_rc_noise_floor``), which takes
-          up noise. Default ``True``.
+        - ``asp_residual_component_noise_floor`` : float, ``T`` is also at least
+          this many times the robust noise of the residual outside the mask.
+          Default 2.0.
+        - ``asp_residual_component_switch_factor`` : float, hand over to the Asp
+          iterations at this multiple of ``threshold_per_cycle``. Default 1.0
+          (handing over earlier brings the rings back).
+        - ``asp_residual_component_floor_at_threshold`` : bool, keep ``T`` at
+          least ``threshold_per_cycle``; without it a component takes residual
+          below the threshold (down to ``asp_residual_component_noise_floor``),
+          which takes up noise. Default ``True``.
 
         Note: ``clean_box`` is ignored by the Asp algorithm (use a mask
         instead).
@@ -1647,28 +1634,42 @@ def asp_clean(
         gain=deconvolve_params["gain"],
         threshold_per_cycle=threshold_per_cycle,
         max_iter_per_cycle_updated=max_iter_per_cycle_updated,
-        fusedthreshold=deconvolve_params.get("fusedthreshold", 0.0),
-        psf_width=deconvolve_params.get("psf_width", 0.0),
-        largestscale=deconvolve_params.get("largestscale", -1),
-        stoppointmode=deconvolve_params.get("stoppointmode", -1),
-        norm_method=deconvolve_params.get("norm_method", 1),
+        asp_fused_threshold=deconvolve_params.get("asp_fused_threshold", 0.0),
+        asp_psf_width=deconvolve_params.get("asp_psf_width", -1.0),
+        asp_largest_scale=deconvolve_params.get("asp_largest_scale", -1),
+        asp_stop_point_mode=deconvolve_params.get("asp_stop_point_mode", -1),
+        asp_scale_normalization_method=deconvolve_params.get(
+            "asp_scale_normalization_method", 1
+        ),
         processing_function_threads=int(processing_function_threads),
-        stop_after_hogbom_run=bool(
+        asp_stop_after_hogbom_run=bool(
             deconvolve_params.get("asp_stop_after_hogbom_run", False)
         ),
         # Options beyond CASA and LibRA (off by default in the kernel).
-        scale_significance=bool(deconvolve_params.get("asp_scale_significance", True)),
-        significance=float(deconvolve_params.get("asp_significance", 0.0)),
-        residual_components=bool(
+        asp_scale_significance=bool(
+            deconvolve_params.get("asp_scale_significance", True)
+        ),
+        asp_significance=float(deconvolve_params.get("asp_significance", 0.0)),
+        asp_residual_components=bool(
             deconvolve_params.get("asp_residual_components", True)
         ),
-        rc_noise_floor=float(deconvolve_params.get("asp_rc_noise_floor", 2.0)),
-        rc_frac_min=float(deconvolve_params.get("asp_rc_frac_min", 0.3)),
-        rc_eps_max=float(deconvolve_params.get("asp_rc_eps_max", 10.0)),
-        rc_switch_factor=float(deconvolve_params.get("asp_rc_switch_factor", 1.0)),
-        rc_floor_at_threshold=bool(
-            deconvolve_params.get("asp_rc_floor_at_threshold", True)
+        asp_residual_component_noise_floor=float(
+            deconvolve_params.get("asp_residual_component_noise_floor", 2.0)
         ),
-        significance_gain=float(deconvolve_params.get("asp_significance_gain", 0.3)),
+        asp_residual_component_min_fraction=float(
+            deconvolve_params.get("asp_residual_component_min_fraction", 0.3)
+        ),
+        asp_residual_component_max_epsilon_fraction=float(
+            deconvolve_params.get("asp_residual_component_max_epsilon_fraction", 10.0)
+        ),
+        asp_residual_component_switch_factor=float(
+            deconvolve_params.get("asp_residual_component_switch_factor", 1.0)
+        ),
+        asp_residual_component_floor_at_threshold=bool(
+            deconvolve_params.get("asp_residual_component_floor_at_threshold", True)
+        ),
+        asp_significance_gain=float(
+            deconvolve_params.get("asp_significance_gain", 0.3)
+        ),
         **_divergence_kwargs(deconvolve_params, asp=True),
     )

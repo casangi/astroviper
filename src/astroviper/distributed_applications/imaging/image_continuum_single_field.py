@@ -2610,10 +2610,10 @@ def _load_continuum_clean_mask(clean_mask, image_size):
 
 def _resolve_continuum_deconvolver(deconvolver, image_params):
     """Resolve user-facing continuum deconvolver choices before graph creation."""
-    import operator
-    import warnings
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _validate_n_taylor_terms,
+    )
 
-    deconvolver = str(deconvolver).lower()
     if deconvolver not in ("hogbom", "mtmfs"):
         raise ValueError(
             "deconvolver must be 'hogbom' or 'mtmfs' for continuum imaging; "
@@ -2626,21 +2626,7 @@ def _resolve_continuum_deconvolver(deconvolver, image_params):
         raise KeyError(
             "image_params must contain 'n_taylor_terms' when deconvolver='mtmfs'."
         )
-    try:
-        n_taylor_terms = operator.index(image_params["n_taylor_terms"])
-    except TypeError as exc:
-        raise TypeError(
-            "image_params['n_taylor_terms'] must be an integer when deconvolver='mtmfs'."
-        ) from exc
-
-    if n_taylor_terms == 1:
-        warnings.warn(
-            "deconvolver='mtmfs' was requested with n_taylor_terms=1; falling back "
-            "to deconvolver='hogbom'.",
-            UserWarning,
-            stacklevel=3,
-        )
-        return "hogbom"
+    n_taylor_terms = _validate_n_taylor_terms(image_params["n_taylor_terms"])
     if not 2 <= n_taylor_terms <= 4:
         raise ValueError(
             "deconvolver='mtmfs' requires image_params['n_taylor_terms'] between "
@@ -2654,61 +2640,34 @@ def _resolve_continuum_taylor_expansion(image_params):
 
     The node tasks and processing functions read only
     ``image_params["n_taylor_terms"]`` and ``image_params["reference_frequency"]``.
-    The deprecated alias ``image_params["reference_frequency_hz"]`` is
-    resolved here, once, so that every stage uses the same frequency.
 
     Parameters
     ----------
     image_params : dict
         Application-local copy of the image parameters, with ``n_taylor_terms``
-        present and at least 1 (checked by the schema). ``n_taylor_terms`` may be any
-        integer type, and the reference frequency any real scalar (Python,
-        NumPy or xarray). Modified in place: on return ``n_taylor_terms`` is an int,
-        ``reference_frequency`` holds the reference frequency in Hz as a float,
-        and ``reference_frequency_hz`` is removed.
+        present (checked by the schema), a Python or NumPy integer of at least
+        1, and the reference frequency any real scalar (Python, NumPy or
+        xarray). Modified in place: on return ``n_taylor_terms`` is an int and
+        ``reference_frequency`` holds the reference frequency in Hz as a float.
 
     Raises
     ------
     TypeError
         If ``n_taylor_terms`` is not an integer.
     KeyError
-        If neither ``reference_frequency`` nor ``reference_frequency_hz`` is
-        given.
+        If ``reference_frequency`` is not given.
     ValueError
-        If both are given with different values, or the reference frequency is
-        not a finite and positive scalar.
+        If ``n_taylor_terms`` is below 1, or the reference frequency is not a
+        finite and positive scalar.
     """
-    import operator
-    import warnings
-
     from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
         _get_reference_frequency_hz,
+        _validate_n_taylor_terms,
     )
 
-    try:
-        image_params["n_taylor_terms"] = operator.index(image_params["n_taylor_terms"])
-    except TypeError as exc:
-        raise TypeError("image_params['n_taylor_terms'] must be an integer.") from exc
-
-    if "reference_frequency_hz" in image_params:
-        warnings.warn(
-            "image_params['reference_frequency_hz'] is deprecated; use "
-            "image_params['reference_frequency'] (in Hz) instead.",
-            FutureWarning,
-            stacklevel=3,
-        )
-        alias = image_params.pop("reference_frequency_hz")
-        if "reference_frequency" not in image_params:
-            image_params["reference_frequency"] = alias
-        elif _get_reference_frequency_hz(image_params) != _get_reference_frequency_hz(
-            {"reference_frequency": alias}
-        ):
-            raise ValueError(
-                "image_params gives two different reference frequencies: "
-                f"reference_frequency={image_params['reference_frequency']} and "
-                f"reference_frequency_hz={alias}. Give only reference_frequency."
-            )
-
+    image_params["n_taylor_terms"] = _validate_n_taylor_terms(
+        image_params["n_taylor_terms"]
+    )
     image_params["reference_frequency"] = _get_reference_frequency_hz(image_params)
 
 
@@ -2776,8 +2735,8 @@ def image_continuum_single_field(
     channel FFTs and PB correction in map tasks, then reduces Taylor
     contributions. Native MT-MFS updates the complete Taylor model; Högbom
     updates Taylor term zero. Both verify refreshed residuals before
-    finalization. With one Taylor term, an MT-MFS request emits a warning and
-    falls back to Högbom. Restoration is optional.
+    finalization. MT-MFS needs two to four Taylor terms. Restoration is
+    optional.
 
     The imaging cycle loop (``cycle_control_params``) does not run separately
     for every frequency channel as in cube imaging. Continuum performs one
@@ -2876,8 +2835,8 @@ def image_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -2909,9 +2868,8 @@ def image_continuum_single_field(
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
         (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
-        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
-        are refused before anything is written.
+        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4. Other
+        values are refused before anything is written.
     primary_beam_limit : float
         Primary-beam cutoff in ``[0, 1]``. This single setting controls CLEAN
         support, MVC channel correction and spectral fitting, and final
@@ -3158,7 +3116,7 @@ def image_continuum_single_field(
           iterations go on from there. They remove the ring residuals Asp
           leaves on resolved emission in far fewer iterations, and take no
           residual below ``threshold_per_cycle``. Further keys
-          (``asp_rc_*``) are described in
+          (``asp_residual_component_*``) are described in
           :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
           Asp only. Default ``True``. No CASA equivalent.
         - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
@@ -3244,10 +3202,7 @@ def image_continuum_single_field(
     The sky model is a Taylor expansion in frequency with
     ``image_params["n_taylor_terms"]`` terms (an integer of at least 1) about
     ``image_params["reference_frequency"]``, one frequency in Hz shared by all
-    frequency chunks. Both are required.
-    ``image_params["reference_frequency_hz"]`` is a deprecated alias of
-    ``reference_frequency``: it is accepted with a ``FutureWarning``, and two
-    different values are refused. ``image_params["frequency_coords"]`` must
+    frequency chunks. Both are required. ``image_params["frequency_coords"]`` must
     hold exactly the channels of the selected Processing Set. These parameters
     are checked before anything is written.
 
@@ -3376,7 +3331,6 @@ def image_continuum_single_field(
         )
 
     # Validate continuum_mode
-    continuum_mode = str(continuum_mode).lower()
     if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
             f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."

@@ -17,6 +17,10 @@ from astroviper.processing_functions.imaging.imaging_setup_continuum_single_fiel
     _get_reference_frequency_hz,
     _imaging_weights_are_available,
     _validate_continuum_parameters,
+    _validate_n_taylor_terms,
+)
+from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
+    make_undeconvolved_image_continuum_single_field,
 )
 
 
@@ -33,7 +37,7 @@ def test_reference_frequency_accepts_a_one_element_array():
 
 @pytest.mark.parametrize("params", [{}, {"reference_frequency_hz": 120.0}])
 def test_reference_frequency_is_read_from_one_key_without_fallback(params):
-    """Only ``reference_frequency`` is read; the driver resolves the alias."""
+    """Only ``reference_frequency`` is read."""
     with pytest.raises(KeyError, match="'reference_frequency'"):
         _get_reference_frequency_hz(params)
 
@@ -41,6 +45,27 @@ def test_reference_frequency_is_read_from_one_key_without_fallback(params):
 def test_invalid_taylor_order_is_rejected_before_setup():
     with pytest.raises(ValueError, match="n_taylor_terms"):
         _validate_continuum_parameters({"n_taylor_terms": 0})
+    with pytest.raises(KeyError, match="n_taylor_terms"):
+        _validate_continuum_parameters({"reference_frequency": 1.0e9})
+
+
+@pytest.mark.parametrize("value", [True, np.True_, 1.9, 2.0, "2", None])
+def test_taylor_order_is_not_coerced(value):
+    with pytest.raises(TypeError, match="n_taylor_terms must be an integer"):
+        _validate_n_taylor_terms(value)
+
+
+@pytest.mark.parametrize("value", [2, np.int64(2)])
+def test_taylor_order_accepts_python_and_numpy_integers(value):
+    assert type(_validate_n_taylor_terms(value)) is int
+
+
+@pytest.mark.parametrize("n_taylor_terms", [None, True])
+def test_gridding_checks_the_given_or_image_params_taylor_order(n_taylor_terms):
+    with pytest.raises(TypeError, match="n_taylor_terms must be an integer"):
+        make_undeconvolved_image_continuum_single_field(
+            None, None, {"n_taylor_terms": True}, None, n_taylor_terms=n_taylor_terms
+        )
 
 
 @pytest.mark.parametrize("fault", ["empty", "group", "role", "variable", "none"])

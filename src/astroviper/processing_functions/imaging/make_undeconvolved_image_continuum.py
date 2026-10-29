@@ -47,8 +47,8 @@ def make_undeconvolved_image_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -87,23 +87,22 @@ def make_undeconvolved_image_continuum_single_field(
     from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
         add_visibility_grid_continuum_single_field,
     )
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _validate_n_taylor_terms,
+    )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
 
     if complex_dtype is None:
         complex_dtype = np.complex128
 
     if n_taylor_terms is None:
-        n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
-    else:
-        n_taylor_terms = int(n_taylor_terms)
+        n_taylor_terms = image_params["n_taylor_terms"]
+    n_taylor_terms = _validate_n_taylor_terms(n_taylor_terms)
 
     if reference_frequency is None:
         reference_frequency = float(image_params["reference_frequency"])
     else:
         reference_frequency = float(reference_frequency)
-
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(

@@ -8,7 +8,6 @@ rather than retaining the frequency-cube NaN placeholders created at startup.
 import inspect
 import json
 import shutil
-import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -1138,9 +1137,7 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
         )
 
 
-@pytest.mark.parametrize(
-    "deconvolver", ["hogbom_many_threads", "asp", "aspclean", "asp_clean"]
-)
+@pytest.mark.parametrize("deconvolver", ["hogbom_many_threads", "asp"])
 def test_tw_hydra_refused_deconvolvers_write_nothing(
     tmp_path, tw_hydra_store, deconvolver
 ):
@@ -1212,18 +1209,9 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
     assert not output_store.exists()
 
 
-@pytest.mark.filterwarnings("ignore::FutureWarning")
 @pytest.mark.parametrize(
     "change,error,message",
     [
-        pytest.param(
-            lambda params: params.update(
-                reference_frequency_hz=1.001 * params["reference_frequency"]
-            ),
-            ValueError,
-            "two different reference frequencies",
-            id="differing-reference-frequencies",
-        ),
         pytest.param(
             lambda params: params.pop("reference_frequency"),
             KeyError,
@@ -1288,64 +1276,6 @@ def test_tw_hydra_refused_image_params_write_nothing(
         )
     assert _store_snapshot(store) == files
     assert not output_store.exists()
-
-
-@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
-def test_tw_hydra_reference_frequency_alias_gives_the_same_images(
-    tmp_path, tw_hydra_store, continuum_mode
-):
-    """``reference_frequency`` alone, both keys equal and the deprecated
-    ``reference_frequency_hz`` alone give the same images."""
-    processing_set = open_processing_set(str(tw_hydra_store))
-    reference_frequency = _tw_hydra_image_params(processing_set)["reference_frequency"]
-    images = {}
-    for name, keys in (
-        ("reference_frequency", {"reference_frequency": reference_frequency}),
-        (
-            "both",
-            {
-                "reference_frequency": reference_frequency,
-                "reference_frequency_hz": reference_frequency,
-            },
-        ),
-        ("alias", {"reference_frequency_hz": reference_frequency}),
-    ):
-        image_params = _tw_hydra_image_params(processing_set)
-        del image_params["reference_frequency"]
-        image_params.update(keys)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result, images[name] = _run_tw_hydra_continuum(
-                tw_hydra_store,
-                tmp_path / f"reference_frequency_{continuum_mode}_{name}.img.zarr",
-                processing_set,
-                2,
-                continuum_mode,
-                {"weighting": "natural", "weighting_scope": "local"},
-                image_params=image_params,
-                cycle_control_params={
-                    "max_iter": 20,
-                    "max_cycles": 2,
-                    "threshold": 0.001,
-                    "gain": 0.1,
-                    "psf_sidelobe_factor": 1.5,
-                    "max_iter_per_cycle": 5,
-                    "min_psf_fraction": 0.05,
-                    "max_psf_fraction": 0.8,
-                },
-            )
-        deprecations = [
-            warning
-            for warning in caught
-            if issubclass(warning.category, FutureWarning)
-            and "reference_frequency_hz" in str(warning.message)
-        ]
-        assert len(deprecations) == ("reference_frequency_hz" in keys)
-        assert result["n_cycles"] == 2
-        assert np.nanmax(np.abs(images[name].SKY_MODEL.values)) > 0.0
-
-    for name in ("both", "alias"):
-        xr.testing.assert_equal(images[name], images["reference_frequency"])
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])

@@ -407,7 +407,7 @@ def image_cube_single_field(
           iterations go on from there. They remove the ring residuals Asp
           leaves on resolved emission in far fewer iterations, and take no
           residual below ``threshold_per_cycle``. Further keys
-          (``asp_rc_*``) are described in
+          (``asp_residual_component_*``) are described in
           :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
           Asp only. Default ``True``. No CASA equivalent.
         - ``asp_scale_significance`` : If ``True``, Asp measures the noise of

@@ -1153,8 +1153,8 @@ def residual_update_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -1342,8 +1342,6 @@ def residual_update_continuum_single_field(
             "primary_beam",
         ]
 
-    continuum_mode = str(continuum_mode).lower()
-
     if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
             f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
@@ -1465,8 +1463,6 @@ def residual_update_continuum_single_field(
     # =============================================================
     # Resolve the task-local MVC primary beam
     # =============================================================
-
-    continuum_mode = str(continuum_mode).lower()
 
     if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
@@ -1785,8 +1781,8 @@ def grid_imaging_weight_density_continuum_node(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -2065,8 +2061,8 @@ def degrid_imaging_weights_continuum_node(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -2432,12 +2428,10 @@ def _prepare_continuum_image(
     reference_frequency = config["reference_frequency"]
     image_data_group_name = config["image_data_group_in_name"]
 
-    continuum_mode = str(
-        input_params.get(
-            "continuum_mode",
-            image_params.get("continuum_mode", "mfs"),
-        )
-    ).lower()
+    continuum_mode = input_params.get(
+        "continuum_mode",
+        image_params.get("continuum_mode", "mfs"),
+    )
 
     if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
@@ -2842,7 +2836,7 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
             "Later continuum append nodes require input_params['model_xds']."
         )
 
-    continuum_mode = str(input_params.get("continuum_mode", "mfs")).lower()
+    continuum_mode = input_params.get("continuum_mode", "mfs")
     model_xds = accumulate_continuum_model(
         model_increment_xds,
         previous_model_xds=previous_model_xds,
@@ -2947,7 +2941,7 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
             f"'recompute'; received {visibility_memory_mode!r}."
         )
 
-    continuum_mode = str(input_params.get("continuum_mode", "mfs")).lower()
+    continuum_mode = input_params.get("continuum_mode", "mfs")
     if continuum_mode == "mvc":
         # MVC caches are task-local and have already been applied before each
         # map task's inverse FFT and Taylor construction.
