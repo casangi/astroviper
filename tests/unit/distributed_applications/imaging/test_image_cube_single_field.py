@@ -213,21 +213,20 @@ def _add_shifted_execution_block(ps_store, offset=EXECUTION_BLOCK_FREQUENCY_OFFS
     return frequencies
 
 
-@pytest.mark.parametrize("n_tasks", [1])
+@pytest.mark.parametrize("n_tasks", [1, 2])
 @pytest.mark.parametrize("skunk_works", [True, False])
 def test_execution_blocks_with_offset_frequencies_are_all_imaged(
     tmp_path, skunk_works, n_tasks
 ):
     """Two execution blocks whose channel centres differ by a few kHz, imaged
-    on the first one's frequencies: every task selects and images both (each
-    channel maps onto its nearest image channel), with the direct Zarr loader
-    (``skunk_works=True``) as with the standard one, and the two loaders give
-    the same images. The direct loader used to require every selected
-    frequency to equal an image frequency to 1e-12, so it failed the load
-    and, as a load failure is logged and skipped, wrote no image at all.
-    One task per channel needs graphviper >= 0.0.57, whose channel selection
-    keeps the second block in the task of an end channel
-    (casangi/graphviper#77)."""
+    on the first one's frequencies in one node task or one per channel: every
+    task selects and images both (each channel maps onto its nearest image
+    channel), with the direct Zarr loader (``skunk_works=True``) as with the
+    standard one, and the two loaders give the same images. The direct loader
+    used to require every selected frequency to equal an image frequency to
+    1e-12, so it failed the load and, as a load failure is logged and
+    skipped, wrote no image at all; and graphviper's channel selection used
+    to drop the second block from the task of an end channel."""
     ps_store = _simulate_point_source(tmp_path)
     frequencies = _add_shifted_execution_block(ps_store)
 
