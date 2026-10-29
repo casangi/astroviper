@@ -9,6 +9,8 @@ hand-constructed inputs as well as the zero-copy / in-place contract of
 the binding.
 """
 
+import pickle
+
 import numpy as np
 import pytest
 
@@ -749,6 +751,34 @@ class TestCubeBasicCorrectness:
 
 
 class TestCubeInPlaceContract:
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_pickle_roundtrip_preserves_zero_copy_dtype_compatibility(self, dtype):
+        """Dask-like serialization must not make an equivalent dtype invalid."""
+        shape = (1, 1, 1, 16, 16)
+        residual = np.zeros(shape, dtype=dtype)
+        residual[..., 8, 8] = 2.0
+        psf = _delta_psf_cube(1, 1, 1, 16, 16, dtype=dtype)
+        model = np.zeros(shape, dtype=dtype)
+
+        residual, psf, model = pickle.loads(pickle.dumps((residual, psf, model)))
+        residual_ptr = residual.__array_interface__["data"][0]
+        model_ptr = model.__array_interface__["data"][0]
+
+        hogbom.clean_cube(
+            residual_cube=residual,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold_per_cycle=_plane_threshold(residual, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(residual, 1),
+            processing_function_threads=1,
+        )
+
+        assert residual.__array_interface__["data"][0] == residual_ptr
+        assert model.__array_interface__["data"][0] == model_ptr
+        assert residual[0, 0, 0, 8, 8] == pytest.approx(0.0)
+        assert model[0, 0, 0, 8, 8] == pytest.approx(2.0)
+
     def test_cube_buffers_modified_in_place(self):
         ny, nx = 16, 16
         nt, nf, npol = 1, 1, 2

@@ -12,6 +12,9 @@
 
 namespace py = pybind11;
 
+// Compare dtype values: pickle/Dask may reconstruct an equivalent NumPy dtype
+// with a different descriptor object, while the underlying buffer is unchanged.
+
 // Validate that `arr` has dtype T, ndim dimensions, the expected shape and is
 // C-contiguous. If `writable`, also require it writeable. Returns buffer_info
 // so the caller can take the raw pointer with no copy.
@@ -19,7 +22,7 @@ template <typename T>
 static py::buffer_info check_array(py::array& arr, const char* name, int ndim,
                                    const std::vector<py::ssize_t>& shape,
                                    bool writable) {
-    if (!arr.dtype().is(py::dtype::of<T>()))
+    if (!arr.dtype().equal(py::dtype::of<T>()))
         throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
                                  py::cast<std::string>(py::dtype::of<T>().attr("name")));
     if (!(arr.flags() & py::array::c_style))
@@ -150,14 +153,14 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
     if (residual.ndim() != 2)
         throw std::runtime_error("residual must be a 2D array [ny, nx]");
     auto dt = residual.dtype();
-    if (dt.is(py::dtype::of<float>()))
+    if (dt.equal(py::dtype::of<float>()))
         return plane_impl<float>(residual, psf, model, mask, gain, threshold_per_cycle,
                                  max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
                                  asp_largest_scale, asp_stop_point_mode,
                                  asp_scale_normalization_method, verbose, max_iter_divergence,
                                  divergence_rms_factor, divergence_peak_factor,
                                  processing_function_threads, asp_stop_after_hogbom_run, options);
-    if (dt.is(py::dtype::of<double>()))
+    if (dt.equal(py::dtype::of<double>()))
         return plane_impl<double>(residual, psf, model, mask, gain, threshold_per_cycle,
                                   max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
                                   asp_largest_scale, asp_stop_point_mode,
@@ -186,7 +189,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     py::buffer_info ri = check_array<T>(residual, "residual", 5, shp, true);
     py::buffer_info mi = check_array<T>(model, "model", 5, shp, true);
 
-    if (!psf.dtype().is(py::dtype::of<T>()))
+    if (!psf.dtype().equal(py::dtype::of<T>()))
         throw std::runtime_error("psf has wrong dtype");
     if (psf.ndim() != 5)
         throw std::runtime_error("psf must be a 5D array");
@@ -301,14 +304,14 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
         throw std::runtime_error(
             "residual must be a 5D array [time, frequency, polarization, y, x]");
     auto dt = residual.dtype();
-    if (dt.is(py::dtype::of<float>()))
+    if (dt.equal(py::dtype::of<float>()))
         return cube_impl<float>(residual, psf, model, mask, gain, threshold_per_cycle,
                                 max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
                                 asp_largest_scale, asp_stop_point_mode,
                                 asp_scale_normalization_method, processing_function_threads,
                                 max_iter_divergence, divergence_rms_factor,
                                 divergence_peak_factor, asp_stop_after_hogbom_run, options);
-    if (dt.is(py::dtype::of<double>()))
+    if (dt.equal(py::dtype::of<double>()))
         return cube_impl<double>(residual, psf, model, mask, gain, threshold_per_cycle,
                                  max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
                                  asp_largest_scale, asp_stop_point_mode,

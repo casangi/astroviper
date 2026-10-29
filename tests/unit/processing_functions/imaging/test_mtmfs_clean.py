@@ -914,23 +914,30 @@ class TestArrayValidation:
         with pytest.raises(RuntimeError, match="3-D"):
             mtmfs.clean(residual[0], psf[0], model[0])
 
-    def test_equal_dtype_from_pickle_is_accepted(self):
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_equal_dtype_from_pickle_is_accepted(self, dtype):
         """An equal but non-builtin dtype object (pickle, Dask, Zarr) is used in place."""
         residual, psf, model, mask = pickle.loads(
             pickle.dumps(
                 (
-                    make_dirty_stack(2, 48, 40),
-                    make_psf_stack(2, 48, 40),
-                    np.zeros((2, 40, 48), dtype=np.float32),
-                    np.ones((40, 48), dtype=np.float32),
+                    make_dirty_stack(2, 48, 40, dtype=dtype),
+                    make_psf_stack(2, 48, 40, dtype=dtype),
+                    np.zeros((2, 40, 48), dtype=dtype),
+                    np.ones((40, 48), dtype=dtype),
                 )
             )
         )
+        residual_ptr = residual.__array_interface__["data"][0]
+        model_ptr = model.__array_interface__["data"][0]
         out = mtmfs.clean(residual, psf, model, mask=mask)
         assert out["iterations_performed"] > 0 and np.any(model)
+        assert residual.__array_interface__["data"][0] == residual_ptr
+        assert model.__array_interface__["data"][0] == model_ptr
         mtmfs.principal_solution(residual, mtmfs.hessian(psf)["inverse_hessian"][0])
         with pytest.raises(RuntimeError, match="float32 or float64"):
-            mtmfs.clean(residual.astype(">f4"), psf, model)
+            mtmfs.clean(
+                residual.astype(">f4" if dtype == np.float32 else ">f8"), psf, model
+            )
 
     def test_mask_validation(self):
         residual = make_dirty_stack(2, 48, 40)
