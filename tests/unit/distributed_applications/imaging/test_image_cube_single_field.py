@@ -180,6 +180,106 @@ def test_kept_variables_the_run_does_not_make_are_skipped(tmp_path):
     assert np.isfinite(img.POINT_SPREAD_FUNCTION.values).all()
 
 
+#: Frequency offset (Hz) of the second execution block, of the order of those
+#: between ALMA execution blocks converted to LSRK (0.7 to 4.9 kHz on 488 kHz
+#: channels).
+EXECUTION_BLOCK_FREQUENCY_OFFSET = 5.0e3
+
+
+def _add_shifted_execution_block(ps_store, offset=EXECUTION_BLOCK_FREQUENCY_OFFSET):
+    """Copy the processing set's only MSv4 as a second execution block whose
+    channel centres are ``offset`` Hz higher and whose visibilities are three
+    times brighter, and consolidate the metadata. Equal weights give the
+    natural-weighted dirty image of both a peak of 2 Jy/beam (1 and 3 if one
+    block were left out). Returns the frequencies of the first block."""
+    import zarr
+
+    (ms_name,) = open_processing_set(ps_store).keys()
+    shifted_name = f"{ms_name}_shifted"
+    shutil.copytree(
+        os.path.join(ps_store, ms_name), os.path.join(ps_store, shifted_name)
+    )
+    frequency = zarr.open_array(os.path.join(ps_store, shifted_name, "frequency"))
+    frequencies = frequency[:]
+    frequency[:] = frequencies + offset
+    visibility = zarr.open_array(os.path.join(ps_store, shifted_name, "VISIBILITY"))
+    visibility[:] = 3.0 * visibility[:]
+    zarr.consolidate_metadata(ps_store)
+    shifted = open_processing_set(ps_store)
+    assert sorted(shifted.keys()) == sorted([ms_name, shifted_name])
+    np.testing.assert_array_equal(
+        shifted[shifted_name].frequency.values, frequencies + offset
+    )
+    return frequencies
+
+
+@pytest.mark.parametrize("n_tasks", [1, 2])
+@pytest.mark.parametrize("skunk_works", [True, False])
+def test_execution_blocks_with_offset_frequencies_are_all_imaged(
+    tmp_path, skunk_works, n_tasks
+):
+    """Two execution blocks whose channel centres differ by a few kHz, imaged
+    on the first one's frequencies in one node task or one per channel: every
+    task selects and images both (each channel maps onto its nearest image
+    channel), with the direct Zarr loader (``skunk_works=True``) as with the
+    standard one, and the two loaders give the same images. The direct loader
+    used to require every selected frequency to equal an image frequency to
+    1e-12, so it failed the load and, as a load failure is logged and
+    skipped, wrote no image at all; and graphviper's channel selection used
+    to drop the second block from the task of an end channel."""
+    ps_store = _simulate_point_source(tmp_path)
+    frequencies = _add_shifted_execution_block(ps_store)
+
+    def image(store_name, use_skunk_works):
+        return distributed_applications.imaging.image_cube_single_field(
+            ps_store=ps_store,
+            image_store=str(tmp_path / store_name),
+            image_params={
+                "image_size": [64, 64],
+                "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600),
+                "phase_direction": PC,
+                "frequency_coords": frequencies,
+                "polarization_coords": ["I", "V"],
+                "time_coords": [0],
+                "fft_padding": 1.2,
+            },
+            instrument_polarization_basis="circular",
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params={
+                "max_iter": 0,
+                "max_cycles": 0,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": -1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            image_data_variables_keep=["sky_residual", "point_spread_function"],
+            processing_set_data_group_name="base",
+            single_precision_image=False,
+            n_mapping_parallelism={"frequency": n_tasks},
+            skunk_works=use_skunk_works,
+        )
+
+    result = image("cube.img.zarr", skunk_works)
+    _assert_imaged(result, n_tasks=n_tasks)
+    img = load_image(str(tmp_path / "cube.img.zarr"))
+    # The natural-weighted dirty image of the source at the phase centre, 1 Jy
+    # in the first execution block and 3 Jy in the second, peaks at 2 Jy/beam
+    # in both channels only when both blocks are imaged in both.
+    stokes_i = img.SKY_RESIDUAL.values[0, :, 0]  # [frequency, l, m]
+    np.testing.assert_allclose(np.nanmax(stokes_i, axis=(1, 2)), [2.0, 2.0], rtol=1e-3)
+    assert np.isfinite(img.POINT_SPREAD_FUNCTION.values).all()
+
+    if skunk_works:
+        reference = image("standard.img.zarr", False)
+        _assert_imaged(reference, n_tasks=n_tasks)
+        _assert_images_equal(
+            str(tmp_path / "cube.img.zarr"), str(tmp_path / "standard.img.zarr")
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Measurement Set v2 ps_store
 # --------------------------------------------------------------------------- #
