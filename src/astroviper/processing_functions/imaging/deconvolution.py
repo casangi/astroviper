@@ -1563,7 +1563,7 @@ def asp_clean(
         - ``asp_rc_positive_only`` : bool, the residual-shaped components
           take only positive residual (their peak is the largest positive
           residual in the mask); the Asp iterations clean the negative
-          residual. Default ``False``.
+          residual. Default ``True``.
         - ``asp_no_change_tolerance`` : float, an Asp iteration that changes
           the peak residual by less than this fraction of the previous peak
           counts as no change, and two such iterations switch to a Hogbom
@@ -1721,7 +1721,7 @@ def asp_clean(
         rc_floor_at_threshold=bool(
             deconvolve_params.get("asp_rc_floor_at_threshold", True)
         ),
-        rc_positive_only=bool(deconvolve_params.get("asp_rc_positive_only", False)),
+        rc_positive_only=bool(deconvolve_params.get("asp_rc_positive_only", True)),
         significance_gain=float(deconvolve_params.get("asp_significance_gain", 0.3)),
         no_change_tolerance=float(
             deconvolve_params.get("asp_no_change_tolerance", 0.0)

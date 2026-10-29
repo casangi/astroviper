@@ -110,9 +110,10 @@ struct AspResult {
 };
 
 // Options of Asp beyond CASA's and LibRA's AspMatrixCleaner, all off by default
-// in the kernel; deconvolution.asp_clean() turns scale_significance and
-// residual_components on: together they clean the ring residuals Asp leaves
-// on resolved emission, with far fewer iterations.
+// in the kernel; deconvolution.asp_clean() turns scale_significance,
+// residual_components and rc_positive_only on: the first two together clean
+// the ring residuals Asp leaves on resolved emission, with far fewer
+// iterations.
 //   scale_significance: measure the noise of the residual smoothed with each
 //     initial scale (robust, outside the mask) and, once the peak is below
 //     the threshold, go on cleaning the most significant smoothed residual
