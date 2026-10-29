@@ -376,8 +376,8 @@ def image_cube_single_field(
           to the bit with and without it, and the RMS is the sum of squares
           the peak search of the next iteration makes anyway, so it costs no
           extra pass over the image per iteration. Hogbom deconvolvers only:
-          ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
-          No CASA equivalent.
+          ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise
+          ``ValueError``. Default ``False``. No CASA equivalent.
         - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
           subtracts the PSF of every component it finds from the whole residual
           image, with a PSF of twice the image size made once per channel from
@@ -390,8 +390,9 @@ def image_cube_single_field(
           image-sized PSF either way. Costs a second PSF per channel (four
           times the pixels, kept through the channel's cycles) and a
           subtraction over the whole image at every iteration. Hogbom
-          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
-          Default ``False``. No CASA equivalent.
+          deconvolvers of cube imaging only: ``deconvolver="asp"`` and
+          continuum imaging raise ``ValueError``. Default ``False``. No CASA
+          equivalent.
         - ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends
           after each of its Hogbom runs (51 or 510 point components) unless
           the RMS of the residual has fallen, by less than a factor 1.5, since

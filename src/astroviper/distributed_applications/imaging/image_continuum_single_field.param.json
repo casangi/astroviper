@@ -17,7 +17,7 @@
         "gridder": { "type": ["str"], "allowed": ["anti_alias"] },
         "deconvolver": {
             "type": ["str"],
-            "allowed": ["hogbom", "mtmfs"]
+            "allowed": ["hogbom", "asp", "mtmfs"]
         },
         "primary_beam_correction": { "type": "boolean" },
         "primary_beam_limit": {"type": "float"},

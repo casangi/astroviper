@@ -1843,11 +1843,18 @@ def residual_update_continuum_single_field(
 
     deconvolver : str, optional
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
-        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
-        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
-        are refused before anything is written.
+        threaded across planes) cleans Taylor term zero only. ``"asp"``
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
+        ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
+        (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
+        measures the noise on the pixels outside its mask, which without a
+        clean mask lie outside the primary-beam support, where MVC sets the
+        residual to 0, so the test cleans nothing below ``threshold_per_cycle``
+        (a warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        synthesis) cleans the Taylor terms together and needs
+        ``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``
+        it falls back to ``"hogbom"`` with a warning. Other values are refused
+        before anything is written.
 
     instrument_polarization_basis : {"linear", "circular"}, optional
         Correlation (instrument) polarization basis the gridding is performed in:
@@ -2595,10 +2602,10 @@ def model_update_mtmfs_single_field(
 ):
     """Perform one continuum model update.
 
-    Dispatch the continuum model update to native MT-MFS or to the compatibility
-    Högbom path. Native MT-MFS receives each complete Taylor stack directly as
-    ``(n_taylor_terms, l, m)``. Högbom temporarily projects Taylor term zero onto a
-    single-frequency cube representation.
+    Dispatch the continuum model update to native MT-MFS or to the cube
+    deconvolvers (Högbom or Asp). Native MT-MFS receives each complete Taylor
+    stack directly as ``(n_taylor_terms, l, m)``. Högbom and Asp temporarily
+    project Taylor term zero onto a single-frequency cube representation.
 
     The procedure is
 
@@ -2637,11 +2644,18 @@ def model_update_mtmfs_single_field(
 
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
-        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
-        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
-        are refused before anything is written.
+        threaded across planes) cleans Taylor term zero only. ``"asp"``
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
+        ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
+        (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
+        measures the noise on the pixels outside its mask, which without a
+        clean mask lie outside the primary-beam support, where MVC sets the
+        residual to 0, so the test cleans nothing below ``threshold_per_cycle``
+        (a warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        synthesis) cleans the Taylor terms together and needs
+        ``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``
+        it falls back to ``"hogbom"`` with a warning. Other values are refused
+        before anything is written.
 
     deconvolve_params : dict
         Model-update control parameters. These typically include entries such as
@@ -2653,16 +2667,24 @@ def model_update_mtmfs_single_field(
         ``max_iter_per_cycle`` means no cap) and ``threshold_per_cycle`` is
         ``threshold``, as in the cube deconvolver. ``max_iter_divergence``
         (default 1, ``-1`` turns the test off) sets the divergence test of
-        the model update, made on the Taylor-zero residual: a plane stops
-        when its RMS has been above ``(1 + gain)`` times the lowest RMS of
-        the model update for that many iterations in a row (the limit of
-        Asp), or at once when its peak exceeds ``(1 + gain)`` times the
-        peak at the start of the model update. ``gain``
-        (``0 < gain <= 1``) and ``max_iter_divergence`` are checked as in
-        the cube deconvolver. Both deconvolvers restrict cleaning to pixels
-        where the primary beam is at least ``primary_beam_limit`` (default 0)
-        times its peak and not 0. When a clean mask is present, its intersection
-        with that PB support is used; the stop test measures the same pixels.
+        the model update, made on the Taylor-zero residual. With
+        ``"mtmfs"`` a plane stops when its RMS has been above ``(1 + gain)``
+        times the lowest RMS of the model update for that many iterations
+        in a row (the limit of Asp), or at once when its peak exceeds
+        ``(1 + gain)`` times the peak at the start of the model update;
+        ``"hogbom"`` and ``"asp"`` take the limits of their cube kernels
+        (Hogbom: RMS ``1 + gain / 10``, peak ``1 + gain``; Asp: RMS
+        ``1 + gain``, no peak limit). ``gain`` (``0 < gain <= 1``) and
+        ``max_iter_divergence`` are checked as in the cube deconvolver.
+        Every deconvolver places its component centres on pixels where the
+        primary beam is at least ``primary_beam_limit`` (default 0) times its
+        peak and not 0 (Asp components reach past them). When a clean mask is
+        present, its intersection with that PB support is used; the stop
+        test measures the same pixels. With ``"asp"`` the keys of
+        :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`
+        (``largestscale``, ``asp_residual_components``,
+        ``asp_scale_significance`` and the others) reach the Asp kernel
+        unchanged.
 
     is_first_cycle : bool, optional
         Indicates whether this is the first model update.
@@ -2708,9 +2730,9 @@ def model_update_mtmfs_single_field(
     )
 
     deconvolver = deconvolver.lower()
-    if deconvolver not in {"hogbom", "mtmfs"}:
+    if deconvolver not in {"hogbom", "asp", "mtmfs"}:
         raise NotImplementedError(
-            "Continuum deconvolution supports 'hogbom' and 'mtmfs'; "
+            "Continuum deconvolution supports 'hogbom', 'asp' and 'mtmfs'; "
             f"received {deconvolver!r}."
         )
 
@@ -2748,6 +2770,14 @@ def model_update_mtmfs_single_field(
 
     if residual.sizes["taylor_term"] < 1:
         raise ValueError("SKY_RESIDUAL contains no Taylor terms.")
+
+    if deconvolver == "asp" and residual.sizes["taylor_term"] != 1:
+        raise ValueError(
+            "deconvolver='asp' cleans Taylor term zero only and requires "
+            "SKY_RESIDUAL with one Taylor term; received "
+            f"{residual.sizes['taylor_term']}. Use deconvolver='mtmfs' for 2 to 4 "
+            "Taylor terms."
+        )
 
     if psf.sizes["psf_taylor_order"] < 1:
         raise ValueError("POINT_SPREAD_FUNCTION contains no PSF Taylor terms.")
@@ -2821,10 +2851,13 @@ def model_update_mtmfs_single_field(
             image_data_group_out_name,
         )
 
+    # Högbom and Asp share this path; only the labels below name the backend.
+    backend_label = "Asp" if deconvolver == "asp" else "Högbom"
+
     # ------------------------------------------------------------------
     # Build a temporary cube-like image dataset.
     #
-    # The existing Högbom backend expects
+    # The existing Högbom and Asp backends expect
     #
     #     time x frequency x polarization x l x m
     #
@@ -2966,15 +2999,15 @@ def model_update_mtmfs_single_field(
         hogbom_xds,
         data_group_out_name=image_data_group_out_name,
         data_group_out=hogbom_model_group,
-        description="Temporary single-plane Högbom continuum model.",
+        description=f"Temporary single-plane {backend_label} continuum model.",
     )
     model_name = hogbom_model_group["sky"]
 
     T_make_hogbom_view = time.time() - start
 
-    # Högbom operates on real arrays but supports both image precisions. Match
-    # the residual precision throughout and avoid copying arrays already in the
-    # required real dtype.
+    # Högbom and Asp operate on real arrays and support both image precisions.
+    # Match the residual precision throughout and avoid copying arrays already
+    # in the required real dtype.
     float_dtype = hogbom_xds[residual_name].real.dtype
     hogbom_xds[residual_name] = hogbom_xds[residual_name].real.astype(
         float_dtype, copy=False
@@ -2986,7 +3019,8 @@ def model_update_mtmfs_single_field(
     hogbom_xds[model_name] = hogbom_xds[model_name].real.astype(float_dtype, copy=False)
 
     # ------------------------------------------------------------------
-    # Run the existing single-frequency Högbom model-update backend.
+    # Run the existing single-frequency cube model-update backend
+    # (Högbom or Asp).
     # ------------------------------------------------------------------
     start = time.time()
 
@@ -3007,12 +3041,14 @@ def model_update_mtmfs_single_field(
     T_hogbom = time.time() - start
 
     # ------------------------------------------------------------------
-    # Copy the Högbom model back into Taylor term zero.
+    # Copy the cube model back into Taylor term zero.
     # ------------------------------------------------------------------
     start = time.time()
 
     if "SKY_MODEL" not in hogbom_xds:
-        raise RuntimeError("The Högbom model-update backend did not produce SKY_MODEL.")
+        raise RuntimeError(
+            f"The {backend_label} model-update backend did not produce SKY_MODEL."
+        )
 
     model_zero = hogbom_xds["SKY_MODEL"].isel(
         frequency=0,
@@ -3043,7 +3079,7 @@ def model_update_mtmfs_single_field(
         img_xds,
         data_group_out_name=image_data_group_out_name,
         data_group_out=continuum_model_group,
-        description="Continuum model increment produced by Högbom CLEAN.",
+        description=f"Continuum model increment produced by {backend_label} CLEAN.",
     )
 
     T_copy_model = time.time() - start
@@ -3254,7 +3290,7 @@ def restore_continuum_image(
     primary_beam_key : str, optional
         Role key of the primary beam in the residual data group.
 
-    deconvolver : {"hogbom", "mtmfs"}, optional
+    deconvolver : {"hogbom", "asp", "mtmfs"}, optional
         Deconvolver that produced the model. MT-MFS restoration applies the
         Taylor Hessian's principal solution to a private residual copy before
         selecting Taylor term zero. The stored residual remains unchanged.
