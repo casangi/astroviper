@@ -1844,8 +1844,7 @@ def residual_update_continuum_single_field(
     deconvolver : str, optional
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"asp"``
-        (C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)
-        cleans Taylor term zero only and needs
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
         (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
         measures the noise on the pixels outside its mask, which without a
@@ -2646,8 +2645,7 @@ def model_update_mtmfs_single_field(
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"asp"``
-        (C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)
-        cleans Taylor term zero only and needs
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
         (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
         measures the noise on the pixels outside its mask, which without a
@@ -2732,12 +2730,10 @@ def model_update_mtmfs_single_field(
     )
 
     deconvolver = deconvolver.lower()
-    if deconvolver in ("aspclean", "asp_clean"):
-        deconvolver = "asp"
     if deconvolver not in {"hogbom", "asp", "mtmfs"}:
         raise NotImplementedError(
-            "Continuum deconvolution supports 'hogbom', 'asp' (aliases "
-            f"'aspclean' and 'asp_clean') and 'mtmfs'; received {deconvolver!r}."
+            "Continuum deconvolution supports 'hogbom', 'asp' and 'mtmfs'; "
+            f"received {deconvolver!r}."
         )
 
     if "SKY_RESIDUAL" not in img_xds:
@@ -2774,6 +2770,14 @@ def model_update_mtmfs_single_field(
 
     if residual.sizes["taylor_term"] < 1:
         raise ValueError("SKY_RESIDUAL contains no Taylor terms.")
+
+    if deconvolver == "asp" and residual.sizes["taylor_term"] != 1:
+        raise ValueError(
+            "deconvolver='asp' cleans Taylor term zero only and requires "
+            "SKY_RESIDUAL with one Taylor term; received "
+            f"{residual.sizes['taylor_term']}. Use deconvolver='mtmfs' for 2 to 4 "
+            "Taylor terms."
+        )
 
     if psf.sizes["psf_taylor_order"] < 1:
         raise ValueError("POINT_SPREAD_FUNCTION contains no PSF Taylor terms.")

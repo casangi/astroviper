@@ -66,13 +66,13 @@ def test_public_api_rejects_msv2_before_creating_output(monkeypatch, tmp_path):
     assert not output.exists()
 
 
-@pytest.mark.parametrize("deconvolver", ["hogbom_many_threads", "clark", ""])
+@pytest.mark.parametrize(
+    "deconvolver", ["hogbom_many_threads", "clark", "", "aspclean", "asp_clean"]
+)
 def test_public_api_rejects_deconvolvers_the_continuum_model_update_lacks(
     deconvolver,
 ):
-    with pytest.raises(
-        ValueError, match=r"must be 'hogbom', 'asp' \(aliases .*\) or 'mtmfs'"
-    ):
+    with pytest.raises(ValueError, match="must be 'hogbom', 'asp' or 'mtmfs'"):
         _resolve_continuum_deconvolver(deconvolver, {"n_taylor_terms": 1})
 
 
@@ -80,9 +80,8 @@ def test_non_mtmfs_deconvolver_does_not_require_nterms():
     assert _resolve_continuum_deconvolver("hogbom", {}) == "hogbom"
 
 
-@pytest.mark.parametrize("deconvolver", ["asp", "ASP", "aspclean", "asp_clean"])
-def test_public_api_resolves_asp_and_its_aliases_with_one_taylor_term(deconvolver):
-    assert _resolve_continuum_deconvolver(deconvolver, {"n_taylor_terms": 1}) == "asp"
+def test_public_api_resolves_asp_with_one_taylor_term():
+    assert _resolve_continuum_deconvolver("asp", {"n_taylor_terms": 1}) == "asp"
 
 
 @pytest.mark.parametrize(
@@ -111,12 +110,9 @@ def test_public_api_resolves_asp_and_its_aliases_with_one_taylor_term(deconvolve
         ),
     ],
 )
-@pytest.mark.parametrize("deconvolver", ["asp", "aspclean"])
-def test_public_api_refuses_asp_without_exactly_one_taylor_term(
-    deconvolver, params, error, message
-):
+def test_public_api_refuses_asp_without_exactly_one_taylor_term(params, error, message):
     with pytest.raises(error, match=message):
-        _resolve_continuum_deconvolver(deconvolver, params)
+        _resolve_continuum_deconvolver("asp", params)
 
 
 @pytest.mark.parametrize(

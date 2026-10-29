@@ -744,17 +744,13 @@ def test_hogbom_adapter_canonicalizes_generated_primary_beam_mask(monkeypatch):
     model_update_mtmfs_single_field(image, "hogbom", {"max_iter": 1})
 
 
-@pytest.mark.parametrize("deconvolver", ["asp", "ASP", "aspclean", "asp_clean"])
 @pytest.mark.parametrize(
     "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
 )
-def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(
-    monkeypatch, asp_options, deconvolver
-):
+def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(monkeypatch, asp_options):
     """The adapter runs the cube Asp path on Taylor term zero of every
     (time, polarization) plane, with the per-plane limits, the divergence
-    limits of Asp and the Asp options, and copies the model back. The aliases
-    of ``"asp"`` take the same path."""
+    limits of Asp and the Asp options, and copies the model back."""
     import astroviper.processing_functions.imaging.deconvolution as deconvolution
 
     image, _, _ = make_single_term_continuum_image()
@@ -780,7 +776,7 @@ def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(
     monkeypatch.setattr(deconvolution.aspclean, "clean_cube", clean_cube)
     statistics, timing = model_update_mtmfs_single_field(
         image,
-        deconvolver,
+        "asp",
         {
             "max_iter": 10,
             "max_iter_per_cycle_updated": limits,

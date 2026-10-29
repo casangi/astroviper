@@ -106,8 +106,7 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
     'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
-    '(C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)\n'
-    "cleans Taylor term zero only and needs\n"
+    "(C++, adaptive scale pixel) cleans Taylor term zero only and needs\n"
     '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
     "(``asp_scale_significance``) needs an explicit ``clean_mask``: Asp\n"
     "measures the noise on the pixels outside its mask, which without a\n"

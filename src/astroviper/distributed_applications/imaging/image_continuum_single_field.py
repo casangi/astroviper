@@ -2638,19 +2638,16 @@ def _warn_on_mvc_asp_significance_without_clean_mask(
 def _resolve_continuum_deconvolver(deconvolver, image_params):
     """Resolve user-facing continuum deconvolver choices before graph creation.
 
-    ``"aspclean"`` and ``"asp_clean"`` resolve to ``"asp"``. Asp cleans Taylor
-    term zero, so it needs ``image_params["n_taylor_terms"] == 1``.
+    Asp cleans Taylor term zero, so it needs
+    ``image_params["n_taylor_terms"] == 1``.
     """
     import operator
     import warnings
 
     deconvolver = str(deconvolver).lower()
-    if deconvolver in ("aspclean", "asp_clean"):
-        deconvolver = "asp"
     if deconvolver not in ("hogbom", "asp", "mtmfs"):
         raise ValueError(
-            "deconvolver must be 'hogbom', 'asp' (aliases 'aspclean' and "
-            "'asp_clean') or 'mtmfs' for continuum imaging; "
+            "deconvolver must be 'hogbom', 'asp' or 'mtmfs' for continuum imaging; "
             f"received {deconvolver!r}."
         )
     if deconvolver == "hogbom":
@@ -2854,8 +2851,8 @@ def image_continuum_single_field(
     MFS reduces Taylor UV grids before the global inverse FFT. MVC performs
     channel FFTs and PB correction in map tasks, then reduces Taylor
     contributions. Native MT-MFS updates the complete Taylor model; Högbom
-    updates Taylor term zero. Asp (``"asp"``, aliases ``"aspclean"`` and
-    ``"asp_clean"``) updates Taylor term zero as Högbom does and requires
+    updates Taylor term zero. Asp (``"asp"``) updates Taylor term zero as
+    Högbom does and requires
     ``image_params["n_taylor_terms"] = 1``; with more Taylor terms it raises
     ``ValueError`` before anything is written. In MVC the significance test
     of Asp (``asp_scale_significance``) needs a ``clean_mask`` (see
@@ -2999,8 +2996,7 @@ def image_continuum_single_field(
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"asp"``
-        (C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)
-        cleans Taylor term zero only and needs
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
         (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
         measures the noise on the pixels outside its mask, which without a
