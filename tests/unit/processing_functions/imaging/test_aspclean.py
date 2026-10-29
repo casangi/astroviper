@@ -1206,19 +1206,6 @@ class TestRingCleaning:
         assert fits.shape == (timing["n_residual_components"] + 1, 6)
         assert np.all((fits[:, 1] >= 0.3) & (fits[:, 1] <= 0.99))  # frac
         assert np.all((fits[:, 2] >= 1e-3) & (fits[:, 2] <= 10.0))  # eps_frac
-        assert np.all(fits[:, 0] > 0)  # positive peaks only
-
-    def test_residual_components_take_positive_residual_only(self):
-        """A negative source: the residual-shaped components take positive
-        residual only, so they take none of it, and the Asp iterations clean
-        it to the threshold."""
-        psf, sky, dirty, mask, threshold = self._scene()
-        out, resid, model = self._clean(
-            psf, dirty * -1.0, mask, threshold, residual_components=True
-        )
-        assert out["timing"]["n_residual_components"] == 0
-        assert out["stop_code"] == 2  # the threshold
-        np.testing.assert_allclose(model.sum(), -sky.sum(), rtol=0.05)
 
     def test_scale_significance_cleans_a_faint_broad_source(self):
         """A broad source whose dirty peak is below the threshold: Asp alone

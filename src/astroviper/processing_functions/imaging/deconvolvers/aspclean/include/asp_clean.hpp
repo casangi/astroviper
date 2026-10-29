@@ -116,11 +116,10 @@ struct AspResult {
 //   record_components: return the components in AspResult::components.
 //   residual_components: before the Asp iterations of a model update, clean
 //     with components shaped by the residual (Ma, Zhang & Zhang 2026, A&A
-//     713, A164): C = R tanh((R - T) / eps) on the mask pixels with R >= T,
-//     T = max(frac R_peak, rc_noise_floor * noise[, the threshold when
-//     rc_floor_at_threshold, the default]), eps = eps_frac R_peak, R_peak
-//     the largest positive residual in the mask (the components take
-//     positive residual only); (frac, eps_frac) fitted within their bounds by least
+//     713, A164): C = R tanh((sR - T) / eps) on the mask pixels with sR >= T,
+//     T = max(frac |R_peak|, rc_noise_floor * noise[, the threshold when
+//     rc_floor_at_threshold, the default]), eps = eps_frac |R_peak|,
+//     s = sign R_peak; (frac, eps_frac) fitted within their bounds by least
 //     squares of the masked residual, down to rc_switch_factor times the
 //     threshold; the Asp iterations take it on to the threshold.
 struct AspOptions {

@@ -1471,13 +1471,12 @@ def asp_clean(
           test, which takes fewer imaging cycles.
         - ``asp_residual_components`` : bool, start each model update with
           components shaped by the residual (Ma, Zhang & Zhang 2026, A&A 713,
-          A164): ``C = R tanh((R - T) / eps)`` on the mask pixels with
-          ``R >= T``, where ``R`` is the residual, ``R_p`` its largest
-          positive value in the mask, ``T = max(frac R_p, threshold_per_cycle)``
-          and ``eps = eps_frac R_p``, with ``(frac, eps_frac)`` fitted by least
-          squares of the masked residual. They take positive residual only,
-          down to ``threshold_per_cycle``; the Asp iterations clean the
-          negative residual and go on from there.
+          A164): ``C = R tanh((s R - T) / eps)`` on the mask pixels with
+          ``s R >= T``, where ``R`` is the residual, ``s`` the sign of its
+          peak ``R_p``, ``T = max(frac |R_p|, threshold_per_cycle)`` and
+          ``eps = eps_frac |R_p|``, with ``(frac, eps_frac)`` fitted by least
+          squares of the masked residual. They take the residual down to
+          ``threshold_per_cycle``, and the Asp iterations go on from there.
           They remove the ring residuals Asp leaves on resolved emission in
           far fewer iterations; on a plane of noise they take up no more
           noise than Asp. Default ``True``.

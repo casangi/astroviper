@@ -668,31 +668,31 @@ private:
         double logEps = std::min(std::max(std::log(1.0), llo), lhi);
         int status = deconvolvers::STOP_NONE;
         while (iteration_ < maxNiter_) {
-            // The components take positive residual only; the Asp iterations
-            // clean the negative residual.
-            double A = 0.0, sumSquares = 0.0;
+            double A = 0.0, peak = 0.0, sumSquares = 0.0;
             for (std::size_t k = 0; k < nb; ++k) {
                 if (inMask[k] == 0.0) continue;
                 sumSquares += R[k] * R[k];
-                A = std::max(A, R[k]);
+                if (std::fabs(R[k]) > A) { A = std::fabs(R[k]); peak = R[k]; }
             }
             if (A <= options_.rc_switch_factor * threshold_) break;
             if (stopTest_.check_divergence(A, sumSquares, divergence_) != deconvolvers::STOP_NONE) {
                 status = deconvolvers::STOP_DIVERGED;
                 break;
             }
+            const double s = peak > 0 ? 1.0 : -1.0;
             // C (and dC/dT, dC/deps) of (frac, eps_frac)
             auto component = [&](double fr, double epsf, bool derivatives, bool& floorActive) {
                 const double T0 = fr * A;
                 floorActive = floor > T0;
                 const double level = std::max(T0, floor), eps = epsf * A;
                 for (std::size_t k = 0; k < nb; ++k) {
-                    if (inMask[k] == 0.0 || R[k] < level) {
+                    const double sR = s * R[k];
+                    if (inMask[k] == 0.0 || sR < level) {
                         C[k] = 0.0;
                         if (derivatives) { dCdT[k] = 0.0; dCde[k] = 0.0; }
                         continue;
                     }
-                    const double u = (R[k] - level) / eps;
+                    const double u = (sR - level) / eps;
                     const double th = std::tanh(u);
                     C[k] = R[k] * th;
                     if (derivatives) {
@@ -758,7 +758,7 @@ private:
                 if (it + 1 < options_.rc_fit_iterations) f = misfit(frac, logEps, true);
             }
             if (options_.record_components) {
-                const double rec[6] = {A, frac, std::exp(logEps), 0.0, 0.0, f};
+                const double rec[6] = {peak, frac, std::exp(logEps), 0.0, 0.0, f};
                 timing_.residual_fits.insert(timing_.residual_fits.end(), rec, rec + 6);
             }
             // No progress: the fit cannot lower the misfit any more (its best
