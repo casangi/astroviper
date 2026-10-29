@@ -250,8 +250,10 @@ def validate_record_iteration_history(deconvolver, record_iteration_history):
     """Refuse ``record_iteration_history`` for a deconvolver that cannot record it.
 
     Every deconvolver records, for every component it subtracts, the signed
-    peak of the masked residual before it, the RMS of the masked residual
-    after it and the component (:data:`ITERATION_HISTORY_ALGORITHMS`).
+    peak of the masked residual before it (for a residual-shaped component of
+    Asp with ``asp_rc_positive_only``, the default, the largest positive
+    residual), the RMS of the masked residual after it and the component
+    (:data:`ITERATION_HISTORY_ALGORITHMS`).
 
     Parameters
     ----------

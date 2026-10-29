@@ -1207,6 +1207,25 @@ class TestRingCleaning:
         assert np.all((fits[:, 1] >= 0.3) & (fits[:, 1] <= 0.99))  # frac
         assert np.all((fits[:, 2] >= 1e-3) & (fits[:, 2] <= 10.0))  # eps_frac
 
+    @pytest.mark.parametrize("positive_only", [True, False])
+    def test_positive_only_leaves_a_negative_source_to_asp(self, positive_only):
+        """A negative source: with rc_positive_only the residual-shaped
+        components take positive residual only, so they take none of it, and
+        the Asp iterations clean it to the threshold. Without it (the kernel
+        default) they take it."""
+        psf, sky, dirty, mask, threshold = self._scene()
+        out, resid, model = self._clean(
+            psf,
+            -dirty,
+            mask,
+            threshold,
+            residual_components=True,
+            rc_positive_only=positive_only,
+        )
+        assert (out["timing"]["n_residual_components"] == 0) is positive_only
+        assert out["stop_code"] == 2  # the threshold
+        np.testing.assert_allclose(model.sum(), -sky.sum(), rtol=0.05)
+
     def test_iteration_history(self):
         """One record per component of every kind, without changing the
         clean: the residual-shaped components have scale -1 and the points

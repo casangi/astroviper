@@ -99,9 +99,10 @@ struct AspResult {
     int n_switch_point_scales = 0;
     int n_switch_fused = 0;
     // The record of every component (AspOptions::record_history): the
-    // signed peak of the masked residual before it, the RMS of the masked
-    // residual after it, its pixel (row, column), its scale in pixels (0 a
-    // point, -1 residual shaped) and its flux.
+    // signed peak of the masked residual before it (with rc_positive_only,
+    // the largest positive residual for a residual-shaped component), the
+    // RMS of the masked residual after it, its pixel (row, column), its scale
+    // in pixels (0 a point, -1 residual shaped) and its flux.
     std::vector<double> history_peak, history_rms, history_l, history_m, history_scale,
         history_flux;
     // Per residual-shaped component fit (peak, frac, eps_frac, 0, 0, the

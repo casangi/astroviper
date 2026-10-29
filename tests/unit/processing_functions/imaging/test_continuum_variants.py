@@ -839,7 +839,7 @@ def test_asp_cleans_every_plane_of_taylor_term_zero(dtype, asp_options):
     """The real Asp kernel cleans all four (time, polarization) planes. With
     threshold_per_cycle 0 each spends its 200 iterations (stop code 1); the
     residual peak falls to about 2 % of its start (measured: at most 2.1 %)
-    and the model holds the flux of the plane (measured: within 3.6 %)."""
+    and the model holds the flux of the plane (measured: within 2.9 %)."""
     image, sky, scale = make_single_term_continuum_image(dtype)
 
     statistics, _ = model_update_mtmfs_single_field(

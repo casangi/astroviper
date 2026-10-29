@@ -747,7 +747,9 @@ def image_cube_single_field(
           records, for every plane and every component it subtracts, the
           signed peak of the residual inside the clean mask before the
           component (the peak the threshold test sees; for MT-MFS that of
-          Taylor term zero), the RMS of that residual inside the clean mask
+          Taylor term zero, and for a residual-shaped component of Asp with
+          ``asp_rc_positive_only``, the default, the largest positive
+          residual), the RMS of that residual inside the clean mask
           after it, the model flux after it, and the component: its pixel
           along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an
           Asp residual-shaped component) and its flux, to follow the
