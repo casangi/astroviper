@@ -1,5 +1,7 @@
 """Antenna beam models: analytic responses, Jones images, sampling, Mueller matrices."""
 
+from math import factorial
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -247,6 +249,25 @@ def test_zernike_basis_and_surface():
     assert cplx.dtype == np.complex128
     with pytest.raises(ValueError):
         zernike_surface(np.zeros(67), x, y)
+
+
+def test_zernike_basis_is_textbook():
+    """R_n^|m| cos(m t) (m >= 0) or R_n^|m| sin(|m| t) (m < 0) in OSA order, x = rho sin t, y = rho cos t (#362)."""
+    rng = np.random.default_rng(362)
+    rho, t = np.sqrt(rng.uniform(0, 1, 1000)), rng.uniform(0, 2 * np.pi, 1000)
+    basis = zernike_basis(rho * np.sin(t), rho * np.cos(t))
+    nm = [(n, m) for n in range(11) for m in range(-n, n + 1, 2)]
+    for j, (n, m) in enumerate(nm):
+        a = abs(m)
+        radial = sum(
+            (-1) ** k
+            * factorial(n - k)
+            / (factorial(k) * factorial((n + a) // 2 - k) * factorial((n - a) // 2 - k))
+            * rho ** (n - 2 * k)
+            for k in range((n - a) // 2 + 1)
+        )
+        angular = np.cos(m * t) if m >= 0 else np.sin(a * t)
+        np.testing.assert_allclose(basis[j], radial * angular, atol=1e-12)
 
 
 # ----------------------------------------------------------------------------

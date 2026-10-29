@@ -1,12 +1,16 @@
 """Zernike polynomial basis used by the aperture-coefficient beam models.
 
 The 66 polynomials (radial orders ``n = 0 .. 10``) are written in expanded
-Cartesian form, in the exact order and normalisation used by the aperture
+Cartesian form, in the order and normalisation used by the aperture
 coefficient tables (Sekhar et al. 2022) shipped with AstroVIPER — ported
-verbatim from SIRIUS ``_zernike_polynomials.py``.  They are **not** the
-orthonormal Zernike polynomials (no ``sqrt(2 (n + 1))`` factors), so they must
-not be regenerated from a generic Zernike library without re-validating the
-coefficient tables.
+from SIRIUS ``_zernike_polynomials.py``.  They are the textbook Zernike
+polynomials ``R_n^|m|(rho) cos(m theta)`` (``m >= 0``) and
+``R_n^|m|(rho) sin(|m| theta)`` (``m < 0``) in OSA order, with ``x`` and ``y``
+in the roles of the Cartesian Y and X.  SIRIUS's polynomials 23, 39 and 53 had
+wrong terms; they are corrected here, and the shipped tables were converted
+exactly to the corrected polynomials (casangi/astroviper#362).  They are
+**not** the orthonormal Zernike polynomials (no ``sqrt(2 (n + 1))`` factors),
+and the tables depend on that normalisation.
 """
 
 from __future__ import annotations
@@ -80,11 +84,11 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     )  # m = -4 n = 6
     basis[23] = (
         12 * x * y
-        + 40 * (x**3) * y
+        - 40 * (x**3) * y
         - 40 * x * (y**3)
         + 30 * (x**5) * y
         + 60 * (x**3) * (y**3)
-        - 30 * x * (y**5)
+        + 30 * x * (y**5)
     )  # m = -2 n = 6
     basis[24] = (
         -1
@@ -219,7 +223,7 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         - 210 * (x**5) * y
         - 420 * (x**3) * (y**3)
         - 210 * x * (y**5)
-        - 112 * (x**7) * y
+        + 112 * (x**7) * y
         + 336 * (x**5) * (y**3)
         + 336 * (x**3) * (y**5)
         + 112 * x * (y**7)
@@ -281,7 +285,7 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     )  # m = 6 n = 8
     basis[44] = (
         x**8 - 28 * (x**6) * (y**2) + 70 * (x**4) * (y**4) - 28 * (x**2) * (y**6) + y**8
-    )  # m = 8 n = 9
+    )  # m = 8 n = 8
     basis[45] = (
         x**9
         - 36 * (x**7) * (y**2)
@@ -361,7 +365,7 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         + 756 * (y**5) * (x**4)
         + 504 * (y**3) * (x**6)
         + 126 * y * (x**8)
-    )  # m = -1 n = 9
+    )  # m = 1 n = 9
     basis[51] = (
         -20 * y**3
         + 60 * y * (x**2)
@@ -398,7 +402,7 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         + 9 * y**9
         - 180 * (y**7) * (x**2)
         + 126 * (y**5) * (x**4)
-        - 252 * (y**3) * (x**6)
+        + 252 * (y**3) * (x**6)
         - 63 * y * (x**8)
     )  # m = 7 n = 9
     basis[54] = (
