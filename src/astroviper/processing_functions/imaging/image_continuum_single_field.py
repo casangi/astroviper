@@ -2485,9 +2485,9 @@ def build_continuum_residual_imaging_dict(
     plane, broadcasting masks and sidelobes by dimension name. Peaks are
     measured on finite pixels in the explicit CLEAN mask, or the same PB
     support as model_update when no explicit mask exists. No counters or
-    history entries are advanced. When entropy stopping is enabled, residual
-    entropy and SNR are measured on Taylor term zero using that same clean
-    support. The cube workflow is unchanged.
+    history entries are advanced. The residual entropy and SNR and the
+    residual statistics inside and outside the clean support are measured on
+    Taylor term zero using that same clean support.
 
     Parameters
     ----------
@@ -2512,6 +2512,7 @@ def build_continuum_residual_imaging_dict(
         image_statistics as imgstats,
     )
     from astroviper.processing_functions.imaging.utils import (
+        ITERATION_HISTORY_FIELDS,
         ImagingDict,
         validate_entropy_params,
     )
@@ -2549,24 +2550,24 @@ def build_continuum_residual_imaging_dict(
     )
     sidelobe = sidelobe.broadcast_like(residual.isel(l=0, m=0, drop=True))
     sidelobe = sidelobe.transpose("time", "polarization").values
-    if entropy_stop:
-        entropy_residual = residual.expand_dims(frequency=[0], axis=1)
-        entropy_image = entropy_residual.to_dataset(name="SKY_RESIDUAL")
-        entropy_image["MASK"] = xr.DataArray(
-            support[:, np.newaxis],
-            dims=entropy_residual.dims,
-            coords=entropy_residual.coords,
-        )
-        entropy_image.attrs["data_groups"] = {
-            "residual": {"sky": "SKY_RESIDUAL", "mask": "MASK"}
-        }
-        entropy, residual_snr = imgstats.image_residual_entropy(
-            entropy_image,
-            data_group_name="residual",
-            spatial_bins=entropy_spatial_bins,
-            flux_bins=entropy_flux_bins,
-            max_snr=entropy_max_snr,
-        )
+    entropy_residual = residual.expand_dims(frequency=[0], axis=1)
+    entropy_image = entropy_residual.to_dataset(name="SKY_RESIDUAL")
+    entropy_image["MASK"] = xr.DataArray(
+        support[:, np.newaxis],
+        dims=entropy_residual.dims,
+        coords=entropy_residual.coords,
+    )
+    entropy_image.attrs["data_groups"] = {
+        "residual": {"sky": "SKY_RESIDUAL", "mask": "MASK"}
+    }
+    entropy, residual_snr = imgstats.image_residual_entropy(
+        entropy_image,
+        data_group_name="residual",
+        spatial_bins=entropy_spatial_bins,
+        flux_bins=entropy_flux_bins,
+        max_snr=entropy_max_snr,
+    )
+    residual_statistics = imgstats.cube_residual_statistics(residual.values, support)
     statistics = ImagingDict()
     for tt in range(residual.sizes["time"]):
         for pp in range(residual.sizes["polarization"]):
@@ -2579,10 +2580,16 @@ def build_continuum_residual_imaging_dict(
                 "iter_done": 0,
                 "max_psf_sidelobe": float(sidelobe[tt, pp]),
                 "gain": cycle_control_params.get("gain", 0.1),
+                "entropy": float(entropy[tt, 0, pp]),
+                "residual_snr": float(residual_snr[tt, 0, pp]),
+                **{
+                    field: float(values[tt, pp])
+                    for field, values in residual_statistics.items()
+                },
             }
-            if entropy_stop:
-                fields["entropy"] = float(entropy[tt, 0, pp])
-                fields["residual_snr"] = float(residual_snr[tt, 0, pp])
+            if cycle_control_params.get("record_iteration_history", False):
+                for field in ITERATION_HISTORY_FIELDS:
+                    fields[field] = np.empty(0)
             statistics.add(
                 fields,
                 time=tt,
@@ -2607,11 +2614,18 @@ def _model_update_native_mtmfs(
     import numpy as np
     import pandas as pd
 
+    from astroviper.processing_functions.image_analysis import (
+        image_statistics as imgstats,
+    )
     from astroviper.processing_functions.imaging.deconvolution import (
         _divergence_factors,
     )
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
-    from astroviper.processing_functions.imaging.utils import ImagingDict, StopCode
+    from astroviper.processing_functions.imaging.utils import (
+        ITERATION_HISTORY_FIELDS,
+        ImagingDict,
+        StopCode,
+    )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
         MODEL_UPDATE_STOP_DESCRIPTIONS,
@@ -2738,6 +2752,9 @@ def _model_update_native_mtmfs(
         "divergence_peak_factor": limit,
     }
 
+    record_iteration_history = bool(
+        deconvolve_params.get("record_iteration_history", False)
+    )
     model = np.zeros_like(residual)
     imaging_dict = ImagingDict()
     start = time.time()
@@ -2799,6 +2816,7 @@ def _model_update_native_mtmfs(
                 threshold_per_cycle=threshold_per_cycle,
                 mask_threshold=deconvolve_params.get("mask_threshold", 0.9),
                 **divergence,
+                record_iteration_history=record_iteration_history,
             )
             if not native_layout:
                 residual_view[...] = residual_work
@@ -2831,7 +2849,20 @@ def _model_update_native_mtmfs(
                 "masksum": int(np.count_nonzero(final_selected)),
                 "scales": result["scales"],
                 "hessian_condition_number": result["hessian_condition_number"],
+                "n_point_components": int(result["n_point_components"]),
+                "n_scale_components": int(result["n_scale_components"]),
+                **imgstats.plane_residual_statistics(residual_work[0], support[tt, pp]),
             }
+            positive, negative = imgstats.cube_flux_by_sign(model_work[0])
+            fields["model_flux_positive"] = float(positive)
+            fields["model_flux_negative"] = float(negative)
+            if record_iteration_history:
+                for field in ITERATION_HISTORY_FIELDS:
+                    if field in result:
+                        fields[field] = np.asarray(result[field])
+                fields["iteration_model_flux"] = np.cumsum(
+                    fields["iteration_component_flux"]
+                )
             imaging_dict.add(fields, time=tt, pol=pp, chan=0)
 
     img_xds["SKY_MODEL"] = residual_da.copy(data=model)

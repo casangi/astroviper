@@ -90,15 +90,31 @@ struct AspResult {
     // (AspOptions::scale_significance) and their time, search and fit included.
     int n_significance_components = 0;
     double t_significance = 0.0;
+    // Hogbom runs: switches from the Asp iterations to point components, and
+    // the switches of each test: two iterations without change of the peak
+    // residual, 5 of the last 10 Aspens of scale 0, the peak residual or the
+    // optimum strength below fusedthreshold.
+    int n_hogbom_runs = 0;
+    int n_switch_no_change = 0;
+    int n_switch_point_scales = 0;
+    int n_switch_fused = 0;
+    // The record of every component (AspOptions::record_history): the
+    // signed peak of the masked residual before it (with rc_positive_only,
+    // the largest positive residual for a residual-shaped component), the
+    // RMS of the masked residual after it, its pixel (row, column), its scale
+    // in pixels (0 a point, -1 residual shaped) and its flux.
+    std::vector<double> history_peak, history_rms, history_l, history_m, history_scale,
+        history_flux;
     // Per residual-shaped component fit (peak, frac, eps_frac, 0, 0, the
     // objective at the end of the fit), when record_components.
     std::vector<double> residual_fits;
 };
 
 // Options of Asp beyond CASA's and LibRA's AspMatrixCleaner, all off by default
-// in the kernel; deconvolution.asp_clean() turns scale_significance and
-// residual_components on: together they clean the ring residuals Asp leaves
-// on resolved emission, with far fewer iterations.
+// in the kernel; deconvolution.asp_clean() turns scale_significance,
+// residual_components and rc_positive_only on: the first two together clean
+// the ring residuals Asp leaves on resolved emission, with far fewer
+// iterations.
 //   scale_significance: measure the noise of the residual smoothed with each
 //     initial scale (robust, outside the mask) and, once the peak is below
 //     the threshold, go on cleaning the most significant smoothed residual
@@ -121,7 +137,16 @@ struct AspResult {
 //     rc_floor_at_threshold, the default]), eps = eps_frac |R_peak|,
 //     s = sign R_peak; (frac, eps_frac) fitted within their bounds by least
 //     squares of the masked residual, down to rc_switch_factor times the
-//     threshold; the Asp iterations take it on to the threshold.
+//     threshold; the Asp iterations take it on to the threshold. With
+//     rc_positive_only the components take only positive residual: R_peak is
+//     the largest positive residual and s = +1, so the Asp iterations clean
+//     the negative residual.
+//   record_history: record every component (AspResult::history_*).
+//   no_change_tolerance: an Asp iteration that changes the peak residual by
+//     less than this fraction of the previous peak counts as no change (two
+//     switch to a Hogbom run); 0 keeps CASA's and LibRA's absolute 1e-4, in
+//     the units of the image, which counts every iteration once the peak
+//     residual is below about a mJy.
 struct AspOptions {
     bool scale_significance = false;
     double significance = 0.0;
@@ -132,8 +157,11 @@ struct AspOptions {
     double rc_noise_floor = 2.0;
     double rc_switch_factor = 1.0;
     bool rc_floor_at_threshold = true;
+    bool rc_positive_only = false;
     double significance_gain = 0.0;
     int rc_fit_iterations = 10;
+    double no_change_tolerance = 0.0;
+    bool record_history = false;
 };
 
 // Estimate the PSF Gaussian width (mean FWHM in pixels) that seeds the Asp

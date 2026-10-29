@@ -207,20 +207,28 @@ def imaging_preparation_single_field(
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
         - ``record_iteration_history`` : If ``True``, every model update
-          records, for every plane and every deconvolution iteration, the peak
-          residual the iteration cleaned (signed, in the units of the residual
-          image) and the RMS of the residual inside the clean mask after its
-          subtraction, to follow the deconvolution in detail. The returned
-          convergence record holds them as ``iteration_peak_residual`` and
-          ``iteration_residual_rms``: per plane one array per cycle, with one
-          value per iteration of that cycle's model update (empty for a cycle
-          without one), so the record grows by two float64 values per
-          iteration done. A debugging and tuning tool: the images are the same
-          to the bit with and without it, and the RMS is the sum of squares
-          the peak search of the next iteration makes anyway, so it costs no
-          extra pass over the image per iteration. Hogbom deconvolvers only:
-          ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise
-          ``ValueError``. Default ``False``. No CASA equivalent.
+          records, for every plane and every component it subtracts, the
+          signed peak of the residual inside the clean mask before the
+          component (the peak the threshold test sees; for MT-MFS that of
+          Taylor term zero, and for a residual-shaped component of Asp with
+          ``asp_rc_positive_only``, the default, the largest positive
+          residual), the RMS of that residual inside the clean mask
+          after it, the model flux after it, and the component: its pixel
+          along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an
+          Asp residual-shaped component) and its flux, to follow the
+          deconvolution in detail. The returned convergence record holds them
+          as ``iteration_peak_residual``, ``iteration_residual_rms``,
+          ``iteration_model_flux``, ``iteration_component_l``,
+          ``iteration_component_m``, ``iteration_component_scale`` and
+          ``iteration_component_flux``: per plane one array per cycle, with one
+          value per component of that cycle's model update (empty for a cycle
+          without one), so the record grows by seven float64 values per
+          component. Asp counts in ``iter_done`` the iteration that ends a
+          model update on one of its tests, which subtracts nothing. A
+          debugging and tuning tool for every deconvolver: the images are the
+          same to the bit with and without it, and the RMS comes from the sum
+          of squares the peak search makes anyway, so it costs no extra pass
+          over the image per component. Default ``False``. No CASA equivalent.
         - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
           subtracts the PSF of every component it finds from the whole residual
           image, with a PSF of twice the image size made once per channel from
@@ -673,20 +681,28 @@ def image_cube_single_field(
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
         - ``record_iteration_history`` : If ``True``, every model update
-          records, for every plane and every deconvolution iteration, the peak
-          residual the iteration cleaned (signed, in the units of the residual
-          image) and the RMS of the residual inside the clean mask after its
-          subtraction, to follow the deconvolution in detail. The returned
-          convergence record holds them as ``iteration_peak_residual`` and
-          ``iteration_residual_rms``: per plane one array per cycle, with one
-          value per iteration of that cycle's model update (empty for a cycle
-          without one), so the record grows by two float64 values per
-          iteration done. A debugging and tuning tool: the images are the same
-          to the bit with and without it, and the RMS is the sum of squares
-          the peak search of the next iteration makes anyway, so it costs no
-          extra pass over the image per iteration. Hogbom deconvolvers only:
-          ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise
-          ``ValueError``. Default ``False``. No CASA equivalent.
+          records, for every plane and every component it subtracts, the
+          signed peak of the residual inside the clean mask before the
+          component (the peak the threshold test sees; for MT-MFS that of
+          Taylor term zero, and for a residual-shaped component of Asp with
+          ``asp_rc_positive_only``, the default, the largest positive
+          residual), the RMS of that residual inside the clean mask
+          after it, the model flux after it, and the component: its pixel
+          along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an
+          Asp residual-shaped component) and its flux, to follow the
+          deconvolution in detail. The returned convergence record holds them
+          as ``iteration_peak_residual``, ``iteration_residual_rms``,
+          ``iteration_model_flux``, ``iteration_component_l``,
+          ``iteration_component_m``, ``iteration_component_scale`` and
+          ``iteration_component_flux``: per plane one array per cycle, with one
+          value per component of that cycle's model update (empty for a cycle
+          without one), so the record grows by seven float64 values per
+          component. Asp counts in ``iter_done`` the iteration that ends a
+          model update on one of its tests, which subtracts nothing. A
+          debugging and tuning tool for every deconvolver: the images are the
+          same to the bit with and without it, and the RMS comes from the sum
+          of squares the peak search makes anyway, so it costs no extra pass
+          over the image per component. Default ``False``. No CASA equivalent.
         - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
           subtracts the PSF of every component it finds from the whole residual
           image, with a PSF of twice the image size made once per channel from
@@ -901,10 +917,19 @@ def image_cube_single_field(
         update and a closing entry from the stop test that ended the loop
         (``iter_done`` 0, ``peakres`` the peak of the written residual inside
         the clean mask).  Channel labels are chunk-local (0-based); the node
-        task remaps them to global channel numbers before the reduce.  With
-        ``record_iteration_history`` every plane holds, per entry, the
-        ``iteration_peak_residual`` and ``iteration_residual_rms`` of its
-        model update (one value per iteration; empty for the closing entry);
+        task remaps them to global channel numbers before the reduce.  Every
+        entry holds the statistics of the residual
+        (:data:`~astroviper.processing_functions.image_analysis.image_statistics.RESIDUAL_STATISTICS`),
+        its ``entropy``, ``residual_snr`` and the seconds of the residual
+        update it follows (``t_residual_update``); an entry of a model update
+        also those of the residual it started from (prefixed ``start_``), the
+        seconds of the model update (``t_model_update``), its
+        ``threshold_per_cycle``, the positive and negative model flux after it
+        (``model_flux_positive``, ``model_flux_negative``) and the components
+        it subtracted (``n_point_components``, ``n_scale_components``, and the
+        Asp counts). With ``record_iteration_history`` every plane holds, per
+        entry, the iteration history of its model update (one value per
+        component; empty for the closing entry);
         with ``max_cycles="auto"`` it holds ``max_cycles_auto``, the limit
         predicted for the plane (the channel's limit is the largest of its
         planes').
@@ -931,9 +956,10 @@ def image_cube_single_field(
     from astroviper.processing_functions.imaging.utils import (
         accumulate_timing,
         build_residual_imaging_dict,
-        copy_residual_entropy,
+        copy_residual_statistics,
         get_per_cycle_limits,
         merge_imaging_dicts,
+        record_cycle_time,
         resolve_auto_max_cycles,
     )
     from astroviper.utils.clean_mask import install_clean_mask
@@ -1033,7 +1059,8 @@ def image_cube_single_field(
             image_data_variables_keep=image_data_variables_keep,
             gridding_kernel_params=gridding_kernel_params,
         )
-        timing["T_residual_update"] += time.time() - start
+        t_residual_update = time.time() - start
+        timing["T_residual_update"] += t_residual_update
         accumulate_timing(timing, residual_return_df)
         if not model_exists:
             install_clean_mask(img_xds, clean_mask)
@@ -1049,6 +1076,7 @@ def image_cube_single_field(
             image_data_group_in_name="residual",
             cycle_control_params=cycle_control_params,
         )
+        record_cycle_time(residual_imaging_dict, "t_residual_update", t_residual_update)
         # max_cycles="auto" becomes a number from the dirty image, the
         # residual of the first cycle, and for a plane with threshold 0 from
         # the sensitivity of the imaging weights (a no-op afterwards, and for
@@ -1100,6 +1128,7 @@ def image_cube_single_field(
             if subtraction_psf_cube is not None:
                 deconvolve_params["subtraction_psf_cube"] = subtraction_psf_cube
 
+            start = time.time()
             (
                 imaging_dict,
                 model_update_return_df,
@@ -1112,10 +1141,10 @@ def image_cube_single_field(
                 image_data_group_in_name="residual",
                 image_data_group_out_name="model",
             )
+            record_cycle_time(imaging_dict, "t_model_update", time.time() - start)
             accumulate_timing(timing, model_update_return_df)
-            # The entropy belongs to the residual this model update started
-            # from (a no-op unless the entropy stop is on).
-            copy_residual_entropy(imaging_dict, residual_imaging_dict)
+            # The statistics of the residual this model update started from.
+            copy_residual_statistics(imaging_dict, residual_imaging_dict)
             model_exists = True
             n_cycles += 1
 

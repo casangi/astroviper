@@ -1039,6 +1039,12 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         previous_flux = 16.0 * (pol + 2)
         assert fields["start_model_flux"] == [previous_flux]
         assert fields["model_flux"] == [previous_flux + 16.0 * (pol + 1)]
+        # the signed fluxes of the accumulated model (previous + increment of
+        # 1 per Taylor-0 pixel), and the residual statistics and times of the cycle
+        assert fields["model_flux_positive"] == [previous_flux + 16.0]
+        assert fields["model_flux_negative"] == [0.0]
+        assert fields["start_rms_in_mask"] == [1.0]
+        assert fields["t_model_update"][0] > 0
 
 
 @pytest.mark.parametrize(

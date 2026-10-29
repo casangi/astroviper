@@ -202,7 +202,10 @@ def test_channel_without_visibilities_next_to_a_mapped_channel(
     imaging weights and model visibilities on it, so a mapped channel after
     it failed with "AssertionError: Output data variable WEIGHT_IMAGING
     already exists"."""
-    from astroviper.processing_functions.imaging.utils.imaging_dict import Key
+    from astroviper.processing_functions.imaging.utils.imaging_dict import (
+        CYCLE_TIMING_FIELDS,
+        Key,
+    )
 
     both, both_result = _image(
         node_task_inputs, tmp_path / "both.img.zarr", frequencies
@@ -224,8 +227,15 @@ def test_channel_without_visibilities_next_to_a_mapped_channel(
         assert alone_dict
         for key, value in alone_dict.items():
             moved = Key(time=key.time, pol=key.pol, chan=key.chan + chan)
+            # the record to the bit, except the wall times of the cycles
             _assert_same(
-                both_result["deconvolution"].data[moved], value, f"imaging dict {moved}"
+                {
+                    f: v
+                    for f, v in both_result["deconvolution"].data[moved].items()
+                    if f not in CYCLE_TIMING_FIELDS
+                },
+                {f: v for f, v in value.items() if f not in CYCLE_TIMING_FIELDS},
+                f"imaging dict {moved}",
             )
         for key, statistics in alone_result["image_statistics"].items():
             in_both = both_result["image_statistics"][key].isel(frequency=[chan])

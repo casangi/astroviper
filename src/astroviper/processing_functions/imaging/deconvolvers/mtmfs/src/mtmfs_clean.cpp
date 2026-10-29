@@ -403,7 +403,8 @@ template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
                      const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
                      T threshold_per_cycle, T mask_threshold,
-                     const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride) {
+                     const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride,
+                     bool record_history) {
     if (max_iter_per_cycle_updated < 0) throw std::invalid_argument("max_iter_per_cycle_updated must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) ||
         !std::isfinite(static_cast<double>(threshold_per_cycle)) ||
@@ -527,12 +528,23 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         return c;
     };
 
+    // The signed peak and the RMS of the Taylor-0 residual in the mask at the
+    // last test (record_history).
+    double last_peak = 0.0, last_rms = 0.0;
+    const double n_masked =
+        record_history ? static_cast<double>(std::count_if(vec_scale_masks[0].begin(), vec_scale_masks[0].end(),
+                                                           [](T v) { return v != static_cast<T>(0); }))
+                       : 0.0;
     auto check_convergence = [&](int itercount, bool component_selected) -> int {
         double sum_squares = 0.0;
         const PeakResult<T> pr = find_max_abs_mask<T>(mat_r[static_cast<std::size_t>(w.ind2(0, 0))].data(),
                                                       vec_scale_masks[0].data(), nx, ny, sum_squares);
         const T norma = static_cast<T>(1.0 / w.mat_a[0][0]);
         const T rmaxval = std::abs(pr.value * norma);
+        if (record_history) {
+            last_peak = static_cast<double>(pr.value * norma);
+            last_rms = n_masked > 0 ? std::sqrt(sum_squares / n_masked) * std::abs(static_cast<double>(norma)) : 0.0;
+        }
         int flag = 0;
         if (std::abs(rmaxval) < threshold_per_cycle)
             flag = kStopThreshold;
@@ -619,6 +631,8 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             const int bh = trc[1] - blc[1];
             std::array<T, kMaxTaylorTerms> coeffs{};
             for (int t = 0; t < nt; ++t) coeffs[t] = coeff_at(max_scale_index, t, gpk);
+            const double peak_before = last_peak;
+            double flux = 0.0;
             for (int t = 0; t < nt; ++t) {
                 const T coeff = coeffs[t];
                 T* mdl = model + static_cast<std::size_t>(t) * nimg;
@@ -631,6 +645,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                         const T add = scale_sub[kp] * loopgain * coeff;
                         mdl[km] += add;
                         dlt[km] += add;
+                        if (t == 0) flux += add;
                     }
             }
             for (int scale = 0; scale < ns; ++scale)
@@ -652,7 +667,17 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 }
 
             ++iterdone;
+            const double scale_size = w.scales[static_cast<std::size_t>(max_scale_index)];
+            ++(scale_size == 0.0 ? out.n_point_components : out.n_scale_components);
             stop = check_convergence(itercount, true);
+            if (record_history) {
+                out.history_peak.push_back(peak_before);
+                out.history_rms.push_back(last_rms);
+                out.history_l.push_back(global_max_pos[1]);
+                out.history_m.push_back(global_max_pos[0]);
+                out.history_scale.push_back(scale_size);
+                out.history_flux.push_back(flux);
+            }
             if (stop) break;
         }
         if (stop == kStopNone && max_iter_per_cycle_updated > 0) stop = kStopMaxIter;
@@ -713,10 +738,10 @@ template int taylor_hessian<double>(const double*, int, int, int, std::vector<fl
                                     std::vector<double>&, std::vector<double>&, int&);
 template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
                                          const std::vector<float>&, float, int, float, float, float,
-                                         const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t);
+                                         const deconvolvers::DivergenceControl<float>&, std::ptrdiff_t, bool);
 template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
                                            const std::vector<float>&, float, int, double, double, double,
-                                           const deconvolvers::DivergenceControl<double>&, std::ptrdiff_t);
+                                           const deconvolvers::DivergenceControl<double>&, std::ptrdiff_t, bool);
 template void principal_solution<float>(float*, const double*, int, int, int);
 template void principal_solution<double>(double*, const double*, int, int, int);
 

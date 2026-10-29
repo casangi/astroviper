@@ -425,6 +425,7 @@ public:
         res.peak_residual = peakResidual_;
         res.model_flux = modelSum();
         res.switched_to_hogbom = switchedToHogbom_;
+        res.n_hogbom_runs = fusedThreshold_ < 0 ? 0 : static_cast<int>(nthHogbom_);
         res.psf_width = psfWidth_;
         res.components = components_;
         res.scale_noise = noiseScale_;
@@ -485,6 +486,8 @@ private:
 
     // running state
     double peakResidual_ = 1000.0, prevPeakResidual_ = 0.0;
+    double peakSigned_ = 0.0;  // the signed value of the last masked peak
+    double nMasked_ = 0.0;     // pixels of the scale-0 mask (record_history)
     bool switchedToHogbom_ = false;
     unsigned int numHogbomIter_ = 0, nthHogbom_ = 0;
     std::deque<int> numIterNoGoodAspen_;
@@ -669,10 +672,12 @@ private:
         int status = deconvolvers::STOP_NONE;
         while (iteration_ < maxNiter_) {
             double A = 0.0, peak = 0.0, sumSquares = 0.0;
+            std::size_t kPeak = 0;
             for (std::size_t k = 0; k < nb; ++k) {
                 if (inMask[k] == 0.0) continue;
                 sumSquares += R[k] * R[k];
-                if (std::fabs(R[k]) > A) { A = std::fabs(R[k]); peak = R[k]; }
+                const double v = options_.rc_positive_only ? R[k] : std::fabs(R[k]);
+                if (v > A) { A = v; peak = R[k]; kPeak = k; }
             }
             if (A <= options_.rc_switch_factor * threshold_) break;
             if (stopTest_.check_divergence(A, sumSquares, divergence_) != deconvolvers::STOP_NONE) {
@@ -774,10 +779,16 @@ private:
                 fComp += d * d;
             }
             if (!(fComp < fNone * (1.0 - 1e-6))) break;
+            double flux = 0.0, sumSquaresAfter = 0.0;
             for (std::size_t k = 0; k < nb; ++k) {
                 acc[k] += gain_ * C[k];
+                flux += gain_ * C[k];
                 R[k] -= gain_ * CP[k];
+                sumSquaresAfter += inMask[k] * R[k] * R[k];
             }
+            recordComponent(peak, nMasked_ > 0 ? std::sqrt(sumSquaresAfter / nMasked_) : 0.0,
+                            box.i0 + static_cast<int>(kPeak % bx), box.j0 + static_cast<int>(kPeak / bx),
+                            -1.0, flux);
             ++iteration_;
             ++timing_.n_residual_components;
         }
@@ -1083,8 +1094,10 @@ private:
     // getActiveSetAspen: find the next Aspen and optimize its (amp, scale).
     std::vector<double> getActiveSetAspen() {
         if (!switchedToHogbom_ &&
-            std::accumulate(numIterNoGoodAspen_.begin(), numIterNoGoodAspen_.end(), 0) >= 5)
+            std::accumulate(numIterNoGoodAspen_.begin(), numIterNoGoodAspen_.end(), 0) >= 5) {
             switchedToHogbom(false);
+            timing_.n_switch_point_scales += switchedToHogbom_;
+        }
 
         nInitScales_ = switchedToHogbom_ ? 1 : static_cast<int>(initScaleSizes_.size());
         auto clock = std::chrono::steady_clock::now();
@@ -1183,8 +1196,21 @@ private:
                 }
             }
         }
+        peakSigned_ = std::fabs(maxVal) >= std::fabs(minVal) ? maxVal : minVal;
         return std::max(std::fabs(maxVal), std::fabs(minVal));
     }
+
+    // The record of a component (AspOptions::record_history).
+    void recordComponent(double peak, double rms, int i, int j, double scale, double flux) {
+        if (!options_.record_history) return;
+        timing_.history_peak.push_back(peak);
+        timing_.history_rms.push_back(rms);
+        timing_.history_l.push_back(j);
+        timing_.history_m.push_back(i);
+        timing_.history_scale.push_back(scale);
+        timing_.history_flux.push_back(flux);
+    }
+    double maskedRms() const { return nMasked_ > 0 ? std::sqrt(sumSquares_ / nMasked_) : 0.0; }
 
     // -----------------------------------------------------------------------
     // The model update (AspMatrixCleaner::aspclean).
@@ -1196,6 +1222,11 @@ private:
         double initRMSResidual = 1000.0;
 
         iteration_ = startingIter_;
+        if (options_.record_history) {
+            const Box& box = initScaleMaskBoxes_[0];
+            for (int j = box.j0; j <= box.j1; ++j)
+                for (int i = box.i0; i <= box.i1; ++i) nMasked_ += initScaleMasks_[0](i, j) != 0.0;
+        }
         if (options_.residual_components) {
             // Residual-shaped components down to the threshold,
             // then the Asp iterations (from a new search of the residual).
@@ -1243,12 +1274,14 @@ private:
                       (numNoChange_ >= 2)))) {
                     bool runlong = (initRMSResidual > rms && initRMSResidual / rms < 1.5);
                     switchedToHogbom(runlong);
+                    timing_.n_switch_fused += switchedToHogbom_;
                     if (numNoChange_ >= 2) numNoChange_ = 0;
                 }
                 if (!switchedToHogbom_ && numNoChange_ >= 2) {
                     numNoChange_ = 0;
                     bool runlong = (initRMSResidual > rms && initRMSResidual / rms < 1.5);
                     switchedToHogbom(runlong);
+                    timing_.n_switch_no_change += switchedToHogbom_;
                 }
             }
 
@@ -1328,6 +1361,8 @@ private:
             const double iterationGain = (significantScale && options_.significance_gain > 0.0)
                                              ? options_.significance_gain : gain_;
             const double scaleFactor = iterationGain * strengthOptimum_;
+            const double peakBefore = peakSigned_;
+            double componentFlux = scaleFactor;
             if (options_.record_components) {
                 components_.push_back(static_cast<double>(posOptI_));
                 components_.push_back(static_cast<double>(posOptJ_));
@@ -1361,6 +1396,8 @@ private:
                 const std::vector<cd> X = aspfft::rfft1d_half(gx);
                 const std::vector<cd> Y = aspfft::fft1d_forward(gy);
                 const double norm = 1.0 / (kSqrtTwoPi * usedScale);
+                componentFlux = scaleFactor * norm * std::accumulate(rx.begin(), rx.end(), 0.0) *
+                                std::accumulate(ry.begin(), ry.end(), 0.0);
                 const int hx = padNx_ / 2 + 1;
                 std::vector<cd>& spec = work_.specA;
                 spec.resize(static_cast<std::size_t>(hx) * padNy_);
@@ -1389,8 +1426,12 @@ private:
             // update peak residual
             prevPeakResidual_ = peakResidual_;
             peakResidual_ = peakResidualMasked();
+            recordComponent(peakBefore, maskedRms(), posOptI_, posOptJ_, usedScale, componentFlux);
             timing_.t_bookkeeping += lap(clock);
-            if (!switchedToHogbom_ && std::fabs(peakResidual_ - prevPeakResidual_) < 1e-4)
+            const double noChange = options_.no_change_tolerance > 0.0
+                                        ? options_.no_change_tolerance * std::fabs(prevPeakResidual_)
+                                        : 1e-4;
+            if (!switchedToHogbom_ && std::fabs(peakResidual_ - prevPeakResidual_) < noChange)
                 numNoChange_ += 1;
 
             // Hogbom bookkeeping: count down, then return to Asp.

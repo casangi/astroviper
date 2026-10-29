@@ -135,6 +135,17 @@ static py::buffer_info validate_per_plane_array(py::array& arr,
     return info;
 }
 
+// The iteration history fields of the results, with their records.
+static const std::pair<const char*, std::vector<double> hclean::IterationHistory::*>
+    kIterationHistoryRecords[] = {
+        {"iteration_peak_residual", &hclean::IterationHistory::peak},
+        {"iteration_residual_rms", &hclean::IterationHistory::rms},
+        {"iteration_component_l", &hclean::IterationHistory::l},
+        {"iteration_component_m", &hclean::IterationHistory::m},
+        {"iteration_component_flux", &hclean::IterationHistory::flux},
+        {"iteration_component_scale", &hclean::IterationHistory::scale},
+};
+
 /**
  * A per-plane iteration record (hclean::IterationHistory::peak or ::rms) as
  * nested lists indexed [t][f][p] of 1-D float64 arrays, each with one value
@@ -377,10 +388,11 @@ py::dict hclean_impl(
     results["stop_code"] = stop_reason;
     results["diverged"] = (stop_reason == hclean::STOP_DIVERGED);
     if (record_iteration_history) {
-        results["iteration_peak_residual"] = py::array_t<double>(
-            static_cast<py::ssize_t>(history.peak.size()), history.peak.data());
-        results["iteration_residual_rms"] = py::array_t<double>(
-            static_cast<py::ssize_t>(history.rms.size()), history.rms.data());
+        for (const auto& [name, record] : kIterationHistoryRecords) {
+            const std::vector<double>& values = history.*record;
+            results[name] = py::array_t<double>(
+                static_cast<py::ssize_t>(values.size()), values.data());
+        }
     }
     return results;
 }
@@ -618,10 +630,8 @@ py::dict hclean_cube_impl(
     results["stop_code"] = stop_code_arr;
     results["diverged"] = diverged_arr;
     if (record_iteration_history) {
-        results["iteration_peak_residual"] = per_plane_iteration_history(
-            history, &hclean::IterationHistory::peak, nt, nf, np_img);
-        results["iteration_residual_rms"] = per_plane_iteration_history(
-            history, &hclean::IterationHistory::rms, nt, nf, np_img);
+        for (const auto& [name, record] : kIterationHistoryRecords)
+            results[name] = per_plane_iteration_history(history, record, nt, nf, np_img);
     }
     return results;
 }

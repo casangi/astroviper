@@ -48,6 +48,9 @@ from xradio.measurement_set import open_processing_set
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
     image_cube_single_field,
 )
+from astroviper.processing_functions.image_analysis.image_statistics import (
+    RESIDUAL_STATISTICS,
+)
 from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
     airy_disk_rorder,
     airy_disk_rorder_v2,
@@ -55,6 +58,11 @@ from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric impo
 from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_MAX_CYCLES,
     print_imaging_dict,
+)
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    COMPONENT_COUNT_FIELDS,
+    CYCLE_TIMING_FIELDS,
+    MODEL_FLUX_SIGN_FIELDS,
 )
 
 PS_STORE = "twhya_selfcal_lsrk_5chans.ps.zarr"
@@ -176,6 +184,21 @@ _BIFURCATION_SENSITIVE_FIELDS = frozenset(
     }
 )
 MULTI_CYCLE_SINGLE_DICT_RTOL = 0.15
+
+# Fields of the record the literals below leave out: the statistics of the
+# residual (its images are pinned), the times of the cycles and the component
+# counts.
+UNPINNED_RECORD_FIELDS = frozenset(
+    {
+        *RESIDUAL_STATISTICS,
+        *(f"start_{field}" for field in RESIDUAL_STATISTICS),
+        "entropy",
+        "residual_snr",
+        *CYCLE_TIMING_FIELDS,
+        *MODEL_FLUX_SIGN_FIELDS,
+        *COMPONENT_COUNT_FIELDS,
+    }
+)
 
 # Imaging weighting is identical for every base test.
 IMAGING_WEIGHTS_PARAMS = {
@@ -482,9 +505,11 @@ def _check_imaging_dict(
     )
     for key, exp_fields in expected.items():
         got = actual[key]
-        assert set(got) == set(exp_fields), (
-            f"plane {key}: fields {sorted(got)} != expected {sorted(exp_fields)}"
-        )
+        # the per-cycle statistics of the residual, the times of the cycle and
+        # the component counts are not pinned
+        assert set(exp_fields) <= set(got) and set(got) - set(exp_fields) <= (
+            UNPINNED_RECORD_FIELDS
+        ), f"plane {key}: fields {sorted(got)} != expected {sorted(exp_fields)}"
         for field, exp_val in exp_fields.items():
             val = got[field]
             if field == "stop_code":
@@ -663,10 +688,9 @@ def _check_deep_clean_history(deconvolve_dict):
                 and n_cycles == controls["max_cycles"]
                 and code == (9, 2)
             ), f"{plane}: {counts.sum()} iterations in {n_cycles} cycles, stop {code}"
-        assert (
-            np.isfinite(fields["threshold_per_cycle"])
-            and fields["threshold_per_cycle"] > 0
-        )
+        thresholds = np.asarray(fields["threshold_per_cycle"])
+        assert thresholds.shape == (n_cycles,)
+        assert np.isfinite(thresholds).all() and (thresholds > 0).all()
         # peakres has the closing entry too, start_peakres and model_flux one
         # entry per model update only.
         for key, length in (
@@ -1735,7 +1759,12 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
 EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     (0, 0, 0): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.009577202018895784,
+        "threshold_per_cycle": [
+            0.12393003628972019,
+            0.04296016357050919,
+            0.017139896269855112,
+            0.009577202018895711,
+        ],
         "iter_done": [30, 1079, 3761, 3369, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
@@ -1789,7 +1818,12 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     },
     (0, 1, 0): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.005675545346962147,
+        "threshold_per_cycle": [
+            0.035949731706109975,
+            0.014385360589713361,
+            0.00997699485127338,
+            0.005675545346962088,
+        ],
         "iter_done": [1365, 5369, 1731, 1535, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
@@ -1843,7 +1877,12 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     },
     (0, 0, 1): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.00928263924423757,
+        "threshold_per_cycle": [
+            0.116147833512548,
+            0.03975766665800914,
+            0.017247707318797927,
+            0.009282639244237533,
+        ],
         "iter_done": [36, 1299, 2864, 4265, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
@@ -1897,7 +1936,12 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     },
     (0, 1, 1): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.005988954646716409,
+        "threshold_per_cycle": [
+            0.0363322288786166,
+            0.014846591487405454,
+            0.00877242769996627,
+            0.005988954646716473,
+        ],
         "iter_done": [1414, 4408, 3302, 876, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
@@ -1951,7 +1995,12 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     },
     (0, 0, 2): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.008531069896067202,
+        "threshold_per_cycle": [
+            0.11719933499600624,
+            0.04019633045560018,
+            0.015997261184765514,
+            0.008531069896067322,
+        ],
         "iter_done": [38, 1204, 3663, 4293, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
@@ -2005,7 +2054,12 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     },
     (0, 1, 2): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.006120220527490573,
+        "threshold_per_cycle": [
+            0.04518761781390537,
+            0.017426908793972077,
+            0.010953774065691944,
+            0.006120220527490607,
+        ],
         "iter_done": [789, 4522, 1864, 2825, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
@@ -2059,7 +2113,12 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     },
     (0, 0, 3): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.009066949045576039,
+        "threshold_per_cycle": [
+            0.11270139217132918,
+            0.03902024865767319,
+            0.01670212818709138,
+            0.009066949045576006,
+        ],
         "iter_done": [41, 1446, 3176, 4046, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
@@ -2113,7 +2172,12 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     },
     (0, 1, 3): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.005725305541315224,
+        "threshold_per_cycle": [
+            0.04604480262305097,
+            0.01694878477573347,
+            0.010250830042499015,
+            0.005725305541315425,
+        ],
         "iter_done": [877, 4466, 2132, 2525, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
@@ -2167,7 +2231,12 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     },
     (0, 0, 4): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.00988305152971994,
+        "threshold_per_cycle": [
+            0.12252204708009794,
+            0.041650381450173336,
+            0.017355752634265503,
+            0.009883051529719793,
+        ],
         "iter_done": [30, 1126, 3533, 3564, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
@@ -2221,7 +2290,12 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     },
     (0, 1, 4): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.006165381222119387,
+        "threshold_per_cycle": [
+            0.038287445458578095,
+            0.01591327447091192,
+            0.008421411769663899,
+            0.006165381222119409,
+        ],
         "iter_done": [1254, 3495, 4841, 410, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,

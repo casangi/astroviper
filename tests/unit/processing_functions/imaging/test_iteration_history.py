@@ -1,10 +1,11 @@
 """
 The iteration history of a model update (``record_iteration_history``).
 
-With the flag every Hogbom kernel records, per plane and for every iteration
-of the model update, the signed residual value at the peak the iteration
-cleaned and the RMS of the residual over the searched pixels (the clean box
-inside the mask) after its subtraction. These tests check
+With the flag every deconvolver records, per plane and for every component
+of the model update, the signed residual value at the peak before it, the RMS
+of the residual over the searched pixels (the clean box inside the mask)
+after it, and the component (its pixel, scale and flux); ``deconvolve`` adds
+the model flux after every component. These tests check
 
 - the kernels against a brute force NumPy Hogbom clean that recomputes the RMS
   from the whole residual after every iteration, and the recorded peaks
@@ -13,6 +14,8 @@ inside the mask) after its subtraction. These tests check
   model and the stop codes are the same to the bit with and without it);
 - the per-plane arrays of the cube kernels (as long as the plane's own
   iterations, no padding) and the agreement of the two cube kernels;
+- the Asp history: one record per component, whose fluxes add up to the
+  model and whose RMS is that of the masked residual;
 - the path of the history through ``deconvolve``, the per-cycle merge, the
   DataFrame (and feather), the pretty printer and the imaging cycle loop.
 """
@@ -55,6 +58,10 @@ NY, NX = 24, 32
 GAIN = 0.2
 CUBE_KERNELS = ["clean_cube", "clean_cube_many_threads"]
 KERNELS = ["clean", *CUBE_KERNELS]
+# The history the kernels record (deconvolve adds the model flux).
+KERNEL_FIELDS = tuple(
+    f for f in ITERATION_HISTORY_FIELDS if f != "iteration_model_flux"
+)
 
 
 def _gaussian(dy, dx, sigma=1.5):
@@ -103,10 +110,11 @@ def _reference_history(residual, psf, searched, gain, max_iter, threshold=0.0):
     """Hogbom clean of one plane in NumPy, with the kernel's selection rule
     (first largest |residual| in row order) and its arithmetic. Returns the
     signed peak each iteration cleaned, the RMS of the searched pixels after
-    its subtraction (recomputed from the whole residual) and the residual."""
+    its subtraction (recomputed from the whole residual), the residual and the
+    (row, column) of every peak."""
     residual = residual.copy()
     rows, cols = np.arange(NY), np.arange(NX)
-    peaks, rms = [], []
+    peaks, rms, positions = [], [], []
     for _ in range(max_iter):
         magnitude = np.where(searched, np.abs(residual), -1.0)
         py, px = np.unravel_index(np.argmax(magnitude), residual.shape)
@@ -120,8 +128,9 @@ def _reference_history(residual, psf, searched, gain, max_iter, threshold=0.0):
             residual.dtype.type(gain) * peak
         ) * psf[np.ix_(psf_rows[keep_rows], psf_cols[keep_cols])]
         peaks.append(float(peak))
+        positions.append((py, px))
         rms.append(float(np.sqrt(np.mean(residual[searched].astype(np.float64) ** 2))))
-    return np.array(peaks), np.array(rms), residual
+    return np.array(peaks), np.array(rms), residual, np.array(positions).reshape(-1, 2)
 
 
 def _run(kernel, residual, psf, mask, max_iter, threshold=0.0, clean_box=None, **kw):
@@ -182,7 +191,7 @@ class TestKernelHistory:
     def test_off_by_default(self, kernel, record):
         kw = {} if record is None else {"record_iteration_history": record}
         result, _, _ = _run(kernel, _residual(), _psf(), _mask(), 10, **kw)
-        for field in ITERATION_HISTORY_FIELDS:
+        for field in KERNEL_FIELDS:
             assert field not in result
 
     @pytest.mark.parametrize("kernel", KERNELS)
@@ -200,7 +209,7 @@ class TestKernelHistory:
     ):
         residual, psf, mask = _residual(dtype=dtype), _psf(dtype), _mask()
         searched = mask & _box_selection(clean_box or (-1, -1, -1, -1))
-        peaks, rms, reference_residual = _reference_history(
+        peaks, rms, reference_residual, positions = _reference_history(
             residual, psf, searched, GAIN, max_iter, threshold
         )
         result, final_residual, _ = _run(
@@ -223,6 +232,22 @@ class TestKernelHistory:
         np.testing.assert_allclose(recorded_rms, rms, rtol=1e-10, atol=0)
         # the reference follows the kernel's arithmetic to the bit
         np.testing.assert_array_equal(final_residual, reference_residual)
+        # every component is a point of gain x peak at the peak's pixel
+        component = {
+            field: (result[field] if kernel == "clean" else result[field][0][0][0])
+            for field in KERNEL_FIELDS
+        }
+        np.testing.assert_array_equal(
+            component["iteration_component_l"], positions[:, 0]
+        )
+        np.testing.assert_array_equal(
+            component["iteration_component_m"], positions[:, 1]
+        )
+        np.testing.assert_array_equal(component["iteration_component_scale"], 0.0)
+        np.testing.assert_array_equal(
+            component["iteration_component_flux"],
+            (dtype(GAIN) * peaks.astype(dtype)).astype(np.float64),
+        )
 
     def test_peaks_are_the_progress_callback_peaks(self):
         calls = []
@@ -255,7 +280,7 @@ class TestKernelHistory:
             record_iteration_history=True,
         )
         assert result["iterations_performed"] == 20
-        for field in ITERATION_HISTORY_FIELDS:
+        for field in KERNEL_FIELDS:
             assert result[field].shape == (15,)
             assert np.isfinite(result[field]).all()
 
@@ -306,7 +331,7 @@ class TestKernelHistory:
         assert 0 < iterations[0, 0, 1] < 400  # threshold
         assert iterations[0, 1, 0] == 0  # all-zero residual
         assert iterations[0, 1, 1] == 0  # no budget
-        for field in ITERATION_HISTORY_FIELDS:
+        for field in KERNEL_FIELDS:
             history = result[field]
             for tt, nn, pp in np.ndindex(iterations.shape):
                 plane = history[tt][nn][pp]
@@ -322,7 +347,7 @@ class TestKernelHistory:
         result, _, _ = _run(
             kernel, _residual(), _psf(), _mask(), 0, record_iteration_history=True
         )
-        for field in ITERATION_HISTORY_FIELDS:
+        for field in KERNEL_FIELDS:
             assert result[field][0][0][0].shape == (0,)
 
 
@@ -385,10 +410,21 @@ class TestDeconvolve:
                 assert history.shape == (n_iter,)
                 assert history.dtype == np.float64
             residual = _residual(seed=key.pol)
-            peaks, rms, _ = _reference_history(residual, _psf(), _mask(), GAIN, n_iter)
+            peaks, rms, _, _ = _reference_history(
+                residual, _psf(), _mask(), GAIN, n_iter
+            )
             np.testing.assert_array_equal(entry["iteration_peak_residual"][0], peaks)
             np.testing.assert_allclose(
                 entry["iteration_residual_rms"][0], rms, rtol=1e-10
+            )
+            # the model flux after every component ends at the model's flux
+            np.testing.assert_allclose(
+                entry["iteration_model_flux"][0],
+                np.cumsum(GAIN * peaks),
+                rtol=1e-12,
+            )
+            assert entry["iteration_model_flux"][0][-1] == pytest.approx(
+                entry["model_flux"][0], rel=1e-12
             )
 
     @requires_hogbom
@@ -402,33 +438,60 @@ class TestDeconvolve:
                 assert field not in entry
 
     @pytest.mark.parametrize("algorithm", ["asp", "aspclean", "asp_clean"])
-    def test_asp_refuses_the_history(self, algorithm):
+    def test_asp_records_every_component(self, algorithm):
+        """One record per component (Asp also counts the iteration that ends
+        the model update on its threshold test); the component fluxes add up
+        to the model, and the RMS is that of the masked residual left."""
         xds = _image_dataset()
-        with pytest.raises(ValueError, match="record_iteration_history"):
-            deconvolve(
-                img_xds=xds,
-                algorithm=algorithm,
-                deconvolve_params={"max_iter": 10, "record_iteration_history": True},
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            algorithm=algorithm,
+            deconvolve_params={
+                "gain": GAIN,
+                "max_iter": 40,
+                "max_iter_divergence": -1,
+                "record_iteration_history": True,
+            },
+        )
+        for key, entry in imaging_dict.data.items():
+            history = {field: entry[field][0] for field in ITERATION_HISTORY_FIELDS}
+            n = len(history["iteration_component_flux"])
+            assert 0 < n <= entry["iter_done"][0]
+            n_components = (
+                entry["n_point_components"][0]
+                + entry["n_scale_components"][0]
+                + entry["n_residual_components"][0]
             )
-        # refused before the model is created
-        assert "SKY_MODEL" not in xds
+            assert n == n_components
+            for values in history.values():
+                assert values.shape == (n,) and np.isfinite(values).all()
+            model = xds["SKY_MODEL"].values[0, 0, key.pol]
+            assert history["iteration_model_flux"][-1] == pytest.approx(
+                model.sum(), rel=1e-9
+            )
+            residual = xds["SKY_RESIDUAL"].values[0, 0, key.pol]
+            assert history["iteration_residual_rms"][-1] == pytest.approx(
+                np.sqrt(np.mean(residual[_mask()] ** 2)), rel=1e-9
+            )
+            assert np.all(history["iteration_component_scale"] >= -1)
 
-    def test_asp_clean_refuses_the_history(self):
+    def test_asp_clean_records_the_history(self):
         cube = _residual()[None, None, None]
-        with pytest.raises(ValueError, match="Hogbom deconvolvers"):
-            asp_clean(
-                cube.copy(),
-                _psf()[None, None, None],
-                np.zeros_like(cube),
-                deconvolve_params={"max_iter": 10, "record_iteration_history": True},
-            )
+        result = asp_clean(
+            cube.copy(),
+            _psf()[None, None, None],
+            np.zeros_like(cube),
+            deconvolve_params={"max_iter": 10, "record_iteration_history": True},
+        )
+        for field in KERNEL_FIELDS:
+            assert len(result[field][0][0][0]) > 0
 
     def test_validate_record_iteration_history(self):
-        validate_record_iteration_history("hogbom", True)
-        validate_record_iteration_history("HOGBOM_MANY_THREADS", True)
-        validate_record_iteration_history("asp", False)
-        with pytest.raises(ValueError, match="'asp'"):
-            validate_record_iteration_history("asp", True)
+        for deconvolver in ("hogbom", "HOGBOM_MANY_THREADS", "asp", "mtmfs"):
+            validate_record_iteration_history(deconvolver, True)
+        validate_record_iteration_history("multiscale", False)
+        with pytest.raises(ValueError, match="'multiscale'"):
+            validate_record_iteration_history("multiscale", True)
 
     def test_parameter_defaults_to_false(self):
         assert _validate_deconvolve_params({})["record_iteration_history"] is False

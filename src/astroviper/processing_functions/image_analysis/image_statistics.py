@@ -361,3 +361,155 @@ def cube_plane_abs_max(cube):
     for index in np.ndindex(plane_shape):
         result[index] = plane_abs_max(cube[index])
     return result
+
+
+# The statistics of a residual plane (plane_residual_statistics): about zero
+# for the RMS, about the mean for the skew and the excess kurtosis.
+RESIDUAL_STATISTICS = (
+    "rms_in_mask",
+    "rms_outside_mask",
+    "max_in_mask",
+    "min_in_mask",
+    "mad_rms_outside_mask",
+    "skew_in_mask",
+    "excess_kurtosis_in_mask",
+)
+
+# Pixels outside the mask the robust noise (mad_rms_outside_mask) is taken
+# from, at most: a regular subsample of the plane.
+MAD_SAMPLES = 1_000_000
+
+
+def plane_residual_statistics(plane, mask=None):
+    """
+    Statistics of a residual plane inside and outside a mask, without a copy
+    of the plane.
+
+    Pixels that are not a number are ignored. Without a mask every pixel is
+    inside it and the statistics outside it are NaN, as are those of an empty
+    region.
+
+    Parameters
+    ----------
+    plane : numpy.ndarray
+        2-D residual plane.
+    mask : numpy.ndarray, optional
+        Array of the same shape; the mask is where ``mask > 0.5``.
+
+    Returns
+    -------
+    dict
+        Floats keyed by :data:`RESIDUAL_STATISTICS`: the RMS about zero inside
+        and outside the mask, the largest and the smallest value inside it,
+        the 1.4826 x median absolute deviation outside it (on a regular
+        subsample of at most :data:`MAD_SAMPLES` pixels of the plane), and
+        the skew and the excess kurtosis inside it.
+    """
+    rows = _rows_per_block(plane)
+    count = {True: 0, False: 0}
+    squares = {True: 0.0, False: 0.0}
+    total = 0.0
+    largest, smallest = -np.inf, np.inf
+    for start in range(0, plane.shape[0], rows):
+        block = np.asarray(plane[start : start + rows], dtype=np.float64)
+        finite = np.isfinite(block)
+        inside = finite if mask is None else finite & (mask[start : start + rows] > 0.5)
+        for region, selected in ((True, inside), (False, finite & ~inside)):
+            values = block[selected]
+            count[region] += values.size
+            squares[region] += float(np.dot(values, values))
+            if region and values.size:
+                total += float(values.sum())
+                largest = max(largest, float(values.max()))
+                smallest = min(smallest, float(values.min()))
+    n = count[True]
+    mean = total / n if n else np.nan
+    central = np.zeros(3)  # second, third and fourth central moments x n
+    if n:
+        for start in range(0, plane.shape[0], rows):
+            block = np.asarray(plane[start : start + rows], dtype=np.float64)
+            inside = np.isfinite(block)
+            if mask is not None:
+                inside &= mask[start : start + rows] > 0.5
+            d = block[inside] - mean
+            d2 = d * d
+            central += (d2.sum(), (d2 * d).sum(), (d2 * d2).sum())
+    m2, m3, m4 = central / n if n else (np.nan,) * 3
+    step = max(1, int(np.ceil(np.sqrt(plane.size / MAD_SAMPLES))))
+    sample = np.asarray(plane[::step, ::step], dtype=np.float64)
+    outside = np.isfinite(sample)
+    outside &= False if mask is None else ~(mask[::step, ::step] > 0.5)
+    sample = sample[outside]
+    mad = (
+        1.4826 * float(np.median(np.abs(sample - np.median(sample))))
+        if sample.size
+        else np.nan
+    )
+
+    def rms(region):
+        return np.sqrt(squares[region] / count[region]) if count[region] else np.nan
+
+    return {
+        "rms_in_mask": float(rms(True)),
+        "rms_outside_mask": float(rms(False)),
+        "max_in_mask": largest if n else np.nan,
+        "min_in_mask": smallest if n else np.nan,
+        "mad_rms_outside_mask": mad,
+        "skew_in_mask": float(m3 / m2**1.5) if n and m2 > 0 else np.nan,
+        "excess_kurtosis_in_mask": float(m4 / m2**2 - 3.0) if n and m2 > 0 else np.nan,
+    }
+
+
+def cube_residual_statistics(cube, mask=None):
+    """
+    :func:`plane_residual_statistics` of every plane of a cube.
+
+    Parameters
+    ----------
+    cube : numpy.ndarray
+        Array whose last two axes are the image plane.
+    mask : numpy.ndarray, optional
+        Array of the shape of ``cube``.
+
+    Returns
+    -------
+    dict
+        Float64 arrays of shape ``cube.shape[:-2]`` keyed by
+        :data:`RESIDUAL_STATISTICS`.
+    """
+    plane_shape = cube.shape[:-2]
+    result = {name: np.empty(plane_shape) for name in RESIDUAL_STATISTICS}
+    for index in np.ndindex(plane_shape):
+        stats = plane_residual_statistics(
+            cube[index], None if mask is None else mask[index]
+        )
+        for name, value in stats.items():
+            result[name][index] = value
+    return result
+
+
+def cube_flux_by_sign(cube):
+    """
+    Sums of the positive and of the negative values of every plane of a cube,
+    without a copy of the cube.
+
+    Parameters
+    ----------
+    cube : numpy.ndarray
+        Array whose last two axes are the image plane.
+
+    Returns
+    -------
+    positive, negative : numpy.ndarray
+        Float64 arrays of shape ``cube.shape[:-2]``.
+    """
+    plane_shape = cube.shape[:-2]
+    positive, negative = np.zeros(plane_shape), np.zeros(plane_shape)
+    for index in np.ndindex(plane_shape):
+        plane = cube[index]
+        rows = _rows_per_block(plane)
+        for start in range(0, plane.shape[0], rows):
+            block = np.asarray(plane[start : start + rows], dtype=np.float64)
+            positive[index] += block[block > 0].sum()
+            negative[index] += block[block < 0].sum()
+    return positive, negative

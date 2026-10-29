@@ -1207,6 +1207,76 @@ class TestRingCleaning:
         assert np.all((fits[:, 1] >= 0.3) & (fits[:, 1] <= 0.99))  # frac
         assert np.all((fits[:, 2] >= 1e-3) & (fits[:, 2] <= 10.0))  # eps_frac
 
+    @pytest.mark.parametrize("positive_only", [True, False])
+    def test_positive_only_leaves_a_negative_source_to_asp(self, positive_only):
+        """A negative source: with rc_positive_only the residual-shaped
+        components take positive residual only, so they take none of it, and
+        the Asp iterations clean it to the threshold. Without it (the kernel
+        default) they take it."""
+        psf, sky, dirty, mask, threshold = self._scene()
+        out, resid, model = self._clean(
+            psf,
+            -dirty,
+            mask,
+            threshold,
+            residual_components=True,
+            rc_positive_only=positive_only,
+        )
+        assert (out["timing"]["n_residual_components"] == 0) is positive_only
+        assert out["stop_code"] == 2  # the threshold
+        np.testing.assert_allclose(model.sum(), -sky.sum(), rtol=0.05)
+
+    def test_iteration_history(self):
+        """One record per component of every kind, without changing the
+        clean: the residual-shaped components have scale -1 and the points
+        scale 0, the fluxes add up to the model, and the last RMS is that of
+        the masked residual left."""
+        psf, _, dirty, mask, threshold = self._scene()
+        kwargs = {"residual_components": True, "scale_significance": True}
+        off, resid_off, model_off = self._clean(psf, dirty, mask, threshold, **kwargs)
+        out, resid, model = self._clean(
+            psf, dirty, mask, threshold, record_iteration_history=True, **kwargs
+        )
+        np.testing.assert_array_equal(resid, resid_off)
+        np.testing.assert_array_equal(model, model_off)
+        assert "iteration_component_flux" not in off
+        timing = out["timing"]
+        scale = out["iteration_component_scale"]
+        assert len(scale) == (
+            timing["n_residual_components"]
+            + timing["n_scale_components"]
+            + timing["n_point_components"]
+        )
+        assert np.count_nonzero(scale == -1) == timing["n_residual_components"] > 0
+        assert np.count_nonzero(scale == 0) == timing["n_point_components"]
+        for field in (
+            "iteration_peak_residual",
+            "iteration_residual_rms",
+            "iteration_component_l",
+            "iteration_component_m",
+            "iteration_component_flux",
+        ):
+            assert out[field].shape == scale.shape
+        np.testing.assert_allclose(
+            out["iteration_component_flux"].sum(), model.sum(), rtol=1e-9
+        )
+        inside = mask > 0
+        np.testing.assert_allclose(
+            out["iteration_residual_rms"][-1],
+            np.sqrt(np.mean(resid[inside] ** 2)),
+            rtol=1e-9,
+        )
+        # the first component starts from the dirty peak in the mask
+        peak = dirty[inside][np.argmax(np.abs(dirty[inside]))]
+        assert out["iteration_peak_residual"][0] == pytest.approx(peak, rel=1e-12)
+        # residual-shaped and point components lie in the mask (the Gaussians
+        # are searched in the masks of their scales)
+        searched = scale <= 0
+        assert inside[
+            out["iteration_component_l"][searched].astype(int),
+            out["iteration_component_m"][searched].astype(int),
+        ].all()
+
     def test_scale_significance_cleans_a_faint_broad_source(self):
         """A broad source whose dirty peak is below the threshold: Asp alone
         takes nothing; with the test of significance per scale it takes the
