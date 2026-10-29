@@ -108,12 +108,25 @@ def test_restoration_layouts_match_actual_cube_backend(psf_axis, beam_axis, lega
     snapshot = image.copy(deep=True)
     reference, _ = restore_continuum_image(make_continuum_image())
     result, _ = restore_continuum_image(image)
-    xr.testing.assert_allclose(result.SKY_RESTORED, reference.SKY_RESTORED)
+    xr.testing.assert_allclose(
+        result.SKY_RESTORED_FLAT_NOISE, reference.SKY_RESTORED_FLAT_NOISE
+    )
     xr.testing.assert_identical(result.SKY_MODEL, snapshot.SKY_MODEL)
     xr.testing.assert_identical(result.SKY_RESIDUAL, snapshot.SKY_RESIDUAL)
-    assert result.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
-    assert np.isfinite(result.SKY_RESTORED).all()
-    assert float(result.SKY_RESTORED.max()) == pytest.approx(2.25)
+    assert result.SKY_RESTORED_FLAT_NOISE.dims == (
+        "time",
+        "taylor_term",
+        "polarization",
+        "l",
+        "m",
+    )
+    assert np.isfinite(result.SKY_RESTORED_FLAT_NOISE).all()
+    np.testing.assert_allclose(
+        result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=0).max(), 2.25, rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=1).max(), 17.25, rtol=1e-6
+    )
 
 
 @pytest.mark.parametrize("image_shape", [(8, 8), (7, 7), (7, 10), (10, 7), (8, 11)])
@@ -126,25 +139,40 @@ def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype
 
     result, timing = restore_continuum_image(image, primary_beam_correction=True)
 
-    assert result.SKY_RESTORED.sizes["l"] == image_shape[0]
-    assert result.SKY_RESTORED.sizes["m"] == image_shape[1]
-    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.sizes["l"] == image_shape[0]
-    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.sizes["m"] == image_shape[1]
-    assert result.SKY_RESTORED.dtype == dtype
-    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.dtype == dtype
-    assert result.SKY_RESTORED.dims == ("time", "polarization", "l", "m")
-    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.dims == (
+    assert result.SKY_RESTORED_FLAT_NOISE.sizes["l"] == image_shape[0]
+    assert result.SKY_RESTORED_FLAT_NOISE.sizes["m"] == image_shape[1]
+    assert result.SKY_RESTORED_FLAT_SKY.sizes["l"] == image_shape[0]
+    assert result.SKY_RESTORED_FLAT_SKY.sizes["m"] == image_shape[1]
+    assert result.SKY_RESTORED_FLAT_NOISE.dtype == dtype
+    assert result.SKY_RESTORED_FLAT_SKY.dtype == dtype
+    assert result.SKY_RESTORED_FLAT_NOISE.dims == (
         "time",
+        "taylor_term",
         "polarization",
         "l",
         "m",
     )
-    assert np.isfinite(result.SKY_RESTORED).all()
-    assert np.isfinite(result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED).all()
-    assert float(result.SKY_RESTORED.max()) == pytest.approx(2.25, rel=1e-6)
-    assert float(result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.max()) == pytest.approx(
-        4.5, rel=1e-6
+    assert result.SKY_RESTORED_FLAT_SKY.dims == (
+        "time",
+        "taylor_term",
+        "polarization",
+        "l",
+        "m",
     )
+    assert np.isfinite(result.SKY_RESTORED_FLAT_NOISE).all()
+    assert np.isfinite(result.SKY_RESTORED_FLAT_SKY).all()
+    assert float(
+        result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=0).max()
+    ) == pytest.approx(2.25, rel=1e-6)
+    assert float(
+        result.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0).max()
+    ) == pytest.approx(4.5, rel=1e-6)
+    assert float(
+        result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=1).max()
+    ) == pytest.approx(17.25, rel=1e-6)
+    assert float(
+        result.SKY_RESTORED_FLAT_SKY.isel(taylor_term=1).max()
+    ) == pytest.approx(34.5, rel=1e-6)
     xr.testing.assert_identical(result.SKY_MODEL, snapshot.SKY_MODEL)
     xr.testing.assert_identical(result.SKY_RESIDUAL, snapshot.SKY_RESIDUAL)
     assert "T_restore" in timing
@@ -153,7 +181,7 @@ def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_mtmfs_restoration_uses_principal_residual_copy(dtype):
-    """MT-MFS restores the principal tt0 solution without changing residuals."""
+    """MT-MFS restores every principal residual without changing residuals."""
     image = make_continuum_image()
     nl, nm = image.sizes["l"], image.sizes["m"]
     moments = np.asarray([1.0, 0.25, 0.5], dtype=dtype)
@@ -178,8 +206,69 @@ def test_mtmfs_restoration_uses_principal_residual_copy(dtype):
 
     result, _ = restore_continuum_image(image, deconvolver="mtmfs")
 
-    np.testing.assert_allclose(result.SKY_RESTORED, coefficients[0], rtol=1e-6)
+    for term, coefficient in enumerate(coefficients):
+        np.testing.assert_allclose(
+            result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=term),
+            coefficient,
+            rtol=1e-6,
+        )
+    np.testing.assert_allclose(result.ALPHA, coefficients[1] / coefficients[0])
+    np.testing.assert_allclose(
+        result.ALPHA_ERROR,
+        abs(coefficients[1] / coefficients[0]) * np.sqrt(2.0),
+        rtol=1e-6,
+    )
     xr.testing.assert_identical(result.SKY_RESIDUAL, residual_snapshot)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_restoration_creates_alpha_error_and_beta(dtype):
+    """Restored Taylor terms produce masked CASA-style spectral products."""
+    image = make_continuum_image()
+    nl, nm = image.sizes["l"], image.sizes["m"]
+    image = image.drop_dims("taylor_term").assign_coords(taylor_term=np.arange(3))
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    residual = np.empty((1, 3, 1, nl, nm), dtype=dtype)
+    residual[:, 0] = 2.0
+    residual[:, 1] = 1.0
+    residual[:, 2] = 3.0
+    residual[0, :, 0, 0, 0] = (0.1, 1.0, 3.0)
+    image["SKY_RESIDUAL"] = (dims, residual)
+    image["SKY_MODEL"] = (dims, np.zeros_like(residual))
+
+    result, _ = restore_continuum_image(image)
+
+    assert result.ALPHA.dims == ("time", "polarization", "l", "m")
+    assert result.ALPHA.dtype == dtype
+    assert result.ALPHA_ERROR.dtype == dtype
+    assert result.BETA.dtype == dtype
+    np.testing.assert_allclose(result.ALPHA.values[0, 0, 1:, 1:], 0.5)
+    np.testing.assert_allclose(
+        result.ALPHA_ERROR.values[0, 0, 1:, 1:],
+        0.5 * np.sqrt(2.0),
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(result.BETA.values[0, 0, 1:, 1:], 1.625)
+    assert np.isnan(result.ALPHA.values[0, 0, 0, 0])
+    assert np.isnan(result.ALPHA_ERROR.values[0, 0, 0, 0])
+    assert np.isnan(result.BETA.values[0, 0, 0, 0])
+    assert result.attrs["data_groups"]["restored"]["alpha"] == "ALPHA"
+    assert result.attrs["data_groups"]["restored"]["alpha_error"] == "ALPHA_ERROR"
+    assert result.attrs["data_groups"]["restored"]["beta"] == "BETA"
+
+
+def test_single_term_restoration_does_not_invent_spectral_products():
+    """Alpha and beta require at least two and three Taylor terms respectively."""
+    image = make_continuum_image()
+    image = image.isel(taylor_term=slice(0, 1))
+
+    result, _ = restore_continuum_image(image)
+
+    assert "ALPHA" not in result
+    assert "ALPHA_ERROR" not in result
+    assert "BETA" not in result
+    restored_group = result.attrs["data_groups"]["restored"]
+    assert not {"alpha", "alpha_error", "beta"} & restored_group.keys()
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -744,18 +833,20 @@ def test_hogbom_adapter_canonicalizes_generated_primary_beam_mask(monkeypatch):
 def test_restoration_reports_incomplete_backend_result(monkeypatch):
     module = importlib.import_module("astroviper.processing_functions.imaging.restore")
 
-    def broken_restore(image, **kwargs):
-        image.attrs["data_groups"]["restored"] = {"sky": "ABSENT"}
-        return image, pd.DataFrame()
+    def broken_restore(*args, **kwargs):
+        return {}, {"apparent": 0.0, "primary_beam_corrected": 0.0}
 
-    monkeypatch.setattr(module, "restore_image", broken_restore)
+    monkeypatch.setattr(module, "_restore_image_arrays", broken_restore)
     with pytest.raises(RuntimeError, match="did not create"):
         restore_continuum_image(make_continuum_image())
 
 
 @pytest.mark.parametrize(
     "fault,message",
-    [("empty_psf", "no Taylor orders"), ("beam_dimensions", "Missing dimensions")],
+    [
+        ("empty_psf", "no Taylor-order planes"),
+        ("beam_dimensions", "Missing dimensions"),
+    ],
 )
 def test_restoration_rejects_remaining_invalid_layouts(fault, message):
     image = make_continuum_image()
@@ -790,12 +881,15 @@ def test_pb_correction_cutoff_includes_exact_boundary(dtype):
         image,
         primary_beam_correction=True,
         primary_beam_limit=float(limit),
+        continuum_mode="mvc",
     )
-    finite = np.isfinite(result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[0, 0])
-    np.testing.assert_array_equal(finite[:, 0::4], False)
-    np.testing.assert_array_equal(finite[:, 1::4], True)
-    np.testing.assert_array_equal(finite[:, 2::4], True)
-    np.testing.assert_array_equal(finite[:, 3::4], False)
+    finite = np.isfinite(
+        result.SKY_RESTORED_FLAT_SKY.isel(time=0, polarization=0).values
+    )
+    np.testing.assert_array_equal(finite[:, :, 0::4], False)
+    np.testing.assert_array_equal(finite[:, :, 1::4], True)
+    np.testing.assert_array_equal(finite[:, :, 2::4], True)
+    np.testing.assert_array_equal(finite[:, :, 3::4], False)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -867,14 +961,10 @@ def test_mvc_channel_cutoff_excludes_exact_boundary_without_renormalizing(dtype)
         primary_beam_limit=float(limit),
     )
     expected_beam = (float(pb.values.ravel()[2]) + 1.0) / 4.0
-    # The cutoff applies to the effective beam only: the residual fits every
-    # channel with weight pb**2, as the PSF sums every channel.
-    channel_pb = pb.values.ravel().astype(float)
-    expected = (
-        expected_beam
-        * np.sum(channel_pb * np.array([3.0, 5.0, 7.0, 11.0]))
-        / np.sum(channel_pb**2)
-    )
+    # CASA excludes channels at or below the strict PB cutoff from the
+    # residual, PSF, and effective-beam numerators without renormalizing the
+    # remaining channel weights.
+    expected = (7.0 + 11.0) / 4.0
     np.testing.assert_allclose(actual, expected, rtol=1e-6)
     np.testing.assert_allclose(beam, expected_beam)
     np.testing.assert_allclose(psf, 1.0)

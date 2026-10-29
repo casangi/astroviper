@@ -19,11 +19,14 @@
             "type": ["str"],
             "allowed": ["hogbom", "mtmfs"]
         },
-        "primary_beam_correction": { "type": "boolean" },
         "primary_beam_limit": {"type": "float"},
         "continuum_mode": {
             "type": ["str"],
             "allowed": ["mfs", "mvc"]
+        },
+        "mvc_minor_cycle_approximation": {
+            "type": ["str"],
+            "allowed": ["channel_psf", "local_beam_moments"]
         },
         "instrument_polarization_basis": {
             "type": ["str"],

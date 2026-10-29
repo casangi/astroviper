@@ -871,9 +871,11 @@ def image_cube_single_field(
     primary_beam_correction : bool, optional
         If ``True`` write the primary beam corrected restored sky to the
         ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
-        by the (power) primary beam and convolved with the clean beam, plus
-        the residual divided by the primary beam; pixels below the primary
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable. Cube imaging and
+        MVC divide the model and residual by their channel or common (power)
+        primary beam before restoration. MFS instead divides the apparent
+        Taylor polynomials by the fitted primary-beam Taylor polynomial.
+        Pixels below the zeroth-order primary-
         beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
         ``restore``.
     psf_fitting_method : str, optional

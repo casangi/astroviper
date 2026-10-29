@@ -689,12 +689,14 @@ def _install_static_continuum_products(
     """Install cached PSF, PB, and beam-fit products into a residual image."""
     import xarray as xr
 
-    static_variable_names = (
+    static_variable_names = [
         "POINT_SPREAD_FUNCTION",
         "PRIMARY_BEAM",
         "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
         "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
-    )
+    ]
+    if "PRIMARY_BEAM_TAYLOR" in static_xds:
+        static_variable_names.append("PRIMARY_BEAM_TAYLOR")
 
     for name in static_variable_names:
         if name not in static_xds:
@@ -748,6 +750,8 @@ def _install_static_continuum_products(
             ),
         }
     )
+    if "PRIMARY_BEAM_TAYLOR" in static_xds:
+        residual_group["primary_beam_taylor"] = "PRIMARY_BEAM_TAYLOR"
 
     return img_xds
 
@@ -1073,6 +1077,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
+    mvc_minor_cycle_approximation="channel_psf",
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
@@ -1101,12 +1106,10 @@ def residual_update_continuum_single_field(
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
 
-    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
-    ``MVC_RESIDUAL_WEIGHT_SUM`` and the additive moments of the per-pixel
-    spectral fit (``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``,
-    ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``, ``MVC_RESIDUAL_BEAM_CHANNEL_COUNT``).
-    During the first imaging cycle it also returns the additive Taylor PSF
-    numerator, PSF weight sum, and weighted PB sum.
+    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and
+    ``MVC_RESIDUAL_WEIGHT_SUM``. During the first imaging cycle it also returns
+    the additive beam-weighted Taylor PSF numerator, PSF weight sum, and
+    weighted PB sum.
 
     Parameters
     ----------
@@ -1115,8 +1118,11 @@ def residual_update_continuum_single_field(
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
-        index. Its reference-frequency primary beam corrects the Taylor-zero
-        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        index. Wideband primary-beam correction fits the beam in the same Taylor
+        basis and divides the apparent-sky polynomial by the beam polynomial
+        before restoration, removing that contribution from corrected spectral
+        products.
+        ``"mvc"`` forms
         channel images and common-beam Taylor equations, and predicts
         ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
         the intrinsic spectrum under the common-beam convention, so
@@ -1270,6 +1276,14 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used for MVC map-local Taylor products.
 
+    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, optional
+        MVC approximation used to construct the Taylor residuals and PSFs.
+        ``"channel_psf"`` retains the frequency-dependent channel PSFs while
+        approximating the channel-to-common-beam ratio as one.
+        ``"local_beam_moments"`` retains local frequency-dependent primary-beam
+        moments while approximating the channel PSFs by a common response. The
+        setting is ignored by MFS.
+
     input_data : dict, optional
         Preloaded visibility data for this chunk.
 
@@ -1332,6 +1346,16 @@ def residual_update_continuum_single_field(
         raise ValueError(
             "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
+        )
+    mvc_minor_cycle_approximation = str(mvc_minor_cycle_approximation).lower()
+    if mvc_minor_cycle_approximation not in (
+        "channel_psf",
+        "local_beam_moments",
+    ):
+        raise ValueError(
+            "mvc_minor_cycle_approximation must be 'channel_psf' or "
+            "'local_beam_moments'; received "
+            f"{mvc_minor_cycle_approximation!r}."
         )
 
     if image_data_variables_keep is None:
@@ -1581,6 +1605,7 @@ def residual_update_continuum_single_field(
         continuum_mode=continuum_mode,
         task_id=task_id,
         primary_beam_limit=primary_beam_limit,
+        mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
     )
 
     # Retain the task-local frequency-dependent PB for MVC
@@ -2421,6 +2446,8 @@ def _prepare_continuum_image(
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         finalize_mvc_taylor_normal_equations,
+        fit_mfs_primary_beam_taylor,
+        fit_mvc_primary_beam_taylor,
         point_spread_function_gaussian_fit_continuum,
     )
 
@@ -2495,8 +2522,17 @@ def _prepare_continuum_image(
                 "placeholder": False,
             }
         )
+        primary_beam_taylor = None
+        if initialize_static_products:
+            primary_beam_taylor = fit_mfs_primary_beam_taylor(
+                img_xds,
+                primary_beam_limit=float(input_params.get("primary_beam_limit", 0.2)),
+            )
 
     elif continuum_mode == "mvc":
+        primary_beam_taylor = None
+        if initialize_static_products:
+            primary_beam_taylor = fit_mvc_primary_beam_taylor(img_xds)
         effective_primary_beam = None
         if not initialize_static_products:
             static_primary_beam = input_params["static_xds"]["PRIMARY_BEAM"]
@@ -2526,6 +2562,10 @@ def _prepare_continuum_image(
             img_xds.attrs["data_groups"][image_data_group_name][
                 "point_spread_function"
             ] = "POINT_SPREAD_FUNCTION"
+            img_xds["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
+            img_xds.attrs["data_groups"][image_data_group_name][
+                "primary_beam_taylor"
+            ] = "PRIMARY_BEAM_TAYLOR"
 
         # ----------------------------------------------------------
         # Construct the effective PB used only by the model update.
@@ -2668,6 +2708,10 @@ def _prepare_continuum_image(
                 reference_frequency=reference_frequency,
                 image_data_group_name=image_data_group_name,
             )
+            img_xds["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
+            img_xds.attrs["data_groups"][image_data_group_name][
+                "primary_beam_taylor"
+            ] = "PRIMARY_BEAM_TAYLOR"
 
         elif continuum_mode == "mvc":
             # MVC already constructed PRIMARY_BEAM immediately after the
@@ -2707,6 +2751,7 @@ def _prepare_continuum_image(
         static_variable_names = (
             "POINT_SPREAD_FUNCTION",
             "PRIMARY_BEAM",
+            "PRIMARY_BEAM_TAYLOR",
             "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
             "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         )
@@ -2725,6 +2770,13 @@ def _prepare_continuum_image(
         # and perform that conversion exactly once per cycle.
         static_xds = img_xds[list(static_variable_names)].copy(deep=True)
         static_xds.attrs = dict(img_xds.attrs)
+        img_xds = img_xds.drop_vars(
+            [
+                "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+            ],
+            errors="ignore",
+        )
 
     # ------------------------------------------------------------------
     # Later imaging cycles: reinstall static products.
@@ -2776,6 +2828,13 @@ def _prepare_continuum_image(
         "PRIMARY_BEAM": (
             "time",
             "frequency",
+            "polarization",
+            "l",
+            "m",
+        ),
+        "PRIMARY_BEAM_TAYLOR": (
+            "time",
+            "taylor_term",
             "polarization",
             "l",
             "m",
@@ -3282,6 +3341,12 @@ def continuum_finalize_node(
             restore_continuum_image,
         )
 
+        continuum_mode = str(input_params.get("continuum_mode", "mfs")).lower()
+        restoration_output = (
+            "primary_beam_corrected"
+            if input_params.get("primary_beam_correction", False)
+            else "apparent"
+        )
         img_xds, restore_timing_df = restore_continuum_image(
             img_xds,
             image_data_group_in_residual_name=(
@@ -3299,7 +3364,21 @@ def continuum_finalize_node(
             primary_beam_correction=input_params.get("primary_beam_correction", False),
             primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
             deconvolver=input_params.get("deconvolver", "hogbom"),
+            restoration_output=restoration_output,
+            continuum_mode=continuum_mode,
         )
+
+        if restoration_output == "primary_beam_corrected":
+            corrected_name = "SKY_RESTORED_FLAT_SKY"
+            if corrected_name not in img_xds:
+                raise RuntimeError(
+                    "Continuum restoration did not create its intrinsic "
+                    "PB-corrected Taylor image."
+                )
+            if "SKY_RESTORED_FLAT_NOISE" in img_xds:
+                raise RuntimeError(
+                    "Continuum restoration created an apparent Taylor image."
+                )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
 

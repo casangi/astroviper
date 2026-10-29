@@ -586,6 +586,7 @@ def test_first_cycle_does_not_rewrite_loaded_global_weights(monkeypatch):
         )
     }
     calls = {"load": 0, "write": 0}
+    processing_kwargs = {}
 
     def fake_load_weights(ps_xdt, *args, **kwargs):
         calls["load"] += 1
@@ -599,12 +600,14 @@ def test_first_cycle_does_not_rewrite_loaded_global_weights(monkeypatch):
         "_write_continuum_weights_in_place",
         lambda *args, **kwargs: calls.__setitem__("write", calls["write"] + 1),
     )
+
+    def fake_residual_update(ps_xdt, img_xds, *args, **kwargs):
+        processing_kwargs.update(kwargs)
+        return img_xds, pd.DataFrame({"imaging_weights_calculated": [0.0]})
+
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.residual_update_continuum_single_field",
-        lambda ps_xdt, img_xds, *args, **kwargs: (
-            img_xds,
-            pd.DataFrame({"imaging_weights_calculated": [0.0]}),
-        ),
+        fake_residual_update,
     )
     params = _weight_node_params()
     params.update(
@@ -612,6 +615,7 @@ def test_first_cycle_does_not_rewrite_loaded_global_weights(monkeypatch):
         weight_memory_mode="in_place",
         weight_cache_is_active=True,
         continuum_mode="mfs",
+        mvc_minor_cycle_approximation="local_beam_moments",
         data_group={"correlated_data": "VISIBILITY"},
         input_data=processing_set,
     )
@@ -619,6 +623,7 @@ def test_first_cycle_does_not_rewrite_loaded_global_weights(monkeypatch):
     result = continuum_node.residual_update_continuum_single_field(**params)
 
     assert calls == {"load": 1, "write": 0}
+    assert processing_kwargs["mvc_minor_cycle_approximation"] == "local_beam_moments"
     assert "weight_datasets" not in result
 
 

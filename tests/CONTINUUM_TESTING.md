@@ -34,7 +34,10 @@ Paths below are relative to `tests/`.
 - `component/test_continuum_known_truth.py`: compact generated phase-centre
   spectral-index and single-field off-axis point-source cases. MFS and MVC must
   recover the two Taylor coefficients and the primary-beam-corrected one-Jy
-  flux without CASA or stored visibility data.
+  flux without CASA or stored visibility data. MVC additionally verifies that
+  `local_beam_moments` recovers the off-axis spectral index; the processing-level
+  regression contrasts this with the documented `channel_psf`/CASA bias at the
+  same realistic Taylor-zero stopping threshold.
 
 The component comparisons are within each algorithm configuration. They do
 **not** require MFS and MVC, local and global weighting, or native and CASA

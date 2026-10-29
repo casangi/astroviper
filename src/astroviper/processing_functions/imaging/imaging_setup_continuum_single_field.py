@@ -102,12 +102,18 @@ def _convert_primary_beam_to_reference_frequency(
     float_dtype,
     image_data_group_in_name="residual",
 ):
-    """Replace an MFS channel PB cube by the PB evaluated at ``reffreq``.
+    """Build the static and polynomial primary-beam products needed by MFS.
 
     CASA's standard-gridder MFS path evaluates ``pb.tt0`` on the singleton
     Taylor image at its spectral coordinate, i.e. at the MT-MFS reference
     frequency.  The reference PB is independent of visibility partitioning and
     imaging weights, so it is retained as a non-additive static product.
+
+    The frequency-dependent beam is additionally projected onto the same
+    Taylor basis as the apparent sky.  This task-local function stores only
+    additive polynomial-fit numerators and spectral moments; the global append
+    node solves the fit after all frequency partitions have been reduced.  No
+    channel-sized beam cube is carried through the distributed reduction.
     """
     import numpy as np
     import xarray as xr
@@ -143,6 +149,80 @@ def _convert_primary_beam_to_reference_frequency(
         "list_blockage_diameters": np.asarray(blockage_diameters),
         "ipower": image_params.get("primary_beam_ipower", 2),
     }
+    n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
+    if n_taylor_terms < 1:
+        raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
+
+    channel_frequencies = np.asarray(img_xds.frequency.values, dtype=np.float64)
+    if channel_frequencies.ndim != 1 or channel_frequencies.size == 0:
+        raise ValueError("MFS primary-beam fitting requires channel frequencies.")
+    if not np.all(np.isfinite(channel_frequencies)):
+        raise ValueError("MFS primary-beam frequencies must be finite.")
+
+    channel_data = evaluate_primary_beam(
+        channel_frequencies,
+        img_xds.polarization.values,
+        pb_params,
+        pb_image_params,
+        dtype=float_dtype,
+    )[0]
+    channel_data = np.broadcast_to(
+        channel_data,
+        (img_xds.sizes["time"], *channel_data.shape),
+    )
+    x_frequency = (channel_frequencies - reference_frequency_hz) / (
+        reference_frequency_hz
+    )
+    n_moments = 2 * n_taylor_terms - 1
+    numerator = np.stack(
+        [
+            np.sum(
+                channel_data * x_frequency[None, :, None, None, None] ** order,
+                axis=1,
+            )
+            for order in range(n_taylor_terms)
+        ],
+        axis=1,
+    )
+    moments = np.asarray(
+        [np.sum(x_frequency**order) for order in range(n_moments)],
+        dtype=np.float64,
+    )
+    moments = np.broadcast_to(
+        moments[None, :, None],
+        (img_xds.sizes["time"], n_moments, img_xds.sizes["polarization"]),
+    ).copy()
+    common_coords = {
+        dim: img_xds.coords[dim]
+        for dim in ("time", "polarization", "l", "m")
+        if dim in img_xds.coords
+    }
+    img_xds["MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR"] = xr.DataArray(
+        numerator,
+        dims=("time", "taylor_term", "polarization", "l", "m"),
+        coords={
+            **common_coords,
+            "taylor_term": np.arange(n_taylor_terms, dtype=np.int64),
+        },
+        attrs={
+            "description": "Additive MFS primary-beam Taylor-fit numerator.",
+            "reference_frequency_hz": reference_frequency_hz,
+        },
+    )
+    img_xds["MFS_PRIMARY_BEAM_FIT_MOMENTS"] = xr.DataArray(
+        moments,
+        dims=("time", "psf_taylor_order", "polarization"),
+        coords={
+            key: value
+            for key, value in common_coords.items()
+            if key in ("time", "polarization")
+        }
+        | {"psf_taylor_order": np.arange(n_moments, dtype=np.int64)},
+        attrs={
+            "description": "Additive MFS primary-beam Taylor-fit moments.",
+            "reference_frequency_hz": reference_frequency_hz,
+        },
+    )
     reference_data = evaluate_primary_beam(
         np.asarray([reference_frequency_hz]),
         img_xds.polarization.values,
@@ -150,14 +230,14 @@ def _convert_primary_beam_to_reference_frequency(
         pb_image_params,
         dtype=float_dtype,
     )[0, 0, ...][None, ...]
+    reference_data = np.broadcast_to(
+        reference_data,
+        (img_xds.sizes["time"], *reference_data.shape[1:]),
+    )
     reference_primary_beam = xr.DataArray(
         reference_data,
         dims=("time", "polarization", "l", "m"),
-        coords={
-            dim: img_xds.coords[dim]
-            for dim in ("time", "polarization", "l", "m")
-            if dim in img_xds.coords
-        },
+        coords=common_coords,
         name="PRIMARY_BEAM_REFERENCE",
         attrs={
             "description": "MFS primary beam evaluated at the reference frequency.",
@@ -209,8 +289,11 @@ def imaging_setup_continuum_single_field(
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
-        index. Its reference-frequency primary beam corrects the Taylor-zero
-        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        index. Wideband primary-beam correction fits the beam in the same Taylor
+        basis and divides the apparent-sky polynomial by the beam polynomial
+        before restoration, removing that contribution from corrected spectral
+        products.
+        ``"mvc"`` forms
         channel images and common-beam Taylor equations, and predicts
         ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
         the intrinsic spectrum under the common-beam convention, so

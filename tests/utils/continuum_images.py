@@ -40,7 +40,7 @@ def make_continuum_image(
     dims = ("time", "taylor_term", "polarization", "l", "m")
     model = np.zeros((1, 2, 1, nl, nm))
     model[0, 0, 0, nl // 2, nm // 2] = 2.0
-    model[0, 1, 0, nl // 2, nm // 2] = 17.0  # Higher Taylor terms must not be restored.
+    model[0, 1, 0, nl // 2, nm // 2] = 17.0
     image = xr.Dataset(
         {"SKY_MODEL": (dims, model), "SKY_RESIDUAL": (dims, np.full_like(model, 0.25))},
         coords=coords,
@@ -70,7 +70,16 @@ def make_continuum_image(
     image["POINT_SPREAD_FUNCTION"] = psf
     image["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = beam
     image["PRIMARY_BEAM"] = plane * 0.5
-    residual = {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+    primary_beam_taylor = xr.zeros_like(image.SKY_MODEL)
+    primary_beam_taylor.loc[{"taylor_term": 0}] = image.PRIMARY_BEAM.isel(
+        polarization=0
+    )
+    image["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
+    residual = {
+        "sky": "SKY_RESIDUAL",
+        "primary_beam": "PRIMARY_BEAM",
+        "primary_beam_taylor": "PRIMARY_BEAM_TAYLOR",
+    }
     if not legacy:
         residual.update(
             point_spread_function="POINT_SPREAD_FUNCTION",
