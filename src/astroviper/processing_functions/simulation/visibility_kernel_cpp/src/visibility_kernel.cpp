@@ -154,8 +154,8 @@ inline void sample_jones(const BeamModel& bm, double l, double m, double freq,
         const double delta_pa = parallactic_angle - bm.jones_parallactic_angle[i_pa];
         const double c = std::cos(delta_pa), s = std::sin(delta_pa);
         const double ls = l * scale, ms = m * scale;
-        const double l_rot = c * ls + s * ms;
-        const double m_rot = -s * ls + c * ms;
+        const double l_rot = c * ls - s * ms;
+        const double m_rot = s * ls + c * ms;
         const double x = clampd(l_rot / bm.cell_size_l + (bm.n_l / 2), 0.0, double(bm.n_l - 1));
         const double y = clampd(m_rot / bm.cell_size_m + (bm.n_m / 2), 0.0, double(bm.n_m - 1));
         const std::int64_t x0 = static_cast<std::int64_t>(std::floor(x));
