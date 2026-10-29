@@ -82,6 +82,16 @@ imaging_data_variables_and_dims_double_precision = {
         "dtype": "<f8",
         "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
     },
+    "sky_restored_flat_noise": {
+        "dims": full_dims_lm,
+        "dtype": "<f8",
+        "name": "SKY_RESTORED_FLAT_NOISE",
+    },
+    "sky_restored_flat_sky": {
+        "dims": full_dims_lm,
+        "dtype": "<f8",
+        "name": "SKY_RESTORED_FLAT_SKY",
+    },
     "alpha": {
         "dims": continuum_spectral_product_dims,
         "dtype": "<f8",
@@ -165,6 +175,16 @@ imaging_data_variables_and_dims_single_precision = {
         "dtype": "<f4",
         "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
     },
+    "sky_restored_flat_noise": {
+        "dims": full_dims_lm,
+        "dtype": "<f4",
+        "name": "SKY_RESTORED_FLAT_NOISE",
+    },
+    "sky_restored_flat_sky": {
+        "dims": full_dims_lm,
+        "dtype": "<f4",
+        "name": "SKY_RESTORED_FLAT_SKY",
+    },
     "alpha": {
         "dims": continuum_spectral_product_dims,
         "dtype": "<f4",
@@ -235,6 +255,8 @@ imaging_data_variable_data_group_roles = {
         "restored",
         "sky_primary_beam_corrected",
     ),
+    "sky_restored_flat_noise": ("restored", "sky_flat_noise"),
+    "sky_restored_flat_sky": ("restored", "sky_flat_sky"),
     "alpha": ("restored", "alpha"),
     "alpha_error": ("restored", "alpha_error"),
     "beta": ("restored", "beta"),

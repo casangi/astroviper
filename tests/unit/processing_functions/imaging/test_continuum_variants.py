@@ -108,22 +108,24 @@ def test_restoration_layouts_match_actual_cube_backend(psf_axis, beam_axis, lega
     snapshot = image.copy(deep=True)
     reference, _ = restore_continuum_image(make_continuum_image())
     result, _ = restore_continuum_image(image)
-    xr.testing.assert_allclose(result.SKY_RESTORED, reference.SKY_RESTORED)
+    xr.testing.assert_allclose(
+        result.SKY_RESTORED_FLAT_NOISE, reference.SKY_RESTORED_FLAT_NOISE
+    )
     xr.testing.assert_identical(result.SKY_MODEL, snapshot.SKY_MODEL)
     xr.testing.assert_identical(result.SKY_RESIDUAL, snapshot.SKY_RESIDUAL)
-    assert result.SKY_RESTORED.dims == (
+    assert result.SKY_RESTORED_FLAT_NOISE.dims == (
         "time",
         "taylor_term",
         "polarization",
         "l",
         "m",
     )
-    assert np.isfinite(result.SKY_RESTORED).all()
+    assert np.isfinite(result.SKY_RESTORED_FLAT_NOISE).all()
     np.testing.assert_allclose(
-        result.SKY_RESTORED.isel(taylor_term=0).max(), 2.25, rtol=1e-6
+        result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=0).max(), 2.25, rtol=1e-6
     )
     np.testing.assert_allclose(
-        result.SKY_RESTORED.isel(taylor_term=1).max(), 17.25, rtol=1e-6
+        result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=1).max(), 17.25, rtol=1e-6
     )
 
 
@@ -137,39 +139,39 @@ def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype
 
     result, timing = restore_continuum_image(image, primary_beam_correction=True)
 
-    assert result.SKY_RESTORED.sizes["l"] == image_shape[0]
-    assert result.SKY_RESTORED.sizes["m"] == image_shape[1]
-    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.sizes["l"] == image_shape[0]
-    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.sizes["m"] == image_shape[1]
-    assert result.SKY_RESTORED.dtype == dtype
-    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.dtype == dtype
-    assert result.SKY_RESTORED.dims == (
+    assert result.SKY_RESTORED_FLAT_NOISE.sizes["l"] == image_shape[0]
+    assert result.SKY_RESTORED_FLAT_NOISE.sizes["m"] == image_shape[1]
+    assert result.SKY_RESTORED_FLAT_SKY.sizes["l"] == image_shape[0]
+    assert result.SKY_RESTORED_FLAT_SKY.sizes["m"] == image_shape[1]
+    assert result.SKY_RESTORED_FLAT_NOISE.dtype == dtype
+    assert result.SKY_RESTORED_FLAT_SKY.dtype == dtype
+    assert result.SKY_RESTORED_FLAT_NOISE.dims == (
         "time",
         "taylor_term",
         "polarization",
         "l",
         "m",
     )
-    assert result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.dims == (
+    assert result.SKY_RESTORED_FLAT_SKY.dims == (
         "time",
         "taylor_term",
         "polarization",
         "l",
         "m",
     )
-    assert np.isfinite(result.SKY_RESTORED).all()
-    assert np.isfinite(result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED).all()
-    assert float(result.SKY_RESTORED.isel(taylor_term=0).max()) == pytest.approx(
-        2.25, rel=1e-6
-    )
+    assert np.isfinite(result.SKY_RESTORED_FLAT_NOISE).all()
+    assert np.isfinite(result.SKY_RESTORED_FLAT_SKY).all()
     assert float(
-        result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(taylor_term=0).max()
+        result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=0).max()
+    ) == pytest.approx(2.25, rel=1e-6)
+    assert float(
+        result.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0).max()
     ) == pytest.approx(4.5, rel=1e-6)
-    assert float(result.SKY_RESTORED.isel(taylor_term=1).max()) == pytest.approx(
-        17.25, rel=1e-6
-    )
     assert float(
-        result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(taylor_term=1).max()
+        result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=1).max()
+    ) == pytest.approx(17.25, rel=1e-6)
+    assert float(
+        result.SKY_RESTORED_FLAT_SKY.isel(taylor_term=1).max()
     ) == pytest.approx(34.5, rel=1e-6)
     xr.testing.assert_identical(result.SKY_MODEL, snapshot.SKY_MODEL)
     xr.testing.assert_identical(result.SKY_RESIDUAL, snapshot.SKY_RESIDUAL)
@@ -206,7 +208,9 @@ def test_mtmfs_restoration_uses_principal_residual_copy(dtype):
 
     for term, coefficient in enumerate(coefficients):
         np.testing.assert_allclose(
-            result.SKY_RESTORED.isel(taylor_term=term), coefficient, rtol=1e-6
+            result.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=term),
+            coefficient,
+            rtol=1e-6,
         )
     np.testing.assert_allclose(result.ALPHA, coefficients[1] / coefficients[0])
     np.testing.assert_allclose(
@@ -880,7 +884,7 @@ def test_pb_correction_cutoff_includes_exact_boundary(dtype):
         continuum_mode="mvc",
     )
     finite = np.isfinite(
-        result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(time=0, polarization=0).values
+        result.SKY_RESTORED_FLAT_SKY.isel(time=0, polarization=0).values
     )
     np.testing.assert_array_equal(finite[:, :, 0::4], False)
     np.testing.assert_array_equal(finite[:, :, 1::4], True)

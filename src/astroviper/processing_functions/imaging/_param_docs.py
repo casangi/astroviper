@@ -622,11 +622,11 @@ IMAGING_PARAM_DOCS = {
     "image_continuum_single_field.restore": (
         "If ``True`` restore every Taylor coefficient after deconvolution and\n"
         "always produce the intrinsic, primary-beam-corrected Taylor image in\n"
-        "``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``. MVC exposes this as its sole\n"
-        "restored sky product; MFS additionally retains the apparent\n"
-        "``SKY_RESTORED`` image. Pixels below ``primary_beam_limit`` are blanked\n"
-        "with NaN. With at least two Taylor terms, also write ``ALPHA`` and\n"
-        "``ALPHA_ERROR``; with at least three, also write ``BETA``."
+        "``SKY_RESTORED_FLAT_SKY``. This is the sole restored sky product for\n"
+        "both MFS and MVC; the apparent ``SKY_RESTORED_FLAT_NOISE`` image is not\n"
+        "written. Pixels below ``primary_beam_limit`` are blanked with NaN. With\n"
+        "at least two Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``;\n"
+        "with at least three, also write ``BETA``."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.

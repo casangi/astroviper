@@ -3597,7 +3597,8 @@ def restore_continuum_image(
     Taylor planes are passed directly to the same array-level restoration core
     used by cube imaging. No temporary frequency cube is constructed. The
     caller may request the apparent restored stack, the intrinsic
-    primary-beam-corrected stack, or both.
+    primary-beam-corrected stack, or both. These are stored as
+    ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``, respectively.
 
     Every Taylor coefficient is restored independently with the same fitted
     clean beam. MFS first divides the apparent model and residual Taylor
@@ -3974,8 +3975,8 @@ def restore_continuum_image(
         ):
             _require_backend_product(products, required_product)
 
-    apparent_name = "SKY_RESTORED"
-    corrected_name = "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+    apparent_name = "SKY_RESTORED_FLAT_NOISE"
+    corrected_name = "SKY_RESTORED_FLAT_SKY"
     sky_name = (
         corrected_name
         if restoration_output == "primary_beam_corrected"
@@ -4003,7 +4004,7 @@ def restore_continuum_image(
         ).transpose(*residual_da.dims)
         img_xds[corrected_name] = corrected_da
         if restoration_output == "both":
-            continuum_restored_group["sky_primary_beam_corrected"] = corrected_name
+            continuum_restored_group["sky_flat_sky"] = corrected_name
 
     spectral_restored_da = apparent_da
     spectral_residual_da = restoration_residual_da

@@ -240,7 +240,7 @@ def _final_continuum_image():
             "POINT_SPREAD_FUNCTION": (psf_dims, np.ones((1, 3, 1, 2, 3))),
             "PRIMARY_BEAM": (pb_dims, np.full((1, 1, 1, 2, 3), 0.8)),
             "MASK": (sky_dims, np.ones((1, 2, 1, 2, 3), dtype=bool)),
-            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED": (
+            "SKY_RESTORED_FLAT_SKY": (
                 sky_dims,
                 np.full((1, 2, 1, 2, 3), 2.5),
             ),
@@ -256,11 +256,7 @@ def _final_continuum_image():
                     "mask": "MASK",
                 },
                 "model": {"sky": "SKY_MODEL"},
-                "restored": {
-                    "sky_primary_beam_corrected": (
-                        "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
-                    )
-                },
+                "restored": {"sky_flat_sky": ("SKY_RESTORED_FLAT_SKY")},
             },
         },
     )
@@ -316,7 +312,7 @@ def test_final_continuum_image_round_trips_finite_taylor_data(tmp_path):
             "sky_residual",
             "point_spread_function",
             "primary_beam",
-            "sky_restored_primary_beam_corrected",
+            "sky_restored_flat_sky",
         ],
     )
     store = tmp_path / "continuum.img.zarr"
@@ -337,7 +333,7 @@ def test_final_continuum_image_round_trips_finite_taylor_data(tmp_path):
     )
     assert np.isfinite(persisted["SKY_RESIDUAL"].values).all()
     assert np.isfinite(persisted["POINT_SPREAD_FUNCTION"].values).all()
-    assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in persisted
+    assert "SKY_RESTORED_FLAT_SKY" in persisted
 
 
 def test_continuum_image_for_disk_keeps_registry_mask_and_role():
@@ -2105,17 +2101,11 @@ def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(
         primary_beam_limit=0.2,
     )
 
-    assert "SKY_RESTORED" in image
-    assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in image
-    assert image.SKY_RESTORED.dims == (
-        "time",
-        "taylor_term",
-        "polarization",
-        "l",
-        "m",
-    )
-    assert np.isfinite(image.SKY_RESTORED.values).all()
-    pbcor_finite = np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values)
+    assert "SKY_RESTORED_FLAT_NOISE" not in image
+    assert "SKY_RESTORED_FLAT_SKY" in image
+    assert image.attrs["data_groups"]["restored"]["sky"] == ("SKY_RESTORED_FLAT_SKY")
+    assert "sky_flat_sky" not in image.attrs["data_groups"]["restored"]
+    pbcor_finite = np.isfinite(image.SKY_RESTORED_FLAT_SKY.values)
     assert np.any(pbcor_finite)
     assert np.any(~pbcor_finite)
     primary_beam = np.squeeze(np.asarray(image.PRIMARY_BEAM.values), axis=1)
@@ -2251,20 +2241,18 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     assert image.attrs["data_groups"]["restored"]["primary_beam_taylor"] == (
         "PRIMARY_BEAM_TAYLOR"
     )
-    assert "SKY_RESTORED" not in image
-    assert image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.dims == (
+    assert "SKY_RESTORED_FLAT_NOISE" not in image
+    assert image.SKY_RESTORED_FLAT_SKY.dims == (
         "time",
         "taylor_term",
         "polarization",
         "l",
         "m",
     )
-    assert image.attrs["data_groups"]["restored"]["sky"] == (
-        "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
-    )
-    assert "sky_primary_beam_corrected" not in image.attrs["data_groups"]["restored"]
-    assert np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).any()
-    assert not np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values).all()
+    assert image.attrs["data_groups"]["restored"]["sky"] == ("SKY_RESTORED_FLAT_SKY")
+    assert "sky_flat_sky" not in image.attrs["data_groups"]["restored"]
+    assert np.isfinite(image.SKY_RESTORED_FLAT_SKY.values).any()
+    assert not np.isfinite(image.SKY_RESTORED_FLAT_SKY.values).all()
 
 
 @pytest.mark.parametrize(

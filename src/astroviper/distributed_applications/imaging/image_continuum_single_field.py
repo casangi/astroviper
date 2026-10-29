@@ -2823,11 +2823,11 @@ def image_continuum_single_field(
     restore : bool
         If ``True`` restore every Taylor coefficient after deconvolution and
         always produce the intrinsic, primary-beam-corrected Taylor image in
-        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``. MVC exposes this as its sole
-        restored sky product; MFS additionally retains the apparent
-        ``SKY_RESTORED`` image. Pixels below ``primary_beam_limit`` are blanked
-        with NaN. With at least two Taylor terms, also write ``ALPHA`` and
-        ``ALPHA_ERROR``; with at least three, also write ``BETA``.
+        ``SKY_RESTORED_FLAT_SKY``. This is the sole restored sky product for
+        both MFS and MVC; the apparent ``SKY_RESTORED_FLAT_NOISE`` image is not
+        written. Pixels below ``primary_beam_limit`` are blanked with NaN. With
+        at least two Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``;
+        with at least three, also write ``BETA``.
     scan_intents : list of str or str, optional
         Scan intent or intents passed to
         :func:`xradio.measurement_set.open_processing_set` when opening the
@@ -3405,9 +3405,8 @@ def image_continuum_single_field(
         raise ValueError(
             f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
-    # Continuum restoration always makes its intrinsic PB-corrected product;
-    # there is no separate PB-correction switch. MVC exposes only this product,
-    # while MFS also retains the apparent restored image.
+    # Continuum restoration always writes only its intrinsic PB-corrected
+    # product; there is no separate PB-correction switch.
     primary_beam_correction = bool(restore)
     # Work with an application-local copy: continuum setup may augment the
     # image parameters with metadata derived from the Processing Set.
@@ -3441,14 +3440,8 @@ def image_continuum_single_field(
             f"{imaging_weights_params['weighting']!r}."
         )
 
-    # When restoring, the restored sky must be created on disk and written, so
-    # ensure it is in the keep list (without mutating the caller's list).
-    if (
-        restore
-        and continuum_mode != "mvc"
-        and "sky_restored" not in image_data_variables_keep
-    ):
-        image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
+    # When restoring, ensure the derived spectral products are written without
+    # retaining the intermediate apparent restored Taylor image.
     if restore:
         spectral_products = ("alpha", "alpha_error", "beta")
         image_data_variables_keep = list(image_data_variables_keep) + [
@@ -3457,10 +3450,10 @@ def image_continuum_single_field(
             if product not in image_data_variables_keep
         ]
     if primary_beam_correction and (
-        "sky_restored_primary_beam_corrected" not in image_data_variables_keep
+        "sky_restored_flat_sky" not in image_data_variables_keep
     ):
         image_data_variables_keep = list(image_data_variables_keep) + [
-            "sky_restored_primary_beam_corrected"
+            "sky_restored_flat_sky"
         ]
 
     # One public primary-beam limit controls CLEAN support, MVC correction,

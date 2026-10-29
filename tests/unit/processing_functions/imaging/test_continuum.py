@@ -358,7 +358,7 @@ def test_primary_beam_correction_restores_every_taylor_term():
         primary_beam_limit=0.2,
         continuum_mode="mvc",
     )
-    corrected = result["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
+    corrected = result["SKY_RESTORED_FLAT_SKY"]
     assert corrected.dims == ("time", "taylor_term", "polarization", "l", "m")
 
     kernel_ft = _clean_beam_kernel_ft(beam[0, 0], 8, 8, 1.0e-5, model.dtype, 1)
@@ -372,7 +372,7 @@ def test_primary_beam_correction_restores_every_taylor_term():
         )
         np.testing.assert_allclose(corrected.values[0, term, 0], expected)
         old_post_restore_division = (
-            result.SKY_RESTORED.values[0, term, 0] / primary_beam[0, 0]
+            result.SKY_RESTORED_FLAT_NOISE.values[0, term, 0] / primary_beam[0, 0]
         )
         assert not np.allclose(corrected.values[0, term, 0], old_post_restore_division)
 
@@ -411,31 +411,32 @@ def test_corrected_only_continuum_restoration_matches_the_both_product_path():
         continuum_mode="mvc",
     )
 
-    assert "SKY_RESTORED" in both
-    assert "SKY_RESTORED" not in corrected_only
+    assert "SKY_RESTORED_FLAT_NOISE" in both
+    assert "SKY_RESTORED_FLAT_NOISE" not in corrected_only
     np.testing.assert_array_equal(
-        corrected_only.SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
-        both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
+        corrected_only.SKY_RESTORED_FLAT_SKY,
+        both.SKY_RESTORED_FLAT_SKY,
     )
     np.testing.assert_array_equal(corrected_only.ALPHA, both.ALPHA)
     np.testing.assert_array_equal(corrected_only.ALPHA_ERROR, both.ALPHA_ERROR)
     np.testing.assert_array_equal(corrected_only.BETA, both.BETA)
-    expected_alpha = both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(
+    expected_alpha = both.SKY_RESTORED_FLAT_SKY.isel(
         taylor_term=1
-    ) / both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(taylor_term=0)
+    ) / both.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0)
     np.testing.assert_array_equal(corrected_only.ALPHA, expected_alpha)
-    expected_beta = both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(
+    expected_beta = both.SKY_RESTORED_FLAT_SKY.isel(
         taylor_term=2
-    ) / both.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(
-        taylor_term=0
-    ) - 0.5 * expected_alpha * (expected_alpha - 1.0)
+    ) / both.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0) - 0.5 * expected_alpha * (
+        expected_alpha - 1.0
+    )
     np.testing.assert_array_equal(corrected_only.BETA, expected_beta)
     assert not np.allclose(
         corrected_only.ALPHA,
-        both.SKY_RESTORED.isel(taylor_term=1) / both.SKY_RESTORED.isel(taylor_term=0),
+        both.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=1)
+        / both.SKY_RESTORED_FLAT_NOISE.isel(taylor_term=0),
     )
     assert corrected_only.attrs["data_groups"]["restored"]["sky"] == (
-        "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        "SKY_RESTORED_FLAT_SKY"
     )
 
 
@@ -494,7 +495,7 @@ def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore()
         output="apparent",
     )
     np.testing.assert_allclose(
-        result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
+        result.SKY_RESTORED_FLAT_SKY,
         expected_products["apparent"],
     )
     expected_residual = _divide_taylor_polynomials(
@@ -503,9 +504,9 @@ def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore()
         0.2,
     )
     np.testing.assert_allclose(expected_residual, intrinsic_residual)
-    expected_alpha = result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(
+    expected_alpha = result.SKY_RESTORED_FLAT_SKY.isel(
         taylor_term=1
-    ) / result.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(taylor_term=0)
+    ) / result.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0)
     np.testing.assert_allclose(result.ALPHA, expected_alpha, equal_nan=True)
 
 

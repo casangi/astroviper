@@ -3344,12 +3344,8 @@ def continuum_finalize_node(
         continuum_mode = str(input_params.get("continuum_mode", "mfs")).lower()
         restoration_output = (
             "primary_beam_corrected"
-            if continuum_mode == "mvc"
-            else (
-                "both"
-                if input_params.get("primary_beam_correction", False)
-                else "apparent"
-            )
+            if input_params.get("primary_beam_correction", False)
+            else "apparent"
         )
         img_xds, restore_timing_df = restore_continuum_image(
             img_xds,
@@ -3372,15 +3368,17 @@ def continuum_finalize_node(
             continuum_mode=continuum_mode,
         )
 
-        if continuum_mode == "mvc":
-            corrected_name = "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        if restoration_output == "primary_beam_corrected":
+            corrected_name = "SKY_RESTORED_FLAT_SKY"
             if corrected_name not in img_xds:
                 raise RuntimeError(
-                    "MVC restoration did not create its intrinsic PB-corrected "
-                    "Taylor image."
+                    "Continuum restoration did not create its intrinsic "
+                    "PB-corrected Taylor image."
                 )
-            if "SKY_RESTORED" in img_xds:
-                raise RuntimeError("MVC restoration created an apparent Taylor image.")
+            if "SKY_RESTORED_FLAT_NOISE" in img_xds:
+                raise RuntimeError(
+                    "Continuum restoration created an apparent Taylor image."
+                )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
 

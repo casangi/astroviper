@@ -164,7 +164,6 @@ def _assert_restoration_values(image, primary_beam_limit=0.2):
         if dimension in fitted_beam.dims:
             fitted_beam = fitted_beam.isel({dimension: 0}, drop=True)
     cell_size = abs(float(image.l.values[1] - image.l.values[0]))
-    apparent_reference = xr.zeros_like(residual)
     corrected_reference = xr.full_like(residual, np.nan)
     corrected_residual = xr.full_like(residual, np.nan)
 
@@ -177,26 +176,8 @@ def _assert_restoration_values(image, primary_beam_limit=0.2):
                     "polarization": polarization,
                 }
                 beam_index = {"time": time, "polarization": polarization}
-                model_plane = model.isel(index).values
-                residual_plane = residual.isel(index).values
                 beam_plane = correction_beam.isel(beam_index).values
                 beam_parameters = fitted_beam.isel(beam_index).values
-
-                convolved_model = _circular_clean_beam_convolution(
-                    model_plane, beam_parameters, cell_size
-                )
-                expected_restored = convolved_model + residual_plane
-                apparent_reference.data[time, term, polarization] = expected_restored
-                if "SKY_RESTORED" in image:
-                    np.testing.assert_allclose(
-                        image.SKY_RESTORED.isel(index),
-                        expected_restored,
-                        rtol=1e-6,
-                        atol=max(
-                            float(np.max(np.abs(expected_restored))) * 1e-8,
-                            1e-14,
-                        ),
-                    )
 
                 inside = beam_plane >= primary_beam_limit
                 divided_model = corrected_model_stack.isel(index).values
@@ -211,7 +192,7 @@ def _assert_restoration_values(image, primary_beam_limit=0.2):
                     corrected_residual_plane[inside]
                 )
                 np.testing.assert_allclose(
-                    image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.isel(index),
+                    image.SKY_RESTORED_FLAT_SKY.isel(index),
                     expected_corrected,
                     rtol=1e-6,
                     atol=max(
@@ -283,15 +264,12 @@ def test_continuum_configuration_cache_and_reduction_regression(
         "PRIMARY_BEAM",
         "PRIMARY_BEAM_TAYLOR",
         "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
-        "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
+        "SKY_RESTORED_FLAT_SKY",
         "ALPHA",
         "ALPHA_ERROR",
     ]
-    if continuum_mode == "mfs":
-        products.append("SKY_RESTORED")
-    else:
-        assert "SKY_RESTORED" not in actual
-        assert "SKY_RESTORED" not in reference
+    assert "SKY_RESTORED_FLAT_NOISE" not in actual
+    assert "SKY_RESTORED_FLAT_NOISE" not in reference
     assert result["n_cycles"] == reference_result["n_cycles"] == 2
     # max_iter is per image plane; the reported total sums polarizations.
     assert 0 < result["controller"].total_iter_done <= 8 * actual.sizes["polarization"]
@@ -331,15 +309,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
         if continuum_mode == "mfs"
         else beam
     )
-    if continuum_mode == "mfs":
-        assert actual.SKY_RESTORED.dims == (
-            "time",
-            "taylor_term",
-            "polarization",
-            "l",
-            "m",
-        )
-    corrected = actual.SKY_RESTORED_PRIMARY_BEAM_CORRECTED
+    corrected = actual.SKY_RESTORED_FLAT_SKY
     assert corrected.dims == (
         "time",
         "taylor_term",
@@ -394,5 +364,5 @@ def test_continuum_uses_writer_resolved_path(
     assert resolved.is_dir()
     assert result["n_cycles"] == 2
     assert np.isfinite(image.SKY_RESIDUAL).all()
-    assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in image
+    assert "SKY_RESTORED_FLAT_SKY" in image
     assert not any("CACHE" in name or "MVC_" in name for name in image.data_vars)

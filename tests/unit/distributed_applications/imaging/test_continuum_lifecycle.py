@@ -63,33 +63,43 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
     xr.testing.assert_identical(result["image"].SKY_MODEL, model.SKY_MODEL)
     assert not np.shares_memory(result["image"].SKY_MODEL, model.SKY_MODEL)
     if restore:
-        expected, _ = original_restore(
-            make_continuum_image(), primary_beam_correction=primary_beam_correction
+        restoration_output = (
+            "primary_beam_corrected" if primary_beam_correction else "apparent"
         )
-        xr.testing.assert_allclose(result["image"].SKY_RESTORED, expected.SKY_RESTORED)
+        expected, _ = original_restore(
+            make_continuum_image(),
+            primary_beam_correction=primary_beam_correction,
+            restoration_output=restoration_output,
+        )
+        expected_name = (
+            "SKY_RESTORED_FLAT_SKY"
+            if primary_beam_correction
+            else "SKY_RESTORED_FLAT_NOISE"
+        )
+        xr.testing.assert_allclose(
+            result["image"][expected_name], expected[expected_name]
+        )
     else:
-        assert "SKY_RESTORED" not in result["image"]
+        assert "SKY_RESTORED_FLAT_NOISE" not in result["image"]
+        assert "SKY_RESTORED_FLAT_SKY" not in result["image"]
         assert result["timing_restore"] is None
     if primary_beam_correction:
-        xr.testing.assert_allclose(
-            result["image"].SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
-            expected.SKY_RESTORED_PRIMARY_BEAM_CORRECTED,
-        )
+        assert "SKY_RESTORED_FLAT_NOISE" not in result["image"]
         assert (
-            result["image"].attrs["data_groups"]["restored"][
-                "sky_primary_beam_corrected"
-            ]
-            == "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            result["image"].attrs["data_groups"]["restored"]["sky"]
+            == "SKY_RESTORED_FLAT_SKY"
         )
+        assert "sky_flat_sky" not in result["image"].attrs["data_groups"]["restored"]
         assert "T_correct_sky_by_primary_beam" in result["timing_restore"]
     else:
-        assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" not in result["image"]
+        assert "SKY_RESTORED_FLAT_SKY" not in result["image"]
         if restore:
             assert "T_correct_sky_by_primary_beam" not in result["timing_restore"]
 
 
-def test_mvc_finalization_exposes_only_the_corrected_restored_sky():
-    """MVC drops its temporary apparent Taylor cube after restoration."""
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_continuum_finalization_exposes_only_the_flat_sky(continuum_mode):
+    """Distributed restoration exposes only its intrinsic flat-sky product."""
     image = make_continuum_image()
     model = image[["SKY_MODEL"]].copy(deep=True)
 
@@ -101,18 +111,15 @@ def test_mvc_finalization_exposes_only_the_corrected_restored_sky():
             "model_xds": model,
             "restore": True,
             "primary_beam_correction": True,
-            "continuum_mode": "mvc",
+            "continuum_mode": continuum_mode,
         },
     )
 
     restored = result["image"]
-    assert "SKY_RESTORED" not in restored
-    assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in restored
-    assert (
-        restored.attrs["data_groups"]["restored"]["sky"]
-        == "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
-    )
-    assert "sky_primary_beam_corrected" not in restored.attrs["data_groups"]["restored"]
+    assert "SKY_RESTORED_FLAT_NOISE" not in restored
+    assert "SKY_RESTORED_FLAT_SKY" in restored
+    assert restored.attrs["data_groups"]["restored"]["sky"] == "SKY_RESTORED_FLAT_SKY"
+    assert "sky_flat_sky" not in restored.attrs["data_groups"]["restored"]
 
 
 @pytest.mark.parametrize("zarr_format", [2, 3])
