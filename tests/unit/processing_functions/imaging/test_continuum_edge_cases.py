@@ -19,6 +19,9 @@ from astroviper.processing_functions.imaging.imaging_setup_continuum_single_fiel
     _validate_continuum_parameters,
     _validate_n_taylor_terms,
 )
+from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
+    make_undeconvolved_image_continuum_single_field,
+)
 
 
 @pytest.mark.parametrize("value", [0.0, -1.0, np.nan, np.inf, [1.0, 2.0], []])
@@ -55,6 +58,14 @@ def test_taylor_order_is_not_coerced(value):
 @pytest.mark.parametrize("value", [2, np.int64(2)])
 def test_taylor_order_accepts_python_and_numpy_integers(value):
     assert type(_validate_n_taylor_terms(value)) is int
+
+
+@pytest.mark.parametrize("n_taylor_terms", [None, True])
+def test_gridding_checks_the_given_or_image_params_taylor_order(n_taylor_terms):
+    with pytest.raises(TypeError, match="n_taylor_terms must be an integer"):
+        make_undeconvolved_image_continuum_single_field(
+            None, None, {"n_taylor_terms": True}, None, n_taylor_terms=n_taylor_terms
+        )
 
 
 @pytest.mark.parametrize("fault", ["empty", "group", "role", "variable", "none"])
