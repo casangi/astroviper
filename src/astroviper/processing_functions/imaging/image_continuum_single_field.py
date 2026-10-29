@@ -1113,6 +1113,17 @@ def make_mvc_taylor_normal_equation_contributions(
     ``Abar * C @ inv(G) @ u``, where
     ``C_tq = sum(w_nu * x_nu**(t+q)) / sum(w_nu)``, together with the beam-free
     Taylor PSFs ``sum(w_nu * x_nu**k * B_nu) / sum(w_nu)``.
+
+    This factorization assumes that the primary beam is broad compared with
+    the important PSF structure, so that
+    ``B_nu * (A_nu * f) ~= A_nu * (B_nu * f)``, and that the normalized PSF
+    response dominating the minor-cycle update varies slowly with frequency.
+    These assumptions are most appropriate for compact emission, including
+    compact sources away from the pointing centre, because the local matrix
+    ``G`` retains the frequency-dependent beam moments at each pixel. They are
+    less reliable for diffuse emission, distant PSF sidelobes, strongly
+    frequency-dependent PSFs, or poorly conditioned beam-weighted spectral
+    coverage near the primary-beam cutoff.
     """
     import numpy as np
     import xarray as xr
@@ -1390,6 +1401,33 @@ def finalize_mvc_taylor_normal_equations(
     effective_primary_beam=None,
 ):
     """Normalize globally reduced MVC map contributions in the append node.
+
+    For ``mvc_minor_cycle_approximation="channel_psf"``, divide the reduced
+    Taylor residual moments by the total residual weight and normalize the
+    primary-beam-weighted channel PSFs by ``sum(w_nu) * Abar``. This implements
+    the approximation ``A_nu / Abar ~= 1`` in the residual while retaining the
+    channel-dependent PSFs.
+
+    For ``"local_beam_moments"``, the map stage supplies the exact-gradient
+    numerator
+
+    ``u_t = sum(w_nu * x_nu**t * A_nu * R_nu)``,
+
+    the pixel-local squared-beam matrix
+
+    ``G_tq = sum(w_nu * x_nu**(t+q) * A_nu**2)``,
+
+    and the beam-free spectral matrix
+
+    ``C_tq = sum(w_nu * x_nu**(t+q)) / sum(w_nu)``.
+
+    This function constructs the preconditioned right-hand side
+    ``Abar * C @ inv(G) @ u`` and pairs it with the beam-free Taylor PSF
+    matrix. The factorization assumes that the primary beam is broad compared
+    with the important PSF structure and that the dominant normalized PSF
+    response varies slowly with frequency. Pixels with insufficient channel
+    support retain only a scalar Taylor-zero solution; pixels outside the
+    effective-primary-beam support are set to zero.
 
     Parameters
     ----------
@@ -3460,7 +3498,22 @@ def accumulate_continuum_model(
 
 
 def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
-    """Return a principal-solution residual copy for MT-MFS restoration."""
+    """Return an MT-MFS principal-solution residual copy for restoration.
+
+    The stored MT-MFS Taylor residuals are normal-equation right-hand sides,
+    not independent sky-coefficient residual images. At the central pixel of
+    the Taylor PSF stack, form the Taylor Hessian ``H`` and apply its inverse to
+    every residual pixel,
+
+    ``R_principal[:, l, m] = inv(H) @ R[:, l, m]``.
+
+    Restoration then adds these coefficient-space residuals to the separately
+    restored model coefficients. The transformation is performed on a private
+    contiguous copy so the residual used for cycle control and written to the
+    output remains unchanged. Pixels containing a non-finite value in any
+    Taylor term are temporarily zeroed for the native solver and restored to
+    NaN afterwards.
+    """
     import numpy as np
 
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
