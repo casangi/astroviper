@@ -857,56 +857,27 @@ def test_asp_cleans_every_plane_of_taylor_term_zero(dtype, asp_options):
         )
 
 
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-@pytest.mark.parametrize(
-    "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
-)
-def test_continuum_asp_with_one_taylor_term_is_cube_asp_on_one_channel(
-    dtype, asp_options
-):
-    """Continuum Asp with one Taylor term and cube Asp on one channel of the
-    same residual, PSF and primary beam give the same model and residual,
-    bit for bit."""
+def _assert_continuum_asp_is_cube_asp(continuum, params):
+    """Run continuum Asp on ``continuum`` (one Taylor term) and cube Asp on a
+    one-channel cube built here from its arrays; the models and residuals
+    must agree bit for bit."""
     from astroviper.processing_functions.imaging.model_update import (
         model_update_cube_single_field,
     )
 
-    params = {
-        "max_iter": 100,
-        "max_iter_per_cycle_updated": 100,
-        "threshold_per_cycle": 0.0,
-        "gain": 0.1,
-        "asp_residual_components": asp_options,
-        "asp_scale_significance": asp_options,
-    }
-    continuum, _, _ = make_single_term_continuum_image(dtype)
     dims = ("time", "frequency", "polarization", "l", "m")
+    names = ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"]
+    names += ["CLEAN_MASK"] if "CLEAN_MASK" in continuum else []
+    group = dict(continuum.attrs["data_groups"]["residual"])
+    group["max_sidelobe_point_spread_function"] = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
     cube = xr.Dataset(
-        {
-            "SKY_RESIDUAL": (dims, continuum.SKY_RESIDUAL.values.copy()),
-            "POINT_SPREAD_FUNCTION": (
-                dims,
-                continuum.POINT_SPREAD_FUNCTION.values.copy(),
-            ),
-            "PRIMARY_BEAM": (dims, continuum.PRIMARY_BEAM.values.copy()),
-            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
-                dims[:3],
-                continuum.MAX_SIDELOBE_POINT_SPREAD_FUNCTION.values[:, None, :],
-            ),
-        },
+        {name: (dims, continuum[name].values.copy()) for name in names},
         coords={name: continuum.coords[name] for name in dims},
-        attrs={
-            "data_groups": {
-                "residual": {
-                    "sky": "SKY_RESIDUAL",
-                    "point_spread_function": "POINT_SPREAD_FUNCTION",
-                    "primary_beam": "PRIMARY_BEAM",
-                    "max_sidelobe_point_spread_function": (
-                        "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
-                    ),
-                }
-            }
-        },
+        attrs={"data_groups": {"residual": group}},
+    )
+    cube["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+        dims[:3],
+        continuum.MAX_SIDELOBE_POINT_SPREAD_FUNCTION.values[:, None, :],
     )
 
     model_update_mtmfs_single_field(continuum, "asp", dict(params))
@@ -916,6 +887,59 @@ def test_continuum_asp_with_one_taylor_term_is_cube_asp_on_one_channel(
     np.testing.assert_array_equal(continuum.SKY_MODEL.values, cube.SKY_MODEL.values)
     np.testing.assert_array_equal(
         continuum.SKY_RESIDUAL.values, cube.SKY_RESIDUAL.values
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
+)
+def test_continuum_asp_with_one_taylor_term_is_cube_asp_on_one_channel(
+    dtype, asp_options
+):
+    """Continuum Asp with one Taylor term and cube Asp on one channel give
+    the same model and residual. The PSF and the primary beam, and with
+    primary_beam_limit the mask, differ from plane to plane, so a plane taken
+    for another shows."""
+    continuum, _, _ = make_single_term_continuum_image(dtype)
+    nl, nm = continuum.sizes["l"], continuum.sizes["m"]
+    yy, xx = np.indices((nl, nm))
+    r2 = (yy - nl // 2) ** 2 + (xx - nm // 2) ** 2
+    # (time, plane, polarization, l, m)
+    width = (1.2 + 0.3 * np.arange(2)[:, None] + 0.2 * np.arange(2))[
+        :, None, :, None, None
+    ]
+    continuum.POINT_SPREAD_FUNCTION.values[:] = np.exp(-r2 / (2 * width**2))
+    continuum.PRIMARY_BEAM.values[:] = np.exp(-r2 / (2 * (4 * width) ** 2))
+    _assert_continuum_asp_is_cube_asp(
+        continuum,
+        {
+            "max_iter": 100,
+            "max_iter_per_cycle_updated": 100,
+            "threshold_per_cycle": 0.0,
+            "gain": 0.1,
+            "primary_beam_limit": 0.5,
+            "asp_residual_components": asp_options,
+            "asp_scale_significance": asp_options,
+        },
+    )
+
+
+def test_continuum_coral_with_a_clean_mask_is_cube_coral_on_one_channel():
+    """The same with the clean mask and threshold_per_cycle 5 of the faint
+    source of the Coral test below, where the test of significance per scale
+    cleans below the threshold."""
+    continuum, _, _ = make_single_term_faint_source_image()
+    _assert_continuum_asp_is_cube_asp(
+        continuum,
+        {
+            "max_iter": 3000,
+            "max_iter_per_cycle_updated": 3000,
+            "threshold_per_cycle": 5.0,
+            "gain": 0.1,
+            "asp_residual_components": True,
+            "asp_scale_significance": True,
+        },
     )
 
 

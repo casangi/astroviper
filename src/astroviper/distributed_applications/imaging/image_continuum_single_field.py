@@ -2852,13 +2852,12 @@ def image_continuum_single_field(
     channel FFTs and PB correction in map tasks, then reduces Taylor
     contributions. Native MT-MFS updates the complete Taylor model; Högbom
     updates Taylor term zero. Asp (``"asp"``) updates Taylor term zero as
-    Högbom does and requires
-    ``image_params["n_taylor_terms"] = 1``; with more Taylor terms it raises
-    ``ValueError`` before anything is written. In MVC the significance test
-    of Asp (``asp_scale_significance``) needs a ``clean_mask`` (see
-    ``deconvolver``). All verify refreshed residuals before finalization.
-    With one Taylor term, an MT-MFS request emits a warning and falls back to
-    Högbom. Restoration is optional.
+    Högbom does and requires ``image_params["n_taylor_terms"] = 1``; with
+    more Taylor terms it raises ``ValueError`` before anything is written.
+    In MVC the significance test of Asp (``asp_scale_significance``) needs a
+    ``clean_mask`` (see ``deconvolver``). All verify refreshed residuals
+    before finalization. With one Taylor term, an MT-MFS request emits a
+    warning and falls back to Högbom. Restoration is optional.
 
     The imaging cycle loop (``cycle_control_params``) does not run separately
     for every frequency channel as in cube imaging. Continuum performs one
