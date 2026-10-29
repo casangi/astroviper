@@ -857,6 +857,68 @@ def test_asp_cleans_every_plane_of_taylor_term_zero(dtype, asp_options):
         )
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
+)
+def test_continuum_asp_with_one_taylor_term_is_cube_asp_on_one_channel(
+    dtype, asp_options
+):
+    """Continuum Asp with one Taylor term and cube Asp on one channel of the
+    same residual, PSF and primary beam give the same model and residual,
+    bit for bit."""
+    from astroviper.processing_functions.imaging.model_update import (
+        model_update_cube_single_field,
+    )
+
+    params = {
+        "max_iter": 100,
+        "max_iter_per_cycle_updated": 100,
+        "threshold_per_cycle": 0.0,
+        "gain": 0.1,
+        "asp_residual_components": asp_options,
+        "asp_scale_significance": asp_options,
+    }
+    continuum, _, _ = make_single_term_continuum_image(dtype)
+    dims = ("time", "frequency", "polarization", "l", "m")
+    cube = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (dims, continuum.SKY_RESIDUAL.values.copy()),
+            "POINT_SPREAD_FUNCTION": (
+                dims,
+                continuum.POINT_SPREAD_FUNCTION.values.copy(),
+            ),
+            "PRIMARY_BEAM": (dims, continuum.PRIMARY_BEAM.values.copy()),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                dims[:3],
+                continuum.MAX_SIDELOBE_POINT_SPREAD_FUNCTION.values[:, None, :],
+            ),
+        },
+        coords={name: continuum.coords[name] for name in dims},
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                    "primary_beam": "PRIMARY_BEAM",
+                    "max_sidelobe_point_spread_function": (
+                        "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+                    ),
+                }
+            }
+        },
+    )
+
+    model_update_mtmfs_single_field(continuum, "asp", dict(params))
+    model_update_cube_single_field(cube, "asp", dict(params), model_exists=False)
+
+    assert continuum.SKY_MODEL.values.any()
+    np.testing.assert_array_equal(continuum.SKY_MODEL.values, cube.SKY_MODEL.values)
+    np.testing.assert_array_equal(
+        continuum.SKY_RESIDUAL.values, cube.SKY_RESIDUAL.values
+    )
+
+
 @pytest.mark.parametrize(
     "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
 )
