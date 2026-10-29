@@ -36,131 +36,6 @@ def _continuum_plane_to_frequency(img_xds, data_array, plane_dimension):
     return plane.expand_dims(frequency=frequency_coord, axis=axis)
 
 
-def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
-    """Return a principal-solution residual copy for MT-MFS restoration."""
-    import numpy as np
-
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
-
-    residual_dims = ("time", "taylor_term", "polarization", "l", "m")
-    psf_dims = ("time", "psf_taylor_order", "polarization", "l", "m")
-    missing_residual_dims = [
-        dim for dim in residual_dims if dim not in residual_da.dims
-    ]
-    missing_psf_dims = [dim for dim in psf_dims if dim not in psf_da.dims]
-    if missing_residual_dims:
-        raise ValueError(
-            "MT-MFS restoration requires residual dimensions "
-            f"{residual_dims}; missing {missing_residual_dims}."
-        )
-    if missing_psf_dims:
-        raise ValueError(
-            "MT-MFS restoration requires PSF dimensions "
-            f"{psf_dims}; missing {missing_psf_dims}."
-        )
-
-    residual_ordered = residual_da.transpose(*residual_dims)
-    psf_ordered = psf_da.transpose(*psf_dims)
-    n_taylor_terms = residual_ordered.sizes["taylor_term"]
-    expected_psf_terms = 2 * n_taylor_terms - 1
-    if psf_ordered.sizes["psf_taylor_order"] != expected_psf_terms:
-        raise ValueError(
-            "MT-MFS restoration requires 2 * n_taylor_terms - 1 PSF Taylor "
-            f"orders; received {psf_ordered.sizes['psf_taylor_order']} for "
-            f"n_taylor_terms={n_taylor_terms}."
-        )
-
-    principal_values = np.array(residual_ordered.values, copy=True, order="C")
-    psf_values = psf_ordered.values
-    for time_index in range(residual_ordered.sizes["time"]):
-        for polarization_index in range(residual_ordered.sizes["polarization"]):
-            psf_stack = np.ascontiguousarray(
-                psf_values[time_index, :, polarization_index]
-            )
-            inverse_hessian = mtmfs.hessian(psf_stack)["inverse_hessian"][0]
-            residual_stack = np.ascontiguousarray(
-                principal_values[time_index, :, polarization_index]
-            )
-            finite_pixels = np.all(np.isfinite(residual_stack), axis=0)
-            residual_stack[:, ~finite_pixels] = 0
-            mtmfs.principal_solution(residual_stack, inverse_hessian)
-            residual_stack[:, ~finite_pixels] = np.nan
-            principal_values[time_index, :, polarization_index] = residual_stack
-
-    principal = residual_ordered.copy(data=principal_values)
-    return principal.transpose(*residual_da.dims)
-
-
-def _restored_spectral_products(restored_da, restoration_residual_da):
-    """Derive CASA-style alpha, alpha error, and beta image products.
-
-    The products use the restored Taylor coefficients and the residuals that
-    entered restoration. For MT-MFS these are the principal-solution
-    residuals, not the stored Taylor right-hand sides. As in CASA, pixels are
-    selected where restored Taylor term zero exceeds one tenth of the peak
-    Taylor-zero residual in that time/polarization plane. Invalid pixels are
-    represented by NaN because xarray does not attach CASA lattice masks.
-    """
-    import numpy as np
-    import xarray as xr
-
-    if restored_da.sizes.get("taylor_term", 0) < 2:
-        return {}
-
-    spatial_dims = tuple(dim for dim in ("l", "m") if dim in restored_da.dims)
-    restored_zero = restored_da.isel(taylor_term=0, drop=True)
-    restored_one = restored_da.isel(taylor_term=1, drop=True)
-    residual_zero = restoration_residual_da.isel(taylor_term=0, drop=True)
-    residual_one = restoration_residual_da.isel(taylor_term=1, drop=True)
-    spectral_threshold = residual_zero.max(dim=spatial_dims, skipna=True) / 10.0
-    valid = (
-        np.isfinite(restored_zero)
-        & np.isfinite(restored_one)
-        & (restored_zero > spectral_threshold)
-        & (restored_zero != 0.0)
-    )
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        alpha = xr.where(valid, restored_one / restored_zero, np.nan)
-        alpha_error = abs(alpha) * np.sqrt(
-            (residual_zero / restored_zero) ** 2 + (residual_one / restored_one) ** 2
-        )
-    alpha_error = xr.where(valid & np.isfinite(alpha_error), alpha_error, np.nan)
-
-    alpha = alpha.astype(restored_da.dtype, copy=False)
-    alpha_error = alpha_error.astype(restored_da.dtype, copy=False)
-    alpha.attrs = {
-        "type": "spectral_index",
-        "units": "dimensionless",
-        "description": "Spectral index alpha derived from restored tt1 / tt0.",
-        "spectral_product_threshold": "peak principal tt0 residual / 10",
-    }
-    alpha_error.attrs = {
-        "type": "spectral_index_error",
-        "units": "dimensionless",
-        "description": "CASA-style propagated spectral-index error.",
-        "spectral_product_threshold": "peak principal tt0 residual / 10",
-    }
-    products = {"ALPHA": alpha, "ALPHA_ERROR": alpha_error}
-
-    if restored_da.sizes["taylor_term"] >= 3:
-        restored_two = restored_da.isel(taylor_term=2, drop=True)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            beta = restored_two / restored_zero - 0.5 * alpha * (alpha - 1.0)
-        beta = xr.where(valid & np.isfinite(restored_two), beta, np.nan).astype(
-            restored_da.dtype, copy=False
-        )
-        beta.attrs = {
-            "type": "spectral_curvature",
-            "units": "dimensionless",
-            "description": "Spectral curvature beta derived from restored Taylor terms.",
-            "spectral_product_threshold": "peak principal tt0 residual / 10",
-        }
-        products["BETA"] = beta
-
-    return products
-
-
 ###############################################################################
 # Imaging setup and PSF beam fitting
 ###############################################################################
@@ -1509,223 +1384,6 @@ def make_mvc_taylor_normal_equation_contributions(
     return contributions
 
 
-def _fit_primary_beam_taylor(
-    contributions,
-    *,
-    numerator_name,
-    moments_name,
-    continuum_mode,
-    primary_beam_limit,
-    usage,
-):
-    """Solve a globally reduced primary-beam polynomial fit.
-
-    The reduced normal equations are expressed in the fractional-frequency
-    coordinate ``x = (nu - nu_0) / nu_0``. For ``nterms > 1``, solve them in
-    the numerically scaled coordinate ``z = x / s``, where
-    ``s = sqrt(sum(w * x**2) / sum(w))`` is obtained from the zeroth and second
-    reduced moments. This prevents a narrow but nonzero frequency span from
-    appearing rank deficient. Dividing the fitted coefficient of order ``q``
-    by ``s**q`` returns it to the original ``x`` basis, so the scaling changes
-    only the conditioning of the solve, not the fitted primary-beam polynomial.
-    A zero span or a rank-deficient scaled system remains an error. The local
-    numerical boundary also rejects non-finite scaled equations, solver
-    failures, and non-finite coefficients after conversion back to ``x``.
-    """
-    import numpy as np
-
-    missing = [
-        name for name in (numerator_name, moments_name) if name not in contributions
-    ]
-    if missing:
-        raise KeyError(
-            f"{continuum_mode.upper()} primary-beam Taylor fit is missing {missing}."
-        )
-
-    numerator = contributions[numerator_name].transpose(
-        "time", "taylor_term", "polarization", "l", "m"
-    )
-    moments = contributions[moments_name].transpose(
-        "time", "psf_taylor_order", "polarization"
-    )
-    nterms = numerator.sizes["taylor_term"]
-    if moments.sizes["psf_taylor_order"] != 2 * nterms - 1:
-        raise ValueError(
-            f"{continuum_mode.upper()} primary-beam Taylor fitting requires "
-            "2 * nterms - 1 moments; received "
-            f"{moments.sizes['psf_taylor_order']} for nterms={nterms}."
-        )
-
-    taylor_orders = np.arange(nterms)
-    hankel = np.add.outer(taylor_orders, taylor_orders)
-    gram = np.asarray(
-        moments.transpose("time", "polarization", "psf_taylor_order").values[
-            ..., hankel
-        ],
-        dtype=np.float64,
-    )
-    rhs = np.asarray(
-        numerator.transpose("time", "polarization", "taylor_term", "l", "m").values,
-        dtype=np.float64,
-    )
-    coefficients = np.empty_like(rhs)
-    for time_index in range(rhs.shape[0]):
-        for polarization_index in range(rhs.shape[1]):
-            matrix = gram[time_index, polarization_index]
-            if nterms == 1:
-                frequency_scale = 1.0
-            else:
-                zeroth_moment = matrix[0, 0]
-                second_moment = matrix[1, 1]
-                if (
-                    not np.isfinite(zeroth_moment)
-                    or not np.isfinite(second_moment)
-                    or zeroth_moment <= 0.0
-                    or second_moment <= 0.0
-                ):
-                    raise ValueError(
-                        f"{continuum_mode.upper()} primary-beam Taylor fit is "
-                        "underdetermined for "
-                        f"time={time_index}, polarization={polarization_index}."
-                    )
-                frequency_scale = np.sqrt(second_moment / zeroth_moment)
-                if not np.isfinite(frequency_scale) or frequency_scale <= 0.0:
-                    raise ValueError(
-                        f"{continuum_mode.upper()} primary-beam Taylor fit has "
-                        "an invalid frequency scale for "
-                        f"time={time_index}, polarization={polarization_index}."
-                    )
-
-            # Solve in z = x / frequency_scale so narrowly spaced channels do
-            # not make otherwise independent polynomial columns appear singular.
-            coefficient_scale = frequency_scale**taylor_orders
-            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-                scaled_matrix = matrix / frequency_scale**hankel
-                scaled_rhs = (
-                    rhs[time_index, polarization_index].reshape(nterms, -1)
-                    / coefficient_scale[:, None]
-                )
-            if not np.all(np.isfinite(scaled_matrix)) or not np.all(
-                np.isfinite(scaled_rhs)
-            ):
-                raise ValueError(
-                    f"{continuum_mode.upper()} primary-beam Taylor fit has "
-                    "non-finite scaled normal equations for "
-                    f"time={time_index}, polarization={polarization_index}."
-                )
-            if np.linalg.matrix_rank(scaled_matrix) < nterms:
-                raise ValueError(
-                    f"{continuum_mode.upper()} primary-beam Taylor fit is "
-                    "underdetermined for "
-                    f"time={time_index}, polarization={polarization_index}."
-                )
-            try:
-                scaled_coefficients = np.linalg.solve(scaled_matrix, scaled_rhs)
-            except np.linalg.LinAlgError as error:
-                raise ValueError(
-                    f"{continuum_mode.upper()} primary-beam Taylor fit could "
-                    "not be solved for "
-                    f"time={time_index}, polarization={polarization_index}."
-                ) from error
-            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-                fitted_coefficients = scaled_coefficients / coefficient_scale[:, None]
-            if not np.all(np.isfinite(fitted_coefficients)):
-                raise ValueError(
-                    f"{continuum_mode.upper()} primary-beam Taylor fit produced "
-                    "non-finite coefficients for "
-                    f"time={time_index}, polarization={polarization_index}."
-                )
-            coefficients[time_index, polarization_index] = fitted_coefficients.reshape(
-                rhs.shape[2:]
-            )
-
-    supported = np.isfinite(coefficients[:, :, 0]) & (
-        coefficients[:, :, 0] >= primary_beam_limit
-    )
-    coefficients = np.where(supported[:, :, None], coefficients, np.nan)
-    coefficients = coefficients.astype(numerator.dtype, copy=False)
-
-    result = numerator.copy(
-        data=coefficients.transpose(0, 2, 1, 3, 4),
-    )
-    result.name = "PRIMARY_BEAM_TAYLOR"
-    result.attrs = {
-        "description": (
-            "Taylor fit to the frequency-dependent "
-            f"{continuum_mode.upper()} primary beam."
-        ),
-        "type": "primary_beam",
-        "method": "frequency_polynomial_fit",
-        "continuum_mode": continuum_mode,
-        "reference_frequency": contributions.attrs.get(
-            "reference_frequency",
-            contributions.attrs.get(
-                "reference_frequency_hz",
-                numerator.attrs.get("reference_frequency_hz"),
-            ),
-        ),
-        "n_taylor_terms": nterms,
-        "primary_beam_limit": primary_beam_limit,
-        "usage": usage,
-    }
-    return result
-
-
-def fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2):
-    """Fit the MFS primary-beam Taylor polynomial after global reduction.
-
-    The resulting coefficients describe ``A(nu)`` in the same fractional-
-    frequency basis as the apparent-sky Taylor coefficients. They are used by
-    restoration to recover intrinsic-sky model and residual coefficients via
-    polynomial division before clean-beam convolution.
-    """
-    return _fit_primary_beam_taylor(
-        contributions,
-        numerator_name="MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
-        moments_name="MFS_PRIMARY_BEAM_FIT_MOMENTS",
-        continuum_mode="mfs",
-        primary_beam_limit=float(primary_beam_limit),
-        usage="wideband_primary_beam_correction",
-    )
-
-
-def fit_mvc_primary_beam_taylor(contributions):
-    """Fit the frequency-dependent MVC primary beam in the Taylor basis.
-
-    Map tasks supply additive weighted PB projections and spectral weight
-    moments.  Solving their globally reduced normal equations produces the PB
-    polynomial without carrying a channel-sized image cube through reduce.
-    This product is diagnostic only: MVC has already incorporated the channel
-    PB in its common-beam normal equations, so it must not be applied again to
-    the restored Taylor coefficients.
-
-    Parameters
-    ----------
-    contributions : xarray.Dataset
-        Globally reduced first-cycle MVC contributions.
-
-    Returns
-    -------
-    xarray.DataArray
-        ``PRIMARY_BEAM_TAYLOR`` with dimensions
-        ``(time, taylor_term, polarization, l, m)``. Pixels whose fitted
-        zeroth-order PB is not above the configured PB limit are NaN.
-    """
-    primary_beam_limit = float(contributions.attrs.get("primary_beam_limit", 0.2))
-    result = _fit_primary_beam_taylor(
-        contributions,
-        numerator_name="MVC_PRIMARY_BEAM_TAYLOR_NUMERATOR",
-        moments_name="MVC_PRIMARY_BEAM_FIT_WEIGHT_MOMENTS",
-        continuum_mode="mvc",
-        primary_beam_limit=primary_beam_limit,
-        usage="diagnostic_only_already_incorporated_by_mvc",
-    )
-    output_dtype = contributions.attrs.get("mvc_output_dtype")
-    if output_dtype is not None:
-        result = result.astype(output_dtype, copy=False)
-    return result
-
-
 def finalize_mvc_taylor_normal_equations(
     contributions,
     *,
@@ -1950,6 +1608,228 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
         mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
     )
     return finalize_mvc_taylor_normal_equations(contributions)
+
+
+###############################################################################
+# Primary-beam Taylor fitting
+###############################################################################
+
+
+def _fit_primary_beam_taylor(
+    contributions,
+    *,
+    numerator_name,
+    moments_name,
+    continuum_mode,
+    primary_beam_limit,
+    usage,
+):
+    """Solve a globally reduced primary-beam polynomial fit.
+
+    The reduced normal equations are expressed in the fractional-frequency
+    coordinate ``x = (nu - nu_0) / nu_0``. For ``nterms > 1``, solve them in
+    the numerically scaled coordinate ``z = x / s``, where
+    ``s = sqrt(sum(w * x**2) / sum(w))`` is obtained from the zeroth and second
+    reduced moments. This prevents a narrow but nonzero frequency span from
+    appearing rank deficient. Dividing the fitted coefficient of order ``q``
+    by ``s**q`` returns it to the original ``x`` basis, so the scaling changes
+    only the conditioning of the solve, not the fitted primary-beam polynomial.
+    A zero span or a rank-deficient scaled system remains an error. The local
+    numerical boundary also rejects non-finite scaled equations, solver
+    failures, and non-finite coefficients after conversion back to ``x``.
+    """
+    import numpy as np
+
+    missing = [
+        name for name in (numerator_name, moments_name) if name not in contributions
+    ]
+    if missing:
+        raise KeyError(
+            f"{continuum_mode.upper()} primary-beam Taylor fit is missing {missing}."
+        )
+
+    numerator = contributions[numerator_name].transpose(
+        "time", "taylor_term", "polarization", "l", "m"
+    )
+    moments = contributions[moments_name].transpose(
+        "time", "psf_taylor_order", "polarization"
+    )
+    nterms = numerator.sizes["taylor_term"]
+    if moments.sizes["psf_taylor_order"] != 2 * nterms - 1:
+        raise ValueError(
+            f"{continuum_mode.upper()} primary-beam Taylor fitting requires "
+            "2 * nterms - 1 moments; received "
+            f"{moments.sizes['psf_taylor_order']} for nterms={nterms}."
+        )
+
+    taylor_orders = np.arange(nterms)
+    hankel = np.add.outer(taylor_orders, taylor_orders)
+    gram = np.asarray(
+        moments.transpose("time", "polarization", "psf_taylor_order").values[
+            ..., hankel
+        ],
+        dtype=np.float64,
+    )
+    rhs = np.asarray(
+        numerator.transpose("time", "polarization", "taylor_term", "l", "m").values,
+        dtype=np.float64,
+    )
+    coefficients = np.empty_like(rhs)
+    for time_index in range(rhs.shape[0]):
+        for polarization_index in range(rhs.shape[1]):
+            matrix = gram[time_index, polarization_index]
+            if nterms == 1:
+                frequency_scale = 1.0
+            else:
+                zeroth_moment = matrix[0, 0]
+                second_moment = matrix[1, 1]
+                if (
+                    not np.isfinite(zeroth_moment)
+                    or not np.isfinite(second_moment)
+                    or zeroth_moment <= 0.0
+                    or second_moment <= 0.0
+                ):
+                    raise ValueError(
+                        f"{continuum_mode.upper()} primary-beam Taylor fit is "
+                        "underdetermined for "
+                        f"time={time_index}, polarization={polarization_index}."
+                    )
+                frequency_scale = np.sqrt(second_moment / zeroth_moment)
+                if not np.isfinite(frequency_scale) or frequency_scale <= 0.0:
+                    raise ValueError(
+                        f"{continuum_mode.upper()} primary-beam Taylor fit has "
+                        "an invalid frequency scale for "
+                        f"time={time_index}, polarization={polarization_index}."
+                    )
+
+            # Solve in z = x / frequency_scale so narrowly spaced channels do
+            # not make otherwise independent polynomial columns appear singular.
+            coefficient_scale = frequency_scale**taylor_orders
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                scaled_matrix = matrix / frequency_scale**hankel
+                scaled_rhs = (
+                    rhs[time_index, polarization_index].reshape(nterms, -1)
+                    / coefficient_scale[:, None]
+                )
+            if not np.all(np.isfinite(scaled_matrix)) or not np.all(
+                np.isfinite(scaled_rhs)
+            ):
+                raise ValueError(
+                    f"{continuum_mode.upper()} primary-beam Taylor fit has "
+                    "non-finite scaled normal equations for "
+                    f"time={time_index}, polarization={polarization_index}."
+                )
+            if np.linalg.matrix_rank(scaled_matrix) < nterms:
+                raise ValueError(
+                    f"{continuum_mode.upper()} primary-beam Taylor fit is "
+                    "underdetermined for "
+                    f"time={time_index}, polarization={polarization_index}."
+                )
+            try:
+                scaled_coefficients = np.linalg.solve(scaled_matrix, scaled_rhs)
+            except np.linalg.LinAlgError as error:
+                raise ValueError(
+                    f"{continuum_mode.upper()} primary-beam Taylor fit could "
+                    "not be solved for "
+                    f"time={time_index}, polarization={polarization_index}."
+                ) from error
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                fitted_coefficients = scaled_coefficients / coefficient_scale[:, None]
+            if not np.all(np.isfinite(fitted_coefficients)):
+                raise ValueError(
+                    f"{continuum_mode.upper()} primary-beam Taylor fit produced "
+                    "non-finite coefficients for "
+                    f"time={time_index}, polarization={polarization_index}."
+                )
+            coefficients[time_index, polarization_index] = fitted_coefficients.reshape(
+                rhs.shape[2:]
+            )
+
+    supported = np.isfinite(coefficients[:, :, 0]) & (
+        coefficients[:, :, 0] >= primary_beam_limit
+    )
+    coefficients = np.where(supported[:, :, None], coefficients, np.nan)
+    coefficients = coefficients.astype(numerator.dtype, copy=False)
+
+    result = numerator.copy(
+        data=coefficients.transpose(0, 2, 1, 3, 4),
+    )
+    result.name = "PRIMARY_BEAM_TAYLOR"
+    result.attrs = {
+        "description": (
+            "Taylor fit to the frequency-dependent "
+            f"{continuum_mode.upper()} primary beam."
+        ),
+        "type": "primary_beam",
+        "method": "frequency_polynomial_fit",
+        "continuum_mode": continuum_mode,
+        "reference_frequency": contributions.attrs.get(
+            "reference_frequency",
+            contributions.attrs.get(
+                "reference_frequency_hz",
+                numerator.attrs.get("reference_frequency_hz"),
+            ),
+        ),
+        "n_taylor_terms": nterms,
+        "primary_beam_limit": primary_beam_limit,
+        "usage": usage,
+    }
+    return result
+
+
+def fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2):
+    """Fit the MFS primary-beam Taylor polynomial after global reduction.
+
+    The resulting coefficients describe ``A(nu)`` in the same fractional-
+    frequency basis as the apparent-sky Taylor coefficients. They are used by
+    restoration to recover intrinsic-sky model and residual coefficients via
+    polynomial division before clean-beam convolution.
+    """
+    return _fit_primary_beam_taylor(
+        contributions,
+        numerator_name="MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+        moments_name="MFS_PRIMARY_BEAM_FIT_MOMENTS",
+        continuum_mode="mfs",
+        primary_beam_limit=float(primary_beam_limit),
+        usage="wideband_primary_beam_correction",
+    )
+
+
+def fit_mvc_primary_beam_taylor(contributions):
+    """Fit the frequency-dependent MVC primary beam in the Taylor basis.
+
+    Map tasks supply additive weighted PB projections and spectral weight
+    moments.  Solving their globally reduced normal equations produces the PB
+    polynomial without carrying a channel-sized image cube through reduce.
+    This product is diagnostic only: MVC has already incorporated the channel
+    PB in its common-beam normal equations, so it must not be applied again to
+    the restored Taylor coefficients.
+
+    Parameters
+    ----------
+    contributions : xarray.Dataset
+        Globally reduced first-cycle MVC contributions.
+
+    Returns
+    -------
+    xarray.DataArray
+        ``PRIMARY_BEAM_TAYLOR`` with dimensions
+        ``(time, taylor_term, polarization, l, m)``. Pixels whose fitted
+        zeroth-order PB is not above the configured PB limit are NaN.
+    """
+    primary_beam_limit = float(contributions.attrs.get("primary_beam_limit", 0.2))
+    result = _fit_primary_beam_taylor(
+        contributions,
+        numerator_name="MVC_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+        moments_name="MVC_PRIMARY_BEAM_FIT_WEIGHT_MOMENTS",
+        continuum_mode="mvc",
+        primary_beam_limit=primary_beam_limit,
+        usage="diagnostic_only_already_incorporated_by_mvc",
+    )
+    output_dtype = contributions.attrs.get("mvc_output_dtype")
+    if output_dtype is not None:
+        result = result.astype(output_dtype, copy=False)
+    return result
 
 
 ###############################################################################
@@ -3577,6 +3457,131 @@ def accumulate_continuum_model(
 ###############################################################################
 # Restoration and primary-beam correction
 ###############################################################################
+
+
+def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
+    """Return a principal-solution residual copy for MT-MFS restoration."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+
+    residual_dims = ("time", "taylor_term", "polarization", "l", "m")
+    psf_dims = ("time", "psf_taylor_order", "polarization", "l", "m")
+    missing_residual_dims = [
+        dim for dim in residual_dims if dim not in residual_da.dims
+    ]
+    missing_psf_dims = [dim for dim in psf_dims if dim not in psf_da.dims]
+    if missing_residual_dims:
+        raise ValueError(
+            "MT-MFS restoration requires residual dimensions "
+            f"{residual_dims}; missing {missing_residual_dims}."
+        )
+    if missing_psf_dims:
+        raise ValueError(
+            "MT-MFS restoration requires PSF dimensions "
+            f"{psf_dims}; missing {missing_psf_dims}."
+        )
+
+    residual_ordered = residual_da.transpose(*residual_dims)
+    psf_ordered = psf_da.transpose(*psf_dims)
+    n_taylor_terms = residual_ordered.sizes["taylor_term"]
+    expected_psf_terms = 2 * n_taylor_terms - 1
+    if psf_ordered.sizes["psf_taylor_order"] != expected_psf_terms:
+        raise ValueError(
+            "MT-MFS restoration requires 2 * n_taylor_terms - 1 PSF Taylor "
+            f"orders; received {psf_ordered.sizes['psf_taylor_order']} for "
+            f"n_taylor_terms={n_taylor_terms}."
+        )
+
+    principal_values = np.array(residual_ordered.values, copy=True, order="C")
+    psf_values = psf_ordered.values
+    for time_index in range(residual_ordered.sizes["time"]):
+        for polarization_index in range(residual_ordered.sizes["polarization"]):
+            psf_stack = np.ascontiguousarray(
+                psf_values[time_index, :, polarization_index]
+            )
+            inverse_hessian = mtmfs.hessian(psf_stack)["inverse_hessian"][0]
+            residual_stack = np.ascontiguousarray(
+                principal_values[time_index, :, polarization_index]
+            )
+            finite_pixels = np.all(np.isfinite(residual_stack), axis=0)
+            residual_stack[:, ~finite_pixels] = 0
+            mtmfs.principal_solution(residual_stack, inverse_hessian)
+            residual_stack[:, ~finite_pixels] = np.nan
+            principal_values[time_index, :, polarization_index] = residual_stack
+
+    principal = residual_ordered.copy(data=principal_values)
+    return principal.transpose(*residual_da.dims)
+
+
+def _restored_spectral_products(restored_da, restoration_residual_da):
+    """Derive CASA-style alpha, alpha error, and beta image products.
+
+    The products use the restored Taylor coefficients and the residuals that
+    entered restoration. For MT-MFS these are the principal-solution
+    residuals, not the stored Taylor right-hand sides. As in CASA, pixels are
+    selected where restored Taylor term zero exceeds one tenth of the peak
+    Taylor-zero residual in that time/polarization plane. Invalid pixels are
+    represented by NaN because xarray does not attach CASA lattice masks.
+    """
+    import numpy as np
+    import xarray as xr
+
+    if restored_da.sizes.get("taylor_term", 0) < 2:
+        return {}
+
+    spatial_dims = tuple(dim for dim in ("l", "m") if dim in restored_da.dims)
+    restored_zero = restored_da.isel(taylor_term=0, drop=True)
+    restored_one = restored_da.isel(taylor_term=1, drop=True)
+    residual_zero = restoration_residual_da.isel(taylor_term=0, drop=True)
+    residual_one = restoration_residual_da.isel(taylor_term=1, drop=True)
+    spectral_threshold = residual_zero.max(dim=spatial_dims, skipna=True) / 10.0
+    valid = (
+        np.isfinite(restored_zero)
+        & np.isfinite(restored_one)
+        & (restored_zero > spectral_threshold)
+        & (restored_zero != 0.0)
+    )
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        alpha = xr.where(valid, restored_one / restored_zero, np.nan)
+        alpha_error = abs(alpha) * np.sqrt(
+            (residual_zero / restored_zero) ** 2 + (residual_one / restored_one) ** 2
+        )
+    alpha_error = xr.where(valid & np.isfinite(alpha_error), alpha_error, np.nan)
+
+    alpha = alpha.astype(restored_da.dtype, copy=False)
+    alpha_error = alpha_error.astype(restored_da.dtype, copy=False)
+    alpha.attrs = {
+        "type": "spectral_index",
+        "units": "dimensionless",
+        "description": "Spectral index alpha derived from restored tt1 / tt0.",
+        "spectral_product_threshold": "peak principal tt0 residual / 10",
+    }
+    alpha_error.attrs = {
+        "type": "spectral_index_error",
+        "units": "dimensionless",
+        "description": "CASA-style propagated spectral-index error.",
+        "spectral_product_threshold": "peak principal tt0 residual / 10",
+    }
+    products = {"ALPHA": alpha, "ALPHA_ERROR": alpha_error}
+
+    if restored_da.sizes["taylor_term"] >= 3:
+        restored_two = restored_da.isel(taylor_term=2, drop=True)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            beta = restored_two / restored_zero - 0.5 * alpha * (alpha - 1.0)
+        beta = xr.where(valid & np.isfinite(restored_two), beta, np.nan).astype(
+            restored_da.dtype, copy=False
+        )
+        beta.attrs = {
+            "type": "spectral_curvature",
+            "units": "dimensionless",
+            "description": "Spectral curvature beta derived from restored Taylor terms.",
+            "spectral_product_threshold": "peak principal tt0 residual / 10",
+        }
+        products["BETA"] = beta
+
+    return products
 
 
 def restore_continuum_image(
