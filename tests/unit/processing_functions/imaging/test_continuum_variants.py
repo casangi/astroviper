@@ -839,7 +839,10 @@ def test_restoration_reports_incomplete_backend_result(monkeypatch):
 
 @pytest.mark.parametrize(
     "fault,message",
-    [("empty_psf", "no Taylor orders"), ("beam_dimensions", "Missing dimensions")],
+    [
+        ("empty_psf", "no Taylor-order planes"),
+        ("beam_dimensions", "Missing dimensions"),
+    ],
 )
 def test_restoration_rejects_remaining_invalid_layouts(fault, message):
     image = make_continuum_image()
