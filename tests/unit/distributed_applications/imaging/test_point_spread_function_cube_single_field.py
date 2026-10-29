@@ -121,3 +121,36 @@ def test_measurement_set_v2_is_refused(tmp_path):
         psf_module.point_spread_function_cube_single_field(
             str(ms_v2), _image_params([3e9]), {"weighting": "natural"}
         )
+
+
+def test_the_direct_fourier_transform_point_spread_function(ps_store):
+    """The DFT option reaches the node tasks and the record names the parameters
+    as resolved. The beam fit stays within 1 percent of the gridder's: the DFT
+    includes the w term, which the gridder leaves out, and the fits of this
+    PSF, wider than the image, differ by 1.1e-3."""
+    from xradio.measurement_set import open_processing_set
+
+    frequency_coords = open_processing_set(ps_store).xr_ps.get_freq_axis().values
+    common = dict(
+        instrument_polarization_basis="circular",
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        n_mapping_parallelism={"frequency": 3},
+    )
+    dft = psf_module.point_spread_function_cube_single_field(
+        ps_store,
+        _image_params(frequency_coords),
+        {"weighting": "natural"},
+        gridding_kernel_params={"type": "dft"},
+        **common,
+    )
+    gridder = psf_module.point_spread_function_cube_single_field(
+        ps_store, _image_params(frequency_coords), {"weighting": "natural"}, **common
+    )
+    assert dft.attrs["gridding_kernel_params"] == {"type": "dft"}
+    np.testing.assert_allclose(
+        dft.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values,
+        gridder.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values,
+        rtol=1e-2,
+    )
+    xr.testing.assert_identical(dft.SENSITIVITY, gridder.SENSITIVITY)

@@ -105,11 +105,19 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
 
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
-    'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
-    "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
-    'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
-    '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
-    "are refused before anything is written."
+    'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
+    '(C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)\n'
+    "cleans Taylor term zero only and needs\n"
+    '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
+    "(``asp_scale_significance``) needs an explicit ``clean_mask``: Asp\n"
+    "measures the noise on the pixels outside its mask, which without a\n"
+    "clean mask lie outside the primary-beam support, where MVC sets the\n"
+    "residual to 0, so the test cleans nothing below ``threshold_per_cycle``\n"
+    '(a warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
+    "synthesis) cleans the Taylor terms together and needs\n"
+    '``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``\n'
+    'it falls back to ``"hogbom"`` with a warning. Other values are refused\n'
+    "before anything is written."
 )
 
 _CONTINUUM_MODE_DOC = (
@@ -229,19 +237,40 @@ IMAGING_PARAM_DOCS = {
         "and with it the floor the imaging cycle converges to, falls as 1 over\n"
         'the oversampling; ``"linear"`` interpolates the two neighbouring\n'
         "samples and the error falls as 1 over its square). Missing keys take\n"
-        'the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,\n'
-        '"oversampling": 100, "interpolation": "nearest"}``; ``None`` is all\n'
-        "defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or\n"
-        "``least_misfit`` kernel whose image plane correction falls below 1e-6\n"
-        "of its centre value at the edge of the image kept (a support too large\n"
-        "for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the\n"
+        'the defaults ``{"type": "least_misfit", "support": 9,\n'
+        '"oversampling": 300, "interpolation": "linear"}``, the kernel RADPS\n'
+        "Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic\n"
+        "range of 1e4 (its table for ``fft_padding`` 1.2 ships with the\n"
+        "package, other paddings solve it at run time); ``None`` is all\n"
+        'defaults. With the type ``"prolate_spheroidal_casa"`` missing keys\n'
+        "take CASA's values instead, so that type alone is CASA's kernel and\n"
+        'sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,\n'
+        '"oversampling": 100, "interpolation": "nearest"}``, with Schwab\'s\n'
+        "analytic correction. A ``prolate_spheroidal``,\n"
+        "``exponential_semicircle`` or ``least_misfit`` kernel whose image\n"
+        "plane correction falls below 1e-6 of its centre value at the edge of\n"
+        "the image kept (a support too large for the ``fft_padding``, e.g. 17\n"
+        "at 1.05) is refused. The kernel of the\n"
         'former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,\n'
-        'not ``"prolate_spheroidal"``.'
+        'not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces\n'
+        "the gridding and the FFTs by the exact direct Fourier transform over the\n"
+        "unpadded image, w term included: with the phase\n"
+        "``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the\n"
+        "model visibilities are ``sum M exp(+i phase) / n`` over the model pixels\n"
+        "and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,\n"
+        "the measurement equation of ``simulate_processing_set``. Its cost is\n"
+        "proportional to the samples times the image pixels (30 to 40 s per\n"
+        "residual update of 451,500 samples, four correlations and 160 x 160\n"
+        "pixels on one core), so give it several\n"
+        "``processing_function_threads``; its results do not depend on their\n"
+        "number. Its ``VISIBILITY_NORMALIZATION`` and\n"
+        "``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the\n"
+        "gridders' that sum times the kernel's stencil sums."
     ),
     "cgk_1D": (
         "The gridding kernel\n"
         "(:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),\n"
-        "or the bare table of the default prolate spheroidal kernel of support 7."
+        "or a bare table of CASA's prolate spheroidal kernel of support 7."
     ),
     "primary_beam_params": (
         "The primary beam of the imager, the power pattern that gives the clean\n"
@@ -440,8 +469,8 @@ IMAGING_PARAM_DOCS = {
         "  to the bit with and without it, and the RMS is the sum of squares\n"
         "  the peak search of the next iteration makes anyway, so it costs no\n"
         "  extra pass over the image per iteration. Hogbom deconvolvers only:\n"
-        '  ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.\n'
-        "  No CASA equivalent.\n"
+        '  ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise\n'
+        "  ``ValueError``. Default ``False``. No CASA equivalent.\n"
         "- ``exact_psf_subtraction`` : If ``True``, a Hogbom model update\n"
         "  subtracts the PSF of every component it finds from the whole residual\n"
         "  image, with a PSF of twice the image size made once per channel from\n"
@@ -454,8 +483,9 @@ IMAGING_PARAM_DOCS = {
         "  image-sized PSF either way. Costs a second PSF per channel (four\n"
         "  times the pixels, kept through the channel's cycles) and a\n"
         "  subtraction over the whole image at every iteration. Hogbom\n"
-        '  deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.\n'
-        "  Default ``False``. No CASA equivalent.\n"
+        '  deconvolvers of cube imaging only: ``deconvolver="asp"`` and\n'
+        "  continuum imaging raise ``ValueError``. Default ``False``. No CASA\n"
+        "  equivalent.\n"
         "- ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends\n"
         "  after each of its Hogbom runs (51 or 510 point components) unless\n"
         "  the RMS of the residual has fallen, by less than a factor 1.5, since\n"
@@ -598,6 +628,17 @@ IMAGING_PARAM_DOCS = {
         "If ``True`` produce a restored image after deconvolution: the model\n"
         "convolved with the clean beam (the Gaussian fit to the PSF) plus the\n"
         "residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable."
+    ),
+    "clean_mask": (
+        'Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:\n'
+        "the path of a NumPy ``.npy`` file for the distributed applications and\n"
+        "the bool plane loaded from it\n"
+        "(:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values\n"
+        "greater than 0.5) for the layers below. It selects the pixels of every\n"
+        "residual plane that the model update cleans, in place of the\n"
+        "primary-beam mask of ``primary_beam_limit``; Asp measures the noise of\n"
+        "its significance test (``asp_scale_significance``) outside it.\n"
+        "``None`` keeps the primary-beam mask."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.

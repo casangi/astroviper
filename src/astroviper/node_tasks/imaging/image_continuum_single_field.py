@@ -1,3 +1,4 @@
+from astroviper.utils.clean_mask import install_clean_mask
 from astroviper.utils.continuum_cache import (
     CONTINUUM_WEIGHT_CACHE_GROUP as _CONTINUUM_WEIGHT_CACHE_GROUP,
 )
@@ -678,6 +679,7 @@ def _resolve_continuum_append_configuration(input_params):
             "image_data_group_in_name",
             "residual",
         ),
+        "gridding_kernel_params": input_params.get("gridding_kernel_params"),
     }
 
 
@@ -990,63 +992,6 @@ def _finalize_reference_primary_beam(
 ###############################################################################
 
 
-def _install_continuum_clean_mask(
-    img_xds,
-    clean_mask,
-    image_data_group_name="residual",
-):
-    """Install a user-supplied 2-D mask on every continuum residual plane."""
-    if clean_mask is None:
-        return
-
-    import numpy as np
-    import xarray as xr
-
-    from astroviper.utils.data_group_tools import modify_data_groups_xds
-
-    if "SKY_RESIDUAL" not in img_xds:
-        raise KeyError("The continuum image does not contain 'SKY_RESIDUAL'.")
-
-    residual = img_xds["SKY_RESIDUAL"]
-    if residual.dims[-2:] != ("l", "m"):
-        raise ValueError("SKY_RESIDUAL must end in the ('l', 'm') dimensions.")
-
-    mask_plane = np.asarray(clean_mask, dtype=bool)
-    expected_shape = (residual.sizes["l"], residual.sizes["m"])
-    if mask_plane.shape != expected_shape:
-        raise ValueError(
-            "The continuum clean mask has shape "
-            f"{mask_plane.shape}; expected {expected_shape}."
-        )
-
-    expanded = mask_plane.reshape((1,) * (residual.ndim - 2) + mask_plane.shape)
-    mask_values = np.broadcast_to(expanded, residual.shape).copy()
-    img_xds["MASK"] = xr.DataArray(
-        mask_values,
-        dims=residual.dims,
-        coords={dimension: residual.coords[dimension] for dimension in residual.dims},
-        attrs={
-            "description": "User-supplied continuum deconvolution mask.",
-            "type": "mask",
-        },
-    )
-
-    data_groups = img_xds.attrs.get("data_groups", {})
-    if image_data_group_name not in data_groups:
-        raise KeyError(
-            "The continuum image does not contain image data group "
-            f"{image_data_group_name!r}."
-        )
-    residual_group = dict(data_groups[image_data_group_name])
-    residual_group["mask"] = "MASK"
-    modify_data_groups_xds(
-        img_xds,
-        data_group_out_name=image_data_group_name,
-        data_group_out=residual_group,
-        description="User-supplied continuum deconvolution mask installed.",
-    )
-
-
 @shares_param_docs
 def residual_update_continuum_single_field(
     image_params,
@@ -1080,6 +1025,7 @@ def residual_update_continuum_single_field(
     weight_cache_is_active=False,
     primary_beam_xds=None,
     observed_visibility_grid_xds=None,
+    gridding_kernel_params=None,
 ):
     """Compute one frequency chunk's continuum products in memory.
 
@@ -1100,6 +1046,10 @@ def residual_update_continuum_single_field(
     - ``VISIBILITY_NORMALIZATION``;
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
+
+    or, with the direct Fourier transform (``gridding_kernel_params={"type":
+    "dft"}``), the unnormalised Taylor images ``SKY_RESIDUAL`` and
+    ``POINT_SPREAD_FUNCTION`` in place of the two grids.
 
     MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
     ``MVC_RESIDUAL_WEIGHT_SUM`` and the additive moments of the per-pixel
@@ -1276,6 +1226,56 @@ def residual_update_continuum_single_field(
     task_time_kill_switch_seconds : float, optional
         Abort the distributed calculation if this task exceeds the specified wall
         time.
+
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -1581,6 +1581,7 @@ def residual_update_continuum_single_field(
         continuum_mode=continuum_mode,
         task_id=task_id,
         primary_beam_limit=primary_beam_limit,
+        gridding_kernel_params=gridding_kernel_params,
     )
 
     # Retain the task-local frequency-dependent PB for MVC
@@ -2373,7 +2374,9 @@ def _prepare_continuum_image(
 
     For ``continuum_mode='mfs'``, the reduced visibility grids already represent
     Taylor residual terms. They are inverse Fourier-transformed directly into
-    ``SKY_RESIDUAL(taylor_term)``.
+    ``SKY_RESIDUAL(taylor_term)``. With the direct Fourier transform
+    (``gridding_kernel_params={"type": "dft"}``) the reduced residual and PSF
+    are already Taylor images and are only divided by their normalization.
 
     For ``continuum_mode='mvc'``, map tasks have already normalized and inverse
     Fourier-transformed their exclusively owned channels, applied the channel
@@ -2416,8 +2419,15 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
+    from astroviper.processing_functions.imaging.direct_fourier_transform import (
+        normalize_dft_image,
+    )
     from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         ifft_norm_img_xds,
+    )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
+        make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         finalize_mvc_taylor_normal_equations,
@@ -2446,9 +2456,19 @@ def _prepare_continuum_image(
 
     # MFS still reduces Taylor-weighted UV grids and therefore performs its
     # inverse FFT globally. MVC map tasks already returned Taylor products.
+    # With the direct Fourier transform the MFS map tasks returned the sums of
+    # the Taylor images themselves, which are only normalised here.
     residual_output_name = "SKY_RESIDUAL"
+    direct_fourier_transform = is_direct_fourier_transform(
+        config["gridding_kernel_params"]
+    )
 
-    if continuum_mode == "mfs":
+    if continuum_mode == "mfs" and direct_fourier_transform:
+        normalize_dft_image(img_xds, image_data_group_name, uv_sampling=False)
+    elif continuum_mode == "mfs":
+        gridding_kernel = make_gridding_kernel(
+            config["gridding_kernel_params"], image_params["fft_padding"]
+        )
         img_xds = ifft_norm_img_xds(
             img_xds,
             image_params=image_params,
@@ -2461,6 +2481,7 @@ def _prepare_continuum_image(
             processing_function_threads=config["processing_function_threads"],
             fft_backend=config["fft_backend"],
             complex_dtype=config["complex_dtype"],
+            gridding_kernel=gridding_kernel,
         )
 
     if continuum_mode == "mfs" and residual_output_name not in img_xds:
@@ -2595,7 +2616,9 @@ def _prepare_continuum_image(
     # ------------------------------------------------------------------
 
     if initialize_static_products:
-        if continuum_mode == "mfs":
+        if continuum_mode == "mfs" and direct_fourier_transform:
+            normalize_dft_image(img_xds, image_data_group_name, uv_sampling=True)
+        elif continuum_mode == "mfs":
             img_xds = ifft_norm_img_xds(
                 img_xds,
                 image_params=image_params,
@@ -2608,6 +2631,7 @@ def _prepare_continuum_image(
                 processing_function_threads=config["processing_function_threads"],
                 fft_backend=config["fft_backend"],
                 complex_dtype=config["complex_dtype"],
+                gridding_kernel=gridding_kernel,
             )
 
         # register name of data group
@@ -2866,6 +2890,7 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
                 1,
             ),
             fft_backend=input_params.get("fft_backend", "pyfftw"),
+            gridding_kernel_params=input_params.get("gridding_kernel_params"),
         )
     elif continuum_mode == "mvc":
         model_uv_xds = None
@@ -3116,7 +3141,7 @@ def continuum_cycle_append_node(
 
     input_data["image"] = img_xds
 
-    _install_continuum_clean_mask(
+    install_clean_mask(
         img_xds,
         input_params.get("clean_mask"),
         input_params.get("image_data_group_in_name", "residual"),

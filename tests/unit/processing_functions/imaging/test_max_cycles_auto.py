@@ -540,6 +540,7 @@ def _image(
     noise=0.0,
     deconvolver="hogbom",
     restore=False,
+    gridding_kernel_params=None,
     **visibilities,
 ):
     from xradio.image import make_empty_sky_image
@@ -581,6 +582,7 @@ def _image(
         fft_backend="scipy",
         image_data_variables_keep=["sky_residual", "sky_model"],
         restore=restore,
+        gridding_kernel_params=gridding_kernel_params,
     )
 
 
@@ -979,8 +981,13 @@ class TestThePerCycleThresholdOfTheFreshResidual:
                 on_model_update(imaging_dict)
 
         seen = _spy_on_the_loop(monkeypatch, on_model_update=spy)
+        # CASA's kernel, so that the residual update moves the peak a model
+        # update ended with: with the default least misfit kernel it
+        # reproduces that peak to 1 to 3 ulp, and on some platforms exactly,
+        # and the two bases could not be told apart
         _, _, record = _image(
-            {"max_cycles": 3, "max_iter_per_cycle": 5, "threshold": 1e-6}
+            {"max_cycles": 3, "max_iter_per_cycle": 5, "threshold": 1e-6},
+            gridding_kernel_params={"type": "prolate_spheroidal_casa"},
         )
         stokes_i = record.data[STOKES_I]
         fraction = stokes_i["max_psf_sidelobe"]  # inside the clamp here
@@ -993,9 +1000,10 @@ class TestThePerCycleThresholdOfTheFreshResidual:
         thresholds, own_peaks = (list(values) for values in zip(*used, strict=True))
         assert thresholds == pytest.approx(expected, rel=1e-12)
         # the residual update moves the peak a model update ended with (here
-        # by 2e-8 to 5e-7 of it)
+        # by 2e-8 to 5e-7 of it), far beyond the tolerance above, so the
+        # check tells the two bases apart
         for own, fresh in zip(own_peaks, tested[1:], strict=True):
-            assert abs(own) != fresh
+            assert abs(abs(own) - fresh) > 1e-9 * fresh
 
     def test_a_diverged_model_update_leaves_a_finite_threshold(self, monkeypatch):
         def diverged_to_infinity(imaging_dict):

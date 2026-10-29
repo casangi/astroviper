@@ -8,6 +8,12 @@ import xradio.image.image_xds  # noqa: F401
 from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
     ifft_norm_img_xds,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    CASA_GRIDDING_KERNEL_PARAMS,
+    make_gridding_kernel,
+)
+
+CASA_KERNEL = make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS)
 
 
 def _image(axis, four):
@@ -39,6 +45,7 @@ def _transform(image, dtype, overwrite=True, keep_grid=True):
         fft_backend="scipy",
         complex_dtype=dtype,
         overwrite=overwrite,
+        gridding_kernel=CASA_KERNEL,
     )
 
 
@@ -119,6 +126,7 @@ def _forward(image, axis, dtype, **kwargs):
         image_data_group_out_name="uv_model",
         image_data_group_out_modified={"visibility": "OUTPUT"},
         complex_dtype=dtype,
+        gridding_kernel=CASA_KERNEL,
         **kwargs,
     )
 
@@ -241,3 +249,39 @@ def test_forward_uses_output_as_workspace_and_drops_unkept_sky(axis, monkeypatch
     assert "MODEL" not in result
     np.testing.assert_array_equal(original_sky, saved_sky)
     assert result.attrs["data_groups"]["uv_model"]["visibility"] == "OUTPUT"
+
+
+@pytest.mark.parametrize(
+    "function", ["ifft_norm_img_xds", "fft_norm_img_xds", "fft_norm_continuum_img_xds"]
+)
+@pytest.mark.parametrize("given", ["omitted", "None"])
+def test_gridding_kernel_is_required(function, given):
+    """No transform falls back to a default kernel (CASA's): without gridding_kernel
+    each refuses, naming the parameter, before it changes the dataset."""
+    import importlib
+
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder"
+    )
+    if function == "ifft_norm_img_xds":
+        image = _image("frequency", False)
+        image_params = {"image_size": [16, 16]}
+        kwargs = {
+            "image_data_group_in_name": "input",
+            "image_data_group_out_name": "output",
+            "image_data_group_out_modified": {"sky": "RESULT"},
+        }
+    else:
+        axis = "frequency" if function == "fft_norm_img_xds" else "taylor_term"
+        image = _sky_image(axis)
+        image_params = {"fft_padding": 1.25}
+        kwargs = {
+            "image_data_group_out_name": "uv_model",
+            "image_data_group_out_modified": {"visibility": "OUTPUT"},
+        }
+    if given == "None":
+        kwargs["gridding_kernel"] = None
+    original = image.copy(deep=True)
+    with pytest.raises(ValueError, match=f"^{function} needs gridding_kernel"):
+        getattr(module, function)(image, image_params, fft_backend="scipy", **kwargs)
+    xr.testing.assert_identical(image, original)

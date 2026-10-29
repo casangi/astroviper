@@ -94,7 +94,7 @@ def test_delphi_parameters_file_then_image_from_it(tmp_path):
         "robust": 0.5,
     }
     assert arguments["gridding_kernel_params"] == {
-        "type": "prolate_spheroidal",
+        "type": "least_misfit",
         "support": 9,
         "oversampling": 300,
         "interpolation": "linear",

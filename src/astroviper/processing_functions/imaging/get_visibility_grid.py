@@ -51,7 +51,7 @@ def get_visibility_grid_single_field(
     cgk_1D : GriddingKernel or np.ndarray
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or the bare table of the default prolate spheroidal kernel of support 7.
+        or a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset holding the model UV grid.  Must expose an image data
         group under ``image_data_group_in_name`` whose ``"visibility"`` role

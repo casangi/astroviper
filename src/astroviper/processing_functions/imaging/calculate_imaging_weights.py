@@ -444,7 +444,6 @@ def grid_imaging_weight_density_continuum(
             n_uv,
             delta_lm,
             processing_function_threads=processing_function_threads,
-            truncate_uv_cells=True,
             frequency_map=np.zeros(ms_frequency.size, dtype=np.int64),
         )
 
@@ -914,7 +913,6 @@ def degrid_imaging_weights_continuum(
             delta_lm,
             processing_function_threads=(processing_function_threads),
             frequency_map=frequency_map,
-            truncate_uv_cells=True,
         )
 
         imaging_weights = np.asarray(imaging_weights)
@@ -1061,7 +1059,7 @@ def calculate_imaging_weights(
     truncate_uv_cells : bool, default ``False``
         If True, assign shifted UV coordinates to density cells by integer
         truncation, matching CASA continuum weighting. If False, use the
-        nearest-cell convention used by cube weighting.
+        nearest-cell convention used by cube and continuum weighting.
 
     frequency_matching : {"nearest", "exact"}, default "nearest"
         Cube and continuum imaging assign visibility frequencies to the nearest image

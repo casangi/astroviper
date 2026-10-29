@@ -233,13 +233,16 @@ PSF beam fit is switchable
 `tclean`'s restoring beam exactly on the same PSF.
 
 **PSF of twice the image size.** The PSF that `exact_psf_subtraction`
-subtracts (Hogbom only; Asp refuses the option) has twice the `l` and `m`
-extents of `img_xds`, so it cannot share its coordinates and is kept outside
-`img_xds` and its data groups, as a NumPy cube `(nt, nf, np, 2 n_l, 2 n_m)`.
+subtracts (cube Hogbom only; Asp and continuum imaging refuse the option)
+has twice the `l` and `m` extents of `img_xds`, so it cannot share its
+coordinates and is kept outside `img_xds` and its data groups, as a NumPy
+cube `(nt, nf, np, 2 n_l, 2 n_m)`.
 `make_subtraction_point_spread_function_single_field` makes it once per
 channel, in the correlation basis, from the `WEIGHT_IMAGING` of the setup (not
 recomputed: Briggs weights depend on the uv cell, which the larger grid
-halves), and it reaches `deconvolve` as
+halves); with imaging weights equal in every correlation, as the imager's
+are, it is made once, for the first correlation on one uv grid, and copied to
+the others. It reaches `deconvolve` as
 `deconvolve_params["subtraction_psf_cube"]`. It is used only for the
 subtraction: the beam fit, `max_psf_sidelobe` and the restore keep the
 image-sized PSF.

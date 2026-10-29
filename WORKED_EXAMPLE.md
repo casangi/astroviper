@@ -144,8 +144,10 @@ via `CycleController`:
   `deconvolvers/aspclean` (C++).
 - The anti-aliasing gridder is implemented in C++
   (`gridders/anti_alias_grid_cpp`); `gridding_kernel_params` selects its
-  kernel, and the default, `prolate_spheroidal_casa`, is the kernel of
-  CASA's standard gridder. Pure-Python
+  kernel. The default is the `least_misfit` kernel of support 9,
+  oversampling 300 and linear lookup (RADPS Memo 13a);
+  `prolate_spheroidal_casa` is the kernel of CASA's standard gridder, and that
+  type alone takes CASA's sampling (`CASA_GRIDDING_KERNEL_PARAMS`). Pure-Python
   reference copies used as test oracles live in
   `tests/unit/processing_functions/imaging/gridders/reference_gridders.py`.
   **Keep the references in sync** if you change the gridding math.

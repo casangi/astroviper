@@ -176,7 +176,7 @@ def degrid_imaging_weights(
         - ``"cell_size"`` : tuple(float, float), image pixel scale (Δl, Δm) in radians.
     truncate_uv_cells : bool, default ``False``
         If True, sample the CASA continuum truncated UV cell. If False, sample
-        the nearest UV cell used by cube weighting.
+        the nearest UV cell used by cube and continuum weighting.
 
     Returns
     -------

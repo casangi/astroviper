@@ -115,14 +115,35 @@ def point_spread_function_cube_single_field(
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
-        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
-        ``least_misfit`` kernel whose image plane correction falls below 1e-6
-        of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,

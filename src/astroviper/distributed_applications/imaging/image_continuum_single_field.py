@@ -1328,6 +1328,10 @@ def combine_continuum_chunks(input_data, input_params):
     ``UV_SAMPLING_NORMALIZATION``
         ``(time, psf_taylor_order, polarization)``.
 
+    MFS with the direct Fourier transform (``gridding_kernel_params={"type":
+    "dft"}``) supplies the unnormalised Taylor images ``SKY_RESIDUAL`` and
+    ``POINT_SPREAD_FUNCTION`` in place of the two grids.
+
     MVC supplies a mode-specific additive list. Every imaging cycle reduces
     ``MVC_RESIDUAL_TAYLOR_NUMERATOR``, ``MVC_RESIDUAL_WEIGHT_SUM``,
     ``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``, ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``,
@@ -2585,53 +2589,75 @@ def calculate_number_of_chunks_for_continuum_imaging(
     return n_frequency_chunks
 
 
-def _load_continuum_clean_mask(clean_mask, image_size):
-    """Load and validate an optional two-dimensional continuum CLEAN mask."""
-    if clean_mask is None:
-        return None
+def _warn_on_mvc_asp_significance_without_clean_mask(
+    continuum_mode, deconvolver, cycle_control_params, clean_mask
+):
+    """Warn when the significance test of MVC Asp has no noise to measure.
 
-    import numpy as np
+    Asp measures the noise of its significance test (``asp_scale_significance``,
+    default ``True``) on the pixels outside its mask. Without a clean mask
+    these lie outside the primary-beam support, where MVC sets the residual to
+    0, so the test cleans nothing below ``threshold_per_cycle``.
+    """
+    import toolviper.utils.logger as logger
 
-    clean_mask_array = np.squeeze(np.asarray(np.load(clean_mask)))
-    expected_shape = tuple(int(value) for value in image_size)
-    if clean_mask_array.ndim != 2 or clean_mask_array.shape != expected_shape:
-        raise ValueError(
-            "clean_mask must contain one 2-D image plane with shape "
-            f"{expected_shape}; received {clean_mask_array.shape}."
+    if (
+        continuum_mode == "mvc"
+        and deconvolver == "asp"
+        and cycle_control_params.get("asp_scale_significance", True)
+        and clean_mask is None
+    ):
+        logger.warning(
+            "continuum_mode='mvc' with deconvolver='asp' and "
+            "asp_scale_significance=True but no clean_mask: MVC sets the "
+            "residual to 0 outside the primary-beam support, where Asp then "
+            "measures the noise of its significance test, so that test cleans "
+            "nothing below threshold_per_cycle. Give a clean_mask to use it."
         )
-    if not np.all(np.isfinite(clean_mask_array)):
-        raise ValueError("clean_mask contains non-finite values.")
-
-    clean_mask_array = np.ascontiguousarray(clean_mask_array > 0.5)
-    if not np.any(clean_mask_array):
-        raise ValueError("clean_mask does not select any pixels.")
-    return clean_mask_array
 
 
 def _resolve_continuum_deconvolver(deconvolver, image_params):
-    """Resolve user-facing continuum deconvolver choices before graph creation."""
+    """Resolve user-facing continuum deconvolver choices before graph creation.
+
+    ``"aspclean"`` and ``"asp_clean"`` resolve to ``"asp"``. Asp cleans Taylor
+    term zero, so it needs ``image_params["n_taylor_terms"] == 1``.
+    """
     import operator
     import warnings
 
     deconvolver = str(deconvolver).lower()
-    if deconvolver not in ("hogbom", "mtmfs"):
+    if deconvolver in ("aspclean", "asp_clean"):
+        deconvolver = "asp"
+    if deconvolver not in ("hogbom", "asp", "mtmfs"):
         raise ValueError(
-            "deconvolver must be 'hogbom' or 'mtmfs' for continuum imaging; "
+            "deconvolver must be 'hogbom', 'asp' (aliases 'aspclean' and "
+            "'asp_clean') or 'mtmfs' for continuum imaging; "
             f"received {deconvolver!r}."
         )
-    if deconvolver != "mtmfs":
+    if deconvolver == "hogbom":
         return deconvolver
 
     if "n_taylor_terms" not in image_params:
         raise KeyError(
-            "image_params must contain 'n_taylor_terms' when deconvolver='mtmfs'."
+            "image_params must contain 'n_taylor_terms' when "
+            f"deconvolver='{deconvolver}'."
         )
     try:
         n_taylor_terms = operator.index(image_params["n_taylor_terms"])
     except TypeError as exc:
         raise TypeError(
-            "image_params['n_taylor_terms'] must be an integer when deconvolver='mtmfs'."
+            "image_params['n_taylor_terms'] must be an integer when "
+            f"deconvolver='{deconvolver}'."
         ) from exc
+
+    if deconvolver == "asp":
+        if n_taylor_terms != 1:
+            raise ValueError(
+                "deconvolver='asp' cleans Taylor term zero only and requires "
+                f"image_params['n_taylor_terms'] = 1; received {n_taylor_terms}. "
+                "Use deconvolver='mtmfs' for 2 to 4 Taylor terms."
+            )
+        return deconvolver
 
     if n_taylor_terms == 1:
         warnings.warn(
@@ -2712,6 +2738,40 @@ def _resolve_continuum_taylor_expansion(image_params):
     image_params["reference_frequency"] = _get_reference_frequency_hz(image_params)
 
 
+def _refuse_unsupported_continuum_cycle_options(deconvolver, cycle_control_params):
+    """Refuse cycle control options the resolved continuum deconvolver lacks.
+
+    The continuum Högbom path runs the cube Högbom kernel on Taylor term zero,
+    which records ``record_iteration_history``; Asp and native MT-MFS do not
+    record it, and the cube check
+    (:func:`~astroviper.processing_functions.imaging.deconvolution.validate_record_iteration_history`)
+    refuses them. No continuum deconvolver does ``exact_psf_subtraction``: the
+    continuum graph makes no PSF of twice the image size. Called before
+    anything is written.
+    """
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.deconvolution import (
+        validate_record_iteration_history,
+    )
+
+    validate_record_iteration_history(
+        deconvolver, cycle_control_params.get("record_iteration_history", False)
+    )
+    exact_psf_subtraction = cycle_control_params.get("exact_psf_subtraction", False)
+    if not isinstance(exact_psf_subtraction, bool | np.bool_):
+        raise ValueError(
+            f"exact_psf_subtraction must be a bool; got {exact_psf_subtraction!r}."
+        )
+    if exact_psf_subtraction:
+        raise ValueError(
+            "exact_psf_subtraction is not supported by continuum imaging "
+            f"(deconvolver={deconvolver!r}): the continuum graph makes no PSF "
+            "of twice the image size. Cube imaging supports it with "
+            "deconvolver='hogbom' or 'hogbom_many_threads'."
+        )
+
+
 ###############################################################################
 # Main distributed layer level function call
 ###############################################################################
@@ -2760,6 +2820,7 @@ def image_continuum_single_field(
     disk_chunk_sizes: dict[str, int] | str | None = None,
     fft_backend: str = "pyfftw",
     restore: bool = False,
+    gridding_kernel_params: dict[str, Any] | None = None,
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -2775,15 +2836,20 @@ def image_continuum_single_field(
     MFS reduces Taylor UV grids before the global inverse FFT. MVC performs
     channel FFTs and PB correction in map tasks, then reduces Taylor
     contributions. Native MT-MFS updates the complete Taylor model; Högbom
-    updates Taylor term zero. Both verify refreshed residuals before
-    finalization. With one Taylor term, an MT-MFS request emits a warning and
-    falls back to Högbom. Restoration is optional.
+    updates Taylor term zero. Asp (``"asp"``, aliases ``"aspclean"`` and
+    ``"asp_clean"``) updates Taylor term zero as Högbom does and requires
+    ``image_params["n_taylor_terms"] = 1``; with more Taylor terms it raises
+    ``ValueError`` before anything is written. In MVC the significance test
+    of Asp (``asp_scale_significance``) needs a ``clean_mask`` (see
+    ``deconvolver``). All verify refreshed residuals before finalization.
+    With one Taylor term, an MT-MFS request emits a warning and falls back to
+    Högbom. Restoration is optional.
 
     The imaging cycle loop (``cycle_control_params``) does not run separately
     for every frequency channel as in cube imaging. Continuum performs one
-    model update after reduction across frequency partitions: Högbom updates
-    Taylor term zero, while MT-MFS jointly updates all Taylor terms. Higher
-    terms never run independent imaging-cycle loops.
+    model update after reduction across frequency partitions: Högbom and Asp
+    update Taylor term zero, while MT-MFS jointly updates all Taylor terms.
+    Higher terms never run independent imaging-cycle loops.
 
     ``imaging_weights_params`` also accepts ``weighting_scope``, the uv
     weight density that uniform and Briggs weights are made from:
@@ -2805,6 +2871,26 @@ def image_continuum_single_field(
     of the model update for ``max_iter_divergence`` consecutive iterations,
     or at once when its peak exceeds ``(1 + gain)`` times its peak at the
     start of the model update.
+
+    With ``gridding_kernel_params={"type": "dft"}`` MFS makes its Taylor
+    residuals, its Taylor PSFs and its model visibilities by the exact
+    direct Fourier transform, w term included, over the unpadded image
+    (:mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`):
+    the map tasks return the sums of the Taylor images, which are reduced and
+    divided by the sum of the imaging weights, and the model is predicted
+    from its Taylor images without an FFT. Every residual Taylor term, PSF
+    order and model Taylor term costs one transform of the map task's
+    samples. ``continuum_mode="mvc"``,
+    ``visibility_memory_mode="in_memory"`` or ``"in_place"`` and a kept
+    ``visibility`` or ``uv_sampling`` grid are refused with it, before
+    anything is written, as they are made of uv grids.
+
+    Of the continuum deconvolvers only Högbom records
+    ``record_iteration_history``, and continuum imaging has no
+    ``exact_psf_subtraction`` (it makes no PSF of twice the image size).
+    ``record_iteration_history=True`` with Asp or MT-MFS, and
+    ``exact_psf_subtraction=True`` with any deconvolver, raise ``ValueError``
+    before anything is written.
 
     Parameters
     ----------
@@ -2907,11 +2993,19 @@ def image_continuum_single_field(
         parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
-        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
-        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
-        are refused before anything is written.
+        threaded across planes) cleans Taylor term zero only. ``"asp"``
+        (C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)
+        cleans Taylor term zero only and needs
+        ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
+        (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
+        measures the noise on the pixels outside its mask, which without a
+        clean mask lie outside the primary-beam support, where MVC sets the
+        residual to 0, so the test cleans nothing below ``threshold_per_cycle``
+        (a warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        synthesis) cleans the Taylor terms together and needs
+        ``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``
+        it falls back to ``"hogbom"`` with a warning. Other values are refused
+        before anything is written.
     primary_beam_limit : float
         Primary-beam cutoff in ``[0, 1]``. This single setting controls CLEAN
         support, MVC channel correction and spectral fitting, and final
@@ -3127,8 +3221,8 @@ def image_continuum_single_field(
           to the bit with and without it, and the RMS is the sum of squares
           the peak search of the next iteration makes anyway, so it costs no
           extra pass over the image per iteration. Hogbom deconvolvers only:
-          ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
-          No CASA equivalent.
+          ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise
+          ``ValueError``. Default ``False``. No CASA equivalent.
         - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
           subtracts the PSF of every component it finds from the whole residual
           image, with a PSF of twice the image size made once per channel from
@@ -3141,8 +3235,9 @@ def image_continuum_single_field(
           image-sized PSF either way. Costs a second PSF per channel (four
           times the pixels, kept through the channel's cycles) and a
           subtraction over the whole image at every iteration. Hogbom
-          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
-          Default ``False``. No CASA equivalent.
+          deconvolvers of cube imaging only: ``deconvolver="asp"`` and
+          continuum imaging raise ``ValueError``. Default ``False``. No CASA
+          equivalent.
         - ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends
           after each of its Hogbom runs (51 or 510 point components) unless
           the RMS of the residual has fallen, by less than a factor 1.5, since
@@ -3193,13 +3288,73 @@ def image_continuum_single_field(
         for a plane the entropy or divergence stop has ended), where
         ``max_iter_remaining`` is what is left of ``max_iter``.
     gridder : str, optional
-        Currently ``"anti_alias"``, with the fixed prolate spheroidal kernel of
-        support 7 and oversampling 100. MFS and MVC dispatch visibility, PSF,
-        and prediction work to the shared C++ grid/degrid kernels.
+        Currently ``"anti_alias"``: convolutional gridding with the
+        anti-aliasing kernel of ``gridding_kernel_params`` (by default the
+        ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup).
+        MFS and MVC dispatch visibility, PSF, and prediction work to the shared
+        C++ grid/degrid kernels. With ``gridding_kernel_params={"type":
+        "dft"}`` MFS uses the exact direct Fourier transform with the w term
+        instead.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     clean_mask : str or None, optional
-        Path to a NumPy ``.npy`` file containing one two-dimensional CLEAN mask.
-        Its shape must equal ``image_params["image_size"]``. Finite values greater
-        than 0.5 select pixels in every continuum residual plane.
+        Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:
+        the path of a NumPy ``.npy`` file for the distributed applications and
+        the bool plane loaded from it
+        (:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values
+        greater than 0.5) for the layers below. It selects the pixels of every
+        residual plane that the model update cleans, in place of the
+        primary-beam mask of ``primary_beam_limit``; Asp measures the noise of
+        its significance test (``asp_scale_significance``) outside it.
+        ``None`` keeps the primary-beam mask.
     image_sharding : dict, optional
         Reserved for a future node-task finalization path. Continuum imaging
         currently raises ``NotImplementedError`` when this is supplied rather
@@ -3313,6 +3468,13 @@ def image_continuum_single_field(
     from astroviper.processing_functions.imaging.check_imaging_parameters import (
         check_imaging_weights_params,
     )
+    from astroviper.processing_functions.imaging.direct_fourier_transform import (
+        check_dft_continuum_parameters,
+    )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
+        resolve_gridding_kernel_params,
+    )
     from astroviper.processing_functions.imaging.utils import (
         CONTINUUM_IMAGING_TIMING_PHASES,
         CONTINUUM_MODEL_UPDATE_TIMING_PHASES,
@@ -3385,11 +3547,23 @@ def image_continuum_single_field(
     # image parameters with metadata derived from the Processing Set.
     image_params = dict(image_params)
     deconvolver = _resolve_continuum_deconvolver(deconvolver, image_params)
+    _refuse_unsupported_continuum_cycle_options(deconvolver, cycle_control_params)
     _resolve_continuum_taylor_expansion(image_params)
+    # Checked here, before anything is written, as cube imaging checks them
+    # when it makes its kernel. Whether the padding can hold a kernel designed
+    # for it is checked where the kernel is made.
+    gridding_kernel_params = resolve_gridding_kernel_params(gridding_kernel_params)
+    direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
+    if direct_fourier_transform:
+        check_dft_continuum_parameters(
+            continuum_mode, visibility_memory_mode, image_data_variables_keep
+        )
 
-    clean_mask_array = _load_continuum_clean_mask(
-        clean_mask,
-        image_params["image_size"],
+    from astroviper.utils.clean_mask import load_clean_mask
+
+    clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
+    _warn_on_mvc_asp_significance_without_clean_mask(
+        continuum_mode, deconvolver, cycle_control_params, clean_mask_array
     )
 
     # Validate once at the application boundary so every graph sees the same
@@ -3581,6 +3755,7 @@ def image_continuum_single_field(
     input_params["processing_function_threads"] = processing_function_threads
     input_params["cycle_control_params"] = cycle_control_params
     input_params["gridder"] = gridder
+    input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["is_first_cycle"] = True
     input_params["deconvolver"] = deconvolver
     input_params["primary_beam_correction"] = bool(primary_beam_correction)
@@ -3855,7 +4030,22 @@ def image_continuum_single_field(
             # are reduced. Later cycles only produce new residual products; the
             # static PSF/PB products are supplied by
             # continuum_cycle_append_node.
-            if continuum_mode == "mfs":
+            if continuum_mode == "mfs" and direct_fourier_transform:
+                # The direct Fourier transform's map tasks return the sums of
+                # the Taylor images (and PSFs) instead of uv grids.
+                reduce_input_params = {
+                    "continuum_mode": "mfs",
+                    "additive_variables": (
+                        "SKY_RESIDUAL",
+                        "VISIBILITY_NORMALIZATION",
+                    )
+                    + (
+                        ("POINT_SPREAD_FUNCTION", "UV_SAMPLING_NORMALIZATION")
+                        if is_first_cycle
+                        else ()
+                    ),
+                }
+            elif continuum_mode == "mfs":
                 if is_first_cycle:
                     reduce_input_params = {"continuum_mode": "mfs"}
                 else:
@@ -3905,6 +4095,7 @@ def image_continuum_single_field(
                 "image_data_group_in_name": "residual",
                 "image_data_group_out_name": "model",
                 "image_params": image_params,
+                "gridding_kernel_params": gridding_kernel_params,
                 "image_data_variables_keep": image_data_variables_keep,
                 "fft_backend": fft_backend,
                 "single_precision_image": single_precision_image,
