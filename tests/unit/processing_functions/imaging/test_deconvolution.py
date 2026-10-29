@@ -1024,8 +1024,8 @@ class TestAspClean:
                 "gain": 0.5,
                 "max_iter": 50,
                 "threshold": 0.01,
-                "fusedthreshold": 0.5,
-                "psf_width": 1.0,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
             },
         )
         assert result["iterations_performed"].shape == (nt, nf, npol)
@@ -1053,7 +1053,7 @@ class TestAspClean:
                 "gain": 0.1,
                 "max_iter": 200,
                 "threshold": 0.01,
-                "fusedthreshold": 0.1,
+                "asp_fused_threshold": 0.1,
             },
         )
         # residual reduced and most flux recovered
@@ -1132,11 +1132,11 @@ class TestAspClean:
             "asp_residual_components": False,
             "asp_scale_significance": False,
             "asp_significance": 2.5,
-            "asp_rc_noise_floor": 3.0,
-            "asp_rc_frac_min": 0.4,
-            "asp_rc_eps_max": 5.0,
-            "asp_rc_switch_factor": 2.0,
-            "asp_rc_floor_at_threshold": False,
+            "asp_residual_component_noise_floor": 3.0,
+            "asp_residual_component_min_fraction": 0.4,
+            "asp_residual_component_max_epsilon_fraction": 5.0,
+            "asp_residual_component_switch_factor": 2.0,
+            "asp_residual_component_floor_at_threshold": False,
             "asp_significance_gain": 0.5,
         }
         for extra in ({}, options):
@@ -1145,13 +1145,13 @@ class TestAspClean:
             params = {"gain": 0.1, "max_iter": 20, "threshold": 0.01, **extra}
             asp_clean(resid, psf, np.zeros_like(resid), params)
         default, given = calls
-        assert default["residual_components"] is True
-        assert default["scale_significance"] is True
-        assert default["rc_switch_factor"] == 1.0
-        assert default["rc_floor_at_threshold"] is True
-        assert default["significance_gain"] == 0.3
+        assert default["asp_residual_components"] is True
+        assert default["asp_scale_significance"] is True
+        assert default["asp_residual_component_switch_factor"] == 1.0
+        assert default["asp_residual_component_floor_at_threshold"] is True
+        assert default["asp_significance_gain"] == 0.3
         for key, value in options.items():
-            assert given[key.removeprefix("asp_")] == value
+            assert given[key] == value
 
     def test_threaded_matches_serial(self):
         nt, nf, npol, ny, nx = 1, 2, 2, 32, 32
@@ -1168,7 +1168,7 @@ class TestAspClean:
                 "gain": 0.2,
                 "max_iter": 40,
                 "threshold": 0.05,
-                "fusedthreshold": 0.1,
+                "asp_fused_threshold": 0.1,
             },
             processing_function_threads=1,
         )
@@ -1181,7 +1181,7 @@ class TestAspClean:
                 "gain": 0.2,
                 "max_iter": 40,
                 "threshold": 0.05,
-                "fusedthreshold": 0.1,
+                "asp_fused_threshold": 0.1,
             },
             processing_function_threads=4,
         )
@@ -1204,8 +1204,8 @@ class TestAspClean:
                 "gain": 0.5,
                 "max_iter": 40,
                 "threshold": 0.01,
-                "fusedthreshold": 0.5,
-                "psf_width": 1.0,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
             },
         )
         assert out["model_flux"].shape == (nt, nf, npol)
@@ -1234,9 +1234,9 @@ class TestAspClean:
                 "gain": 0.5,
                 "max_iter": 60,
                 "threshold": 0.01,
-                "fusedthreshold": 0.5,
-                "psf_width": 1.0,
-                "largestscale": 2,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
+                "asp_largest_scale": 2,
             },
             mask_cube=mask,
         )
@@ -1287,8 +1287,8 @@ class TestAspClean:
                 "gain": 0.9,
                 "max_iter": 40,
                 "threshold": 0.0,
-                "psf_width": 1.0,
-                "largestscale": 0,
+                "asp_psf_width": 1.0,
+                "asp_largest_scale": 0,
                 "max_iter_divergence": max_iter_divergence,
                 **PLAIN_ASP,
             },
@@ -1309,8 +1309,8 @@ class TestAspClean:
                 "gain": 0.9,
                 "max_iter": 40,
                 "threshold": 0.0,
-                "psf_width": 1.0,
-                "largestscale": 0,
+                "asp_psf_width": 1.0,
+                "asp_largest_scale": 0,
             },
         )
         assert result["iterations_performed"].item() < 10
@@ -1325,7 +1325,7 @@ class TestAspClean:
             residual,
             psf,
             model,
-            {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "psf_width": 1.0},
+            {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "asp_psf_width": 1.0},
         )
         assert result["iterations_performed"].item() == 0
         assert not result["diverged"].item()
@@ -1344,7 +1344,7 @@ class TestAspClean:
                 residual,
                 psf,
                 model,
-                {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "psf_width": 1.0},
+                {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "asp_psf_width": 1.0},
                 mask_cube=mask,
             )
             out.append((result, residual, model))
@@ -1387,8 +1387,8 @@ class TestDeconvolveAsp:
                 "gain": 0.5,
                 "max_iter": 50,
                 "threshold": 0.01,
-                "fusedthreshold": 0.5,
-                "psf_width": 1.0,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
             },
         )
         assert isinstance(imaging_dict, ImagingDict)
@@ -1397,19 +1397,10 @@ class TestDeconvolveAsp:
         assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=0.1)
         assert np.max(np.abs(xds["RESIDUAL"].values)) < 0.1
 
-    @pytest.mark.parametrize("alias", ["asp", "aspclean", "asp_clean", "ASP"])
-    def test_algorithm_aliases(self, alias):
-        xds = _make_img_xds(nt=1, nf=1, npol=1)
-        rd = deconvolve(
-            img_xds=xds,
-            algorithm=alias,
-            deconvolve_params={
-                "max_iter": 10,
-                "psf_width": 1.0,
-                "fusedthreshold": 0.5,
-            },
-        )
-        assert isinstance(rd, ImagingDict)
+    @pytest.mark.parametrize("algorithm", ["aspclean", "asp_clean", "ASP"])
+    def test_algorithm_names_are_exact(self, algorithm):
+        with pytest.raises(ValueError, match="not recognized"):
+            deconvolve(img_xds=_make_img_xds(nt=1, nf=1, npol=1), algorithm=algorithm)
 
     def test_multi_plane_returndict_entries(self):
         nt, nf, npol = 1, 2, 2
@@ -1421,8 +1412,8 @@ class TestDeconvolveAsp:
                 "gain": 0.5,
                 "max_iter": 30,
                 "threshold": 0.01,
-                "fusedthreshold": 0.5,
-                "psf_width": 1.0,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
             },
         )
         assert len(rd.data) == nt * nf * npol
@@ -1439,8 +1430,8 @@ class TestDeconvolveAsp:
                 "gain": 0.9,
                 "max_iter": 40,
                 "threshold": 0.0,
-                "psf_width": 1.0,
-                "largestscale": 0,
+                "asp_psf_width": 1.0,
+                "asp_largest_scale": 0,
                 **PLAIN_ASP,
             },
         )
@@ -1482,7 +1473,7 @@ EXACT_PARAMS = {
 
 class TestExactPsfSubtraction:
     @pytest.mark.parametrize("value", [False, True, np.bool_(True), np.bool_(False)])
-    @pytest.mark.parametrize("deconvolver", ["hogbom", "HOGBOM_MANY_THREADS"])
+    @pytest.mark.parametrize("deconvolver", ["hogbom", "hogbom_many_threads"])
     def test_accepted(self, value, deconvolver):
         validate_exact_psf_subtraction(deconvolver, value)
         assert (
@@ -1499,20 +1490,18 @@ class TestExactPsfSubtraction:
         with pytest.raises(ValueError, match="exact_psf_subtraction must be a bool"):
             _validate_deconvolve_params({"exact_psf_subtraction": value})
 
-    @pytest.mark.parametrize("deconvolver", ["asp", "aspclean", "asp_clean"])
-    def test_asp_is_refused(self, deconvolver):
-        validate_exact_psf_subtraction(deconvolver, False)
+    def test_asp_is_refused(self):
+        validate_exact_psf_subtraction("asp", False)
         with pytest.raises(ValueError, match="Hogbom deconvolvers"):
-            validate_exact_psf_subtraction(deconvolver, True)
+            validate_exact_psf_subtraction("asp", True)
 
     @requires_asp
-    @pytest.mark.parametrize("algorithm", ["asp", "aspclean", "asp_clean"])
-    def test_deconvolve_refuses_asp_before_the_model_is_made(self, algorithm):
+    def test_deconvolve_refuses_asp_before_the_model_is_made(self):
         xds = _exact_xds()
         params = {**EXACT_PARAMS, "exact_psf_subtraction": True}
         params["subtraction_psf_cube"] = _subtraction_psf_cube(xds)
         with pytest.raises(ValueError, match="exact_psf_subtraction is supported"):
-            deconvolve(img_xds=xds, algorithm=algorithm, deconvolve_params=params)
+            deconvolve(img_xds=xds, algorithm="asp", deconvolve_params=params)
         assert "SKY_MODEL" not in xds
         cube = xds["RESIDUAL"].values
         with pytest.raises(ValueError, match="exact_psf_subtraction is supported"):

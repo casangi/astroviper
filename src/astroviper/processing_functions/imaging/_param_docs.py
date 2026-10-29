@@ -28,8 +28,8 @@ _IMAGE_PARAMS_DOC = (
 
 _CONTINUUM_IMAGE_PARAMS_DOC = (
     _IMAGE_PARAMS_DOC + "\nContinuum imaging also requires ``frequency_coords``,\n"
-    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;\n"
-    "``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``\n"
+    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.\n"
+    "``spectral_reference``\n"
     'sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``\n'
     "selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and\n"
     "``list_blockage_diameters`` are arrays in metres,\n"
@@ -107,9 +107,8 @@ _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
     'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
     "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
-    'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
-    '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
-    "are refused before anything is written."
+    'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4. Other\n'
+    "values are refused before anything is written."
 )
 
 _CONTINUUM_MODE_DOC = (
@@ -471,7 +470,7 @@ IMAGING_PARAM_DOCS = {
         "  iterations go on from there. They remove the ring residuals Asp\n"
         "  leaves on resolved emission in far fewer iterations, and take no\n"
         "  residual below ``threshold_per_cycle``. Further keys\n"
-        "  (``asp_rc_*``) are described in\n"
+        "  (``asp_residual_component_*``) are described in\n"
         "  :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.\n"
         "  Asp only. Default ``True``. No CASA equivalent.\n"
         "- ``asp_scale_significance`` : If ``True``, Asp measures the noise of\n"

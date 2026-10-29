@@ -144,8 +144,8 @@ def imaging_preparation_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -517,8 +517,8 @@ def prepare_model_uv_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -583,6 +583,9 @@ def prepare_model_uv_continuum_single_field(
     from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_continuum_img_xds,
     )
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _validate_n_taylor_terms,
+    )
 
     if not isinstance(model_xds, xr.Dataset):
         raise TypeError(
@@ -595,10 +598,7 @@ def prepare_model_uv_continuum_single_field(
             f"'circular'; received {instrument_polarization_basis!r}."
         )
 
-    n_taylor_terms = int(image_params.get("n_taylor_terms", 0))
-
-    if n_taylor_terms < 1:
-        raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
+    n_taylor_terms = _validate_n_taylor_terms(image_params["n_taylor_terms"])
 
     data_groups = model_xds.attrs.get("data_groups", {})
 
@@ -853,8 +853,8 @@ def prepare_model_uv_mvc_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -1820,8 +1820,8 @@ def residual_update_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -1845,9 +1845,8 @@ def residual_update_continuum_single_field(
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
         (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
-        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
-        are refused before anything is written.
+        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4. Other
+        values are refused before anything is written.
 
     instrument_polarization_basis : {"linear", "circular"}, optional
         Correlation (instrument) polarization basis the gridding is performed in:
@@ -2021,7 +2020,7 @@ def residual_update_continuum_single_field(
 
     mvc_observed_grid_xds = None
     if (
-        str(continuum_mode).lower() == "mvc"
+        continuum_mode == "mvc"
         and is_first_cycle
         and visibility_memory_mode != "recompute"
     ):
@@ -2034,7 +2033,7 @@ def residual_update_continuum_single_field(
         mvc_observed_grid_xds.attrs = img_xds.attrs.copy()
         mvc_observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
 
-    if str(continuum_mode).lower() == "mvc":
+    if continuum_mode == "mvc":
         from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
             ifft_norm_img_xds,
         )
@@ -2639,9 +2638,8 @@ def model_update_mtmfs_single_field(
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
         (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with
-        ``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values
-        are refused before anything is written.
+        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4. Other
+        values are refused before anything is written.
 
     deconvolve_params : dict
         Model-update control parameters. These typically include entries such as
@@ -2707,7 +2705,6 @@ def model_update_mtmfs_single_field(
         modify_data_groups_xds,
     )
 
-    deconvolver = deconvolver.lower()
     if deconvolver not in {"hogbom", "mtmfs"}:
         raise NotImplementedError(
             "Continuum deconvolution supports 'hogbom' and 'mtmfs'; "
@@ -3117,7 +3114,6 @@ def accumulate_continuum_model(
             f"{type(model_increment_xds).__name__}."
         )
 
-    continuum_mode = str(continuum_mode).lower()
     if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
             f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
@@ -3286,6 +3282,11 @@ def restore_continuum_image(
         restore_image as restore_cube_image,
     )
 
+    if deconvolver not in ("hogbom", "mtmfs"):
+        raise ValueError(
+            f"deconvolver must be 'hogbom' or 'mtmfs'; received {deconvolver!r}."
+        )
+
     data_groups = img_xds.attrs.get("data_groups", {})
 
     # ------------------------------------------------------------------
@@ -3372,7 +3373,7 @@ def restore_continuum_image(
     psf_da = img_xds[psf_name]
 
     restoration_residual_da = residual_da
-    if str(deconvolver).lower() == "mtmfs":
+    if deconvolver == "mtmfs":
         restoration_residual_da = _mtmfs_principal_residual_for_restoration(
             residual_da, psf_da
         )

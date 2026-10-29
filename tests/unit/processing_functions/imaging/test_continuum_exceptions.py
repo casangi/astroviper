@@ -74,6 +74,16 @@ def test_restore_rejects_invalid_model_or_residual(group, fault, message):
     xr.testing.assert_identical(image, snapshot)
 
 
+def test_mode_and_deconvolver_names_are_exact():
+    image = _image()
+    with pytest.raises(ValueError, match="continuum_mode"):
+        accumulate_continuum_model(image, continuum_mode="MFS")
+    with pytest.raises(NotImplementedError, match="hogbom"):
+        model_update_mtmfs_single_field(image, "MTMFS", {})
+    with pytest.raises(ValueError, match="deconvolver"):
+        restore_continuum_image(image, deconvolver="MTMFS")
+
+
 @pytest.mark.parametrize(
     "role,variable",
     [

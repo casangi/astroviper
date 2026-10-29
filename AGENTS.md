@@ -532,6 +532,9 @@ per-variable nodes.
     `imsize`).
   - **Classes**: `CamelCase` (`CycleController`, `ReturnDict`).
   - **Consistency**: Parameter names should be consistent throughout the stack.
+    One name per parameter and one spelling per value: no aliases, no case
+    folding. An unsupported value or combination is refused, never coerced or
+    replaced (e.g. by another deconvolver).
   - **CLEAN terminology**: an **imaging cycle** (or simply *cycle*) is one
     **residual update** followed by one **model update**; use exactly these
     three terms in code, docstrings, docs and notebooks, matching

@@ -34,12 +34,24 @@ def _get_reference_frequency_hz(image_params):
     return reference_frequency_hz
 
 
+def _validate_n_taylor_terms(n_taylor_terms):
+    """Return ``n_taylor_terms``, a Python or NumPy integer of at least 1, as an int."""
+    if isinstance(n_taylor_terms, bool) or not isinstance(
+        n_taylor_terms, int | np.integer
+    ):
+        raise TypeError(
+            f"n_taylor_terms must be an integer; received {n_taylor_terms!r}."
+        )
+    if n_taylor_terms < 1:
+        raise ValueError(
+            f"n_taylor_terms must be at least 1; received {n_taylor_terms}."
+        )
+    return int(n_taylor_terms)
+
+
 def _validate_continuum_parameters(image_params):
     """Validate and return ``(n_taylor_terms, reference_frequency_hz)``."""
-    n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
-
-    if n_taylor_terms < 1:
-        raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
+    n_taylor_terms = _validate_n_taylor_terms(image_params["n_taylor_terms"])
 
     reference_frequency_hz = _get_reference_frequency_hz(image_params)
 
@@ -231,8 +243,8 @@ def imaging_setup_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,

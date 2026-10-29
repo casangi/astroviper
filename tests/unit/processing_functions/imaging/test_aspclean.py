@@ -184,7 +184,7 @@ class TestClean:
             gain=0.1,
             threshold_per_cycle=0.01,
             max_iter_per_cycle_updated=200,
-            fusedthreshold=0.1,
+            asp_fused_threshold=0.1,
         )
         peak1 = float(np.max(np.abs(resid)))
         assert peak1 < 0.2 * peak0  # residual substantially reduced
@@ -205,7 +205,7 @@ class TestClean:
             gain=0.1,
             threshold_per_cycle=0.05,
             max_iter_per_cycle_updated=150,
-            fusedthreshold=0.1,
+            asp_fused_threshold=0.1,
         )
         recon = aspclean.convolve_centered(
             model.astype(np.float64), psf.astype(np.float64)
@@ -231,8 +231,8 @@ class TestClean:
             gain=0.5,
             threshold_per_cycle=0.01,
             max_iter_per_cycle_updated=60,
-            fusedthreshold=0.5,
-            psf_width=1.0,
+            asp_fused_threshold=0.5,
+            asp_psf_width=1.0,
         )
         assert np.max(np.abs(resid)) < 0.05
         # essentially all flux placed at the source pixel
@@ -252,7 +252,7 @@ class TestClean:
                 gain=0.1,
                 threshold_per_cycle=0.001,
                 max_iter_per_cycle_updated=100,
-                fusedthreshold=0.1,
+                asp_fused_threshold=0.1,
             )
             peaks.append(float(np.max(np.abs(resid))))
         # residual peak never increases by more than rounding across cycles and
@@ -285,7 +285,7 @@ class TestMask:
             gain=0.1,
             threshold_per_cycle=0.01,
             max_iter_per_cycle_updated=150,
-            fusedthreshold=0.1,
+            asp_fused_threshold=0.1,
         )
         outside = model[mask == 0]
         assert np.max(np.abs(outside)) < 1e-6 * np.max(np.abs(model))
@@ -327,7 +327,7 @@ class TestInPlaceContract:
             gain=0.2,
             threshold_per_cycle=0.01,
             max_iter_per_cycle_updated=50,
-            fusedthreshold=0.1,
+            asp_fused_threshold=0.1,
         )
         # same buffers (no reallocation), and they changed
         assert resid.ctypes.data == resid_id
@@ -407,7 +407,7 @@ class TestCube:
             gain=0.1,
             threshold_per_cycle=threshold,
             max_iter_per_cycle_updated=max_iter,
-            fusedthreshold=0.1,
+            asp_fused_threshold=0.1,
             processing_function_threads=2,
         )
         assert out["iterations_performed"].shape == (nt, nf, npol)
@@ -426,7 +426,7 @@ class TestCube:
                         gain=0.1,
                         threshold_per_cycle=0.05,
                         max_iter_per_cycle_updated=80,
-                        fusedthreshold=0.1,
+                        asp_fused_threshold=0.1,
                     )
                     np.testing.assert_allclose(rc[t, f, p], r1, atol=1e-10)
                     np.testing.assert_allclose(mc[t, f, p], m1, atol=1e-10)
@@ -447,7 +447,7 @@ class TestCube:
             gain=0.1,
             threshold_per_cycle=threshold,
             max_iter_per_cycle_updated=max_iter,
-            fusedthreshold=0.1,
+            asp_fused_threshold=0.1,
         )
         assert out["model_flux"].shape == (nt, nf, npol)
         assert np.all(out["model_flux"] > 0)
@@ -504,8 +504,8 @@ class TestDivergence:
             gain=0.9,
             threshold_per_cycle=0.0,
             max_iter_per_cycle_updated=40,
-            psf_width=1.0,
-            largestscale=0,
+            asp_psf_width=1.0,
+            asp_largest_scale=0,
             **kwargs,
         )
         return result, residual, model
@@ -556,7 +556,7 @@ class TestDivergence:
         # The "5. Diverging" guard of CASA 6.7.5.18 and LibRA (fc54ee25)
         # started its lowest peak at 1000, so it stopped any plane with a peak
         # above 1500 at once (casa master has dropped that test). The model
-        # update ends after its first Hogbom run (stop_after_hogbom_run) in
+        # update ends after its first Hogbom run (asp_stop_after_hogbom_run) in
         # both: going on, Asp's "no change" test (a change of the peak below
         # 1e-4 in the units of the image, CASA's constant) tells the two
         # scalings apart.
@@ -572,7 +572,7 @@ class TestDivergence:
                 gain=0.1,
                 threshold_per_cycle=0.05 * scale,
                 max_iter_per_cycle_updated=100,
-                stop_after_hogbom_run=True,
+                asp_stop_after_hogbom_run=True,
             )
             results.append((result, model.sum() / scale))
         (unit, unit_flux), (scaled, scaled_flux) = results
@@ -686,8 +686,8 @@ class TestDivergence:
             gain=0.9,
             threshold_per_cycle=np.zeros((1, 1, 2)),
             max_iter_per_cycle_updated=np.full((1, 1, 2), 40, dtype=np.int32),
-            psf_width=1.0,
-            largestscale=0,
+            asp_psf_width=1.0,
+            asp_largest_scale=0,
             max_iter_divergence=1,
             divergence_rms_factor=self.RMS_FACTOR,
             divergence_peak_factor=self.PEAK_FACTOR,
@@ -712,8 +712,8 @@ class TestDivergence:
             gain=0.9,
             threshold_per_cycle=0.0,
             max_iter_per_cycle_updated=40,
-            psf_width=1.0,
-            largestscale=0,
+            asp_psf_width=1.0,
+            asp_largest_scale=0,
             max_iter_divergence=1,
             divergence_rms_factor=self.RMS_FACTOR,
             divergence_peak_factor=self.PEAK_FACTOR,
@@ -726,7 +726,7 @@ class TestDivergence:
         residual, psf = self._spreading()
         residual[5, 5] = np.inf
         model = np.zeros_like(residual)
-        result = aspclean.clean(residual, psf, model, gain=0.9, psf_width=1.0)
+        result = aspclean.clean(residual, psf, model, gain=0.9, asp_psf_width=1.0)
         assert result["iterations_performed"] == 1
         assert result["retval"] == -3
         assert result["diverged"]
@@ -752,8 +752,8 @@ class TestStopCode:
             gain=0.9,
             threshold_per_cycle=threshold_per_cycle,
             max_iter_per_cycle_updated=max_iter_per_cycle_updated,
-            psf_width=1.0,
-            largestscale=0,
+            asp_psf_width=1.0,
+            asp_largest_scale=0,
         )
         return result, model
 
@@ -769,9 +769,9 @@ class TestStopCode:
         assert result["stop_code"] == 2
 
     def test_stop_point_mode_is_a_test_of_asp(self):
-        # only scale 0 (largestscale=0): the first component stops it
+        # only scale 0 (asp_largest_scale=0): the first component stops it
         result, _, _ = TestDivergence._clean(
-            TestDivergence._spreading(), stoppointmode=1
+            TestDivergence._spreading(), asp_stop_point_mode=1
         )
         assert result["retval"] == -1
         assert result["stop_code"] == 5
@@ -971,20 +971,22 @@ class TestResolvedSource:
         (here to its iteration limit): the residual is the exact one, so the
         model update does not need to stop for a residual update."""
         default, resid, model, dirty, sky = self._clean_disk()
-        off, resid_off, model_off, _, _ = self._clean_disk(stop_after_hogbom_run=False)
+        off, resid_off, model_off, _, _ = self._clean_disk(
+            asp_stop_after_hogbom_run=False
+        )
         assert default["stop_code"] == 1  # spent max_iter_per_cycle_updated
         assert default["iterations_performed"] == 300
         np.testing.assert_array_equal(resid, resid_off)
         np.testing.assert_array_equal(model, model_off)
-        on, resid_on, model_on, _, _ = self._clean_disk(stop_after_hogbom_run=True)
+        on, resid_on, model_on, _, _ = self._clean_disk(asp_stop_after_hogbom_run=True)
         assert np.abs(resid).max() < np.abs(resid_on).max()
         assert abs(model.sum() - sky.sum()) < abs(model_on.sum() - sky.sum())
 
     def test_stop_after_hogbom_run_ends_the_model_update_like_casa(self):
-        """With stop_after_hogbom_run the model update ends after the Hogbom
+        """With asp_stop_after_hogbom_run the model update ends after the Hogbom
         run once the RMS of the residual has fallen by a factor 1.5 (CASA and
         LibRA): a test of Asp itself, well before the iteration limit."""
-        on, *_ = self._clean_disk(stop_after_hogbom_run=True)
+        on, *_ = self._clean_disk(asp_stop_after_hogbom_run=True)
         assert on["stop_code"] == 5  # a test of Asp itself
         assert on["converged"]
         assert 51 < on["iterations_performed"] < 300
@@ -1094,10 +1096,10 @@ class TestRingCleaning:
             dirty,
             mask,
             threshold,
-            residual_components=False,
-            scale_significance=False,
+            asp_residual_components=False,
+            asp_scale_significance=False,
             record_components=False,
-            rc_switch_factor=1.0,
+            asp_residual_component_switch_factor=1.0,
         )
         np.testing.assert_array_equal(resid, resid_off)
         np.testing.assert_array_equal(model, model_off)
@@ -1108,7 +1110,7 @@ class TestRingCleaning:
         psf, sky, dirty, mask, threshold = self._scene()
         asp, *_ = self._clean(psf, dirty, mask, threshold)
         out, resid, model = self._clean(
-            psf, dirty, mask, threshold, residual_components=True
+            psf, dirty, mask, threshold, asp_residual_components=True
         )
         assert out["timing"]["n_residual_components"] > 10
         assert out["stop_code"] == 2  # the threshold
@@ -1129,8 +1131,8 @@ class TestRingCleaning:
                 dirty,
                 mask,
                 threshold,
-                residual_components=True,
-                rc_switch_factor=factor,
+                asp_residual_components=True,
+                asp_residual_component_switch_factor=factor,
                 record_components=True,
             )
             fits = out["residual_fits"]
@@ -1141,7 +1143,11 @@ class TestRingCleaning:
         assert 0 < counts[10.0] < counts[1.0]
 
     @pytest.mark.parametrize(
-        "kwargs", [{"rc_switch_factor": 1e3}, {"rc_noise_floor": 1e9}]
+        "kwargs",
+        [
+            {"asp_residual_component_switch_factor": 1e3},
+            {"asp_residual_component_noise_floor": 1e9},
+        ],
     )
     def test_no_residual_component_leaves_asp_as_it_is(self, kwargs):
         """A switch level above the peak, or a noise floor above it, makes no
@@ -1150,7 +1156,7 @@ class TestRingCleaning:
         psf, _, dirty, mask, threshold = self._scene()
         _, resid, model = self._clean(psf, dirty, mask, threshold)
         out, resid_rc, model_rc = self._clean(
-            psf, dirty, mask, threshold, residual_components=True, **kwargs
+            psf, dirty, mask, threshold, asp_residual_components=True, **kwargs
         )
         assert out["timing"]["n_residual_components"] == 0
         np.testing.assert_array_equal(resid, resid_rc)
@@ -1158,9 +1164,10 @@ class TestRingCleaning:
 
     @pytest.mark.parametrize("at_threshold", [False, True])
     def test_floor_at_threshold(self, at_threshold):
-        """With ``rc_floor_at_threshold`` a residual-shaped component takes no
-        pixel below the threshold of the model update; without it, it reaches
-        down to ``rc_frac_min`` of the peak. One iteration: one component."""
+        """With ``asp_residual_component_floor_at_threshold`` a residual-shaped
+        component takes no pixel below the threshold of the model update;
+        without it, it reaches down to ``asp_residual_component_min_fraction``
+        of the peak. One iteration: one component."""
         psf, _, dirty, mask, _ = self._scene()
         peak = np.abs(dirty[mask > 0]).max()
         resid = dirty.copy()
@@ -1174,15 +1181,15 @@ class TestRingCleaning:
             threshold_per_cycle=0.6 * peak,
             max_iter_per_cycle_updated=1,
             max_iter_divergence=-1,
-            residual_components=True,
-            rc_floor_at_threshold=at_threshold,
+            asp_residual_components=True,
+            asp_residual_component_floor_at_threshold=at_threshold,
         )
         assert out["timing"]["n_residual_components"] == 1
         lowest = dirty[model != 0].min() / peak
         if at_threshold:
             assert lowest >= 0.6
         else:
-            assert lowest < 0.35  # rc_frac_min is 0.3
+            assert lowest < 0.35  # asp_residual_component_min_fraction is 0.3
 
     def test_record_components(self):
         psf, _, dirty, mask, threshold = self._scene()
@@ -1191,7 +1198,7 @@ class TestRingCleaning:
             dirty,
             mask,
             threshold,
-            residual_components=True,
+            asp_residual_components=True,
             record_components=True,
         )
         timing = out["timing"]
@@ -1216,7 +1223,7 @@ class TestRingCleaning:
         _, _, model = self._clean(psf, dirty, mask, threshold)
         assert not model.any()
         out, resid, model = self._clean(
-            psf, dirty, mask, threshold, scale_significance=True
+            psf, dirty, mask, threshold, asp_scale_significance=True
         )
         noise = np.asarray(out["scale_noise"])
         np.testing.assert_allclose(noise[0], 1.0, rtol=0.1)  # the dirty noise
@@ -1231,7 +1238,7 @@ class TestRingCleaning:
 
     def test_significance_gain(self):
         """The components cleaned below the threshold for their significance
-        take ``significance_gain`` (``<= 0``: the gain): a larger one takes
+        take ``asp_significance_gain`` (``<= 0``: the gain): a larger one takes
         the faint source in fewer of them."""
         psf, sky, dirty, mask, threshold = self._scene(faint=True)
         runs = {}
@@ -1241,8 +1248,8 @@ class TestRingCleaning:
                 dirty,
                 mask,
                 threshold,
-                scale_significance=True,
-                significance_gain=gain,
+                asp_scale_significance=True,
+                asp_significance_gain=gain,
             )
         np.testing.assert_array_equal(runs[0.0][1], runs[0.1][1])
         np.testing.assert_array_equal(runs[0.0][2], runs[0.1][2])
@@ -1255,15 +1262,15 @@ class TestRingCleaning:
         )
 
     def _assert_no_significance_cleaning(self, psf, dirty, mask, threshold, **kwargs):
-        """Clean with ``scale_significance`` on and off: with it on, no
+        """Clean with ``asp_scale_significance`` on and off: with it on, no
         component is cleaned for its significance, the model update stops at
         the threshold, and the result is the one with it off. Returns the
         output with it on."""
         out, resid, model = self._clean(
-            psf, dirty, mask, threshold, scale_significance=True, **kwargs
+            psf, dirty, mask, threshold, asp_scale_significance=True, **kwargs
         )
         off, resid_off, model_off = self._clean(
-            psf, dirty, mask, threshold, scale_significance=False, **kwargs
+            psf, dirty, mask, threshold, asp_scale_significance=False, **kwargs
         )
         assert out["timing"]["n_significance_components"] == 0
         assert out["stop_code"] == 2  # the threshold
@@ -1297,13 +1304,13 @@ class TestRingCleaning:
         """With no pixel outside the clean mask (a mask of ones, or no mask)
         the noise of the smoothed residuals cannot be measured (it stays
         ``inf``), so no smoothed residual is significant and the model update
-        stops at the threshold as with ``scale_significance`` off. With the
-        default limit (``significance`` 0), the limit and every significance
+        stops at the threshold as with ``asp_scale_significance`` off. With the
+        default limit (``asp_significance`` 0), the limit and every significance
         used to be ``threshold / inf = 0``, and ``0 >= 0`` went on cleaning
         below the threshold: on the faint scene it took all of the flux, the
         model peaking 48 pixels from the source. A limit set by the user (3)
         was never reached by a significance of 0; those cases guard that its
-        result stays the one with ``scale_significance`` off."""
+        result stays the one with ``asp_scale_significance`` off."""
         psf, _, dirty, _, threshold = self._scene(faint=faint)
         if mask_kind == "ones":
             mask = np.ones_like(dirty)
@@ -1314,9 +1321,9 @@ class TestRingCleaning:
             dirty,
             mask,
             threshold,
-            residual_components=residual_components,
-            significance=significance,
-            significance_gain=0.3,
+            asp_residual_components=residual_components,
+            asp_significance=significance,
+            asp_significance_gain=0.3,
         )
         assert np.all(np.isinf(out["scale_noise"]))
 
@@ -1332,7 +1339,7 @@ class TestRingCleaning:
         there: the emission inside the mask spreads out when smoothed. No
         smoothed residual is significant, with the default limit and with a
         limit set by the user, and the model update stops at the threshold as
-        with ``scale_significance`` off. With the limit 3 the model update
+        with ``asp_scale_significance`` off. With the limit 3 the model update
         used to go on below the threshold against those noises: on the faint
         scene to the iteration limit (3000 components), on the disk for 182
         components. (The disk with residual-shaped components is not such a
@@ -1344,9 +1351,9 @@ class TestRingCleaning:
             dirty,
             mask,
             threshold,
-            residual_components=residual_components,
-            significance=significance,
-            significance_gain=0.3,
+            asp_residual_components=residual_components,
+            asp_significance=significance,
+            asp_significance_gain=0.3,
         )
         noise = out["scale_noise"]
         assert noise[0] == 0.0
@@ -1358,7 +1365,9 @@ class TestRingCleaning:
         radius 40, still cleans the faint source for its significance."""
         psf, sky, dirty, mask, threshold = self._scene(faint=True)
         kwargs = dict(
-            residual_components=True, scale_significance=True, significance_gain=0.3
+            asp_residual_components=True,
+            asp_scale_significance=True,
+            asp_significance_gain=0.3,
         )
         masks = np.stack([np.ones_like(mask), mask])[None, :, None]
         resid = np.broadcast_to(dirty, masks.shape).copy()
@@ -1385,10 +1394,10 @@ class TestRingCleaning:
     def test_cube_matches_per_plane(self):
         psf, _, dirty, mask, threshold = self._scene()
         kwargs = dict(
-            residual_components=True,
-            scale_significance=True,
-            rc_switch_factor=3.0,
-            significance_gain=0.3,
+            asp_residual_components=True,
+            asp_scale_significance=True,
+            asp_residual_component_switch_factor=3.0,
+            asp_significance_gain=0.3,
         )
         planes = np.stack([dirty, 0.5 * dirty])
         resid = planes[None, :, None].copy()  # planes stays the reference
@@ -1414,8 +1423,8 @@ class TestRingCleaning:
 
 
 class TestInitialScales:
-    """A ``largestscale`` below the PSF width gives the initial scales 0,
-    ``largestscale`` and the PSF width, as LibRA does (issue #327), instead
+    """An ``asp_largest_scale`` below the PSF width gives the initial scales 0,
+    ``asp_largest_scale`` and the PSF width, as LibRA does (issue #327), instead
     of the point scale only (CASA 6.7.5.18); 0 asks for the point scale
     only."""
 
@@ -1425,12 +1434,12 @@ class TestInitialScales:
         largest = int(width // 2)
         assert 0 < largest < width
         point_only, *_ = TestRingCleaning._clean(
-            psf, dirty, mask, threshold, largestscale=0
+            psf, dirty, mask, threshold, asp_largest_scale=0
         )
         assert point_only["timing"]["n_scale_components"] == 0
         assert point_only["stop_code"] == 1  # the iteration limit
         out, resid, model = TestRingCleaning._clean(
-            psf, dirty, mask, threshold, largestscale=largest
+            psf, dirty, mask, threshold, asp_largest_scale=largest
         )
         assert out["timing"]["n_scale_components"] > 0
         assert out["stop_code"] == 2  # the threshold
@@ -1445,11 +1454,21 @@ class TestInitialScales:
         psf, sky, dirty, mask, threshold = TestRingCleaning._scene(faint=True)
         largest = int(aspclean.psf_gaussian_width(psf) // 2)
         _, _, model = TestRingCleaning._clean(
-            psf, dirty, mask, threshold, largestscale=0, scale_significance=True
+            psf,
+            dirty,
+            mask,
+            threshold,
+            asp_largest_scale=0,
+            asp_scale_significance=True,
         )
         assert not model.any()
         out, _, model = TestRingCleaning._clean(
-            psf, dirty, mask, threshold, largestscale=largest, scale_significance=True
+            psf,
+            dirty,
+            mask,
+            threshold,
+            asp_largest_scale=largest,
+            asp_scale_significance=True,
         )
         assert out["timing"]["n_significance_components"] > 0
         assert model.sum() > 0.1 * sky.sum()

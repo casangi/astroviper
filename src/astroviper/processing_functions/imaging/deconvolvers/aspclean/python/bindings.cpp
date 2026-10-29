@@ -367,7 +367,7 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "`model` (float32 or float64, C-contiguous, writeable) are modified: "
           "the residual replaces the dirty image and Asp/Hogbom components are "
           "accumulated into the model. `psf` and optional `mask` share the dtype "
-          "and shape. psf_width <= 0 estimates the PSF width internally. The "
+          "and shape. asp_psf_width <= 0 estimates the PSF width internally. The "
           "model update also stops as diverged (retval -3, diverged) on the "
           "divergence test shared with the other deconvolvers: the RMS of the "
           "masked residual above divergence_rms_factor x its lowest value for "
@@ -379,41 +379,46 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "2 reached threshold_per_cycle, 4 diverged, 5 a test of Asp itself "
           "(optimum strength, end of a Hogbom run, stop point mode). "
           "processing_function_threads is the number of threads of every "
-          "2-D transform. stop_after_hogbom_run ends the model update after a "
+          "2-D transform. asp_stop_after_hogbom_run ends the model update after a "
           "Hogbom run unless the RMS of the residual has fallen, by less than "
           "a factor 1.5, since its start (CASA and LibRA); off, the model "
           "update goes on to its threshold or iteration limit. Options beyond "
           "CASA and LibRA (all off by default here, see AspOptions in "
-          "asp_clean.hpp): residual_components cleans first with components "
+          "asp_clean.hpp): asp_residual_components cleans first with components "
           "shaped by the residual (Ma, Zhang & Zhang 2026), C = R tanh((sR - "
           "T) / eps) on the mask pixels with sR >= T, T = max(frac |R_peak|, "
-          "rc_noise_floor x noise, and the threshold with "
-          "rc_floor_at_threshold), (frac, eps) fitted within [rc_frac_min, "
-          "0.99] x [1e-3, rc_eps_max] by least squares of the masked "
-          "residual, down to rc_switch_factor x threshold_per_cycle; then the "
-          "Asp iterations. scale_significance measures the noise of the "
-          "residual smoothed with each initial scale and, with the peak below "
+          "asp_residual_component_noise_floor x noise, and the threshold with "
+          "asp_residual_component_floor_at_threshold), (frac, eps) fitted within "
+          "[asp_residual_component_min_fraction, 0.99] x [1e-3, "
+          "asp_residual_component_max_epsilon_fraction] by least squares of the "
+          "masked residual, down to asp_residual_component_switch_factor x "
+          "threshold_per_cycle; then the Asp iterations. asp_scale_significance "
+          "measures the noise of the residual smoothed with each initial scale "
+          "and, with the peak below "
           "threshold_per_cycle, goes on cleaning the most significant smoothed "
           "residual while its significance reaches that of the threshold at "
-          "scale 0 (or significance, when > 0), with the gain "
-          "significance_gain (when > 0); scale_noise is returned. "
+          "scale 0 (or asp_significance, when > 0), with the gain "
+          "asp_significance_gain (when > 0); scale_noise is returned. "
           "record_components returns the Asp components (i, j, scale, flux) "
           "and the residual-shaped fits (peak, frac, eps_frac, 0, 0, "
           "objective).",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
           py::arg("threshold_per_cycle") = 0.0, py::arg("max_iter_per_cycle_updated") = 100,
-          py::arg("fusedthreshold") = 0.0, py::arg("psf_width") = 0.0,
-          py::arg("largestscale") = -1, py::arg("stoppointmode") = -1,
-          py::arg("norm_method") = 1, py::arg("verbose") = false,
+          py::arg("asp_fused_threshold") = 0.0, py::arg("asp_psf_width") = 0.0,
+          py::arg("asp_largest_scale") = -1, py::arg("asp_stop_point_mode") = -1,
+          py::arg("asp_scale_normalization_method") = 1, py::arg("verbose") = false,
           py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
           py::arg("divergence_peak_factor") = 1.0, py::arg("processing_function_threads") = 1,
-          py::arg("stop_after_hogbom_run") = false, py::arg("scale_significance") = false,
-          py::arg("significance") = 0.0, py::arg("record_components") = false,
-          py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
-          py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
-          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true,
-          py::arg("significance_gain") = 0.0);
+          py::arg("asp_stop_after_hogbom_run") = false, py::arg("asp_scale_significance") = false,
+          py::arg("asp_significance") = 0.0, py::arg("record_components") = false,
+          py::arg("asp_residual_components") = false,
+          py::arg("asp_residual_component_noise_floor") = 2.0,
+          py::arg("asp_residual_component_min_fraction") = 0.3,
+          py::arg("asp_residual_component_max_epsilon_fraction") = 10.0,
+          py::arg("asp_residual_component_switch_factor") = 1.0,
+          py::arg("asp_residual_component_floor_at_threshold") = true,
+          py::arg("asp_significance_gain") = 0.0);
 
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp model update independently on every (time, frequency, "
@@ -422,24 +427,27 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "Iteration control is independent per plane: threshold_per_cycle "
           "(float64) and max_iter_per_cycle_updated (int32) are (nt, nf, np) "
           "arrays giving each plane its own threshold and iteration limit; the "
-          "divergence test, stop_after_hogbom_run and the options beyond "
-          "CASA (residual_components, scale_significance, ...) are those of "
+          "divergence test, asp_stop_after_hogbom_run and the options beyond "
+          "CASA (asp_residual_components, asp_scale_significance, ...) are those of "
           "clean. "
           "Returns per-plane arrays of shape (nt, nf, np), stop_code among "
           "them.",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
           py::arg("threshold_per_cycle") = py::array(), py::arg("max_iter_per_cycle_updated") = py::array(),
-          py::arg("fusedthreshold") = 0.0, py::arg("psf_width") = 0.0,
-          py::arg("largestscale") = -1, py::arg("stoppointmode") = -1,
-          py::arg("norm_method") = 1, py::arg("processing_function_threads") = 1,
+          py::arg("asp_fused_threshold") = 0.0, py::arg("asp_psf_width") = 0.0,
+          py::arg("asp_largest_scale") = -1, py::arg("asp_stop_point_mode") = -1,
+          py::arg("asp_scale_normalization_method") = 1, py::arg("processing_function_threads") = 1,
           py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
-          py::arg("divergence_peak_factor") = 1.0, py::arg("stop_after_hogbom_run") = false,
-          py::arg("scale_significance") = false, py::arg("significance") = 0.0,
-          py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
-          py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
-          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true,
-          py::arg("significance_gain") = 0.0);
+          py::arg("divergence_peak_factor") = 1.0, py::arg("asp_stop_after_hogbom_run") = false,
+          py::arg("asp_scale_significance") = false, py::arg("asp_significance") = 0.0,
+          py::arg("asp_residual_components") = false,
+          py::arg("asp_residual_component_noise_floor") = 2.0,
+          py::arg("asp_residual_component_min_fraction") = 0.3,
+          py::arg("asp_residual_component_max_epsilon_fraction") = 10.0,
+          py::arg("asp_residual_component_switch_factor") = 1.0,
+          py::arg("asp_residual_component_floor_at_threshold") = true,
+          py::arg("asp_significance_gain") = 0.0);
 
     m.def("psf_gaussian_width", &psf_width_helper,
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "

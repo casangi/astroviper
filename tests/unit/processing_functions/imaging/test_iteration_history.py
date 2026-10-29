@@ -401,13 +401,12 @@ class TestDeconvolve:
             for field in ITERATION_HISTORY_FIELDS:
                 assert field not in entry
 
-    @pytest.mark.parametrize("algorithm", ["asp", "aspclean", "asp_clean"])
-    def test_asp_refuses_the_history(self, algorithm):
+    def test_asp_refuses_the_history(self):
         xds = _image_dataset()
         with pytest.raises(ValueError, match="record_iteration_history"):
             deconvolve(
                 img_xds=xds,
-                algorithm=algorithm,
+                algorithm="asp",
                 deconvolve_params={"max_iter": 10, "record_iteration_history": True},
             )
         # refused before the model is created
@@ -425,10 +424,12 @@ class TestDeconvolve:
 
     def test_validate_record_iteration_history(self):
         validate_record_iteration_history("hogbom", True)
-        validate_record_iteration_history("HOGBOM_MANY_THREADS", True)
+        validate_record_iteration_history("hogbom_many_threads", True)
         validate_record_iteration_history("asp", False)
         with pytest.raises(ValueError, match="'asp'"):
             validate_record_iteration_history("asp", True)
+        with pytest.raises(ValueError, match="'HOGBOM'"):
+            validate_record_iteration_history("HOGBOM", True)
 
     def test_parameter_defaults_to_false(self):
         assert _validate_deconvolve_params({})["record_iteration_history"] is False
