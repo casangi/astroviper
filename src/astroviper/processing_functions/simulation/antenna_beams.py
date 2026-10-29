@@ -369,7 +369,8 @@ def make_zernike_jones_beam(
             center[1] + zernike_center[1] + include_last[1],
         )
         for i_pa, pa in enumerate(parallactic_angle):
-            x_grid, y_grid = make_rotated_grid(zernike_size, zernike_cell, pa)
+            # the antenna turns by +pa on the sky; make_rotated_grid turns clockwise
+            x_grid, y_grid = make_rotated_grid(zernike_size, zernike_cell, -pa)
             outside = (x_grid**2 + y_grid**2) > 1.0
             for i_pol, i_model in enumerate(model_index):
                 aperture = zernike_surface(
@@ -835,7 +836,7 @@ def sample_jones(
         scale = frequency / packed_model["frequency"][i_chan]  # [n_chan]
         delta_pa = parallactic_angle - packed_model["parallactic_angle"][i_pa]
         l_rot, m_rot = rotate_coordinates(
-            l * scale[None, :], m * scale[None, :], delta_pa
+            l * scale[None, :], m * scale[None, :], -delta_pa
         )  # [n, n_chan]
         image = packed_model["jones"][i_pa]  # [n_chan_model, n_pol, n_l, n_m]
         n_l, n_m = image.shape[-2], image.shape[-1]

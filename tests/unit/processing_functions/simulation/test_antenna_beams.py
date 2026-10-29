@@ -255,8 +255,9 @@ def test_zernike_basis_and_surface():
 def test_zernike_jones_beam_matches_legacy():
     f = load_legacy("evla_zernike_beam")
     zpc = f["beam_models"][0]
+    # SIRIUS turned the beams by -pa: its beam at pa is the corrected one at -pa
     jones = make_zernike_jones_beam(
-        zpc, f["beam_pa"], f["beam_frequency"], f["beam_params"]
+        zpc, -f["beam_pa"], f["beam_frequency"], f["beam_params"]
     )
     assert jones.JONES.dims == (
         "parallactic_angle",
@@ -285,6 +286,48 @@ def test_zernike_jones_beam_matches_legacy():
         jones.attrs["model_type"] == "jones_image"
         and jones.attrs["dish_diameter"] == 25.0
     )
+
+
+def test_zernike_beam_turns_with_the_antenna():
+    """A beam fixed to the antenna turns by +q on the sky: +azimuth is west at q = 0 and north at q = 90 deg."""
+    c = np.zeros((1, 4, 3), dtype=complex)
+    c[:, :, 0] = 1.0
+    c[:, :, 1] = (
+        0.6j  # a phase ramp along x, towards decreasing azimuth, puts the peak towards +azimuth
+    )
+    zpc = xr.Dataset(
+        {
+            "ZPC": (("frequency", "polarization", "coefficient"), c),
+            "ETA": (("frequency", "polarization", "coefficient"), np.ones(c.shape)),
+        },
+        coords={
+            "frequency": [1e9],
+            "polarization": ["RR", "RL", "LR", "LL"],
+            "coefficient": np.arange(3),
+        },
+        attrs={"dish_diameter": 25.0, "max_rad_1GHz": 0.015, "telescope_name": "test"},
+    )
+    params = {"image_size": [256, 256], "fov_scaling": 8, "mueller_selection": [0]}
+    jones = make_zernike_jones_beam(zpc, [0.0, np.pi / 2], [1e9], params)
+    l, m = np.meshgrid(jones.l.values, jones.m.values, indexing="ij")  # noqa: E741
+    power = np.abs(jones.JONES.values[:, 0, 0]) ** 2
+    (l0, m0), (l1, m1) = (
+        (l.ravel()[np.argmax(p)], m.ravel()[np.argmax(p)]) for p in power
+    )
+    cell = abs(jones.l.values[1] - jones.l.values[0])
+    assert l0 < -3 * cell and abs(m0) < cell
+    np.testing.assert_allclose([l1, m1], [0.0, -l0], atol=cell)
+    # sampling the q = 0 image at q = 90 deg turns the direction the same way
+    packed = pack_beam_models([make_zernike_jones_beam(zpc, [0.0], [1e9], params)])[0]
+    north, south = (
+        abs(
+            sample_jones(
+                packed, np.array([[0.0, s * -l0]]), np.array([1e9]), np.pi / 2
+            )[0, 0, 0]
+        )
+        for s in (1, -1)
+    )
+    assert north > 0.999 * np.abs(jones.JONES.values).max() and south < 0.9 * north
 
 
 def test_zernike_jones_beam_diagonal_only():
