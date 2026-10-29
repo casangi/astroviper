@@ -578,16 +578,21 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def zernike_surface(
-    coefficients: np.ndarray, x: np.ndarray, y: np.ndarray
+    coefficients: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    indices: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Weighted sum ``sum_i c_i P_i(x, y)`` of the Zernike basis.
+    """Weighted sum ``sum_i c_i P_{indices[i]}(x, y)`` of the Zernike basis.
 
     Parameters
     ----------
-    coefficients : np.ndarray, [n_coefficients <= 66]
-        Real or complex coefficients; missing trailing terms are treated as zero.
+    coefficients : np.ndarray, [n_coefficients]
+        Real or complex coefficients; terms not indexed are treated as zero.
     x, y : np.ndarray
         Aperture coordinates normalised to the dish radius.
+    indices : np.ndarray, [n_coefficients], optional
+        Basis indices of the coefficients, each below 66; ``0, 1, ...`` by default.
 
     Returns
     -------
@@ -595,9 +600,10 @@ def zernike_surface(
         Complex if ``coefficients`` is complex.
     """
     coefficients = np.asarray(coefficients)
-    if coefficients.shape[0] > N_ZERNIKE_TERMS:
-        raise ValueError(
-            f"At most {N_ZERNIKE_TERMS} Zernike coefficients are supported."
-        )
-    basis = zernike_basis(x, y)[: coefficients.shape[0]]
+    indices = (
+        np.arange(coefficients.shape[0]) if indices is None else np.asarray(indices)
+    )
+    if indices.size and (indices.min() < 0 or indices.max() >= N_ZERNIKE_TERMS):
+        raise ValueError(f"Zernike indices must lie in 0 .. {N_ZERNIKE_TERMS - 1}.")
+    basis = zernike_basis(x, y)[indices]
     return np.tensordot(coefficients, basis, axes=(0, 0))
