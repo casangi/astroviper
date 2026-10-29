@@ -32,6 +32,7 @@
 #include <limits>
 #include <deque>
 #include <numeric>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -388,19 +389,20 @@ template <typename T>
 class Cleaner {
 public:
     Cleaner(T* residual, T* model, const T* psf, const T* mask, int nx, int ny,
-            double gain, double threshold, int max_iter_per_cycle_updated, double fusedthreshold,
-            double psf_width, int largestscale, int stoppointmode,
-            int norm_method, bool stop_after_hogbom_run, bool verbose,
+            double gain, double threshold, int max_iter_per_cycle_updated,
+            double asp_fused_threshold, double asp_psf_width, int asp_largest_scale,
+            int asp_stop_point_mode, int asp_scale_normalization_method,
+            bool asp_stop_after_hogbom_run, bool verbose,
             const deconvolvers::DivergenceControl<double>& divergence, const FftThreads& fft_threads,
             const AspOptions& options = AspOptions{})
         : residual_(residual), model_(model), psf_(psf), mask_(mask),
           nx_(nx), ny_(ny), gain_(gain), threshold_(threshold),
-          maxNiter_(max_iter_per_cycle_updated), fusedThreshold_(fusedthreshold),
-          userLargestScale_(static_cast<double>(largestscale)),
-          stopPointMode_(stoppointmode),
-          normMethod_(norm_method <= 0 ? 1 : norm_method),
-          stopAfterHogbomRun_(stop_after_hogbom_run), verbose_(verbose),
-          psfWidthInput_(psf_width), divergence_(divergence),
+          maxNiter_(max_iter_per_cycle_updated), fusedThreshold_(asp_fused_threshold),
+          userLargestScale_(static_cast<double>(asp_largest_scale)),
+          stopPointMode_(asp_stop_point_mode),
+          normMethod_(asp_scale_normalization_method),
+          stopAfterHogbomRun_(asp_stop_after_hogbom_run), verbose_(verbose),
+          psfWidthInput_(asp_psf_width), divergence_(divergence),
           fftThreads_(fft_threads), options_(options) {}
 
     AspResult run() {
@@ -567,7 +569,8 @@ private:
 
         if (noClean_) return;
 
-        if (options_.scale_significance || options_.residual_components) estimateScaleNoise();
+        if (options_.asp_scale_significance || options_.asp_residual_components)
+            estimateScaleNoise();
 
         // getActiveSetAspen() once to seed the first optimum, then defineAspScales.
         std::vector<double> scaleSizes = getActiveSetAspen();
@@ -654,11 +657,13 @@ private:
                 inMask[k] = initScaleMasks_[0](box.i0 + i, box.j0 + j) != 0.0 ? 1.0 : 0.0;
             }
         double floor = (!noiseScale_.empty() && std::isfinite(noiseScale_[0]))
-                           ? options_.rc_noise_floor * noiseScale_[0] : 0.0;
+                           ? options_.asp_residual_component_noise_floor * noiseScale_[0] : 0.0;
         // A component takes no pixel below the threshold of the model update.
-        if (options_.rc_floor_at_threshold) floor = std::max(floor, threshold_);
-        const double flo = options_.rc_frac_min, fhi = options_.rc_frac_max;
-        const double elo = options_.rc_eps_min, ehi = options_.rc_eps_max;
+        if (options_.asp_residual_component_floor_at_threshold) floor = std::max(floor, threshold_);
+        const double flo = options_.asp_residual_component_min_fraction;
+        const double fhi = options_.asp_residual_component_max_fraction;
+        const double elo = options_.asp_residual_component_min_epsilon_fraction;
+        const double ehi = options_.asp_residual_component_max_epsilon_fraction;
         // (frac, log eps_frac), clamped to their bounds; fitted by a bounded
         // Levenberg-Marquardt on the masked residual vector, warm started from
         // the last component's.
@@ -674,7 +679,7 @@ private:
                 sumSquares += R[k] * R[k];
                 if (std::fabs(R[k]) > A) { A = std::fabs(R[k]); peak = R[k]; }
             }
-            if (A <= options_.rc_switch_factor * threshold_) break;
+            if (A <= options_.asp_residual_component_switch_factor * threshold_) break;
             if (stopTest_.check_divergence(A, sumSquares, divergence_) != deconvolvers::STOP_NONE) {
                 status = deconvolvers::STOP_DIVERGED;
                 break;
@@ -730,7 +735,8 @@ private:
             };
             double f = misfit(frac, logEps, true);
             double lambda = 1e-3;
-            for (int it = 0; it < options_.rc_fit_iterations; ++it) {
+            const int fitIterations = options_.asp_residual_component_fit_iterations;
+            for (int it = 0; it < fitIterations; ++it) {
                 double a11 = 0, a12 = 0, a22 = 0, g1 = 0, g2 = 0;
                 for (std::size_t k = 0; k < nb; ++k) {
                     a11 += J1[k] * J1[k]; a12 += J1[k] * J2[k]; a22 += J2[k] * J2[k];
@@ -749,13 +755,13 @@ private:
                         const double rel = (f - fTrial) / std::max(f, 1e-300);
                         frac = nf; logEps = nl; f = fTrial; accepted = true;
                         lambda = std::max(lambda / 3.0, 1e-9);
-                        if (rel < 1e-7) it = options_.rc_fit_iterations;  // converged
+                        if (rel < 1e-7) it = fitIterations;  // converged
                     } else {
                         lambda *= 5.0;
                     }
                 }
                 if (!accepted) break;
-                if (it + 1 < options_.rc_fit_iterations) f = misfit(frac, logEps, true);
+                if (it + 1 < fitIterations) f = misfit(frac, logEps, true);
             }
             if (options_.record_components) {
                 const double rec[6] = {peak, frac, std::exp(logEps), 0.0, 0.0, f};
@@ -814,7 +820,7 @@ private:
 
     // The significance a smoothed residual must reach to be cleaned.
     double significanceLimit() const {
-        if (options_.significance > 0.0) return options_.significance;
+        if (options_.asp_significance > 0.0) return options_.asp_significance;
         return threshold_ / noiseScale_[0];
     }
 
@@ -833,7 +839,7 @@ private:
         return maxSignificance_ >= significanceLimit();
     }
 
-    // setInitScales: choose 0, w, 2w, 4w, 8w (restricted by largestscale).
+    // setInitScales: choose 0, w, 2w, 4w, 8w (restricted by asp_largest_scale).
     void setInitScales() {
         if (userLargestScale_ < 0.0) {
             initScaleSizes_ = {0.0, psfWidth_, 2.0 * psfWidth_, 4.0 * psfWidth_,
@@ -847,10 +853,10 @@ private:
         if (numscale == 0) {
             // A largest scale below the PSF width keeps scale components, as
             // in LibRA (AspMatrixCleaner at fc54ee25): the initial scales are
-            // 0, largestscale and the PSF width. CASA 6.7.5.18 keeps the
+            // 0, asp_largest_scale and the PSF width. CASA 6.7.5.18 keeps the
             // point scale only, which makes Asp a Hogbom clean and leaves the
-            // significance per scale nothing to search. A largestscale of 0
-            // still asks for the point scale only (LibRA would repeat it).
+            // significance per scale nothing to search. An asp_largest_scale of
+            // 0 still asks for the point scale only (LibRA would repeat it).
             if (uls > 0.0)
                 initScaleSizes_ = {0.0, uls, psfWidth_};
             else
@@ -1053,7 +1059,7 @@ private:
         // smoothed residual (|max| / noise of its scale) is cleaned next while
         // it reaches the significance limit.
         lastSearchAllScales_ = nInitScales_ > 1;
-        if (options_.scale_significance && nInitScales_ > 1 && !noiseScale_.empty()) {
+        if (options_.asp_scale_significance && nInitScales_ > 1 && !noiseScale_.empty()) {
             maxSignificance_ = 0.0;
             int sigScale = -1;
             for (int s = 1; s < nInitScales_; ++s) {
@@ -1196,7 +1202,7 @@ private:
         double initRMSResidual = 1000.0;
 
         iteration_ = startingIter_;
-        if (options_.residual_components) {
+        if (options_.asp_residual_components) {
             // Residual-shaped components down to the threshold,
             // then the Asp iterations (from a new search of the residual).
             if (residualComponentPhase() == deconvolvers::STOP_DIVERGED) {
@@ -1207,7 +1213,7 @@ private:
             startingIter_ = iteration_;
             // The noise of the smoothed residuals, now that the sidelobes of
             // the emission cleaned are gone from outside the mask too.
-            if (options_.scale_significance) estimateScaleNoise();
+            if (options_.asp_scale_significance) estimateScaleNoise();
             std::vector<double> scaleSizes = getActiveSetAspen();
             scaleSizes.push_back(0.0);
             defineAspScales(scaleSizes);
@@ -1264,7 +1270,7 @@ private:
 
             // 0. below cycle threshold
             bool significantScale = false;
-            if (options_.scale_significance && std::abs(peakResidual_) < computeThreshold() &&
+            if (options_.asp_scale_significance && std::abs(peakResidual_) < computeThreshold() &&
                 !noiseScale_.empty()) {
                 // Before stopping, search every scale of the current
                 // residual; go on while a smoothed residual is significant.
@@ -1325,8 +1331,8 @@ private:
             // The residual loses the exact linear convolution of the component
             // with the image-sized PSF (see setup()), so residual == dirty -
             // model (*) psf holds on the whole image, as for the Hogbom kernels.
-            const double iterationGain = (significantScale && options_.significance_gain > 0.0)
-                                             ? options_.significance_gain : gain_;
+            const double iterationGain = (significantScale && options_.asp_significance_gain > 0.0)
+                                             ? options_.asp_significance_gain : gain_;
             const double scaleFactor = iterationGain * strengthOptimum_;
             if (options_.record_components) {
                 components_.push_back(static_cast<double>(posOptI_));
@@ -1537,12 +1543,26 @@ double psf_gaussian_width(const double* psf, int nx, int ny) {
 
 namespace {
 
+void check_controls(double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
+                    int asp_scale_normalization_method) {
+    if (asp_psf_width != -1.0 && !(std::isfinite(asp_psf_width) && asp_psf_width > 0.0))
+        throw std::invalid_argument("asp_psf_width must be positive, or -1 to estimate it");
+    if (asp_largest_scale < -1)
+        throw std::invalid_argument(
+            "asp_largest_scale must be at least 0, or -1 for the default scales");
+    if (asp_stop_point_mode == 0 || asp_stop_point_mode < -1)
+        throw std::invalid_argument("asp_stop_point_mode must be positive, or -1 to disable it");
+    if (asp_scale_normalization_method != 1 && asp_scale_normalization_method != 2)
+        throw std::invalid_argument("asp_scale_normalization_method must be 1 or 2");
+}
+
 template <typename T>
 AspResult clean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold_per_cycle,
-                         int max_iter_per_cycle_updated, double fusedthreshold, double psf_width,
-                         int largestscale, int stoppointmode, int norm_method,
-                         bool stop_after_hogbom_run, bool verbose,
+                         int max_iter_per_cycle_updated, double asp_fused_threshold,
+                         double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
+                         int asp_scale_normalization_method, bool asp_stop_after_hogbom_run,
+                         bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence,
                          const FftThreads& fft_threads, const AspOptions& options = AspOptions{}) {
     // A pixel outside the search region that is not finite would spread over
@@ -1559,9 +1579,9 @@ AspResult clean_plane(T* residual, T* model, const T* psf, const T* mask,
             }
     }
     Cleaner<T> cleaner(residual, model, psf, mask, nx, ny, gain, threshold_per_cycle,
-                       max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
-                       stoppointmode, norm_method, stop_after_hogbom_run, verbose, divergence,
-                       fft_threads, options);
+                       max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
+                       asp_largest_scale, asp_stop_point_mode, asp_scale_normalization_method,
+                       asp_stop_after_hogbom_run, verbose, divergence, fft_threads, options);
     const AspResult result = cleaner.run();
     for (const auto& [k, value] : nonFinite) residual[k] = value;
     return result;
@@ -1572,14 +1592,18 @@ AspResult clean_plane(T* residual, T* model, const T* psf, const T* mask,
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold_per_cycle,
-                         int max_iter_per_cycle_updated, double fusedthreshold, double psf_width,
-                         int largestscale, int stoppointmode, int norm_method,
-                         bool stop_after_hogbom_run, bool verbose,
+                         int max_iter_per_cycle_updated, double asp_fused_threshold,
+                         double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
+                         int asp_scale_normalization_method, bool asp_stop_after_hogbom_run,
+                         bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence,
                          int fft_threads, const AspOptions& options) {
+    check_controls(asp_psf_width, asp_largest_scale, asp_stop_point_mode,
+                   asp_scale_normalization_method);
     return clean_plane<T>(residual, model, psf, mask, nx, ny, gain, threshold_per_cycle,
-                          max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
-                          stoppointmode, norm_method, stop_after_hogbom_run, verbose, divergence,
+                          max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
+                          asp_largest_scale, asp_stop_point_mode, asp_scale_normalization_method,
+                          asp_stop_after_hogbom_run, verbose, divergence,
                           FftThreads{std::max(1, fft_threads), nullptr}, options);
 }
 
@@ -1587,11 +1611,14 @@ template <typename T>
 void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                    int nf, int np_img, int np_psf, int nx, int ny, double gain,
                    const double* threshold_per_cycle,
-                   const int* max_iter_per_cycle_updated, double fusedthreshold,
-                   double psf_width, int largestscale, int stoppointmode,
-                   int norm_method, bool stop_after_hogbom_run, int processing_function_threads,
+                   const int* max_iter_per_cycle_updated, double asp_fused_threshold,
+                   double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
+                   int asp_scale_normalization_method, bool asp_stop_after_hogbom_run,
+                   int processing_function_threads,
                    const deconvolvers::DivergenceControl<double>& divergence,
                    AspResult* results, const AspOptions& options) {
+    check_controls(asp_psf_width, asp_largest_scale, asp_stop_point_mode,
+                   asp_scale_normalization_method);
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) return;
     const std::size_t plane = static_cast<std::size_t>(ny) * nx;
@@ -1621,9 +1648,10 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
             // plane uses its own threshold and iteration limit.
             results[p] = clean_plane<T>(residual + img_off, model + img_off,
                                            psf + psf_off, maskp, nx, ny, gain,
-                                           threshold_per_cycle[p], max_iter_per_cycle_updated[p], fusedthreshold,
-                                           psf_width, largestscale, stoppointmode,
-                                           norm_method, stop_after_hogbom_run, false, divergence,
+                                           threshold_per_cycle[p], max_iter_per_cycle_updated[p],
+                                           asp_fused_threshold, asp_psf_width, asp_largest_scale,
+                                           asp_stop_point_mode, asp_scale_normalization_method,
+                                           asp_stop_after_hogbom_run, false, divergence,
                                            fft_threads, options);
         }
         active.fetch_sub(1, std::memory_order_relaxed);

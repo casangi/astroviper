@@ -1437,16 +1437,16 @@ def asp_clean(
           the algorithm fuses to Hogbom-style point cleaning for speed.
           A negative value disables the switch. Default 0.0.
         - ``asp_psf_width`` : float, PSF Gaussian width in pixels used to
-          seed the initial scales. ``<= 0`` estimates it internally.
-          Default 0.0.
+          seed the initial scales. ``-1`` estimates it internally.
+          Default -1.
         - ``asp_largest_scale`` : int, largest initial scale in pixels.
           ``-1`` uses the default (0, w, 2w, 4w, 8w); a value between 0 and
           the PSF width ``w`` gives the scales 0, ``asp_largest_scale`` and
           ``w`` (as LibRA), and 0 the point scale only. Default -1.
         - ``asp_stop_point_mode`` : int, stop after this many consecutive
           smallest-scale (point) components. ``-1`` disables. Default -1.
-        - ``asp_scale_normalization_method`` : int, scale-normalization method
-          (1 is the preferred CASA default). Default 1.
+        - ``asp_scale_normalization_method`` : int, scale-normalization method,
+          1 or 2 (1 is the preferred CASA default). Default 1.
         - ``asp_stop_after_hogbom_run`` : bool, end the model update after a
           Hogbom run of Asp (51 or 510 point components) unless the RMS of
           the residual has fallen, by less than a factor 1.5, since the model
@@ -1635,7 +1635,7 @@ def asp_clean(
         threshold_per_cycle=threshold_per_cycle,
         max_iter_per_cycle_updated=max_iter_per_cycle_updated,
         asp_fused_threshold=deconvolve_params.get("asp_fused_threshold", 0.0),
-        asp_psf_width=deconvolve_params.get("asp_psf_width", 0.0),
+        asp_psf_width=deconvolve_params.get("asp_psf_width", -1.0),
         asp_largest_scale=deconvolve_params.get("asp_largest_scale", -1),
         asp_stop_point_mode=deconvolve_params.get("asp_stop_point_mode", -1),
         asp_scale_normalization_method=deconvolve_params.get(

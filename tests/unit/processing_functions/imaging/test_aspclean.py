@@ -368,6 +368,40 @@ class TestInPlaceContract:
         with pytest.raises((RuntimeError, ValueError)):
             aspclean.clean(resid, psf, model)
 
+    @pytest.mark.parametrize("cube", [False, True])
+    @pytest.mark.parametrize(
+        "name,value",
+        [
+            ("asp_psf_width", 0.0),
+            ("asp_psf_width", -2.0),
+            ("asp_psf_width", np.nan),
+            ("asp_largest_scale", -2),
+            ("asp_stop_point_mode", 0),
+            ("asp_stop_point_mode", -2),
+            ("asp_scale_normalization_method", 0),
+            ("asp_scale_normalization_method", 3),
+        ],
+    )
+    def test_controls_take_only_their_documented_values(self, name, value, cube):
+        """No value outside the documented ones is mapped to a default."""
+        psf = _centered_psf(32, 32)
+        resid = _gauss(32, 32, 16, 16, 3.0, 4.0)
+        model = np.zeros_like(resid)
+        kwargs = {name: value}
+        clean = aspclean.clean
+        if cube:
+            psf, resid, model = (
+                a[None, None, None].copy() for a in (psf, resid, model)
+            )
+            kwargs |= {
+                "threshold_per_cycle": np.zeros((1, 1, 1)),
+                "max_iter_per_cycle_updated": np.full((1, 1, 1), 100, np.int32),
+            }
+            clean = aspclean.clean_cube
+        with pytest.raises(ValueError, match=name):
+            clean(resid, psf, model, **kwargs)
+        assert not model.any()
+
 
 # ---------------------------------------------------------------------------
 # Cube driver
