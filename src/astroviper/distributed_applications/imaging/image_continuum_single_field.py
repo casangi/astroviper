@@ -2585,29 +2585,6 @@ def calculate_number_of_chunks_for_continuum_imaging(
     return n_frequency_chunks
 
 
-def _load_continuum_clean_mask(clean_mask, image_size):
-    """Load and validate an optional two-dimensional continuum CLEAN mask."""
-    if clean_mask is None:
-        return None
-
-    import numpy as np
-
-    clean_mask_array = np.squeeze(np.asarray(np.load(clean_mask)))
-    expected_shape = tuple(int(value) for value in image_size)
-    if clean_mask_array.ndim != 2 or clean_mask_array.shape != expected_shape:
-        raise ValueError(
-            "clean_mask must contain one 2-D image plane with shape "
-            f"{expected_shape}; received {clean_mask_array.shape}."
-        )
-    if not np.all(np.isfinite(clean_mask_array)):
-        raise ValueError("clean_mask contains non-finite values.")
-
-    clean_mask_array = np.ascontiguousarray(clean_mask_array > 0.5)
-    if not np.any(clean_mask_array):
-        raise ValueError("clean_mask does not select any pixels.")
-    return clean_mask_array
-
-
 def _warn_on_mvc_asp_significance_without_clean_mask(
     continuum_mode, deconvolver, cycle_control_params, clean_mask
 ):
@@ -3292,9 +3269,15 @@ def image_continuum_single_field(
         support 7 and oversampling 100. MFS and MVC dispatch visibility, PSF,
         and prediction work to the shared C++ grid/degrid kernels.
     clean_mask : str or None, optional
-        Path to a NumPy ``.npy`` file containing one two-dimensional CLEAN mask.
-        Its shape must equal ``image_params["image_size"]``. Finite values greater
-        than 0.5 select pixels in every continuum residual plane.
+        Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:
+        the path of a NumPy ``.npy`` file for the distributed applications and
+        the bool plane loaded from it
+        (:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values
+        greater than 0.5) for the layers below. It selects the pixels of every
+        residual plane that the model update cleans, in place of the
+        primary-beam mask of ``primary_beam_limit``; Asp measures the noise of
+        its significance test (``asp_scale_significance``) outside it.
+        ``None`` keeps the primary-beam mask.
     image_sharding : dict, optional
         Reserved for a future node-task finalization path. Continuum imaging
         currently raises ``NotImplementedError`` when this is supplied rather
@@ -3483,10 +3466,9 @@ def image_continuum_single_field(
     _refuse_unsupported_continuum_cycle_options(deconvolver, cycle_control_params)
     _resolve_continuum_taylor_expansion(image_params)
 
-    clean_mask_array = _load_continuum_clean_mask(
-        clean_mask,
-        image_params["image_size"],
-    )
+    from astroviper.utils.clean_mask import load_clean_mask
+
+    clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
     _warn_on_mvc_asp_significance_without_clean_mask(
         continuum_mode, deconvolver, cycle_control_params, clean_mask_array
     )
