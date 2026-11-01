@@ -110,11 +110,11 @@ def _inner_product(first, second, n_reduction_dims):
 
 def _validate_momentum_coefficient(momentum_coefficient):
     """Refuse a ``momentum_coefficient`` that is not a real number in ``[0, 1)``."""
-    import numbers
+    import numpy as np
 
     if (
         isinstance(momentum_coefficient, bool)
-        or not isinstance(momentum_coefficient, numbers.Real)
+        or not isinstance(momentum_coefficient, int | float | np.integer | np.floating)
         or not 0.0 <= momentum_coefficient < 1.0
     ):
         raise ValueError(
@@ -413,7 +413,7 @@ def nesterov_momentum_model_step(
         If an input is not real floating point or the dtypes differ.
     ValueError
         If the dimensions, sizes, ``plain_step_planes`` or the state do not
-        match.
+        match, or ``momentum_coefficient`` is not a real number in ``[0, 1)``.
     """
     import numpy as np
     import toolviper.utils.logger as logger
