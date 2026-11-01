@@ -2116,7 +2116,8 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
     """The model update books ``model_flux`` as the flux of the previous model
     plus that of its increment ``z``; the accelerated step replaces ``z``, so
     each model update's ``model_flux`` is the ``start_model_flux`` of the
-    next and the last one the flux of the final model. Two MVC imaging
+    next and the last one, like the last ``model_flux_positive`` and
+    ``model_flux_negative``, the flux of the final model. Two MVC imaging
     cycles through the real model update and model accumulation, with a
     model update giving ``z = r / 4`` and ``B z = z / 2``: the conjugate
     gradient's first step is ``8 z = 2 r``, momentum's second step
@@ -2232,3 +2233,14 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
             fields["model_flux"][0], rel=1e-12
         )
         assert fields["model_flux"][1] == pytest.approx(final_flux[pol], rel=1e-12)
+        plane = (
+            second["model_xds"]
+            .SKY_MODEL.isel(time=0, taylor_term=0, polarization=pol)
+            .values
+        )
+        assert fields["model_flux_positive"][-1] == pytest.approx(
+            plane[plane > 0].sum(), rel=1e-12
+        )
+        assert fields["model_flux_negative"][-1] == pytest.approx(
+            plane[plane < 0].sum(), rel=1e-12
+        )

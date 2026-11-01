@@ -2982,7 +2982,7 @@ def _accelerate_continuum_model_increment(
     return model_increment_xds.assign(SKY_MODEL=model_step), state_xds
 
 
-def _book_accelerated_model_flux(deconvolve_dict, model_step):
+def _book_accelerated_model_flux(deconvolve_dict, model_step, previous_model_xds):
     """Book the flux of the accelerated model step in the convergence record.
 
     The model update books ``model_flux`` as the flux of the previous model
@@ -2990,18 +2990,28 @@ def _book_accelerated_model_flux(deconvolve_dict, model_step):
     The acceleration adds another step to the model instead, so the latest
     ``model_flux`` of each plane is set to its latest ``start_model_flux``
     plus the Taylor-term-zero flux of ``model_step``: the flux of the model
-    the next model update starts from. Every plane of a model update has an
-    entry in ``deconvolve_dict``; entries without both fluxes are left as
-    they are.
+    the next model update starts from. The latest ``model_flux_positive``
+    and ``model_flux_negative`` become those of that model, the previous
+    model (``None`` in the first imaging cycle) plus ``model_step``. Every
+    plane of a model update has an entry in ``deconvolve_dict``; entries
+    without both fluxes are left as they are.
     """
     import numpy as np
 
-    if "taylor_term" in model_step.dims:
-        model_step = model_step.isel(taylor_term=0, drop=True)
-    step_flux = np.sum(
-        model_step.transpose("time", "polarization", "l", "m").values,
-        axis=(-2, -1),
+    from astroviper.processing_functions.image_analysis.image_statistics import (
+        cube_flux_by_sign,
     )
+
+    def taylor_term_zero(model):
+        if "taylor_term" in model.dims:
+            model = model.isel(taylor_term=0, drop=True)
+        return model.transpose("time", "polarization", "l", "m").values
+
+    model = taylor_term_zero(model_step)
+    step_flux = np.sum(model, axis=(-2, -1))
+    if previous_model_xds is not None:
+        model = model + taylor_term_zero(previous_model_xds["SKY_MODEL"])
+    model_flux_by_sign = cube_flux_by_sign(model)
 
     for key, fields in deconvolve_dict.data.items():
         model_flux = fields.get("model_flux")
@@ -3019,6 +3029,15 @@ def _book_accelerated_model_flux(deconvolve_dict, model_step):
         fields["model_flux"] = model_flux[:-1] + [
             float(start_model_flux[-1]) + float(step_flux[key.time, key.pol])
         ]
+        for field, values in zip(
+            ("model_flux_positive", "model_flux_negative"),
+            model_flux_by_sign,
+            strict=True,
+        ):
+            if field in fields:
+                signed = fields[field]
+                signed = signed if isinstance(signed, list) else [signed]
+                fields[field] = signed[:-1] + [float(values[key.time, key.pol])]
 
 
 def _add_previous_continuum_model_flux(
@@ -3364,7 +3383,9 @@ def continuum_cycle_append_node(
             )
             if return_dict.get("deconvolution") is not None:
                 _book_accelerated_model_flux(
-                    return_dict["deconvolution"], model_increment_xds["SKY_MODEL"]
+                    return_dict["deconvolution"],
+                    model_increment_xds["SKY_MODEL"],
+                    input_params.get("model_xds"),
                 )
         del residual_before_model_update
         T_cycle_acceleration += time.time() - start
