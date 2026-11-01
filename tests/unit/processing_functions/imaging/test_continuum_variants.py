@@ -525,6 +525,41 @@ def test_native_mtmfs_cleans_the_support_the_stop_test_measures(
         assert fields["masksum"] == [expected.sum()]
 
 
+@pytest.mark.parametrize("deconvolver", ["hogbom", "asp"])
+def test_cube_deconvolvers_clean_the_support_the_stop_test_measures(
+    monkeypatch, deconvolver
+):
+    """With a clean mask, Högbom and Asp clean its pixels where the primary
+    beam is at least primary_beam_limit times its peak, exactly those the
+    stop test measures."""
+    image, _, _ = make_single_term_continuum_image()
+    primary_beam = np.linspace(1.0, 0.0, 25 * 21).reshape(25, 21)
+    image.PRIMARY_BEAM.values[:] = primary_beam
+    image["MASK"] = xr.ones_like(image.SKY_RESIDUAL, dtype=bool)
+    image.attrs["data_groups"]["residual"]["mask"] = "MASK"
+    params = {"max_iter": 1, "primary_beam_limit": 0.2}
+    expected = primary_beam >= 0.2
+    masks = []
+
+    def cube_backend(cube, *args, **kwargs):
+        masks.append(cube[cube.attrs["data_groups"]["residual"]["mask"]].values)
+        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.model_update."
+        "model_update_cube_single_field",
+        cube_backend,
+    )
+    stop_test = build_continuum_residual_imaging_dict(image, "residual", params)
+    model_update_mtmfs_single_field(image, deconvolver, params)
+
+    (mask,) = masks
+    assert mask.shape == (2, 1, 2, 25, 21)
+    np.testing.assert_array_equal(mask, np.broadcast_to(expected, mask.shape))
+    for fields in stop_test.data.values():
+        assert fields["masksum"] == [expected.sum()]
+
+
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize(
     "max_iter_divergence,iterations,stop_code",

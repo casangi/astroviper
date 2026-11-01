@@ -532,6 +532,40 @@ class TestDegridImagingWeightsCpp(unittest.TestCase):
         np.testing.assert_array_equal(nearest, [[[[0.2]]]])
         np.testing.assert_array_equal(truncated, [[[[0.1]]]])
 
+    def test_sample_not_gridded_left_zero(self):
+        """A sample whose conjugate cell is off the grid is not reweighted."""
+        # u_pix = u: six samples, and one on u cell 0 whose conjugate is cell 8.
+        uvw = np.zeros((1, 7, 3))
+        uvw[0, :, 0] = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, -4.2]
+        uvw[0, :, 1] = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 1.0]
+        frequency = np.array([299792458.0])
+        chan_map = np.array([0], dtype=np.int64)
+        data_weight = np.ones((1, 7, 1, 1))
+        n_uv = np.array([8, 8], dtype=np.int64)
+        delta_lm = np.array([-1.0 / 8.0, -1.0 / 8.0])
+        grid = np.zeros((1, 1, 8, 8))
+        sum_weight = np.zeros((1, 1))
+        grid_imaging_weights(
+            grid, sum_weight, uvw, frequency, chan_map, data_weight, n_uv, delta_lm
+        )
+        imaging_weight = np.zeros_like(data_weight)
+        degrid_imaging_weights(
+            imaging_weight,
+            grid,
+            np.array([[[25.0]], [[1.0]]]),  # Briggs robust 0: sum G**2 / sum w = 1
+            uvw,
+            frequency,
+            chan_map,
+            np.array([0], dtype=np.int64),
+            data_weight,
+            n_uv,
+            delta_lm,
+        )
+
+        np.testing.assert_array_equal(sum_weight, [[12.0]])
+        np.testing.assert_allclose(imaging_weight[0, :6, 0, 0], 1.0 / 26.0)
+        self.assertEqual(imaging_weight[0, 6, 0, 0], 0.0)
+
     def test_oversized_grid_dimension_raises(self):
         """The degrid binding rejects dimensions that cannot be represented."""
         with self.assertRaisesRegex(OverflowError, "grid channel dimension"):

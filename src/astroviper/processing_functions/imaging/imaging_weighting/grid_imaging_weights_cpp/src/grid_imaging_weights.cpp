@@ -217,8 +217,13 @@ void degrid_imaging_weights(
                     if (u_center <= 0 || u_center >= m_u) continue;
                     if (v_center <= 0 || v_center >= m_v) continue;
                 } else {
+                    // As gridded: both Hermitian cells must be on the grid.
+                    const double u_center_conj = std::floor(-u + uv_center_u + 0.5);
+                    const double v_center_conj = std::floor(-v + uv_center_v + 0.5);
                     if (u_center < 0 || u_center >= m_u) continue;
                     if (v_center < 0 || v_center >= m_v) continue;
+                    if (u_center_conj < 0 || u_center_conj >= m_u) continue;
+                    if (v_center_conj < 0 || v_center_conj >= m_v) continue;
                 }
 
                 const std::int64_t u_center_indx =
