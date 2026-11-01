@@ -943,10 +943,11 @@ def image_cube_single_field(
         the bool plane loaded from it
         (:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values
         greater than 0.5) for the layers below. It selects the pixels of every
-        residual plane that the model update cleans, in place of the
-        primary-beam mask of ``primary_beam_limit``; Asp measures the noise of
-        its significance test (``asp_scale_significance``) outside it.
-        ``None`` keeps the primary-beam mask.
+        residual plane that the model update cleans: in cube imaging in place
+        of the primary-beam mask of ``primary_beam_limit``, in continuum
+        imaging within it. Asp measures the noise of its significance test
+        (``asp_scale_significance``) outside the pixels it cleans. ``None``
+        keeps the primary-beam mask.
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
     skunk_works : bool, optional

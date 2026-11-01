@@ -614,10 +614,11 @@ IMAGING_PARAM_DOCS = {
         "the bool plane loaded from it\n"
         "(:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values\n"
         "greater than 0.5) for the layers below. It selects the pixels of every\n"
-        "residual plane that the model update cleans, in place of the\n"
-        "primary-beam mask of ``primary_beam_limit``; Asp measures the noise of\n"
-        "its significance test (``asp_scale_significance``) outside it.\n"
-        "``None`` keeps the primary-beam mask."
+        "residual plane that the model update cleans: in cube imaging in place\n"
+        "of the primary-beam mask of ``primary_beam_limit``, in continuum\n"
+        "imaging within it. Asp measures the noise of its significance test\n"
+        "(``asp_scale_significance``) outside the pixels it cleans. ``None``\n"
+        "keeps the primary-beam mask."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.
