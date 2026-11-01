@@ -2037,8 +2037,7 @@ def residual_update_continuum_single_field(
     deconvolver : str, optional
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"asp"``
-        (C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)
-        cleans Taylor term zero only and needs
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
         (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
         measures the noise on the pixels outside its mask, which without a
@@ -2853,6 +2852,7 @@ def model_update_mtmfs_single_field(
     processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
+    write_back_deconvolver_residual=False,
 ):
     """Perform one continuum model update.
 
@@ -2899,8 +2899,7 @@ def model_update_mtmfs_single_field(
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"asp"``
-        (C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)
-        cleans Taylor term zero only and needs
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
         (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
         measures the noise on the pixels outside its mask, which without a
@@ -2956,6 +2955,12 @@ def model_update_mtmfs_single_field(
     image_data_group_out_name : str, optional
         Name of the output model data group.
 
+    write_back_deconvolver_residual : bool, optional
+        If ``True``, Högbom copies its updated residual back into Taylor term
+        zero of the residual, the only term it updates. Where Högbom works on
+        a view of that term, it has updated it in place already, and the copy
+        changes nothing. Native MT-MFS always updates the residual in place.
+
     Returns
     -------
     deconvolve_dict : ImagingDict
@@ -2985,12 +2990,10 @@ def model_update_mtmfs_single_field(
     )
 
     deconvolver = deconvolver.lower()
-    if deconvolver in ("aspclean", "asp_clean"):
-        deconvolver = "asp"
     if deconvolver not in {"hogbom", "asp", "mtmfs"}:
         raise NotImplementedError(
-            "Continuum deconvolution supports 'hogbom', 'asp' (aliases "
-            f"'aspclean' and 'asp_clean') and 'mtmfs'; received {deconvolver!r}."
+            "Continuum deconvolution supports 'hogbom', 'asp' and 'mtmfs'; "
+            f"received {deconvolver!r}."
         )
 
     if "SKY_RESIDUAL" not in img_xds:
@@ -3027,6 +3030,14 @@ def model_update_mtmfs_single_field(
 
     if residual.sizes["taylor_term"] < 1:
         raise ValueError("SKY_RESIDUAL contains no Taylor terms.")
+
+    if deconvolver == "asp" and residual.sizes["taylor_term"] != 1:
+        raise ValueError(
+            "deconvolver='asp' cleans Taylor term zero only and requires "
+            "SKY_RESIDUAL with one Taylor term; received "
+            f"{residual.sizes['taylor_term']}. Use deconvolver='mtmfs' for 2 to 4 "
+            "Taylor terms."
+        )
 
     if psf.sizes["psf_taylor_order"] < 1:
         raise ValueError("POINT_SPREAD_FUNCTION contains no PSF Taylor terms.")
@@ -3316,6 +3327,10 @@ def model_update_mtmfs_single_field(
     # Use positional assignment because the Taylor coordinate need not
     # literally contain the value zero.
     img_xds["SKY_MODEL"].data[:, 0, ...] = model_zero.data
+    if write_back_deconvolver_residual:
+        img_xds[residual_name].data[:, 0, ...] = (
+            hogbom_xds[residual_name].isel(frequency=0, drop=True).data
+        )
 
     _, continuum_model_group = create_data_groups_in_and_out(
         img_xds,

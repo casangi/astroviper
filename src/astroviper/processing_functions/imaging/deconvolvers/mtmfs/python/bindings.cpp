@@ -14,9 +14,12 @@ namespace py = pybind11;
 
 namespace {
 
+// Compare dtype values: pickle/Dask may reconstruct an equivalent NumPy dtype
+// with a different descriptor object, while the underlying buffer is unchanged.
+
 template <typename T>
 py::buffer_info check_array(py::array& arr, const char* name, const std::vector<py::ssize_t>& shape, bool writable) {
-    if (!py::isinstance<py::array_t<T>>(arr))
+    if (!arr.dtype().equal(py::dtype::of<T>()))
         throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
                                  py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
                                  py::cast<std::string>(arr.dtype().attr("name")));
@@ -39,7 +42,7 @@ py::buffer_info check_array(py::array& arr, const char* name, const std::vector<
 
 template <typename T>
 py::buffer_info check_strided_residual(py::array& arr, const std::vector<py::ssize_t>& shape) {
-    if (!py::isinstance<py::array_t<T>>(arr))
+    if (!arr.dtype().equal(py::dtype::of<T>()))
         throw std::runtime_error("residual has wrong dtype; expected " +
                                  py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
                                  py::cast<std::string>(arr.dtype().attr("name")));
@@ -182,11 +185,11 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                double gain, double threshold_per_cycle, double mask_threshold,
                                int max_iter_divergence, double divergence_rms_factor,
                                double divergence_peak_factor) {
-    if (py::isinstance<py::array_t<float>>(residual))
+    if (residual.dtype().equal(py::dtype::of<float>()))
         return clean_impl<float>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
                                  threshold_per_cycle, mask_threshold, max_iter_divergence,
                                  divergence_rms_factor, divergence_peak_factor);
-    if (py::isinstance<py::array_t<double>>(residual))
+    if (residual.dtype().equal(py::dtype::of<double>()))
         return clean_impl<double>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
                                   threshold_per_cycle, mask_threshold, max_iter_divergence,
                                   divergence_rms_factor, divergence_peak_factor);
@@ -226,8 +229,8 @@ py::dict hessian_impl(py::array psf, const std::vector<float>& scales, float sma
 }
 
 static py::dict hessian_dispatch(py::array psf, const std::vector<float>& scales, float small_scale_bias) {
-    if (py::isinstance<py::array_t<float>>(psf)) return hessian_impl<float>(psf, scales, small_scale_bias);
-    if (py::isinstance<py::array_t<double>>(psf)) return hessian_impl<double>(psf, scales, small_scale_bias);
+    if (psf.dtype().equal(py::dtype::of<float>())) return hessian_impl<float>(psf, scales, small_scale_bias);
+    if (psf.dtype().equal(py::dtype::of<double>())) return hessian_impl<double>(psf, scales, small_scale_bias);
     throw std::runtime_error("psf must be float32 or float64");
 }
 
@@ -242,9 +245,9 @@ void principal_impl(py::array residual, py::array inverse_hessian) {
 }
 
 static void principal_dispatch(py::array residual, py::array inverse_hessian) {
-    if (py::isinstance<py::array_t<float>>(residual))
+    if (residual.dtype().equal(py::dtype::of<float>()))
         principal_impl<float>(residual, inverse_hessian);
-    else if (py::isinstance<py::array_t<double>>(residual))
+    else if (residual.dtype().equal(py::dtype::of<double>()))
         principal_impl<double>(residual, inverse_hessian);
     else
         throw std::runtime_error("residual must be float32 or float64");

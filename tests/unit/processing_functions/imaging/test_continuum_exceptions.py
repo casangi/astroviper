@@ -96,6 +96,9 @@ def test_restore_rejects_missing_registered_or_fallback_products(
     "fault,error,message",
     [
         ("deconvolver", NotImplementedError, "hogbom"),
+        ("aspclean", NotImplementedError, "'hogbom', 'asp' and 'mtmfs'"),
+        ("asp_clean", NotImplementedError, "'hogbom', 'asp' and 'mtmfs'"),
+        ("asp", ValueError, "requires SKY_RESIDUAL with one Taylor term"),
         ("residual", KeyError, "SKY_RESIDUAL"),
         ("psf", KeyError, "POINT_SPREAD_FUNCTION"),
         ("group", KeyError, "Input data group"),
@@ -114,6 +117,8 @@ def test_model_update_rejects_incomplete_images_and_controls(fault, error, messa
     deconvolver = "hogbom"
     if fault == "deconvolver":
         deconvolver = "unsupported"
+    elif fault in ("aspclean", "asp_clean", "asp"):
+        deconvolver = fault
     elif fault in ("residual", "psf"):
         image = image.drop_vars(
             "SKY_RESIDUAL" if fault == "residual" else "POINT_SPREAD_FUNCTION"

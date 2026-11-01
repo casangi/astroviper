@@ -13,6 +13,9 @@
 
 namespace py = pybind11;
 
+// Compare dtype values: pickle/Dask may reconstruct an equivalent NumPy dtype
+// with a different descriptor object, while the underlying buffer is unchanged.
+
 /**
  * Validate that a py::array matches the expected dtype T, is 2D with the
  * given spatial shape, and is C-contiguous. If require_writable is true,
@@ -27,7 +30,7 @@ static py::buffer_info validate_inplace_array(py::array& arr,
                                               const char* name,
                                               int ny, int nx,
                                               bool require_writable) {
-    if (!arr.dtype().is(py::dtype::of<T>())) {
+    if (!arr.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error(
             std::string(name) + " has wrong dtype; expected " +
             py::cast<std::string>(py::dtype::of<T>().attr("name")) +
@@ -65,7 +68,7 @@ static py::buffer_info validate_inplace_cube(py::array& arr,
                                              int nt, int nf, int np_dim,
                                              int ny, int nx,
                                              bool require_writable) {
-    if (!arr.dtype().is(py::dtype::of<T>())) {
+    if (!arr.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error(
             std::string(name) + " has wrong dtype; expected " +
             py::cast<std::string>(py::dtype::of<T>().attr("name")) +
@@ -110,7 +113,7 @@ template<typename U>
 static py::buffer_info validate_per_plane_array(py::array& arr,
                                                 const char* name,
                                                 int nt, int nf, int np_dim) {
-    if (!arr.dtype().is(py::dtype::of<U>())) {
+    if (!arr.dtype().equal(py::dtype::of<U>())) {
         throw std::runtime_error(
             std::string(name) + " has wrong dtype; expected " +
             py::cast<std::string>(py::dtype::of<U>().attr("name")) +
@@ -213,9 +216,9 @@ py::tuple maximg_impl(py::array image_array, py::array mask_array) {
  */
 static py::tuple maximg_dispatch(py::array image, py::array mask) {
     auto dt = image.dtype();
-    if (dt.is(py::dtype::of<float>())) {
+    if (dt.equal(py::dtype::of<float>())) {
         return maximg_impl<float>(image, mask);
-    } else if (dt.is(py::dtype::of<double>())) {
+    } else if (dt.equal(py::dtype::of<double>())) {
         return maximg_impl<double>(image, mask);
     } else {
         throw std::runtime_error("image must be float32 or float64");
@@ -249,7 +252,7 @@ py::dict hclean_impl(
     bool record_iteration_history
 ) {
     // First, read dirty_image shape so we can cross-validate the others.
-    if (!dirty_image.dtype().is(py::dtype::of<T>())) {
+    if (!dirty_image.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error("dirty_image has wrong dtype");
     }
     if (dirty_image.ndim() != 2) {
@@ -427,7 +430,7 @@ py::dict hclean_cube_impl(
     bool record_iteration_history,
     bool many_threads
 ) {
-    if (!residual_cube.dtype().is(py::dtype::of<T>())) {
+    if (!residual_cube.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error("residual_cube has wrong dtype");
     }
     if (residual_cube.ndim() != 5) {
@@ -448,7 +451,7 @@ py::dict hclean_cube_impl(
         /*require_writable=*/true);
 
     // PSF may broadcast on polarization axis.
-    if (!psf_cube.dtype().is(py::dtype::of<T>())) {
+    if (!psf_cube.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error("psf_cube has wrong dtype");
     }
     if (psf_cube.ndim() != 5) {
@@ -650,7 +653,7 @@ static py::dict clean_dispatch(
     bool record_iteration_history
 ) {
     auto dt = dirty_image.dtype();
-    if (dt.is(py::dtype::of<float>())) {
+    if (dt.equal(py::dtype::of<float>())) {
         return hclean_impl<float>(
             dirty_image, psf_array, model_image, mask_array,
             clean_box, max_iter_per_cycle_updated, start_iter,
@@ -662,7 +665,7 @@ static py::dict clean_dispatch(
             divergence_rms_factor,
             static_cast<float>(divergence_peak_factor),
             record_iteration_history);
-    } else if (dt.is(py::dtype::of<double>())) {
+    } else if (dt.equal(py::dtype::of<double>())) {
         return hclean_impl<double>(
             dirty_image, psf_array, model_image, mask_array,
             clean_box, max_iter_per_cycle_updated, start_iter,
@@ -696,7 +699,7 @@ static py::dict clean_cube_dispatch(
     bool record_iteration_history
 ) {
     auto dt = residual_cube.dtype();
-    if (dt.is(py::dtype::of<float>())) {
+    if (dt.equal(py::dtype::of<float>())) {
         return hclean_cube_impl<float>(
             residual_cube, psf_cube, model_cube, mask_cube,
             clean_box, max_iter_per_cycle_updated,
@@ -709,7 +712,7 @@ static py::dict clean_cube_dispatch(
             static_cast<float>(divergence_peak_factor),
             record_iteration_history,
             /*many_threads=*/false);
-    } else if (dt.is(py::dtype::of<double>())) {
+    } else if (dt.equal(py::dtype::of<double>())) {
         return hclean_cube_impl<double>(
             residual_cube, psf_cube, model_cube, mask_cube,
             clean_box, max_iter_per_cycle_updated,
@@ -746,7 +749,7 @@ static py::dict clean_cube_many_threads_dispatch(
     bool record_iteration_history
 ) {
     auto dt = residual_cube.dtype();
-    if (dt.is(py::dtype::of<float>())) {
+    if (dt.equal(py::dtype::of<float>())) {
         return hclean_cube_impl<float>(
             residual_cube, psf_cube, model_cube, mask_cube,
             clean_box, max_iter_per_cycle_updated,
@@ -759,7 +762,7 @@ static py::dict clean_cube_many_threads_dispatch(
             static_cast<float>(divergence_peak_factor),
             record_iteration_history,
             /*many_threads=*/true);
-    } else if (dt.is(py::dtype::of<double>())) {
+    } else if (dt.equal(py::dtype::of<double>())) {
         return hclean_cube_impl<double>(
             residual_cube, psf_cube, model_cube, mask_cube,
             clean_box, max_iter_per_cycle_updated,
@@ -908,10 +911,10 @@ PYBIND11_MODULE(_hogbom_ext, m) {
     }, "Get string representation of array dtype");
 
     m.def("is_float32", [](py::array arr) {
-        return arr.dtype().is(py::dtype::of<float>());
+        return arr.dtype().equal(py::dtype::of<float>());
     }, "Check if array is float32");
 
     m.def("is_float64", [](py::array arr) {
-        return arr.dtype().is(py::dtype::of<double>());
+        return arr.dtype().equal(py::dtype::of<double>());
     }, "Check if array is float64");
 }
