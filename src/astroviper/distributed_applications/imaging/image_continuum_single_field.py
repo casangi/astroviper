@@ -2615,19 +2615,16 @@ def _warn_on_mvc_asp_significance_without_clean_mask(
 def _resolve_continuum_deconvolver(deconvolver, image_params):
     """Resolve user-facing continuum deconvolver choices before graph creation.
 
-    ``"aspclean"`` and ``"asp_clean"`` resolve to ``"asp"``. Asp cleans Taylor
-    term zero, so it needs ``image_params["n_taylor_terms"] == 1``.
+    Asp cleans Taylor term zero, so it needs
+    ``image_params["n_taylor_terms"] == 1``.
     """
     import operator
     import warnings
 
     deconvolver = str(deconvolver).lower()
-    if deconvolver in ("aspclean", "asp_clean"):
-        deconvolver = "asp"
     if deconvolver not in ("hogbom", "asp", "mtmfs"):
         raise ValueError(
-            "deconvolver must be 'hogbom', 'asp' (aliases 'aspclean' and "
-            "'asp_clean') or 'mtmfs' for continuum imaging; "
+            "deconvolver must be 'hogbom', 'asp' or 'mtmfs' for continuum imaging; "
             f"received {deconvolver!r}."
         )
     if deconvolver == "hogbom":
@@ -2768,6 +2765,45 @@ def _refuse_unsupported_continuum_cycle_options(deconvolver, cycle_control_param
         )
 
 
+def _validate_cycle_acceleration(cycle_acceleration, momentum_coefficient):
+    """Validate the imaging-cycle acceleration options before graph creation."""
+    import numbers
+
+    if cycle_acceleration not in ("none", "conjugate_gradient", "nesterov_momentum"):
+        raise ValueError(
+            "cycle_acceleration must be 'none', 'conjugate_gradient' or "
+            f"'nesterov_momentum'; received {cycle_acceleration!r}."
+        )
+    if (
+        isinstance(momentum_coefficient, bool)
+        or not isinstance(momentum_coefficient, numbers.Real)
+        or not 0.0 <= momentum_coefficient < 1.0
+    ):
+        raise ValueError(
+            "momentum_coefficient must be a real number in [0, 1); received "
+            f"{momentum_coefficient!r}."
+        )
+
+
+def _warn_on_disabled_momentum(previous_state_xds, state_xds):
+    """Warn when Nesterov momentum has switched off on further planes."""
+    import toolviper.utils.logger as logger
+
+    if state_xds is None or "MOMENTUM_DISABLED" not in state_xds:
+        return
+    disabled = state_xds["MOMENTUM_DISABLED"]
+    if previous_state_xds is not None:
+        disabled = disabled & ~previous_state_xds["MOMENTUM_DISABLED"]
+    if disabled.any():
+        planes = disabled.stack(plane=disabled.dims)
+        logger.warning(
+            f"Nesterov momentum is switched off on the {disabled.dims} planes "
+            f"{planes.plane.values[planes.values].tolist()}: their residual norm "
+            "grew twice after steps with momentum. Any later model increment "
+            "of these planes is added without momentum."
+        )
+
+
 ###############################################################################
 # Main distributed layer level function call
 ###############################################################################
@@ -2825,20 +2861,23 @@ def image_continuum_single_field(
     image_chunking: dict[str, int] | None = None,
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
+    cycle_acceleration: str = "none",
+    momentum_coefficient: float = 0.5,
 ) -> dict:
     """Run distributed MFS or MVC continuum imaging.
 
     MFS reduces Taylor UV grids before the global inverse FFT. MVC performs
     channel FFTs and PB correction in map tasks, then reduces Taylor
     contributions. Native MT-MFS updates the complete Taylor model; Högbom
-    updates Taylor term zero. Asp (``"asp"``, aliases ``"aspclean"`` and
-    ``"asp_clean"``) updates Taylor term zero as Högbom does and requires
-    ``image_params["n_taylor_terms"] = 1``; with more Taylor terms it raises
-    ``ValueError`` before anything is written. In MVC the significance test
-    of Asp (``asp_scale_significance``) needs a ``clean_mask`` (see
-    ``deconvolver``). All verify refreshed residuals before finalization.
-    With one Taylor term, an MT-MFS request emits a warning and falls back to
-    Högbom. Restoration is optional.
+    updates Taylor term zero. Asp (``"asp"``) updates Taylor term zero as
+    Högbom does and requires ``image_params["n_taylor_terms"] = 1``; with
+    more Taylor terms it raises ``ValueError`` before anything is written.
+    In MVC the significance test of Asp (``asp_scale_significance``) needs a
+    ``clean_mask`` (see ``deconvolver``). All verify refreshed residuals
+    before finalization. With one Taylor term, an MT-MFS request emits a
+    warning and falls back to Högbom. Restoration is optional.
+    ``cycle_acceleration`` optionally replaces each model increment by a
+    conjugate gradient or Nesterov momentum step.
 
     The imaging cycle loop (``cycle_control_params``) does not run separately
     for every frequency channel as in cube imaging. Continuum performs one
@@ -2976,8 +3015,7 @@ def image_continuum_single_field(
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"asp"``
-        (C++, adaptive scale pixel; aliases ``"aspclean"`` and ``"asp_clean"``)
-        cleans Taylor term zero only and needs
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
         (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
         measures the noise on the pixels outside its mask, which without a
@@ -3322,6 +3360,81 @@ def image_continuum_single_field(
         the driver but passes each map only its local beam. The setting is ignored
         for MFS.
 
+    cycle_acceleration : {"none", "conjugate_gradient", "nesterov_momentum"}, optional
+        How each model update's increment ``z`` enters the model (Müller, Hsieh
+        and Bhatnagar 2026, A&A 706, A77). ``"none"`` adds ``z`` unchanged.
+        ``"conjugate_gradient"`` adds a step along a search direction ``p``
+        that is conjugate to the previous one, with a step length fitted per
+        (time, polarization) plane; ``p`` restarts from ``z`` when the
+        conjugacy coefficient or its denominator is not positive, or when
+        ``<r, p>`` or ``<p, B p>`` is not positive (``r`` the residual, ``B``
+        the deconvolver's PSF model). ``"nesterov_momentum"``
+        adds ``z + mu_j v``, with the momentum ``v = mu_j v_previous + z``, so
+        that the next residual update is made at an extrapolated model. The
+        coefficient ramps up as ``mu_j = min(mu, (j - 1) / (j + 2))``, with
+        ``mu`` the ``momentum_coefficient`` and ``j`` the imaging cycles since
+        the plane's last start or restart, so the first step after a start or
+        restart is the plain ``z``; the paper keeps ``mu`` constant (Alg. 6).
+        ``v`` restarts when ``<r, mu_j v + z>`` is not positive (gradient
+        restart) or when the residual norm has grown after a step with
+        ``mu_j > 0``, and a plane whose residual norm grows a second time after
+        such a step continues with plain increments, with a logged warning.
+        All these sums run over the Taylor terms and pixels of a plane. As
+        ``v`` is updated with the current ``mu_j``, the first increment enters
+        the second step with the weight ``mu_2**2 = 1/16``. With deep MT-MFS
+        model updates on simulated data (``max_iter_per_cycle=-1``,
+        ``psf_sidelobe_factor=0.25``, ``min_psf_fraction=0.01``, ``threshold``
+        1 mJy, ``max_iter`` 100000), momentum reached the ``threshold`` in 5
+        imaging cycles and ``"none"`` in 7, while ``max_iter`` ran out at a
+        residual peak of 0.87 Jy with a constant ``mu = 0.5`` and of 50 mJy
+        with the look-ahead update ``v = mu_(j-1) v_previous + z``. There the
+        second step raised the residual peak from 43 to 44 mJy (``"none"``:
+        16 mJy), the gradient restart fired in the third model update, and the
+        later steps were plain: the ``threshold`` was reached because of that
+        one restart, not because of the ramp itself. In 16 of 19 simulated
+        runs with ``max_iter_per_cycle=-1``, momentum with ``mu_j > 0`` acted
+        in the second model update only. Under both options a plane takes the
+        plain increment when its model update brought its residual below
+        ``threshold`` (within ``threshold_tolerance``), or once
+        ``entropy_stop`` follows the entropy of its residual; with momentum,
+        so does every plane that the stop test of the imaging cycle would stop
+        on that residual, for example one that has used up ``max_iter`` or
+        ``max_cycles``. With ``entropy_stop``, the conjugate
+        gradient can still stop with a higher residual than ``"none"``,
+        because the steps before the entropy is first followed are
+        accelerated (one simulated case: residual peak 2.85 mJy against 2.45
+        mJy; momentum 2.45 mJy). Both
+        options reduce the number of imaging cycles mainly when model updates
+        are shallow (a small ``max_iter_per_cycle``, or a
+        ``threshold_per_cycle`` that stays a large fraction of the peak
+        residual). With the adaptive depth (``max_iter_per_cycle=-1``), with
+        deep model updates, or with a ``threshold`` within the noise, either
+        option can need more imaging cycles or deconvolver iterations than
+        ``"none"``. Measured on simulated data with ``max_iter_per_cycle=-1``,
+        ``psf_sidelobe_factor=1.0``, ``min_psf_fraction=0.05`` and
+        ``max_psf_fraction=0.8``: 11 cases needed 53 imaging cycles in all with
+        ``"none"``, 48 with the conjugate gradient and 55 with momentum. On
+        the data of the component tests with the same settings (``threshold``
+        5 mJy, ``max_iter`` 10000), Högbom needed 6 imaging cycles with
+        ``"none"``, 7 with the conjugate gradient and 5 with momentum, and
+        MT-MFS 4, 8 and 6, with 654, 829 and 488 deconvolver iterations.
+        Neither needs an extra residual update; the conjugate gradient keeps
+        three Taylor stacks between cycles and momentum one. Applies to MFS and
+        MVC, Högbom and MT-MFS.
+
+    momentum_coefficient : float, optional
+        Cap ``mu`` of the momentum coefficient
+        ``mu_j = min(mu, (j - 1) / (j + 2))`` in
+        ``cycle_acceleration="nesterov_momentum"``, with ``j`` the imaging
+        cycles since a plane's last start or restart; in ``[0, 1)``. 0 gives
+        the plain imaging cycle. Default 0.5, the constant coefficient of
+        Müller, Hsieh and Bhatnagar (2026), which the ramp reaches at ``j = 4``.
+        A higher cap acts only on planes that run longer without a restart
+        (0.9 at ``j = 28``). On simulated data with shallow MT-MFS model
+        updates, caps of 0.7 and 0.9 needed 18 imaging cycles, 0.5 needed 22
+        and ``"none"`` 33; the paper found models oscillating with constant
+        coefficients of 0.7 to 0.9.
+
     Notes
     -----
     The sky model is a Taylor expansion in frequency with
@@ -3457,6 +3570,8 @@ def image_continuum_single_field(
             "write_imaging_weights_to_ps=True keeps the in-place imaging weights "
             "and requires weight_memory_mode='in_place'."
         )
+
+    _validate_cycle_acceleration(cycle_acceleration, momentum_coefficient)
 
     # Validate continuum_mode
     continuum_mode = str(continuum_mode).lower()
@@ -3823,6 +3938,7 @@ def image_continuum_single_field(
         static_xds = None
         model_xds = None
         model_uv_xds = None
+        cycle_acceleration_state_xds = None
         observed_visibility_grid_xds = None
         observed_visibility_grid_mapping = None
         last_cycle_return_dict = None
@@ -4002,6 +4118,8 @@ def image_continuum_single_field(
                 "clean_mask": clean_mask_array,
                 "restore": restore,
                 "primary_beam_correction": primary_beam_correction,
+                "cycle_acceleration": cycle_acceleration,
+                "momentum_coefficient": momentum_coefficient,
             }
 
             # Static products from the first cycle are required in later cycles.
@@ -4010,6 +4128,9 @@ def image_continuum_single_field(
                 append_input_params["static_xds"] = static_xds
                 append_input_params["model_xds"] = model_xds
                 append_input_params["model_uv_xds"] = model_uv_xds
+                append_input_params["cycle_acceleration_state_xds"] = (
+                    cycle_acceleration_state_xds
+                )
                 append_input_params["deconvolution"] = last_cycle_return_dict[
                     "deconvolution"
                 ]
@@ -4151,6 +4272,14 @@ def image_continuum_single_field(
 
             model_xds = cycle_return_dict["model_xds"]
             model_uv_xds = cycle_return_dict["model_uv_xds"]
+            if cycle_acceleration == "nesterov_momentum":
+                _warn_on_disabled_momentum(
+                    cycle_acceleration_state_xds,
+                    cycle_return_dict.get("cycle_acceleration_state_xds"),
+                )
+            cycle_acceleration_state_xds = cycle_return_dict.get(
+                "cycle_acceleration_state_xds"
+            )
 
             if continuum_mode == "mfs" and model_uv_xds is None:
                 raise RuntimeError(
