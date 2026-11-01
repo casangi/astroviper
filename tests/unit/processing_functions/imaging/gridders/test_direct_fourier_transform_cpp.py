@@ -491,3 +491,16 @@ def test_pickled_arrays_are_accepted_in_place(dtype):
     dft_predict(model, vis, *args)
     assert vis.__array_interface__["data"][0] == vis_ptr
     assert np.any(vis != 0)
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+def test_pickled_uv_sampling_arrays_are_accepted_in_place(dtype):
+    inp = _inputs(seed=14)
+    psf, normalization = _empty(inp, dtype=dtype)
+    psf, normalization, args = pickle.loads(
+        pickle.dumps((psf, normalization, _uv_sampling_args(inp)))
+    )
+    psf_ptr = psf.__array_interface__["data"][0]
+    dft_image_uv_sampling(psf, normalization, *args)
+    assert psf.__array_interface__["data"][0] == psf_ptr
+    assert np.any(psf != 0) and np.all(normalization > 0)
