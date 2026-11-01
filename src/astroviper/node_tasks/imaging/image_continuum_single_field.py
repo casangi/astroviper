@@ -3574,8 +3574,8 @@ def model_update_continuum_single_field(
             Model image data-group name. Defaults to ``"model"``.
 
         ``cycle_acceleration``
-            With ``"conjugate_gradient"``, Högbom writes its updated residual
-            back into the image. Defaults to ``"none"``.
+            With ``"conjugate_gradient"``, Högbom and Asp write their updated
+            residual back into the image. Defaults to ``"none"``.
 
     Returns
     -------
