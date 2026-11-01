@@ -138,12 +138,12 @@ def _model_visibilities(
         ms_xds[output_name] = xr.DataArray(
             np.zeros(template.shape, dtype=np.complex128), dims=template.dims
         )
-        modify_data_groups_xds(
-            ms_xds,
-            ms_data_group_out_name,
-            ms_data_group_out,
-            description=description,
-        )
+    modify_data_groups_xds(
+        ms_xds,
+        ms_data_group_out_name,
+        ms_data_group_out,
+        description=description,
+    )
     return ms_xds[output_name]
 
 
