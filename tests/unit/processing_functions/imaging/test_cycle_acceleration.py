@@ -491,6 +491,13 @@ def test_momentum_coefficient_ramps_up_from_every_start_to_the_cap(mu, coefficie
         np.testing.assert_array_equal(state.MOMENTUM_CYCLES, [cycles])
 
 
+@pytest.mark.parametrize("mu", [True, "0.5", 1.0, -0.1, np.nan])
+def test_momentum_refuses_a_coefficient_outside_zero_to_one(mu):
+    increment = _pixels([1, 0, 0, 0])
+    with pytest.raises(ValueError, match="momentum_coefficient"):
+        nesterov_momentum_model_step(increment, increment, momentum_coefficient=mu)
+
+
 def test_momentum_is_updated_with_the_current_coefficient():
     """``v = mu_j v_previous + z``, so the first increment ``e1`` enters the
     second step with the weight ``mu_2**2 = 1/16``: the step is

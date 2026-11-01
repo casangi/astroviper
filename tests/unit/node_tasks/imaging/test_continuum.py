@@ -1665,6 +1665,16 @@ def test_momentum_append_forwards_its_state_to_the_next_cycle(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("cycle_acceleration", ["CG", "Nesterov_Momentum", ""])
+def test_append_refuses_an_unknown_cycle_acceleration(monkeypatch, cycle_acceleration):
+    """Only the exact names select an acceleration; nothing falls back to momentum."""
+    with pytest.raises(ValueError, match="cycle_acceleration must be"):
+        _run_accelerated_append(
+            monkeypatch,
+            {"cycle_acceleration": cycle_acceleration, "momentum_coefficient": 0.5},
+        )
+
+
 def test_converged_appends_take_no_accelerated_step(monkeypatch):
     def unexpected(*args, **kwargs):
         pytest.fail("A converged imaging cycle must not take an accelerated step")

@@ -2673,22 +2673,16 @@ def _resolve_continuum_taylor_expansion(image_params):
 
 def _validate_cycle_acceleration(cycle_acceleration, momentum_coefficient):
     """Validate the imaging-cycle acceleration options before graph creation."""
-    import numbers
+    from astroviper.processing_functions.imaging.cycle_acceleration import (
+        _validate_momentum_coefficient,
+    )
 
     if cycle_acceleration not in ("none", "conjugate_gradient", "nesterov_momentum"):
         raise ValueError(
             "cycle_acceleration must be 'none', 'conjugate_gradient' or "
             f"'nesterov_momentum'; received {cycle_acceleration!r}."
         )
-    if (
-        isinstance(momentum_coefficient, bool)
-        or not isinstance(momentum_coefficient, numbers.Real)
-        or not 0.0 <= momentum_coefficient < 1.0
-    ):
-        raise ValueError(
-            "momentum_coefficient must be a real number in [0, 1); received "
-            f"{momentum_coefficient!r}."
-        )
+    _validate_momentum_coefficient(momentum_coefficient)
 
 
 def _warn_on_disabled_momentum(previous_state_xds, state_xds):

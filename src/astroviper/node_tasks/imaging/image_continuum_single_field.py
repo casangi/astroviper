@@ -2940,13 +2940,18 @@ def _accelerate_continuum_model_increment(
             plain_step_planes=(stop_codes == IMAGING_THRESHOLD) | entropy_followed,
             cycle_acceleration_state_xds=state_xds,
         )
-    else:
+    elif input_params["cycle_acceleration"] == "nesterov_momentum":
         model_step, state_xds = nesterov_momentum_model_step(
             residual_before_model_update,
             model_increment_xds["SKY_MODEL"],
             plain_step_planes=(stop_codes != IMAGING_CONTINUE) | entropy_followed,
             cycle_acceleration_state_xds=state_xds,
             momentum_coefficient=input_params["momentum_coefficient"],
+        )
+    else:
+        raise ValueError(
+            "cycle_acceleration must be 'none', 'conjugate_gradient' or "
+            f"'nesterov_momentum'; received {input_params['cycle_acceleration']!r}."
         )
     return model_increment_xds.assign(SKY_MODEL=model_step), state_xds
 
