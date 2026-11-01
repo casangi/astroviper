@@ -116,7 +116,7 @@ static void check_image(const py::buffer_info& image_info, const py::buffer_info
     require_c_contiguous(norm_info, "normalization");
     require_writable(image_info, "image");
     require_writable(norm_info, "normalization");
-    if (!normalization.dtype().is(py::dtype::of<double>()))
+    if (!normalization.dtype().equal(py::dtype::of<double>()))
         throw std::runtime_error(
             "normalization must be float64 (no implicit conversion is performed; the array is "
             "modified in place)");
@@ -181,13 +181,13 @@ void dft_image_bind(
             pol_map_ptr, wt_ptr, l_ptr, m_ptr, m_time, m_chan, m_pol, n_l, n_m, s.n_time,
             s.n_baseline, s.n_vis_chan, s.n_pol, processing_function_threads);
     };
-    if (dtype.is(py::dtype::of<double>())) {
+    if (dtype.equal(py::dtype::of<double>())) {
         run(double{});
-    } else if (dtype.is(py::dtype::of<float>())) {
+    } else if (dtype.equal(py::dtype::of<float>())) {
         run(float{});
-    } else if (dtype.is(py::dtype::of<cdbl>())) {
+    } else if (dtype.equal(py::dtype::of<cdbl>())) {
         run(cdbl{});
-    } else if (dtype.is(py::dtype::of<cflt>())) {
+    } else if (dtype.equal(py::dtype::of<cflt>())) {
         run(cflt{});
     } else {
         throw std::runtime_error(
@@ -249,9 +249,9 @@ void dft_image_uv_sampling_bind(
             wt_ptr, l_ptr, m_ptr, m_time, m_chan, m_pol, n_l, n_m, s.n_time, s.n_baseline,
             s.n_vis_chan, s.n_pol, processing_function_threads);
     };
-    if (dtype.is(py::dtype::of<double>())) {
+    if (dtype.equal(py::dtype::of<double>())) {
         run(double{});
-    } else if (dtype.is(py::dtype::of<float>())) {
+    } else if (dtype.equal(py::dtype::of<float>())) {
         run(float{});
     } else {
         throw std::runtime_error(
@@ -303,8 +303,8 @@ void dft_predict_bind(
 
     const py::dtype model_dtype = model.dtype();
     const py::dtype vis_dtype = vis_data.dtype();
-    const bool vis_is_c128 = vis_dtype.is(py::dtype::of<cdbl>());
-    const bool vis_is_c64 = vis_dtype.is(py::dtype::of<cflt>());
+    const bool vis_is_c128 = vis_dtype.equal(py::dtype::of<cdbl>());
+    const bool vis_is_c64 = vis_dtype.equal(py::dtype::of<cflt>());
     if (!vis_is_c128 && !vis_is_c64)
         throw std::runtime_error(
             "vis_data must be complex64 or complex128 (no implicit conversion is performed; the "
@@ -338,13 +338,13 @@ void dft_predict_bind(
             run(model_tag, cflt{});
         }
     };
-    if (model_dtype.is(py::dtype::of<double>())) {
+    if (model_dtype.equal(py::dtype::of<double>())) {
         dispatch_vis(double{});
-    } else if (model_dtype.is(py::dtype::of<float>())) {
+    } else if (model_dtype.equal(py::dtype::of<float>())) {
         dispatch_vis(float{});
-    } else if (model_dtype.is(py::dtype::of<cdbl>())) {
+    } else if (model_dtype.equal(py::dtype::of<cdbl>())) {
         dispatch_vis(cdbl{});
-    } else if (model_dtype.is(py::dtype::of<cflt>())) {
+    } else if (model_dtype.equal(py::dtype::of<cflt>())) {
         dispatch_vis(cflt{});
     } else {
         throw std::runtime_error(

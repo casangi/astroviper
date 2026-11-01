@@ -8,8 +8,10 @@ Coverage:
     visibility) and the normalization (sum of the weights of the samples imaged)
   * accumulation over calls; the NaN-skip contract of the prediction
   * results independent of the thread count (bit for bit) and repeatable
-  * binding input validation
+  * binding input validation; unpickled arrays (Dask) are taken in place
 """
+
+import pickle
 
 import numpy as np
 import pytest
@@ -453,3 +455,26 @@ def test_binding_validation():
         dft_predict(image.real.astype(np.int32), vis, *_predict_args(inp))
     with pytest.raises(RuntimeError, match="image must be float32 or float64"):
         dft_image_uv_sampling(image, normalization, *_uv_sampling_args(inp))
+
+
+@pytest.mark.parametrize("dtype", [np.complex128, np.complex64, np.float64, np.float32])
+def test_pickled_arrays_are_accepted_in_place(dtype):
+    """Dask serialization unpickles arrays with an equal dtype that is not the
+    same object; the bindings take them and write them in place."""
+    inp = _inputs(seed=13)
+    image, normalization = _empty(inp, dtype=dtype)
+    image, normalization, args = pickle.loads(
+        pickle.dumps((image, normalization, _image_args(inp)))
+    )
+    image_ptr = image.__array_interface__["data"][0]
+    dft_image(image, normalization, *args)
+    assert image.__array_interface__["data"][0] == image_ptr
+    assert np.any(image != 0) and np.all(normalization > 0)
+
+    vis_dtype = np.complex64 if dtype in (np.complex64, np.float32) else np.complex128
+    vis = np.zeros(inp["vis_data"].shape, dtype=vis_dtype)
+    model, vis, args = pickle.loads(pickle.dumps((image, vis, _predict_args(inp))))
+    vis_ptr = vis.__array_interface__["data"][0]
+    dft_predict(model, vis, *args)
+    assert vis.__array_interface__["data"][0] == vis_ptr
+    assert np.any(vis != 0)
