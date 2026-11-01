@@ -27,6 +27,9 @@ import astroviper.distributed_applications as distributed_applications
 from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
     LINEAR_CORR_TO_STOKES,
 )
+from astroviper.processing_functions.imaging.direct_fourier_transform import (
+    make_dft_visibility_model_single_field,
+)
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     make_gridding_kernel,
 )
@@ -34,6 +37,7 @@ from astroviper.processing_functions.imaging.make_point_spread_function import (
     make_subtraction_point_spread_function_single_field,
 )
 from astroviper.processing_functions.imaging.residual_update import (
+    calculate_residual_visibilities,
     imaging_setup_single_field,
     residual_update_cube_single_field,
 )
@@ -392,3 +396,40 @@ def test_refused_kernel_keys_with_the_dft(simulated):
     for extra in ({"support": 7}, {"oversampling": 100}, {"interpolation": "linear"}):
         with pytest.raises(ValueError, match="do not apply to the type 'dft'"):
             _image(store, "small_100GHz", {**DFT, **extra})
+
+
+@pytest.mark.parametrize(
+    "model_group", [None, {"correlated_data": "VISIBILITY"}], ids=["absent", "stale"]
+)
+def test_the_prediction_into_an_existing_output_is_subtracted(model_group):
+    """An existing VISIBILITY_MODEL is named by the model group the residual reads."""
+    data_groups = {"base": {"correlated_data": "VISIBILITY", "uvw": "UVW"}}
+    if model_group is not None:
+        data_groups["model"] = model_group
+    dims = ("time", "baseline_id", "frequency", "polarization")
+    ms_xds = xr.Dataset(
+        {
+            "VISIBILITY": (dims, np.ones((1, 2, 1, 1), np.complex128)),
+            "VISIBILITY_MODEL": (dims, np.zeros((1, 2, 1, 1), np.complex128)),
+            "UVW": (("time", "baseline_id", "uvw_label"), np.full((1, 2, 3), 10.0)),
+        },
+        coords={"frequency": [1e9], "polarization": ["XX"]},
+        attrs={"data_groups": data_groups},
+    )
+    img_xds = xr.Dataset(
+        {
+            "SKY_MODEL": (
+                ("time", "frequency", "polarization", "l", "m"),
+                np.full((1, 1, 1, 1, 1), 0.25),
+            )
+        },
+        coords={"frequency": [1e9], "polarization": ["XX"], "l": [0.0], "m": [0.0]},
+        attrs={"data_groups": {"model": {"sky": "SKY_MODEL"}}},
+    )
+    ps_xdt = xr.DataTree.from_dict({"ms": ms_xds})
+    make_dft_visibility_model_single_field(ps_xdt, img_xds)
+    calculate_residual_visibilities(ps_xdt, ms_data_group_in_observed="base")
+    # a model pixel at the phase centre predicts its flux on every baseline
+    np.testing.assert_allclose(
+        ps_xdt["ms"]["VISIBILITY_RESIDUAL"].values, 0.75, rtol=0, atol=1e-15
+    )

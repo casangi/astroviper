@@ -52,9 +52,10 @@ namespace direct_fourier_transform {
  * image (the imaging transform).
  *
  * For every sample k = (i_time, i_baseline, i_chan, i_pol) whose u, v and w
- * are finite and whose weighted visibility weight * vis is neither NaN nor
- * zero (the samples the gridder grids, except that the gridder, which checks
- * u and v only, also grids a sample whose w alone is not finite):
+ * are finite, whose weight is not zero and whose weighted visibility
+ * weight * vis is not NaN (the samples the gridder grids, except that the
+ * gridder, which checks u and v only, also grids a sample whose w alone is
+ * not finite, and skips a zero visibility with its weight):
  *
  *     image[a_time, a_chan, a_pol, i, j] +=
  *         n_ij weight_k vis_k exp(-2 pi i phase_k(l_i, m_j))
