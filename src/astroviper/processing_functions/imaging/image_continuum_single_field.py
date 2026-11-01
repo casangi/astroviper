@@ -2039,12 +2039,13 @@ def residual_update_continuum_single_field(
         threaded across planes) cleans Taylor term zero only. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
-        (``asp_scale_significance``) needs a ``clean_mask`` that leaves part of
-        the primary-beam support outside it: Asp measures the noise on the
-        pixels outside its mask, and MVC sets the residual to 0 outside that
-        support. Without a clean mask the test measures no noise, or after
-        the residual-shaped components only their sidelobes there (a warning is
-        logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
+        pixels of the primary-beam support outside it than the image has
+        outside that support: Asp takes the noise from the median absolute
+        deviation of the pixels outside its mask, and MVC sets the residual to
+        0 outside the support. Without a clean mask that noise is 0, or after
+        the residual-shaped components that of their sidelobes there (a warning
+        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
         synthesis) cleans the Taylor terms together and needs
         ``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``
         it falls back to ``"hogbom"`` with a warning. Other values are refused
@@ -2933,12 +2934,13 @@ def model_update_mtmfs_single_field(
         threaded across planes) cleans Taylor term zero only. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
-        (``asp_scale_significance``) needs a ``clean_mask`` that leaves part of
-        the primary-beam support outside it: Asp measures the noise on the
-        pixels outside its mask, and MVC sets the residual to 0 outside that
-        support. Without a clean mask the test measures no noise, or after
-        the residual-shaped components only their sidelobes there (a warning is
-        logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
+        pixels of the primary-beam support outside it than the image has
+        outside that support: Asp takes the noise from the median absolute
+        deviation of the pixels outside its mask, and MVC sets the residual to
+        0 outside the support. Without a clean mask that noise is 0, or after
+        the residual-shaped components that of their sidelobes there (a warning
+        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
         synthesis) cleans the Taylor terms together and needs
         ``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``
         it falls back to ``"hogbom"`` with a warning. Other values are refused
