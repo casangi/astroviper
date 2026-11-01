@@ -34,9 +34,10 @@ kernel's error only where ``1 - n`` is far below it.
 
 The samples, the weights, the correlations, the frequency mapping and the
 output variables are those of the gridder path; unlike the gridder, no
-sample is dropped for lying beyond the uv grid, as there is none, and a
-sample whose ``w`` alone is not finite is dropped. The normalization
-(``VISIBILITY_NORMALIZATION``, ``UV_SAMPLING_NORMALIZATION``) is the sum of
+sample is dropped for lying beyond the uv grid, as there is none, or for a
+zero visibility, and a sample whose ``w`` alone is not finite is dropped.
+The normalization (``VISIBILITY_NORMALIZATION``,
+``UV_SAMPLING_NORMALIZATION``) is the sum of
 the imaging weights of the samples imaged, per image plane, where the
 gridder's is that sum times the kernel's stencil sums. No uv grid is made,
 so the image data groups get no ``visibility`` or ``uv_sampling`` role.
@@ -175,12 +176,12 @@ def add_dft_image_single_field(
     and
     :func:`~astroviper.processing_functions.imaging.make_point_spread_function.add_uv_sampling_grid_single_field`.
 
-    A sample is imaged when its uvw is finite and, for the visibilities, its
-    weighted visibility ``W V`` is neither NaN nor zero, for the uv sampling
-    its weight neither NaN nor zero (flagged samples carry NaN imaging
+    A sample is imaged when its uvw is finite, its weight is not zero and,
+    for the visibilities, its weighted visibility ``W V`` is not NaN, for the
+    uv sampling its weight not NaN (flagged samples carry NaN imaging
     weights): the samples the gridder grids, except that the gridder, which
     checks ``u`` and ``v`` only, also grids a sample whose ``w`` alone is not
-    finite.
+    finite, and skips a zero visibility with its weight.
 
     Parameters
     ----------

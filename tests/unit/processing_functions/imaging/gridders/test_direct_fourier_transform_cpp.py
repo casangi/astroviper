@@ -4,8 +4,9 @@ Coverage:
   * cos(2 pi t), sin(2 pi t) of the kernels against NumPy, special angles exact
   * dft_image, dft_image_uv_sampling and dft_predict against a NumPy evaluation of
     their definitions (w term and 1/n included), every output dtype
-  * the samples skipped (non-finite uvw, NaN or zero weight, zero weighted
-    visibility) and the normalization (sum of the weights of the samples imaged)
+  * the samples skipped (non-finite uvw, NaN or zero weight, NaN visibility)
+    and the normalization (sum of the weights of the samples imaged, zero
+    visibilities included)
   * accumulation over calls; the NaN-skip contract of the prediction
   * results independent of the thread count (bit for bit) and repeatable
   * binding input validation; unpickled arrays (Dask) are taken in place
@@ -99,7 +100,7 @@ def _reference_image(inp, m_time, m_chan, m_pol, uv_sampling=False):
                     value = (
                         weight if uv_sampling else inp["vis_data"][t, b, c, p] * weight
                     )
-                    if np.isnan(value) or value == 0:
+                    if np.isnan(value) or weight == 0:
                         continue
                     plane = (
                         inp["time_map"][t],
@@ -274,13 +275,13 @@ def test_dft_image_uv_sampling_matches_the_definition(dtype):
 
 
 def test_skipped_samples_and_normalization():
-    """Non-finite uvw, NaN / zero weight and zero weighted visibility count nowhere."""
+    """Non-finite uvw, NaN / zero weight and NaN visibility count nowhere."""
     inp = _inputs(seed=2)
     inp["uvw"][0, 3, 2] = np.nan  # a w of NaN drops the whole row
     inp["uvw"][2, 8, 0] = np.inf  # as does any non-finite u, v or w
     inp["weight"][1, 4, 0, 1] = np.nan  # flagged
     inp["weight"][1, 5, 1, :] = 0.0
-    inp["vis_data"][2, 6, 0, 2] = 0.0  # weighted visibility zero: as the gridder
+    inp["vis_data"][2, 6, 0, 2] = 0.0  # imaged: its weight normalises
     inp["vis_data"][2, 7, 1, 3] = np.nan
     image, normalization = _empty(inp)
     dft_image(image, normalization, *_image_args(inp))
@@ -289,13 +290,25 @@ def test_skipped_samples_and_normalization():
     scale = np.nansum(np.abs(inp["vis_data"] * inp["weight"]))
     assert np.max(np.abs(image - expected)) < 1e-13 * scale
     np.testing.assert_allclose(normalization, expected_norm, rtol=1e-14)
-    valid = np.isfinite(inp["vis_data"] * inp["weight"]) & (
-        inp["vis_data"] * inp["weight"] != 0
-    )
+    valid = np.isfinite(inp["vis_data"] * inp["weight"]) & (inp["weight"] != 0)
     valid &= np.all(np.isfinite(inp["uvw"]), axis=-1)[..., None, None]
     np.testing.assert_allclose(
         normalization[0], np.where(valid, inp["weight"], 0).sum(axis=(0, 1)), rtol=1e-14
     )
+
+
+def test_zero_visibility_counts_in_the_normalization():
+    """V = [2, 0], w = [1, 1]: the phase centre is (2 + 0) / (1 + 1) = 1, and the
+    normalization is that of the point spread function."""
+    inp = _inputs(n_time=1, n_baseline=2, n_vis_chan=1, n_pol=1, n_l=1, n_m=1)
+    inp["vis_data"][0, :, 0, 0] = [2.0, 0.0]
+    inp["weight"][:] = 1.0
+    image, normalization = _empty(inp, m_chan=1)
+    dft_image(image, normalization, *_image_args(inp))
+    psf, psf_normalization = _empty(inp, m_chan=1, dtype=np.float64)
+    dft_image_uv_sampling(psf, psf_normalization, *_uv_sampling_args(inp))
+    np.testing.assert_array_equal(normalization, psf_normalization)
+    np.testing.assert_array_equal(image / normalization[..., None, None], 1.0)
 
 
 def test_calls_accumulate():

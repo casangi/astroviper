@@ -244,13 +244,13 @@ PlaneSamples collect_samples(
     for (std::int64_t c = 0; c < n_vis_chan; ++c) scale[c] = frequency_coord[c] / kSpeedOfLight;
 
     // weighted value of one polarization of a sample; false if the sample is
-    // skipped (as the gridders skip it)
+    // skipped: a NaN value or a zero weight (a zero visibility is imaged)
     auto sample_value = [&](std::int64_t index, double* out) -> bool {
         const double sample_weight = weight[index];
         if constexpr (NComponents == 2) {
             const std::complex<double> weighted = vis_data[index] * sample_weight;
             if (std::isnan(weighted.real()) || std::isnan(weighted.imag())) return false;
-            if (weighted == std::complex<double>(0.0, 0.0)) return false;
+            if (sample_weight == 0.0) return false;
             out[0] = weighted.real();
             out[1] = weighted.imag();
         } else {
