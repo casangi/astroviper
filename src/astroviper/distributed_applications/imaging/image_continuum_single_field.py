@@ -2597,7 +2597,8 @@ def _warn_on_mvc_asp_significance_without_clean_mask(
     Asp measures the noise of its significance test (``asp_scale_significance``,
     default ``True``) on the pixels outside its mask. Without a clean mask
     these lie outside the primary-beam support, where MVC sets the residual to
-    0, so the test cleans nothing below ``threshold_per_cycle``.
+    0, so the test measures no noise, or after the residual-shaped components
+    only their sidelobes there.
     """
     import toolviper.utils.logger as logger
 
@@ -2611,8 +2612,10 @@ def _warn_on_mvc_asp_significance_without_clean_mask(
             "continuum_mode='mvc' with deconvolver='asp' and "
             "asp_scale_significance=True but no clean_mask: MVC sets the "
             "residual to 0 outside the primary-beam support, where Asp then "
-            "measures the noise of its significance test, so that test cleans "
-            "nothing below threshold_per_cycle. Give a clean_mask to use it."
+            "measures the noise of its significance test, so that test measures "
+            "no noise, or after the residual-shaped components only their "
+            "sidelobes. Give a clean_mask that leaves part of the primary-beam "
+            "support outside it."
         )
 
 
@@ -2877,7 +2880,8 @@ def image_continuum_single_field(
     Högbom does and requires ``image_params["n_taylor_terms"] = 1``; with
     more Taylor terms it raises ``ValueError`` before anything is written.
     In MVC the significance test of Asp (``asp_scale_significance``) needs a
-    ``clean_mask`` (see ``deconvolver``). All verify refreshed residuals
+    ``clean_mask`` that leaves part of the primary-beam support outside it
+    (see ``deconvolver``). All verify refreshed residuals
     before finalization. With one Taylor term, an MT-MFS request emits a
     warning and falls back to Högbom. Restoration is optional.
     ``cycle_acceleration`` optionally replaces each model increment by a
@@ -3031,11 +3035,12 @@ def image_continuum_single_field(
         threaded across planes) cleans Taylor term zero only. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
-        (``asp_scale_significance``) needs an explicit ``clean_mask``: Asp
-        measures the noise on the pixels outside its mask, which without a
-        clean mask lie outside the primary-beam support, where MVC sets the
-        residual to 0, so the test cleans nothing below ``threshold_per_cycle``
-        (a warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        (``asp_scale_significance``) needs a ``clean_mask`` that leaves part of
+        the primary-beam support outside it: Asp measures the noise on the
+        pixels outside its mask, and MVC sets the residual to 0 outside that
+        support. Without a clean mask the test measures no noise, or after
+        the residual-shaped components only their sidelobes there (a warning is
+        logged). ``"mtmfs"`` (C++, multi-term multi-frequency
         synthesis) cleans the Taylor terms together and needs
         ``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``
         it falls back to ``"hogbom"`` with a warning. Other values are refused
@@ -3393,10 +3398,11 @@ def image_continuum_single_field(
         the bool plane loaded from it
         (:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values
         greater than 0.5) for the layers below. It selects the pixels of every
-        residual plane that the model update cleans, in place of the
-        primary-beam mask of ``primary_beam_limit``; Asp measures the noise of
-        its significance test (``asp_scale_significance``) outside it.
-        ``None`` keeps the primary-beam mask.
+        residual plane that the model update cleans: in cube imaging in place
+        of the primary-beam mask of ``primary_beam_limit``, in continuum
+        imaging within it. Asp measures the noise of its significance test
+        (``asp_scale_significance``) outside the pixels it cleans. ``None``
+        keeps the primary-beam mask.
     image_sharding : dict, optional
         Reserved for a future node-task finalization path. Continuum imaging
         currently raises ``NotImplementedError`` when this is supplied rather
@@ -3493,10 +3499,17 @@ def image_continuum_single_field(
         the data of the component tests with the same settings (``threshold``
         5 mJy, ``max_iter`` 10000), Högbom needed 6 imaging cycles with
         ``"none"``, 7 with the conjugate gradient and 5 with momentum, and
-        MT-MFS 4, 8 and 6, with 654, 829 and 488 deconvolver iterations.
+        MT-MFS 4, 8 and 6, with 654, 829 and 488 deconvolver iterations. All
+        these measurements grid with CASA's kernel
+        (``gridding_kernel_params={"type": "prolate_spheroidal_casa"}``).
         Neither needs an extra residual update; the conjugate gradient keeps
         three Taylor stacks between cycles and momentum one. Applies to MFS and
-        MVC, Högbom and MT-MFS.
+        MVC, Högbom, Asp and MT-MFS. With Asp (one Taylor term), on the data of
+        the component tests with ``max_iter_per_cycle=10`` and CASA's kernel,
+        neither option helped: with ``threshold`` 0.02 the conjugate gradient took the same 8
+        imaging cycles as ``"none"`` and momentum left planes at
+        ``max_cycles=12``, and after 4 imaging cycles their residual RMS was
+        1.81 and 1.70 times that of ``"none"``.
 
     momentum_coefficient : float, optional
         Cap ``mu`` of the momentum coefficient
