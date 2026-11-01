@@ -622,4 +622,27 @@ IMAGING_PARAM_DOCS = {
         '``"slice"`` into the full output array (for cube imaging the\n'
         "parallel dim is ``frequency``)."
     ),
+    "residual": (
+        "Residual ``r`` before the model update, with dimensions including\n"
+        "``l`` and ``m`` and optionally ``taylor_term``."
+    ),
+    "model_increment": (
+        "Model increment ``z`` of the model update, which started from an\nempty model."
+    ),
+    "cycle_acceleration_state_xds": (
+        "State returned by the preceding call, or ``None`` in the first\nimaging cycle."
+    ),
+    "momentum_coefficient": (
+        "Cap ``mu`` of the momentum coefficient\n"
+        "``mu_j = min(mu, (j - 1) / (j + 2))`` in\n"
+        '``cycle_acceleration="nesterov_momentum"``, with ``j`` the imaging\n'
+        "cycles since a plane's last start or restart; in ``[0, 1)``. 0 gives\n"
+        "the plain imaging cycle. Default 0.5, the constant coefficient of\n"
+        "Müller, Hsieh and Bhatnagar (2026), which the ramp reaches at ``j = 4``.\n"
+        "A higher cap acts only on planes that run longer without a restart\n"
+        "(0.9 at ``j = 28``). On simulated data with shallow MT-MFS model\n"
+        "updates, caps of 0.7 and 0.9 needed 18 imaging cycles, 0.5 needed 22\n"
+        'and ``"none"`` 33; the paper found models oscillating with constant\n'
+        "coefficients of 0.7 to 0.9."
+    ),
 }

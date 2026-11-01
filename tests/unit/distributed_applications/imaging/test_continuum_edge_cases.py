@@ -7,6 +7,8 @@ import xarray as xr
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _resolve_continuum_deconvolver,
     _resolve_continuum_taylor_expansion,
+    _validate_cycle_acceleration,
+    _warn_on_disabled_momentum,
     combine_continuum_imaging_weight_chunks,
     combine_continuum_weight_density_chunks,
     image_continuum_single_field,
@@ -148,6 +150,93 @@ def test_taylor_expansion_is_resolved_to_python_scalars(n_taylor_terms, keys):
 def test_taylor_expansion_rejects_invalid_values(params, error, message):
     with pytest.raises(error, match=message):
         _resolve_continuum_taylor_expansion(params)
+
+
+@pytest.mark.parametrize(
+    "cycle_acceleration", ["none", "conjugate_gradient", "nesterov_momentum"]
+)
+@pytest.mark.parametrize("momentum_coefficient", [0, 0.5, 0.99])
+def test_public_api_accepts_cycle_accelerations(
+    cycle_acceleration, momentum_coefficient
+):
+    _validate_cycle_acceleration(cycle_acceleration, momentum_coefficient)
+
+
+@pytest.mark.parametrize("cycle_acceleration", ["cg", "CG", None, ""])
+def test_public_api_rejects_unknown_cycle_accelerations(cycle_acceleration):
+    with pytest.raises(ValueError, match="cycle_acceleration must be"):
+        _validate_cycle_acceleration(cycle_acceleration, 0.5)
+
+
+@pytest.mark.parametrize(
+    "momentum_coefficient", [-0.1, 1, 1.5, np.nan, np.inf, True, "0.5"]
+)
+def test_public_api_rejects_invalid_momentum_coefficients(momentum_coefficient):
+    with pytest.raises(ValueError, match=r"momentum_coefficient must be .* \[0, 1\)"):
+        _validate_cycle_acceleration("nesterov_momentum", momentum_coefficient)
+
+
+def test_driver_warns_when_momentum_switches_off_on_further_planes(monkeypatch):
+    import toolviper.utils.logger as logger
+
+    messages = []
+    monkeypatch.setattr(logger, "warning", messages.append)
+
+    def state(disabled):
+        return xr.Dataset(
+            {"MOMENTUM_DISABLED": (("time", "polarization"), [disabled])},
+            coords={"polarization": ["I", "Q"]},
+        )
+
+    conjugate_gradient_state = xr.Dataset(
+        {"SKY_MODEL_DIRECTION": (("time", "polarization"), [[1.0, 1.0]])}
+    )
+    for previous, current in [
+        (None, None),
+        (None, conjugate_gradient_state),
+        (None, state([False, False])),
+        (state([False, False]), state([False, True])),
+        (state([False, True]), state([False, True])),
+    ]:
+        _warn_on_disabled_momentum(previous, current)
+    assert len(messages) == 1
+    assert "[(0, 'Q')]" in messages[0]
+    assert messages[0].endswith(
+        "Any later model increment of these planes is added without momentum."
+    )
+
+
+@pytest.mark.parametrize(
+    "options,error,message",
+    [
+        ({"cycle_acceleration": "bogus"}, AssertionError, None),
+        (
+            {"cycle_acceleration": "nesterov_momentum", "momentum_coefficient": 1.0},
+            ValueError,
+            "momentum_coefficient must be",
+        ),
+        (
+            {"cycle_acceleration": "nesterov_momentum", "momentum_coefficient": np.nan},
+            ValueError,
+            "momentum_coefficient must be",
+        ),
+    ],
+)
+def test_public_api_rejects_invalid_cycle_acceleration_options(
+    tmp_path, options, error, message
+):
+    """The schema rejects unknown values; only the driver's own validation
+    rejects coefficients of 1 and NaN."""
+    with pytest.raises(error, match=message):
+        image_continuum_single_field(
+            ps_store=str(tmp_path / "input.ps.zarr"),
+            image_store=str(tmp_path / "output.img.zarr"),
+            image_params={"n_taylor_terms": 1},
+            imaging_weights_params={},
+            cycle_control_params={},
+            **options,
+        )
+    assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize(
