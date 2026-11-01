@@ -4,8 +4,8 @@ Ten VLA D-configuration antennas, six times and four channels over 20 % of
 the band observe three point sources with spectral indices and one Gaussian.
 Every ``"none"`` run is the baseline of both accelerations. Comparisons are
 asserted only where the measured margin is large; the numbers in the test
-docstrings were measured on this data. The whole file took 58 s with a peak
-RSS of 0.40 GiB.
+docstrings were measured on this data with CASA's kernel, which every run
+grids with. The whole file took 58 s with a peak RSS of 0.40 GiB.
 """
 
 import importlib
@@ -170,6 +170,7 @@ def run(simulated_store, tmp_path_factory):
                 processing_function_threads=1,
                 n_mapping_parallelism={"frequency": 2},
                 overwrite=True,
+                gridding_kernel_params={"type": "prolate_spheroidal_casa"},
                 cycle_acceleration=cycle_acceleration,
                 momentum_coefficient=momentum_coefficient,
             )

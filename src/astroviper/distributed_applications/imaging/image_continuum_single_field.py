@@ -3489,7 +3489,9 @@ def image_continuum_single_field(
         the data of the component tests with the same settings (``threshold``
         5 mJy, ``max_iter`` 10000), Högbom needed 6 imaging cycles with
         ``"none"``, 7 with the conjugate gradient and 5 with momentum, and
-        MT-MFS 4, 8 and 6, with 654, 829 and 488 deconvolver iterations.
+        MT-MFS 4, 8 and 6, with 654, 829 and 488 deconvolver iterations. All
+        these measurements grid with CASA's kernel
+        (``gridding_kernel_params={"type": "prolate_spheroidal_casa"}``).
         Neither needs an extra residual update; the conjugate gradient keeps
         three Taylor stacks between cycles and momentum one. Applies to MFS and
         MVC, Högbom and MT-MFS.
