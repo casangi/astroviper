@@ -2877,6 +2877,125 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
     return model_xds, model_uv_xds
 
 
+def _stop_codes_after_model_update(controller, deconvolution):
+    """Imaging stop codes of the residual each plane's model update ended with.
+
+    The cycle controller decides on the residual of the next residual update
+    and only books a model update (``record_model_update``), so after the
+    model update its ``stop_code_imaging`` still holds the codes of the check
+    before it. The plain-step planes are chosen before the next residual
+    exists, so the controller's stop test is made, on a copy, on the
+    deconvolver's own residual: the latest ``peakres`` and ``masksum`` in
+    ``deconvolution``, with the budgets and the no progress and divergence
+    runs the model update has booked. The entropy is not followed, as that
+    test belongs to the residual of a residual update. Neither ``controller``
+    nor ``deconvolution`` changes. Returns a ``(time, polarization)`` array.
+    """
+    import copy
+
+    probe = copy.deepcopy(controller)
+    probe.entropy_stop = False
+    probe.check_convergence(copy.deepcopy(deconvolution))
+    return probe.stop_code_imaging[:, 0, :]
+
+
+def _accelerate_continuum_model_increment(
+    model_increment_xds,
+    residual_before_model_update,
+    controller,
+    deconvolution,
+    input_params,
+):
+    """Replace the model increment by the accelerated model step.
+
+    The plain increment is taken where the controller's stop test, made on
+    the residual the model update ended with
+    (:func:`_stop_codes_after_model_update`), would stop a plane: by the
+    conjugate gradient on planes whose residual is below the global
+    threshold (within ``threshold_tolerance``), by Nesterov momentum on every
+    plane with a stop code. Both take it on planes whose residual entropy
+    the entropy stop follows. Returns the image dataset with the step as
+    ``SKY_MODEL`` and the acceleration state for the next imaging cycle.
+    """
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.cycle_acceleration import (
+        conjugate_gradient_model_step,
+        nesterov_momentum_model_step,
+    )
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        IMAGING_CONTINUE,
+        IMAGING_THRESHOLD,
+    )
+
+    stop_codes = xr.DataArray(
+        _stop_codes_after_model_update(controller, deconvolution),
+        dims=("time", "polarization"),
+    )
+    entropy_followed = np.isfinite(controller.max_entropy[:, 0, :])
+    state_xds = input_params.get("cycle_acceleration_state_xds")
+    if input_params["cycle_acceleration"] == "conjugate_gradient":
+        residual_name = model_increment_xds.attrs["data_groups"][
+            input_params.get("image_data_group_in_name", "residual")
+        ]["sky"]
+        model_step, state_xds = conjugate_gradient_model_step(
+            residual_before_model_update,
+            model_increment_xds[residual_name],
+            model_increment_xds["SKY_MODEL"],
+            plain_step_planes=(stop_codes == IMAGING_THRESHOLD) | entropy_followed,
+            cycle_acceleration_state_xds=state_xds,
+        )
+    else:
+        model_step, state_xds = nesterov_momentum_model_step(
+            residual_before_model_update,
+            model_increment_xds["SKY_MODEL"],
+            plain_step_planes=(stop_codes != IMAGING_CONTINUE) | entropy_followed,
+            cycle_acceleration_state_xds=state_xds,
+            momentum_coefficient=input_params["momentum_coefficient"],
+        )
+    return model_increment_xds.assign(SKY_MODEL=model_step), state_xds
+
+
+def _book_accelerated_model_flux(deconvolve_dict, model_step):
+    """Book the flux of the accelerated model step in the convergence record.
+
+    The model update books ``model_flux`` as the flux of the previous model
+    plus that of its increment (:func:`_add_previous_continuum_model_flux`).
+    The acceleration adds another step to the model instead, so the latest
+    ``model_flux`` of each plane is set to its latest ``start_model_flux``
+    plus the Taylor-term-zero flux of ``model_step``: the flux of the model
+    the next model update starts from. Every plane of a model update has an
+    entry in ``deconvolve_dict``; entries without both fluxes are left as
+    they are.
+    """
+    import numpy as np
+
+    if "taylor_term" in model_step.dims:
+        model_step = model_step.isel(taylor_term=0, drop=True)
+    step_flux = np.sum(
+        model_step.transpose("time", "polarization", "l", "m").values,
+        axis=(-2, -1),
+    )
+
+    for key, fields in deconvolve_dict.data.items():
+        model_flux = fields.get("model_flux")
+        start_model_flux = fields.get("start_model_flux")
+        if model_flux is None or start_model_flux is None:
+            continue
+        model_flux = model_flux if isinstance(model_flux, list) else [model_flux]
+        start_model_flux = (
+            start_model_flux
+            if isinstance(start_model_flux, list)
+            else [start_model_flux]
+        )
+        if not model_flux or not start_model_flux:
+            continue
+        fields["model_flux"] = model_flux[:-1] + [
+            float(start_model_flux[-1]) + float(step_flux[key.time, key.pol])
+        ]
+
+
 def _add_previous_continuum_model_flux(deconvolve_dict, previous_model_xds):
     """Convert per-cycle continuum model increments to cumulative diagnostics."""
     if previous_model_xds is None:
@@ -3059,6 +3178,14 @@ def continuum_cycle_append_node(
     are returned to the distributed application as state objects. The application
     forwards them to the next graph without performing numerical model operations.
 
+    With ``input_params["cycle_acceleration"]`` set to ``"conjugate_gradient"`` or
+    ``"nesterov_momentum"``, the model increment is replaced by the accelerated
+    model step before accumulation, and the latest ``model_flux`` of each plane
+    in the convergence record is the flux of the model after that step. The
+    state of that acceleration is read from
+    ``input_params["cycle_acceleration_state_xds"]`` and returned as
+    ``"cycle_acceleration_state_xds"`` in the same way.
+
     This node performs no distributed processing. It operates on the single,
     globally reduced continuum dataset produced by the GraphViper reduce stage.
 
@@ -3145,11 +3272,41 @@ def continuum_cycle_append_node(
         "weight_datasets",
     )
 
+    cycle_acceleration = input_params.get("cycle_acceleration", "none")
+    if cycle_acceleration != "none":
+        start = time.time()
+        residual_name = img_xds.attrs["data_groups"][
+            input_params.get("image_data_group_in_name", "residual")
+        ]["sky"]
+        # The model update can overwrite the residual in place.
+        residual_before_model_update = img_xds[residual_name].copy(deep=True)
+        T_cycle_acceleration = time.time() - start
+
     # Run the model update.
     return_dict = model_update_continuum_single_field(
         input_data,
         model_update_input_params,
     )
+
+    model_increment_xds = return_dict["image"]
+    if cycle_acceleration != "none":
+        start = time.time()
+        if not return_dict.get("residual_converged", False):
+            model_increment_xds, return_dict["cycle_acceleration_state_xds"] = (
+                _accelerate_continuum_model_increment(
+                    model_increment_xds,
+                    residual_before_model_update,
+                    return_dict["controller"],
+                    return_dict["deconvolution"],
+                    input_params,
+                )
+            )
+            if return_dict.get("deconvolution") is not None:
+                _book_accelerated_model_flux(
+                    return_dict["deconvolution"], model_increment_xds["SKY_MODEL"]
+                )
+        del residual_before_model_update
+        T_cycle_acceleration += time.time() - start
 
     # The append stage owns all numerical state preparation needed by the next
     # residual-update graph. The distributed application only forwards these
@@ -3160,7 +3317,7 @@ def continuum_cycle_append_node(
         model_uv_xds = input_params.get("model_uv_xds")
     else:
         model_xds, model_uv_xds = _prepare_post_update_continuum_model_state(
-            return_dict["image"],
+            model_increment_xds,
             input_params,
         )
     T_prepare_model_state = time.time() - start
@@ -3171,6 +3328,8 @@ def continuum_cycle_append_node(
     timing_model_update = return_dict.get("timing_model_update")
     if timing_model_update is not None:
         timing_model_update["T_prepare_model_state"] = T_prepare_model_state
+        if cycle_acceleration != "none":
+            timing_model_update["T_cycle_acceleration"] = T_cycle_acceleration
 
     # model_update_continuum_single_field constructs its own return dictionary,
     # so explicitly carry the first-cycle imaging-weight cache through the
@@ -3389,6 +3548,10 @@ def model_update_continuum_single_field(
         ``image_data_group_out_name``
             Model image data-group name. Defaults to ``"model"``.
 
+        ``cycle_acceleration``
+            With ``"conjugate_gradient"``, Högbom writes its updated residual
+            back into the image. Defaults to ``"none"``.
+
     Returns
     -------
     dict
@@ -3567,6 +3730,9 @@ def model_update_continuum_single_field(
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
+        write_back_deconvolver_residual=(
+            input_params.get("cycle_acceleration", "none") == "conjugate_gradient"
+        ),
     )
     _add_previous_continuum_model_flux(
         deconvolve_dict,
