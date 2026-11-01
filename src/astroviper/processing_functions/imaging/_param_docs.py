@@ -108,12 +108,13 @@ _CONTINUUM_DECONVOLVER_DOC = (
     'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
     "(C++, adaptive scale pixel) cleans Taylor term zero only and needs\n"
     '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
-    "(``asp_scale_significance``) needs a ``clean_mask`` that leaves part of\n"
-    "the primary-beam support outside it: Asp measures the noise on the\n"
-    "pixels outside its mask, and MVC sets the residual to 0 outside that\n"
-    "support. Without a clean mask the test measures no noise, or after\n"
-    "the residual-shaped components only their sidelobes there (a warning is\n"
-    'logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
+    "(``asp_scale_significance``) needs a ``clean_mask`` that leaves more\n"
+    "pixels of the primary-beam support outside it than the image has\n"
+    "outside that support: Asp takes the noise from the median absolute\n"
+    "deviation of the pixels outside its mask, and MVC sets the residual to\n"
+    "0 outside the support. Without a clean mask that noise is 0, or after\n"
+    "the residual-shaped components that of their sidelobes there (a warning\n"
+    'is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
     "synthesis) cleans the Taylor terms together and needs\n"
     '``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``\n'
     'it falls back to ``"hogbom"`` with a warning. Other values are refused\n'

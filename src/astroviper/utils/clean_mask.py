@@ -48,8 +48,8 @@ def install_clean_mask(img_xds, clean_mask, image_data_group_name="residual"):
     """Install a 2-D CLEAN mask on every residual plane of an image.
 
     The mask is written to ``MASK`` with the dimensions of ``SKY_RESIDUAL`` and
-    registered as the ``mask`` of ``image_data_group_name``, where it takes the
-    place of the primary-beam mask.
+    registered as the ``mask`` of ``image_data_group_name``, where cube imaging
+    cleans it in place of the primary-beam mask and continuum imaging within it.
 
     Parameters
     ----------
