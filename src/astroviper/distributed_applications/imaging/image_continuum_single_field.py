@@ -2633,8 +2633,9 @@ def _warn_on_mvc_asp_significance_without_clean_mask(
             "residual to 0 outside the primary-beam support, where Asp then "
             "measures the noise of its significance test, so that test measures "
             "no noise, or after the residual-shaped components only their "
-            "sidelobes. Give a clean_mask that leaves part of the primary-beam "
-            "support outside it."
+            "sidelobes. Give a clean_mask that leaves more pixels of the "
+            "primary-beam support outside it than the image has outside that "
+            "support."
         )
 
 
@@ -2899,10 +2900,9 @@ def image_continuum_single_field(
     Högbom does and requires ``image_params["n_taylor_terms"] = 1``; with
     more Taylor terms it raises ``ValueError`` before anything is written.
     In MVC the significance test of Asp (``asp_scale_significance``) needs a
-    ``clean_mask`` that leaves part of the primary-beam support outside it
-    (see ``deconvolver``). All verify refreshed residuals
-    before finalization. With one Taylor term, an MT-MFS request emits a
-    warning and falls back to Högbom. Restoration is optional.
+    suitable ``clean_mask`` (see ``deconvolver``). All verify refreshed
+    residuals before finalization. With one Taylor term, an MT-MFS request
+    emits a warning and falls back to Högbom. Restoration is optional.
     ``cycle_acceleration`` optionally replaces each model increment by a
     conjugate gradient or Nesterov momentum step.
 
@@ -3044,12 +3044,13 @@ def image_continuum_single_field(
         threaded across planes) cleans Taylor term zero only. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
-        (``asp_scale_significance``) needs a ``clean_mask`` that leaves part of
-        the primary-beam support outside it: Asp measures the noise on the
-        pixels outside its mask, and MVC sets the residual to 0 outside that
-        support. Without a clean mask the test measures no noise, or after
-        the residual-shaped components only their sidelobes there (a warning is
-        logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
+        pixels of the primary-beam support outside it than the image has
+        outside that support: Asp takes the noise from the median absolute
+        deviation of the pixels outside its mask, and MVC sets the residual to
+        0 outside the support. Without a clean mask that noise is 0, or after
+        the residual-shaped components that of their sidelobes there (a warning
+        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
         synthesis) cleans the Taylor terms together and needs
         ``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``
         it falls back to ``"hogbom"`` with a warning. Other values are refused
@@ -3444,10 +3445,10 @@ def image_continuum_single_field(
         three Taylor stacks between cycles and momentum one. Applies to MFS and
         MVC, Högbom, Asp and MT-MFS. With Asp (one Taylor term), on the data of
         the component tests with ``max_iter_per_cycle=10``, neither option
-        helped: with ``threshold`` 0.02 the conjugate gradient took the same 8
-        imaging cycles as ``"none"`` and momentum left planes at
-        ``max_cycles=12``, and after 4 imaging cycles their residual RMS was
-        1.81 and 1.70 times that of ``"none"``.
+        helped: with ``threshold`` 20 mJy the conjugate gradient took the same
+        8 imaging cycles as ``"none"`` and momentum left Stokes I at
+        ``max_cycles=12`` (Q reached the threshold), and after 4 imaging
+        cycles their residual RMS was 1.81 and 1.70 times that of ``"none"``.
 
     momentum_coefficient : float, optional
         Cap ``mu`` of the momentum coefficient
