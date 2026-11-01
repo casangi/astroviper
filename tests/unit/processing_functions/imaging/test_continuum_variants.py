@@ -555,6 +555,89 @@ def test_native_mtmfs_divergence_test_stops_a_runaway(
     assert fields["peakres"][0] > fields["start_peakres"][0]
 
 
+def _hogbom_continuum_image():
+    """Two Taylor terms with a point source and a Gaussian PSF on 16 x 16 pixels."""
+    image = make_continuum_image(image_shape=(16, 16)).drop_vars("SKY_MODEL")
+    l, m = np.meshgrid(np.arange(16) - 8, np.arange(16) - 8, indexing="ij")
+    psf = np.exp(-(l**2 + m**2) / 4.0)
+    image["POINT_SPREAD_FUNCTION"] = image.POINT_SPREAD_FUNCTION.copy(
+        data=np.broadcast_to(psf, image.POINT_SPREAD_FUNCTION.shape).copy()
+    )
+    residual = np.stack([np.roll(psf, (2, -3), axis=(0, 1)), 0.5 * psf])
+    image["SKY_RESIDUAL"] = image.SKY_RESIDUAL.copy(data=residual[None, :, None])
+    image["PRIMARY_BEAM"] = image.PRIMARY_BEAM.expand_dims(frequency=[100.0], axis=1)
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (("time", "polarization"), [[0.2]])
+    return image
+
+
+@pytest.mark.parametrize(
+    "keywords", [{}, {"write_back_deconvolver_residual": True}], ids=["default", "on"]
+)
+def test_hogbom_writes_back_its_residual_only_on_request(monkeypatch, keywords):
+    """The adapter hands Högbom a view of Taylor term zero where the layout
+    allows, which Högbom then updates in place with or without the write-back.
+    The backend here detaches the residual first, as an adapter that copies
+    would, so that only the write-back can bring it back."""
+    from astroviper.processing_functions.imaging import model_update
+
+    image = _hogbom_continuum_image()
+    snapshot = image.SKY_RESIDUAL.copy(deep=True)
+    backend = model_update.model_update_cube_single_field
+    captured = {}
+
+    def capturing_backend(image_arg, *args, **kwargs):
+        image_arg["SKY_RESIDUAL"] = image_arg.SKY_RESIDUAL.copy(deep=True)
+        result = backend(image_arg, *args, **kwargs)
+        captured["residual"] = image_arg.SKY_RESIDUAL.isel(frequency=0, drop=True)
+        return result
+
+    monkeypatch.setattr(
+        model_update, "model_update_cube_single_field", capturing_backend
+    )
+    model_update_mtmfs_single_field(
+        image,
+        "hogbom",
+        {
+            "max_iter": 20,
+            "max_iter_per_cycle_updated": 20,
+            "threshold_per_cycle": 0.0,
+            "gain": 0.1,
+            "primary_beam_limit": 0.2,
+        },
+        **keywords,
+    )
+
+    cleaned = captured["residual"].astype(snapshot.dtype)
+    assert not np.array_equal(cleaned, snapshot.isel(taylor_term=0))
+    np.testing.assert_array_equal(
+        image.SKY_RESIDUAL.isel(taylor_term=0),
+        cleaned if keywords else snapshot.isel(taylor_term=0),
+    )
+    np.testing.assert_array_equal(
+        image.SKY_RESIDUAL.isel(taylor_term=1), snapshot.isel(taylor_term=1)
+    )
+
+
+def test_native_mtmfs_ignores_the_residual_write_back_flag():
+    images = []
+    for write_back in (False, True):
+        image, _ = _native_mtmfs_continuum_image(2, (8, 8), np.float64, "mask")
+        model_update_mtmfs_single_field(
+            image,
+            "mtmfs",
+            {
+                "max_iter": 1,
+                "max_iter_per_cycle_updated": np.ones((2, 1, 2), dtype=np.int64),
+                "threshold_per_cycle": np.zeros((2, 1, 2)),
+                "gain": 1.0,
+                "scales": [0.0],
+            },
+            write_back_deconvolver_residual=write_back,
+        )
+        images.append(image)
+    xr.testing.assert_identical(*images)
+
+
 def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):
     image = make_continuum_image().isel(
         taylor_term=slice(0, 1), psf_taylor_order=slice(0, 1)
@@ -744,17 +827,13 @@ def test_hogbom_adapter_canonicalizes_generated_primary_beam_mask(monkeypatch):
     model_update_mtmfs_single_field(image, "hogbom", {"max_iter": 1})
 
 
-@pytest.mark.parametrize("deconvolver", ["asp", "ASP", "aspclean", "asp_clean"])
 @pytest.mark.parametrize(
     "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
 )
-def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(
-    monkeypatch, asp_options, deconvolver
-):
+def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(monkeypatch, asp_options):
     """The adapter runs the cube Asp path on Taylor term zero of every
     (time, polarization) plane, with the per-plane limits, the divergence
-    limits of Asp and the Asp options, and copies the model back. The aliases
-    of ``"asp"`` take the same path."""
+    limits of Asp and the Asp options, and copies the model back."""
     import astroviper.processing_functions.imaging.deconvolution as deconvolution
 
     image, _, _ = make_single_term_continuum_image()
@@ -780,7 +859,7 @@ def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(
     monkeypatch.setattr(deconvolution.aspclean, "clean_cube", clean_cube)
     statistics, timing = model_update_mtmfs_single_field(
         image,
-        deconvolver,
+        "asp",
         {
             "max_iter": 10,
             "max_iter_per_cycle_updated": limits,
@@ -859,6 +938,92 @@ def test_asp_cleans_every_plane_of_taylor_term_zero(dtype, asp_options):
         np.testing.assert_allclose(
             model_flux[time, pol], scale[time, pol] * sky.sum(), rtol=0.1
         )
+
+
+def _assert_continuum_asp_is_cube_asp(continuum, params):
+    """Run continuum Asp on ``continuum`` (one Taylor term) and cube Asp on a
+    one-channel cube built here from its arrays; the models and residuals
+    must agree bit for bit."""
+    from astroviper.processing_functions.imaging.model_update import (
+        model_update_cube_single_field,
+    )
+
+    dims = ("time", "frequency", "polarization", "l", "m")
+    names = ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"]
+    names += ["CLEAN_MASK"] if "CLEAN_MASK" in continuum else []
+    group = dict(continuum.attrs["data_groups"]["residual"])
+    group["max_sidelobe_point_spread_function"] = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+    cube = xr.Dataset(
+        {name: (dims, continuum[name].values.copy()) for name in names},
+        coords={name: continuum.coords[name] for name in dims},
+        attrs={"data_groups": {"residual": group}},
+    )
+    cube["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+        dims[:3],
+        continuum.MAX_SIDELOBE_POINT_SPREAD_FUNCTION.values[:, None, :],
+    )
+
+    model_update_mtmfs_single_field(continuum, "asp", dict(params))
+    model_update_cube_single_field(cube, "asp", dict(params), model_exists=False)
+
+    assert continuum.SKY_MODEL.values.any()
+    np.testing.assert_array_equal(continuum.SKY_MODEL.values, cube.SKY_MODEL.values)
+    np.testing.assert_array_equal(
+        continuum.SKY_RESIDUAL.values, cube.SKY_RESIDUAL.values
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "asp_options", [True, False], ids=["asp_options_on", "asp_options_off"]
+)
+def test_continuum_asp_with_one_taylor_term_is_cube_asp_on_one_channel(
+    dtype, asp_options
+):
+    """Continuum Asp with one Taylor term and cube Asp on one channel give
+    the same model and residual. The PSF and the primary beam, and with
+    primary_beam_limit the mask, differ from plane to plane, so a plane taken
+    for another shows."""
+    continuum, _, _ = make_single_term_continuum_image(dtype)
+    nl, nm = continuum.sizes["l"], continuum.sizes["m"]
+    yy, xx = np.indices((nl, nm))
+    r2 = (yy - nl // 2) ** 2 + (xx - nm // 2) ** 2
+    # (time, plane, polarization, l, m)
+    width = (1.2 + 0.3 * np.arange(2)[:, None] + 0.2 * np.arange(2))[
+        :, None, :, None, None
+    ]
+    continuum.POINT_SPREAD_FUNCTION.values[:] = np.exp(-r2 / (2 * width**2))
+    continuum.PRIMARY_BEAM.values[:] = np.exp(-r2 / (2 * (4 * width) ** 2))
+    _assert_continuum_asp_is_cube_asp(
+        continuum,
+        {
+            "max_iter": 100,
+            "max_iter_per_cycle_updated": 100,
+            "threshold_per_cycle": 0.0,
+            "gain": 0.1,
+            "primary_beam_limit": 0.5,
+            "asp_residual_components": asp_options,
+            "asp_scale_significance": asp_options,
+        },
+    )
+
+
+def test_continuum_coral_with_a_clean_mask_is_cube_coral_on_one_channel():
+    """The same with the clean mask and threshold_per_cycle 5 of the faint
+    source of the Coral test below, where the test of significance per scale
+    cleans below the threshold."""
+    continuum, _, _ = make_single_term_faint_source_image()
+    _assert_continuum_asp_is_cube_asp(
+        continuum,
+        {
+            "max_iter": 3000,
+            "max_iter_per_cycle_updated": 3000,
+            "threshold_per_cycle": 5.0,
+            "gain": 0.1,
+            "asp_residual_components": True,
+            "asp_scale_significance": True,
+        },
+    )
 
 
 @pytest.mark.parametrize(
