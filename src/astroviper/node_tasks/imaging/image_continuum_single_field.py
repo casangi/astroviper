@@ -3260,8 +3260,11 @@ def continuum_cycle_append_node(
 
     With ``input_params["cycle_acceleration"]`` set to ``"conjugate_gradient"`` or
     ``"nesterov_momentum"``, the model increment is replaced by the accelerated
-    model step before accumulation, and the latest ``model_flux`` of each plane
-    in the convergence record is the flux of the model after that step. The
+    model step before accumulation, and the latest ``model_flux``,
+    ``model_flux_positive`` and ``model_flux_negative`` of each plane in the
+    convergence record describe the model after that step; its residual
+    statistics, component counts and iteration history describe the model
+    update's own increment and residual. The
     state of that acceleration is read from
     ``input_params["cycle_acceleration_state_xds"]`` and returned as
     ``"cycle_acceleration_state_xds"`` in the same way.

@@ -2116,9 +2116,9 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
     """The model update books ``model_flux`` as the flux of the previous model
     plus that of its increment ``z``; the accelerated step replaces ``z``, so
     each model update's ``model_flux`` is the ``start_model_flux`` of the
-    next and the last one, like the last ``model_flux_positive`` and
-    ``model_flux_negative``, the flux of the final model. Two MVC imaging
-    cycles through the real model update and model accumulation, with a
+    next and, like its ``model_flux_positive`` and ``model_flux_negative``,
+    that of the model after its step. Two MVC imaging cycles, with residuals
+    of both signs, through the real model update and model accumulation, with a
     model update giving ``z = r / 4`` and ``B z = z / 2``: the conjugate
     gradient's first step is ``8 z = 2 r``, momentum's second step
     ``z + mu_2 v``."""
@@ -2134,6 +2134,7 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
 
     def image(seed, scale):
         image = _acceleration_image(seed, scale).assign_coords(polarization=["I", "Q"])
+        image["SKY_RESIDUAL"] = image.SKY_RESIDUAL - 0.75 * scale
         image["POINT_SPREAD_FUNCTION"] = (
             ("time", "psf_taylor_order", "polarization", "l", "m"),
             np.ones((1, 3, 2, 4, 4)),
@@ -2152,6 +2153,7 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
         image_arg["SKY_MODEL"] = 0.25 * image_arg.SKY_RESIDUAL
         image_arg.SKY_RESIDUAL.values -= 0.5 * image_arg.SKY_MODEL.values
         increment_flux = taylor_zero_flux(image_arg.SKY_MODEL)
+        increment = image_arg.SKY_MODEL.isel(time=0, taylor_term=0).values
         result = ImagingDict()
         for pol in range(2):
             result.add(
@@ -2163,6 +2165,8 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
                     "masksum": 16,
                     "start_model_flux": 0.0,
                     "model_flux": float(increment_flux[pol]),
+                    "model_flux_positive": float(np.sum(increment[pol].clip(min=0))),
+                    "model_flux_negative": float(np.sum(increment[pol].clip(max=0))),
                     "stop_code": StopCode(
                         imaging=IMAGING_CONTINUE,
                         model_update=MODEL_UPDATE_MAX_ITER_PER_CYCLE,
@@ -2233,14 +2237,16 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
             fields["model_flux"][0], rel=1e-12
         )
         assert fields["model_flux"][1] == pytest.approx(final_flux[pol], rel=1e-12)
-        plane = (
-            second["model_xds"]
-            .SKY_MODEL.isel(time=0, taylor_term=0, polarization=pol)
-            .values
-        )
-        assert fields["model_flux_positive"][-1] == pytest.approx(
-            plane[plane > 0].sum(), rel=1e-12
-        )
-        assert fields["model_flux_negative"][-1] == pytest.approx(
-            plane[plane < 0].sum(), rel=1e-12
-        )
+        for cycle, result in enumerate((first, second)):
+            plane = (
+                result["model_xds"]
+                .SKY_MODEL.isel(time=0, taylor_term=0, polarization=pol)
+                .values
+            )
+            assert plane.min() < 0 < plane.max()
+            assert fields["model_flux_positive"][cycle] == pytest.approx(
+                plane[plane > 0].sum(), rel=1e-12
+            )
+            assert fields["model_flux_negative"][cycle] == pytest.approx(
+                plane[plane < 0].sum(), rel=1e-12
+            )
