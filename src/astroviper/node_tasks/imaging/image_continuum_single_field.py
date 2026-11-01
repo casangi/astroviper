@@ -2994,7 +2994,7 @@ def _book_accelerated_model_flux(deconvolve_dict, model_step, previous_model_xds
     and ``model_flux_negative`` become those of that model, the previous
     model (``None`` in the first imaging cycle) plus ``model_step``. Every
     plane of a model update has an entry in ``deconvolve_dict``; entries
-    without both fluxes are left as they are.
+    without ``model_flux`` or ``start_model_flux`` are left as they are.
     """
     import numpy as np
 
