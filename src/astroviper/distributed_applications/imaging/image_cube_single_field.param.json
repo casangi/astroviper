@@ -40,6 +40,7 @@
         "psf_fitting_method": { "type": "string", "allowed": ["astroviper", "casa"] },
         "gridding_kernel_params": { "type": ["dict"], "nullable": true },
         "primary_beam_params": { "type": ["dict"], "nullable": true },
+        "clean_mask": { "type": ["str"], "nullable": true },
         "skunk_works": { "type": "boolean" },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },

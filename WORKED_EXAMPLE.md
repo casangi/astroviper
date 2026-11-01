@@ -11,18 +11,30 @@ runnable end-to-end version):
 from astroviper.distributed_applications.imaging import image_cube_single_field
 
 return_dict = image_cube_single_field(
-    ps_store="twhya_selfcal_lsrk_5chans.ps.zarr",   # input processing set (Zarr)
-    image_store="twhya_clean.img.zarr",             # output image dataset (Zarr)
-    image_params=image_params,                       # image geometry + output coords
+    ps_store="twhya_selfcal_lsrk_5chans.ps.zarr",  # input processing set (Zarr)
+    image_store="twhya_clean.img.zarr",  # output image dataset (Zarr)
+    image_params=image_params,  # image geometry + output coords
     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
-    cycle_control_params={"max_iter": 300, "max_cycles": 3, "threshold": 0.001, "gain": 0.1,
-                          "psf_sidelobe_factor": 1.5, "max_iter_per_cycle": -1,
-                          "min_psf_fraction": 0.05, "max_psf_fraction": 0.8},
+    cycle_control_params={
+        "max_iter": 300,
+        "max_cycles": 3,
+        "threshold": 0.001,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": -1,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    },
     gridder="anti_alias",
     deconvolver="hogbom_many_threads",
-    image_data_variables_keep=["sky_residual", "sky_model", "mask",
-                               "point_spread_function", "primary_beam",
-                               "beam_fit_params_point_spread_function"],
+    image_data_variables_keep=[
+        "sky_residual",
+        "sky_model",
+        "mask",
+        "point_spread_function",
+        "primary_beam",
+        "beam_fit_params_point_spread_function",
+    ],
     processing_set_data_group_name="base",
     single_precision_image=True,
     processing_function_threads=1,
