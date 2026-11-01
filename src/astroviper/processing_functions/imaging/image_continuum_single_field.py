@@ -2151,15 +2151,15 @@ def _continuum_clean_support(
     """The pixels of Taylor term zero that may be cleaned, or ``None``.
 
     One support for the stop test (:func:`build_continuum_residual_imaging_dict`)
-    and the native MT-MFS model update, so that a plane is never kept going
+    and every model update, so that a plane is never kept going
     for a peak its model update may not clean. It is the clean mask of the
     data group (values above 0.5) or, without one, the pixels where the
     primary beam is at least ``primary_beam_limit`` times its peak and not 0.
     When both are present, their intersection is used so an explicit mask
     cannot re-enable pixels below the primary-beam cutoff.
     ``primary_beam_limit`` defaults to 0, every pixel where the primary beam
-    is above 0, as for the continuum Högbom model update and cube imaging,
-    which make the same mask with the same default
+    is above 0, as for cube imaging,
+    which makes the same mask with the same default
     (:func:`~astroviper.processing_functions.image_analysis.make_mask.make_mask`):
     the residual holds the sky seen through the primary beam wherever that
     is above 0, and a source there that is not cleaned leaves its sidelobes
@@ -2229,8 +2229,8 @@ def build_continuum_residual_imaging_dict(
     dimensions (time, polarization), whereas the shared controller expects
     (time, frequency, polarization). Build a temporary view with one frequency
     plane, broadcasting masks and sidelobes by dimension name. Peaks are
-    measured on finite pixels in the explicit CLEAN mask, or the same PB
-    support as model_update when no explicit mask exists. No counters or
+    measured on finite pixels of the support every model update cleans
+    (:func:`_continuum_clean_support`). No counters or
     history entries are advanced. When entropy stopping is enabled, residual
     entropy and SNR are measured on Taylor term zero using that same clean
     support. The cube workflow is unchanged.
@@ -2951,46 +2951,20 @@ def model_update_mtmfs_single_field(
     if "SKY_MODEL" not in hogbom_xds:
         hogbom_xds["SKY_MODEL"] = xr.zeros_like(hogbom_xds["SKY_RESIDUAL"])
 
-    # The Taylor-plane selection above can leave a strided view. Högbom's C++
-    # binding deliberately accepts only a C-contiguous bool mask, so make the
-    # one-plane adapter buffer explicit. The > 0.5 rule is the same mask
-    # interpretation used by continuum starting and stopping statistics; NaNs
-    # therefore remain outside the CLEAN support rather than becoming True.
-    hogbom_mask_name = hogbom_xds.attrs["data_groups"][image_data_group_in_name].get(
-        "mask"
+    # Clean the support of the stop test, as the C-contiguous bool mask
+    # Högbom's C++ binding requires.
+    support = _continuum_clean_support(
+        img_xds,
+        image_data_group_in_name,
+        residual.isel(taylor_term=0, drop=True),
+        cube_deconvolve_params,
     )
-    hogbom_data_group = hogbom_xds.attrs["data_groups"][image_data_group_in_name]
-    primary_beam_name = hogbom_data_group.get("primary_beam")
-    if hogbom_mask_name is None and primary_beam_name in hogbom_xds:
-        from astroviper.processing_functions.image_analysis.make_mask import make_mask
-
-        make_mask(
-            hogbom_xds,
-            primary_beam_limit=cube_deconvolve_params.get("primary_beam_limit", 0.0),
-            image_data_group_in_name=image_data_group_in_name,
-            image_data_group_out_name=image_data_group_in_name,
-            combine_mask=False,
-            overwrite=False,
-        )
-        hogbom_mask_name = hogbom_xds.attrs["data_groups"][image_data_group_in_name][
-            "mask"
-        ]
-
-    if hogbom_mask_name in hogbom_xds:
-        hogbom_mask = hogbom_xds[hogbom_mask_name].transpose(
-            "time", "frequency", "polarization", "l", "m", missing_dims="ignore"
-        )
-        if "frequency" not in hogbom_mask.dims:
-            hogbom_mask = hogbom_mask.expand_dims(
-                frequency=frequency_coord,
-                axis=1,
-            )
-        mask_values = np.asarray(hogbom_mask.values)
-        hogbom_xds[hogbom_mask_name] = hogbom_mask.copy(
-            data=np.ascontiguousarray(
-                np.isfinite(mask_values) & (mask_values > 0.5),
-                dtype=np.bool_,
-            )
+    if support is not None:
+        hogbom_data_group = hogbom_xds.attrs["data_groups"][image_data_group_in_name]
+        hogbom_mask_name = hogbom_data_group.setdefault("mask", "MASK")
+        hogbom_xds[hogbom_mask_name] = (
+            ("time", "frequency", "polarization", "l", "m"),
+            support[:, np.newaxis],
         )
 
     # Register the temporary model through the data-group interface expected by
