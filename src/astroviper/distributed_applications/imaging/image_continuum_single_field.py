@@ -4181,12 +4181,21 @@ def image_continuum_single_field(
                         ),
                     }
             else:
+                mvc_residual_additive_variables = (
+                    "MVC_RESIDUAL_TAYLOR_NUMERATOR",
+                    "MVC_RESIDUAL_WEIGHT_SUM",
+                )
+                if mvc_minor_cycle_approximation == "local_beam_moments":
+                    mvc_residual_additive_variables += (
+                        "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM",
+                        "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM",
+                        "MVC_RESIDUAL_BEAM_CHANNEL_COUNT",
+                    )
                 if is_first_cycle:
                     reduce_input_params = {
                         "continuum_mode": "mvc",
-                        "additive_variables": (
-                            "MVC_RESIDUAL_TAYLOR_NUMERATOR",
-                            "MVC_RESIDUAL_WEIGHT_SUM",
+                        "additive_variables": mvc_residual_additive_variables
+                        + (
                             "MVC_PSF_TAYLOR_NUMERATOR",
                             "MVC_PSF_WEIGHT_SUM",
                             "MVC_PRIMARY_BEAM_WEIGHTED_SUM",
@@ -4197,10 +4206,7 @@ def image_continuum_single_field(
                 else:
                     reduce_input_params = {
                         "continuum_mode": "mvc",
-                        "additive_variables": (
-                            "MVC_RESIDUAL_TAYLOR_NUMERATOR",
-                            "MVC_RESIDUAL_WEIGHT_SUM",
-                        ),
+                        "additive_variables": mvc_residual_additive_variables,
                     }
 
             # ---------------------------------------------------------

@@ -742,6 +742,7 @@ def _run_tw_hydra_continuum(
     weighting,
     *,
     deconvolver="hogbom",
+    mvc_minor_cycle_approximation="channel_psf",
     cycle_control_params=None,
     image_param_overrides=None,
     image_params=None,
@@ -800,6 +801,7 @@ def _run_tw_hydra_continuum(
             restore=restore,
             primary_beam_limit=primary_beam_limit,
             continuum_mode=continuum_mode,
+            mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
             scan_intents=["OBSERVE_TARGET#ON_SOURCE"],
             **(
                 {}
@@ -836,6 +838,33 @@ def _run_tw_hydra_continuum(
             reduce_n_batch=reduce_n_batch,
         )
     return result, xr.open_zarr(output_store)
+
+
+def test_tw_hydra_mvc_local_beam_moments_are_frequency_partition_invariant(
+    tmp_path,
+    tw_hydra_store,
+):
+    """All local-beam moments are reduced across MVC frequency map tasks."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    images = []
+    for n_chunks in (1, 2):
+        _, image = _run_tw_hydra_continuum(
+            tw_hydra_store,
+            tmp_path / f"mvc_local_beam_moments_{n_chunks}_chunks.img.zarr",
+            processing_set,
+            n_chunks,
+            "mvc",
+            {"weighting": "natural", "weighting_scope": "local"},
+            mvc_minor_cycle_approximation="local_beam_moments",
+        )
+        images.append(image)
+
+    for variable in (
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        xr.testing.assert_allclose(images[0][variable], images[1][variable])
 
 
 def test_tw_hydra_default_output_keeps_nonzero_model(tmp_path, tw_hydra_store):
