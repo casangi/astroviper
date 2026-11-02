@@ -12,6 +12,10 @@ from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder im
     fft_norm_img_xds,
     ifft_uv_to_lm,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    CASA_GRIDDING_KERNEL_PARAMS,
+    make_gridding_kernel,
+)
 
 
 class FFTTest(unittest.TestCase):
@@ -63,6 +67,7 @@ def test_forward_image_fft_does_not_open_a_matplotlib_window(monkeypatch):
         image,
         {"image_size": [4, 4], "fft_padding": 1.0},
         fft_backend="scipy",
+        gridding_kernel=make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS),
     )
 
     assert result["VISIBILITY_MODEL"].shape == (1, 1, 1, 4, 4)
@@ -164,6 +169,7 @@ class FourCorrelationSkyTest(unittest.TestCase):
                 "point_spread_function": "POINT_SPREAD_FUNCTION",
             },
             fft_backend="scipy",
+            gridding_kernel=make_gridding_kernel(CASA_GRIDDING_KERNEL_PARAMS),
         )
 
     def test_sky_is_complex_for_four_correlations_only(self):

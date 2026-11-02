@@ -19,19 +19,32 @@ def check_gridding_kernel_parameters(params):
     The production builder caches kernels by their recipe, so this preflight
     and later gridding reuse the same design. No image or visibility is read.
     """
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        DEFAULT_GRIDDING_KERNEL_PARAMS,
-    )
-
     # --- Recognized recipe ---
     # Misspellings and false-like non-mappings must not select the default.
     if params is None:
         return
     require_mapping("gridding_kernel_params", params)
+    # DFT selects no kernel table; support/sampling overrides have no meaning.
+    if params.get("type") == "dft":
+        if set(params) != {"type"}:
+            raise ValueError("DFT accepts only gridding_kernel_params={'type': 'dft'}.")
+        return
+
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        CASA_GRIDDING_KERNEL_PARAMS,
+        DEFAULT_GRIDDING_KERNEL_PARAMS,
+    )
+
     unknown = set(params) - set(DEFAULT_GRIDDING_KERNEL_PARAMS)
     if unknown:
         raise ValueError(f"Unknown gridding_kernel_params keys: {sorted(unknown)}.")
-    recipe = {**DEFAULT_GRIDDING_KERNEL_PARAMS, **params}
+    # CASA's fixed support and sampling apply to omitted keys of that type.
+    defaults = (
+        CASA_GRIDDING_KERNEL_PARAMS
+        if params.get("type") == "prolate_spheroidal_casa"
+        else DEFAULT_GRIDDING_KERNEL_PARAMS
+    )
+    recipe = {**defaults, **params}
     check_kernel_options(recipe["type"], recipe["interpolation"])
 
     # --- Table sampling ---
@@ -63,6 +76,12 @@ def check_kernel_padding(fft_padding):
 
 def check_gridding_kernel(params, *, fft_padding=None):
     """Check the recipe and cached numerical image-edge correction."""
+    if params is not None:
+        require_mapping("gridding_kernel_params", params)
+        if params.get("type") == "dft":
+            check_gridding_kernel_parameters(params)
+            return
+
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         make_gridding_kernel,
     )

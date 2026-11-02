@@ -74,6 +74,16 @@ def test_restore_rejects_invalid_model_or_residual(group, fault, message):
     xr.testing.assert_identical(image, snapshot)
 
 
+def test_mode_and_deconvolver_names_are_exact():
+    image = _image()
+    with pytest.raises(ValueError, match="continuum_mode"):
+        accumulate_continuum_model(image, continuum_mode="MFS")
+    with pytest.raises(ValueError, match="deconvolver"):
+        model_update_mtmfs_single_field(image, "MTMFS", {})
+    with pytest.raises(ValueError, match="deconvolver"):
+        restore_continuum_image(image, deconvolver="MTMFS")
+
+
 @pytest.mark.parametrize(
     "role,variable",
     [
@@ -96,6 +106,7 @@ def test_restore_rejects_missing_registered_or_fallback_products(
     "fault,error,message",
     [
         ("deconvolver", ValueError, "hogbom"),
+        ("asp", ValueError, "requires SKY_RESIDUAL with one Taylor term"),
         ("residual", KeyError, "SKY_RESIDUAL"),
         ("psf", KeyError, "POINT_SPREAD_FUNCTION"),
         ("group", KeyError, "Input data group"),
@@ -114,6 +125,9 @@ def test_model_update_rejects_incomplete_images_and_controls(fault, error, messa
     deconvolver = "hogbom"
     if fault == "deconvolver":
         deconvolver = "unsupported"
+    elif fault == "asp":
+        deconvolver = "asp"
+        image = _image()
     elif fault in ("residual", "psf"):
         image = image.drop_vars(
             "SKY_RESIDUAL" if fault == "residual" else "POINT_SPREAD_FUNCTION"

@@ -176,7 +176,7 @@ def degrid_imaging_weights(
         - ``"cell_size"`` : tuple(float, float), image pixel scale (Δl, Δm) in radians.
     truncate_uv_cells : bool, default ``False``
         If True, sample the CASA continuum truncated UV cell. If False, sample
-        the nearest UV cell used by cube weighting.
+        the nearest UV cell used by cube and continuum weighting.
 
     Returns
     -------
@@ -189,9 +189,11 @@ def degrid_imaging_weights(
     * The polarization map is currently single-pol. If you have more
       polarizations, extend ``pol_map`` accordingly.
     * The output is initialized to zero. Out-of-grid samples therefore remain
-      zero; in CASA continuum mode, samples landing on cell index 0 on either
-      axis are also skipped. In-grid samples retain their natural weight when
-      the corresponding density-grid value is zero or NaN.
+      zero; in nearest-cell mode, so do samples whose conjugate cell is off the
+      grid, which are not gridded; in CASA continuum mode, samples landing on
+      cell index 0 on either axis are also skipped. In-grid samples retain
+      their natural weight when the corresponding density-grid value is zero
+      or NaN.
     """
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp import (
         degrid_imaging_weights as degrid_imaging_weights_cpp,

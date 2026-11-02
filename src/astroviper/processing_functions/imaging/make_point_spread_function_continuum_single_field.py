@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import time
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,11 @@ from astroviper.utils.data_group_tools import (
     modify_data_groups_xds,
 )
 from astroviper.utils.param_docs import shares_param_docs
+
+if TYPE_CHECKING:
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        GriddingKernel,
+    )
 
 
 def _validate_mtmfs_parameters(
@@ -52,7 +58,7 @@ def _validate_mtmfs_parameters(
 
 def add_uv_sampling_grid_continuum_single_field(
     ms_xdt: xr.Dataset,
-    cgk_1D: np.ndarray,
+    cgk_1D: GriddingKernel | np.ndarray,
     img_xds: xr.Dataset,
     *,
     n_psf_taylor_terms: int,
@@ -64,8 +70,6 @@ def add_uv_sampling_grid_continuum_single_field(
     overwrite: bool = True,
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
-    gcf_support: int = 7,
-    gcf_oversampling: int = 100,
     complex_dtype=None,
     input_checked: bool = False,
 ) -> None:
@@ -88,8 +92,12 @@ def add_uv_sampling_grid_continuum_single_field(
     ms_xdt : xarray.Dataset
         One Measurement Set partition with visibility coordinates and imaging
         weights.
-    cgk_1D : numpy.ndarray
-        Oversampled one-dimensional gridding convolution kernel.
+    cgk_1D : GriddingKernel or numpy.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
+        whose table, support and oversampling go to the C++
+        ``anti_alias_grid_uv_sampling`` kernel), or a bare table of
+        CASA's prolate spheroidal kernel of support 7.
     img_xds : xarray.Dataset
         Image dataset whose UV-sampling arrays are updated in place.
     n_psf_taylor_terms : int
@@ -110,10 +118,6 @@ def add_uv_sampling_grid_continuum_single_field(
         Image-to-UV-grid padding factor.
     processing_function_threads : int, optional
         Threads supplied to the C++ gridder.
-    gcf_support : int, optional
-        Convolution-kernel support in grid cells.
-    gcf_oversampling : int, optional
-        Convolution-kernel oversampling factor.
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the accumulated UV grids.
 
@@ -268,6 +272,11 @@ def add_uv_sampling_grid_continuum_single_field(
     from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
         anti_alias_grid_uv_sampling,
     )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        as_gridding_kernel,
+    )
+
+    kernel = as_gridding_kernel(cgk_1D)
 
     # Reuse the existing continuum channel map. With one image-time plane, each
     # Taylor-order view has the contiguous layout required by the C++ gridder.
@@ -300,11 +309,12 @@ def add_uv_sampling_grid_continuum_single_field(
             time_map,
             pol_map,
             effective_weight,
-            cgk_1D,
+            kernel.table,
             n_uv,
             delta_lm,
-            support=gcf_support,
-            oversampling=gcf_oversampling,
+            support=kernel.support,
+            oversampling=kernel.oversampling,
+            interpolation=kernel.interpolation_code,
             processing_function_threads=processing_function_threads,
         )
 
@@ -324,8 +334,7 @@ def make_point_spread_function_mvc_single_field(
     ms_data_group_in_name="base",
     image_data_group_in_name="residual",
     image_data_group_out_name="residual",
-    gcf_oversampling=100,
-    gcf_support=7,
+    gridding_kernel_params=None,
     processing_function_threads=1,
     complex_dtype=None,
     input_checked: bool = False,
@@ -350,8 +359,8 @@ def make_point_spread_function_mvc_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -367,10 +376,55 @@ def make_point_spread_function_mvc_single_field(
         data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Output image data-group name.
-    gcf_oversampling : int, optional
-        Convolution-kernel oversampling factor.
-    gcf_support : int, optional
-        Convolution-kernel support in grid cells.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -400,8 +454,8 @@ def make_point_spread_function_mvc_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.make_point_spread_function import (
         add_uv_sampling_grid_single_field,
@@ -421,10 +475,7 @@ def make_point_spread_function_mvc_single_field(
         complex_dtype = np.complex128
 
     start = time.time()
-    cgk_1D = create_prolate_spheroidal_kernel_1D(
-        gcf_oversampling,
-        gcf_support,
-    )
+    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
     T_gcf = time.time() - start
 
     T_vis_mask = 0.0
@@ -477,8 +528,7 @@ def make_point_spread_function_continuum_single_field(
     image_data_group_in_name="residual",
     image_data_group_out_name="residual",
     image_data_variables_keep=None,
-    gcf_oversampling=100,
-    gcf_support=7,
+    gridding_kernel_params=None,
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
@@ -495,6 +545,12 @@ def make_point_spread_function_continuum_single_field(
     frequency ``nu0`` must be supplied globally in ``image_params`` and must be
     identical for every distributed frequency chunk.
 
+    With ``gridding_kernel_params={"type": "dft"}`` the orders are the exact
+    direct Fourier transforms of the weighted imaging weights, w term
+    included, over the unpadded image, still to be normalised
+    (:func:`~astroviper.processing_functions.imaging.direct_fourier_transform.make_dft_point_spread_function_continuum_single_field`);
+    no ``UV_SAMPLING`` grid is made.
+
     Parameters
     ----------
     ps_xdt : xarray.DataTree or mapping
@@ -509,8 +565,8 @@ def make_point_spread_function_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -533,10 +589,55 @@ def make_point_spread_function_continuum_single_field(
     image_data_variables_keep : list of str or None, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
-    gcf_oversampling : int, optional
-        Convolution-kernel oversampling factor.
-    gcf_support : int, optional
-        Convolution-kernel support in grid cells.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -570,8 +671,9 @@ def make_point_spread_function_continuum_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
+        make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
 
@@ -596,11 +698,25 @@ def make_point_spread_function_continuum_single_field(
         np.asarray(image_params["reference_frequency"]).reshape(())
     )
 
+    if is_direct_fourier_transform(gridding_kernel_params):
+        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+            make_dft_point_spread_function_continuum_single_field,
+        )
+
+        return make_dft_point_spread_function_continuum_single_field(
+            ps_xdt,
+            img_xds,
+            n_psf_taylor_terms,
+            reference_frequency,
+            ms_data_group_in_name=ms_data_group_in_name,
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_out_name,
+            processing_function_threads=processing_function_threads,
+            complex_dtype=complex_dtype,
+        )
+
     start = time.time()
-    cgk_1D = create_prolate_spheroidal_kernel_1D(
-        gcf_oversampling,
-        gcf_support,
-    )
+    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
     T_gcf = time.time() - start
 
     T_vis_mask = 0.0
@@ -628,8 +744,6 @@ def make_point_spread_function_continuum_single_field(
             overwrite=True,
             fft_padding=image_params["fft_padding"],
             processing_function_threads=processing_function_threads,
-            gcf_support=gcf_support,
-            gcf_oversampling=gcf_oversampling,
             complex_dtype=complex_dtype,
             input_checked=True,
         )

@@ -150,10 +150,6 @@ def check_residual_update(config, *, mode, require_complete=False):
             raise ValueError(
                 "Use image_params['n_taylor_terms']; nterms is not accepted."
             )
-        if "reference_frequency_hz" in image_params:
-            raise ValueError(
-                "Use image_params['reference_frequency'] in Hz; reference_frequency_hz is not accepted."
-            )
         if require_complete:
             for name in ("reference_frequency", "n_taylor_terms"):
                 if name not in image_params:

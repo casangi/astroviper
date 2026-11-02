@@ -128,7 +128,6 @@ def test_weighting_configuration(params, error):
         ({"min_psf_fraction": 0.9, "max_psf_fraction": 0.8}, ValueError),
         ({"small_scale_bias": 1.1}, ValueError),
         ({"max_iter_typo": 1}, ValueError),
-        ({"record_iteration_history": True}, ValueError),
         ({"entropy_spatial_bins": 0}, ValueError),
         ({"entropy_max_snr": np.inf}, ValueError),
     ],

@@ -71,6 +71,106 @@ class RuntimeReached(Exception):
     """Stop before science, after configuration validation."""
 
 
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"n_taylor_terms": True}, "n_taylor_terms"),
+        ({"n_taylor_terms": 1.5}, "n_taylor_terms"),
+        ({"reference_frequency": 0.0}, "reference_frequency"),
+        ({"reference_frequency": np.nan}, "reference_frequency"),
+    ],
+)
+def test_continuum_gridder_checks_explicit_overrides_before_reading_data(
+    options, message
+):
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.make_undeconvolved_image_continuum"
+    )
+    with pytest.raises((TypeError, ValueError), match=message):
+        module.make_undeconvolved_image_continuum_single_field(
+            None,
+            None,
+            {"n_taylor_terms": 1, "reference_frequency": 1e9},
+            None,
+            **options,
+        )
+
+
+@pytest.mark.parametrize("checked", [False, True])
+def test_continuum_gridder_keeps_runtime_filtering_when_config_checked(
+    monkeypatch, checked
+):
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.make_undeconvolved_image_continuum"
+    )
+    check = Mock(wraps=config_check.check_residual_update)
+    monkeypatch.setattr(config_check, "check_residual_update", check)
+    runtime = Mock(side_effect=RuntimeReached)
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.utils.drop_auto_correlations", runtime
+    )
+    child = object()
+    with pytest.raises(RuntimeReached):
+        module.make_undeconvolved_image_continuum_single_field(
+            {"child": child},
+            None,
+            {"n_taylor_terms": 1, "reference_frequency": 1e9},
+            None,
+            input_checked=checked,
+        )
+    assert check.call_count == (0 if checked else 1)
+    runtime.assert_called_once_with(child)
+
+
+@pytest.mark.parametrize("basis", ["invalid", "LINEAR"])
+def test_continuum_model_preparation_rejects_basis_before_reading_model(basis):
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.image_continuum_single_field"
+    )
+    with pytest.raises(ValueError, match="instrument_polarization_basis"):
+        module.prepare_model_uv_continuum_single_field(
+            None,
+            {"n_taylor_terms": 1, "reference_frequency": 1e9},
+            instrument_polarization_basis=basis,
+        )
+
+
+def test_continuum_accumulation_rejects_mode_before_reading_products():
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.image_continuum_single_field"
+    )
+    with pytest.raises(ValueError, match="continuum_mode"):
+        module.accumulate_continuum_model(None, None, continuum_mode="invalid")
+
+
+@pytest.mark.parametrize(
+    "name", ["continuum_cycle_append_node", "model_update_continuum_single_field"]
+)
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"cycle_acceleration": "unknown"}, "cycle_acceleration"),
+        ({"momentum_coefficient": 1.0}, "momentum_coefficient"),
+        ({"momentum_coefficient": np.nan}, "momentum_coefficient"),
+    ],
+)
+def test_continuum_nodes_reject_acceleration_before_reading_data(
+    name, options, message
+):
+    module = importlib.import_module(
+        "astroviper.node_tasks.imaging.image_continuum_single_field"
+    )
+    params = {
+        "image_params": {"n_taylor_terms": 1, "reference_frequency": 1e9},
+        "deconvolver": "hogbom",
+        "cycle_control_params": {},
+        **options,
+    }
+    # No image is supplied: workflow validation must precede data access.
+    with pytest.raises(ValueError, match=message):
+        getattr(module, name)(None, params)
+
+
 @pytest.mark.parametrize("checked", [False, True])
 def test_processing_function_skips_only_config_checks(monkeypatch, checked):
     module = importlib.import_module(

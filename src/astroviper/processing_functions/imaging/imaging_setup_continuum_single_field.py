@@ -5,7 +5,7 @@ import numpy as np
 from astroviper.utils.param_docs import shares_param_docs
 
 
-def _get_reference_frequency_hz(image_params):
+def _get_reference_frequency(image_params):
     """Return ``image_params["reference_frequency"]`` in Hz. Distributed
     callers must supply one common reference frequency before partitioning.
     """
@@ -19,14 +19,24 @@ def _get_reference_frequency_hz(image_params):
     return float(np.asarray(image_params["reference_frequency"]).reshape(()))
 
 
+def _validate_n_taylor_terms(n_taylor_terms):
+    """Return ``n_taylor_terms``, a Python or NumPy integer of at least 1, as an int."""
+    from astroviper.processing_functions.imaging.config_check._common import (
+        require_integer,
+    )
+
+    require_integer("n_taylor_terms", n_taylor_terms, minimum=1)
+    return int(n_taylor_terms)
+
+
 def _validate_continuum_parameters(image_params):
-    """Validate and return ``(n_taylor_terms, reference_frequency_hz)``."""
+    """Validate and return ``(n_taylor_terms, reference_frequency)``."""
     from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
         check_continuum_basis,
     )
 
     check_continuum_basis(image_params)
-    return image_params["n_taylor_terms"], float(
+    return int(image_params["n_taylor_terms"]), float(
         np.asarray(image_params["reference_frequency"]).reshape(())
     )
 
@@ -65,14 +75,14 @@ def _attach_continuum_metadata(
     img_xds,
     *,
     n_taylor_terms,
-    reference_frequency_hz,
+    reference_frequency,
     continuum_mode,
 ):
     """Attach validated Taylor-expansion metadata to the image dataset."""
     img_xds.attrs["continuum_imaging"] = {
         "continuum_mode": continuum_mode,
         "n_taylor_terms": int(n_taylor_terms),
-        "reference_frequency_hz": float(reference_frequency_hz),
+        "reference_frequency": float(reference_frequency),
         "n_residual_taylor_terms": int(n_taylor_terms),
         "n_psf_taylor_terms": int(2 * n_taylor_terms - 1),
     }
@@ -83,7 +93,7 @@ def _convert_primary_beam_to_reference_frequency(
     img_xds,
     *,
     image_params,
-    reference_frequency_hz,
+    reference_frequency,
     float_dtype,
     image_data_group_in_name="residual",
 ):
@@ -108,14 +118,14 @@ def _convert_primary_beam_to_reference_frequency(
 
     image_data_group = data_groups[image_data_group_in_name]
 
-    reference_frequency_hz = float(reference_frequency_hz)
+    reference_frequency = float(reference_frequency)
     from astroviper.processing_functions.imaging.config_check import (
         CONTINUUM_SINGLE_FIELD,
         check_residual_update,
     )
 
     check_residual_update(
-        {"reference_frequency": reference_frequency_hz}, mode=CONTINUUM_SINGLE_FIELD
+        {"reference_frequency": reference_frequency}, mode=CONTINUUM_SINGLE_FIELD
     )
 
     dish_diameters = image_params.get("list_dish_diameters")
@@ -135,7 +145,7 @@ def _convert_primary_beam_to_reference_frequency(
         "ipower": image_params.get("primary_beam_ipower", 2),
     }
     reference_data = evaluate_primary_beam(
-        np.asarray([reference_frequency_hz]),
+        np.asarray([reference_frequency]),
         img_xds.polarization.values,
         pb_params,
         pb_image_params,
@@ -159,7 +169,7 @@ def _convert_primary_beam_to_reference_frequency(
             "method": "airy_disk",
             "continuum_mode": "mfs",
             "continuum_pb_order": 0,
-            "reference_frequency_hz": reference_frequency_hz,
+            "reference_frequency": reference_frequency,
             "frequency_interpretation": "direct_reference_frequency_evaluation",
         },
     )
@@ -184,6 +194,7 @@ def imaging_setup_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     image_data_group_out_name="residual",
+    gridding_kernel_params=None,
     *,
     input_checked: bool = False,
 ):
@@ -224,8 +235,8 @@ def imaging_setup_continuum_single_field(
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
         Continuum imaging also requires ``frequency_coords``,
-        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;
-        ``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
         sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
         selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
         ``list_blockage_diameters`` are arrays in metres,
@@ -258,6 +269,55 @@ def imaging_setup_continuum_single_field(
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     image_data_group_out_name : str, optional
         Name of the continuum image data group. Defaults to ``"residual"``.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -306,12 +366,12 @@ def imaging_setup_continuum_single_field(
     ps_data_group_name = processing_set_data_group_name
 
     n_taylor_terms = image_params["n_taylor_terms"]
-    reference_frequency_hz = image_params["reference_frequency"]
+    reference_frequency = image_params["reference_frequency"]
 
     img_xds = _attach_continuum_metadata(
         img_xds,
         n_taylor_terms=n_taylor_terms,
-        reference_frequency_hz=reference_frequency_hz,
+        reference_frequency=reference_frequency,
         continuum_mode=continuum_mode,
     )
 
@@ -365,7 +425,6 @@ def imaging_setup_continuum_single_field(
             },
             overwrite=True,
             processing_function_threads=processing_function_threads,
-            truncate_uv_cells=True,
             frequency_matching="nearest",
             input_checked=True,
         )
@@ -415,11 +474,12 @@ def imaging_setup_continuum_single_field(
             img_xds,
             image_params,
             n_taylor_terms=n_taylor_terms,
-            reference_frequency=reference_frequency_hz,
+            reference_frequency=reference_frequency,
             ms_data_group_in_name=ps_data_group_name,
             image_data_group_in_name=image_data_group_out_name,
             image_data_group_out_name=image_data_group_out_name,
             image_data_variables_keep=image_data_variables_keep,
+            gridding_kernel_params=gridding_kernel_params,
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=complex_dtype,
@@ -436,6 +496,7 @@ def imaging_setup_continuum_single_field(
             ms_data_group_in_name=ps_data_group_name,
             image_data_group_in_name=image_data_group_out_name,
             image_data_group_out_name=image_data_group_out_name,
+            gridding_kernel_params=gridding_kernel_params,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
             input_checked=True,
@@ -452,7 +513,7 @@ def imaging_setup_continuum_single_field(
         img_xds = _convert_primary_beam_to_reference_frequency(
             img_xds,
             image_params=image_params,
-            reference_frequency_hz=reference_frequency_hz,
+            reference_frequency=reference_frequency,
             float_dtype=float_dtype,
             image_data_group_in_name=image_data_group_out_name,
         )
@@ -502,7 +563,7 @@ def imaging_setup_continuum_single_field(
             "T_psf_fit": [0.0],
             "n_taylor_terms": [n_taylor_terms],
             "n_psf_taylor_terms": [2 * n_taylor_terms - 1],
-            "reference_frequency_hz": [reference_frequency_hz],
+            "reference_frequency": [reference_frequency],
             "imaging_weights_calculated": [weights_were_calculated],
         }
     )

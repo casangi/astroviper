@@ -149,7 +149,12 @@ class TestKernel:
         k / oversampling cells from the centre, 1 at the centre, zero beyond
         the half width W / 2, and the kernel is even."""
         kernel = make_gridding_kernel(
-            {"type": "prolate_spheroidal", "support": 9, "oversampling": 20},
+            {
+                "type": "prolate_spheroidal",
+                "support": 9,
+                "oversampling": 20,
+                "interpolation": "nearest",
+            },
             fft_padding=2.0,
         )
         c, alpha = SHAPE_TABLE[(9, 2.0)]
@@ -211,7 +216,12 @@ class TestKernel:
     @pytest.mark.parametrize("support", range(3, 18, 2))
     def test_any_odd_support(self, support):
         kernel = make_gridding_kernel(
-            {"type": "prolate_spheroidal", "support": support, "oversampling": 10},
+            {
+                "type": "prolate_spheroidal",
+                "support": support,
+                "oversampling": 10,
+                "interpolation": "nearest",
+            },
             fft_padding=1.25,
         )
         assert kernel.table.size == 10 * (support // 2 + 1)
@@ -228,7 +238,12 @@ class TestKernel:
         self, support, fft_padding, smaller, larger
     ):
         kernel = make_gridding_kernel(
-            {"type": "prolate_spheroidal", "support": support, "oversampling": 10},
+            {
+                "type": "prolate_spheroidal",
+                "support": support,
+                "oversampling": 10,
+                "interpolation": "nearest",
+            },
             fft_padding=fft_padding,
         )
         c, alpha = kernel.shape["c"], kernel.shape["alpha"]
@@ -252,6 +267,7 @@ class TestKernel:
         kernel = make_gridding_kernel(
             {
                 "type": "prolate_spheroidal",
+                "support": 7,
                 "oversampling": 300,
                 "interpolation": "linear",
             },

@@ -91,14 +91,12 @@ def check_model_update(config, *, mode, require_complete=False):
     # --- Deconvolver selection ---
     # Each imaging kind has its own set of implemented algorithms.
     if mode.imaging_kind == "continuum":
-        allowed_deconvolvers = ("hogbom", "mtmfs")
+        allowed_deconvolvers = ("hogbom", "asp", "mtmfs")
     else:
         allowed_deconvolvers = (
             "hogbom",
             "hogbom_many_threads",
             "asp",
-            "aspclean",
-            "asp_clean",
         )
 
     if "deconvolver" in config and deconvolver not in allowed_deconvolvers:
@@ -115,16 +113,16 @@ def check_model_update(config, *, mode, require_complete=False):
             raise ValueError("Cube imaging supports only n_taylor_terms=1.")
 
     # --- Required Taylor order ---
-    # An explicit MT-MFS image configuration must specify its number of terms.
+    # An explicit Asp/MT-MFS image configuration must specify its number of terms.
     # Leaf model-update calls take image products instead of image_params.
     if (
         mode.imaging_kind == "continuum"
-        and deconvolver == "mtmfs"
+        and deconvolver in ("asp", "mtmfs")
         and "image_params" in config
         and "n_taylor_terms" not in image_params
     ):
         raise KeyError(
-            "image_params must contain 'n_taylor_terms' when deconvolver='mtmfs'."
+            f"image_params must contain 'n_taylor_terms' when deconvolver={deconvolver!r}."
         )
 
     if mode.imaging_kind == "continuum" and "n_taylor_terms" in image_params:
@@ -140,10 +138,10 @@ def check_model_update(config, *, mode, require_complete=False):
         if n_taylor_terms < 1:
             raise ValueError("n_taylor_terms must be positive.")
 
-        # --- Högbom compatibility ---
-        # Högbom updates only the constant term of a continuum model.
-        if deconvolver == "hogbom" and n_taylor_terms != 1:
-            raise ValueError("Continuum hogbom requires n_taylor_terms=1.")
+        # --- Single-term deconvolver compatibility ---
+        # Högbom and Asp update only the constant term of a continuum model.
+        if deconvolver in ("hogbom", "asp") and n_taylor_terms != 1:
+            raise ValueError(f"Continuum {deconvolver} requires n_taylor_terms=1.")
 
         # --- MT-MFS compatibility ---
         # The current continuum MT-MFS path supports two to four terms.
@@ -235,18 +233,20 @@ def check_model_update(config, *, mode, require_complete=False):
         "asp_stop_after_hogbom_run",
         "asp_residual_components",
         "asp_scale_significance",
-        "asp_rc_eps_max",
-        "asp_rc_floor_at_threshold",
-        "asp_rc_frac_min",
-        "asp_rc_noise_floor",
-        "asp_rc_switch_factor",
+        "asp_residual_component_max_epsilon_fraction",
+        "asp_residual_component_floor_at_threshold",
+        "asp_residual_component_min_fraction",
+        "asp_residual_component_noise_floor",
+        "asp_residual_component_switch_factor",
+        "asp_residual_component_positive_only",
+        "asp_no_change_tolerance",
         "asp_significance",
         "asp_significance_gain",
-        "fusedthreshold",
-        "largestscale",
-        "norm_method",
-        "psf_width",
-        "stoppointmode",
+        "asp_fused_threshold",
+        "asp_largest_scale",
+        "asp_scale_normalization_method",
+        "asp_psf_width",
+        "asp_stop_point_mode",
     }
     unknown = set(controls) - allowed_controls
     if unknown:
@@ -347,57 +347,63 @@ def check_model_update(config, *, mode, require_complete=False):
             )
 
     # --- Algorithm-specific Boolean controls ---
-    # Iteration history and exact PSF subtraction belong to Högbom only.
+    # History is available for each current deconvolver; exact subtraction is
+    # restricted to cube Högbom, whose graph supplies the larger subtraction PSF.
     boolean_controls = (
         "asp_stop_after_hogbom_run",
         "asp_residual_components",
         "asp_scale_significance",
-        "asp_rc_floor_at_threshold",
+        "asp_residual_component_floor_at_threshold",
+        "asp_residual_component_positive_only",
     )
     for name in boolean_controls:
         if name in controls:
             require_boolean(name, controls[name])
     for name in ("record_iteration_history", "exact_psf_subtraction"):
         if name in controls:
-            check_hogbom_option(deconvolver, name, controls[name])
+            check_hogbom_option(deconvolver, name, controls[name], mode=mode)
     if deconvolver in ("hogbom", "hogbom_many_threads", "mtmfs"):
-        unsupported = [
-            name
-            for name in controls
-            if name.startswith("asp_")
-            or name
-            in (
-                "fusedthreshold",
-                "psf_width",
-                "largestscale",
-                "stoppointmode",
-                "norm_method",
-            )
-        ]
+        unsupported = [name for name in controls if name.startswith("asp_")]
         if unsupported:
             raise ValueError(f"Asp controls require an Asp deconvolver: {unsupported}.")
 
     # --- Asp scale and normalization controls ---
     # Preserve documented -1 sentinels, but reject unsupported normalization modes.
-    for name in ("largestscale", "stoppointmode"):
-        if name in controls:
-            require_integer(name, controls[name], allow_minus_one=True)
-    if "norm_method" in controls:
-        require_integer("norm_method", controls["norm_method"], minimum=1)
-        if controls["norm_method"] not in (1, 2):
-            raise ValueError("norm_method must be 1 or 2.")
+    if "asp_largest_scale" in controls:
+        require_integer(
+            "asp_largest_scale", controls["asp_largest_scale"], allow_minus_one=True
+        )
+    if "asp_stop_point_mode" in controls:
+        require_integer(
+            "asp_stop_point_mode",
+            controls["asp_stop_point_mode"],
+            minimum=1,
+            allow_minus_one=True,
+        )
+    if "asp_scale_normalization_method" in controls:
+        require_integer(
+            "asp_scale_normalization_method",
+            controls["asp_scale_normalization_method"],
+            minimum=1,
+        )
+        if controls["asp_scale_normalization_method"] not in (1, 2):
+            raise ValueError("asp_scale_normalization_method must be 1 or 2.")
     for name in (
-        "fusedthreshold",
-        "psf_width",
+        "asp_fused_threshold",
+        "asp_psf_width",
         "asp_significance",
         "asp_significance_gain",
-        "asp_rc_eps_max",
-        "asp_rc_frac_min",
-        "asp_rc_noise_floor",
-        "asp_rc_switch_factor",
+        "asp_residual_component_max_epsilon_fraction",
+        "asp_residual_component_min_fraction",
+        "asp_residual_component_noise_floor",
+        "asp_residual_component_switch_factor",
     ):
         if name in controls:
             require_finite_real(name, controls[name], scalar=True)
+    if "asp_no_change_tolerance" in controls:
+        check_nonnegative(
+            "asp_no_change_tolerance", controls["asp_no_change_tolerance"], scalar=True
+        )
 
     # --- Entropy stopping ---
     # Bin counts are positive integers; the SNR cutoff must be finite and positive.
@@ -780,8 +786,8 @@ def check_model_products(
     # The actual products must fit the backend even when configuration checks
     # were skipped. Check their derived order without revalidating configuration.
     if mode.imaging_kind == "continuum":
-        if deconvolver == "hogbom" and nterms != 1:
-            raise ValueError("Continuum hogbom requires n_taylor_terms=1.")
+        if deconvolver in ("hogbom", "asp") and nterms != 1:
+            raise ValueError(f"Continuum {deconvolver} requires n_taylor_terms=1.")
         if deconvolver == "mtmfs" and not 2 <= nterms <= 4:
             raise ValueError("Continuum mtmfs requires n_taylor_terms between 2 and 4.")
 
@@ -800,7 +806,7 @@ def check_model_products(
                 )
         configured_reference = config.get("image_params", {}).get("reference_frequency")
         product_reference = img_xds.attrs.get("continuum_imaging", {}).get(
-            "reference_frequency_hz", img_xds.attrs.get("reference_frequency")
+            "reference_frequency", img_xds.attrs.get("reference_frequency")
         )
         if (
             configured_reference is not None
@@ -1132,12 +1138,32 @@ def check_max_cycles(value, max_psf_fraction=None, *, allow_integral_float=False
         raise
 
 
-def check_hogbom_option(deconvolver, name, value):
-    """Check Boolean options implemented only by the Högbom kernels."""
+def check_hogbom_option(deconvolver, name, value, *, mode=None):
+    """Check history/subtraction capabilities, retaining the existing helper API."""
     require_boolean(name, value)
-    if value and deconvolver not in (None, "hogbom", "hogbom_many_threads"):
+    # Continuum graphs never provide the double-sized subtraction PSF.
+    if (
+        value
+        and name == "exact_psf_subtraction"
+        and mode is not None
+        and mode.imaging_kind == "continuum"
+    ):
         raise ValueError(
-            f"{name} is supported only by Hogbom deconvolvers; received {deconvolver!r}."
+            "exact_psf_subtraction is not supported by continuum imaging "
+            f"(deconvolver={deconvolver!r}): the continuum graph makes no PSF "
+            "of twice the image size."
+        )
+    supported = (None, "hogbom", "hogbom_many_threads")
+    if name == "record_iteration_history":
+        supported = (*supported, "asp", "mtmfs")
+    if value and deconvolver not in supported:
+        implementations = (
+            "Hogbom, Asp, and MT-MFS"
+            if name == "record_iteration_history"
+            else "Hogbom"
+        )
+        raise ValueError(
+            f"{name} is supported only by {implementations} deconvolvers; received {deconvolver!r}."
         )
 
 

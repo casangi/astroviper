@@ -383,6 +383,56 @@ class TestMtclean:
         assert out["peak_residual"] < np.max(np.abs(residual_in[0]))
         assert out["model_flux"] == pytest.approx(float(model[0].sum()), rel=1e-5)
 
+    def test_iteration_history(self):
+        """One record per component, without changing the clean: points and
+        scale components add up to the iterations, the Taylor-0 fluxes to the
+        model, and every scale is one of the effective scales."""
+        nterms, nx, ny = 2, 64, 64
+        psf = make_psf_stack(nterms, nx, ny, dtype=np.float64)
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        blob = np.exp(-((yy - 32) ** 2 + (xx - 30) ** 2) / (2 * 5.0**2))
+        dirty = _dirty_from_model(psf, np.stack([blob, 0.2 * blob]))
+        runs = {}
+        for record in (False, True):
+            residual, model = dirty.copy(), np.zeros_like(dirty)
+            out = mtmfs.clean(
+                residual,
+                psf,
+                model,
+                scales=[0, 4, 8],
+                max_iter_per_cycle_updated=60,
+                gain=0.2,
+                threshold_per_cycle=1e-5,
+                record_iteration_history=record,
+            )
+            runs[record] = out, residual, model
+        (off, residual_off, model_off), (out, residual, model) = runs[False], runs[True]
+        np.testing.assert_array_equal(residual, residual_off)
+        np.testing.assert_array_equal(model, model_off)
+        assert "iteration_component_flux" not in off
+        n = out["iterations_performed"]
+        assert out["n_point_components"] + out["n_scale_components"] == n
+        assert out["n_point_components"] > 0 and out["n_scale_components"] > 0
+        for field in (
+            "iteration_peak_residual",
+            "iteration_residual_rms",
+            "iteration_component_l",
+            "iteration_component_m",
+            "iteration_component_scale",
+            "iteration_component_flux",
+        ):
+            assert out[field].shape == (n,)
+            assert np.isfinite(out[field]).all()
+        np.testing.assert_allclose(
+            out["iteration_component_flux"].sum(), model[0].sum(), rtol=1e-9
+        )
+        assert set(out["iteration_component_scale"]) <= set(out["scales"])
+        assert (
+            np.count_nonzero(out["iteration_component_scale"] == 0)
+            == (out["n_point_components"])
+        )
+        assert np.all(out["iteration_residual_rms"] > 0)
+
     def test_float64_run_close_to_float32(self):
         nterms, nx, ny = 2, 64, 64
         res32 = make_dirty_stack(nterms, nx, ny, dtype=np.float32)
@@ -914,23 +964,30 @@ class TestArrayValidation:
         with pytest.raises(RuntimeError, match="3-D"):
             mtmfs.clean(residual[0], psf[0], model[0])
 
-    def test_equal_dtype_from_pickle_is_accepted(self):
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_equal_dtype_from_pickle_is_accepted(self, dtype):
         """An equal but non-builtin dtype object (pickle, Dask, Zarr) is used in place."""
         residual, psf, model, mask = pickle.loads(
             pickle.dumps(
                 (
-                    make_dirty_stack(2, 48, 40),
-                    make_psf_stack(2, 48, 40),
-                    np.zeros((2, 40, 48), dtype=np.float32),
-                    np.ones((40, 48), dtype=np.float32),
+                    make_dirty_stack(2, 48, 40, dtype=dtype),
+                    make_psf_stack(2, 48, 40, dtype=dtype),
+                    np.zeros((2, 40, 48), dtype=dtype),
+                    np.ones((40, 48), dtype=dtype),
                 )
             )
         )
+        residual_ptr = residual.__array_interface__["data"][0]
+        model_ptr = model.__array_interface__["data"][0]
         out = mtmfs.clean(residual, psf, model, mask=mask)
         assert out["iterations_performed"] > 0 and np.any(model)
+        assert residual.__array_interface__["data"][0] == residual_ptr
+        assert model.__array_interface__["data"][0] == model_ptr
         mtmfs.principal_solution(residual, mtmfs.hessian(psf)["inverse_hessian"][0])
         with pytest.raises(RuntimeError, match="float32 or float64"):
-            mtmfs.clean(residual.astype(">f4"), psf, model)
+            mtmfs.clean(
+                residual.astype(">f4" if dtype == np.float32 else ">f8"), psf, model
+            )
 
     def test_mask_validation(self):
         residual = make_dirty_stack(2, 48, 40)
@@ -1572,6 +1629,55 @@ def test_divergence_test_does_not_stop_a_multiscale_clean():
             divergence_peak_factor=1.1,
         )
         assert result["stop_code"] == mtmfs.STOP_MAX_ITER
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("nterms", [1, 2, 3])
+@pytest.mark.parametrize("first_sign", [-1, 1])
+def test_mask_box_keeps_holes_and_separated_candidates(dtype, nterms, first_sign):
+    """Search the mask box, including candidates outside the last update patch."""
+    shape = (64, 64)
+    psf = _parity_psf_stack(nterms, shape, dtype)
+    sky = np.zeros((nterms, *shape), dtype=dtype)
+    first, second = (8, 16), (48, 40)
+    sky[0, *first] = first_sign * 2.0
+    sky[0, *second] = -first_sign * 1.75
+    residual = _parity_dirty_from_model(psf, sky)
+    # Larger peaks in a hole and outside the box must never be selected.
+    residual[0, 24, 32] = 100.0
+    residual[0, 56, 56] = 200.0
+    mask = np.zeros(shape, dtype=dtype)
+    mask[first] = mask[second] = 1.0
+    original = residual.copy()
+    model = np.zeros_like(residual)
+
+    result = mtmfs.clean(
+        residual, psf, model, mask=mask, max_iter_per_cycle_updated=1, gain=1.0
+    )
+    assert result["iterations_performed"] == 1
+    assert model[0, *first] == pytest.approx(first_sign * 2.0, abs=2e-5)
+    assert np.count_nonzero(model[0]) == 1
+
+    # Continue in a fresh call: the other island is still a candidate.
+    result = mtmfs.clean(
+        residual, psf, model, mask=mask, max_iter_per_cycle_updated=1, gain=1.0
+    )
+    assert result["iterations_performed"] == 1
+    assert model[0, *second] == pytest.approx(-first_sign * 1.75, abs=2e-5)
+    assert np.count_nonzero(model[0]) == 2
+    np.testing.assert_allclose(
+        residual, original - _parity_dirty_from_model(psf, model), atol=2e-5
+    )
+
+    # Both islands must also be found within one model update, after its
+    # moving subtraction patch has been centred on the first island.
+    residual = original.copy()
+    together = np.zeros_like(residual)
+    result = mtmfs.clean(
+        residual, psf, together, mask=mask, max_iter_per_cycle_updated=2, gain=1.0
+    )
+    assert result["iterations_performed"] == 2
+    np.testing.assert_allclose(together, model, atol=2e-5)
 
 
 def test_large_scale_component_is_not_truncated():

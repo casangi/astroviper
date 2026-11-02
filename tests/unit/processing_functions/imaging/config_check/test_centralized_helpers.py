@@ -99,11 +99,11 @@ def test_direct_prediction_rejects_order_before_accessing_products():
 @pytest.mark.parametrize("reference", [0.0, float("nan"), [1e9, 2e9]])
 def test_legacy_reference_helper_preserves_its_value_error_api(reference):
     from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
-        _get_reference_frequency_hz,
+        _get_reference_frequency,
     )
 
     with pytest.raises(ValueError, match="scalar, finite and positive"):
-        _get_reference_frequency_hz({"reference_frequency": reference})
+        _get_reference_frequency({"reference_frequency": reference})
 
 
 def test_source_units_use_the_shared_metadata_check():

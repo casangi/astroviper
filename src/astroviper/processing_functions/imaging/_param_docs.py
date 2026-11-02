@@ -28,8 +28,8 @@ _IMAGE_PARAMS_DOC = (
 
 _CONTINUUM_IMAGE_PARAMS_DOC = (
     _IMAGE_PARAMS_DOC + "\nContinuum imaging also requires ``frequency_coords``,\n"
-    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;\n"
-    "``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``\n"
+    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.\n"
+    "``spectral_reference``\n"
     'sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``\n'
     "selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and\n"
     "``list_blockage_diameters`` are arrays in metres,\n"
@@ -104,9 +104,21 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
 )
 
 _CONTINUUM_DECONVOLVER_DOC = (
-    'Deconvolution algorithm: ``"hogbom"`` updates a one-term continuum model;\n'
-    '``"mtmfs"`` jointly updates two to four Taylor terms. Both use C++ kernels.\n'
-    "Unsupported algorithms and Taylor-order combinations raise without substitution."
+    'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
+    'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
+    "(C++, adaptive scale pixel) cleans Taylor term zero only and needs\n"
+    '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
+    "(``asp_scale_significance``) needs a ``clean_mask`` that leaves more\n"
+    "pixels of the primary-beam support outside it than the image has\n"
+    "outside that support: Asp takes the noise from the median absolute\n"
+    "deviation of the pixels outside its mask, and MVC sets the residual to\n"
+    "0 outside the support. Without a clean mask that noise is 0, or after\n"
+    "the residual-shaped components that of their sidelobes there (a warning\n"
+    'is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
+    "synthesis) cleans the Taylor terms together and needs\n"
+    '``image_params["n_taylor_terms"]`` from 2 to 4. Other values are\n'
+    "refused before anything is written, without substituting another algorithm\n"
+    "or Taylor order."
 )
 
 _CONTINUUM_MODE_DOC = (
@@ -232,19 +244,40 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "and with it the floor the imaging cycle converges to, falls as 1 over\n"
         'the oversampling; ``"linear"`` interpolates the two neighbouring\n'
         "samples and the error falls as 1 over its square). Missing keys take\n"
-        'the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,\n'
-        '"oversampling": 100, "interpolation": "nearest"}``; ``None`` is all\n'
-        "defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or\n"
-        "``least_misfit`` kernel whose image plane correction falls below 1e-6\n"
-        "of its centre value at the edge of the image kept (a support too large\n"
-        "for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the\n"
+        'the defaults ``{"type": "least_misfit", "support": 9,\n'
+        '"oversampling": 300, "interpolation": "linear"}``, the kernel RADPS\n'
+        "Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic\n"
+        "range of 1e4 (its table for ``fft_padding`` 1.2 ships with the\n"
+        "package, other paddings solve it at run time); ``None`` is all\n"
+        'defaults. With the type ``"prolate_spheroidal_casa"`` missing keys\n'
+        "take CASA's values instead, so that type alone is CASA's kernel and\n"
+        'sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,\n'
+        '"oversampling": 100, "interpolation": "nearest"}``, with Schwab\'s\n'
+        "analytic correction. A ``prolate_spheroidal``,\n"
+        "``exponential_semicircle`` or ``least_misfit`` kernel whose image\n"
+        "plane correction falls below 1e-6 of its centre value at the edge of\n"
+        "the image kept (a support too large for the ``fft_padding``, e.g. 17\n"
+        "at 1.05) is refused. The kernel of the\n"
         'former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,\n'
-        'not ``"prolate_spheroidal"``.'
+        'not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces\n'
+        "the gridding and the FFTs by the exact direct Fourier transform over the\n"
+        "unpadded image, w term included: with the phase\n"
+        "``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the\n"
+        "model visibilities are ``sum M exp(+i phase) / n`` over the model pixels\n"
+        "and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,\n"
+        "the measurement equation of ``simulate_processing_set``. Its cost is\n"
+        "proportional to the samples times the image pixels (30 to 40 s per\n"
+        "residual update of 451,500 samples, four correlations and 160 x 160\n"
+        "pixels on one core), so give it several\n"
+        "``processing_function_threads``; its results do not depend on their\n"
+        "number. Its ``VISIBILITY_NORMALIZATION`` and\n"
+        "``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the\n"
+        "gridders' that sum times the kernel's stencil sums."
     ),
     "cgk_1D": (
         "The gridding kernel\n"
         "(:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),\n"
-        "or the bare table of the default prolate spheroidal kernel of support 7."
+        "or a bare table of CASA's prolate spheroidal kernel of support 7."
     ),
     "primary_beam_params": (
         "The primary beam of the imager, the power pattern that gives the clean\n"
@@ -431,20 +464,28 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "- ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for\n"
         "  the entropy. Default 10.\n"
         "- ``record_iteration_history`` : If ``True``, every model update\n"
-        "  records, for every plane and every deconvolution iteration, the peak\n"
-        "  residual the iteration cleaned (signed, in the units of the residual\n"
-        "  image) and the RMS of the residual inside the clean mask after its\n"
-        "  subtraction, to follow the deconvolution in detail. The returned\n"
-        "  convergence record holds them as ``iteration_peak_residual`` and\n"
-        "  ``iteration_residual_rms``: per plane one array per cycle, with one\n"
-        "  value per iteration of that cycle's model update (empty for a cycle\n"
-        "  without one), so the record grows by two float64 values per\n"
-        "  iteration done. A debugging and tuning tool: the images are the same\n"
-        "  to the bit with and without it, and the RMS is the sum of squares\n"
-        "  the peak search of the next iteration makes anyway, so it costs no\n"
-        "  extra pass over the image per iteration. Hogbom deconvolvers only:\n"
-        '  ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.\n'
-        "  No CASA equivalent.\n"
+        "  records, for every plane and every component it subtracts, the\n"
+        "  signed peak of the residual inside the clean mask before the\n"
+        "  component (the peak the threshold test sees; for MT-MFS that of\n"
+        "  Taylor term zero, and for a residual-shaped component of Asp with\n"
+        "  ``asp_residual_component_positive_only``, the default, the largest\n"
+        "  positive residual), the RMS of that residual inside the clean mask\n"
+        "  after it, the model flux after it, and the component: its pixel\n"
+        "  along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an\n"
+        "  Asp residual-shaped component) and its flux, to follow the\n"
+        "  deconvolution in detail. The returned convergence record holds them\n"
+        "  as ``iteration_peak_residual``, ``iteration_residual_rms``,\n"
+        "  ``iteration_model_flux``, ``iteration_component_l``,\n"
+        "  ``iteration_component_m``, ``iteration_component_scale`` and\n"
+        "  ``iteration_component_flux``: per plane one array per cycle, with one\n"
+        "  value per component of that cycle's model update (empty for a cycle\n"
+        "  without one), so the record grows by seven float64 values per\n"
+        "  component. Asp counts in ``iter_done`` the iteration that ends a\n"
+        "  model update on one of its tests, which subtracts nothing. A\n"
+        "  debugging and tuning tool for every deconvolver: the images are the\n"
+        "  same to the bit with and without it, and the RMS comes from the sum\n"
+        "  of squares the peak search makes anyway, so it costs no extra pass\n"
+        "  over the image per component. Default ``False``. No CASA equivalent.\n"
         "- ``exact_psf_subtraction`` : If ``True``, a Hogbom model update\n"
         "  subtracts the PSF of every component it finds from the whole residual\n"
         "  image, with a PSF of twice the image size made once per channel from\n"
@@ -457,8 +498,9 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "  image-sized PSF either way. Costs a second PSF per channel (four\n"
         "  times the pixels, kept through the channel's cycles) and a\n"
         "  subtraction over the whole image at every iteration. Hogbom\n"
-        '  deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.\n'
-        "  Default ``False``. No CASA equivalent.\n"
+        '  deconvolvers of cube imaging only: ``deconvolver="asp"`` and\n'
+        "  continuum imaging raise ``ValueError``. Default ``False``. No CASA\n"
+        "  equivalent.\n"
         "- ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends\n"
         "  after each of its Hogbom runs (51 or 510 point components) unless\n"
         "  the RMS of the residual has fallen, by less than a factor 1.5, since\n"
@@ -474,7 +516,7 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "  iterations go on from there. They remove the ring residuals Asp\n"
         "  leaves on resolved emission in far fewer iterations, and take no\n"
         "  residual below ``threshold_per_cycle``. Further keys\n"
-        "  (``asp_rc_*``) are described in\n"
+        "  (``asp_residual_component_*``) are described in\n"
         "  :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.\n"
         "  Asp only. Default ``True``. No CASA equivalent.\n"
         "- ``asp_scale_significance`` : If ``True``, Asp measures the noise of\n"
@@ -602,6 +644,18 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "convolved with the clean beam (the Gaussian fit to the PSF) plus the\n"
         "residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable."
     ),
+    "clean_mask": (
+        'Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:\n'
+        "the path of a NumPy ``.npy`` file for the distributed applications and\n"
+        "the bool plane loaded from it\n"
+        "(:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values\n"
+        "greater than 0.5) for the layers below. It selects the pixels of every\n"
+        "residual plane that the model update cleans: in cube imaging in place\n"
+        "of the primary-beam mask of ``primary_beam_limit``, in continuum\n"
+        "imaging within it. Asp measures the noise of its significance test\n"
+        "(``asp_scale_significance``) outside the pixels it cleans. ``None``\n"
+        "keeps the primary-beam mask."
+    ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.
     "report": (
@@ -624,5 +678,28 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         'this chunk\'s parallel coordinate values (``"data"``) and its\n'
         '``"slice"`` into the full output array (for cube imaging the\n'
         "parallel dim is ``frequency``)."
+    ),
+    "residual": (
+        "Residual ``r`` before the model update, with dimensions including\n"
+        "``l`` and ``m`` and optionally ``taylor_term``."
+    ),
+    "model_increment": (
+        "Model increment ``z`` of the model update, which started from an\nempty model."
+    ),
+    "cycle_acceleration_state_xds": (
+        "State returned by the preceding call, or ``None`` in the first\nimaging cycle."
+    ),
+    "momentum_coefficient": (
+        "Cap ``mu`` of the momentum coefficient\n"
+        "``mu_j = min(mu, (j - 1) / (j + 2))`` in\n"
+        '``cycle_acceleration="nesterov_momentum"``, with ``j`` the imaging\n'
+        "cycles since a plane's last start or restart; in ``[0, 1)``. 0 gives\n"
+        "the plain imaging cycle. Default 0.5, the constant coefficient of\n"
+        "Müller, Hsieh and Bhatnagar (2026), which the ramp reaches at ``j = 4``.\n"
+        "A higher cap acts only on planes that run longer without a restart\n"
+        "(0.9 at ``j = 28``). On simulated data with shallow MT-MFS model\n"
+        "updates, caps of 0.7 and 0.9 needed 18 imaging cycles, 0.5 needed 22\n"
+        'and ``"none"`` 33; the paper found models oscillating with constant\n'
+        "coefficients of 0.7 to 0.9."
     ),
 }

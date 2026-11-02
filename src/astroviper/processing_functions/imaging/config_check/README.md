@@ -32,10 +32,9 @@ a different algorithm. Optional omitted settings use the implementation's
 existing defaults without modifying the caller's dictionary. Explicit invalid
 values, including `None` thresholds, raise.
 
-`reference_frequency` is the canonical configuration key, in Hz.
-`reference_frequency_hz` and `nterms` are rejected configuration aliases.
-The historical `reference_frequency_hz` name in persisted continuum metadata
-remains readable. Högbom continuum requires exactly one Taylor term; MT-MFS
+`reference_frequency`, in Hz, is used consistently in configuration and continuum
+metadata. `nterms` is a rejected configuration alias. Högbom continuum requires
+exactly one Taylor term; MT-MFS
 requires two to four. Cube planes are independent single-term images.
 
 JSON schemas check basic structure, dtypes, and allowed strings. Python owns

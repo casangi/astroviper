@@ -107,6 +107,52 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     ):
         raise ValueError("mpi_cluster_setup requires the implemented cube MPI backend.")
 
+    # --- Imaging-cycle acceleration ---
+    # An unsupported method must not silently select a plain imaging cycle.
+    if "cycle_acceleration" in config:
+        acceleration = config["cycle_acceleration"]
+        if not isinstance(acceleration, str) or acceleration not in (
+            "none",
+            "conjugate_gradient",
+            "nesterov_momentum",
+        ):
+            raise ValueError(
+                "cycle_acceleration must be 'none', 'conjugate_gradient', or 'nesterov_momentum'."
+            )
+
+    # --- Momentum coefficient ---
+    # Zero selects a plain step; a coefficient at or above one is not supported.
+    if "momentum_coefficient" in config:
+        coefficient = require_finite_real(
+            "momentum_coefficient", config["momentum_coefficient"], scalar=True
+        )
+        if not 0 <= coefficient < 1:
+            raise ValueError("momentum_coefficient must lie in [0, 1).")
+
+    # --- Direct Fourier-transform workflow ---
+    # DFT makes images directly, so it cannot supply or cache uv-grid products.
+    kernel = config.get("gridding_kernel_params")
+    if kernel is not None:
+        require_mapping("gridding_kernel_params", kernel)
+        if kernel.get("type") == "dft":
+            if mode.imaging_kind == "continuum":
+                if config.get("continuum_mode", "mfs") != "mfs":
+                    raise ValueError(
+                        "DFT continuum imaging requires continuum_mode='mfs'."
+                    )
+                if config.get("visibility_memory_mode", "recompute") != "recompute":
+                    raise ValueError(
+                        "DFT continuum imaging requires visibility_memory_mode='recompute'."
+                    )
+            kept = config.get("image_data_variables_keep")
+            kept_grids = {"visibility", "uv_sampling"} & set(
+                () if kept is None else kept
+            )
+            if kept_grids:
+                raise ValueError(
+                    f"DFT does not produce the requested uv grids: {sorted(kept_grids)}."
+                )
+
     # --- Unsupported interface options ---
     # Reject accepted-but-unused options until their implementation is available.
     if config.get("field_name") is not None:

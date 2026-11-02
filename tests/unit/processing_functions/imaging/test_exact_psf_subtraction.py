@@ -3,8 +3,9 @@
 from the whole residual image with a PSF of twice the image size, made once
 per channel from the imaging weights of the image.
 
-Tested on the PSF maker (shape, centre, natural and Briggs weights, cell) and
-on the 48 x 48 imaging cycle loop of ``test_max_cycles_auto``: the default is
+Tested on the PSF maker (shape, centre, natural and Briggs weights, cell, one
+uv grid for imaging weights equal in every correlation) and on the 48 x 48
+imaging cycle loop of ``test_max_cycles_auto``: the default is
 unchanged, the option gives to the bit what the image-sized kernel gives on a
 2n image holding the residual, with a 2n PSF made independently, and the 2n
 PSF is freed before the restore.
@@ -17,6 +18,9 @@ import numpy as np
 import pytest
 from xradio.image import make_empty_sky_image
 
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    CYCLE_TIMING_FIELDS,
+)
 from tests.unit.processing_functions.imaging.test_max_cycles_auto import (
     FREQUENCY,
     IMAGE_PARAMS,
@@ -79,13 +83,21 @@ def _run(controls, single_precision_image=False, deconvolver="hogbom", **kwargs)
     )
 
 
+def _untimed(record):
+    """The record without the wall times of its cycles."""
+    return {
+        key: {f: v for f, v in fields.items() if f not in CYCLE_TIMING_FIELDS}
+        for key, fields in record.data.items()
+    }
+
+
 def _same(a, b, extra=()):
     """Residual, model, record and timing columns (times excepted) to the bit;
     ``a`` may have the timing columns ``extra`` besides."""
     (img_a, timing_a, record_a), (img_b, timing_b, record_b) = a, b
     for name in ("SKY_RESIDUAL", "SKY_MODEL"):
         assert np.array_equal(img_a[name].values, img_b[name].values)
-    assert pickle.dumps(record_a.data) == pickle.dumps(record_b.data)
+    assert pickle.dumps(_untimed(record_a)) == pickle.dumps(_untimed(record_b))
     assert [c for c in timing_a.columns if c not in extra] == list(timing_b.columns)
     counts = [c for c in timing_b.columns if not c.startswith("T_")]
     assert timing_a[counts].equals(timing_b[counts])
@@ -150,6 +162,8 @@ def test_the_psf_of_twice_the_image_size(
     assert psf.flags.c_contiguous
     ((sizes, cell, params),) = grids
     assert (sizes["l"], sizes["m"]) == (2 * n, 2 * n)
+    # the imaging weights are equal in both correlations: one is gridded
+    assert sizes["polarization"] == 1
     np.testing.assert_allclose(cell, img_xds.xr_img.get_lm_cell_size(), rtol=1e-12)
     assert params["fft_padding"] == image_params["fft_padding"]
     assert "T_uv_sampling_grid" in timing.columns
@@ -203,6 +217,75 @@ def test_the_psf_of_twice_the_image_size(
         assert not np.allclose(
             recomputed["ms_0"]["WEIGHT_IMAGING"].values, weights, rtol=0.1
         )
+
+
+@pytest.mark.parametrize(
+    ("weights_changed", "gridded"), [("flagged", 1), ("unequal", 2)]
+)
+def test_one_uv_grid_when_the_correlation_weights_are_equal(
+    monkeypatch, weights_changed, gridded
+):
+    """Imaging weights equal in every correlation, flagged (``NaN``) samples
+    included, give one uv grid, whose PSF is copied to the other correlation;
+    unequal weights a grid per correlation. Both give the bits of the PSF
+    maker on a 2n image of both correlations."""
+    import astroviper.processing_functions.imaging.make_point_spread_function as mpsf
+    from astroviper.processing_functions.imaging.residual_update import (
+        imaging_setup_single_field,
+    )
+
+    n = IMAGE_PARAMS["image_size"][0]
+    ps_xdt = _processing_set()
+    img_xds, _ = imaging_setup_single_field(
+        ps_xdt,
+        _empty_image(n),
+        IMAGE_PARAMS,
+        {"weighting": "natural"},
+        processing_set_data_group_name="base",
+        fft_backend="scipy",
+    )
+    weights = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+    if weights_changed == "flagged":
+        weights[::3] = np.nan
+    else:
+        weights[::2, :, :, 1] *= 0.5
+    grids = []
+    original = mpsf.add_uv_sampling_grid_single_field
+
+    def spy(ms_xdt, cgk_1D, psf_xds, **kwargs):
+        original(ms_xdt, cgk_1D, psf_xds, **kwargs)
+        grids.append(psf_xds["UV_SAMPLING"].sizes["polarization"])
+
+    monkeypatch.setattr(mpsf, "add_uv_sampling_grid_single_field", spy)
+    # the measurement sets as a dict, as the node task hands them over
+    psf, _ = mpsf.make_subtraction_point_spread_function_single_field(
+        dict(ps_xdt.items()),
+        img_xds,
+        IMAGE_PARAMS,
+        ["XX", "YY"],
+        ms_data_group_in_name="base",
+        fft_backend="scipy",
+    )
+    monkeypatch.undo()
+
+    assert grids == [gridded]
+    assert psf.shape == (1, 1, 2, 2 * n, 2 * n)
+    assert psf.flags.c_contiguous
+    reference = _empty_image(2 * n)
+    reference.attrs["type"] = "image_dataset"
+    reference = reference.xr_img.add_data_group(
+        new_data_group_name="residual",
+        new_data_group={"description": "test", "date": "2026"},
+    )
+    reference, _ = mpsf.make_point_spread_function_single_field(
+        ps_xdt,
+        reference,
+        {**IMAGE_PARAMS, "image_size": [2 * n, 2 * n]},
+        ms_data_group_in_name="base",
+        fft_backend="scipy",
+    )
+    assert np.array_equal(psf, reference["POINT_SPREAD_FUNCTION"].values)
+    assert np.array_equal(psf[0, 0, 0], psf[0, 0, 1]) == (gridded == 1)
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +375,15 @@ def test_equals_the_image_sized_kernel_on_an_embedded_image(
         )
         residual_cube[...] = residual_2n[region]
         model_cube[...] = model_2n[region]
+        # the components at their pixels of the image
+        for field, offset in (
+            ("iteration_component_l", oy),
+            ("iteration_component_m", ox),
+        ):
+            for per_frequency in out[field]:
+                for per_polarization in per_frequency:
+                    for history in per_polarization:
+                        history -= offset
         return out
 
     monkeypatch.setattr(mpsf, "make_point_spread_function_single_field", psf_maker)

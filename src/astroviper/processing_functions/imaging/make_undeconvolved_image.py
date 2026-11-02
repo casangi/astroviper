@@ -43,7 +43,7 @@ def make_undeconvolved_image_single_field(
     cgk_1D : GriddingKernel or numpy.ndarray
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or the bare table of the default prolate spheroidal kernel of support 7.
+        or a bare table of CASA's prolate spheroidal kernel of support 7.
     model_exists : bool
         Accepted for call-site compatibility with the imaging cycle loop;
         currently unused (the UV-sampling/PSF grid is built once in

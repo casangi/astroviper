@@ -217,3 +217,73 @@ def test_single_precision_image():
     assert entropy.item() == pytest.approx(
         _direct_entropy(plane.astype(float)), abs=1e-3
     )
+
+
+class TestResidualStatistics:
+    """plane_residual_statistics, cube_residual_statistics, cube_flux_by_sign."""
+
+    @staticmethod
+    def _plane():
+        rng = np.random.default_rng(3)
+        plane = rng.normal(size=(300, 400))
+        plane[5, 7] = np.nan
+        mask = np.zeros(plane.shape, dtype=bool)
+        mask[40:200, 60:300] = True
+        return plane, mask
+
+    def test_matches_numpy_and_scipy(self):
+        from scipy import stats
+
+        from astroviper.processing_functions.image_analysis.image_statistics import (
+            plane_residual_statistics,
+        )
+
+        plane, mask = self._plane()
+        result = plane_residual_statistics(plane, mask)
+        finite = np.isfinite(plane)
+        inside, outside = plane[mask & finite], plane[~mask & finite]
+        assert result["rms_in_mask"] == pytest.approx(np.sqrt(np.mean(inside**2)))
+        assert result["rms_outside_mask"] == pytest.approx(np.sqrt(np.mean(outside**2)))
+        assert result["max_in_mask"] == inside.max()
+        assert result["min_in_mask"] == inside.min()
+        assert result["skew_in_mask"] == pytest.approx(stats.skew(inside))
+        assert result["excess_kurtosis_in_mask"] == pytest.approx(
+            stats.kurtosis(inside)
+        )
+        # every pixel outside the mask: the plane is below MAD_SAMPLES
+        assert result["mad_rms_outside_mask"] == pytest.approx(
+            1.4826 * np.median(np.abs(outside - np.median(outside)))
+        )
+
+    def test_without_a_mask_every_pixel_is_inside(self):
+        from astroviper.processing_functions.image_analysis.image_statistics import (
+            plane_residual_statistics,
+        )
+
+        plane, _ = self._plane()
+        result = plane_residual_statistics(plane)
+        assert result["rms_in_mask"] == pytest.approx(np.sqrt(np.nanmean(plane**2)))
+        assert np.isnan(result["rms_outside_mask"])
+        assert np.isnan(result["mad_rms_outside_mask"])
+
+    def test_cube_and_flux_by_sign(self):
+        from astroviper.processing_functions.image_analysis.image_statistics import (
+            RESIDUAL_STATISTICS,
+            cube_flux_by_sign,
+            cube_residual_statistics,
+            plane_residual_statistics,
+        )
+
+        plane, mask = self._plane()
+        cube = np.stack([plane, -2 * plane])[:, None]
+        masks = np.broadcast_to(mask, cube.shape)
+        result = cube_residual_statistics(cube, masks)
+        assert set(result) == set(RESIDUAL_STATISTICS)
+        for index in np.ndindex(cube.shape[:-2]):
+            expected = plane_residual_statistics(cube[index], masks[index])
+            for name, value in expected.items():
+                assert result[name][index] == value
+        positive, negative = cube_flux_by_sign(np.nan_to_num(cube))
+        values = np.nan_to_num(plane)
+        assert positive[0, 0] == pytest.approx(values[values > 0].sum())
+        assert negative[1, 0] == pytest.approx(-2 * values[values > 0].sum())

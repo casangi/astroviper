@@ -136,7 +136,6 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
 @pytest.mark.parametrize(
     ("cycle_control_params", "deconvolver", "match"),
     [
-        ({}, "asp", "record_iteration_history is supported only by Hogbom"),
         ({"record_iteration_history": 1}, "hogbom", "must be a bool"),
         ({"max_cycles": "Auto"}, "hogbom", "must be an integer"),
         ({"max_cycles": 2.5}, "hogbom", "must be an integer"),
@@ -150,7 +149,6 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
         ({"exact_psf_subtraction": 1}, "hogbom", "must be a bool"),
     ],
     ids=[
-        "history_asp",
         "history_int",
         "max_cycles_Auto",
         "max_cycles_float",

@@ -43,14 +43,21 @@ CELL_GUESS_SAMPLES_PER_U_MAX = 3.0
 ACA_DISH_DIAMETER_LIMIT = 9.5
 # CASA pipeline robust of a cube.
 DEFAULT_ROBUST = {"alma": 0.5, "aca": 0.5, "vla": 2.0}
-# Requirement (a) of RADPS Memo 13: the kernel floor at most a third of the w term floor.
-# Measured on the five cases of its K set (zenith tracks): at fft_padding 1.2 the
-# only tested kernel that meets it on all five; 0.30 on the 7 m array at 950 GHz,
-# 91 percent of the limit (exponential semicircle 9: 0.41), the case with the
-# smallest B_max lambda / D**2 (the most demanding by that ordering, derived); at
-# most 0.20 on ALMA C-1 and C-8, the VLA D and the ngVLA core.
+# The dynamic range rule of RADPS Memo 13a: kernel errors at most 0.1 sigma at a
+# dynamic range of 1e4, i.e. a far floor (the residual RMS away from the sources after
+# one residual update at the true model, w term off, over the Stokes I peak) of at most
+# 1e-5, worst case over its ALMA C-8, ALMA C-1 and 7 m array skies, a source anywhere
+# from 0.75 of the half width kept to the 0.2 primary beam radius, and every Stokes
+# plane. Measured worst case 2.7e-7 (the 7 m array, a source at 0.85), a margin of 36
+# (35 between pixel centres and out to the clean mask edge, predicted); prolate
+# spheroidal 9/300/linear 5.7e-7, least misfit 7/300/linear 6.1e-6, CASA's kernel
+# 1.3e-4. Cost order: grid memory (fft_padding 1.2), then time (support 9 costs 51
+# percent more than 7, which leaves too little margin for ten sources near the edge,
+# derived). It replaces requirement (a) of RADPS Memo 13 (the kernel floor at most a
+# third of the w term floor: 0.002 sigma at 1e4 on the 7 m array, met only at
+# fft_padding 1.5; this kernel reaches 0.45).
 GRIDDING_KERNEL_PARAMS = {
-    "type": "prolate_spheroidal",
+    "type": "least_misfit",
     "support": 9,
     "oversampling": 300,
     "interpolation": "linear",

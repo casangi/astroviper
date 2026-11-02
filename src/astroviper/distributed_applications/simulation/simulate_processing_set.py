@@ -79,6 +79,8 @@ def simulate_processing_set(
     beam_models: list,
     beam_model_map: np.ndarray | list,
     sky_components: list | None = None,
+    sky_model_image: str | None = None,
+    sky_model_image_predict: dict | None = None,
     point_source_flux: np.ndarray | list | None = None,
     point_source_ra_dec: np.ndarray | list | None = None,
     beam_params: dict | None = None,
@@ -150,6 +152,23 @@ def simulate_processing_set(
         m_ring, crescent, annulus, exponential_disk, tapered_power_law,
         shapelet): ``{"kind", "flux", "ra_dec", <shape parameters>}`` as
         described in :mod:`~astroviper.processing_functions.simulation.sky_components`.
+    sky_model_image : str, optional
+        A sky image added to the components: an XRADIO image (the path of a
+        FITS, CASA or Zarr image for the distributed application and the node
+        task, the opened dataset for the processing function) with ``SKY`` in Jy
+        per pixel, Stokes ``I`` (or the two Stokes planes of the parallel hands,
+        or ``I, Q, U, V``) and ``l, m`` about the phase centre. Every channel
+        takes the image channel nearest in frequency. It is seen through the
+        power beam of the one beam model of every antenna, which must point at
+        the phase centre (``pointing_ra_dec`` None). It is not part of the sky
+        image written with ``sky_image_params``.
+    sky_model_image_predict : dict, optional
+        How ``sky_model_image`` is predicted: ``{"predict": "dft"}`` (default),
+        the exact direct Fourier transform over the non-zero pixels, the w term
+        included unless ``uvw_params["w_term"]`` is False; or
+        ``{"predict": "gridded", "gridding_kernel_params": ...,
+        "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
+        which has no w term and so needs ``uvw_params["w_term"]`` False.
     point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy, optional
         Flux of every point source in the four instrumental correlations
         (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes
@@ -488,14 +507,30 @@ def simulate_processing_set(
                 kind, flux, ra_dec, shape, extra
             )
     all_components += sky_components
-    if not all_components:
+    if not all_components and sky_model_image is None:
         raise ValueError(
-            "no sources: give sky_components and/or point_source_flux / point_source_ra_dec."
+            "no sources: give sky_components, sky_model_image and/or "
+            "point_source_flux / point_source_ra_dec."
         )
+    _check_sky_model_image(
+        sky_model_image,
+        sky_model_image_predict,
+        uvw_params,
+        beam_model_map,
+        pointing_ra_dec,
+    )
     normalized_components = normalize_sky_components(
         all_components, n_time, n_frequency, direction_frame
     )
-    described = describe_sky_components(normalized_components)
+    described = ", ".join(
+        filter(
+            None,
+            [
+                describe_sky_components(normalized_components),
+                sky_model_image and "a sky image",
+            ],
+        )
+    )
     sky_image = _resolve_sky_image_params(
         sky_image_params, phase_center_ra_dec, polarization, n_time
     )
@@ -622,6 +657,8 @@ def simulate_processing_set(
         "gaussian_ring_source_ra_dec": gaussian_ring_source_ra_dec,
         "gaussian_ring_source_shape": gaussian_ring_source_shape,
         "sky_components": sky_components,
+        "sky_model_image": sky_model_image,
+        "sky_model_image_predict": sky_model_image_predict,
         "phase_center_ra_dec": phase_center_ra_dec,
         "beam_models": list(beam_models),
         "beam_model_map": beam_model_map,
@@ -804,6 +841,43 @@ def _check_extended_source_shapes(
             )
         if np.any(shape[:, :2] < 0):
             raise ValueError("disk_source_shape diameters must be non-negative.")
+
+
+def _check_sky_model_image(
+    sky_model_image,
+    sky_model_image_predict,
+    uvw_params,
+    beam_model_map,
+    pointing_ra_dec,
+):
+    """Refuse a sky model image the node tasks cannot simulate, before anything is written."""
+    if sky_model_image is None:
+        return
+    from xradio.image import open_image
+
+    from astroviper.processing_functions.simulation.sky_image_visibilities import (
+        SKY_IMAGE_PREDICTIONS,
+    )
+
+    image = open_image(sky_model_image)
+    if "SKY" not in image:
+        raise ValueError(f"sky_model_image {sky_model_image} has no SKY data variable.")
+    predict = {"predict": "dft", **(sky_model_image_predict or {})}
+    if predict["predict"] not in SKY_IMAGE_PREDICTIONS:
+        raise ValueError(
+            f"sky_model_image_predict['predict'] must be one of {SKY_IMAGE_PREDICTIONS}; "
+            f"got {predict['predict']!r}."
+        )
+    if predict["predict"] == "gridded" and uvw_params["w_term"]:
+        raise ValueError(
+            'sky_model_image_predict "gridded" has no w term: simulate with '
+            'uvw_params={"w_term": False} or use "dft".'
+        )
+    if np.unique(np.asarray(beam_model_map)).size != 1 or pointing_ra_dec is not None:
+        raise NotImplementedError(
+            "a sky model image is simulated through one beam model shared by every "
+            "antenna, pointing at the phase centre."
+        )
 
 
 def _check_input_shapes(

@@ -129,7 +129,8 @@ def test_invalid_model_config_is_not_replaced(deconvolver, nterms, error):
 
 
 @pytest.mark.parametrize(
-    "deconvolver,nterms", [("hogbom", 1), ("mtmfs", 2), ("mtmfs", 3), ("mtmfs", 4)]
+    "deconvolver,nterms",
+    [("hogbom", 1), ("asp", 1), ("mtmfs", 2), ("mtmfs", 3), ("mtmfs", 4)],
 )
 def test_supported_continuum_model_configs(deconvolver, nterms):
     check_model_update(

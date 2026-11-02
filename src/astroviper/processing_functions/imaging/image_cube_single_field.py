@@ -209,20 +209,28 @@ def imaging_preparation_single_field(
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
         - ``record_iteration_history`` : If ``True``, every model update
-          records, for every plane and every deconvolution iteration, the peak
-          residual the iteration cleaned (signed, in the units of the residual
-          image) and the RMS of the residual inside the clean mask after its
-          subtraction, to follow the deconvolution in detail. The returned
-          convergence record holds them as ``iteration_peak_residual`` and
-          ``iteration_residual_rms``: per plane one array per cycle, with one
-          value per iteration of that cycle's model update (empty for a cycle
-          without one), so the record grows by two float64 values per
-          iteration done. A debugging and tuning tool: the images are the same
-          to the bit with and without it, and the RMS is the sum of squares
-          the peak search of the next iteration makes anyway, so it costs no
-          extra pass over the image per iteration. Hogbom deconvolvers only:
-          ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
-          No CASA equivalent.
+          records, for every plane and every component it subtracts, the
+          signed peak of the residual inside the clean mask before the
+          component (the peak the threshold test sees; for MT-MFS that of
+          Taylor term zero, and for a residual-shaped component of Asp with
+          ``asp_residual_component_positive_only``, the default, the largest
+          positive residual), the RMS of that residual inside the clean mask
+          after it, the model flux after it, and the component: its pixel
+          along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an
+          Asp residual-shaped component) and its flux, to follow the
+          deconvolution in detail. The returned convergence record holds them
+          as ``iteration_peak_residual``, ``iteration_residual_rms``,
+          ``iteration_model_flux``, ``iteration_component_l``,
+          ``iteration_component_m``, ``iteration_component_scale`` and
+          ``iteration_component_flux``: per plane one array per cycle, with one
+          value per component of that cycle's model update (empty for a cycle
+          without one), so the record grows by seven float64 values per
+          component. Asp counts in ``iter_done`` the iteration that ends a
+          model update on one of its tests, which subtracts nothing. A
+          debugging and tuning tool for every deconvolver: the images are the
+          same to the bit with and without it, and the RMS comes from the sum
+          of squares the peak search makes anyway, so it costs no extra pass
+          over the image per component. Default ``False``. No CASA equivalent.
         - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
           subtracts the PSF of every component it finds from the whole residual
           image, with a PSF of twice the image size made once per channel from
@@ -235,8 +243,9 @@ def imaging_preparation_single_field(
           image-sized PSF either way. Costs a second PSF per channel (four
           times the pixels, kept through the channel's cycles) and a
           subtraction over the whole image at every iteration. Hogbom
-          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
-          Default ``False``. No CASA equivalent.
+          deconvolvers of cube imaging only: ``deconvolver="asp"`` and
+          continuum imaging raise ``ValueError``. Default ``False``. No CASA
+          equivalent.
         - ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends
           after each of its Hogbom runs (51 or 510 point components) unless
           the RMS of the residual has fallen, by less than a factor 1.5, since
@@ -252,7 +261,7 @@ def imaging_preparation_single_field(
           iterations go on from there. They remove the ring residuals Asp
           leaves on resolved emission in far fewer iterations, and take no
           residual below ``threshold_per_cycle``. Further keys
-          (``asp_rc_*``) are described in
+          (``asp_residual_component_*``) are described in
           :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
           Asp only. Default ``True``. No CASA equivalent.
         - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
@@ -322,14 +331,35 @@ def imaging_preparation_single_field(
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
-        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
-        ``least_misfit`` kernel whose image plane correction falls below 1e-6
-        of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
@@ -470,6 +500,7 @@ def image_cube_single_field(
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
+    clean_mask=None,
     task_id=0,
     *,
     input_checked: bool = False,
@@ -669,20 +700,28 @@ def image_cube_single_field(
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
         - ``record_iteration_history`` : If ``True``, every model update
-          records, for every plane and every deconvolution iteration, the peak
-          residual the iteration cleaned (signed, in the units of the residual
-          image) and the RMS of the residual inside the clean mask after its
-          subtraction, to follow the deconvolution in detail. The returned
-          convergence record holds them as ``iteration_peak_residual`` and
-          ``iteration_residual_rms``: per plane one array per cycle, with one
-          value per iteration of that cycle's model update (empty for a cycle
-          without one), so the record grows by two float64 values per
-          iteration done. A debugging and tuning tool: the images are the same
-          to the bit with and without it, and the RMS is the sum of squares
-          the peak search of the next iteration makes anyway, so it costs no
-          extra pass over the image per iteration. Hogbom deconvolvers only:
-          ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
-          No CASA equivalent.
+          records, for every plane and every component it subtracts, the
+          signed peak of the residual inside the clean mask before the
+          component (the peak the threshold test sees; for MT-MFS that of
+          Taylor term zero, and for a residual-shaped component of Asp with
+          ``asp_residual_component_positive_only``, the default, the largest
+          positive residual), the RMS of that residual inside the clean mask
+          after it, the model flux after it, and the component: its pixel
+          along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an
+          Asp residual-shaped component) and its flux, to follow the
+          deconvolution in detail. The returned convergence record holds them
+          as ``iteration_peak_residual``, ``iteration_residual_rms``,
+          ``iteration_model_flux``, ``iteration_component_l``,
+          ``iteration_component_m``, ``iteration_component_scale`` and
+          ``iteration_component_flux``: per plane one array per cycle, with one
+          value per component of that cycle's model update (empty for a cycle
+          without one), so the record grows by seven float64 values per
+          component. Asp counts in ``iter_done`` the iteration that ends a
+          model update on one of its tests, which subtracts nothing. A
+          debugging and tuning tool for every deconvolver: the images are the
+          same to the bit with and without it, and the RMS comes from the sum
+          of squares the peak search makes anyway, so it costs no extra pass
+          over the image per component. Default ``False``. No CASA equivalent.
         - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
           subtracts the PSF of every component it finds from the whole residual
           image, with a PSF of twice the image size made once per channel from
@@ -695,8 +734,9 @@ def image_cube_single_field(
           image-sized PSF either way. Costs a second PSF per channel (four
           times the pixels, kept through the channel's cycles) and a
           subtraction over the whole image at every iteration. Hogbom
-          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
-          Default ``False``. No CASA equivalent.
+          deconvolvers of cube imaging only: ``deconvolver="asp"`` and
+          continuum imaging raise ``ValueError``. Default ``False``. No CASA
+          equivalent.
         - ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends
           after each of its Hogbom runs (51 or 510 point components) unless
           the RMS of the residual has fallen, by less than a factor 1.5, since
@@ -712,7 +752,7 @@ def image_cube_single_field(
           iterations go on from there. They remove the ring residuals Asp
           leaves on resolved emission in far fewer iterations, and take no
           residual below ``threshold_per_cycle``. Further keys
-          (``asp_rc_*``) are described in
+          (``asp_residual_component_*``) are described in
           :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
           Asp only. Default ``True``. No CASA equivalent.
         - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
@@ -811,14 +851,35 @@ def image_cube_single_field(
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
-        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
-        ``least_misfit`` kernel whose image plane correction falls below 1e-6
-        of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
@@ -846,6 +907,17 @@ def image_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
         Zernike aperture models and Jones images are not supported: they are
         not azimuthally symmetric and depend on the parallactic angle.
+    clean_mask : numpy.ndarray or None, optional
+        Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:
+        the path of a NumPy ``.npy`` file for the distributed applications and
+        the bool plane loaded from it
+        (:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values
+        greater than 0.5) for the layers below. It selects the pixels of every
+        residual plane that the model update cleans: in cube imaging in place
+        of the primary-beam mask of ``primary_beam_limit``, in continuum
+        imaging within it. Asp measures the noise of its significance test
+        (``asp_scale_significance``) outside the pixels it cleans. ``None``
+        keeps the primary-beam mask.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     input_checked : bool, optional
@@ -871,10 +943,19 @@ def image_cube_single_field(
         update and a closing entry from the stop test that ended the loop
         (``iter_done`` 0, ``peakres`` the peak of the written residual inside
         the clean mask).  Channel labels are chunk-local (0-based); the node
-        task remaps them to global channel numbers before the reduce.  With
-        ``record_iteration_history`` every plane holds, per entry, the
-        ``iteration_peak_residual`` and ``iteration_residual_rms`` of its
-        model update (one value per iteration; empty for the closing entry);
+        task remaps them to global channel numbers before the reduce.  Every
+        entry holds the statistics of the residual
+        (:data:`~astroviper.processing_functions.image_analysis.image_statistics.RESIDUAL_STATISTICS`),
+        its ``entropy``, ``residual_snr`` and the seconds of the residual
+        update it follows (``t_residual_update``); an entry of a model update
+        also those of the residual it started from (prefixed ``start_``), the
+        seconds of the model update (``t_model_update``), its
+        ``threshold_per_cycle``, the positive and negative model flux after it
+        (``model_flux_positive``, ``model_flux_negative``) and the components
+        it subtracted (``n_point_components``, ``n_scale_components``, and the
+        Asp counts). With ``record_iteration_history`` every plane holds, per
+        entry, the iteration history of its model update (one value per
+        component; empty for the closing entry);
         with ``max_cycles="auto"`` it holds ``max_cycles_auto``, the limit
         predicted for the plane (the channel's limit is the largest of its
         planes').
@@ -905,11 +986,13 @@ def image_cube_single_field(
     from astroviper.processing_functions.imaging.utils import (
         accumulate_timing,
         build_residual_imaging_dict,
-        copy_residual_entropy,
+        copy_residual_statistics,
         get_per_cycle_limits,
         merge_imaging_dicts,
+        record_cycle_time,
         resolve_auto_max_cycles,
     )
+    from astroviper.utils.clean_mask import install_clean_mask
 
     if image_data_variables_keep is None:
         image_data_variables_keep = []
@@ -1002,8 +1085,11 @@ def image_cube_single_field(
             gridding_kernel_params=gridding_kernel_params,
             input_checked=True,
         )
-        timing["T_residual_update"] += time.time() - start
+        t_residual_update = time.time() - start
+        timing["T_residual_update"] += t_residual_update
         accumulate_timing(timing, residual_return_df)
+        if not model_exists:
+            install_clean_mask(img_xds, clean_mask)
 
         from astroviper.processing_functions.imaging.config_check._common import (
             CUBE_SINGLE_FIELD,
@@ -1036,6 +1122,7 @@ def image_cube_single_field(
             image_data_group_in_name="residual",
             cycle_control_params=cycle_control_params,
         )
+        record_cycle_time(residual_imaging_dict, "t_residual_update", t_residual_update)
         # max_cycles="auto" becomes a number from the dirty image, the
         # residual of the first cycle, and for a plane with threshold 0 from
         # the sensitivity of the imaging weights (a no-op afterwards, and for
@@ -1087,6 +1174,7 @@ def image_cube_single_field(
             if subtraction_psf_cube is not None:
                 deconvolve_params["subtraction_psf_cube"] = subtraction_psf_cube
 
+            start = time.time()
             (
                 imaging_dict,
                 model_update_return_df,
@@ -1100,10 +1188,10 @@ def image_cube_single_field(
                 image_data_group_out_name="model",
                 input_checked=True,
             )
+            record_cycle_time(imaging_dict, "t_model_update", time.time() - start)
             accumulate_timing(timing, model_update_return_df)
-            # The entropy belongs to the residual this model update started
-            # from (a no-op unless the entropy stop is on).
-            copy_residual_entropy(imaging_dict, residual_imaging_dict)
+            # The statistics of the residual this model update started from.
+            copy_residual_statistics(imaging_dict, residual_imaging_dict)
             model_exists = True
             n_cycles += 1
 

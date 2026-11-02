@@ -5,7 +5,6 @@ These tests ensure the disk output uses those finalized dimensions and values,
 rather than retaining the frequency-cube NaN placeholders created at startup.
 """
 
-import copy
 import inspect
 import json
 import shutil
@@ -28,7 +27,6 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _continuum_image_for_disk,
     _create_continuum_weight_cache_store,
     _graph_timing_record,
-    _load_continuum_clean_mask,
     _mapping_with_task_primary_beams,
     _mapping_with_task_weights,
     calculate_number_of_chunks_for_continuum_imaging,
@@ -41,6 +39,7 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
 )
 from astroviper.distributed_applications.simulation import simulate_processing_set
 from astroviper.utils.beam_models import airy_disk_model
+from astroviper.utils.clean_mask import load_clean_mask
 from astroviper.utils.data_group_tools import (
     create_ps_xdt_data_groups_in_and_out,
     modify_data_groups_ps_xdt,
@@ -95,12 +94,12 @@ def _frequency_mapping(task_frequency_chunks, child_frequencies):
     return mapping, processing_set
 
 
-def test_load_continuum_clean_mask_returns_contiguous_boolean_plane(tmp_path):
+def test_load_clean_mask_returns_contiguous_boolean_plane(tmp_path):
     """The public mask file is normalized to a C-contiguous Boolean plane."""
     mask_path = tmp_path / "clean_mask.npy"
     np.save(mask_path, np.array([[0.0, 1.0, 0.5], [0.6, -1.0, 2.0]]))
 
-    actual = _load_continuum_clean_mask(mask_path, [2, 3])
+    actual = load_clean_mask(mask_path, [2, 3])
 
     assert actual.dtype == np.bool_
     assert actual.flags.c_contiguous
@@ -118,7 +117,7 @@ def test_load_continuum_clean_mask_returns_contiguous_boolean_plane(tmp_path):
         (np.zeros((2, 2)), [2, 2], "does not select any pixels"),
     ],
 )
-def test_load_continuum_clean_mask_rejects_invalid_input(
+def test_load_clean_mask_rejects_invalid_input(
     tmp_path,
     mask,
     image_size,
@@ -129,7 +128,7 @@ def test_load_continuum_clean_mask_rejects_invalid_input(
     np.save(mask_path, mask)
 
     with pytest.raises(ValueError, match=message):
-        _load_continuum_clean_mask(mask_path, image_size)
+        load_clean_mask(mask_path, image_size)
 
 
 def test_exact_frequency_selection_reorders_a_nonmonotonic_child():
@@ -360,7 +359,7 @@ def _mfs_map_result(task_id, value=1.0):
     image.attrs["continuum_imaging"] = {
         "continuum_mode": "mfs",
         "n_taylor_terms": 2,
-        "reference_frequency_hz": 1.0e9,
+        "reference_frequency": 1.0e9,
     }
     return {
         "image": image,
@@ -1169,18 +1168,23 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
 
 
 @pytest.mark.parametrize(
-    "deconvolver", ["hogbom_many_threads", "asp", "aspclean", "asp_clean"]
+    ("deconvolver", "error", "message"),
+    [
+        ("hogbom_many_threads", AssertionError, None),
+        ("asp", ValueError, "deconvolver='asp' cleans Taylor term zero"),
+    ],
 )
 def test_tw_hydra_refused_deconvolvers_write_nothing(
-    tmp_path, tw_hydra_store, deconvolver
+    tmp_path, tw_hydra_store, deconvolver, error, message
 ):
-    """A deconvolver the continuum model update does not support is refused
-    before the in-place imaging weights or the image store are written."""
+    """A deconvolver the continuum model update does not support, and Asp
+    with the two Taylor terms of this configuration, are refused before the
+    in-place imaging weights or the image store are written."""
     store = tmp_path / "input.ps.zarr"
     shutil.copytree(tw_hydra_store, store)
     files = _store_snapshot(store)
     output_store = tmp_path / "refused.img.zarr"
-    with pytest.raises(AssertionError):
+    with pytest.raises(error, match=message):
         _run_tw_hydra_continuum(
             store,
             output_store,
@@ -1242,18 +1246,9 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
     assert not output_store.exists()
 
 
-@pytest.mark.filterwarnings("ignore::FutureWarning")
 @pytest.mark.parametrize(
     "change,error,message",
     [
-        pytest.param(
-            lambda params: params.update(
-                reference_frequency_hz=1.001 * params["reference_frequency"]
-            ),
-            ValueError,
-            "reference_frequency_hz is not accepted",
-            id="differing-reference-frequencies",
-        ),
         pytest.param(
             lambda params: params.pop("reference_frequency"),
             KeyError,
@@ -1318,34 +1313,6 @@ def test_tw_hydra_refused_image_params_write_nothing(
         )
     assert _store_snapshot(store) == files
     assert not output_store.exists()
-
-
-@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
-@pytest.mark.parametrize("keep_canonical", [False, True])
-def test_tw_hydra_reference_frequency_alias_is_rejected(
-    tmp_path, tw_hydra_store, continuum_mode, keep_canonical
-):
-    """Deprecated keys raise before any output is created or config is rewritten."""
-    processing_set = open_processing_set(str(tw_hydra_store))
-    params = _tw_hydra_image_params(processing_set)
-    params["reference_frequency_hz"] = params["reference_frequency"]
-    if not keep_canonical:
-        del params["reference_frequency"]
-    snapshot = copy.deepcopy(params)
-    output = tmp_path / "alias.img.zarr"
-    with pytest.raises(ValueError, match="reference_frequency_hz is not accepted"):
-        _run_tw_hydra_continuum(
-            tw_hydra_store,
-            output,
-            processing_set,
-            2,
-            continuum_mode,
-            {"weighting": "natural"},
-            image_params=params,
-        )
-    assert not output.exists()
-    for key in params:
-        np.testing.assert_array_equal(params[key], snapshot[key])
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
@@ -2337,7 +2304,7 @@ def test_wideband_uniform_and_briggs_weights_default_to_the_global_density(
     channel (``"local"``) can still be requested. With the local density the
     weights of a uv cell add up over the channels that sample it, which favours
     the inner uv plane, where the tracks of most channels overlap, so the PSF
-    is wider (measured: major axis 1.29 times for uniform, 1.03 times for
+    is wider (measured: major axis 1.32 times for uniform, 1.03 times for
     Briggs 0.5)."""
     images = _run_wideband_scopes(
         tmp_path,
