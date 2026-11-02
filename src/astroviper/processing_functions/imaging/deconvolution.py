@@ -1532,11 +1532,13 @@ def asp_clean(
           about half the iterations of the gain 0.1 for the same deconvolution
           error (within 3 % on four test skies), 0.5 is worse on
           crescent-like emission.
-          ``<= 0`` uses ``gain``. Default 0.3.
+          Must not exceed 1; ``<= 0`` uses ``gain``. Default 0.3.
         - ``asp_residual_component_min_fraction``,
           ``asp_residual_component_max_epsilon_fraction`` : float, lower bound
           of ``frac`` (upper 0.99) and upper bound of ``eps_frac`` (lower 1e-3)
-          in the fit of the residual-shaped components. Defaults 0.3 and
+          in the fit of the residual-shaped components. The lower fraction
+          must not exceed 0.99 and the upper epsilon fraction must be at
+          least 1e-3. Defaults 0.3 and
           10.0; a lower ``frac`` or a larger ``eps_frac`` makes broad weak
           components that fail on crescent-like emission.
         - ``asp_residual_component_noise_floor`` : float, ``T`` is also at least

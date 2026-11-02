@@ -392,14 +392,48 @@ def check_model_update(config, *, mode, require_complete=False):
         "asp_fused_threshold",
         "asp_psf_width",
         "asp_significance",
-        "asp_significance_gain",
-        "asp_residual_component_max_epsilon_fraction",
-        "asp_residual_component_min_fraction",
         "asp_residual_component_noise_floor",
         "asp_residual_component_switch_factor",
     ):
         if name in controls:
             require_finite_real(name, controls[name], scalar=True)
+
+    # --- Asp significance gain ---
+    # Positive gains must not exceed one; nonpositive values deliberately use
+    # the ordinary CLEAN gain and remain valid sentinels.
+    if "asp_significance_gain" in controls:
+        gain = require_finite_real(
+            "asp_significance_gain", controls["asp_significance_gain"], scalar=True
+        )
+        if gain > 1:
+            raise ValueError("asp_significance_gain must be <= 1.")
+
+    # --- Residual-component fraction interval ---
+    # The native fit fixes its upper fraction at 0.99. A larger lower bound
+    # creates an empty fitting interval instead of a meaningful configuration.
+    if "asp_residual_component_min_fraction" in controls:
+        fraction = require_finite_real(
+            "asp_residual_component_min_fraction",
+            controls["asp_residual_component_min_fraction"],
+            scalar=True,
+        )
+        if fraction > 0.99:
+            raise ValueError("asp_residual_component_min_fraction must be <= 0.99.")
+
+    # --- Residual-component smoothing interval ---
+    # The native log-space fit fixes its lower epsilon fraction at 1e-3.
+    # Its upper bound must preserve that interval and be positive for the log.
+    if "asp_residual_component_max_epsilon_fraction" in controls:
+        fraction = require_finite_real(
+            "asp_residual_component_max_epsilon_fraction",
+            controls["asp_residual_component_max_epsilon_fraction"],
+            scalar=True,
+        )
+        if fraction < 1e-3:
+            raise ValueError(
+                "asp_residual_component_max_epsilon_fraction must be >= 1e-3."
+            )
+
     if "asp_no_change_tolerance" in controls:
         check_nonnegative(
             "asp_no_change_tolerance", controls["asp_no_change_tolerance"], scalar=True
