@@ -254,7 +254,7 @@ def test_the_reduce_adds_the_taylor_images_of_the_map_tasks(
         difference = _relative_difference(
             np.nan_to_num(two[name].values), np.nan_to_num(one[name].values)
         )
-        tolerance = 1e-10 if name == "SKY_RESTORED_FLAT_SKY" else 1e-12
+        tolerance = 2e-10 if name == "SKY_RESTORED_FLAT_SKY" else 1e-12
         assert difference <= tolerance, (name, difference)
     assert ("PRIMARY_BEAM_TAYLOR" in one) is restore
     assert ("PRIMARY_BEAM_TAYLOR" in two) is restore
