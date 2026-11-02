@@ -19,6 +19,9 @@ from astroviper.distributed_applications.imaging import image_cube_single_field
 from astroviper.distributed_applications.imaging.point_spread_function_cube_single_field import (
     point_spread_function_cube_single_field,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    DEFAULT_GRIDDING_KERNEL_PARAMS,
+)
 from astroviper.processing_functions.imaging.utils.imaging_dict import Key
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.telescope_layout import read_telescope_layout
@@ -169,9 +172,7 @@ def test_returned_dataset_layout(noise_processing_set, natural_point_spread_func
     assert properties.attrs["image_size"] == IMAGE_SIZE
     assert properties.attrs["fft_padding"] == 1.2
     assert properties.attrs["psf_fitting_method"] == "astroviper"
-    assert (
-        properties.attrs["gridding_kernel_params"]["type"] == "prolate_spheroidal_casa"
-    )
+    assert properties.attrs["gridding_kernel_params"] == DEFAULT_GRIDDING_KERNEL_PARAMS
     np.testing.assert_array_equal(properties.FLAGGED_FRACTION.values, 0.0)
     assert np.all(properties.UV_DISTANCE_MAX > properties.UV_DISTANCE_MIN)
     assert np.all(properties.ABS_W_MAX > 0)

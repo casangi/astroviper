@@ -239,7 +239,7 @@ def add_uv_sampling_grid_single_field(
     cgk_1D : GriddingKernel or np.ndarray
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or the bare table of the default prolate spheroidal kernel of support 7.
+        or a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset that accumulates the UV-sampling grid.  The arrays
         named by ``image_data_group_out_modified`` are created on the first call
@@ -427,6 +427,12 @@ def make_point_spread_function_single_field(
     The Gaussian beam fit of the PSF is performed afterwards by
     :func:`~astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit.point_spread_function_gaussian_fit`.
 
+    With ``gridding_kernel_params={"type": "dft"}`` the PSF is the exact direct
+    Fourier transform of the imaging weights, w term included, over the
+    unpadded image
+    (:func:`~astroviper.processing_functions.imaging.direct_fourier_transform.make_dft_point_spread_function_single_field`);
+    no ``UV_SAMPLING`` grid is made.
+
     Parameters
     ----------
     ps_xdt : xarray.DataTree
@@ -475,14 +481,35 @@ def make_point_spread_function_single_field(
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
-        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
-        ``least_misfit`` kernel whose image plane correction falls below 1e-6
-        of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -514,6 +541,7 @@ def make_point_spread_function_single_field(
         ifft_norm_img_xds,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
@@ -522,6 +550,21 @@ def make_point_spread_function_single_field(
         complex_dtype = np.complex128
     if image_data_variables_keep is None:
         image_data_variables_keep = []
+
+    if is_direct_fourier_transform(gridding_kernel_params):
+        from astroviper.processing_functions.imaging.direct_fourier_transform import (
+            make_dft_point_spread_function_single_field,
+        )
+
+        return make_dft_point_spread_function_single_field(
+            ps_xdt,
+            img_xds,
+            ms_data_group_in_name=ms_data_group_in_name,
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_out_name,
+            processing_function_threads=processing_function_threads,
+            complex_dtype=complex_dtype,
+        )
 
     T_start_gcf = time.time()
     cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
@@ -608,7 +651,16 @@ def make_subtraction_point_spread_function_single_field(
     on are the image-sized PSF up to the gridding errors of the two: the lookup
     of the kernel table, on uv cells that differ by a factor of two, and the
     aliasing at the edge of the padded grid, which lies at the edge of the image
-    for the image-sized PSF and twice as far out for this one.
+    for the image-sized PSF and twice as far out for this one. With the direct
+    Fourier transform (``gridding_kernel_params={"type": "dft"}``) those
+    pixels are the image-sized PSF to rounding.
+
+    Imaging weights equal in every correlation (``NaN`` at the same samples),
+    as the imaging weights of the single-field imager are, give every
+    correlation the same uv sampling grid and so the same PSF, to the bit.
+    The PSF is then made once, for the first correlation, and copied to the
+    others: the uv grid of the ``2 n_l x 2 n_m`` image, the largest array
+    while the PSF is made, holds one correlation instead of all.
 
     Parameters
     ----------
@@ -652,14 +704,35 @@ def make_subtraction_point_spread_function_single_field(
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
-        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
-        ``least_misfit`` kernel whose image plane correction falls below 1e-6
-        of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
         former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
-        not ``"prolate_spheroidal"``.
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -680,6 +753,18 @@ def make_subtraction_point_spread_function_single_field(
         :func:`make_point_spread_function_single_field`.
     """
     from xradio.image import make_empty_sky_image
+
+    from astroviper.processing_functions.imaging.utils import drop_auto_correlations
+
+    for ms_xdt in ps_xdt.values():
+        drop_auto_correlations(ms_xdt)
+    n_correlation = len(correlation_coords)
+    made_once = n_correlation > 1 and _correlation_weights_equal(
+        ps_xdt, ms_data_group_in_name
+    )
+    if made_once:
+        ps_xdt = _first_correlation(ps_xdt, ms_data_group_in_name)
+        correlation_coords = correlation_coords[:1]
 
     image_size = [2 * img_xds.sizes["l"], 2 * img_xds.sizes["m"]]
     psf_xds = make_empty_sky_image(
@@ -708,4 +793,36 @@ def make_subtraction_point_spread_function_single_field(
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
     )
-    return psf_xds["POINT_SPREAD_FUNCTION"].values, return_df
+    point_spread_function = psf_xds["POINT_SPREAD_FUNCTION"].values
+    if made_once:
+        point_spread_function = np.repeat(point_spread_function, n_correlation, axis=2)
+    return point_spread_function, return_df
+
+
+def _correlation_weights_equal(ps_xdt, ms_data_group_in_name):
+    """Whether the imaging weights of every measurement set in ``ps_xdt`` are
+    equal in every correlation (``NaN`` at the same samples), so that one uv
+    sampling grid serves all correlations."""
+    for ms_xdt in ps_xdt.values():
+        name = ms_xdt.attrs["data_groups"][ms_data_group_in_name]["weight_imaging"]
+        weight = ms_xdt[name].values
+        for p in range(1, weight.shape[-1]):
+            if not np.array_equal(weight[..., p], weight[..., 0], equal_nan=True):
+                return False
+    return True
+
+
+def _first_correlation(ps_xdt, ms_data_group_in_name):
+    """``{ms_name: measurement set}`` of ``ps_xdt`` (a processing set or, as
+    the node task hands it over, a dict of measurement sets) with the first
+    correlation alone: views of its arrays, except the imaging weights, a
+    C-contiguous copy for the gridders."""
+    first = {}
+    for ms_name, ms_xdt in ps_xdt.items():
+        ms_first = ms_xdt.isel(polarization=slice(0, 1))
+        name = ms_first.attrs["data_groups"][ms_data_group_in_name]["weight_imaging"]
+        ms_first[name] = ms_first[name].copy(
+            data=np.ascontiguousarray(ms_first[name].values)
+        )
+        first[ms_name] = ms_first
+    return first

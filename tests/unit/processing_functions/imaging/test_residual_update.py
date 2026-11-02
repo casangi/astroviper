@@ -18,6 +18,9 @@ import xarray as xr
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    CASA_GRIDDING_KERNEL_PARAMS,
+)
 from astroviper.processing_functions.imaging.residual_update import (
     imaging_setup_single_field,
     make_visibility_model_single_field,
@@ -340,13 +343,25 @@ def _degrid_error(kernel, x, y, n_offsets=4000):
     "gridding_kernel_params",
     [
         None,
-        {"type": "exponential_semicircle", "oversampling": 1000},
+        CASA_GRIDDING_KERNEL_PARAMS,
         {
             "type": "exponential_semicircle",
+            "support": 7,
+            "oversampling": 1000,
+            "interpolation": "nearest",
+        },
+        {
+            "type": "exponential_semicircle",
+            "support": 7,
             "oversampling": 100,
             "interpolation": "linear",
         },
-        {"type": "least_misfit", "oversampling": 1000, "interpolation": "linear"},
+        {
+            "type": "least_misfit",
+            "support": 7,
+            "oversampling": 1000,
+            "interpolation": "linear",
+        },
     ],
 )
 @pytest.mark.parametrize("offset", [(30, 0), (40, 20)])

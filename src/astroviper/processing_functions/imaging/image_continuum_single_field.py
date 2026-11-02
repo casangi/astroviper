@@ -109,6 +109,7 @@ def imaging_preparation_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     task_id=0,
+    gridding_kernel_params=None,
 ):
     """Prepare static products once per continuum map task.
 
@@ -186,6 +187,56 @@ def imaging_preparation_continuum_single_field(
     task_id : int, optional
         Identifier of the parallel chunk being processed.
 
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -224,6 +275,7 @@ def imaging_preparation_continuum_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
+        gridding_kernel_params=gridding_kernel_params,
     )
 
     T_setup = time.time() - start
@@ -489,6 +541,7 @@ def prepare_model_uv_continuum_single_field(
     fft_backend="pyfftw",
     image_data_group_in_name="model",
     image_data_group_out_name="model",
+    gridding_kernel_params=None,
 ):
     """Prepare the Fourier-domain continuum model for the next imaging cycle.
 
@@ -556,14 +609,66 @@ def prepare_model_uv_continuum_single_field(
         ``"mask"``) roles name the input data variables.  Datasets without
         data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
-        Data group receiving the Fourier-domain model visibility grids.
+        Data group receiving the Fourier-domain model visibility grids (with
+        the direct Fourier transform, naming the Taylor model images).
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------
     model_uv_xds : xarray.Dataset
         Continuum model dataset in the instrumental correlation basis containing
         the Fourier-domain Taylor coefficients (``VISIBILITY_MODEL``), indexed by
-        ``taylor_term``.
+        ``taylor_term``. With ``gridding_kernel_params={"type": "dft"}`` it
+        holds the Taylor model images themselves (the ``sky`` variable, no
+        FFT), which the direct Fourier transform predicts from.
 
     Notes
     -----
@@ -582,6 +687,10 @@ def prepare_model_uv_continuum_single_field(
     )
     from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_continuum_img_xds,
+    )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
+        make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
         _validate_n_taylor_terms,
@@ -650,6 +759,30 @@ def prepare_model_uv_continuum_single_field(
         overwrite=True,
     )
 
+    if is_direct_fourier_transform(gridding_kernel_params):
+        # The direct Fourier transform predicts from the Taylor model images
+        # themselves: no FFT, padding or kernel correction.
+        model_uv_xds[model_sky_name].attrs.update(
+            {
+                "description": (
+                    "Global continuum Taylor model in the correlation basis, "
+                    "predicted by the direct Fourier transform."
+                ),
+                "n_taylor_terms": n_taylor_terms,
+                "instrument_polarization_basis": (instrument_polarization_basis),
+            }
+        )
+        if image_data_group_out_name != image_data_group_in_name:
+            from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+            modify_data_groups_xds(
+                model_uv_xds,
+                image_data_group_out_name,
+                {"sky": model_sky_name},
+                description="Continuum Taylor model for the direct Fourier transform.",
+            )
+        return model_uv_xds
+
     model_uv_xds = fft_norm_continuum_img_xds(
         model_uv_xds,
         image_params=image_params,
@@ -664,6 +797,9 @@ def prepare_model_uv_continuum_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
+        gridding_kernel=make_gridding_kernel(
+            gridding_kernel_params, image_params["fft_padding"]
+        ),
     )
 
     output_data_groups = model_uv_xds.attrs.get("data_groups", {})
@@ -830,6 +966,7 @@ def prepare_model_uv_mvc_single_field(
     fft_backend="pyfftw",
     image_data_group_in_name="model",
     image_data_group_out_name="model",
+    gridding_kernel_params=None,
 ):
     """Construct a local MVC model UV cube in the channel-PB convention.
 
@@ -888,6 +1025,55 @@ def prepare_model_uv_mvc_single_field(
         data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Output data-group name for the channelized model grid.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
 
     Returns
     -------
@@ -905,6 +1091,9 @@ def prepare_model_uv_mvc_single_field(
     )
     from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         fft_norm_img_xds,
+    )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
 
@@ -1062,6 +1251,9 @@ def prepare_model_uv_mvc_single_field(
         processing_function_threads=(processing_function_threads),
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
+        gridding_kernel=make_gridding_kernel(
+            gridding_kernel_params, image_params["fft_padding"]
+        ),
     )
 
     return mvc_xds
@@ -1761,6 +1953,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
+    gridding_kernel_params=None,
 ):
     """Perform one continuum imaging-cycle update for a single frequency chunk.
 
@@ -1843,10 +2036,19 @@ def residual_update_continuum_single_field(
 
     deconvolver : str, optional
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
-        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4. Other
-        values are refused before anything is written.
+        threaded across planes) cleans Taylor term zero only. ``"asp"``
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
+        ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
+        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
+        pixels of the primary-beam support outside it than the image has
+        outside that support: Asp takes the noise from the median absolute
+        deviation of the pixels outside its mask, and MVC sets the residual to
+        0 outside the support. Without a clean mask that noise is 0, or after
+        the residual-shaped components that of their sidelobes there (a warning
+        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        synthesis) cleans the Taylor terms together and needs
+        ``image_params["n_taylor_terms"]`` from 2 to 4. Other values are
+        refused before anything is written.
 
     instrument_polarization_basis : {"linear", "circular"}, optional
         Correlation (instrument) polarization basis the gridding is performed in:
@@ -1898,6 +2100,56 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used by MVC map-local Taylor construction.
 
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -1948,6 +2200,7 @@ def residual_update_continuum_single_field(
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
             task_id=task_id,
+            gridding_kernel_params=gridding_kernel_params,
         )
 
         timing["T_prep"] = T_setup
@@ -2006,6 +2259,7 @@ def residual_update_continuum_single_field(
         image_data_variables_keep=image_data_variables_keep,
         visibility_memory_mode=visibility_memory_mode,
         observed_visibility_grid_xds=observed_visibility_grid_xds,
+        gridding_kernel_params=gridding_kernel_params,
     )
 
     timing["T_residual_cycle"] = time.time() - start
@@ -2037,8 +2291,14 @@ def residual_update_continuum_single_field(
         from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
             ifft_norm_img_xds,
         )
+        from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+            make_gridding_kernel,
+        )
 
         start = time.time()
+        gridding_kernel = make_gridding_kernel(
+            gridding_kernel_params, image_params["fft_padding"]
+        )
 
         img_xds = ifft_norm_img_xds(
             img_xds,
@@ -2052,6 +2312,7 @@ def residual_update_continuum_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=(np.complex64 if single_precision_image else np.complex128),
+            gridding_kernel=gridding_kernel,
         )
 
         if "SKY_RESIDUAL_MVC_CUBE" not in img_xds:
@@ -2074,6 +2335,7 @@ def residual_update_continuum_single_field(
                 complex_dtype=(
                     np.complex64 if single_precision_image else np.complex128
                 ),
+                gridding_kernel=gridding_kernel,
             )
 
             if "POINT_SPREAD_FUNCTION_MVC_CUBE" not in img_xds:
@@ -2143,15 +2405,15 @@ def _continuum_clean_support(
     """The pixels of Taylor term zero that may be cleaned, or ``None``.
 
     One support for the stop test (:func:`build_continuum_residual_imaging_dict`)
-    and the native MT-MFS model update, so that a plane is never kept going
+    and every model update, so that a plane is never kept going
     for a peak its model update may not clean. It is the clean mask of the
     data group (values above 0.5) or, without one, the pixels where the
     primary beam is at least ``primary_beam_limit`` times its peak and not 0.
     When both are present, their intersection is used so an explicit mask
     cannot re-enable pixels below the primary-beam cutoff.
     ``primary_beam_limit`` defaults to 0, every pixel where the primary beam
-    is above 0, as for the continuum Högbom model update and cube imaging,
-    which make the same mask with the same default
+    is above 0, as for cube imaging,
+    which makes the same mask with the same default
     (:func:`~astroviper.processing_functions.image_analysis.make_mask.make_mask`):
     the residual holds the sky seen through the primary beam wherever that
     is above 0, and a source there that is not cleaned leaves its sidelobes
@@ -2221,8 +2483,8 @@ def build_continuum_residual_imaging_dict(
     dimensions (time, polarization), whereas the shared controller expects
     (time, frequency, polarization). Build a temporary view with one frequency
     plane, broadcasting masks and sidelobes by dimension name. Peaks are
-    measured on finite pixels in the explicit CLEAN mask, or the same PB
-    support as model_update when no explicit mask exists. No counters or
+    measured on finite pixels of the support every model update cleans
+    (:func:`_continuum_clean_support`). No counters or
     history entries are advanced. When entropy stopping is enabled, residual
     entropy and SNR are measured on Taylor term zero using that same clean
     support. The cube workflow is unchanged.
@@ -2595,10 +2857,10 @@ def model_update_mtmfs_single_field(
 ):
     """Perform one continuum model update.
 
-    Dispatch the continuum model update to native MT-MFS or to the compatibility
-    Högbom path. Native MT-MFS receives each complete Taylor stack directly as
-    ``(n_taylor_terms, l, m)``. Högbom temporarily projects Taylor term zero onto a
-    single-frequency cube representation.
+    Dispatch the continuum model update to native MT-MFS or to the cube
+    deconvolvers (Högbom or Asp). Native MT-MFS receives each complete Taylor
+    stack directly as ``(n_taylor_terms, l, m)``. Högbom and Asp temporarily
+    project Taylor term zero onto a single-frequency cube representation.
 
     The procedure is
 
@@ -2637,10 +2899,19 @@ def model_update_mtmfs_single_field(
 
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"mtmfs"``
-        (C++, multi-term multi-frequency synthesis) cleans the Taylor terms
-        together and needs ``image_params["n_taylor_terms"]`` from 2 to 4. Other
-        values are refused before anything is written.
+        threaded across planes) cleans Taylor term zero only. ``"asp"``
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
+        ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
+        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
+        pixels of the primary-beam support outside it than the image has
+        outside that support: Asp takes the noise from the median absolute
+        deviation of the pixels outside its mask, and MVC sets the residual to
+        0 outside the support. Without a clean mask that noise is 0, or after
+        the residual-shaped components that of their sidelobes there (a warning
+        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        synthesis) cleans the Taylor terms together and needs
+        ``image_params["n_taylor_terms"]`` from 2 to 4. Other values are
+        refused before anything is written.
 
     deconvolve_params : dict
         Model-update control parameters. These typically include entries such as
@@ -2652,16 +2923,24 @@ def model_update_mtmfs_single_field(
         ``max_iter_per_cycle`` means no cap) and ``threshold_per_cycle`` is
         ``threshold``, as in the cube deconvolver. ``max_iter_divergence``
         (default 1, ``-1`` turns the test off) sets the divergence test of
-        the model update, made on the Taylor-zero residual: a plane stops
-        when its RMS has been above ``(1 + gain)`` times the lowest RMS of
-        the model update for that many iterations in a row (the limit of
-        Asp), or at once when its peak exceeds ``(1 + gain)`` times the
-        peak at the start of the model update. ``gain``
-        (``0 < gain <= 1``) and ``max_iter_divergence`` are checked as in
-        the cube deconvolver. Both deconvolvers restrict cleaning to pixels
-        where the primary beam is at least ``primary_beam_limit`` (default 0)
-        times its peak and not 0. When a clean mask is present, its intersection
-        with that PB support is used; the stop test measures the same pixels.
+        the model update, made on the Taylor-zero residual. With
+        ``"mtmfs"`` a plane stops when its RMS has been above ``(1 + gain)``
+        times the lowest RMS of the model update for that many iterations
+        in a row (the limit of Asp), or at once when its peak exceeds
+        ``(1 + gain)`` times the peak at the start of the model update;
+        ``"hogbom"`` and ``"asp"`` take the limits of their cube kernels
+        (Hogbom: RMS ``1 + gain / 10``, peak ``1 + gain``; Asp: RMS
+        ``1 + gain``, no peak limit). ``gain`` (``0 < gain <= 1``) and
+        ``max_iter_divergence`` are checked as in the cube deconvolver.
+        Every deconvolver places its component centres on pixels where the
+        primary beam is at least ``primary_beam_limit`` (default 0) times its
+        peak and not 0 (Asp components reach past them). When a clean mask is
+        present, its intersection with that PB support is used; the stop
+        test measures the same pixels. With ``"asp"`` the keys of
+        :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`
+        (``asp_largest_scale``, ``asp_residual_components``,
+        ``asp_scale_significance`` and the others) reach the Asp kernel
+        unchanged.
 
     is_first_cycle : bool, optional
         Indicates whether this is the first model update.
@@ -2679,10 +2958,11 @@ def model_update_mtmfs_single_field(
         Name of the output model data group.
 
     write_back_deconvolver_residual : bool, optional
-        If ``True``, Högbom copies its updated residual back into Taylor term
-        zero of the residual, the only term it updates. Where Högbom works on
-        a view of that term, it has updated it in place already, and the copy
-        changes nothing. Native MT-MFS always updates the residual in place.
+        If ``True``, Högbom and Asp copy their updated residual back into
+        Taylor term zero of the residual, the only term they update. Where
+        they work on a view of that term, they have updated it in place
+        already, and the copy changes nothing. Native MT-MFS always updates
+        the residual in place.
 
     Returns
     -------
@@ -2712,9 +2992,9 @@ def model_update_mtmfs_single_field(
         modify_data_groups_xds,
     )
 
-    if deconvolver not in {"hogbom", "mtmfs"}:
+    if deconvolver not in {"hogbom", "asp", "mtmfs"}:
         raise NotImplementedError(
-            "Continuum deconvolution supports 'hogbom' and 'mtmfs'; "
+            "Continuum deconvolution supports 'hogbom', 'asp' and 'mtmfs'; "
             f"received {deconvolver!r}."
         )
 
@@ -2752,6 +3032,14 @@ def model_update_mtmfs_single_field(
 
     if residual.sizes["taylor_term"] < 1:
         raise ValueError("SKY_RESIDUAL contains no Taylor terms.")
+
+    if deconvolver == "asp" and residual.sizes["taylor_term"] != 1:
+        raise ValueError(
+            "deconvolver='asp' cleans Taylor term zero only and requires "
+            "SKY_RESIDUAL with one Taylor term; received "
+            f"{residual.sizes['taylor_term']}. Use deconvolver='mtmfs' for 2 to 4 "
+            "Taylor terms."
+        )
 
     if psf.sizes["psf_taylor_order"] < 1:
         raise ValueError("POINT_SPREAD_FUNCTION contains no PSF Taylor terms.")
@@ -2825,10 +3113,13 @@ def model_update_mtmfs_single_field(
             image_data_group_out_name,
         )
 
+    # Högbom and Asp share this path; only the labels below name the backend.
+    backend_label = "Asp" if deconvolver == "asp" else "Högbom"
+
     # ------------------------------------------------------------------
     # Build a temporary cube-like image dataset.
     #
-    # The existing Högbom backend expects
+    # The existing Högbom and Asp backends expect
     #
     #     time x frequency x polarization x l x m
     #
@@ -2915,46 +3206,20 @@ def model_update_mtmfs_single_field(
     if "SKY_MODEL" not in hogbom_xds:
         hogbom_xds["SKY_MODEL"] = xr.zeros_like(hogbom_xds["SKY_RESIDUAL"])
 
-    # The Taylor-plane selection above can leave a strided view. Högbom's C++
-    # binding deliberately accepts only a C-contiguous bool mask, so make the
-    # one-plane adapter buffer explicit. The > 0.5 rule is the same mask
-    # interpretation used by continuum starting and stopping statistics; NaNs
-    # therefore remain outside the CLEAN support rather than becoming True.
-    hogbom_mask_name = hogbom_xds.attrs["data_groups"][image_data_group_in_name].get(
-        "mask"
+    # Clean the support of the stop test, as the C-contiguous bool mask
+    # Högbom's C++ binding requires.
+    support = _continuum_clean_support(
+        img_xds,
+        image_data_group_in_name,
+        residual.isel(taylor_term=0, drop=True),
+        cube_deconvolve_params,
     )
-    hogbom_data_group = hogbom_xds.attrs["data_groups"][image_data_group_in_name]
-    primary_beam_name = hogbom_data_group.get("primary_beam")
-    if hogbom_mask_name is None and primary_beam_name in hogbom_xds:
-        from astroviper.processing_functions.image_analysis.make_mask import make_mask
-
-        make_mask(
-            hogbom_xds,
-            primary_beam_limit=cube_deconvolve_params.get("primary_beam_limit", 0.0),
-            image_data_group_in_name=image_data_group_in_name,
-            image_data_group_out_name=image_data_group_in_name,
-            combine_mask=False,
-            overwrite=False,
-        )
-        hogbom_mask_name = hogbom_xds.attrs["data_groups"][image_data_group_in_name][
-            "mask"
-        ]
-
-    if hogbom_mask_name in hogbom_xds:
-        hogbom_mask = hogbom_xds[hogbom_mask_name].transpose(
-            "time", "frequency", "polarization", "l", "m", missing_dims="ignore"
-        )
-        if "frequency" not in hogbom_mask.dims:
-            hogbom_mask = hogbom_mask.expand_dims(
-                frequency=frequency_coord,
-                axis=1,
-            )
-        mask_values = np.asarray(hogbom_mask.values)
-        hogbom_xds[hogbom_mask_name] = hogbom_mask.copy(
-            data=np.ascontiguousarray(
-                np.isfinite(mask_values) & (mask_values > 0.5),
-                dtype=np.bool_,
-            )
+    if support is not None:
+        hogbom_data_group = hogbom_xds.attrs["data_groups"][image_data_group_in_name]
+        hogbom_mask_name = hogbom_data_group.setdefault("mask", "MASK")
+        hogbom_xds[hogbom_mask_name] = (
+            ("time", "frequency", "polarization", "l", "m"),
+            support[:, np.newaxis],
         )
 
     # Register the temporary model through the data-group interface expected by
@@ -2970,15 +3235,15 @@ def model_update_mtmfs_single_field(
         hogbom_xds,
         data_group_out_name=image_data_group_out_name,
         data_group_out=hogbom_model_group,
-        description="Temporary single-plane Högbom continuum model.",
+        description=f"Temporary single-plane {backend_label} continuum model.",
     )
     model_name = hogbom_model_group["sky"]
 
     T_make_hogbom_view = time.time() - start
 
-    # Högbom operates on real arrays but supports both image precisions. Match
-    # the residual precision throughout and avoid copying arrays already in the
-    # required real dtype.
+    # Högbom and Asp operate on real arrays and support both image precisions.
+    # Match the residual precision throughout and avoid copying arrays already
+    # in the required real dtype.
     float_dtype = hogbom_xds[residual_name].real.dtype
     hogbom_xds[residual_name] = hogbom_xds[residual_name].real.astype(
         float_dtype, copy=False
@@ -2990,7 +3255,8 @@ def model_update_mtmfs_single_field(
     hogbom_xds[model_name] = hogbom_xds[model_name].real.astype(float_dtype, copy=False)
 
     # ------------------------------------------------------------------
-    # Run the existing single-frequency Högbom model-update backend.
+    # Run the existing single-frequency cube model-update backend
+    # (Högbom or Asp).
     # ------------------------------------------------------------------
     start = time.time()
 
@@ -3011,12 +3277,14 @@ def model_update_mtmfs_single_field(
     T_hogbom = time.time() - start
 
     # ------------------------------------------------------------------
-    # Copy the Högbom model back into Taylor term zero.
+    # Copy the cube model back into Taylor term zero.
     # ------------------------------------------------------------------
     start = time.time()
 
     if "SKY_MODEL" not in hogbom_xds:
-        raise RuntimeError("The Högbom model-update backend did not produce SKY_MODEL.")
+        raise RuntimeError(
+            f"The {backend_label} model-update backend did not produce SKY_MODEL."
+        )
 
     model_zero = hogbom_xds["SKY_MODEL"].isel(
         frequency=0,
@@ -3051,7 +3319,7 @@ def model_update_mtmfs_single_field(
         img_xds,
         data_group_out_name=image_data_group_out_name,
         data_group_out=continuum_model_group,
-        description="Continuum model increment produced by Högbom CLEAN.",
+        description=f"Continuum model increment produced by {backend_label} CLEAN.",
     )
 
     T_copy_model = time.time() - start
@@ -3261,7 +3529,7 @@ def restore_continuum_image(
     primary_beam_key : str, optional
         Role key of the primary beam in the residual data group.
 
-    deconvolver : {"hogbom", "mtmfs"}, optional
+    deconvolver : {"hogbom", "asp", "mtmfs"}, optional
         Deconvolver that produced the model. MT-MFS restoration applies the
         Taylor Hessian's principal solution to a private residual copy before
         selecting Taylor term zero. The stored residual remains unchanged.
@@ -3293,9 +3561,9 @@ def restore_continuum_image(
         restore_image as restore_cube_image,
     )
 
-    if deconvolver not in ("hogbom", "mtmfs"):
+    if deconvolver not in ("hogbom", "asp", "mtmfs"):
         raise ValueError(
-            f"deconvolver must be 'hogbom' or 'mtmfs'; received {deconvolver!r}."
+            f"deconvolver must be 'hogbom', 'asp' or 'mtmfs'; received {deconvolver!r}."
         )
 
     data_groups = img_xds.attrs.get("data_groups", {})
