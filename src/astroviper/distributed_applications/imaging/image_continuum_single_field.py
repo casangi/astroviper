@@ -2756,6 +2756,25 @@ def _validate_cycle_acceleration(cycle_acceleration, momentum_coefficient):
     _validate_momentum_coefficient(momentum_coefficient)
 
 
+def _validate_continuum_output_keys(image_data_variables_keep):
+    """Reject cube-era restored-image keys that continuum no longer produces."""
+    legacy_messages = {
+        "sky_restored": (
+            "continuum imaging no longer writes the apparent/flat-noise restored "
+            "product; set restore=True to write 'sky_restored_flat_sky'"
+        ),
+        "sky_restored_primary_beam_corrected": (
+            "use 'sky_restored_flat_sky' instead; restore=True retains it automatically"
+        ),
+    }
+    for key in image_data_variables_keep:
+        if key in legacy_messages:
+            raise ValueError(
+                f"image_data_variables_keep contains legacy continuum key {key!r}: "
+                f"{legacy_messages[key]}."
+            )
+
+
 def _warn_on_disabled_momentum(previous_state_xds, state_xds):
     """Warn when Nesterov momentum has switched off on further planes."""
     import toolviper.utils.logger as logger
@@ -3597,6 +3616,8 @@ def image_continuum_single_field(
 
     if n_mapping_parallelism is not None:
         _validate_n_mapping_parallelism(n_mapping_parallelism)
+
+    _validate_continuum_output_keys(image_data_variables_keep)
 
     if not 0.0 <= primary_beam_limit <= 1.0:
         raise ValueError("primary_beam_limit must be between 0 and 1.")

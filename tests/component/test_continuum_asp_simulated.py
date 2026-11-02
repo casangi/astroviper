@@ -170,7 +170,6 @@ def run_continuum_asp(simulated, directory, continuum_mode, options, clean_mask=
             continuum_mode=continuum_mode,
             instrument_polarization_basis="circular",
             restore=True,
-            primary_beam_correction=True,
             primary_beam_limit=0.2,
             scan_intents=["OBSERVE_TARGET#ON_SOURCE"],
             processing_set_data_group_name="base",
