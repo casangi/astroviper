@@ -17,6 +17,9 @@ import unittest
 import numpy as np
 import xarray as xr
 
+from astroviper.processing_functions.image_analysis.image_statistics import (
+    RESIDUAL_STATISTICS,
+)
 from astroviper.processing_functions.imaging.utils.cycle_control import (  # Stop codes; Utility functions; Main class
     IMAGING_CONTINUE,
     IMAGING_MAX_CYCLES,
@@ -41,8 +44,10 @@ from astroviper.processing_functions.imaging.utils.cycle_control_heuristics impo
     THRESHOLD_TOLERANCE,
 )
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    COMPONENT_COUNT_FIELDS,
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
+    ITERATION_HISTORY_FIELDS,
     ImagingDict,
     Key,
 )
@@ -418,8 +423,15 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             "entropy",
             "residual_snr",
             "model_update_stop_code",
-            "iteration_peak_residual",
-            "iteration_residual_rms",
+            "threshold_per_cycle",
+            *RESIDUAL_STATISTICS,
+            *(f"start_{field}" for field in RESIDUAL_STATISTICS),
+            *ITERATION_HISTORY_FIELDS,
+            *COMPONENT_COUNT_FIELDS,
+            "model_flux_positive",
+            "model_flux_negative",
+            "t_residual_update",
+            "t_model_update",
         }
         self.assertEqual(FIELD_ACCUM, expected_fields)
 
@@ -452,6 +464,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
                 "entropy": 7.5,
                 "residual_snr": 3.0,
                 "model_update_stop_code": 2,
+                **{field: 1.0 for field in FIELD_ACCUM},
                 "iteration_peak_residual": np.array([1.0, 0.9]),
                 "iteration_residual_rms": np.array([0.2, 0.19]),
             },
@@ -3083,15 +3096,14 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
         }
         return img_xds
 
-    def test_entropy_is_recorded_only_with_entropy_stop(self):
+    def test_entropy_is_recorded_with_and_without_entropy_stop(self):
         img_xds = self._img_xds()
         off = build_residual_imaging_dict(img_xds, "residual", {"gain": 0.1})
-        for fields in off.data.values():
-            self.assertNotIn("entropy", fields)
-            self.assertNotIn("residual_snr", fields)
         on = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
         )
+        for key, fields in off.data.items():
+            np.testing.assert_equal(fields["entropy"], on.data[key]["entropy"])
         self.assertEqual(len(on.data), 4)
         for key, fields in on.data.items():
             self.assertEqual(len(fields["entropy"]), 1)
@@ -3138,7 +3150,7 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
 
     def test_copy_into_the_result_of_a_model_update(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
-            copy_residual_entropy,
+            copy_residual_statistics,
             merge_imaging_dicts,
         )
 
@@ -3154,21 +3166,44 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
                 pol=key.pol,
                 chan=key.chan,
             )
-        copy_residual_entropy(update, residual)
+        copy_residual_statistics(update, residual)
         key = Key(time=0, chan=0, pol=1)
         self.assertEqual(update.data[key]["entropy"], residual.data[key]["entropy"])
         self.assertEqual(
             update.data[key]["residual_snr"], residual.data[key]["residual_snr"]
         )
+        # the statistics of the residual the model update started from
+        for field in RESIDUAL_STATISTICS:
+            self.assertEqual(
+                update.data[key][f"start_{field}"], residual.data[key][field]
+            )
         # one value per imaging cycle in the merged record
         merged = merge_imaging_dicts([update, update])
         self.assertEqual(len(merged.data[key]["entropy"]), 2)
-        # nothing to copy without the entropy stop
-        plain = build_residual_imaging_dict(img_xds, "residual", {"gain": 0.1})
-        other = ImagingDict()
-        other.add({"peakres": 0.1, "masksum": 10, "iter_done": 5}, 0, 0, 0)
-        copy_residual_entropy(other, plain)
-        self.assertNotIn("entropy", other.data[Key(time=0, chan=0, pol=0)])
+        self.assertEqual(len(merged.data[key]["start_rms_in_mask"]), 2)
+
+    def test_residual_statistics_of_every_plane(self):
+        from astroviper.processing_functions.image_analysis.image_statistics import (
+            plane_residual_statistics,
+        )
+
+        img_xds = self._img_xds()
+        record = build_residual_imaging_dict(img_xds, "residual", {"gain": 0.1})
+        for key, fields in record.data.items():
+            plane = img_xds["SKY_RESIDUAL"].values[key.time, key.chan, key.pol]
+            for field, value in plane_residual_statistics(plane).items():
+                np.testing.assert_equal(fields[field], [value])
+        self.assertEqual(record.data[Key(time=0, chan=1, pol=1)]["max_in_mask"], [50.0])
+
+    def test_record_cycle_time(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            record_cycle_time,
+        )
+
+        record = build_residual_imaging_dict(self._img_xds(), "residual", {"gain": 0.1})
+        record_cycle_time(record, "t_residual_update", 1.5)
+        for fields in record.data.values():
+            self.assertEqual(fields["t_residual_update"], [1.5])
 
 
 if __name__ == "__main__":

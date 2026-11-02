@@ -2982,7 +2982,7 @@ def _accelerate_continuum_model_increment(
     return model_increment_xds.assign(SKY_MODEL=model_step), state_xds
 
 
-def _book_accelerated_model_flux(deconvolve_dict, model_step):
+def _book_accelerated_model_flux(deconvolve_dict, model_step, previous_model_xds):
     """Book the flux of the accelerated model step in the convergence record.
 
     The model update books ``model_flux`` as the flux of the previous model
@@ -2990,18 +2990,28 @@ def _book_accelerated_model_flux(deconvolve_dict, model_step):
     The acceleration adds another step to the model instead, so the latest
     ``model_flux`` of each plane is set to its latest ``start_model_flux``
     plus the Taylor-term-zero flux of ``model_step``: the flux of the model
-    the next model update starts from. Every plane of a model update has an
-    entry in ``deconvolve_dict``; entries without both fluxes are left as
-    they are.
+    the next model update starts from. The latest ``model_flux_positive``
+    and ``model_flux_negative`` become those of that model, the previous
+    model (``None`` in the first imaging cycle) plus ``model_step``. Every
+    plane of a model update has an entry in ``deconvolve_dict``; entries
+    without ``model_flux`` or ``start_model_flux`` are left as they are.
     """
     import numpy as np
 
-    if "taylor_term" in model_step.dims:
-        model_step = model_step.isel(taylor_term=0, drop=True)
-    step_flux = np.sum(
-        model_step.transpose("time", "polarization", "l", "m").values,
-        axis=(-2, -1),
+    from astroviper.processing_functions.image_analysis.image_statistics import (
+        cube_flux_by_sign,
     )
+
+    def taylor_term_zero(model):
+        if "taylor_term" in model.dims:
+            model = model.isel(taylor_term=0, drop=True)
+        return model.transpose("time", "polarization", "l", "m").values
+
+    model = taylor_term_zero(model_step)
+    step_flux = np.sum(model, axis=(-2, -1))
+    if previous_model_xds is not None:
+        model = model + taylor_term_zero(previous_model_xds["SKY_MODEL"])
+    model_flux_by_sign = cube_flux_by_sign(model)
 
     for key, fields in deconvolve_dict.data.items():
         model_flux = fields.get("model_flux")
@@ -3019,10 +3029,27 @@ def _book_accelerated_model_flux(deconvolve_dict, model_step):
         fields["model_flux"] = model_flux[:-1] + [
             float(start_model_flux[-1]) + float(step_flux[key.time, key.pol])
         ]
+        for field, values in zip(
+            ("model_flux_positive", "model_flux_negative"),
+            model_flux_by_sign,
+            strict=True,
+        ):
+            if field in fields:
+                signed = fields[field]
+                signed = signed if isinstance(signed, list) else [signed]
+                fields[field] = signed[:-1] + [float(values[key.time, key.pol])]
 
 
-def _add_previous_continuum_model_flux(deconvolve_dict, previous_model_xds):
-    """Convert per-cycle continuum model increments to cumulative diagnostics."""
+def _add_previous_continuum_model_flux(
+    deconvolve_dict, previous_model_xds, model_increment=None
+):
+    """Convert per-cycle continuum model increments to cumulative diagnostics.
+
+    The model fluxes and the model flux of every iteration gain the flux of
+    the previous model, and with ``model_increment`` (the model this model
+    update made) the positive and negative model fluxes become those of the
+    previous model plus the increment.
+    """
     if previous_model_xds is None:
         return
     if "SKY_MODEL" not in previous_model_xds:
@@ -3042,6 +3069,23 @@ def _add_previous_continuum_model_flux(deconvolve_dict, previous_model_xds):
         taylor_term=0, drop=True
     )
     previous_flux = np.sum(previous_taylor_zero.values, axis=(-2, -1))
+    model_flux_by_sign = None
+    if model_increment is not None:
+        from astroviper.processing_functions.image_analysis.image_statistics import (
+            cube_flux_by_sign,
+        )
+
+        increment_taylor_zero = model_increment.isel(
+            {
+                dim: 0
+                for dim in ("taylor_term", "frequency")
+                if dim in model_increment.dims
+            },
+            drop=True,
+        ).transpose("time", "polarization", "l", "m")
+        model_flux_by_sign = cube_flux_by_sign(
+            previous_taylor_zero.values + increment_taylor_zero.values
+        )
 
     for key, fields in deconvolve_dict.data.items():
         if key.time >= previous_flux.shape[0] or key.pol >= previous_flux.shape[1]:
@@ -3068,6 +3112,17 @@ def _add_previous_continuum_model_flux(deconvolve_dict, previous_model_xds):
             fields["start_model_flux"] = [
                 float(value) + offset for value in start_model_flux
             ]
+        if "iteration_model_flux" in fields:
+            fields["iteration_model_flux"] = [
+                np.asarray(values) + offset for values in fields["iteration_model_flux"]
+            ]
+        if model_flux_by_sign is not None:
+            for field, values in zip(
+                ("model_flux_positive", "model_flux_negative"),
+                model_flux_by_sign,
+                strict=True,
+            ):
+                fields[field] = [float(values[key.time, key.pol])]
 
 
 def _prepare_cached_mfs_residual_grid(input_data, input_params):
@@ -3205,8 +3260,11 @@ def continuum_cycle_append_node(
 
     With ``input_params["cycle_acceleration"]`` set to ``"conjugate_gradient"`` or
     ``"nesterov_momentum"``, the model increment is replaced by the accelerated
-    model step before accumulation, and the latest ``model_flux`` of each plane
-    in the convergence record is the flux of the model after that step. The
+    model step before accumulation, and the latest ``model_flux``,
+    ``model_flux_positive`` and ``model_flux_negative`` of each plane in the
+    convergence record describe the model after that step; its residual
+    statistics, component counts and iteration history describe the model
+    update's own increment and residual. The
     state of that acceleration is read from
     ``input_params["cycle_acceleration_state_xds"]`` and returned as
     ``"cycle_acceleration_state_xds"`` in the same way.
@@ -3328,7 +3386,9 @@ def continuum_cycle_append_node(
             )
             if return_dict.get("deconvolution") is not None:
                 _book_accelerated_model_flux(
-                    return_dict["deconvolution"], model_increment_xds["SKY_MODEL"]
+                    return_dict["deconvolution"],
+                    model_increment_xds["SKY_MODEL"],
+                    input_params.get("model_xds"),
                 )
         del residual_before_model_update
         T_cycle_acceleration += time.time() - start
@@ -3606,10 +3666,11 @@ def model_update_continuum_single_field(
     )
     from astroviper.processing_functions.imaging.utils import (
         ImagingDict,
-        copy_residual_entropy,
+        copy_residual_statistics,
         get_per_cycle_limits,
         make_continuum_cycle_controller,
         merge_imaging_dicts,
+        record_cycle_time,
     )
 
     node_start = time.time()
@@ -3691,6 +3752,15 @@ def model_update_continuum_single_field(
     residual_imaging_dict = build_continuum_residual_imaging_dict(
         img_xds, image_data_group_in_name, cycle_control_params
     )
+    # The residual update of this cycle ran in the map tasks before this one:
+    # its time is that of the longest of them.
+    residual_timing = input_data.get("timing_node_tasks")
+    if residual_timing is not None and "T_image_cube_task" in residual_timing:
+        record_cycle_time(
+            residual_imaging_dict,
+            "t_residual_update",
+            residual_timing["T_image_cube_task"].max(),
+        )
     stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
     if stopcode.imaging != 0:
         import xarray as xr
@@ -3762,10 +3832,12 @@ def model_update_continuum_single_field(
     _add_previous_continuum_model_flux(
         deconvolve_dict,
         input_params.get("model_xds"),
+        img_xds["SKY_MODEL"],
     )
-    copy_residual_entropy(deconvolve_dict, residual_imaging_dict)
+    copy_residual_statistics(deconvolve_dict, residual_imaging_dict)
 
     timing["T_model_update"] = time.time() - start
+    record_cycle_time(deconvolve_dict, "t_model_update", timing["T_model_update"])
 
     # -------------------------------------------------------------
     # Update convergence bookkeeping.

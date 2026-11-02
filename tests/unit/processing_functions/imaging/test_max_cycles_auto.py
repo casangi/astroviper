@@ -21,6 +21,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from astroviper.processing_functions.image_analysis.image_statistics import (
+    RESIDUAL_STATISTICS,
+)
 from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_CONTINUE,
     IMAGING_DIVERGENCE,
@@ -708,9 +711,62 @@ class TestImagingCycleLoop:
                 (history,) = entry[field]
                 assert history.shape == (0,)
 
-    def test_asp_refuses_the_history_before_imaging(self):
-        with pytest.raises(ValueError, match="record_iteration_history"):
-            _image({"record_iteration_history": True}, deconvolver="asp")
+    def test_asp_records_the_history_of_every_model_update(self):
+        params = {"max_cycles": 3, "threshold": 0.01, "record_iteration_history": True}
+        img, _, record = _image(params, deconvolver="asp")
+        cleaned = 0
+        for key, entry in record.data.items():
+            n_updates = len(entry["start_peakres"])
+            assert n_updates > 0
+            n_components = [
+                sum(counts)
+                for counts in zip(
+                    entry["n_point_components"],
+                    entry["n_scale_components"],
+                    entry["n_residual_components"],
+                    strict=True,
+                )
+            ]
+            *histories, closing = entry["iteration_component_flux"]
+            assert closing.shape == (0,)
+            assert [len(h) for h in histories] == n_components
+            if not sum(n_components):
+                continue
+            cleaned += 1
+            model = img["SKY_MODEL"].values[key.time, key.chan, key.pol]
+            last = next(h for h in reversed(entry["iteration_model_flux"]) if len(h))
+            assert last[-1] == pytest.approx(model.sum(), rel=1e-9)
+        assert cleaned
+
+    def test_cycle_statistics(self):
+        """Every entry holds the residual statistics, the times and the
+        threshold of its cycle; a model update also those of the residual it
+        started from, which are those of the stop test before it."""
+        _, _, record = _image({"max_cycles": 3, "threshold": 0.01})
+        for entry in record.data.values():
+            n_entries = len(entry["iter_done"])
+            n_updates = len(entry["start_peakres"])
+            for field in (*RESIDUAL_STATISTICS, "t_residual_update", "entropy"):
+                assert len(entry[field]) == n_entries, field
+            for field in (
+                *(f"start_{field}" for field in RESIDUAL_STATISTICS),
+                "t_model_update",
+                "threshold_per_cycle",
+                "model_flux_positive",
+                "model_flux_negative",
+                "n_point_components",
+            ):
+                assert len(entry[field]) == n_updates, field
+            assert entry["n_point_components"] == entry["iter_done"][:n_updates]
+            assert min(entry["t_model_update"]) > 0
+            np.testing.assert_allclose(
+                np.add(entry["model_flux_positive"], entry["model_flux_negative"]),
+                entry["model_flux"][:n_updates],
+                rtol=1e-9,
+            )
+        stokes_i = record.data[STOKES_I]
+        # the dirty image against the residual left
+        assert stokes_i["start_rms_in_mask"][0] > stokes_i["rms_in_mask"][-1] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -910,7 +966,7 @@ class TestTheStopTestIsOnTheFreshResidual:
                 record.data[STOKES_I]["peakres"] = [peak]
 
         def target(imaging_dict):
-            targets.append(imaging_dict.data[STOKES_I]["threshold_per_cycle"])
+            targets.append(imaging_dict.data[STOKES_I]["threshold_per_cycle"][0])
 
         seen = _spy_on_the_loop(
             monkeypatch, on_record=just_above, on_model_update=target
@@ -945,7 +1001,7 @@ class TestTheStopTestIsOnTheFreshResidual:
         )
         _image({"threshold": 0.01, "threshold_tolerance": tau, "max_iter_per_cycle": 5})
         stokes_i = updates[1].data[STOKES_I]
-        assert abs(stokes_i["start_peakres"][0]) > stokes_i["threshold_per_cycle"]
+        assert abs(stokes_i["start_peakres"][0]) > stokes_i["threshold_per_cycle"][0]
         assert stokes_i["iter_done"] == [iterations]
 
     def test_the_images_come_from_the_last_residual_update(self, monkeypatch):
@@ -976,7 +1032,7 @@ class TestThePerCycleThresholdOfTheFreshResidual:
 
         def spy(imaging_dict):
             entry = imaging_dict.data[STOKES_I]
-            used.append((entry["threshold_per_cycle"], entry["peakres"][0]))
+            used.append((entry["threshold_per_cycle"][0], entry["peakres"][0]))
             if on_model_update is not None:
                 on_model_update(imaging_dict)
 

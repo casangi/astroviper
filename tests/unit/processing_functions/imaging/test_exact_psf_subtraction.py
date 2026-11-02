@@ -18,6 +18,9 @@ import numpy as np
 import pytest
 from xradio.image import make_empty_sky_image
 
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    CYCLE_TIMING_FIELDS,
+)
 from tests.unit.processing_functions.imaging.test_max_cycles_auto import (
     FREQUENCY,
     IMAGE_PARAMS,
@@ -80,13 +83,21 @@ def _run(controls, single_precision_image=False, deconvolver="hogbom", **kwargs)
     )
 
 
+def _untimed(record):
+    """The record without the wall times of its cycles."""
+    return {
+        key: {f: v for f, v in fields.items() if f not in CYCLE_TIMING_FIELDS}
+        for key, fields in record.data.items()
+    }
+
+
 def _same(a, b, extra=()):
     """Residual, model, record and timing columns (times excepted) to the bit;
     ``a`` may have the timing columns ``extra`` besides."""
     (img_a, timing_a, record_a), (img_b, timing_b, record_b) = a, b
     for name in ("SKY_RESIDUAL", "SKY_MODEL"):
         assert np.array_equal(img_a[name].values, img_b[name].values)
-    assert pickle.dumps(record_a.data) == pickle.dumps(record_b.data)
+    assert pickle.dumps(_untimed(record_a)) == pickle.dumps(_untimed(record_b))
     assert [c for c in timing_a.columns if c not in extra] == list(timing_b.columns)
     counts = [c for c in timing_b.columns if not c.startswith("T_")]
     assert timing_a[counts].equals(timing_b[counts])
@@ -364,6 +375,15 @@ def test_equals_the_image_sized_kernel_on_an_embedded_image(
         )
         residual_cube[...] = residual_2n[region]
         model_cube[...] = model_2n[region]
+        # the components at their pixels of the image
+        for field, offset in (
+            ("iteration_component_l", oy),
+            ("iteration_component_m", ox),
+        ):
+            for per_frequency in out[field]:
+                for per_polarization in per_frequency:
+                    for history in per_polarization:
+                        history -= offset
         return out
 
     monkeypatch.setattr(mpsf, "make_point_spread_function_single_field", psf_maker)

@@ -2471,9 +2471,9 @@ def build_residual_imaging_dict(
     cycle_control_params : dict
         Cycle control parameters; ``gain`` seeds the placeholder
         per-plane field and ``primary_beam_limit`` (default 0) gives the
-        clean mask before the first model update. With ``entropy_stop`` the
-        entropy of the residual is worked out as well (``entropy_max_snr``,
-        ``entropy_spatial_bins``, ``entropy_flux_bins``).
+        clean mask before the first model update. The entropy of the residual
+        is worked out with ``entropy_max_snr``, ``entropy_spatial_bins`` and
+        ``entropy_flux_bins``.
 
     Returns
     -------
@@ -2481,11 +2481,12 @@ def build_residual_imaging_dict(
         Per-plane ``peakres`` (the absolute peak of the residual inside the
         clean mask, 0 for an empty mask), ``peakres_nomask`` (that of the
         whole plane), ``masksum`` (the pixels of the clean mask) and
-        ``iter_done`` (0), indexed ``(time, chan, pol)``. With ``entropy_stop``
-        also ``entropy`` and ``residual_snr``, the entropy of the whole plane
-        and the ratio of the peak inside the same clean mask to the RMS of
-        the plane
-        (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`).
+        ``iter_done`` (0), indexed ``(time, chan, pol)``, ``entropy`` and
+        ``residual_snr``, the entropy of the whole plane and the ratio of the
+        peak inside the same clean mask to the RMS of the plane
+        (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`),
+        and the statistics of the residual inside and outside the clean mask
+        (:func:`~astroviper.processing_functions.image_analysis.image_statistics.plane_residual_statistics`).
         With ``record_iteration_history`` also an empty
         ``iteration_peak_residual`` and ``iteration_residual_rms`` (no
         iteration ran), so that a merged record holds one iteration history
@@ -2520,15 +2521,15 @@ def build_residual_imaging_dict(
     max_psf_sidelobe_arr = img_xds[
         residual_data_group["max_sidelobe_point_spread_function"]
     ].values  # (ntime, nfreq, npol)
-    if entropy_stop:
-        entropy, residual_snr = imgstats.image_residual_entropy(
-            img_xds,
-            data_group_name=image_data_group_in_name,
-            spatial_bins=entropy_spatial_bins,
-            flux_bins=entropy_flux_bins,
-            max_snr=entropy_max_snr,
-            mask=mask,
-        )
+    entropy, residual_snr = imgstats.image_residual_entropy(
+        img_xds,
+        data_group_name=image_data_group_in_name,
+        spatial_bins=entropy_spatial_bins,
+        flux_bins=entropy_flux_bins,
+        max_snr=entropy_max_snr,
+        mask=mask,
+    )
+    residual_statistics = imgstats.cube_residual_statistics(residual, mask)
     rd = ImagingDict()
     for tt in range(ntime):
         for nn in range(nfreq):
@@ -2540,10 +2541,13 @@ def build_residual_imaging_dict(
                     "iter_done": 0,
                     "max_psf_sidelobe": float(max_psf_sidelobe_arr[tt, nn, pp]),
                     "gain": cycle_control_params["gain"],
+                    "entropy": float(entropy[tt, nn, pp]),
+                    "residual_snr": float(residual_snr[tt, nn, pp]),
+                    **{
+                        field: float(values[tt, nn, pp])
+                        for field, values in residual_statistics.items()
+                    },
                 }
-                if entropy_stop:
-                    fields["entropy"] = float(entropy[tt, nn, pp])
-                    fields["residual_snr"] = float(residual_snr[tt, nn, pp])
                 if record_iteration_history:
                     for field in ITERATION_HISTORY_FIELDS:
                         fields[field] = np.empty(0)
@@ -2551,14 +2555,33 @@ def build_residual_imaging_dict(
     return rd
 
 
-def copy_residual_entropy(imaging_dict, residual_imaging_dict):
-    """Record the entropy of the residual in the result of a model update.
+def record_cycle_time(imaging_dict, field, seconds):
+    """Record the seconds of a step of the imaging cycle for every plane.
 
-    A model update reports what the deconvolver did. The entropy belongs to
-    the residual the model update started from, which
-    :func:`build_residual_imaging_dict` has measured. This copies ``entropy``
-    and ``residual_snr`` of every plane into ``imaging_dict``, so that the
-    merged record holds one value per imaging cycle.
+    Parameters
+    ----------
+    imaging_dict : ImagingDict
+        Record of the cycle. Modified in place.
+    field : str
+        ``t_residual_update`` or ``t_model_update``.
+    seconds : float
+        Wall time of the step, shared by the planes it processed.
+    """
+    for fields in imaging_dict.data.values():
+        fields[field] = [float(seconds)]
+
+
+def copy_residual_statistics(imaging_dict, residual_imaging_dict):
+    """Record the statistics of the residual in the result of a model update.
+
+    A model update reports what the deconvolver did. The statistics of the
+    residual it started from belong to the residual update before it, which
+    :func:`build_residual_imaging_dict` has measured. This copies ``entropy``,
+    ``residual_snr`` and ``t_residual_update`` of every plane into
+    ``imaging_dict``, and the residual statistics
+    (:data:`~astroviper.processing_functions.image_analysis.image_statistics.RESIDUAL_STATISTICS`)
+    with the prefix ``start_``, so that the merged record holds one value per
+    imaging cycle.
 
     Parameters
     ----------
@@ -2567,13 +2590,17 @@ def copy_residual_entropy(imaging_dict, residual_imaging_dict):
     residual_imaging_dict : ImagingDict
         Statistics of the residual the model update started from.
     """
+    copied = {
+        field: field for field in ("entropy", "residual_snr", "t_residual_update")
+    }
+    copied.update({field: f"start_{field}" for field in imgstats.RESIDUAL_STATISTICS})
     for key, residual_fields in residual_imaging_dict.data.items():
         if key not in imaging_dict.data:
             continue
-        for field in ("entropy", "residual_snr"):
+        for field, name in copied.items():
             if field in residual_fields:
                 value = residual_fields[field]
-                imaging_dict.data[key][field] = (
+                imaging_dict.data[key][name] = (
                     list(value) if isinstance(value, list) else [value]
                 )
 
