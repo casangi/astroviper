@@ -141,7 +141,10 @@ def check_model_update(config, *, mode, require_complete=False):
         # --- Single-term deconvolver compatibility ---
         # Högbom and Asp update only the constant term of a continuum model.
         if deconvolver in ("hogbom", "asp") and n_taylor_terms != 1:
-            raise ValueError(f"Continuum {deconvolver} requires n_taylor_terms=1.")
+            raise ValueError(
+                f"Continuum {deconvolver} requires n_taylor_terms=1. "
+                "Use deconvolver='mtmfs' for 2 to 4 Taylor terms."
+            )
 
         # --- MT-MFS compatibility ---
         # The current continuum MT-MFS path supports two to four terms.
@@ -821,7 +824,10 @@ def check_model_products(
     # were skipped. Check their derived order without revalidating configuration.
     if mode.imaging_kind == "continuum":
         if deconvolver in ("hogbom", "asp") and nterms != 1:
-            raise ValueError(f"Continuum {deconvolver} requires n_taylor_terms=1.")
+            raise ValueError(
+                f"Continuum {deconvolver} requires n_taylor_terms=1. "
+                "Use deconvolver='mtmfs' for 2 to 4 Taylor terms."
+            )
         if deconvolver == "mtmfs" and not 2 <= nterms <= 4:
             raise ValueError("Continuum mtmfs requires n_taylor_terms between 2 and 4.")
 

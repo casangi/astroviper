@@ -105,7 +105,8 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
 
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
-    'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
+    'threaded across planes) requires one Taylor term. Use ``"mtmfs"``\n'
+    'for two to four terms. ``"asp"``\n'
     "(C++, adaptive scale pixel) cleans Taylor term zero only and needs\n"
     '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
     "(``asp_scale_significance``) needs a ``clean_mask`` that leaves more\n"

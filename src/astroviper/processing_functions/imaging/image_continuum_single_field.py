@@ -2086,7 +2086,8 @@ def residual_update_continuum_single_field(
 
     deconvolver : str, optional
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"asp"``
+        threaded across planes) requires one Taylor term. Use ``"mtmfs"``
+        for two to four terms. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
         (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
@@ -3005,7 +3006,8 @@ def model_update_mtmfs_single_field(
 
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
-        threaded across planes) cleans Taylor term zero only. ``"asp"``
+        threaded across planes) requires one Taylor term. Use ``"mtmfs"``
+        for two to four terms. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
         (``asp_scale_significance``) needs a ``clean_mask`` that leaves more

@@ -619,7 +619,11 @@ def test_hogbom_writes_back_its_residual_only_on_request(monkeypatch, keywords):
     would, so that only the write-back can bring it back."""
     from astroviper.processing_functions.imaging import model_update
 
-    image = _hogbom_continuum_image()
+    image = (
+        _hogbom_continuum_image()
+        .isel(taylor_term=slice(0, 1))
+        .assign_coords(psf_taylor_order=[0])
+    )
     snapshot = image.SKY_RESIDUAL.copy(deep=True)
     backend = model_update.model_update_cube_single_field
     captured = {}
@@ -651,9 +655,6 @@ def test_hogbom_writes_back_its_residual_only_on_request(monkeypatch, keywords):
     np.testing.assert_array_equal(
         image.SKY_RESIDUAL.isel(taylor_term=0),
         cleaned if keywords else snapshot.isel(taylor_term=0),
-    )
-    np.testing.assert_array_equal(
-        image.SKY_RESIDUAL.isel(taylor_term=1), snapshot.isel(taylor_term=1)
     )
 
 
