@@ -611,7 +611,7 @@ IMAGING_PARAM_DOCS = {
         "the driver but passes each map only its local beam. The setting is ignored\n"
         "for MFS."
     ),
-    "mvc_minor_cycle_approximation": (
+    "mvc_model_update_approximation": (
         "MVC approximation used to construct the Taylor residuals and PSFs.\n"
         '``"channel_psf"`` retains the frequency-dependent channel PSFs while\n'
         "approximating the channel-to-common-beam ratio as one.\n"

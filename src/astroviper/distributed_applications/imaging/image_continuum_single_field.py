@@ -2811,7 +2811,7 @@ def image_continuum_single_field(
     deconvolver: str = "hogbom",
     primary_beam_limit: float = 0.2,
     continuum_mode: str = "mfs",
-    mvc_minor_cycle_approximation: str = "channel_psf",
+    mvc_model_update_approximation: str = "channel_psf",
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json requires list/str (not nullable); never mutated
     field_name: str | None = None,
@@ -3011,7 +3011,7 @@ def image_continuum_single_field(
         ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
         match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
         parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
-    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, optional
+    mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, optional
         MVC approximation used to construct the Taylor residuals and PSFs.
         ``"channel_psf"`` retains the frequency-dependent channel PSFs while
         approximating the channel-to-common-beam ratio as one.
@@ -3645,15 +3645,15 @@ def image_continuum_single_field(
             "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
         )
-    mvc_minor_cycle_approximation = str(mvc_minor_cycle_approximation).lower()
-    if mvc_minor_cycle_approximation not in (
+    mvc_model_update_approximation = str(mvc_model_update_approximation).lower()
+    if mvc_model_update_approximation not in (
         "channel_psf",
         "local_beam_moments",
     ):
         raise ValueError(
-            "mvc_minor_cycle_approximation must be 'channel_psf' or "
+            "mvc_model_update_approximation must be 'channel_psf' or "
             "'local_beam_moments'; received "
-            f"{mvc_minor_cycle_approximation!r}."
+            f"{mvc_model_update_approximation!r}."
         )
     if weight_memory_mode == "in_place" and skunk_works:
         raise NotImplementedError(
@@ -3897,7 +3897,7 @@ def image_continuum_single_field(
     input_params["primary_beam_correction"] = bool(primary_beam_correction)
     input_params["primary_beam_limit"] = float(primary_beam_limit)
     input_params["continuum_mode"] = continuum_mode
-    input_params["mvc_minor_cycle_approximation"] = mvc_minor_cycle_approximation
+    input_params["mvc_model_update_approximation"] = mvc_model_update_approximation
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
@@ -4211,7 +4211,7 @@ def image_continuum_single_field(
                 )
                 if (
                     is_first_cycle
-                    and mvc_minor_cycle_approximation == "local_beam_moments"
+                    and mvc_model_update_approximation == "local_beam_moments"
                 ):
                     mvc_residual_additive_variables += MVC_LOCAL_BEAM_STATIC_VARIABLES
                 if is_first_cycle:
@@ -4250,7 +4250,7 @@ def image_continuum_single_field(
                 "single_precision_image": single_precision_image,
                 "instrument_polarization_basis": instrument_polarization_basis,
                 "continuum_mode": continuum_mode,
-                "mvc_minor_cycle_approximation": mvc_minor_cycle_approximation,
+                "mvc_model_update_approximation": mvc_model_update_approximation,
                 "visibility_memory_mode": visibility_memory_mode,
                 "image_store": image_store,
                 "primary_beam_limit": primary_beam_limit,

@@ -274,7 +274,7 @@ def test_continuum_public_api_matches_shared_imaging_names_and_defaults():
     assert "primary_beam_correction" not in parameters
     assert "primary_beam_limit" in parameters
     assert "continuum_mode" in parameters
-    assert parameters["mvc_minor_cycle_approximation"].default == "channel_psf"
+    assert parameters["mvc_model_update_approximation"].default == "channel_psf"
     assert "wideband_primary_beam_memory_mode" in parameters
 
 
@@ -743,7 +743,7 @@ def _run_tw_hydra_continuum(
     weighting,
     *,
     deconvolver="hogbom",
-    mvc_minor_cycle_approximation="channel_psf",
+    mvc_model_update_approximation="channel_psf",
     cycle_control_params=None,
     image_param_overrides=None,
     image_params=None,
@@ -802,7 +802,7 @@ def _run_tw_hydra_continuum(
             restore=restore,
             primary_beam_limit=primary_beam_limit,
             continuum_mode=continuum_mode,
-            mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
+            mvc_model_update_approximation=mvc_model_update_approximation,
             scan_intents=["OBSERVE_TARGET#ON_SOURCE"],
             **(
                 {}
@@ -856,7 +856,7 @@ def test_tw_hydra_mvc_local_beam_moments_are_frequency_partition_invariant(
             n_chunks,
             "mvc",
             {"weighting": "natural", "weighting_scope": "local"},
-            mvc_minor_cycle_approximation="local_beam_moments",
+            mvc_model_update_approximation="local_beam_moments",
             cycle_control_params={
                 "max_iter": 2,
                 "max_cycles": 2,

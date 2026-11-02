@@ -23,7 +23,7 @@
             "type": ["str"],
             "allowed": ["mfs", "mvc"]
         },
-        "mvc_minor_cycle_approximation": {
+        "mvc_model_update_approximation": {
             "type": ["str"],
             "allowed": ["channel_psf", "local_beam_moments"]
         },

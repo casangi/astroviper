@@ -69,7 +69,7 @@ $$
 
 Map tasks grid Taylor-weighted visibility and PSF contributions. Reduction
 sums those contributions before one global inverse FFT and normalization. The
-minor-cycle model coefficients `SKY_MODEL` are therefore the apparent-sky
+model-update coefficients `SKY_MODEL` are therefore the apparent-sky
 coefficients $J_t$, and the MFS predictor evaluates their Taylor polynomial at
 each channel before degridding it.
 
@@ -90,7 +90,7 @@ $$
 This division is applied separately to the model and principal-solution
 residual coefficients before clean-beam convolution.
 
-## MVC convention and exact major-cycle prediction
+## MVC convention and exact residual-update prediction
 
 MVC stores the Taylor model in a common effective-primary-beam convention.
 With
@@ -113,8 +113,8 @@ S_\nu F\left[
 $$
 
 Substitution of $J_t=\bar A I_t$ recovers the physical predictor
-$S_\nu F[A_\nu\sum_t I_tx_\nu^t]$. Thus the MVC major cycle uses the physical
-measurement operator independently of the selected minor-cycle approximation.
+$S_\nu F[A_\nu\sum_t I_tx_\nu^t]$. Thus the MVC residual update uses the physical
+measurement operator independently of the selected model-update approximation.
 
 The exact negative gradient and Hessian in the common-beam variables are
 
@@ -133,7 +133,7 @@ $$
 $$
 
 This Hessian is direction dependent and is not an ordinary convolution. MVC
-therefore provides two convolutional minor-cycle approximations.
+therefore provides two convolutional model-update approximations.
 
 ### `channel_psf`
 
@@ -201,7 +201,7 @@ $$
 H_I\simeq G C^{-1}K
 $$
 
-and the preconditioned minor-cycle system
+and the preconditioned model-update system
 
 $$
 K\Delta J\simeq \bar A C G^{-1}u.

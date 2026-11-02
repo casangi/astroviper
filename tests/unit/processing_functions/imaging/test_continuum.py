@@ -718,7 +718,7 @@ def test_mvc_channel_psf_conversion_matches_taylor_equations():
         n_taylor_terms=2,
         reference_frequency=1.0e9,
         primary_beam_limit=0.2,
-        mvc_minor_cycle_approximation="channel_psf",
+        mvc_model_update_approximation="channel_psf",
     )
     expected_pb = np.sum(weight * pb) / np.sum(weight)
     np.testing.assert_allclose(effective_pb.squeeze(), expected_pb)
@@ -733,9 +733,9 @@ def test_mvc_channel_psf_conversion_matches_taylor_equations():
             for order in range(3)
         ],
     )
-    assert residual_taylor.attrs["mvc_minor_cycle_approximation"] == "channel_psf"
-    assert psf_taylor.attrs["mvc_minor_cycle_approximation"] == "channel_psf"
-    assert effective_pb.attrs["mvc_minor_cycle_approximation"] == "channel_psf"
+    assert residual_taylor.attrs["mvc_model_update_approximation"] == "channel_psf"
+    assert psf_taylor.attrs["mvc_model_update_approximation"] == "channel_psf"
+    assert effective_pb.attrs["mvc_model_update_approximation"] == "channel_psf"
 
 
 def test_mvc_local_beam_moments_apply_spatial_g_inverse_preconditioner():
@@ -757,7 +757,7 @@ def test_mvc_local_beam_moments_apply_spatial_g_inverse_preconditioner():
             n_taylor_terms=2,
             reference_frequency=1.0e9,
             primary_beam_limit=0.2,
-            mvc_minor_cycle_approximation="local_beam_moments",
+            mvc_model_update_approximation="local_beam_moments",
         )
     )
 
@@ -777,9 +777,9 @@ def test_mvc_local_beam_moments_apply_spatial_g_inverse_preconditioner():
     np.testing.assert_allclose(residual_taylor.squeeze(), expected_residual)
     np.testing.assert_allclose(psf_taylor.squeeze(), expected_psf)
     assert (
-        residual_taylor.attrs["mvc_minor_cycle_approximation"] == "local_beam_moments"
+        residual_taylor.attrs["mvc_model_update_approximation"] == "local_beam_moments"
     )
-    assert psf_taylor.attrs["mvc_minor_cycle_approximation"] == "local_beam_moments"
+    assert psf_taylor.attrs["mvc_model_update_approximation"] == "local_beam_moments"
 
 
 def test_mvc_conversion_uses_psf_weights_for_common_response():
@@ -833,10 +833,10 @@ def test_mvc_conversion_preserves_single_precision_image_products():
 
 
 @pytest.mark.parametrize(
-    "mvc_minor_cycle_approximation", ["channel_psf", "local_beam_moments"]
+    "mvc_model_update_approximation", ["channel_psf", "local_beam_moments"]
 )
 def test_mvc_map_contributions_reduce_to_full_cube_result(
-    mvc_minor_cycle_approximation,
+    mvc_model_update_approximation,
 ):
     """Summed map Taylor products reproduce the former global cube conversion."""
     frequency = np.array([0.8e9, 0.9e9, 1.1e9, 1.2e9])
@@ -853,7 +853,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result(
         normalization,
         n_taylor_terms=2,
         reference_frequency=1.0e9,
-        mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
+        mvc_model_update_approximation=mvc_model_update_approximation,
     )
     chunks = []
     for channel_indices in ([0, 1], [2, 3]):
@@ -867,7 +867,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result(
                 normalization.isel(selection),
                 n_taylor_terms=2,
                 reference_frequency=1.0e9,
-                mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
+                mvc_model_update_approximation=mvc_model_update_approximation,
             )
         )
 
@@ -891,7 +891,7 @@ def test_later_mvc_map_omits_cached_local_beam_moments():
         None,
         n_taylor_terms=2,
         reference_frequency=1.0e9,
-        mvc_minor_cycle_approximation="local_beam_moments",
+        mvc_model_update_approximation="local_beam_moments",
         include_local_beam_static=False,
     )
 
@@ -1221,7 +1221,7 @@ def test_mvc_channel_near_beam_null_adds_bounded_residual(channel_pb):
 
 
 def _mvc_image_point_sources(
-    sources, threshold, mvc_minor_cycle_approximation="channel_psf"
+    sources, threshold, mvc_model_update_approximation="channel_psf"
 ):
     """Image point sources with the MVC Taylor products and native MT-MFS.
 
@@ -1304,7 +1304,7 @@ def _mvc_image_point_sources(
                 n_taylor_terms=n_taylor_terms,
                 reference_frequency=1.0e11,
                 primary_beam_limit=0.2,
-                mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
+                mvc_model_update_approximation=mvc_model_update_approximation,
             ),
             effective_primary_beam=effective_beam,
         )
@@ -1363,7 +1363,7 @@ def test_mvc_characterizes_casa_off_axis_spectral_index_approximation(
         "off_centre": ((52, 32), 0.5 * (1.0 + x) ** off_centre_index),
     }
     model, effective_beam, final_peak = _mvc_image_point_sources(
-        sources.values(), 5.0e-3, mvc_minor_cycle_approximation="channel_psf"
+        sources.values(), 5.0e-3, mvc_model_update_approximation="channel_psf"
     )
     assert final_peak < 5.0e-3
 
@@ -1421,7 +1421,7 @@ def test_mvc_local_beam_moments_recovers_off_axis_spectral_index_after_stopping(
     model, effective_beam, final_peak = _mvc_image_point_sources(
         sources.values(),
         threshold,
-        mvc_minor_cycle_approximation="local_beam_moments",
+        mvc_model_update_approximation="local_beam_moments",
     )
 
     assert final_peak < threshold

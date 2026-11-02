@@ -1227,7 +1227,7 @@ def make_mvc_taylor_normal_equation_contributions(
     n_taylor_terms,
     reference_frequency,
     primary_beam_limit=0.2,
-    mvc_minor_cycle_approximation="channel_psf",
+    mvc_model_update_approximation="channel_psf",
     include_local_beam_static=True,
 ):
     """Form additive MVC Taylor products for one map-task frequency chunk.
@@ -1268,7 +1268,7 @@ def make_mvc_taylor_normal_equation_contributions(
         and Gram moments but uses the cutoff to determine local Taylor support.
         Final products are zero where the effective beam is at or below the
         cutoff.
-    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, default "channel_psf"
+    mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, default "channel_psf"
         MVC approximation used to construct the Taylor residuals and PSFs.
         ``"channel_psf"`` retains channel-dependent PSFs while approximating
         :math:`A_\\nu/A \\simeq 1`. ``"local_beam_moments"`` retains local
@@ -1316,7 +1316,7 @@ def make_mvc_taylor_normal_equation_contributions(
     This factorization assumes that the primary beam is broad compared with
     the important PSF structure, so that
     ``B_nu * (A_nu * f) ~= A_nu * (B_nu * f)``, and that the normalized PSF
-    response dominating the minor-cycle update varies slowly with frequency.
+    response dominating the model update varies slowly with frequency.
     These assumptions are most appropriate for compact emission, including
     compact sources away from the pointing centre, because the local matrix
     ``G`` retains the frequency-dependent beam moments at each pixel. They are
@@ -1380,7 +1380,7 @@ def make_mvc_taylor_normal_equation_contributions(
     n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
     primary_beam_limit = float(primary_beam_limit)
-    mvc_minor_cycle_approximation = str(mvc_minor_cycle_approximation).lower()
+    mvc_model_update_approximation = str(mvc_model_update_approximation).lower()
 
     if n_taylor_terms < 1:
         raise ValueError(f"n_taylor_terms must be positive; received {n_taylor_terms}.")
@@ -1388,14 +1388,14 @@ def make_mvc_taylor_normal_equation_contributions(
         raise ValueError("reference_frequency must be finite and positive.")
     if not np.isfinite(primary_beam_limit) or primary_beam_limit < 0.0:
         raise ValueError("primary_beam_limit must be finite and non-negative.")
-    if mvc_minor_cycle_approximation not in (
+    if mvc_model_update_approximation not in (
         "channel_psf",
         "local_beam_moments",
     ):
         raise ValueError(
-            "mvc_minor_cycle_approximation must be 'channel_psf' or "
+            "mvc_model_update_approximation must be 'channel_psf' or "
             "'local_beam_moments'; received "
-            f"{mvc_minor_cycle_approximation!r}."
+            f"{mvc_model_update_approximation!r}."
         )
 
     frequency = np.asarray(residual_cube.frequency.values, dtype=np.float64)
@@ -1437,7 +1437,7 @@ def make_mvc_taylor_normal_equation_contributions(
     # denominator, including weights from clipped channels.
     finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
 
-    if mvc_minor_cycle_approximation == "local_beam_moments":
+    if mvc_model_update_approximation == "local_beam_moments":
         # Form the exact-gradient numerator u from A_nu R_nu.
         channel_primary_beam = xr.where(
             np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
@@ -1465,7 +1465,7 @@ def make_mvc_taylor_normal_equation_contributions(
     residual_numerator.attrs = {
         "description": (
             "Additive local-beam-moment MVC Taylor residual numerators."
-            if mvc_minor_cycle_approximation == "local_beam_moments"
+            if mvc_model_update_approximation == "local_beam_moments"
             else "Additive channel-PSF MVC Taylor residual numerators."
         ),
         "continuum_mode": "mvc",
@@ -1473,7 +1473,7 @@ def make_mvc_taylor_normal_equation_contributions(
         "n_taylor_terms": n_taylor_terms,
         "primary_beam_limit": primary_beam_limit,
         "primary_beam_convention": "casa_mvc_common_beam",
-        "mvc_minor_cycle_approximation": mvc_minor_cycle_approximation,
+        "mvc_model_update_approximation": mvc_model_update_approximation,
     }
 
     contributions = xr.Dataset(
@@ -1487,14 +1487,14 @@ def make_mvc_taylor_normal_equation_contributions(
             "reference_frequency": reference_frequency,
             "primary_beam_limit": primary_beam_limit,
             "primary_beam_convention": "casa_mvc_common_beam",
-            "mvc_minor_cycle_approximation": mvc_minor_cycle_approximation,
+            "mvc_model_update_approximation": mvc_model_update_approximation,
             "mvc_output_dtype": np.dtype(output_dtype).name,
         },
     )
 
     n_psf_taylor_terms = 2 * n_taylor_terms - 1
     if (
-        mvc_minor_cycle_approximation == "local_beam_moments"
+        mvc_model_update_approximation == "local_beam_moments"
         and include_local_beam_static
     ):
         psf_taylor_order = xr.IndexVariable(
@@ -1527,7 +1527,7 @@ def make_mvc_taylor_normal_equation_contributions(
         psf_weight_sum = psf_weight.sum(dim="frequency")
 
         finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
-        if mvc_minor_cycle_approximation == "local_beam_moments":
+        if mvc_model_update_approximation == "local_beam_moments":
             psf_terms = [
                 (psf_weight * x_frequency**order * finite_psf).sum(dim="frequency")
                 for order in range(n_psf_taylor_terms)
@@ -1549,7 +1549,7 @@ def make_mvc_taylor_normal_equation_contributions(
         psf_numerator.attrs = {
             "description": (
                 "Additive beam-free local-beam-moment MVC Taylor PSF numerators."
-                if mvc_minor_cycle_approximation == "local_beam_moments"
+                if mvc_model_update_approximation == "local_beam_moments"
                 else "Additive channel-PSF MVC Taylor PSF numerators."
             ),
             "continuum_mode": "mvc",
@@ -1558,7 +1558,7 @@ def make_mvc_taylor_normal_equation_contributions(
             "n_psf_taylor_terms": n_psf_taylor_terms,
             "primary_beam_limit": primary_beam_limit,
             "primary_beam_convention": "casa_mvc_common_beam",
-            "mvc_minor_cycle_approximation": mvc_minor_cycle_approximation,
+            "mvc_model_update_approximation": mvc_model_update_approximation,
         }
         contributions["MVC_PSF_TAYLOR_NUMERATOR"] = psf_numerator
         contributions["MVC_PSF_WEIGHT_SUM"] = psf_weight_sum
@@ -1602,7 +1602,7 @@ def finalize_mvc_taylor_normal_equations(
 ):
     """Normalize globally reduced MVC map contributions in the append node.
 
-    For ``mvc_minor_cycle_approximation="channel_psf"``, divide the reduced
+    For ``mvc_model_update_approximation="channel_psf"``, divide the reduced
     Taylor residual moments by the total residual weight and normalize the
     primary-beam-weighted channel PSFs by ``sum(w_nu) * Abar``. This implements
     the approximation ``A_nu / Abar ~= 1`` in the residual while retaining the
@@ -1669,10 +1669,10 @@ def finalize_mvc_taylor_normal_equations(
         effective_primary_beam > primary_beam_limit
     )
 
-    mvc_minor_cycle_approximation = contributions.attrs.get(
-        "mvc_minor_cycle_approximation", "channel_psf"
+    mvc_model_update_approximation = contributions.attrs.get(
+        "mvc_model_update_approximation", "channel_psf"
     )
-    if mvc_minor_cycle_approximation == "local_beam_moments":
+    if mvc_model_update_approximation == "local_beam_moments":
         # Apply the spatially varying preconditioner Abar C G^-1 to the
         # exact-gradient numerator u. Pixels with too few supported channels
         # retain only the scalar Taylor-zero solution.
@@ -1752,16 +1752,16 @@ def finalize_mvc_taylor_normal_equations(
         "reference_frequency": contributions.attrs.get("reference_frequency"),
         "n_taylor_terms": contributions.attrs.get("n_taylor_terms"),
         "primary_beam_limit": primary_beam_limit,
-        "mvc_minor_cycle_approximation": contributions.attrs.get(
-            "mvc_minor_cycle_approximation", "channel_psf"
+        "mvc_model_update_approximation": contributions.attrs.get(
+            "mvc_model_update_approximation", "channel_psf"
         ),
     }
     effective_primary_beam.attrs = {
         "description": "Imaging-weighted effective primary beam for MVC.",
         "continuum_mode": "mvc",
         "primary_beam_limit": primary_beam_limit,
-        "mvc_minor_cycle_approximation": contributions.attrs.get(
-            "mvc_minor_cycle_approximation", "channel_psf"
+        "mvc_model_update_approximation": contributions.attrs.get(
+            "mvc_model_update_approximation", "channel_psf"
         ),
     }
     if psf_taylor is not None:
@@ -1773,8 +1773,8 @@ def finalize_mvc_taylor_normal_equations(
             "n_taylor_terms": contributions.attrs.get("n_taylor_terms"),
             "n_psf_taylor_terms": psf_taylor.sizes["psf_taylor_order"],
             "primary_beam_limit": primary_beam_limit,
-            "mvc_minor_cycle_approximation": contributions.attrs.get(
-                "mvc_minor_cycle_approximation", "channel_psf"
+            "mvc_model_update_approximation": contributions.attrs.get(
+                "mvc_model_update_approximation", "channel_psf"
             ),
         }
 
@@ -1791,7 +1791,7 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
     n_taylor_terms,
     reference_frequency,
     primary_beam_limit=0.2,
-    mvc_minor_cycle_approximation="channel_psf",
+    mvc_model_update_approximation="channel_psf",
 ):
     """Convert complete MVC channel cubes into Taylor normal equations for tests.
 
@@ -1817,7 +1817,7 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
         Taylor-expansion reference frequency in Hz.
     primary_beam_limit : float, optional
         Minimum common primary-beam response used by the Taylor solution.
-    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, optional
+    mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, optional
         MVC approximation used to construct the Taylor residuals and PSFs.
 
     Returns
@@ -1843,7 +1843,7 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
         n_taylor_terms=n_taylor_terms,
         reference_frequency=reference_frequency,
         primary_beam_limit=primary_beam_limit,
-        mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
+        mvc_model_update_approximation=mvc_model_update_approximation,
     )
     return finalize_mvc_taylor_normal_equations(contributions)
 
@@ -2266,7 +2266,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
-    mvc_minor_cycle_approximation="channel_psf",
+    mvc_model_update_approximation="channel_psf",
     gridding_kernel_params=None,
 ):
     """Perform one continuum imaging-cycle update for a single frequency chunk.
@@ -2417,7 +2417,7 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used by MVC map-local Taylor construction.
 
-    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, optional
+    mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, optional
         MVC approximation used to construct the Taylor residuals and PSFs.
         ``"channel_psf"`` retains the frequency-dependent channel PSFs while
         approximating the channel-to-common-beam ratio as one.
@@ -2692,7 +2692,7 @@ def residual_update_continuum_single_field(
             n_taylor_terms=image_params.get("n_taylor_terms", 2),
             reference_frequency=image_params["reference_frequency"],
             primary_beam_limit=primary_beam_limit,
-            mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
+            mvc_model_update_approximation=mvc_model_update_approximation,
             include_local_beam_static=is_first_cycle,
         )
         for variable_name, data_array in contributions.data_vars.items():

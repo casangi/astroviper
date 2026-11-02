@@ -1023,7 +1023,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
-    mvc_minor_cycle_approximation="channel_psf",
+    mvc_model_update_approximation="channel_psf",
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
@@ -1232,7 +1232,7 @@ def residual_update_continuum_single_field(
     primary_beam_limit : float, optional
         Channel primary-beam cutoff used for MVC map-local Taylor products.
 
-    mvc_minor_cycle_approximation : {"channel_psf", "local_beam_moments"}, optional
+    mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, optional
         MVC approximation used to construct the Taylor residuals and PSFs.
         ``"channel_psf"`` retains the frequency-dependent channel PSFs while
         approximating the channel-to-common-beam ratio as one.
@@ -1353,15 +1353,15 @@ def residual_update_continuum_single_field(
             "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
         )
-    mvc_minor_cycle_approximation = str(mvc_minor_cycle_approximation).lower()
-    if mvc_minor_cycle_approximation not in (
+    mvc_model_update_approximation = str(mvc_model_update_approximation).lower()
+    if mvc_model_update_approximation not in (
         "channel_psf",
         "local_beam_moments",
     ):
         raise ValueError(
-            "mvc_minor_cycle_approximation must be 'channel_psf' or "
+            "mvc_model_update_approximation must be 'channel_psf' or "
             "'local_beam_moments'; received "
-            f"{mvc_minor_cycle_approximation!r}."
+            f"{mvc_model_update_approximation!r}."
         )
 
     if image_data_variables_keep is None:
@@ -1607,7 +1607,7 @@ def residual_update_continuum_single_field(
         continuum_mode=continuum_mode,
         task_id=task_id,
         primary_beam_limit=primary_beam_limit,
-        mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
+        mvc_model_update_approximation=mvc_model_update_approximation,
         gridding_kernel_params=gridding_kernel_params,
     )
 
@@ -2475,8 +2475,8 @@ def _prepare_continuum_image(
         "continuum_mode",
         image_params.get("continuum_mode", "mfs"),
     )
-    mvc_minor_cycle_approximation = input_params.get(
-        "mvc_minor_cycle_approximation",
+    mvc_model_update_approximation = input_params.get(
+        "mvc_model_update_approximation",
         "channel_psf",
     )
 
@@ -2573,7 +2573,7 @@ def _prepare_continuum_image(
                 drop=True,
             ).transpose("time", "polarization", "l", "m")
 
-            if mvc_minor_cycle_approximation == "local_beam_moments":
+            if mvc_model_update_approximation == "local_beam_moments":
                 missing = [
                     name
                     for name in MVC_LOCAL_BEAM_STATIC_VARIABLES
@@ -2814,7 +2814,7 @@ def _prepare_continuum_image(
         static_variable_names = static_image_variable_names
         if (
             continuum_mode == "mvc"
-            and mvc_minor_cycle_approximation == "local_beam_moments"
+            and mvc_model_update_approximation == "local_beam_moments"
         ):
             static_variable_names += MVC_LOCAL_BEAM_STATIC_VARIABLES
 
