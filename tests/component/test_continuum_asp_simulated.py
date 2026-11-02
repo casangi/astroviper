@@ -266,12 +266,16 @@ def test_continuum_asp_recovers_simulated_sources(
     assert np.isfinite(residual).all() and np.isfinite(model).all()
     assert np.abs(residual).max() < 0.03 * apparent["point"]
 
-    # Restore and primary-beam correction as for Hogbom.
-    beam = image.PRIMARY_BEAM.isel(frequency=0, drop=True)
-    for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
-        assert name in image
+    # Asp writes the same sole, intrinsic restored product as Hogbom.
+    beam = (
+        image.PRIMARY_BEAM_TAYLOR.isel(taylor_term=0, drop=True)
+        if continuum_mode == "mfs"
+        else image.PRIMARY_BEAM.isel(frequency=0, drop=True)
+    )
+    assert "SKY_RESTORED_FLAT_SKY" in image
+    assert "SKY_RESTORED_FLAT_NOISE" not in image
     np.testing.assert_array_equal(
-        np.isfinite(image.SKY_RESTORED_PRIMARY_BEAM_CORRECTED),
+        np.isfinite(image.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0, drop=True)),
         np.isfinite(beam) & (beam >= 0.2),
     )
 

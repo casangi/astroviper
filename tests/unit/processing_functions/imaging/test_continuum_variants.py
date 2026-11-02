@@ -136,7 +136,9 @@ def test_asp_restores_as_hogbom():
     """An Asp model of Taylor term zero is restored as a Högbom one."""
     reference, _ = restore_continuum_image(make_continuum_image())
     result, _ = restore_continuum_image(make_continuum_image(), deconvolver="asp")
-    xr.testing.assert_identical(result.SKY_RESTORED, reference.SKY_RESTORED)
+    xr.testing.assert_identical(
+        result.SKY_RESTORED_FLAT_NOISE, reference.SKY_RESTORED_FLAT_NOISE
+    )
 
 
 @pytest.mark.parametrize("image_shape", [(8, 8), (7, 7), (7, 10), (10, 7), (8, 11)])

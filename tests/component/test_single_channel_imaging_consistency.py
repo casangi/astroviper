@@ -307,9 +307,13 @@ DECONVOLUTION_CONTROLS = {
     "max_psf_fraction": 0.8,
     "max_iter_per_cycle": -1,
 }
-# The model, residual and restored image of the two imagers, over the brightest
-# apparent Stokes I flux: 5.3e-16 (their iterations are the same).
+# The model and residual of the two imagers, over the brightest apparent Stokes
+# I flux: 5.3e-16 (their iterations are the same).
 DECONVOLUTION_RTOL = 1e-12
+# Their flat-sky restored products differ at the rounding of the independently
+# evaluated cube primary beam and one-term MFS primary-beam Taylor polynomial
+# (measured: 2.9e-8 of the brightest apparent Stokes I flux).
+DECONVOLUTION_RESTORED_RTOL = 1e-7
 # Errors of the deconvolution against the truth, per Stokes plane (measured in
 # both imagers; :func:`deconvolution_errors`): the model in the 3 x 3 pixels of
 # a source minus its apparent flux (largest over the sources) and the restored
@@ -320,10 +324,10 @@ DECONVOLUTION_RTOL = 1e-12
 # directions moved by up to four units in the last place by at most 1.9e-7 (ten
 # draws, the same iterations), scipy's FFT in place of pyfftw's by 5.6e-11.
 DECONVOLUTION_ERRORS = {
-    "I": {"model_flux": 2.910e-3, "spurious_flux": 3.859e-2, "restored": 3.394e-3},
-    "Q": {"model_flux": 1.154e-3, "spurious_flux": 7.548e-3, "restored": 1.138e-3},
-    "U": {"model_flux": 2.229e-3, "spurious_flux": 2.575e-2, "restored": 2.267e-3},
-    "V": {"model_flux": 3.094e-3, "spurious_flux": 4.381e-2, "restored": 2.877e-3},
+    "I": {"model_flux": 2.910e-3, "spurious_flux": 3.859e-2, "restored": 1.529e-2},
+    "Q": {"model_flux": 1.154e-3, "spurious_flux": 7.548e-3, "restored": 5.020e-3},
+    "U": {"model_flux": 2.229e-3, "spurious_flux": 2.575e-2, "restored": 1.029e-2},
+    "V": {"model_flux": 3.094e-3, "spurious_flux": 4.381e-2, "restored": 1.297e-2},
 }
 # The errors may rise by these factors (design G.2 of Memo 13a: 3 for the
 # largest values, 2 for sums).
@@ -375,9 +379,9 @@ def build_sky():
 
     Returns a dict with the simulator components, the pixels ``[n_source, 2]``,
     the Stokes fluxes ``[n_source, 4]`` (I, Q, U, V), the primary beam at the
-    sources, the true model (Stokes, l, m) in Jy per pixel with the primary
-    beam, ``f_ref``, the brightest apparent flux of every Stokes plane, and
-    the image's ``l`` and ``m`` coordinates.
+    sources, the intrinsic and primary-beam-attenuated models (Stokes, l, m)
+    in Jy per pixel, ``f_ref``, the brightest apparent flux of every Stokes
+    plane, and the image's ``l`` and ``m`` coordinates.
     """
     table = np.array(SOURCES, dtype=np.float64)
     pixels = table[:, :2].astype(int)
@@ -402,6 +406,8 @@ def build_sky():
         components.append(
             {"kind": "point", "flux": flux, "ra_dec": ra_dec[s], "name": f"source_{s}"}
         )
+    intrinsic_model = np.zeros((len(STOKES), *IMAGE_SIZE))
+    intrinsic_model[:, pixels[:, 0], pixels[:, 1]] = stokes.T
     true_model = np.zeros((len(STOKES), *IMAGE_SIZE))
     true_model[:, pixels[:, 0], pixels[:, 1]] = (stokes * primary_beam[:, None]).T
     apparent = np.abs(stokes) * primary_beam[:, None]
@@ -410,6 +416,7 @@ def build_sky():
         "pixels": pixels,
         "stokes": stokes,
         "primary_beam": primary_beam,
+        "intrinsic_model": intrinsic_model,
         "true_model": true_model,
         "f_ref": dict(zip(STOKES, apparent.max(axis=0), strict=True)),
         "l": grid.l.values,
@@ -542,13 +549,11 @@ def image(
         "deconvolver": "hogbom",
         "instrument_polarization_basis": "linear",
         "scan_intents": ["OBSERVE_TARGET#ON_SOURCE"],
-        "image_data_variables_keep": KEEP + ["sky_restored"] if deconvolve else KEEP,
         "processing_set_data_group_name": "base",
         "single_precision_image": False,
         "processing_function_threads": 1,
         "n_mapping_parallelism": {"frequency": 1},
         "restore": deconvolve,
-        "primary_beam_correction": False,
         "gridding_kernel_params": dict(gridding_kernel_params),
         "overwrite": True,
     }
@@ -559,6 +564,8 @@ def image(
             imaging_weights_params=dict(IMAGING_WEIGHTS_PARAMS),
             cycle_control_params={**controls, "primary_beam_limit": PRIMARY_BEAM_LIMIT},
             primary_beam_params={"telescope": TELESCOPE},
+            primary_beam_correction=deconvolve,
+            image_data_variables_keep=(KEEP + ["sky_restored"] if deconvolve else KEEP),
         )
     else:
         driver = image_continuum_single_field
@@ -578,6 +585,9 @@ def image(
             cycle_control_params=controls,
             continuum_mode="mfs",
             primary_beam_limit=PRIMARY_BEAM_LIMIT,
+            image_data_variables_keep=(
+                KEEP + ["sky_restored_flat_sky"] if deconvolve else KEEP
+            ),
             visibility_memory_mode="recompute",
         )
     arguments.update(overrides)
@@ -627,7 +637,11 @@ def image(
     n_model_updates = captured["n_model_updates"]
     captured.update(
         record=result["deconvolution"],
-        restored=planes("SKY_RESTORED"),
+        restored=planes(
+            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            if imager == "cube"
+            else "SKY_RESTORED_FLAT_SKY"
+        ),
         stop_code={
             STOKES[key.pol]: int(fields["stop_code"].imaging)
             for key, fields in final.data.items()
@@ -730,7 +744,7 @@ def reference_image(ps_store, weights, sky, pixels):
 
 
 def clean_beam_truth(sky, beam):
-    """The true model (Stokes, l, m) convolved with the clean beam of every plane.
+    """The intrinsic model convolved with the clean beam of every Stokes plane.
 
     The clean beam of plane ``k`` is the elliptical Gaussian of peak 1 with the
     fitted beam ``beam[k]``, ``[major, minor, position angle]`` (FWHM and
@@ -739,7 +753,7 @@ def clean_beam_truth(sky, beam):
     in the restore's circular convolution (offsets ``-n // 2`` to
     ``n // 2 - 1``).
     """
-    out = np.zeros_like(sky["true_model"])
+    out = np.zeros_like(sky["intrinsic_model"])
     for k, (major, minor, position_angle) in enumerate(beam):
         major, minor = major / abs(CELL_SIZE[0]), minor / abs(CELL_SIZE[1])
         for i, j in sky["pixels"]:
@@ -750,7 +764,9 @@ def clean_beam_truth(sky, beam):
             along = di[:, None] * np.sin(position_angle) - dj * np.cos(position_angle)
             across = di[:, None] * np.cos(position_angle) + dj * np.sin(position_angle)
             exponent = (along / major) ** 2 + (across / minor) ** 2
-            out[k] += sky["true_model"][k, i, j] * np.exp(-4 * np.log(2) * exponent)
+            out[k] += sky["intrinsic_model"][k, i, j] * np.exp(
+                -4 * np.log(2) * exponent
+            )
     return out
 
 
@@ -913,8 +929,15 @@ def test_deconvolution_cube_against_continuum(tmp_path, field):
     assert continuum["n_model_updates"] == cube["n_model_updates"]
     assert continuum["iterations"] == cube["iterations"]
     for name in ("model", "residual", "restored"):
-        difference = np.abs(continuum[name] - cube[name]).max() / sky["f_ref"]["I"]
-        assert difference <= DECONVOLUTION_RTOL, (name, difference)
+        if name == "restored":
+            np.testing.assert_array_equal(
+                np.isfinite(continuum[name]), np.isfinite(cube[name])
+            )
+        difference = np.nanmax(np.abs(continuum[name] - cube[name])) / sky["f_ref"]["I"]
+        tolerance = (
+            DECONVOLUTION_RESTORED_RTOL if name == "restored" else DECONVOLUTION_RTOL
+        )
+        assert difference <= tolerance, (name, difference)
     for name, run in runs.items():
         errors = deconvolution_errors(run, sky, threshold)
         print(

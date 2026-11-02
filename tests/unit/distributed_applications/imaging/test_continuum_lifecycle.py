@@ -100,7 +100,7 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
 def test_continuum_finalization_exposes_only_the_flat_sky(continuum_mode):
     """Distributed restoration exposes only its intrinsic flat-sky product."""
-    image = make_continuum_image()
+    image = make_continuum_image(continuum_mode=continuum_mode)
     model = image[["SKY_MODEL"]].copy(deep=True)
 
     result = node.continuum_finalize_node(
