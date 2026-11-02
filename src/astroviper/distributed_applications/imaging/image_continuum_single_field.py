@@ -2593,37 +2593,6 @@ def calculate_number_of_chunks_for_continuum_imaging(
     return n_frequency_chunks
 
 
-def _warn_on_mvc_asp_significance_without_clean_mask(
-    continuum_mode, deconvolver, cycle_control_params, clean_mask
-):
-    """Warn when the significance test of MVC Asp has no noise to measure.
-
-    Asp measures the noise of its significance test (``asp_scale_significance``,
-    default ``True``) on the pixels outside its mask. Without a clean mask
-    these lie outside the primary-beam support, where MVC sets the residual to
-    0, so the test measures no noise, or after the residual-shaped components
-    only their sidelobes there.
-    """
-    import toolviper.utils.logger as logger
-
-    if (
-        continuum_mode == "mvc"
-        and deconvolver == "asp"
-        and cycle_control_params.get("asp_scale_significance", True)
-        and clean_mask is None
-    ):
-        logger.warning(
-            "continuum_mode='mvc' with deconvolver='asp' and "
-            "asp_scale_significance=True but no clean_mask: MVC sets the "
-            "residual to 0 outside the primary-beam support, where Asp then "
-            "measures the noise of its significance test, so that test measures "
-            "no noise, or after the residual-shaped components only their "
-            "sidelobes. Give a clean_mask that leaves more pixels of the "
-            "primary-beam support outside it than the image has outside that "
-            "support."
-        )
-
-
 def _resolve_continuum_deconvolver(deconvolver, image_params):
     """Validate a continuum deconvolver and return it without substitution."""
     from astroviper.processing_functions.imaging.config_check import (
@@ -3533,9 +3502,6 @@ def image_continuum_single_field(
     # while selecting the execution path and loading the actual CLEAN mask.
     direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
     clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
-    _warn_on_mvc_asp_significance_without_clean_mask(
-        continuum_mode, deconvolver, cycle_control_params, clean_mask_array
-    )
 
     from astroviper.processing_functions.imaging.config_check._common import (
         CONTINUUM_SINGLE_FIELD,

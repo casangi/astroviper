@@ -10,7 +10,6 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _resolve_continuum_taylor_expansion,
     _validate_cycle_acceleration,
     _warn_on_disabled_momentum,
-    _warn_on_mvc_asp_significance_without_clean_mask,
     combine_continuum_imaging_weight_chunks,
     combine_continuum_weight_density_chunks,
     image_continuum_single_field,
@@ -143,39 +142,6 @@ def test_public_api_resolves_asp_with_one_taylor_term():
 def test_public_api_refuses_asp_without_exactly_one_taylor_term(params, error, message):
     with pytest.raises(error, match=message):
         _resolve_continuum_deconvolver("asp", params)
-
-
-@pytest.mark.parametrize(
-    "continuum_mode,deconvolver,cycle_control_params,clean_mask,warns",
-    [
-        ("mvc", "asp", {}, None, True),
-        ("mvc", "asp", {"asp_scale_significance": True}, None, True),
-        ("mvc", "asp", {"asp_scale_significance": False}, None, False),
-        ("mvc", "asp", {}, np.ones((8, 8), dtype=bool), False),
-        ("mfs", "asp", {}, None, False),
-        ("mvc", "hogbom", {}, None, False),
-        ("mvc", "mtmfs", {}, None, False),
-    ],
-)
-def test_mvc_asp_significance_without_a_clean_mask_warns(
-    monkeypatch, continuum_mode, deconvolver, cycle_control_params, clean_mask, warns
-):
-    """MVC sets the residual to 0 outside the primary-beam support, where Asp
-    measures the noise of its significance test when there is no clean mask."""
-    import toolviper.utils.logger
-
-    messages = []
-    monkeypatch.setattr(
-        toolviper.utils.logger,
-        "warning",
-        lambda message, *args, **kwargs: messages.append(message),
-    )
-    _warn_on_mvc_asp_significance_without_clean_mask(
-        continuum_mode, deconvolver, cycle_control_params, clean_mask
-    )
-    assert len(messages) == int(warns)
-    if warns:
-        assert "Give a clean_mask" in messages[0]
 
 
 def test_public_api_refuses_multi_term_asp_before_writing(tmp_path):

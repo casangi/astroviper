@@ -296,6 +296,41 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     ):
         raise ValueError("disk_chunk_sizes must be 'Auto', a mapping, or None.")
 
+    # --- MVC Asp significance support ---
+    # MVC zeros the residual outside primary-beam support. Without an explicit
+    # clean mask, Asp's outside-mask noise estimate is zero or sees sidelobes,
+    # so its significance extension cannot use the intended noise reference.
+    # This is a diagnostic, not a prohibition of MVC Asp. Type-check the flag
+    # before using it, including when this checker is called independently.
+    if mode.imaging_kind == "continuum" and config.get("deconvolver") == "asp":
+        controls = config.get(
+            "cycle_control_params", config.get("deconvolve_params", {})
+        )
+        require_mapping("cycle/deconvolution controls", controls)
+        significance = controls.get("asp_scale_significance", True)
+        require_boolean("asp_scale_significance", significance)
+        continuum_mode = config.get(
+            "continuum_mode",
+            config.get("image_params", {}).get("continuum_mode", "mfs"),
+        )
+        if (
+            continuum_mode == "mvc"
+            and significance
+            and config.get("clean_mask") is None
+        ):
+            import toolviper.utils.logger as logger
+
+            logger.warning(
+                "continuum_mode='mvc' with deconvolver='asp' and "
+                "asp_scale_significance=True but no clean_mask: MVC sets the "
+                "residual to 0 outside the primary-beam support, where Asp then "
+                "measures the noise of its significance test, so that test measures "
+                "no noise, or after the residual-shaped components only their "
+                "sidelobes. Give a clean_mask that leaves more pixels of the "
+                "primary-beam support outside it than the image has outside that "
+                "support."
+            )
+
     # --- Shared primary-beam limit ---
     # A per-cycle copy must not silently override the public application limit.
     controls = config.get("cycle_control_params", {})

@@ -46,6 +46,11 @@ Unsupported requested features raise, including multifield execution,
 `field_name`, continuum MPI, continuum graph visualization, and cube global
 weighting. The cube Dask graph visualization and cube MPI setup remain supported.
 
+The workflow checker also logs the MVC/Asp significance warning when significance
+is enabled without an explicit clean mask. The diagnostic runs at the unchecked
+entry boundary; checked downstream calls do not repeat it. Actual noise estimation
+remains part of deconvolution.
+
 ## Units and numerical policies
 
 Pass plain numerical values in the API's units: frequencies in Hz; cell sizes
