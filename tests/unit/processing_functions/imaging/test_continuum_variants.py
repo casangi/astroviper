@@ -813,7 +813,7 @@ def test_hogbom_adapter_builds_one_contiguous_boolean_mask_plane(monkeypatch):
     )
     mask = np.ones(image.SKY_RESIDUAL.shape, dtype=np.float64)
     mask[..., 0, 0] = 0.3
-    mask[..., 0, 1] = np.nan
+    mask[..., 0, 1] = 0.0
     # Exercise the layout produced when a spatial mask is broadcast across
     # polarization: polarization is the innermost dimension before the
     # continuum adapter canonicalizes the temporary cube.

@@ -928,6 +928,11 @@ def check_model_products(
             raise TypeError(
                 "Floating masks must use the residual precision; Boolean masks are also accepted."
             )
+        # A non-finite mask has no defined support. Check the actual values
+        # even for trusted configuration, before any comparison or bool cast
+        # can hide NaNs. Empty finite support remains valid for derived masks.
+        if not np.all(np.isfinite(mask.values)):
+            raise ValueError("Mask contains non-finite values.")
         for dim in mask.dims:
             if mask.sizes[dim] not in (1, residual.sizes[dim]):
                 raise ValueError(f"Mask has incompatible {dim} geometry.")
