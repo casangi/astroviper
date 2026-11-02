@@ -176,7 +176,7 @@ def test_inferred_alma_aperture_and_explicit_override():
         ({"type": "bad"}, 1.2),
         ({"support": 2}, 1.2),
         ({"support": True}, 1.2),
-        ({"support": 5}, 1.2),
+        ({"type": "prolate_spheroidal_casa", "support": 5}, 1.2),
         ({"oversampling": 0}, 1.2),
         ({"oversampling": True}, 1.2),
         ({"interpolation": "cubic"}, 1.2),

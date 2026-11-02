@@ -655,6 +655,7 @@ def test_residual_update_node_passes_the_gridding_kernel_on(
         fake_residual_update,
     )
     params = _weight_node_params()
+    params["image_params"]["fft_padding"] = 1.2
     params.update(
         image_store="image.zarr",
         weight_memory_mode="in_place",
@@ -1749,7 +1750,8 @@ def _run_accelerated_append(
     controller = CycleController(max_iter=100)
     controller.ensure_planes(1, 1, 2)
 
-    def fake_model_update(input_data, input_params):
+    def fake_model_update(input_data, input_params, *, input_checked=False):
+        assert input_checked is True
         image = input_data["image"]
         image["SKY_MODEL"] = (0.0 if converged else 0.25) * image.SKY_RESIDUAL
         image.SKY_RESIDUAL.values -= 0.5 * image.SKY_MODEL.values
@@ -1796,14 +1798,15 @@ def test_default_append_does_not_enter_cycle_acceleration(monkeypatch, params):
     monkeypatch.setattr(
         continuum_node,
         "model_update_continuum_single_field",
-        lambda input_data, input_params: {
+        lambda input_data, input_params, *, input_checked: {
             "image": input_data["image"],
             "timing_model_update": pd.DataFrame({"T_model_update": [0.0]}),
         },
     )
     captured = {}
 
-    def prepare(model_increment_xds, input_params):
+    def prepare(model_increment_xds, input_params, *, input_checked):
+        assert input_checked is True
         captured["increment"] = model_increment_xds
         return xr.Dataset(), None
 
@@ -1932,10 +1935,10 @@ def test_only_conjugate_gradient_writes_back_the_hogbom_residual(
 ):
     from astroviper.processing_functions.imaging.utils import CycleController
 
-    image = _acceleration_image(0)
+    image = _acceleration_image(0).isel(taylor_term=slice(0, 1))
     image["POINT_SPREAD_FUNCTION"] = (
         ("time", "psf_taylor_order", "polarization", "l", "m"),
-        np.ones((1, 3, 2, 4, 4)),
+        np.ones((1, 1, 2, 4, 4)),
     )
     image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
         ("time", "polarization"),
@@ -2062,6 +2065,8 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
         ("time", "psf_taylor_order", "polarization", "l", "m"),
         np.ones((1, 3, 2, 4, 4)),
     )
+    # The central Taylor Hessian is the identity, not a singular all-ones matrix.
+    image["POINT_SPREAD_FUNCTION"].values[:, 1] = 0.0
     image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
         ("time", "polarization"),
         [[0.1, 0.1]],
@@ -2120,7 +2125,10 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda model_increment_xds, input_params: (xr.Dataset(), None),
+        lambda model_increment_xds, input_params, *, input_checked: (
+            xr.Dataset(),
+            None,
+        ),
     )
     result = continuum_node.continuum_cycle_append_node(
         {"image": image},
@@ -2174,6 +2182,8 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
             ("time", "psf_taylor_order", "polarization", "l", "m"),
             np.ones((1, 3, 2, 4, 4)),
         )
+        # The central Taylor Hessian is the identity, not a singular all-ones matrix.
+        image["POINT_SPREAD_FUNCTION"].values[:, 1] = 0.0
         image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
             ("time", "polarization"),
             [[0.1, 0.1]],

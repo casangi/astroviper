@@ -629,25 +629,21 @@ def _unwrap_continuum_reduce_result(input_data, node_name):
     return input_data
 
 
-def _resolve_continuum_append_configuration(input_params):
-    """Resolve validated continuum parameters used by global append nodes."""
+def _resolve_continuum_append_configuration(input_params, *, input_checked=False):
+    """Resolve residual-preparation settings without changing caller inputs."""
     import numpy as np
 
     image_params = input_params["image_params"]
 
-    if not input_params.get("input_checked", False):
+    if not (input_checked or input_params.get("input_checked", False)):
         from astroviper.processing_functions.imaging.config_check import (
             CONTINUUM_SINGLE_FIELD,
-            check_model_update,
             check_residual_update,
         )
-        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
-            check_continuum_basis,
-        )
 
-        check_continuum_basis(image_params)
+        # The append entry owns model/workflow checks. This helper prepares
+        # residual products, so validate only its residual configuration once.
         check_residual_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
-        check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
     n_taylor_terms = image_params["n_taylor_terms"]
     reference_frequency = image_params["reference_frequency"]
     single_precision_image = input_params.get("single_precision_image", True)
@@ -2378,6 +2374,7 @@ def _prepare_continuum_image(
     input_params,
     *,
     initialize_static_products,
+    input_checked=False,
 ):
     """Convert globally reduced MFS or MVC products to image-domain products.
 
@@ -2411,6 +2408,11 @@ def _prepare_continuum_image(
         primary-beam products. This should be true only for the first major
         cycle.
 
+    input_checked : bool, optional
+        Skip residual configuration checks performed by an upper layer.
+        The input_params dictionary flag is also honored. Product checks
+        on the reduced image remain active.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -2443,7 +2445,9 @@ def _prepare_continuum_image(
         point_spread_function_gaussian_fit_continuum,
     )
 
-    config = _resolve_continuum_append_configuration(input_params)
+    config = _resolve_continuum_append_configuration(
+        input_params, input_checked=input_checked
+    )
 
     image_params = config["image_params"]
     n_taylor_terms = config["n_taylor_terms"]
@@ -3343,6 +3347,7 @@ def continuum_cycle_append_node(
         input_data["image"],
         input_params,
         initialize_static_products=is_first_cycle,
+        input_checked=input_checked or input_params.get("input_checked", False),
     )
 
     input_data["image"] = img_xds

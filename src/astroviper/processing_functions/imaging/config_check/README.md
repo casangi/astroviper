@@ -24,6 +24,11 @@ inside `if not input_checked`. Checked callers pass `input_checked=True` down
 the stack; graph nodes also receive it through `input_params`. Only reuse that
 flag with unchanged configuration in the same imaging mode.
 
+Continuum append preparation honors either the keyword flag or the dictionary
+flag, without inserting a flag into the caller's mapping. For unchecked calls,
+the append entry checks model/workflow settings and preparation checks residual
+settings once; checks on actual reduced products always remain active.
+
 Distributed drivers use `require_complete=True` to require image coordinates
 and cycle controls before I/O, output creation, or graph construction. Lower
 entry points validate the subset of settings their interfaces receive. Validation
