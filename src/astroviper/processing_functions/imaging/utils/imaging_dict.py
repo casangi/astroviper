@@ -218,9 +218,9 @@ def imaging_dict_to_dataframe(imaging_dict):
         ``model_update_stop_code``, ...) have
         one entry per model update, one fewer than ``iter_done`` and
         ``peakres`` in that record. The iteration history
-        (``iteration_peak_residual``, ``iteration_residual_rms``; only with
-        ``record_iteration_history``) is a list of one 1-D array per cycle,
-        which feather stores as a list of lists. Empty for an empty dict.
+        (``ITERATION_HISTORY_FIELDS``; only with ``record_iteration_history``)
+        is a list of one 1-D array per cycle, which feather stores as a list
+        of lists. Empty for an empty dict.
     """
     import pandas as pd
 

@@ -967,8 +967,8 @@ def image_cube_single_field(
 
     if image_data_variables_keep is None:
         image_data_variables_keep = []
-    # Only the Hogbom deconvolvers record the iteration history: refused
-    # before any imaging work is done.
+    # A record_iteration_history that is not a bool is refused before any
+    # imaging work is done.
     validate_record_iteration_history(
         deconvolver, cycle_control_params.get("record_iteration_history", False)
     )
