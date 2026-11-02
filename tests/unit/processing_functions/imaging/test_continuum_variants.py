@@ -1302,7 +1302,7 @@ def test_pb_correction_cutoff_includes_exact_boundary(dtype):
         [np.nextafter(limit, dtype(0)), limit, np.nextafter(limit, dtype(1)), np.nan],
         dtype=dtype,
     )
-    image = make_continuum_image()
+    image = make_continuum_image(continuum_mode="mvc")
     for name in ("SKY_MODEL", "SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
         image[name] = image[name].astype(dtype)
     primary_beam = np.tile(values, 16).reshape(1, 1, 8, 8)

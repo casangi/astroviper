@@ -9,6 +9,7 @@ def make_continuum_image(
     beam_axis=None,
     legacy=False,
     image_shape=(8, 8),
+    continuum_mode="mfs",
 ):
     """Create a small deterministic continuum image for unit tests.
 
@@ -22,6 +23,8 @@ def make_continuum_image(
         Omit PSF and beam-fit roles from the residual data group when true.
     image_shape : tuple of int, optional
         Spatial ``(l, m)`` image shape.
+    continuum_mode : {"mfs", "mvc"}, optional
+        Continuum convention recorded in the synthetic image metadata.
 
     Returns
     -------
@@ -75,6 +78,7 @@ def make_continuum_image(
         polarization=0
     )
     image["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
+    image["SKY_RESIDUAL"].attrs["continuum_mode"] = continuum_mode
     residual = {
         "sky": "SKY_RESIDUAL",
         "primary_beam": "PRIMARY_BEAM",
@@ -87,6 +91,7 @@ def make_continuum_image(
         )
     image.attrs = {
         "reference_frequency": 100.0,
+        "continuum_imaging": {"continuum_mode": continuum_mode},
         "data_groups": {"residual": residual, "model": {"sky": "SKY_MODEL"}},
     }
     return image

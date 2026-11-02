@@ -349,7 +349,7 @@ def test_primary_beam_correction_restores_every_taylor_term():
         primary_beam_corrected_plane,
     )
 
-    image = make_continuum_image()
+    image = make_continuum_image(continuum_mode="mvc")
     primary_beam = np.linspace(0.25, 1.0, 64).reshape(1, 1, 8, 8)
     image["PRIMARY_BEAM"].data[...] = primary_beam
     model = image.SKY_MODEL.values.copy()
@@ -383,7 +383,7 @@ def test_primary_beam_correction_restores_every_taylor_term():
 
 def test_corrected_only_continuum_restoration_matches_the_both_product_path():
     """Corrected-only and dual-output restoration use corrected spectral terms."""
-    both_image = make_continuum_image()
+    both_image = make_continuum_image(continuum_mode="mvc")
     both_image = both_image.drop_dims("taylor_term").assign_coords(
         taylor_term=np.arange(3)
     )

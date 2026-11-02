@@ -259,7 +259,7 @@ def test_model_accumulation_rejects_incompatible_state(continuum_mode, fault):
 )
 def test_pb_correction_rejects_invalid_final_products(fault):
     """An unreduced channel beam must not broadcast a continuum image to a cube."""
-    image = make_continuum_image()
+    image = make_continuum_image(continuum_mode="mvc")
     if fault == "channel_beam":
         image["PRIMARY_BEAM"] = image.PRIMARY_BEAM.expand_dims(
             frequency=[100.0, 110.0], axis=1

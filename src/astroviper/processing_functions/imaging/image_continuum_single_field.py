@@ -3952,6 +3952,54 @@ def _restored_spectral_products(restored_da, restoration_residual_da):
     return products
 
 
+def _resolve_restoration_continuum_mode(img_xds, residual_da, continuum_mode):
+    """Resolve and cross-check the continuum convention used for restoration."""
+    metadata_modes = {
+        "residual variable": residual_da.attrs.get("continuum_mode"),
+        "image dataset": img_xds.attrs.get("continuum_mode"),
+        "continuum_imaging metadata": img_xds.attrs.get("continuum_imaging", {}).get(
+            "continuum_mode"
+        ),
+    }
+    metadata_modes = {
+        source: mode for source, mode in metadata_modes.items() if mode is not None
+    }
+
+    allowed_modes = {"mfs", "mvc"}
+    for source, mode in metadata_modes.items():
+        if mode not in allowed_modes:
+            raise ValueError(
+                f"Invalid continuum_mode {mode!r} in {source}; expected 'mfs' or 'mvc'."
+            )
+
+    distinct_metadata_modes = set(metadata_modes.values())
+    if len(distinct_metadata_modes) > 1:
+        details = ", ".join(
+            f"{source}={mode!r}" for source, mode in metadata_modes.items()
+        )
+        raise ValueError(f"Conflicting continuum_mode metadata: {details}.")
+
+    metadata_mode = next(iter(distinct_metadata_modes), None)
+    if continuum_mode is None:
+        if metadata_mode is None:
+            raise ValueError(
+                "continuum_mode is required because the residual and image "
+                "dataset contain no continuum-mode metadata."
+            )
+        return metadata_mode
+
+    if continuum_mode not in allowed_modes:
+        raise ValueError(
+            f"continuum_mode must be 'mfs' or 'mvc'; received {continuum_mode!r}."
+        )
+    if metadata_mode is not None and continuum_mode != metadata_mode:
+        raise ValueError(
+            f"Explicit continuum_mode {continuum_mode!r} conflicts with image "
+            f"metadata {metadata_mode!r}."
+        )
+    return continuum_mode
+
+
 def restore_continuum_image(
     img_xds,
     image_data_group_in_residual_name="residual",
@@ -3963,7 +4011,7 @@ def restore_continuum_image(
     primary_beam_key="primary_beam",
     deconvolver="hogbom",
     restoration_output=None,
-    continuum_mode="mfs",
+    continuum_mode=None,
 ):
     """Restore the continuum image.
 
@@ -4020,10 +4068,12 @@ def restore_continuum_image(
         processing-function behavior: ``"both"`` when
         ``primary_beam_correction`` is true and ``"apparent"`` otherwise.
 
-    continuum_mode : {"mfs", "mvc"}, optional
-        Continuum construction convention. MFS corrects the Taylor polynomial
-        as a whole; MVC divides each coefficient by its already-constructed
-        common primary beam.
+    continuum_mode : {"mfs", "mvc"} or None, optional
+        Continuum construction convention. When omitted, infer it from the
+        residual or image metadata. An explicit value must agree with any
+        stored metadata. MFS corrects the Taylor polynomial as a whole; MVC
+        divides each coefficient by its already-constructed common primary
+        beam.
 
     Returns
     -------
@@ -4061,11 +4111,6 @@ def restore_continuum_image(
         )
 
     data_groups = img_xds.attrs.get("data_groups", {})
-    continuum_mode = str(continuum_mode).lower()
-    if continuum_mode not in {"mfs", "mvc"}:
-        raise ValueError(
-            f"continuum_mode must be 'mfs' or 'mvc'; received {continuum_mode!r}."
-        )
 
     # ------------------------------------------------------------------
     # Resolve the residual and model variables.
@@ -4129,6 +4174,12 @@ def restore_continuum_image(
 
         if data_array.sizes["taylor_term"] < 1:
             raise ValueError(f"{variable_name!r} contains no Taylor terms.")
+
+    continuum_mode = _resolve_restoration_continuum_mode(
+        img_xds,
+        residual_da,
+        continuum_mode,
+    )
 
     # ------------------------------------------------------------------
     # Resolve the PSF.

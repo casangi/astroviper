@@ -2542,6 +2542,7 @@ def _prepare_continuum_image(
         residual.attrs.update(
             {
                 "description": "Continuum residual Taylor products.",
+                "continuum_mode": "mfs",
                 "n_taylor_terms": n_taylor_terms,
                 "reference_frequency": reference_frequency,
                 "placeholder": False,
