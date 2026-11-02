@@ -3902,6 +3902,7 @@ def image_continuum_single_field(
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
+    input_params["make_primary_beam_taylor"] = bool(restore)
     input_params["skunk_works"] = skunk_works
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
@@ -4181,10 +4182,26 @@ def image_continuum_single_field(
                         ("POINT_SPREAD_FUNCTION", "UV_SAMPLING_NORMALIZATION")
                         if is_first_cycle
                         else ()
+                    )
+                    + (
+                        (
+                            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                            "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+                        )
+                        if is_first_cycle and restore
+                        else ()
                     ),
                 }
             elif continuum_mode == "mfs":
                 if is_first_cycle:
+                    primary_beam_fit_variables = (
+                        (
+                            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                            "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+                        )
+                        if restore
+                        else ()
+                    )
                     reduce_input_params = {
                         "continuum_mode": "mfs",
                         "additive_variables": (
@@ -4192,9 +4209,8 @@ def image_continuum_single_field(
                             "VISIBILITY_NORMALIZATION",
                             "UV_SAMPLING",
                             "UV_SAMPLING_NORMALIZATION",
-                            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
-                            "MFS_PRIMARY_BEAM_FIT_MOMENTS",
-                        ),
+                        )
+                        + primary_beam_fit_variables,
                     }
                 else:
                     reduce_input_params = {
@@ -4254,6 +4270,7 @@ def image_continuum_single_field(
                 "visibility_memory_mode": visibility_memory_mode,
                 "image_store": image_store,
                 "primary_beam_limit": primary_beam_limit,
+                "make_primary_beam_taylor": bool(restore),
                 "clean_mask": clean_mask_array,
                 "restore": restore,
                 "primary_beam_correction": primary_beam_correction,

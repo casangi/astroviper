@@ -113,6 +113,7 @@ def _convert_primary_beam_to_reference_frequency(
     reference_frequency_hz,
     float_dtype,
     image_data_group_in_name="residual",
+    make_primary_beam_taylor=True,
 ):
     """Build the static and polynomial primary-beam products needed by MFS.
 
@@ -121,11 +122,12 @@ def _convert_primary_beam_to_reference_frequency(
     frequency.  The reference PB is independent of visibility partitioning and
     imaging weights, so it is retained as a non-additive static product.
 
-    The frequency-dependent beam is additionally projected onto the same
-    Taylor basis as the apparent sky.  This task-local function stores only
-    additive polynomial-fit numerators and spectral moments; the global append
-    node solves the fit after all frequency partitions have been reduced.  No
-    channel-sized beam cube is carried through the distributed reduction.
+    When ``make_primary_beam_taylor`` is true, the frequency-dependent beam is
+    additionally projected onto the same Taylor basis as the apparent sky.
+    This task-local function stores only additive polynomial-fit numerators and
+    spectral moments; the global append node solves the fit after all frequency
+    partitions have been reduced. No channel-sized beam cube is carried through
+    the distributed reduction. Runs without restoration skip that projection.
     """
     import numpy as np
     import xarray as xr
@@ -161,80 +163,81 @@ def _convert_primary_beam_to_reference_frequency(
         "list_blockage_diameters": np.asarray(blockage_diameters),
         "ipower": image_params.get("primary_beam_ipower", 2),
     }
-    n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
-    if n_taylor_terms < 1:
-        raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
-
-    channel_frequencies = np.asarray(img_xds.frequency.values, dtype=np.float64)
-    if channel_frequencies.ndim != 1 or channel_frequencies.size == 0:
-        raise ValueError("MFS primary-beam fitting requires channel frequencies.")
-    if not np.all(np.isfinite(channel_frequencies)):
-        raise ValueError("MFS primary-beam frequencies must be finite.")
-
-    channel_data = evaluate_primary_beam(
-        channel_frequencies,
-        img_xds.polarization.values,
-        pb_params,
-        pb_image_params,
-        dtype=float_dtype,
-    )[0]
-    channel_data = np.broadcast_to(
-        channel_data,
-        (img_xds.sizes["time"], *channel_data.shape),
-    )
-    x_frequency = (channel_frequencies - reference_frequency_hz) / (
-        reference_frequency_hz
-    )
-    n_moments = 2 * n_taylor_terms - 1
-    numerator = np.stack(
-        [
-            np.sum(
-                channel_data * x_frequency[None, :, None, None, None] ** order,
-                axis=1,
-            )
-            for order in range(n_taylor_terms)
-        ],
-        axis=1,
-    )
-    moments = np.asarray(
-        [np.sum(x_frequency**order) for order in range(n_moments)],
-        dtype=np.float64,
-    )
-    moments = np.broadcast_to(
-        moments[None, :, None],
-        (img_xds.sizes["time"], n_moments, img_xds.sizes["polarization"]),
-    ).copy()
     common_coords = {
         dim: img_xds.coords[dim]
         for dim in ("time", "polarization", "l", "m")
         if dim in img_xds.coords
     }
-    img_xds["MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR"] = xr.DataArray(
-        numerator,
-        dims=("time", "taylor_term", "polarization", "l", "m"),
-        coords={
-            **common_coords,
-            "taylor_term": np.arange(n_taylor_terms, dtype=np.int64),
-        },
-        attrs={
-            "description": "Additive MFS primary-beam Taylor-fit numerator.",
-            "reference_frequency_hz": reference_frequency_hz,
-        },
-    )
-    img_xds["MFS_PRIMARY_BEAM_FIT_MOMENTS"] = xr.DataArray(
-        moments,
-        dims=("time", "psf_taylor_order", "polarization"),
-        coords={
-            key: value
-            for key, value in common_coords.items()
-            if key in ("time", "polarization")
-        }
-        | {"psf_taylor_order": np.arange(n_moments, dtype=np.int64)},
-        attrs={
-            "description": "Additive MFS primary-beam Taylor-fit moments.",
-            "reference_frequency_hz": reference_frequency_hz,
-        },
-    )
+    if make_primary_beam_taylor:
+        n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
+        if n_taylor_terms < 1:
+            raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
+
+        channel_frequencies = np.asarray(img_xds.frequency.values, dtype=np.float64)
+        if channel_frequencies.ndim != 1 or channel_frequencies.size == 0:
+            raise ValueError("MFS primary-beam fitting requires channel frequencies.")
+        if not np.all(np.isfinite(channel_frequencies)):
+            raise ValueError("MFS primary-beam frequencies must be finite.")
+
+        channel_data = evaluate_primary_beam(
+            channel_frequencies,
+            img_xds.polarization.values,
+            pb_params,
+            pb_image_params,
+            dtype=float_dtype,
+        )[0]
+        channel_data = np.broadcast_to(
+            channel_data,
+            (img_xds.sizes["time"], *channel_data.shape),
+        )
+        x_frequency = (channel_frequencies - reference_frequency_hz) / (
+            reference_frequency_hz
+        )
+        n_moments = 2 * n_taylor_terms - 1
+        numerator = np.stack(
+            [
+                np.sum(
+                    channel_data * x_frequency[None, :, None, None, None] ** order,
+                    axis=1,
+                )
+                for order in range(n_taylor_terms)
+            ],
+            axis=1,
+        )
+        moments = np.asarray(
+            [np.sum(x_frequency**order) for order in range(n_moments)],
+            dtype=np.float64,
+        )
+        moments = np.broadcast_to(
+            moments[None, :, None],
+            (img_xds.sizes["time"], n_moments, img_xds.sizes["polarization"]),
+        ).copy()
+        img_xds["MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR"] = xr.DataArray(
+            numerator,
+            dims=("time", "taylor_term", "polarization", "l", "m"),
+            coords={
+                **common_coords,
+                "taylor_term": np.arange(n_taylor_terms, dtype=np.int64),
+            },
+            attrs={
+                "description": "Additive MFS primary-beam Taylor-fit numerator.",
+                "reference_frequency_hz": reference_frequency_hz,
+            },
+        )
+        img_xds["MFS_PRIMARY_BEAM_FIT_MOMENTS"] = xr.DataArray(
+            moments,
+            dims=("time", "psf_taylor_order", "polarization"),
+            coords={
+                key: value
+                for key, value in common_coords.items()
+                if key in ("time", "polarization")
+            }
+            | {"psf_taylor_order": np.arange(n_moments, dtype=np.int64)},
+            attrs={
+                "description": "Additive MFS primary-beam Taylor-fit moments.",
+                "reference_frequency_hz": reference_frequency_hz,
+            },
+        )
     reference_data = evaluate_primary_beam(
         np.asarray([reference_frequency_hz]),
         img_xds.polarization.values,
@@ -285,6 +288,7 @@ def imaging_setup_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     image_data_group_out_name="residual",
+    make_primary_beam_taylor=True,
     gridding_kernel_params=None,
 ):
     """Prepare static products for one continuum partition.
@@ -361,6 +365,9 @@ def imaging_setup_continuum_single_field(
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     image_data_group_out_name : str, optional
         Name of the continuum image data group. Defaults to ``"residual"``.
+    make_primary_beam_taylor : bool, optional
+        Whether MFS should evaluate the channel-dependent primary beam and form
+        the additive Taylor-fit contributions used by restoration. Default true.
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -596,6 +603,7 @@ def imaging_setup_continuum_single_field(
             reference_frequency_hz=reference_frequency_hz,
             float_dtype=float_dtype,
             image_data_group_in_name=image_data_group_out_name,
+            make_primary_beam_taylor=make_primary_beam_taylor,
         )
         primary_beam_return_df = pd.DataFrame({"T_primary_beam": [time.time() - start]})
     else:

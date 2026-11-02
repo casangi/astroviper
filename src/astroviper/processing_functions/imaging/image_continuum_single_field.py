@@ -54,6 +54,7 @@ def imaging_preparation_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     task_id=0,
+    make_primary_beam_taylor=True,
     gridding_kernel_params=None,
 ):
     """Prepare static products once per continuum map task.
@@ -134,6 +135,10 @@ def imaging_preparation_continuum_single_field(
 
     task_id : int, optional
         Identifier of the parallel chunk being processed.
+
+    make_primary_beam_taylor : bool, optional
+        Whether MFS should form the additive primary-beam Taylor-fit
+        contributions needed by restoration. Default true.
 
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
@@ -223,6 +228,7 @@ def imaging_preparation_continuum_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
+        make_primary_beam_taylor=make_primary_beam_taylor,
         gridding_kernel_params=gridding_kernel_params,
     )
 
@@ -2262,6 +2268,7 @@ def residual_update_continuum_single_field(
     visibility_memory_mode="recompute",
     observed_visibility_grid_xds=None,
     is_first_cycle=True,
+    make_primary_beam_taylor=True,
     model_xds=None,
     model_uv_xds=None,
     task_id=0,
@@ -2407,6 +2414,10 @@ def residual_update_continuum_single_field(
     is_first_cycle : bool, optional
         Indicates whether this is the first imaging cycle.
 
+    make_primary_beam_taylor : bool, optional
+        Whether MFS should form the additive primary-beam Taylor-fit
+        contributions needed by restoration. Default true.
+
     model_uv_xds : xarray.Dataset, optional
         Globally prepared Fourier-domain Taylor model used for degridding during
         all imaging cycles after the first.
@@ -2525,6 +2536,7 @@ def residual_update_continuum_single_field(
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
             task_id=task_id,
+            make_primary_beam_taylor=make_primary_beam_taylor,
             gridding_kernel_params=gridding_kernel_params,
         )
 

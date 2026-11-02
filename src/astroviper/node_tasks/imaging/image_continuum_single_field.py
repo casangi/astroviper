@@ -1020,6 +1020,7 @@ def residual_update_continuum_single_field(
     skunk_works=False,
     data_group=None,
     is_first_cycle=True,
+    make_primary_beam_taylor=True,
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
@@ -1221,6 +1222,10 @@ def residual_update_continuum_single_field(
 
     is_first_cycle : bool, optional
         Indicates whether this is the first imaging cycle.
+
+    make_primary_beam_taylor : bool, optional
+        Whether MFS should form the additive primary-beam Taylor-fit
+        contributions needed by restoration. Default true.
 
     model_uv_xds : xarray.Dataset, optional
         Precomputed Taylor-domain model visibility grids used for degridding.
@@ -1601,6 +1606,7 @@ def residual_update_continuum_single_field(
         visibility_memory_mode=visibility_memory_mode,
         observed_visibility_grid_xds=observed_visibility_grid_xds,
         is_first_cycle=is_first_cycle,
+        make_primary_beam_taylor=make_primary_beam_taylor,
         model_uv_xds=model_uv_xds,
         model_xds=model_xds,
         primary_beam_xds=primary_beam_xds,
@@ -2475,6 +2481,7 @@ def _prepare_continuum_image(
         "continuum_mode",
         image_params.get("continuum_mode", "mfs"),
     )
+    make_primary_beam_taylor = bool(input_params.get("make_primary_beam_taylor", True))
     mvc_model_update_approximation = input_params.get(
         "mvc_model_update_approximation",
         "channel_psf",
@@ -2549,7 +2556,7 @@ def _prepare_continuum_image(
             }
         )
         primary_beam_taylor = None
-        if initialize_static_products:
+        if initialize_static_products and make_primary_beam_taylor:
             primary_beam_taylor = fit_mfs_primary_beam_taylor(
                 img_xds,
                 primary_beam_limit=float(input_params.get("primary_beam_limit", 0.2)),
@@ -2764,10 +2771,11 @@ def _prepare_continuum_image(
                 reference_frequency=reference_frequency,
                 image_data_group_name=image_data_group_name,
             )
-            img_xds["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
-            img_xds.attrs["data_groups"][image_data_group_name][
-                "primary_beam_taylor"
-            ] = "PRIMARY_BEAM_TAYLOR"
+            if make_primary_beam_taylor:
+                img_xds["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
+                img_xds.attrs["data_groups"][image_data_group_name][
+                    "primary_beam_taylor"
+                ] = "PRIMARY_BEAM_TAYLOR"
 
         elif continuum_mode == "mvc":
             # MVC already constructed PRIMARY_BEAM immediately after the
@@ -2807,7 +2815,10 @@ def _prepare_continuum_image(
         static_image_variable_names = (
             "POINT_SPREAD_FUNCTION",
             "PRIMARY_BEAM",
-            "PRIMARY_BEAM_TAYLOR",
+        )
+        if continuum_mode == "mvc" or make_primary_beam_taylor:
+            static_image_variable_names += ("PRIMARY_BEAM_TAYLOR",)
+        static_image_variable_names += (
             "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
             "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         )

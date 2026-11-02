@@ -1440,8 +1440,11 @@ def test_mvc_local_beam_moments_recovers_off_axis_spectral_index_after_stopping(
     )
 
 
-def test_mfs_primary_beam_is_evaluated_at_reference_frequency():
-    """MFS emits a reference PB plus additive wideband-fit contributions."""
+@pytest.mark.parametrize("make_primary_beam_taylor", [False, True])
+def test_mfs_primary_beam_is_evaluated_at_reference_frequency(
+    make_primary_beam_taylor,
+):
+    """MFS always emits its reference PB and makes fit inputs only on request."""
     image_params = {
         "image_size": [8, 8],
         "cell_size": np.asarray([-2.0e-4, 2.0e-4]),
@@ -1466,14 +1469,16 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency():
         reference_frequency_hz=1.5e9,
         float_dtype=np.float64,
         image_data_group_in_name="residual",
+        make_primary_beam_taylor=make_primary_beam_taylor,
     )
     assert "PRIMARY_BEAM_REFERENCE" in result
-    assert "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR" in result
-    assert "MFS_PRIMARY_BEAM_FIT_MOMENTS" in result
+    assert ("MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR" in result) is (make_primary_beam_taylor)
+    assert ("MFS_PRIMARY_BEAM_FIT_MOMENTS" in result) is make_primary_beam_taylor
     assert "PRIMARY_BEAM" not in result
     assert result["PRIMARY_BEAM_REFERENCE"].attrs["reference_frequency_hz"] == 1.5e9
-    assert result.MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR.shape == (1, 2, 1, 8, 8)
-    assert result.MFS_PRIMARY_BEAM_FIT_MOMENTS.shape == (1, 3, 1)
+    if make_primary_beam_taylor:
+        assert result.MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR.shape == (1, 2, 1, 8, 8)
+        assert result.MFS_PRIMARY_BEAM_FIT_MOMENTS.shape == (1, 3, 1)
 
 
 def _taylor_model(value=1.0):
