@@ -97,6 +97,8 @@ def calculate_noise(
     noise_params: dict,
     auto_correlations: bool = False,
     random_seed: int | None = None,
+    time_index_offset: int = 0,
+    frequency_index_offset: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Gaussian noise realisation plus matching ``WEIGHT`` and ``SIGMA``.
 
@@ -112,7 +114,12 @@ def calculate_noise(
     auto_correlations : bool
         Autocorrelations get real-only noise with ``sqrt(2)`` the cross RMS.
     random_seed : int or None
-        Seed for ``numpy.random.default_rng``; ``None`` draws a fresh seed.
+        Seed of the noise; ``None`` draws a fresh seed.
+    time_index_offset, frequency_index_offset : int
+        Indices of the first time and channel in the full time and frequency
+        axes.  Every (time, channel) draws from its own stream, keyed by the
+        seed and its two indices, so a block of the axes gets the noise it has
+        in a draw of the whole.
 
     Returns
     -------
@@ -133,9 +140,20 @@ def calculate_noise(
     sigma = np.broadcast_to(sigma_bl[None, :, None, None], visibility_shape).astype(
         np.float64
     )
-    rng = np.random.default_rng(random_seed)
-    noise_re = rng.normal(0.0, sigma)
-    noise_im = rng.normal(0.0, sigma)
+    entropy = np.random.SeedSequence(random_seed).entropy
+    noise_re = np.empty(visibility_shape)
+    noise_im = np.empty(visibility_shape)
+    for i in range(n_time):
+        for j in range(n_chan):
+            index = (time_index_offset + i, frequency_index_offset + j)
+            rng = np.random.default_rng(
+                np.random.SeedSequence(entropy, spawn_key=index)
+            )
+            noise_re[i, :, j], noise_im[i, :, j] = rng.standard_normal(
+                (2, n_baseline, n_pol)
+            )
+    noise_re *= sigma
+    noise_im *= sigma
     if auto_correlations:
         is_auto = np.asarray(antenna1) == np.asarray(antenna2)
         noise_re[:, is_auto] *= np.sqrt(2.0)

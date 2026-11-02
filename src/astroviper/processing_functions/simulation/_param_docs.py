@@ -137,7 +137,9 @@ SIMULATION_PARAM_DOCS = {
         "Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual\n"
         "model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,\n"
         "``spill_efficiency``, ``corr_efficiency``, ``quantization_efficiency``,\n"
-        "``t_cmb`` and ``random_seed``; ``None`` disables noise (unit weights)."
+        "``t_cmb`` and ``random_seed`` (the noise of a visibility depends only on\n"
+        "the seed and the indices of its time and channel, not on the chunking);\n"
+        "``None`` disables noise (unit weights)."
     ),
     "antenna_dish_diameter": (
         "Diameter of the main reflector of each antenna\n"

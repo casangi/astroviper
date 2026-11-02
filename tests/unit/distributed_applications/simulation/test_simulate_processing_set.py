@@ -204,6 +204,56 @@ def test_noise_collecting_area_is_the_antenna_dish_diameter(tmp_path):
         )
 
 
+def simulated_noise(tmp_path, name, **overrides):
+    """VISIBILITY of a sky without flux, which is the noise alone."""
+    result, _ = run(
+        tmp_path,
+        ps_store=str(tmp_path / f"{name}.ps.zarr"),
+        point_source_flux=np.zeros((1, 1, 1, 4)),
+        **overrides,
+    )
+    ms = load_processing_set(result["ps_store"])[result["ms_name"]].ds
+    return ms.VISIBILITY.values
+
+
+def test_noise_does_not_depend_on_the_chunking(tmp_path):
+    """One seed gives the same noise for any chunking (which, when not given,
+    follows the CPU count)."""
+    noise = [
+        simulated_noise(
+            tmp_path,
+            f"chunks_{n_time_chunks}x{n_frequency_chunks}",
+            noise_params={"random_seed": 7},
+            n_time_chunks=n_time_chunks,
+            n_frequency_chunks=n_frequency_chunks,
+        )
+        for n_time_chunks, n_frequency_chunks in [(1, 1), (4, 1), (2, 3)]
+    ]
+    assert np.all(noise[0] != 0)
+    np.testing.assert_array_equal(noise[1], noise[0])
+    np.testing.assert_array_equal(noise[2], noise[0])
+
+
+def test_noise_of_nearby_seeds_is_independent(tmp_path):
+    """With one time per task, seeds 1 and 2 share no noise value (no row of
+    one is a shifted row of the other) and no row of one correlates with any
+    row of the other."""
+    noise = [
+        simulated_noise(
+            tmp_path,
+            f"seed_{seed}",
+            noise_params={"random_seed": seed},
+            n_time_chunks=4,
+            n_frequency_chunks=1,
+        )
+        for seed in (1, 2)
+    ]
+    assert not np.isin(noise[1], noise[0]).any()
+    rows = [np.concatenate([r.real.ravel(), r.imag.ravel()]) for n in noise for r in n]
+    cross = np.corrcoef(rows)[:4, 4:]
+    assert np.abs(cross).max() < 4 / np.sqrt(rows[0].size)
+
+
 def test_automatic_chunking_and_validation_errors(tmp_path):
     result, _ = run(
         tmp_path,

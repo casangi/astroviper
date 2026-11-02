@@ -262,6 +262,20 @@ def test_noise_model_matches_legacy_weights():
     assert np.all(auto[:, 1].imag != 0.0)
 
 
+def test_noise_of_a_block_is_that_block_of_the_whole():
+    a1, a2 = np.triu_indices(6, 1)
+    args = ([25.0] * 6, a1, a2, 1e6, 10.0, {})
+    whole, _, _ = calculate_noise((6, 15, 4, 2), *args, random_seed=7)
+    block, _, _ = calculate_noise(
+        (2, 15, 3, 2),
+        *args,
+        random_seed=7,
+        time_index_offset=3,
+        frequency_index_offset=1,
+    )
+    np.testing.assert_array_equal(block, whole[3:5, :, 1:4])
+
+
 def test_simulate_processing_set_processing_function_end_to_end():
     f = load_legacy("alma_het_mosaic_noise")
     xds, timing = simulate_processing_set(
