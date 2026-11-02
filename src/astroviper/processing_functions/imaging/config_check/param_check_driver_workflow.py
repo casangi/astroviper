@@ -11,6 +11,10 @@ from astroviper.processing_functions.imaging.config_check._common import (
 )
 from astroviper.utils.param_docs import shares_param_docs
 
+# ========================================================================
+# Configuration checks
+# ========================================================================
+
 
 @shares_param_docs
 def check_driver_workflow(config, *, mode, require_complete=False):
@@ -37,6 +41,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     NotImplementedError
         If multifield imaging is requested.
     """
+    # ========================================================================
+    # 1. Supported workflows and restoration
+    # ========================================================================
+
     # --- Supported imaging mode ---
     # Reject multifield requests before creating outputs or constructing a graph.
     mode.require_supported()
@@ -72,6 +80,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
 
         check_primary_beam_limit(config["primary_beam_limit"])
 
+    # ========================================================================
+    # 2. Configuration structure and backend settings
+    # ========================================================================
+
     # --- Required configuration groups ---
     # A distributed driver must not defer missing input groups to a worker.
     if require_complete:
@@ -106,6 +118,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         or config.get("compute_backend", "dask") != "mpi"
     ):
         raise ValueError("mpi_cluster_setup requires the implemented cube MPI backend.")
+
+    # ========================================================================
+    # 3. Acceleration and execution capabilities
+    # ========================================================================
 
     # --- Imaging-cycle acceleration ---
     # An unsupported method must not silently select a plain imaging cycle.
@@ -170,6 +186,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     ):
         raise ValueError("Continuum write_visibility_model_to_ps is not implemented.")
 
+    # ========================================================================
+    # 4. Cache and input write-back policies
+    # ========================================================================
+
     # --- Continuum cache policies ---
     # Only these storage policies have node-task implementations.
     if mode.imaging_kind == "continuum":
@@ -211,6 +231,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
                     f"{name} is not implemented for the in-memory cube workflow."
                 )
 
+    # ========================================================================
+    # 5. Output format and storage layout
+    # ========================================================================
+
     # --- Concurrent sharded output ---
     # Partial shards need the direct writer; the standard writer cannot share them.
     if config.get("image_sharding") and not config.get("skunk_works", False):
@@ -244,6 +268,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     check_kept_variables(config, fits=output_format == "fits")
     check_output_layout(config)
     check_output_codec(config)
+
+    # ========================================================================
+    # 6. Input selection, partitioning, and resource limits
+    # ========================================================================
 
     # --- Measurement Set opening options ---
     # These keys are owned by the reader; an override would be ineffective.
@@ -296,6 +324,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     ):
         raise ValueError("disk_chunk_sizes must be 'Auto', a mapping, or None.")
 
+    # ========================================================================
+    # 7. Workflow diagnostics and shared settings
+    # ========================================================================
+
     # --- MVC Asp significance support ---
     # MVC zeros the residual outside primary-beam support. Without an explicit
     # clean mask, Asp's outside-mask noise estimate is zero or sees sidelobes,
@@ -339,6 +371,11 @@ def check_driver_workflow(config, *, mode, require_complete=False):
             raise ValueError(
                 "cycle_control_params['primary_beam_limit'] conflicts with the application primary_beam_limit."
             )
+
+
+# ========================================================================
+# Graph partition coverage
+# ========================================================================
 
 
 def check_channel_partitions(mapping, processing_set, *, image_params):
@@ -397,6 +434,11 @@ def check_channel_partitions(mapping, processing_set, *, image_params):
             raise ValueError(
                 f"Channel partition preflight failed for {name!r}: missing={missing}, repeated={repeated}, extra={extra}."
             )
+
+
+# ========================================================================
+# Configuration consistency between stages
+# ========================================================================
 
 
 def check_configuration_consistency(reference, candidate, *, names=None):

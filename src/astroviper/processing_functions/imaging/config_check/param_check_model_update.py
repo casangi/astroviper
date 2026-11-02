@@ -12,6 +12,10 @@ from astroviper.processing_functions.imaging.config_check._common import (
 )
 from astroviper.utils.param_docs import shares_param_docs
 
+# ========================================================================
+# Configuration checks
+# ========================================================================
+
 
 @shares_param_docs
 def check_model_update(config, *, mode, require_complete=False):
@@ -41,6 +45,10 @@ def check_model_update(config, *, mode, require_complete=False):
     NotImplementedError
         If multifield imaging is requested.
     """
+    # ========================================================================
+    # 1. Validation context
+    # ========================================================================
+
     # --- Supported imaging mode ---
     # Reject multifield requests until their model-update path is implemented.
     mode.require_supported()
@@ -48,6 +56,10 @@ def check_model_update(config, *, mode, require_complete=False):
 
     deconvolver = config.get("deconvolver")
     image_params = require_mapping("image_params", config.get("image_params", {}))
+
+    # ========================================================================
+    # 2. PSF fitting and helper inputs
+    # ========================================================================
 
     # --- PSF fitting implementation ---
     # A misspelled fitter must fail before constructing its input PSF.
@@ -87,6 +99,10 @@ def check_model_update(config, *, mode, require_complete=False):
         and "psf_normalization" in config
     ):
         raise ValueError("psf_normalization is required when psf_cube is supplied.")
+
+    # ========================================================================
+    # 3. Deconvolver choice and Taylor basis
+    # ========================================================================
 
     # --- Deconvolver selection ---
     # Each imaging kind has its own set of implemented algorithms.
@@ -150,6 +166,10 @@ def check_model_update(config, *, mode, require_complete=False):
         # The current continuum MT-MFS path supports two to four terms.
         if deconvolver == "mtmfs" and not 2 <= n_taylor_terms <= 4:
             raise ValueError("Continuum mtmfs requires n_taylor_terms between 2 and 4.")
+
+    # ========================================================================
+    # 4. Stopping controls and iteration budgets
+    # ========================================================================
 
     # --- Stopping thresholds ---
     # The absolute floor and per-cycle thresholds must be finite and non-negative.
@@ -305,6 +325,10 @@ def check_model_update(config, *, mode, require_complete=False):
         if name in controls:
             check_nonnegative(name, controls[name], scalar=True)
 
+    # ========================================================================
+    # 5. Component geometry and spatial scales
+    # ========================================================================
+
     # --- MT-MFS scale bias ---
     # Reject a bias the native implementation would otherwise clamp.
     if "small_scale_bias" in controls:
@@ -348,6 +372,10 @@ def check_model_update(config, *, mode, require_complete=False):
             raise ValueError(
                 f"MT-MFS controls require deconvolver='mtmfs': {sorted(unused)}."
             )
+
+    # ========================================================================
+    # 6. Algorithm options and entropy stopping
+    # ========================================================================
 
     # --- Algorithm-specific Boolean controls ---
     # History is available for each current deconvolver; exact subtraction is
@@ -447,6 +475,11 @@ def check_model_update(config, *, mode, require_complete=False):
     check_entropy_controls(controls)
 
 
+# ========================================================================
+# Shared control-shape and scale checks
+# ========================================================================
+
+
 def _check_control_shapes(controls, image_params, *, mode):
     """Check caller control arrays against the geometry known at this boundary."""
     if "threshold" in controls:
@@ -536,6 +569,11 @@ def check_scales(scales, *, image_size=None):
     return effective.tolist()
 
 
+# ========================================================================
+# Approximate Taylor-Hessian checks before PSFs exist
+# ========================================================================
+
+
 def check_taylor_hessian_approximation(
     frequencies,
     effective_weights,
@@ -599,6 +637,10 @@ def check_taylor_hessian_approximation(
             f"Approximate Taylor-Hessian preflight: {reason}; {diagnostics}"
         )
 
+    # ========================================================================
+    # 1. Selected data and approximate Hessian construction
+    # ========================================================================
+
     # --- Selected spectral metadata ---
     # Only positive-weight samples constrain the approximate Taylor system.
     frequencies = require_finite_real(
@@ -650,6 +692,10 @@ def check_taylor_hessian_approximation(
     columns /= np.linalg.norm(columns, axis=0)
     equilibrated = columns.T @ columns
     epsilon = np.finfo(precision).eps
+
+    # ========================================================================
+    # 2. Local inversion, rank, and noise diagnostics
+    # ========================================================================
 
     # --- 1. Approximate native inversion safety ---
     # A Cholesky failure predicts that even this spectral approximation cannot
@@ -704,6 +750,10 @@ def check_taylor_hessian_approximation(
             stacklevel=2,
         )
 
+    # ========================================================================
+    # 3. Interactions between component positions
+    # ========================================================================
+
     # --- Spatial coupling between delta components ---
     # The local Gram matrix above cannot diagnose coupling between positions.
     # Build Gaussian channel PSF Fourier blocks with FWHM = lambda / Bmax;
@@ -725,6 +775,11 @@ def check_taylor_hessian_approximation(
         context=context,
     )
     return diagnostics
+
+
+# ========================================================================
+# Actual model-update products and Taylor Hessians
+# ========================================================================
 
 
 @shares_param_docs
@@ -780,6 +835,10 @@ def check_model_products(
         "l",
         "m",
     )
+
+    # ========================================================================
+    # 1. Product dimensions, Taylor basis, and precision
+    # ========================================================================
 
     # --- Residual dimensions and working precision ---
     # Every time, polarization, and spatial plane participates in validation.
@@ -874,6 +933,10 @@ def check_model_products(
             "Product polarization coordinates differ from the validated selection."
         )
 
+    # ========================================================================
+    # 2. Product alignment and mask validity
+    # ========================================================================
+
     # --- Shared geometry, coordinates, and precision ---
     # A common shape alone is insufficient if coordinate labels disagree.
     spatial_dims = ("time", "polarization", "l", "m")
@@ -950,6 +1013,10 @@ def check_model_products(
             ):
                 raise ValueError(f"Mask has incompatible {dim} coordinates.")
 
+    # ========================================================================
+    # 3. Runtime controls and effective scales
+    # ========================================================================
+
     # --- Derived per-plane controls ---
     # Validate every runtime limit before the first image plane can be modified.
     expected_control_shape = (
@@ -1009,6 +1076,10 @@ def check_model_products(
     }
     if deconvolver != "mtmfs":
         return diagnostics
+
+    # ========================================================================
+    # 4. Actual local and spatial Taylor-Hessian diagnostics
+    # ========================================================================
 
     # --- Every per-scale Taylor Hessian ---
     # Validate all planes before any kernel can modify a residual or model plane.
@@ -1159,6 +1230,11 @@ def check_model_products(
                 }
             )
     return diagnostics
+
+
+# ========================================================================
+# Shared stopping and algorithm-capability helpers
+# ========================================================================
 
 
 def check_max_cycles(value, max_psf_fraction=None, *, allow_integral_float=False):

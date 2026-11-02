@@ -11,6 +11,10 @@ from astroviper.processing_functions.imaging.config_check._common import (
 )
 from astroviper.utils.param_docs import shares_param_docs
 
+# ========================================================================
+# Configuration checks
+# ========================================================================
+
 
 @shares_param_docs
 def check_residual_update(config, *, mode, require_complete=False):
@@ -38,6 +42,10 @@ def check_residual_update(config, *, mode, require_complete=False):
     NotImplementedError
         If multifield imaging is requested.
     """
+    # ========================================================================
+    # 1. Supported execution choices
+    # ========================================================================
+
     # --- Supported imaging mode ---
     # Reject multifield requests until their residual-update path is implemented.
     mode.require_supported()
@@ -56,6 +64,10 @@ def check_residual_update(config, *, mode, require_complete=False):
     # The single-field nodes implement anti-alias gridding only; no fallback.
     if "gridder" in config and config["gridder"] != "anti_alias":
         raise ValueError("Single-field imaging supports only gridder='anti_alias'.")
+
+    # ========================================================================
+    # 2. Image and spectral configuration
+    # ========================================================================
 
     # --- Required image coordinates ---
     # Full application calls need every coordinate before any output is created.
@@ -157,6 +169,10 @@ def check_residual_update(config, *, mode, require_complete=False):
                         f"image_params must contain {name!r} for continuum imaging."
                     )
 
+    # ========================================================================
+    # 3. Image geometry and time sampling
+    # ========================================================================
+
     # --- Image size ---
     # Both spatial dimensions are positive integer pixel counts.
     if "image_size" in image_params:
@@ -170,6 +186,7 @@ def check_residual_update(config, *, mode, require_complete=False):
             raise ValueError(
                 "Single-field imaging/PSF fitting needs at least 2 pixels per spatial axis."
             )
+
     # --- Angular cell size ---
     # Signed cells are allowed; both angular increments must be nonzero.
     if "cell_size" in image_params:
@@ -180,6 +197,7 @@ def check_residual_update(config, *, mode, require_complete=False):
             raise ValueError(
                 "cell_size must contain two finite, nonzero angles in radians."
             )
+
     # --- Phase direction ---
     # Declination is bounded by the poles; both angles are expressed in radians.
     if "phase_direction" in image_params:
@@ -190,6 +208,7 @@ def check_residual_update(config, *, mode, require_complete=False):
             raise ValueError(
                 "phase_direction must be [right ascension, declination] in radians with |declination| <= pi/2."
             )
+
     # --- FFT padding ---
     # The supported padding range must not be changed by a later grid setup.
     if "fft_padding" in image_params:
@@ -212,6 +231,10 @@ def check_residual_update(config, *, mode, require_complete=False):
             and time_coords.size != 1
         ):
             raise ValueError("Single-field MVC requires exactly one image time plane.")
+
+    # ========================================================================
+    # 4. Feeds, polarization, and primary beams
+    # ========================================================================
 
     # --- Instrument feeds ---
     # A direct model-preparation call may supply the basis without Stokes labels.
@@ -266,6 +289,10 @@ def check_residual_update(config, *, mode, require_complete=False):
         check_continuum_primary_beam(image_params)
     elif "primary_beam_params" in config:
         check_cube_primary_beam(config["primary_beam_params"])
+
+    # ========================================================================
+    # 5. Gridding kernels and imaging weights
+    # ========================================================================
 
     # --- Kernel design ---
     # Validate schema, padding and cached image-edge correction before gridding.
@@ -338,6 +365,11 @@ def check_residual_update(config, *, mode, require_complete=False):
         require_boolean(
             "casa_weighting_implementation", weights["casa_weighting_implementation"]
         )
+
+
+# ========================================================================
+# Source metadata and inferred primary beams
+# ========================================================================
 
 
 def check_input_metadata(source, config, *, mode, measurement_set="input"):
@@ -482,6 +514,11 @@ def check_continuum_beam_metadata(image_params, antenna_xds, *, continuum_mode):
     check_continuum_primary_beam(resolved)
 
 
+# ========================================================================
+# Spectral sampling and numerical diagnostics
+# ========================================================================
+
+
 def check_spectral_sampling(
     frequencies,
     effective_weights,
@@ -525,6 +562,10 @@ def check_spectral_sampling(
     from astroviper.processing_functions.imaging.config_check._common import (
         require_integer,
     )
+
+    # ========================================================================
+    # 1. Diagnostic context and selected-data sanity
+    # ========================================================================
 
     # --- Diagnostic context ---
     # Keep the same identifying information on successful and failed checks.
@@ -574,6 +615,10 @@ def check_spectral_sampling(
     reference_value = float(reference_value)
     diagnostics["reference_frequency"] = reference_value
     diagnostics["n_taylor_terms"] = int(n_taylor_terms)
+
+    # ========================================================================
+    # 2. Independent frequency constraints and numerical rank
+    # ========================================================================
 
     # --- Independent usable samples ---
     # Zero-weight channels contribute neither constraints nor frequency support.
@@ -634,6 +679,7 @@ def check_spectral_sampling(
         working_precision=np.dtype(precision).name,
         spectral_design_rank_tolerance=float(tolerance),
     )
+
     # --- Enough independent frequency constraints ---
     # Fitting p Taylor coefficients requires at least p independent equations.
     # Each distinct positive-weight frequency supplies at most one; repeated
@@ -644,6 +690,10 @@ def check_spectral_sampling(
         fail("fewer distinct positive-weight frequencies than requested Taylor terms")
     if rank != n_taylor_terms:
         fail("the weighted Taylor design is numerically rank deficient")
+
+    # ========================================================================
+    # 3. Noise amplification and reference placement
+    # ========================================================================
 
     # --- Order-zero noise amplification ---
     # A small singular value may describe slope or curvature with little effect
@@ -693,6 +743,11 @@ def check_spectral_sampling(
         )
 
     return diagnostics
+
+
+# ========================================================================
+# Shared Taylor-basis and reference-frequency helpers
+# ========================================================================
 
 
 def check_continuum_basis(image_params):
