@@ -239,7 +239,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
         T pv = gain * maxval;
         limage[py * nx + px] += pv;
         if (history != nullptr) {
-            history->peak.push_back(static_cast<double>(maxval));
+            history->add_component(maxval, py, px, pv);
         }
 
         // Subtract scaled PSF from residual
@@ -627,7 +627,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             T pv = gain * maxval;
             mod[static_cast<std::size_t>(py) * nx + px] += pv;
             if (history != nullptr) {
-                history[pl].peak.push_back(static_cast<double>(maxval));
+                history[pl].add_component(maxval, py, px, pv);
             }
             peak_y[pl] = py;
             peak_x[pl] = px;

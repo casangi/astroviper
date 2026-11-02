@@ -1,5 +1,7 @@
 """Antenna beam models: analytic responses, Jones images, sampling, Mueller matrices."""
 
+from math import factorial
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -245,8 +247,31 @@ def test_zernike_basis_and_surface():
     np.testing.assert_allclose(short, 1.0 + 0.5 * x)
     cplx = zernike_surface(np.array([1j, 0.0]), x, y)
     assert cplx.dtype == np.complex128
+    sparse = zernike_surface(np.array([2.0, 0.5]), x, y, indices=[4, 1])
+    np.testing.assert_allclose(sparse, 2 * basis[4] + 0.5 * x)
     with pytest.raises(ValueError):
         zernike_surface(np.zeros(67), x, y)
+    with pytest.raises(ValueError):
+        zernike_surface(np.ones(2), x, y, indices=[4, 66])
+
+
+def test_zernike_basis_is_textbook():
+    """R_n^|m| cos(m t) (m >= 0) or R_n^|m| sin(|m| t) (m < 0) in OSA order, x = rho sin t, y = rho cos t (#362)."""
+    rng = np.random.default_rng(362)
+    rho, t = np.sqrt(rng.uniform(0, 1, 1000)), rng.uniform(0, 2 * np.pi, 1000)
+    basis = zernike_basis(rho * np.sin(t), rho * np.cos(t))
+    nm = [(n, m) for n in range(11) for m in range(-n, n + 1, 2)]
+    for j, (n, m) in enumerate(nm):
+        a = abs(m)
+        radial = sum(
+            (-1) ** k
+            * factorial(n - k)
+            / (factorial(k) * factorial((n + a) // 2 - k) * factorial((n - a) // 2 - k))
+            * rho ** (n - 2 * k)
+            for k in range((n - a) // 2 + 1)
+        )
+        angular = np.cos(m * t) if m >= 0 else np.sin(a * t)
+        np.testing.assert_allclose(basis[j], radial * angular, atol=1e-12)
 
 
 # ----------------------------------------------------------------------------
@@ -301,6 +326,17 @@ def test_zernike_jones_beam_diagonal_only():
     np.testing.assert_allclose(np.abs(only_p.JONES.values).max(), 1.0)
     with pytest.raises(ValueError):
         resolve_beam_params({"mueller_selection": [5]})
+
+
+def test_zernike_jones_beam_sparse_coefficients():
+    zpc = read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup")
+    keep = [0, 3, 4, 10, 11, 12, 24]
+    dense = zpc.copy(deep=True)
+    dense["ZPC"] = dense.ZPC.where(dense.coefficient.isin(keep), 0.0)
+    params = {"image_size": [64, 64], "mueller_selection": [0, 15]}
+    expected = make_zernike_jones_beam(dense, [0.3], [3e9], params)
+    sparse = make_zernike_jones_beam(zpc.sel(coefficient=keep), [0.3], [3e9], params)
+    np.testing.assert_allclose(sparse.JONES.values, expected.JONES.values, atol=1e-12)
 
 
 def test_airy_and_polynomial_jones_images():

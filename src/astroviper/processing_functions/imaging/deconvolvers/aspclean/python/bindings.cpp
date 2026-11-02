@@ -5,6 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../include/asp_clean.hpp"
@@ -41,14 +42,30 @@ static py::buffer_info check_array(py::array& arr, const char* name, int ndim,
     return info;
 }
 
+// The iteration history fields (record_iteration_history), with their records.
+static const std::pair<const char*, std::vector<double> aspclean::AspResult::*>
+    kIterationHistoryRecords[] = {
+        {"iteration_peak_residual", &aspclean::AspResult::history_peak},
+        {"iteration_residual_rms", &aspclean::AspResult::history_rms},
+        {"iteration_component_l", &aspclean::AspResult::history_l},
+        {"iteration_component_m", &aspclean::AspResult::history_m},
+        {"iteration_component_scale", &aspclean::AspResult::history_scale},
+        {"iteration_component_flux", &aspclean::AspResult::history_flux},
+};
+
+static py::array_t<double> history_array(const std::vector<double>& values) {
+    return py::array_t<double>(static_cast<py::ssize_t>(values.size()), values.data());
+}
+
 template <typename T>
 static py::dict plane_impl(py::array residual, py::array psf, py::array model,
                            py::array mask, double gain, double threshold_per_cycle,
-                           int max_iter_per_cycle_updated, double fusedthreshold, double psf_width,
-                           int largestscale, int stoppointmode, int norm_method,
+                           int max_iter_per_cycle_updated, double asp_fused_threshold,
+                           double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
+                           int asp_scale_normalization_method,
                            bool verbose, int max_iter_divergence,
                            double divergence_rms_factor, double divergence_peak_factor,
-                           int processing_function_threads, bool stop_after_hogbom_run,
+                           int processing_function_threads, bool asp_stop_after_hogbom_run,
                            const aspclean::AspOptions& options) {
     const int ny = static_cast<int>(residual.shape(0));
     const int nx = static_cast<int>(residual.shape(1));
@@ -75,9 +92,9 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
         res = aspclean::aspclean_plane<T>(
             static_cast<T*>(ri.ptr), static_cast<T*>(mi.ptr),
             static_cast<const T*>(pi.ptr), mask_ptr, nx, ny, gain, threshold_per_cycle,
-            max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale, stoppointmode,
-            norm_method, stop_after_hogbom_run, verbose, divergence, processing_function_threads,
-            options);
+            max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width, asp_largest_scale,
+            asp_stop_point_mode, asp_scale_normalization_method, asp_stop_after_hogbom_run,
+            verbose, divergence, processing_function_threads, options);
     }
 
     py::dict out;
@@ -106,7 +123,13 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     timing["n_residual_fit_evaluations"] = res.n_residual_fit_evaluations;
     timing["significance"] = res.t_significance;
     timing["n_significance_components"] = res.n_significance_components;
+    timing["n_hogbom_runs"] = res.n_hogbom_runs;
+    timing["n_switch_no_change"] = res.n_switch_no_change;
+    timing["n_switch_point_scales"] = res.n_switch_point_scales;
+    timing["n_switch_fused"] = res.n_switch_fused;
     out["timing"] = timing;
+    if (options.record_iteration_history)
+        for (const auto& [name, record] : kIterationHistoryRecords) out[name] = history_array(res.*record);
     if (options.record_components) {
         const py::ssize_t n = static_cast<py::ssize_t>(res.components.size() / 4);
         py::array_t<double> components({n, static_cast<py::ssize_t>(4)});
@@ -117,60 +140,72 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
         if (m) std::memcpy(fits.mutable_data(), res.residual_fits.data(), res.residual_fits.size() * sizeof(double));
         out["residual_fits"] = fits;
     }
-    if (options.scale_significance) out["scale_noise"] = res.scale_noise;
+    if (options.asp_scale_significance) out["scale_noise"] = res.scale_noise;
     return out;
 }
 
 static py::dict clean_dispatch(py::array residual, py::array psf, py::array model,
                                py::array mask, double gain, double threshold_per_cycle,
-                               int max_iter_per_cycle_updated, double fusedthreshold, double psf_width,
-                               int largestscale, int stoppointmode,
-                               int norm_method, bool verbose, int max_iter_divergence,
+                               int max_iter_per_cycle_updated, double asp_fused_threshold,
+                               double asp_psf_width, int asp_largest_scale,
+                               int asp_stop_point_mode, int asp_scale_normalization_method,
+                               bool verbose, int max_iter_divergence,
                                double divergence_rms_factor,
                                double divergence_peak_factor,
-                               int processing_function_threads, bool stop_after_hogbom_run,
-                               bool scale_significance, double significance,
-                               bool record_components, bool residual_components,
-                               double rc_noise_floor, double rc_frac_min, double rc_eps_max,
-                               double rc_switch_factor, bool rc_floor_at_threshold,
-                               double significance_gain) {
+                               int processing_function_threads, bool asp_stop_after_hogbom_run,
+                               bool asp_scale_significance, double asp_significance,
+                               bool record_components, bool asp_residual_components,
+                               double asp_residual_component_noise_floor,
+                               double asp_residual_component_min_fraction,
+                               double asp_residual_component_max_epsilon_fraction,
+                               double asp_residual_component_switch_factor,
+                               bool asp_residual_component_floor_at_threshold,
+                               bool asp_residual_component_positive_only,
+                               double asp_significance_gain, double asp_no_change_tolerance,
+                               bool record_iteration_history) {
     aspclean::AspOptions options;
-    options.scale_significance = scale_significance;
-    options.significance = significance;
+    options.asp_scale_significance = asp_scale_significance;
+    options.asp_significance = asp_significance;
     options.record_components = record_components;
-    options.residual_components = residual_components;
-    options.rc_noise_floor = rc_noise_floor;
-    options.rc_frac_min = rc_frac_min;
-    options.rc_eps_max = rc_eps_max;
-    options.rc_switch_factor = rc_switch_factor;
-    options.rc_floor_at_threshold = rc_floor_at_threshold;
-    options.significance_gain = significance_gain;
+    options.asp_residual_components = asp_residual_components;
+    options.asp_residual_component_noise_floor = asp_residual_component_noise_floor;
+    options.asp_residual_component_min_fraction = asp_residual_component_min_fraction;
+    options.asp_residual_component_max_epsilon_fraction = asp_residual_component_max_epsilon_fraction;
+    options.asp_residual_component_switch_factor = asp_residual_component_switch_factor;
+    options.asp_residual_component_floor_at_threshold = asp_residual_component_floor_at_threshold;
+    options.asp_residual_component_positive_only = asp_residual_component_positive_only;
+    options.asp_significance_gain = asp_significance_gain;
+    options.asp_no_change_tolerance = asp_no_change_tolerance;
+    options.record_iteration_history = record_iteration_history;
     if (residual.ndim() != 2)
         throw std::runtime_error("residual must be a 2D array [ny, nx]");
     auto dt = residual.dtype();
     if (dt.equal(py::dtype::of<float>()))
         return plane_impl<float>(residual, psf, model, mask, gain, threshold_per_cycle,
-                                 max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
-                                 stoppointmode, norm_method, verbose, max_iter_divergence,
+                                 max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
+                                 asp_largest_scale, asp_stop_point_mode,
+                                 asp_scale_normalization_method, verbose, max_iter_divergence,
                                  divergence_rms_factor, divergence_peak_factor,
-                                 processing_function_threads, stop_after_hogbom_run, options);
+                                 processing_function_threads, asp_stop_after_hogbom_run, options);
     if (dt.equal(py::dtype::of<double>()))
         return plane_impl<double>(residual, psf, model, mask, gain, threshold_per_cycle,
-                                  max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
-                                  stoppointmode, norm_method, verbose, max_iter_divergence,
+                                  max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
+                                  asp_largest_scale, asp_stop_point_mode,
+                                  asp_scale_normalization_method, verbose, max_iter_divergence,
                                   divergence_rms_factor, divergence_peak_factor,
-                                  processing_function_threads, stop_after_hogbom_run, options);
+                                  processing_function_threads, asp_stop_after_hogbom_run, options);
     throw std::runtime_error("residual must be float32 or float64");
 }
 
 template <typename T>
 static py::dict cube_impl(py::array residual, py::array psf, py::array model,
                           py::array mask, double gain, py::array threshold_per_cycle,
-                          py::array max_iter_per_cycle_updated, double fusedthreshold, double psf_width,
-                          int largestscale, int stoppointmode, int norm_method,
+                          py::array max_iter_per_cycle_updated, double asp_fused_threshold,
+                          double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
+                          int asp_scale_normalization_method,
                           int processing_function_threads, int max_iter_divergence,
                           double divergence_rms_factor, double divergence_peak_factor,
-                          bool stop_after_hogbom_run, const aspclean::AspOptions& options) {
+                          bool asp_stop_after_hogbom_run, const aspclean::AspOptions& options) {
     const int nt = static_cast<int>(residual.shape(0));
     const int nf = static_cast<int>(residual.shape(1));
     const int np_img = static_cast<int>(residual.shape(2));
@@ -225,9 +260,9 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
         aspclean::aspclean_cube<T>(
             static_cast<T*>(ri.ptr), static_cast<T*>(mi.ptr),
             static_cast<const T*>(pi.ptr), mask_ptr, nt, nf, np_img, np_psf, nx,
-            ny, gain, thr_ptr, nit_ptr, fusedthreshold, psf_width, largestscale,
-            stoppointmode, norm_method, stop_after_hogbom_run, processing_function_threads,
-            divergence, results.data(), options);
+            ny, gain, thr_ptr, nit_ptr, asp_fused_threshold, asp_psf_width, asp_largest_scale,
+            asp_stop_point_mode, asp_scale_normalization_method, asp_stop_after_hogbom_run,
+            processing_function_threads, divergence, results.data(), options);
     }
 
     py::array_t<int> iters({nt, nf, np_img});
@@ -262,47 +297,94 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     out["diverged"] = diverged;
     out["peak_residual"] = peak;
     out["model_flux"] = flux;
+    // Components of each kind the model update of every plane subtracted.
+    const std::pair<const char*, int aspclean::AspResult::*> counts[] = {
+        {"n_residual_components", &aspclean::AspResult::n_residual_components},
+        {"n_scale_components", &aspclean::AspResult::n_scale_components},
+        {"n_point_components", &aspclean::AspResult::n_point_components},
+        {"n_significance_components", &aspclean::AspResult::n_significance_components},
+        {"n_hogbom_runs", &aspclean::AspResult::n_hogbom_runs},
+        {"n_switch_no_change", &aspclean::AspResult::n_switch_no_change},
+        {"n_switch_point_scales", &aspclean::AspResult::n_switch_point_scales},
+        {"n_switch_fused", &aspclean::AspResult::n_switch_fused},
+    };
+    for (const auto& [name, member] : counts) {
+        py::array_t<int> a({nt, nf, np_img});
+        int* ap = a.mutable_data();
+        for (int i = 0; i < nplanes; ++i) ap[i] = results[i].*member;
+        out[name] = a;
+    }
+    // The iteration history: nested lists [t][f][p] of 1-D arrays, one value
+    // per component of the plane's model update.
+    if (options.record_iteration_history) {
+        for (const auto& [name, record] : kIterationHistoryRecords) {
+            py::list per_time;
+            for (int tt = 0, i = 0; tt < nt; ++tt) {
+                py::list per_frequency;
+                for (int ff = 0; ff < nf; ++ff) {
+                    py::list per_polarization;
+                    for (int pp = 0; pp < np_img; ++pp, ++i)
+                        per_polarization.append(history_array(results[i].*record));
+                    per_frequency.append(per_polarization);
+                }
+                per_time.append(per_frequency);
+            }
+            out[name] = per_time;
+        }
+    }
     return out;
 }
 
 static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     py::array model, py::array mask, double gain,
                                     py::array threshold_per_cycle, py::array max_iter_per_cycle_updated,
-                                    double fusedthreshold, double psf_width,
-                                    int largestscale, int stoppointmode,
-                                    int norm_method, int processing_function_threads,
+                                    double asp_fused_threshold, double asp_psf_width,
+                                    int asp_largest_scale, int asp_stop_point_mode,
+                                    int asp_scale_normalization_method,
+                                    int processing_function_threads,
                                     int max_iter_divergence, double divergence_rms_factor,
-                                    double divergence_peak_factor, bool stop_after_hogbom_run,
-                                    bool scale_significance, double significance,
-                                    bool residual_components, double rc_noise_floor,
-                                    double rc_frac_min, double rc_eps_max, double rc_switch_factor,
-                                    bool rc_floor_at_threshold, double significance_gain) {
+                                    double divergence_peak_factor, bool asp_stop_after_hogbom_run,
+                                    bool asp_scale_significance, double asp_significance,
+                                    bool asp_residual_components,
+                                    double asp_residual_component_noise_floor,
+                                    double asp_residual_component_min_fraction,
+                                    double asp_residual_component_max_epsilon_fraction,
+                                    double asp_residual_component_switch_factor,
+                                    bool asp_residual_component_floor_at_threshold,
+                                    bool asp_residual_component_positive_only,
+                                    double asp_significance_gain, double asp_no_change_tolerance,
+                                    bool record_iteration_history) {
     aspclean::AspOptions options;
-    options.scale_significance = scale_significance;
-    options.significance = significance;
-    options.residual_components = residual_components;
-    options.rc_noise_floor = rc_noise_floor;
-    options.rc_frac_min = rc_frac_min;
-    options.rc_eps_max = rc_eps_max;
-    options.rc_switch_factor = rc_switch_factor;
-    options.rc_floor_at_threshold = rc_floor_at_threshold;
-    options.significance_gain = significance_gain;
+    options.asp_scale_significance = asp_scale_significance;
+    options.asp_significance = asp_significance;
+    options.asp_residual_components = asp_residual_components;
+    options.asp_residual_component_noise_floor = asp_residual_component_noise_floor;
+    options.asp_residual_component_min_fraction = asp_residual_component_min_fraction;
+    options.asp_residual_component_max_epsilon_fraction = asp_residual_component_max_epsilon_fraction;
+    options.asp_residual_component_switch_factor = asp_residual_component_switch_factor;
+    options.asp_residual_component_floor_at_threshold = asp_residual_component_floor_at_threshold;
+    options.asp_residual_component_positive_only = asp_residual_component_positive_only;
+    options.asp_significance_gain = asp_significance_gain;
+    options.asp_no_change_tolerance = asp_no_change_tolerance;
+    options.record_iteration_history = record_iteration_history;
     if (residual.ndim() != 5)
         throw std::runtime_error(
             "residual must be a 5D array [time, frequency, polarization, y, x]");
     auto dt = residual.dtype();
     if (dt.equal(py::dtype::of<float>()))
         return cube_impl<float>(residual, psf, model, mask, gain, threshold_per_cycle,
-                                max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
-                                stoppointmode, norm_method, processing_function_threads,
+                                max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
+                                asp_largest_scale, asp_stop_point_mode,
+                                asp_scale_normalization_method, processing_function_threads,
                                 max_iter_divergence, divergence_rms_factor,
-                                divergence_peak_factor, stop_after_hogbom_run, options);
+                                divergence_peak_factor, asp_stop_after_hogbom_run, options);
     if (dt.equal(py::dtype::of<double>()))
         return cube_impl<double>(residual, psf, model, mask, gain, threshold_per_cycle,
-                                 max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
-                                 stoppointmode, norm_method, processing_function_threads,
+                                 max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
+                                 asp_largest_scale, asp_stop_point_mode,
+                                 asp_scale_normalization_method, processing_function_threads,
                                  max_iter_divergence, divergence_rms_factor,
-                                 divergence_peak_factor, stop_after_hogbom_run, options);
+                                 divergence_peak_factor, asp_stop_after_hogbom_run, options);
     throw std::runtime_error("residual must be float32 or float64");
 }
 
@@ -370,7 +452,7 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "`model` (float32 or float64, C-contiguous, writeable) are modified: "
           "the residual replaces the dirty image and Asp/Hogbom components are "
           "accumulated into the model. `psf` and optional `mask` share the dtype "
-          "and shape. psf_width <= 0 estimates the PSF width internally. The "
+          "and shape. asp_psf_width = -1 estimates the PSF width internally. The "
           "model update also stops as diverged (retval -3, diverged) on the "
           "divergence test shared with the other deconvolvers: the RMS of the "
           "masked residual above divergence_rms_factor x its lowest value for "
@@ -382,41 +464,48 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "2 reached threshold_per_cycle, 4 diverged, 5 a test of Asp itself "
           "(optimum strength, end of a Hogbom run, stop point mode). "
           "processing_function_threads is the number of threads of every "
-          "2-D transform. stop_after_hogbom_run ends the model update after a "
+          "2-D transform. asp_stop_after_hogbom_run ends the model update after a "
           "Hogbom run unless the RMS of the residual has fallen, by less than "
           "a factor 1.5, since its start (CASA and LibRA); off, the model "
           "update goes on to its threshold or iteration limit. Options beyond "
           "CASA and LibRA (all off by default here, see AspOptions in "
-          "asp_clean.hpp): residual_components cleans first with components "
+          "asp_clean.hpp): asp_residual_components cleans first with components "
           "shaped by the residual (Ma, Zhang & Zhang 2026), C = R tanh((sR - "
           "T) / eps) on the mask pixels with sR >= T, T = max(frac |R_peak|, "
-          "rc_noise_floor x noise, and the threshold with "
-          "rc_floor_at_threshold), (frac, eps) fitted within [rc_frac_min, "
-          "0.99] x [1e-3, rc_eps_max] by least squares of the masked "
-          "residual, down to rc_switch_factor x threshold_per_cycle; then the "
-          "Asp iterations. scale_significance measures the noise of the "
-          "residual smoothed with each initial scale and, with the peak below "
+          "asp_residual_component_noise_floor x noise, and the threshold with "
+          "asp_residual_component_floor_at_threshold), (frac, eps) fitted within "
+          "[asp_residual_component_min_fraction, 0.99] x [1e-3, "
+          "asp_residual_component_max_epsilon_fraction] by least squares of the "
+          "masked residual, down to asp_residual_component_switch_factor x "
+          "threshold_per_cycle; then the Asp iterations. asp_scale_significance "
+          "measures the noise of the residual smoothed with each initial scale "
+          "and, with the peak below "
           "threshold_per_cycle, goes on cleaning the most significant smoothed "
           "residual while its significance reaches that of the threshold at "
-          "scale 0 (or significance, when > 0), with the gain "
-          "significance_gain (when > 0); scale_noise is returned. "
+          "scale 0 (or asp_significance, when > 0), with the gain "
+          "asp_significance_gain (when > 0); scale_noise is returned. "
           "record_components returns the Asp components (i, j, scale, flux) "
           "and the residual-shaped fits (peak, frac, eps_frac, 0, 0, "
           "objective).",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
           py::arg("threshold_per_cycle") = 0.0, py::arg("max_iter_per_cycle_updated") = 100,
-          py::arg("fusedthreshold") = 0.0, py::arg("psf_width") = 0.0,
-          py::arg("largestscale") = -1, py::arg("stoppointmode") = -1,
-          py::arg("norm_method") = 1, py::arg("verbose") = false,
+          py::arg("asp_fused_threshold") = 0.0, py::arg("asp_psf_width") = -1.0,
+          py::arg("asp_largest_scale") = -1, py::arg("asp_stop_point_mode") = -1,
+          py::arg("asp_scale_normalization_method") = 1, py::arg("verbose") = false,
           py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
           py::arg("divergence_peak_factor") = 1.0, py::arg("processing_function_threads") = 1,
-          py::arg("stop_after_hogbom_run") = false, py::arg("scale_significance") = false,
-          py::arg("significance") = 0.0, py::arg("record_components") = false,
-          py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
-          py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
-          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true,
-          py::arg("significance_gain") = 0.0);
+          py::arg("asp_stop_after_hogbom_run") = false, py::arg("asp_scale_significance") = false,
+          py::arg("asp_significance") = 0.0, py::arg("record_components") = false,
+          py::arg("asp_residual_components") = false,
+          py::arg("asp_residual_component_noise_floor") = 2.0,
+          py::arg("asp_residual_component_min_fraction") = 0.3,
+          py::arg("asp_residual_component_max_epsilon_fraction") = 10.0,
+          py::arg("asp_residual_component_switch_factor") = 1.0,
+          py::arg("asp_residual_component_floor_at_threshold") = true,
+          py::arg("asp_residual_component_positive_only") = false,
+          py::arg("asp_significance_gain") = 0.0, py::arg("asp_no_change_tolerance") = 0.0,
+          py::arg("record_iteration_history") = false);
 
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp model update independently on every (time, frequency, "
@@ -425,24 +514,29 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "Iteration control is independent per plane: threshold_per_cycle "
           "(float64) and max_iter_per_cycle_updated (int32) are (nt, nf, np) "
           "arrays giving each plane its own threshold and iteration limit; the "
-          "divergence test, stop_after_hogbom_run and the options beyond "
-          "CASA (residual_components, scale_significance, ...) are those of "
+          "divergence test, asp_stop_after_hogbom_run and the options beyond "
+          "CASA (asp_residual_components, asp_scale_significance, ...) are those of "
           "clean. "
           "Returns per-plane arrays of shape (nt, nf, np), stop_code among "
           "them.",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
           py::arg("threshold_per_cycle") = py::array(), py::arg("max_iter_per_cycle_updated") = py::array(),
-          py::arg("fusedthreshold") = 0.0, py::arg("psf_width") = 0.0,
-          py::arg("largestscale") = -1, py::arg("stoppointmode") = -1,
-          py::arg("norm_method") = 1, py::arg("processing_function_threads") = 1,
+          py::arg("asp_fused_threshold") = 0.0, py::arg("asp_psf_width") = -1.0,
+          py::arg("asp_largest_scale") = -1, py::arg("asp_stop_point_mode") = -1,
+          py::arg("asp_scale_normalization_method") = 1, py::arg("processing_function_threads") = 1,
           py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
-          py::arg("divergence_peak_factor") = 1.0, py::arg("stop_after_hogbom_run") = false,
-          py::arg("scale_significance") = false, py::arg("significance") = 0.0,
-          py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
-          py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
-          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true,
-          py::arg("significance_gain") = 0.0);
+          py::arg("divergence_peak_factor") = 1.0, py::arg("asp_stop_after_hogbom_run") = false,
+          py::arg("asp_scale_significance") = false, py::arg("asp_significance") = 0.0,
+          py::arg("asp_residual_components") = false,
+          py::arg("asp_residual_component_noise_floor") = 2.0,
+          py::arg("asp_residual_component_min_fraction") = 0.3,
+          py::arg("asp_residual_component_max_epsilon_fraction") = 10.0,
+          py::arg("asp_residual_component_switch_factor") = 1.0,
+          py::arg("asp_residual_component_floor_at_threshold") = true,
+          py::arg("asp_residual_component_positive_only") = false,
+          py::arg("asp_significance_gain") = 0.0, py::arg("asp_no_change_tolerance") = 0.0,
+          py::arg("record_iteration_history") = false);
 
     m.def("psf_gaussian_width", &psf_width_helper,
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "

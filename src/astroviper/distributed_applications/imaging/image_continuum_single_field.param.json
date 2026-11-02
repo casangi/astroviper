@@ -8,8 +8,7 @@
             "allow_unknown": true,
             "schema": {
                 "n_taylor_terms": { "required": true, "min": 1 },
-                "reference_frequency": {},
-                "reference_frequency_hz": {}
+                "reference_frequency": {}
             }
         },
         "imaging_weights_params": { "required": true, "type": ["dict"] },
@@ -17,7 +16,7 @@
         "gridder": { "type": ["str"], "allowed": ["anti_alias"] },
         "deconvolver": {
             "type": ["str"],
-            "allowed": ["hogbom", "mtmfs"]
+            "allowed": ["hogbom", "asp", "mtmfs"]
         },
         "primary_beam_limit": {"type": "float"},
         "continuum_mode": {
@@ -67,6 +66,7 @@
         "disk_chunk_sizes": { "type": ["dict", "str"], "nullable": true },
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
+        "gridding_kernel_params": { "type": ["dict"], "nullable": true },
         "skunk_works": { "type": "boolean" },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
@@ -78,6 +78,11 @@
         "image_sharding": { "type": ["dict"], "nullable": true },
         "image_chunking": { "type": ["dict"], "nullable": true },
         "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
-        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 }
+        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
+        "cycle_acceleration": {
+            "type": ["str"],
+            "allowed": ["none", "conjugate_gradient", "nesterov_momentum"]
+        },
+        "momentum_coefficient": { "type": ["int", "float"], "min": 0, "max": 1 }
     }
 }

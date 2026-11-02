@@ -38,6 +38,19 @@ Paths below are relative to `tests/`.
   `local_beam_moments` recovers the off-axis spectral index; the processing-level
   regression contrasts this with the documented `channel_psf`/CASA bias at the
   same realistic Taylor-zero stopping threshold.
+- `component/test_single_channel_imaging_consistency.py`: MFS with one Taylor
+  term against the cube imager on one generated channel with four
+  correlations (the 7 m array field of RADPS Memo 13a), with the one model
+  update of each run leaving the true model. With the direct Fourier transform
+  both give the same imaging weights, PSF, mask, dirty image and fitted beam,
+  the dirty image and the PSF are those of a NumPy direct Fourier transform,
+  and the residual of the true model is at the rounding of the input; with the
+  default kernel its floors (less the direct Fourier transform's residual) are
+  pinned and at most 1e-5 of the brightest flux. A third test deconvolves
+  instead (Hogbom, the image-sized PSF, to 1e-4 of every plane's brightest
+  flux): every plane stops on its threshold, both imagers take the same
+  iterations and agree in model, residual and restored image to 1e-12, and
+  the errors against the truth stay within margins of their measured values.
 
 The component comparisons are within each algorithm configuration. They do
 **not** require MFS and MVC, local and global weighting, or native and CASA

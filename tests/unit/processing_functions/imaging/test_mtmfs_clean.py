@@ -383,6 +383,56 @@ class TestMtclean:
         assert out["peak_residual"] < np.max(np.abs(residual_in[0]))
         assert out["model_flux"] == pytest.approx(float(model[0].sum()), rel=1e-5)
 
+    def test_iteration_history(self):
+        """One record per component, without changing the clean: points and
+        scale components add up to the iterations, the Taylor-0 fluxes to the
+        model, and every scale is one of the effective scales."""
+        nterms, nx, ny = 2, 64, 64
+        psf = make_psf_stack(nterms, nx, ny, dtype=np.float64)
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        blob = np.exp(-((yy - 32) ** 2 + (xx - 30) ** 2) / (2 * 5.0**2))
+        dirty = _dirty_from_model(psf, np.stack([blob, 0.2 * blob]))
+        runs = {}
+        for record in (False, True):
+            residual, model = dirty.copy(), np.zeros_like(dirty)
+            out = mtmfs.clean(
+                residual,
+                psf,
+                model,
+                scales=[0, 4, 8],
+                max_iter_per_cycle_updated=60,
+                gain=0.2,
+                threshold_per_cycle=1e-5,
+                record_iteration_history=record,
+            )
+            runs[record] = out, residual, model
+        (off, residual_off, model_off), (out, residual, model) = runs[False], runs[True]
+        np.testing.assert_array_equal(residual, residual_off)
+        np.testing.assert_array_equal(model, model_off)
+        assert "iteration_component_flux" not in off
+        n = out["iterations_performed"]
+        assert out["n_point_components"] + out["n_scale_components"] == n
+        assert out["n_point_components"] > 0 and out["n_scale_components"] > 0
+        for field in (
+            "iteration_peak_residual",
+            "iteration_residual_rms",
+            "iteration_component_l",
+            "iteration_component_m",
+            "iteration_component_scale",
+            "iteration_component_flux",
+        ):
+            assert out[field].shape == (n,)
+            assert np.isfinite(out[field]).all()
+        np.testing.assert_allclose(
+            out["iteration_component_flux"].sum(), model[0].sum(), rtol=1e-9
+        )
+        assert set(out["iteration_component_scale"]) <= set(out["scales"])
+        assert (
+            np.count_nonzero(out["iteration_component_scale"] == 0)
+            == (out["n_point_components"])
+        )
+        assert np.all(out["iteration_residual_rms"] > 0)
+
     def test_float64_run_close_to_float32(self):
         nterms, nx, ny = 2, 64, 64
         res32 = make_dirty_stack(nterms, nx, ny, dtype=np.float32)

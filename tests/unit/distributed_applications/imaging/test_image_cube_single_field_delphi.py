@@ -47,8 +47,8 @@ PSF_MODULE = "astroviper.distributed_applications.imaging.point_spread_function_
 delphi_module = importlib.import_module(
     "astroviper.distributed_applications.imaging.image_cube_single_field_delphi"
 )
-PROLATE_SPHEROIDAL_9 = {
-    "type": "prolate_spheroidal",
+LEAST_MISFIT_9 = {
+    "type": "least_misfit",
     "support": 9,
     "oversampling": 300,
     "interpolation": "linear",
@@ -355,7 +355,7 @@ def test_delphi_calculate_parameters_only(ps_store, tmp_path, psf_calls):
     assert call["image_store"] is None
     assert call["instrument_polarization_basis"] == "circular"
     assert call["image_params"]["polarization_coords"] == ["I", "V"]
-    assert call["gridding_kernel_params"] == PROLATE_SPHEROIDAL_9
+    assert call["gridding_kernel_params"] == LEAST_MISFIT_9
     assert call["image_params"]["fft_padding"] == 1.2
     assert call["primary_beam_params"] == {"telescope": "vla"}
     assert call["imaging_weights_params"] == {"weighting": "briggs", "robust": 2.0}
@@ -392,7 +392,7 @@ def test_delphi_calculate_parameters_only(ps_store, tmp_path, psf_calls):
     assert controls["threshold_tolerance"] == 0.02
     assert controls["exact_psf_subtraction"] is False
     assert not {"psf_fraction", "predicted_imaging_cycles"} & set(derived)
-    assert arguments["gridding_kernel_params"] == PROLATE_SPHEROIDAL_9
+    assert arguments["gridding_kernel_params"] == LEAST_MISFIT_9
     assert arguments["restore"] is True and arguments["primary_beam_correction"]
     np.testing.assert_allclose(
         derived["sensitivity_natural"], 0.8 * np.array([[1e-3, 2e-3], [3e-3, 4e-3]])

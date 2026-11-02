@@ -54,7 +54,9 @@ inline double scan_row(const T* row, const bool* mask_row, int xbeg, int xend,
  * describes iteration k: peak[k] is the signed residual value at the peak of
  * |residual| that the iteration cleaned (it subtracted gain x peak[k] x PSF),
  * rms[k] the RMS (about zero) of the residual after that subtraction, over
- * the pixels the peak search covers (the clean box inside the mask).
+ * the pixels the peak search covers (the clean box inside the mask), and
+ * l[k], m[k], flux[k] and scale[k] the component: its pixel (row, column of
+ * the plane), its flux gain x peak[k] and its scale, 0 (a point).
  *
  * The RMS costs no pass of its own: the peak search of every iteration
  * already sums the squares of the residual for the divergence test
@@ -66,6 +68,18 @@ inline double scan_row(const T* row, const bool* mask_row, int xbeg, int xend,
 struct IterationHistory {
     std::vector<double> peak;
     std::vector<double> rms;
+    std::vector<double> l;
+    std::vector<double> m;
+    std::vector<double> flux;
+    std::vector<double> scale;
+
+    void add_component(double peak_value, int row, int column, double component_flux) {
+        peak.push_back(peak_value);
+        l.push_back(row);
+        m.push_back(column);
+        flux.push_back(component_flux);
+        scale.push_back(0.0);
+    }
 };
 
 /**

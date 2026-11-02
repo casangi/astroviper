@@ -3,22 +3,6 @@
 import numpy as np
 
 
-def _half_channel_widths(image_frequencies, visibility_frequencies):
-    """Return the per-image-channel matching tolerance (half a channel width).
-
-    The channel width is taken from the image axis when it has more than one
-    channel, from the visibility axis when only that one does, and is
-    unbounded when both axes hold a single channel (a single visibility
-    channel imaged onto a single plane can only mean that plane).
-    """
-    if image_frequencies.size > 1:
-        return 0.5 * np.abs(np.gradient(image_frequencies))
-    if visibility_frequencies.size > 1:
-        width = np.abs(np.gradient(visibility_frequencies)).max()
-        return np.full(image_frequencies.shape, 0.5 * width)
-    return np.full(image_frequencies.shape, np.inf)
-
-
 def map_visibility_frequencies_to_image(
     visibility_frequencies,
     image_frequencies,
@@ -29,15 +13,19 @@ def map_visibility_frequencies_to_image(
 ):
     """Map each visibility channel onto its nearest image-frequency channel.
 
-    Every visibility channel is assigned to the image channel whose centre
-    frequency is closest, provided that distance is at most half an image
-    channel width. This mirrors the nearest-neighbour selection
+    Nearest matching is
+    :func:`graphviper.graph_tools.coordinate_utils.map_to_nearest_coordinate`,
+    the rule by which
     :func:`graphviper.graph_tools.coordinate_utils.interpolate_data_coords_onto_parallel_coords`
-    uses to pick the visibility channels of a task, so image axes that are
-    not copied verbatim from the processing set (regridded, shifted, or from
-    a second measurement set with slightly different channel centres) still
-    map without raising. Several visibility channels may map onto one image
-    channel (channel averaging onto a coarser image axis).
+    selects the visibility channels of a task, so a task grids every channel it
+    selects: every visibility channel is assigned to the image channel whose
+    centre frequency is closest, provided it lies within the half channel of
+    that image channel on its side (half the gap to the neighbouring image
+    channel, or beyond either end of the image axis half the end gap). Image
+    axes that are not copied verbatim from the processing set (regridded,
+    shifted, or from a second measurement set with slightly different channel
+    centres) therefore map without raising. Several visibility channels may
+    map onto one image channel (channel averaging onto a coarser image axis).
 
     Parameters
     ----------
@@ -46,8 +34,8 @@ def map_visibility_frequencies_to_image(
     image_frequencies : array-like
         One-dimensional image-channel centre frequencies (Hz). The channel
         width is the spacing of this axis; when the image has a single
-        channel the visibility spacing is used instead, and when both axes
-        have one channel any frequency maps onto that plane.
+        channel the widest visibility spacing is used instead, and when both
+        axes have one channel any frequency maps onto that plane.
 
     matching : {"nearest", "exact"}, default "nearest"
         Use the shared nearest-channel assignment for cube and continuum imaging.
@@ -108,25 +96,23 @@ def map_visibility_frequencies_to_image(
             )
         return frequency_map
 
-    distances = np.abs(
-        visibility_frequencies[:, np.newaxis] - image_frequencies[np.newaxis, :]
-    )
-    frequency_map = np.argmin(distances, axis=1).astype(np.int64)
-    nearest_distance = distances[np.arange(visibility_frequencies.size), frequency_map]
-    tolerance = _half_channel_widths(image_frequencies, visibility_frequencies)[
-        frequency_map
-    ]
+    from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
 
-    too_far = nearest_distance > tolerance
+    frequency_map = map_to_nearest_coordinate(visibility_frequencies, image_frequencies)
+    too_far = frequency_map < 0
     if np.any(too_far):
         offending = np.flatnonzero(too_far)
+        separations = np.abs(
+            visibility_frequencies[offending, np.newaxis]
+            - image_frequencies[np.newaxis, :]
+        )
+        nearest = np.argmin(separations, axis=1)
         raise ValueError(
             "Visibility channel(s) lie more than half an image channel width "
             "from the nearest image channel centre; visibility channel indices="
             f"{offending.tolist()}, visibility frequencies="
             f"{visibility_frequencies[offending].tolist()} Hz, nearest image "
-            f"frequencies={image_frequencies[frequency_map[offending]].tolist()} Hz, "
-            f"separations={nearest_distance[offending].tolist()} Hz, allowed="
-            f"{tolerance[offending].tolist()} Hz."
+            f"frequencies={image_frequencies[nearest].tolist()} Hz, "
+            f"separations={separations[np.arange(offending.size), nearest].tolist()} Hz."
         )
     return frequency_map
