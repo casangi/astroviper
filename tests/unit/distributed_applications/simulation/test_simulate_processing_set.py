@@ -425,6 +425,58 @@ def test_sky_image_store_is_the_store_written(tmp_path):
     np.testing.assert_allclose(img.SKY.values.sum(axis=(2, 3, 4)), [[1.0] * 3])
 
 
+def test_sky_model_image_through_the_driver(tmp_path):
+    """A sky image store simulates through the node tasks as a point source at
+    its one non-zero pixel."""
+    from xradio.image import make_empty_sky_image, write_image
+
+    from astroviper.utils.coordinate_transforms import inverse_sin_project
+
+    arcsec = np.pi / (180 * 3600)
+    image = make_empty_sky_image(
+        phase_center=PC[0],
+        image_size=[64, 64],
+        cell_size=[-10 * arcsec, 10 * arcsec],
+        frequency_coords=[3.2e9],
+        pol_coords=["I"],
+        time_coords=[0],
+    )
+    sky = np.zeros((1, 1, 1, 64, 64))
+    sky[0, 0, 0, 40, 20] = 2.0
+    image["SKY"] = (("time", "frequency", "polarization", "l", "m"), sky)
+    store = str(tmp_path / "model.img.zarr")
+    write_image(image, store, out_format="zarr", overwrite=True)
+    lm = np.array([[image.l.values[40], image.m.values[20]]])
+    point, _ = run(
+        tmp_path,
+        point_source_flux=np.array([2.0, 0, 0, 2.0])[None, None, None, :],
+        point_source_ra_dec=inverse_sin_project(PC[0], lm)[None],
+        noise_params=None,
+    )
+    pixel, _ = run(
+        tmp_path,
+        ps_store=str(tmp_path / "model.ps.zarr"),
+        point_source_flux=None,
+        point_source_ra_dec=None,
+        sky_model_image=store,
+        noise_params=None,
+    )
+    point_ms = load_processing_set(point["ps_store"])["VLA_SBand"].ds
+    pixel_ms = load_processing_set(pixel["ps_store"])["VLA_SBand"].ds
+    np.testing.assert_allclose(
+        pixel_ms.VISIBILITY.values, point_ms.VISIBILITY.values, rtol=0, atol=1e-9
+    )
+    assert pixel_ms.attrs["data_groups"]["base"]["description"].startswith(
+        "Simulated visibilities of a sky image with"
+    )
+    with pytest.raises(ValueError, match="no w term"):
+        run(
+            tmp_path,
+            sky_model_image=store,
+            sky_model_image_predict={"predict": "gridded"},
+        )
+
+
 def _report_text(path):
     with open(path, encoding="utf-8") as file:
         return file.read()
