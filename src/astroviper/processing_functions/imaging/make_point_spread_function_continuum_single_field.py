@@ -44,6 +44,10 @@ def _validate_mtmfs_parameters(
     image_params: dict,
 ) -> tuple[int, int, float]:
     """Return validated ``n_taylor_terms``, number of PSF terms, and reference frequency."""
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _validate_n_taylor_terms,
+    )
+
     if "n_taylor_terms" not in image_params:
         raise KeyError("image_params must contain 'n_taylor_terms' for MT-MFS imaging.")
     if "reference_frequency" not in image_params:
@@ -51,11 +55,7 @@ def _validate_mtmfs_parameters(
             "image_params must contain one globally shared 'reference_frequency'."
         )
 
-    n_taylor_terms = int(image_params["n_taylor_terms"])
-    if n_taylor_terms < 1:
-        raise ValueError(
-            f"n_taylor_terms must be at least 1; received {n_taylor_terms}."
-        )
+    n_taylor_terms = _validate_n_taylor_terms(image_params["n_taylor_terms"])
 
     reference_frequency = float(image_params["reference_frequency"])
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
@@ -669,7 +669,7 @@ def make_point_spread_function_continuum_single_field(
 
     # Support both explicit keyword arguments and values stored in image_params.
     if n_taylor_terms is not None:
-        image_params["n_taylor_terms"] = int(n_taylor_terms)
+        image_params["n_taylor_terms"] = n_taylor_terms
 
     if reference_frequency is not None:
         image_params["reference_frequency"] = float(reference_frequency)

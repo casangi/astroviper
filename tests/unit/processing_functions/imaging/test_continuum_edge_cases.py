@@ -7,6 +7,9 @@ import pytest
 import xarray as xr
 import xradio.image.image_xds  # noqa: F401
 
+from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
+    add_visibility_grid_continuum_single_field,
+)
 from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc import (
     add_visibility_grid_mvc_single_field,
 )
@@ -23,8 +26,14 @@ from astroviper.processing_functions.imaging.imaging_setup_continuum_single_fiel
     _validate_continuum_parameters,
     _validate_n_taylor_terms,
 )
+from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
+    make_point_spread_function_continuum_single_field,
+)
 from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
     make_undeconvolved_image_continuum_single_field,
+)
+from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
+    make_visibility_model_continuum_single_field,
 )
 
 
@@ -73,16 +82,24 @@ def test_gridding_checks_the_given_or_image_params_taylor_order(n_taylor_terms):
 
 
 @pytest.mark.parametrize(
-    "function",
+    "call",
     [
-        add_dft_image_continuum_single_field,
-        make_dft_visibility_model_continuum_single_field,
+        lambda n: add_visibility_grid_continuum_single_field(None, None, None, n, 1e9),
+        lambda n: make_visibility_model_continuum_single_field(
+            None, None, None, n, 1e9
+        ),
+        lambda n: make_point_spread_function_continuum_single_field(
+            None, None, {"reference_frequency": 1e9}, n_taylor_terms=n
+        ),
+        lambda n: add_dft_image_continuum_single_field(None, None, n, 1e9),
+        lambda n: make_dft_visibility_model_continuum_single_field(None, None, n, 1e9),
     ],
+    ids=["grid", "grid-model", "psf", "dft", "dft-model"],
 )
 @pytest.mark.parametrize("n_taylor_terms", [True, 1.9, "2"])
-def test_dft_checks_the_taylor_order(function, n_taylor_terms):
+def test_entry_points_check_the_taylor_order(call, n_taylor_terms):
     with pytest.raises(TypeError, match="n_taylor_terms must be an integer"):
-        function(None, None, n_taylor_terms, 1.0e9)
+        call(n_taylor_terms)
 
 
 @pytest.mark.parametrize("fault", ["empty", "group", "role", "variable", "none"])

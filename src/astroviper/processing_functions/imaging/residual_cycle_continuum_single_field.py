@@ -599,6 +599,9 @@ def make_visibility_model_continuum_single_field(
     from astroviper.processing_functions.imaging.degrid_visibility_grid import (
         degrid_visibility_grid_single_field,
     )
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _validate_n_taylor_terms,
+    )
 
     # ------------------------------------------------------------
     # Load grids from memory and perform sanity checks
@@ -610,11 +613,8 @@ def make_visibility_model_continuum_single_field(
         }
     output_visibility_name = ms_data_group_out_modified["correlated_data"]
 
-    n_taylor_terms = int(n_taylor_terms)
+    n_taylor_terms = _validate_n_taylor_terms(n_taylor_terms)
     reference_frequency = float(reference_frequency)
-
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(

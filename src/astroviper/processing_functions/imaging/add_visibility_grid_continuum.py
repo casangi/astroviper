@@ -95,6 +95,9 @@ def add_visibility_grid_continuum_single_field(
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         as_gridding_kernel,
     )
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _validate_n_taylor_terms,
+    )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
     )
@@ -104,11 +107,8 @@ def add_visibility_grid_continuum_single_field(
     )
 
     # Read input
-    n_taylor_terms = int(n_taylor_terms)
+    n_taylor_terms = _validate_n_taylor_terms(n_taylor_terms)
     reference_frequency = float(reference_frequency)
-
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
 
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
