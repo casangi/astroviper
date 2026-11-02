@@ -5,6 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../include/asp_clean.hpp"
@@ -39,6 +40,21 @@ static py::buffer_info check_array(py::array& arr, const char* name, int ndim,
         if (info.shape[d] != shape[d])
             throw std::runtime_error(std::string(name) + " has an unexpected shape");
     return info;
+}
+
+// The iteration history fields (record_iteration_history), with their records.
+static const std::pair<const char*, std::vector<double> aspclean::AspResult::*>
+    kIterationHistoryRecords[] = {
+        {"iteration_peak_residual", &aspclean::AspResult::history_peak},
+        {"iteration_residual_rms", &aspclean::AspResult::history_rms},
+        {"iteration_component_l", &aspclean::AspResult::history_l},
+        {"iteration_component_m", &aspclean::AspResult::history_m},
+        {"iteration_component_scale", &aspclean::AspResult::history_scale},
+        {"iteration_component_flux", &aspclean::AspResult::history_flux},
+};
+
+static py::array_t<double> history_array(const std::vector<double>& values) {
+    return py::array_t<double>(static_cast<py::ssize_t>(values.size()), values.data());
 }
 
 template <typename T>
@@ -107,7 +123,13 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     timing["n_residual_fit_evaluations"] = res.n_residual_fit_evaluations;
     timing["significance"] = res.t_significance;
     timing["n_significance_components"] = res.n_significance_components;
+    timing["n_hogbom_runs"] = res.n_hogbom_runs;
+    timing["n_switch_no_change"] = res.n_switch_no_change;
+    timing["n_switch_point_scales"] = res.n_switch_point_scales;
+    timing["n_switch_fused"] = res.n_switch_fused;
     out["timing"] = timing;
+    if (options.record_iteration_history)
+        for (const auto& [name, record] : kIterationHistoryRecords) out[name] = history_array(res.*record);
     if (options.record_components) {
         const py::ssize_t n = static_cast<py::ssize_t>(res.components.size() / 4);
         py::array_t<double> components({n, static_cast<py::ssize_t>(4)});
@@ -138,7 +160,9 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                double asp_residual_component_max_epsilon_fraction,
                                double asp_residual_component_switch_factor,
                                bool asp_residual_component_floor_at_threshold,
-                               double asp_significance_gain) {
+                               bool asp_residual_component_positive_only,
+                               double asp_significance_gain, double asp_no_change_tolerance,
+                               bool record_iteration_history) {
     aspclean::AspOptions options;
     options.asp_scale_significance = asp_scale_significance;
     options.asp_significance = asp_significance;
@@ -149,7 +173,10 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
     options.asp_residual_component_max_epsilon_fraction = asp_residual_component_max_epsilon_fraction;
     options.asp_residual_component_switch_factor = asp_residual_component_switch_factor;
     options.asp_residual_component_floor_at_threshold = asp_residual_component_floor_at_threshold;
+    options.asp_residual_component_positive_only = asp_residual_component_positive_only;
     options.asp_significance_gain = asp_significance_gain;
+    options.asp_no_change_tolerance = asp_no_change_tolerance;
+    options.record_iteration_history = record_iteration_history;
     if (residual.ndim() != 2)
         throw std::runtime_error("residual must be a 2D array [ny, nx]");
     auto dt = residual.dtype();
@@ -270,6 +297,41 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     out["diverged"] = diverged;
     out["peak_residual"] = peak;
     out["model_flux"] = flux;
+    // Components of each kind the model update of every plane subtracted.
+    const std::pair<const char*, int aspclean::AspResult::*> counts[] = {
+        {"n_residual_components", &aspclean::AspResult::n_residual_components},
+        {"n_scale_components", &aspclean::AspResult::n_scale_components},
+        {"n_point_components", &aspclean::AspResult::n_point_components},
+        {"n_significance_components", &aspclean::AspResult::n_significance_components},
+        {"n_hogbom_runs", &aspclean::AspResult::n_hogbom_runs},
+        {"n_switch_no_change", &aspclean::AspResult::n_switch_no_change},
+        {"n_switch_point_scales", &aspclean::AspResult::n_switch_point_scales},
+        {"n_switch_fused", &aspclean::AspResult::n_switch_fused},
+    };
+    for (const auto& [name, member] : counts) {
+        py::array_t<int> a({nt, nf, np_img});
+        int* ap = a.mutable_data();
+        for (int i = 0; i < nplanes; ++i) ap[i] = results[i].*member;
+        out[name] = a;
+    }
+    // The iteration history: nested lists [t][f][p] of 1-D arrays, one value
+    // per component of the plane's model update.
+    if (options.record_iteration_history) {
+        for (const auto& [name, record] : kIterationHistoryRecords) {
+            py::list per_time;
+            for (int tt = 0, i = 0; tt < nt; ++tt) {
+                py::list per_frequency;
+                for (int ff = 0; ff < nf; ++ff) {
+                    py::list per_polarization;
+                    for (int pp = 0; pp < np_img; ++pp, ++i)
+                        per_polarization.append(history_array(results[i].*record));
+                    per_frequency.append(per_polarization);
+                }
+                per_time.append(per_frequency);
+            }
+            out[name] = per_time;
+        }
+    }
     return out;
 }
 
@@ -289,7 +351,9 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     double asp_residual_component_max_epsilon_fraction,
                                     double asp_residual_component_switch_factor,
                                     bool asp_residual_component_floor_at_threshold,
-                                    double asp_significance_gain) {
+                                    bool asp_residual_component_positive_only,
+                                    double asp_significance_gain, double asp_no_change_tolerance,
+                                    bool record_iteration_history) {
     aspclean::AspOptions options;
     options.asp_scale_significance = asp_scale_significance;
     options.asp_significance = asp_significance;
@@ -299,7 +363,10 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
     options.asp_residual_component_max_epsilon_fraction = asp_residual_component_max_epsilon_fraction;
     options.asp_residual_component_switch_factor = asp_residual_component_switch_factor;
     options.asp_residual_component_floor_at_threshold = asp_residual_component_floor_at_threshold;
+    options.asp_residual_component_positive_only = asp_residual_component_positive_only;
     options.asp_significance_gain = asp_significance_gain;
+    options.asp_no_change_tolerance = asp_no_change_tolerance;
+    options.record_iteration_history = record_iteration_history;
     if (residual.ndim() != 5)
         throw std::runtime_error(
             "residual must be a 5D array [time, frequency, polarization, y, x]");
@@ -436,7 +503,9 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("asp_residual_component_max_epsilon_fraction") = 10.0,
           py::arg("asp_residual_component_switch_factor") = 1.0,
           py::arg("asp_residual_component_floor_at_threshold") = true,
-          py::arg("asp_significance_gain") = 0.0);
+          py::arg("asp_residual_component_positive_only") = false,
+          py::arg("asp_significance_gain") = 0.0, py::arg("asp_no_change_tolerance") = 0.0,
+          py::arg("record_iteration_history") = false);
 
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp model update independently on every (time, frequency, "
@@ -465,7 +534,9 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("asp_residual_component_max_epsilon_fraction") = 10.0,
           py::arg("asp_residual_component_switch_factor") = 1.0,
           py::arg("asp_residual_component_floor_at_threshold") = true,
-          py::arg("asp_significance_gain") = 0.0);
+          py::arg("asp_residual_component_positive_only") = false,
+          py::arg("asp_significance_gain") = 0.0, py::arg("asp_no_change_tolerance") = 0.0,
+          py::arg("record_iteration_history") = false);
 
     m.def("psf_gaussian_width", &psf_width_helper,
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "

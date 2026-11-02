@@ -14,12 +14,53 @@ deconvolution progress across imaging cycles.
 
 from collections import OrderedDict, namedtuple
 
+from astroviper.processing_functions.image_analysis.image_statistics import (
+    RESIDUAL_STATISTICS,
+)
+
 # Define the key structure
 # A namedtuple is used for the keys to ensure immutability and easy comparison
 # It can be treated as a regular tuple for indexing and comparisons
 Key = namedtuple("Key", ["time", "pol", "chan"])
 
-# Fields that accumulate as lists (per-cycle measurements)
+# The iteration history of the model updates (record_iteration_history): per
+# cycle a 1-D array with one value per iteration of that cycle's model update,
+# for every deconvolver.
+ITERATION_HISTORY_FIELDS = (
+    "iteration_peak_residual",  # Signed peak residual in the mask before the iteration
+    "iteration_residual_rms",  # RMS of the residual in the mask after the iteration
+    "iteration_model_flux",  # Model flux after the iteration (Jy)
+    "iteration_component_l",  # Pixel of the component along l
+    "iteration_component_m",  # Pixel of the component along m
+    "iteration_component_scale",  # Scale of the component in pixels (0: a point)
+    "iteration_component_flux",  # Flux of the component (Jy)
+)
+
+# The components of each kind a model update subtracted, per plane: points
+# and scale components for every deconvolver, the rest for Asp (its residual
+# shaped and significance components, its Hogbom runs and what started them).
+COMPONENT_COUNT_FIELDS = (
+    "n_point_components",
+    "n_scale_components",
+    "n_residual_components",
+    "n_significance_components",
+    "n_hogbom_runs",
+    "n_switch_no_change",
+    "n_switch_point_scales",
+    "n_switch_fused",
+)
+
+# The sums of the positive and of the negative model pixels after each model
+# update.
+MODEL_FLUX_SIGN_FIELDS = ("model_flux_positive", "model_flux_negative")
+
+# Seconds of the residual update a cycle starts with and of its model update.
+CYCLE_TIMING_FIELDS = ("t_residual_update", "t_model_update")
+
+# Fields that accumulate as lists (per-cycle measurements). The residual
+# statistics (RESIDUAL_STATISTICS) are those of the residual each model
+# update leaves and of the residual of the closing stop test, and with the
+# prefix ``start_`` those of the residual each model update started from.
 FIELD_ACCUM = {
     "peakres",  # Peak residual value (Jy)
     "peakres_nomask",  # Peak residual without mask (Jy)
@@ -32,13 +73,14 @@ FIELD_ACCUM = {
     "entropy",  # Entropy of the residual at the start of each cycle
     "residual_snr",  # Peak / RMS of the residual at the start of each cycle
     "model_update_stop_code",  # Stop code of the deconvolver in each model update
-    "iteration_peak_residual",  # Signed peak residual of every iteration (Jy/beam)
-    "iteration_residual_rms",  # Residual RMS after every iteration (Jy/beam)
+    "threshold_per_cycle",  # Threshold each model update cleaned to (Jy)
+    *RESIDUAL_STATISTICS,
+    *(f"start_{field}" for field in RESIDUAL_STATISTICS),
+    *ITERATION_HISTORY_FIELDS,
+    *COMPONENT_COUNT_FIELDS,
+    *MODEL_FLUX_SIGN_FIELDS,
+    *CYCLE_TIMING_FIELDS,
 }
-
-# The iteration history of the model updates (record_iteration_history): per
-# cycle a 1-D array with one value per iteration of that cycle's model update.
-ITERATION_HISTORY_FIELDS = ("iteration_peak_residual", "iteration_residual_rms")
 
 # Fields that remain single values (constant parameters)
 FIELD_SINGLE_VALUE = {

@@ -1116,8 +1116,9 @@ class TestAspClean:
 
     def test_ring_cleaning_options_reach_the_kernel(self, monkeypatch):
         """The ``asp_*`` ring-cleaning keys of ``deconvolve_params`` are
-        handed to the kernel; residual-shaped components and the test of
-        significance per scale are on by default (off in the kernel)."""
+        handed to the kernel; residual-shaped components from positive
+        residual only and the test of significance per scale are on by
+        default (off in the kernel)."""
         nt, nf, npol, ny, nx = 1, 1, 1, 32, 32
         psf, aspclean = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
         calls = []
@@ -1137,6 +1138,7 @@ class TestAspClean:
             "asp_residual_component_max_epsilon_fraction": 5.0,
             "asp_residual_component_switch_factor": 2.0,
             "asp_residual_component_floor_at_threshold": False,
+            "asp_residual_component_positive_only": False,
             "asp_significance_gain": 0.5,
         }
         for extra in ({}, options):
@@ -1149,6 +1151,7 @@ class TestAspClean:
         assert default["asp_scale_significance"] is True
         assert default["asp_residual_component_switch_factor"] == 1.0
         assert default["asp_residual_component_floor_at_threshold"] is True
+        assert default["asp_residual_component_positive_only"] is True
         assert default["asp_significance_gain"] == 0.3
         for key, value in options.items():
             assert given[key] == value
