@@ -28,7 +28,6 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _continuum_image_for_disk,
     _create_continuum_weight_cache_store,
     _graph_timing_record,
-    _load_continuum_clean_mask,
     _mapping_with_task_primary_beams,
     _mapping_with_task_weights,
     calculate_number_of_chunks_for_continuum_imaging,
@@ -41,6 +40,7 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
 )
 from astroviper.distributed_applications.simulation import simulate_processing_set
 from astroviper.utils.beam_models import airy_disk_model
+from astroviper.utils.clean_mask import load_clean_mask
 from astroviper.utils.data_group_tools import (
     create_ps_xdt_data_groups_in_and_out,
     modify_data_groups_ps_xdt,
@@ -95,12 +95,12 @@ def _frequency_mapping(task_frequency_chunks, child_frequencies):
     return mapping, processing_set
 
 
-def test_load_continuum_clean_mask_returns_contiguous_boolean_plane(tmp_path):
+def test_load_clean_mask_returns_contiguous_boolean_plane(tmp_path):
     """The public mask file is normalized to a C-contiguous Boolean plane."""
     mask_path = tmp_path / "clean_mask.npy"
     np.save(mask_path, np.array([[0.0, 1.0, 0.5], [0.6, -1.0, 2.0]]))
 
-    actual = _load_continuum_clean_mask(mask_path, [2, 3])
+    actual = load_clean_mask(mask_path, [2, 3])
 
     assert actual.dtype == np.bool_
     assert actual.flags.c_contiguous
@@ -118,7 +118,7 @@ def test_load_continuum_clean_mask_returns_contiguous_boolean_plane(tmp_path):
         (np.zeros((2, 2)), [2, 2], "does not select any pixels"),
     ],
 )
-def test_load_continuum_clean_mask_rejects_invalid_input(
+def test_load_clean_mask_rejects_invalid_input(
     tmp_path,
     mask,
     image_size,
@@ -129,7 +129,7 @@ def test_load_continuum_clean_mask_rejects_invalid_input(
     np.save(mask_path, mask)
 
     with pytest.raises(ValueError, match=message):
-        _load_continuum_clean_mask(mask_path, image_size)
+        load_clean_mask(mask_path, image_size)
 
 
 def test_exact_frequency_selection_reorders_a_nonmonotonic_child():

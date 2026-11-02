@@ -14,6 +14,7 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _create_mfs_visibility_grid_cache_store,
 )
 from astroviper.processing_functions.imaging.utils import ImagingDict
+from astroviper.utils.clean_mask import install_clean_mask
 from tests.utils.continuum_images import (
     make_runaway_taylor_image,
     make_single_term_continuum_image,
@@ -57,7 +58,7 @@ def _mfs_uv_grid(value):
     )
 
 
-def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
+def test_install_clean_mask_broadcasts_and_registers_data_group():
     """A 2-D user mask is broadcast across all Taylor residual planes."""
     residual = xr.DataArray(
         np.zeros((1, 2, 1, 2, 3)),
@@ -76,7 +77,7 @@ def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
     )
     mask = np.array([[True, False, True], [False, True, False]])
 
-    continuum_node._install_continuum_clean_mask(image, mask)
+    install_clean_mask(image, mask)
 
     assert image["MASK"].dims == residual.dims
     np.testing.assert_array_equal(
@@ -87,12 +88,12 @@ def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
     )
     assert image.attrs["data_groups"]["residual"]["mask"] == "MASK"
     assert (
-        "User-supplied continuum deconvolution mask installed"
+        "User-supplied deconvolution mask installed"
         in (image.attrs["data_groups"]["residual"]["description"])
     )
 
 
-def test_install_continuum_clean_mask_rejects_wrong_shape():
+def test_install_clean_mask_rejects_wrong_shape():
     """Node-level validation protects direct callers from mismatched masks."""
     image = xr.Dataset(
         {
@@ -105,7 +106,7 @@ def test_install_continuum_clean_mask_rejects_wrong_shape():
     )
 
     with pytest.raises(ValueError, match="expected"):
-        continuum_node._install_continuum_clean_mask(
+        install_clean_mask(
             image,
             np.ones((3, 2), dtype=bool),
         )
