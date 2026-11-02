@@ -1228,6 +1228,7 @@ def make_mvc_taylor_normal_equation_contributions(
     reference_frequency,
     primary_beam_limit=0.2,
     mvc_minor_cycle_approximation="channel_psf",
+    include_local_beam_static=True,
 ):
     """Form additive MVC Taylor products for one map-task frequency chunk.
 
@@ -1273,6 +1274,12 @@ def make_mvc_taylor_normal_equation_contributions(
         :math:`A_\\nu/A \\simeq 1`. ``"local_beam_moments"`` retains local
         frequency-dependent primary-beam moments through :math:`G` while
         approximating the channel PSFs by a common beam-free Taylor response.
+    include_local_beam_static : bool, default True
+        If true, calculate the squared-beam moments, beam-free spectral moments,
+        and valid-channel count used by ``"local_beam_moments"``. These depend
+        only on the fixed weights, frequencies, and primary beam, so distributed
+        imaging enables them only in the first imaging cycle and caches the
+        globally reduced results for later cycles.
 
     Returns
     -------
@@ -1431,9 +1438,7 @@ def make_mvc_taylor_normal_equation_contributions(
     finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
 
     if mvc_minor_cycle_approximation == "local_beam_moments":
-        # Form the exact-gradient numerator u from A_nu R_nu and collect the
-        # A_nu^2 moments needed by the spatially varying G^-1 preconditioner in
-        # the append node.
+        # Form the exact-gradient numerator u from A_nu R_nu.
         channel_primary_beam = xr.where(
             np.isfinite(primary_beam_cube), primary_beam_cube, 0.0
         )
@@ -1488,7 +1493,10 @@ def make_mvc_taylor_normal_equation_contributions(
     )
 
     n_psf_taylor_terms = 2 * n_taylor_terms - 1
-    if mvc_minor_cycle_approximation == "local_beam_moments":
+    if (
+        mvc_minor_cycle_approximation == "local_beam_moments"
+        and include_local_beam_static
+    ):
         psf_taylor_order = xr.IndexVariable(
             "psf_taylor_order", np.arange(n_psf_taylor_terms, dtype=np.int64)
         )
@@ -2685,6 +2693,7 @@ def residual_update_continuum_single_field(
             reference_frequency=image_params["reference_frequency"],
             primary_beam_limit=primary_beam_limit,
             mvc_minor_cycle_approximation=mvc_minor_cycle_approximation,
+            include_local_beam_static=is_first_cycle,
         )
         for variable_name, data_array in contributions.data_vars.items():
             img_xds[variable_name] = data_array

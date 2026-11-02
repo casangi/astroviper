@@ -8,6 +8,7 @@ from astroviper.utils.continuum_cache import (
 from astroviper.utils.continuum_cache import (
     MFS_VISIBILITY_GRID_CACHE_GROUP as _MFS_VISIBILITY_GRID_CACHE_GROUP,
 )
+from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
 from astroviper.utils.continuum_cache import (
     MVC_OBSERVED_NORMALIZATION_CACHE as _MVC_OBSERVED_NORMALIZATION_CACHE,
 )
@@ -1057,13 +1058,14 @@ def residual_update_continuum_single_field(
     ``POINT_SPREAD_FUNCTION`` in place of the two grids.
 
     MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
-    ``MVC_RESIDUAL_WEIGHT_SUM`` and, for ``local_beam_moments``, the additive
-    moments of the per-pixel spectral fit
+    ``MVC_RESIDUAL_WEIGHT_SUM`` and, in the first imaging cycle for
+    ``local_beam_moments``, the additive moments of the per-pixel spectral fit
     (``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``,
     ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``, ``MVC_RESIDUAL_BEAM_CHANNEL_COUNT``).
-    During the first imaging cycle it also returns the additive Taylor PSF
-    numerator, PSF weight sum, weighted PB sum, PB Taylor numerator, and PB-fit
-    weight moments.
+    The append node caches those moments for later cycles. During the first
+    imaging cycle the map task also returns the additive Taylor PSF numerator,
+    PSF weight sum, weighted PB sum, PB Taylor numerator, and PB-fit weight
+    moments.
 
     Parameters
     ----------
@@ -2473,6 +2475,10 @@ def _prepare_continuum_image(
         "continuum_mode",
         image_params.get("continuum_mode", "mfs"),
     )
+    mvc_minor_cycle_approximation = input_params.get(
+        "mvc_minor_cycle_approximation",
+        "channel_psf",
+    )
 
     if continuum_mode not in ("mfs", "mvc"):
         raise ValueError(
@@ -2554,11 +2560,32 @@ def _prepare_continuum_image(
             primary_beam_taylor = fit_mvc_primary_beam_taylor(img_xds)
         effective_primary_beam = None
         if not initialize_static_products:
-            static_primary_beam = input_params["static_xds"]["PRIMARY_BEAM"]
+            if "static_xds" not in input_params:
+                raise KeyError(
+                    "static_xds must be supplied when static products are "
+                    "not initialized in this node."
+                )
+            static_xds = input_params["static_xds"]
+            static_primary_beam = static_xds["PRIMARY_BEAM"]
             effective_primary_beam = static_primary_beam.isel(
                 frequency=0,
                 drop=True,
             ).transpose("time", "polarization", "l", "m")
+
+            if mvc_minor_cycle_approximation == "local_beam_moments":
+                missing = [
+                    name
+                    for name in MVC_LOCAL_BEAM_STATIC_VARIABLES
+                    if name not in static_xds
+                ]
+                if missing:
+                    raise KeyError(
+                        f"The cached MVC local-beam state is missing {missing}."
+                    )
+                for name in MVC_LOCAL_BEAM_STATIC_VARIABLES:
+                    # Reattach shallow views of the first-cycle global moments;
+                    # finalization reads but does not modify their backing arrays.
+                    img_xds[name] = static_xds[name].copy(deep=False)
 
         (
             residual_taylor,
@@ -2593,6 +2620,12 @@ def _prepare_continuum_image(
         contribution_variables = [
             name for name in img_xds.data_vars if name.startswith("MVC_")
         ]
+        if initialize_static_products:
+            contribution_variables = [
+                name
+                for name in contribution_variables
+                if name not in MVC_LOCAL_BEAM_STATIC_VARIABLES
+            ]
         img_xds = img_xds.drop_vars(contribution_variables, errors="ignore")
 
         # ----------------------------------------------------------
@@ -2770,13 +2803,19 @@ def _prepare_continuum_image(
             )
 
         # Static variables shared with the model-update controls.
-        static_variable_names = (
+        static_image_variable_names = (
             "POINT_SPREAD_FUNCTION",
             "PRIMARY_BEAM",
             "PRIMARY_BEAM_TAYLOR",
             "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
             "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         )
+        static_variable_names = static_image_variable_names
+        if (
+            continuum_mode == "mvc"
+            and mvc_minor_cycle_approximation == "local_beam_moments"
+        ):
+            static_variable_names += MVC_LOCAL_BEAM_STATIC_VARIABLES
 
         missing = [name for name in static_variable_names if name not in img_xds]
 
@@ -2790,12 +2829,18 @@ def _prepare_continuum_image(
         # Keep the correlation-basis cache independent: img_xds is converted
         # to Stokes below, while later residual updates reinstall this cache
         # and perform that conversion exactly once per cycle.
-        static_xds = img_xds[list(static_variable_names)].copy(deep=True)
+        static_xds = img_xds[list(static_image_variable_names)].copy(deep=True)
+        for name in static_variable_names[len(static_image_variable_names) :]:
+            # The contribution arrays are dropped from img_xds before its
+            # polarization conversion, so the cache can retain them without a
+            # second image-sized allocation.
+            static_xds[name] = img_xds[name].copy(deep=False)
         static_xds.attrs = dict(img_xds.attrs)
         img_xds = img_xds.drop_vars(
             [
                 "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
                 "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+                *MVC_LOCAL_BEAM_STATIC_VARIABLES,
             ],
             errors="ignore",
         )

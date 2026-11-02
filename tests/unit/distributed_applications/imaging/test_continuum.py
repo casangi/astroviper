@@ -40,6 +40,7 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
 from astroviper.distributed_applications.simulation import simulate_processing_set
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.clean_mask import load_clean_mask
+from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
 from astroviper.utils.data_group_tools import (
     create_ps_xdt_data_groups_in_and_out,
     modify_data_groups_ps_xdt,
@@ -844,11 +845,11 @@ def test_tw_hydra_mvc_local_beam_moments_are_frequency_partition_invariant(
     tmp_path,
     tw_hydra_store,
 ):
-    """All local-beam moments are reduced across MVC frequency map tasks."""
+    """Reduced local-beam moments are partition invariant and reused in later cycles."""
     processing_set = open_processing_set(str(tw_hydra_store))
     images = []
     for n_chunks in (1, 2):
-        _, image = _run_tw_hydra_continuum(
+        result, image = _run_tw_hydra_continuum(
             tw_hydra_store,
             tmp_path / f"mvc_local_beam_moments_{n_chunks}_chunks.img.zarr",
             processing_set,
@@ -856,7 +857,19 @@ def test_tw_hydra_mvc_local_beam_moments_are_frequency_partition_invariant(
             "mvc",
             {"weighting": "natural", "weighting_scope": "local"},
             mvc_minor_cycle_approximation="local_beam_moments",
+            cycle_control_params={
+                "max_iter": 2,
+                "max_cycles": 2,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
         )
+        assert set(MVC_LOCAL_BEAM_STATIC_VARIABLES) <= set(result["static_xds"])
+        assert not set(MVC_LOCAL_BEAM_STATIC_VARIABLES) & set(image.data_vars)
         images.append(image)
 
     for variable in (

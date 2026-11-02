@@ -34,6 +34,7 @@ from astroviper.utils.continuum_cache import (
 from astroviper.utils.continuum_cache import (
     MFS_VISIBILITY_GRID_CACHE_GROUP as _MFS_VISIBILITY_GRID_CACHE_GROUP,
 )
+from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
 from astroviper.utils.continuum_cache import (
     MVC_VISIBILITY_GRID_CACHE_GROUP as _MVC_VISIBILITY_GRID_CACHE_GROUP,
 )
@@ -1341,9 +1342,11 @@ def combine_continuum_chunks(input_data, input_params):
     cycle additionally reduces ``MVC_PSF_TAYLOR_NUMERATOR``,
     ``MVC_PSF_WEIGHT_SUM``, ``MVC_PRIMARY_BEAM_WEIGHTED_SUM``,
     ``MVC_PRIMARY_BEAM_TAYLOR_NUMERATOR``, and
-    ``MVC_PRIMARY_BEAM_FIT_WEIGHT_MOMENTS``. The final two permit a weighted
-    PB Taylor fit without reducing a channel-sized image cube. None of these
-    products has a frequency dimension.
+    ``MVC_PRIMARY_BEAM_FIT_WEIGHT_MOMENTS``. For ``local_beam_moments`` it also
+    reduces the squared-beam moments, beam-free spectral moments, and valid
+    channel count in that first cycle. The append node caches these static
+    quantities, so later cycles neither recreate nor reduce their image-sized
+    arrays. None of these products has a frequency dimension.
 
     MFS also carries ``PRIMARY_BEAM_REFERENCE`` with dimensions
     ``(time, polarization, l, m)`` as a non-additive static product. On the
@@ -4185,12 +4188,11 @@ def image_continuum_single_field(
                     "MVC_RESIDUAL_TAYLOR_NUMERATOR",
                     "MVC_RESIDUAL_WEIGHT_SUM",
                 )
-                if mvc_minor_cycle_approximation == "local_beam_moments":
-                    mvc_residual_additive_variables += (
-                        "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM",
-                        "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM",
-                        "MVC_RESIDUAL_BEAM_CHANNEL_COUNT",
-                    )
+                if (
+                    is_first_cycle
+                    and mvc_minor_cycle_approximation == "local_beam_moments"
+                ):
+                    mvc_residual_additive_variables += MVC_LOCAL_BEAM_STATIC_VARIABLES
                 if is_first_cycle:
                     reduce_input_params = {
                         "continuum_mode": "mvc",
@@ -4227,6 +4229,7 @@ def image_continuum_single_field(
                 "single_precision_image": single_precision_image,
                 "instrument_polarization_basis": instrument_polarization_basis,
                 "continuum_mode": continuum_mode,
+                "mvc_minor_cycle_approximation": mvc_minor_cycle_approximation,
                 "visibility_memory_mode": visibility_memory_mode,
                 "image_store": image_store,
                 "primary_beam_limit": primary_beam_limit,

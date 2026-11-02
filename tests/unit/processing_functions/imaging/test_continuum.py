@@ -50,6 +50,7 @@ from astroviper.processing_functions.imaging.utils import Key
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (
     map_visibility_frequencies_to_image,
 )
+from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
 from tests.utils.continuum_images import make_continuum_image
 
 
@@ -877,6 +878,25 @@ def test_mvc_map_contributions_reduce_to_full_cube_result(
 
     for actual_array, expected_array in zip(actual, expected, strict=False):
         np.testing.assert_allclose(actual_array, expected_array)
+
+
+def test_later_mvc_map_omits_cached_local_beam_moments():
+    """Later MVC maps form the changing gradient without reallocating static moments."""
+    frequency = np.array([0.8e9, 0.9e9, 1.1e9, 1.2e9])
+    contributions = make_mvc_taylor_normal_equation_contributions(
+        _frequency_cube([2.0, 3.0, 7.0, 11.0], frequency),
+        None,
+        _frequency_cube([0.5, 0.7, 1.1, 1.3], frequency),
+        _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency),
+        None,
+        n_taylor_terms=2,
+        reference_frequency=1.0e9,
+        mvc_minor_cycle_approximation="local_beam_moments",
+        include_local_beam_static=False,
+    )
+
+    assert "MVC_RESIDUAL_TAYLOR_NUMERATOR" in contributions
+    assert not set(MVC_LOCAL_BEAM_STATIC_VARIABLES) & set(contributions.data_vars)
 
 
 def test_mvc_prediction_applies_channel_over_effective_primary_beam():
