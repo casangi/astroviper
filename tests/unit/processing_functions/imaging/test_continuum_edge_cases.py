@@ -10,6 +10,10 @@ import xradio.image.image_xds  # noqa: F401
 from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc import (
     add_visibility_grid_mvc_single_field,
 )
+from astroviper.processing_functions.imaging.direct_fourier_transform import (
+    add_dft_image_continuum_single_field,
+    make_dft_visibility_model_continuum_single_field,
+)
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     prepare_model_uv_continuum_single_field,
 )
@@ -66,6 +70,19 @@ def test_gridding_checks_the_given_or_image_params_taylor_order(n_taylor_terms):
         make_undeconvolved_image_continuum_single_field(
             None, None, {"n_taylor_terms": True}, None, n_taylor_terms=n_taylor_terms
         )
+
+
+@pytest.mark.parametrize(
+    "function",
+    [
+        add_dft_image_continuum_single_field,
+        make_dft_visibility_model_continuum_single_field,
+    ],
+)
+@pytest.mark.parametrize("n_taylor_terms", [True, 1.9, "2"])
+def test_dft_checks_the_taylor_order(function, n_taylor_terms):
+    with pytest.raises(TypeError, match="n_taylor_terms must be an integer"):
+        function(None, None, n_taylor_terms, 1.0e9)
 
 
 @pytest.mark.parametrize("fault", ["empty", "group", "role", "variable", "none"])

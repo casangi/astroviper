@@ -905,6 +905,8 @@ def add_dft_image_continuum_single_field(
 
     Raises
     ------
+    TypeError
+        If ``n_taylor_terms`` is not a Python or NumPy integer.
     ValueError
         For fewer than one plane, a reference frequency that is not finite
         and positive, an existing output of another shape, or as
@@ -914,14 +916,15 @@ def add_dft_image_continuum_single_field(
         dft_image,
         dft_image_uv_sampling,
     )
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _validate_n_taylor_terms,
+    )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
         is_four_correlation_basis,
     )
 
-    n_taylor_terms = int(n_taylor_terms)
+    n_taylor_terms = _validate_n_taylor_terms(n_taylor_terms)
     reference_frequency = float(reference_frequency)
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
             "reference_frequency must be a positive finite frequency in Hz."
@@ -1339,6 +1342,8 @@ def make_dft_visibility_model_continuum_single_field(
     ------
     KeyError
         If the model's data group or sky variable is absent.
+    TypeError
+        If ``n_taylor_terms`` is not a Python or NumPy integer.
     ValueError
         For fewer than one Taylor term or fewer in the model, a reference
         frequency that is not finite and positive, or as
@@ -1347,11 +1352,12 @@ def make_dft_visibility_model_continuum_single_field(
     from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
         dft_predict,
     )
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _validate_n_taylor_terms,
+    )
 
-    n_taylor_terms = int(n_taylor_terms)
+    n_taylor_terms = _validate_n_taylor_terms(n_taylor_terms)
     reference_frequency = float(reference_frequency)
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(
             "reference_frequency must be a positive finite frequency in Hz."
