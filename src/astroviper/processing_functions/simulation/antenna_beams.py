@@ -373,7 +373,10 @@ def make_zernike_jones_beam(
             outside = (x_grid**2 + y_grid**2) > 1.0
             for i_pol, i_model in enumerate(model_index):
                 aperture = zernike_surface(
-                    interp.ZPC.values[i_model, :], x_grid, y_grid
+                    interp.ZPC.values[i_model, :],
+                    x_grid,
+                    y_grid,
+                    interp.coefficient.values,
                 )
                 aperture[outside] = 0.0
                 plane = np.zeros((image_size[0], image_size[1]), dtype=np.complex128)
