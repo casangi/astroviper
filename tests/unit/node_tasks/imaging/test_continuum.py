@@ -14,6 +14,7 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _create_mfs_visibility_grid_cache_store,
 )
 from astroviper.processing_functions.imaging.utils import ImagingDict
+from astroviper.utils.clean_mask import install_clean_mask
 from tests.utils.continuum_images import (
     make_runaway_taylor_image,
     make_single_term_continuum_image,
@@ -57,7 +58,7 @@ def _mfs_uv_grid(value):
     )
 
 
-def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
+def test_install_clean_mask_broadcasts_and_registers_data_group():
     """A 2-D user mask is broadcast across all Taylor residual planes."""
     residual = xr.DataArray(
         np.zeros((1, 2, 1, 2, 3)),
@@ -76,7 +77,7 @@ def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
     )
     mask = np.array([[True, False, True], [False, True, False]])
 
-    continuum_node._install_continuum_clean_mask(image, mask)
+    install_clean_mask(image, mask)
 
     assert image["MASK"].dims == residual.dims
     np.testing.assert_array_equal(
@@ -87,12 +88,12 @@ def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
     )
     assert image.attrs["data_groups"]["residual"]["mask"] == "MASK"
     assert (
-        "User-supplied continuum deconvolution mask installed"
+        "User-supplied deconvolution mask installed"
         in (image.attrs["data_groups"]["residual"]["description"])
     )
 
 
-def test_install_continuum_clean_mask_rejects_wrong_shape():
+def test_install_clean_mask_rejects_wrong_shape():
     """Node-level validation protects direct callers from mismatched masks."""
     image = xr.Dataset(
         {
@@ -105,7 +106,7 @@ def test_install_continuum_clean_mask_rejects_wrong_shape():
     )
 
     with pytest.raises(ValueError, match="expected"):
-        continuum_node._install_continuum_clean_mask(
+        install_clean_mask(
             image,
             np.ones((3, 2), dtype=bool),
         )
@@ -336,6 +337,7 @@ def test_mfs_append_accumulates_before_preparing_fourier_model(monkeypatch):
             "single_precision_image": False,
             "processing_function_threads": 3,
             "fft_backend": "scipy",
+            "gridding_kernel_params": {"type": "exponential_semicircle"},
         },
     )
 
@@ -346,6 +348,9 @@ def test_mfs_append_accumulates_before_preparing_fourier_model(monkeypatch):
     assert captured["kwargs"]["single_precision_image"] is False
     assert captured["kwargs"]["processing_function_threads"] == 3
     assert captured["kwargs"]["fft_backend"] == "scipy"
+    assert captured["kwargs"]["gridding_kernel_params"] == {
+        "type": "exponential_semicircle"
+    }
 
 
 def test_mvc_append_returns_accumulated_image_model_without_global_fft(monkeypatch):
@@ -624,6 +629,43 @@ def test_first_cycle_does_not_rewrite_loaded_global_weights(monkeypatch):
 
     assert calls == {"load": 1, "write": 0}
     assert "weight_datasets" not in result
+
+
+@pytest.mark.parametrize(
+    "gridding_kernel_params",
+    [None, {"type": "prolate_spheroidal", "support": 9, "oversampling": 300}],
+)
+def test_residual_update_node_passes_the_gridding_kernel_on(
+    monkeypatch, gridding_kernel_params
+):
+    """The map node hands gridding_kernel_params to the processing function."""
+    monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
+    monkeypatch.setattr(
+        continuum_node, "_load_continuum_weights_in_place", lambda ps, *a, **k: ps
+    )
+    received = {}
+
+    def fake_residual_update(ps_xdt, img_xds, *args, **kwargs):
+        received.update(kwargs)
+        return img_xds, pd.DataFrame({"imaging_weights_calculated": [0.0]})
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.residual_update_continuum_single_field",
+        fake_residual_update,
+    )
+    params = _weight_node_params()
+    params.update(
+        image_store="image.zarr",
+        weight_memory_mode="in_place",
+        weight_cache_is_active=True,
+        continuum_mode="mfs",
+        data_group={"correlated_data": "VISIBILITY"},
+        gridding_kernel_params=gridding_kernel_params,
+    )
+
+    continuum_node.residual_update_continuum_single_field(**params)
+
+    assert received["gridding_kernel_params"] == gridding_kernel_params
 
 
 def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):

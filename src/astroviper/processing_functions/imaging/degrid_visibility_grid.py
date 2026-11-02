@@ -51,7 +51,7 @@ def degrid_visibility_grid_single_field(
     cgk_1D : GriddingKernel or np.ndarray
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or the bare table of the default prolate spheroidal kernel of support 7.
+        or a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xarray.Dataset
         Image geometry supplying direction-cell sizes and unpadded image shape.
     grid : numpy.ndarray

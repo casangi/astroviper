@@ -367,7 +367,21 @@ def test_parallel_hands_are_loaded_alone(
 def test_single_task_visibility_cache_modes_match_driver_default(
     tmp_path, processing_sets, continuum_mode
 ):
-    """One-leaf in-memory and on-disk caches reproduce default recomputation."""
+    """One-leaf in-memory and on-disk caches reproduce default recomputation.
+
+    The model and the point spread function agree to 5e-6 (measured: bit for
+    bit). In single precision the cached observed grid minus the model grid
+    rounds in complex64, and the image correction of the default kernel (5e-5
+    in the image corners, 0.0068 per axis at the edge of the image kept)
+    amplifies that rounding in the residual there: 2.6e-4 (MFS) and 3.3e-5
+    (MVC) at a corner pixel, at most 2.1e-7 in the inner half of the image
+    (5e-13 in double precision). The residual agrees to 5e-6 in the inner half
+    and to 1e-3 out to the corners.
+    """
+    inner_half = {
+        "l": slice(IMAGE_SIZE[0] // 4, 3 * IMAGE_SIZE[0] // 4),
+        "m": slice(IMAGE_SIZE[1] // 4, 3 * IMAGE_SIZE[1] // 4),
+    }
     images = {}
     stores = {}
     for mode in ("recompute", "in_memory", "in_place"):
@@ -384,12 +398,19 @@ def test_single_task_visibility_cache_modes_match_driver_default(
 
     for mode in ("in_memory", "in_place"):
         for variable in ("SKY_RESIDUAL", "SKY_MODEL", "POINT_SPREAD_FUNCTION"):
+            region = inner_half if variable == "SKY_RESIDUAL" else {}
             np.testing.assert_allclose(
-                images[mode][variable],
-                images["recompute"][variable],
+                images[mode][variable].isel(region),
+                images["recompute"][variable].isel(region),
                 rtol=1e-5,
                 atol=5e-6,
             )
+        np.testing.assert_allclose(
+            images[mode]["SKY_RESIDUAL"],
+            images["recompute"]["SKY_RESIDUAL"],
+            rtol=1e-5,
+            atol=1e-3,
+        )
         cache_name = (
             "_MFS_VISIBILITY_GRID_CACHE"
             if continuum_mode == "mfs"

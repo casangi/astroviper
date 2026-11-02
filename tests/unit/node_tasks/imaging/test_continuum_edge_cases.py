@@ -77,6 +77,7 @@ def test_append_supports_reference_frequency_and_explicit_controls(
         "fft_backend": "numpy",
         "image_data_variables_keep": ["sky_model"],
         "image_data_group_in_name": "custom",
+        "gridding_kernel_params": {"type": "least_misfit", "support": 9},
     }
     actual = _resolve_continuum_append_configuration(params)
     assert actual["reference_frequency"] == 100.0
@@ -89,6 +90,7 @@ def test_append_supports_reference_frequency_and_explicit_controls(
         "fft_backend",
         "image_data_variables_keep",
         "image_data_group_in_name",
+        "gridding_kernel_params",
     ):
         assert actual[name] == params[name]
 
