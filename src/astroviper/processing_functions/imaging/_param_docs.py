@@ -105,11 +105,20 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
 
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
-    'threaded across planes) cleans Taylor term zero only. ``"mtmfs"``\n'
-    "(C++, multi-term multi-frequency synthesis) cleans the Taylor terms\n"
-    'together and needs ``image_params["n_taylor_terms"]`` from 2 to 4; with\n'
-    '``n_taylor_terms=1`` it falls back to ``"hogbom"`` with a warning. Other values\n'
-    "are refused before anything is written."
+    'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
+    "(C++, adaptive scale pixel) cleans Taylor term zero only and needs\n"
+    '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
+    "(``asp_scale_significance``) needs a ``clean_mask`` that leaves more\n"
+    "pixels of the primary-beam support outside it than the image has\n"
+    "outside that support: Asp takes the noise from the median absolute\n"
+    "deviation of the pixels outside its mask, and MVC sets the residual to\n"
+    "0 outside the support. Without a clean mask that noise is 0, or after\n"
+    "the residual-shaped components that of their sidelobes there (a warning\n"
+    'is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
+    "synthesis) cleans the Taylor terms together and needs\n"
+    '``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``\n'
+    'it falls back to ``"hogbom"`` with a warning. Other values are refused\n'
+    "before anything is written."
 )
 
 _CONTINUUM_MODE_DOC = (
@@ -440,8 +449,8 @@ IMAGING_PARAM_DOCS = {
         "  to the bit with and without it, and the RMS is the sum of squares\n"
         "  the peak search of the next iteration makes anyway, so it costs no\n"
         "  extra pass over the image per iteration. Hogbom deconvolvers only:\n"
-        '  ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.\n'
-        "  No CASA equivalent.\n"
+        '  ``deconvolver="asp"`` and continuum ``deconvolver="mtmfs"`` raise\n'
+        "  ``ValueError``. Default ``False``. No CASA equivalent.\n"
         "- ``exact_psf_subtraction`` : If ``True``, a Hogbom model update\n"
         "  subtracts the PSF of every component it finds from the whole residual\n"
         "  image, with a PSF of twice the image size made once per channel from\n"
@@ -454,8 +463,9 @@ IMAGING_PARAM_DOCS = {
         "  image-sized PSF either way. Costs a second PSF per channel (four\n"
         "  times the pixels, kept through the channel's cycles) and a\n"
         "  subtraction over the whole image at every iteration. Hogbom\n"
-        '  deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.\n'
-        "  Default ``False``. No CASA equivalent.\n"
+        '  deconvolvers of cube imaging only: ``deconvolver="asp"`` and\n'
+        "  continuum imaging raise ``ValueError``. Default ``False``. No CASA\n"
+        "  equivalent.\n"
         "- ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends\n"
         "  after each of its Hogbom runs (51 or 510 point components) unless\n"
         "  the RMS of the residual has fallen, by less than a factor 1.5, since\n"
