@@ -28,8 +28,8 @@ _IMAGE_PARAMS_DOC = (
 
 _CONTINUUM_IMAGE_PARAMS_DOC = (
     _IMAGE_PARAMS_DOC + "\nContinuum imaging also requires ``frequency_coords``,\n"
-    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz;\n"
-    "``reference_frequency_hz`` is a deprecated alias. ``spectral_reference``\n"
+    "``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.\n"
+    "``spectral_reference``\n"
     'sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``\n'
     "selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and\n"
     "``list_blockage_diameters`` are arrays in metres,\n"
@@ -116,9 +116,8 @@ _CONTINUUM_DECONVOLVER_DOC = (
     "the residual-shaped components that of their sidelobes there (a warning\n"
     'is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
     "synthesis) cleans the Taylor terms together and needs\n"
-    '``image_params["n_taylor_terms"]`` from 2 to 4; with ``n_taylor_terms=1``\n'
-    'it falls back to ``"hogbom"`` with a warning. Other values are refused\n'
-    "before anything is written."
+    '``image_params["n_taylor_terms"]`` from 2 to 4. Other values are\n'
+    "refused before anything is written."
 )
 
 _CONTINUUM_MODE_DOC = (
@@ -462,8 +461,8 @@ IMAGING_PARAM_DOCS = {
         "  signed peak of the residual inside the clean mask before the\n"
         "  component (the peak the threshold test sees; for MT-MFS that of\n"
         "  Taylor term zero, and for a residual-shaped component of Asp with\n"
-        "  ``asp_rc_positive_only``, the default, the largest positive\n"
-        "  residual), the RMS of that residual inside the clean mask\n"
+        "  ``asp_residual_component_positive_only``, the default, the largest\n"
+        "  positive residual), the RMS of that residual inside the clean mask\n"
         "  after it, the model flux after it, and the component: its pixel\n"
         "  along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an\n"
         "  Asp residual-shaped component) and its flux, to follow the\n"
@@ -510,7 +509,7 @@ IMAGING_PARAM_DOCS = {
         "  iterations go on from there. They remove the ring residuals Asp\n"
         "  leaves on resolved emission in far fewer iterations, and take no\n"
         "  residual below ``threshold_per_cycle``. Further keys\n"
-        "  (``asp_rc_*``) are described in\n"
+        "  (``asp_residual_component_*``) are described in\n"
         "  :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.\n"
         "  Asp only. Default ``True``. No CASA equivalent.\n"
         "- ``asp_scale_significance`` : If ``True``, Asp measures the noise of\n"

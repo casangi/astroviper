@@ -437,15 +437,14 @@ class TestDeconvolve:
             for field in ITERATION_HISTORY_FIELDS:
                 assert field not in entry
 
-    @pytest.mark.parametrize("algorithm", ["asp", "aspclean", "asp_clean"])
-    def test_asp_records_every_component(self, algorithm):
+    def test_asp_records_every_component(self):
         """One record per component (Asp also counts the iteration that ends
         the model update on its threshold test); the component fluxes add up
         to the model, and the RMS is that of the masked residual left."""
         xds = _image_dataset()
         imaging_dict = deconvolve(
             img_xds=xds,
-            algorithm=algorithm,
+            algorithm="asp",
             deconvolve_params={
                 "gain": GAIN,
                 "max_iter": 40,
@@ -487,11 +486,13 @@ class TestDeconvolve:
             assert len(result[field][0][0][0]) > 0
 
     def test_validate_record_iteration_history(self):
-        for deconvolver in ("hogbom", "HOGBOM_MANY_THREADS", "asp", "mtmfs"):
+        for deconvolver in ("hogbom", "hogbom_many_threads", "asp", "mtmfs"):
             validate_record_iteration_history(deconvolver, True)
         validate_record_iteration_history("multiscale", False)
         with pytest.raises(ValueError, match="'multiscale'"):
             validate_record_iteration_history("multiscale", True)
+        with pytest.raises(ValueError, match="'HOGBOM'"):
+            validate_record_iteration_history("HOGBOM", True)
 
     def test_parameter_defaults_to_false(self):
         assert _validate_deconvolve_params({})["record_iteration_history"] is False

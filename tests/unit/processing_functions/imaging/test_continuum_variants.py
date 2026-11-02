@@ -119,6 +119,13 @@ def test_restoration_layouts_match_actual_cube_backend(psf_axis, beam_axis, lega
     assert float(result.SKY_RESTORED.max()) == pytest.approx(2.25)
 
 
+def test_asp_restores_as_hogbom():
+    """An Asp model of Taylor term zero is restored as a Högbom one."""
+    reference, _ = restore_continuum_image(make_continuum_image())
+    result, _ = restore_continuum_image(make_continuum_image(), deconvolver="asp")
+    xr.testing.assert_identical(result.SKY_RESTORED, reference.SKY_RESTORED)
+
+
 @pytest.mark.parametrize("image_shape", [(8, 8), (7, 7), (7, 10), (10, 7), (8, 11)])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype):
@@ -909,7 +916,7 @@ def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(monkeypatch, asp_opti
             "threshold_per_cycle": thresholds,
             "gain": 0.2,
             "max_iter_divergence": 3,
-            "largestscale": 4,
+            "asp_largest_scale": 4,
             "asp_residual_components": asp_options,
             "asp_scale_significance": asp_options,
         },
@@ -927,9 +934,9 @@ def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(monkeypatch, asp_opti
     assert kwargs["max_iter_divergence"] == 3
     assert kwargs["divergence_rms_factor"] == pytest.approx(1.2)
     assert kwargs["divergence_peak_factor"] == np.inf
-    assert kwargs["residual_components"] is asp_options
-    assert kwargs["scale_significance"] is asp_options
-    assert kwargs["largestscale"] == 4
+    assert kwargs["asp_residual_components"] is asp_options
+    assert kwargs["asp_scale_significance"] is asp_options
+    assert kwargs["asp_largest_scale"] == 4
 
     expected_model = np.zeros(image.SKY_RESIDUAL.shape)
     expected_model[..., 8, 7] = 0.5

@@ -17,13 +17,6 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
 )
 
 
-def test_public_api_resolves_single_term_mtmfs_to_hogbom():
-    with pytest.warns(UserWarning, match="n_taylor_terms=1.*falling back.*hogbom"):
-        resolved = _resolve_continuum_deconvolver("mtmfs", {"n_taylor_terms": 1})
-
-    assert resolved == "hogbom"
-
-
 @pytest.mark.parametrize("n_taylor_terms", [2, 3, 4])
 def test_public_api_preserves_supported_mtmfs_taylor_orders(n_taylor_terms):
     assert (
@@ -37,7 +30,10 @@ def test_public_api_preserves_supported_mtmfs_taylor_orders(n_taylor_terms):
     [
         ({}, KeyError, "must contain 'n_taylor_terms'"),
         ({"n_taylor_terms": 1.0}, TypeError, "must be an integer"),
-        ({"n_taylor_terms": 0}, ValueError, "between 2 and 4"),
+        ({"n_taylor_terms": True}, TypeError, "must be an integer"),
+        ({"n_taylor_terms": "2"}, TypeError, "must be an integer"),
+        ({"n_taylor_terms": 0}, ValueError, "at least 1"),
+        ({"n_taylor_terms": 1}, ValueError, "between 2 and 4"),
         ({"n_taylor_terms": 5}, ValueError, "between 2 and 4"),
     ],
 )
@@ -68,9 +64,7 @@ def test_public_api_rejects_msv2_before_creating_output(monkeypatch, tmp_path):
     assert not output.exists()
 
 
-@pytest.mark.parametrize(
-    "deconvolver", ["hogbom_many_threads", "clark", "", "aspclean", "asp_clean"]
-)
+@pytest.mark.parametrize("deconvolver", ["hogbom_many_threads", "clark", "", "MTMFS"])
 def test_public_api_rejects_deconvolvers_the_continuum_model_update_lacks(
     deconvolver,
 ):
@@ -90,16 +84,8 @@ def test_public_api_resolves_asp_with_one_taylor_term():
     "params,error,message",
     [
         ({}, KeyError, "must contain 'n_taylor_terms' when deconvolver='asp'"),
-        (
-            {"n_taylor_terms": 1.0},
-            TypeError,
-            "must be an integer when deconvolver='asp'",
-        ),
-        (
-            {"n_taylor_terms": 0},
-            ValueError,
-            r"requires image_params\['n_taylor_terms'\] = 1",
-        ),
+        ({"n_taylor_terms": 1.0}, TypeError, "must be an integer"),
+        ({"n_taylor_terms": 0}, ValueError, "at least 1"),
         (
             {"n_taylor_terms": 2},
             ValueError,
@@ -256,25 +242,18 @@ def test_public_api_refuses_unsupported_cycle_options_before_writing(
         {"reference_frequency": np.float32(100.0)},
         {"reference_frequency": xr.DataArray(100.0)},
         {"reference_frequency": np.array([100.0])},
-        {"reference_frequency_hz": 100.0},
-        {"reference_frequency": 100.0, "reference_frequency_hz": np.float32(100.0)},
     ],
 )
 def test_taylor_expansion_is_resolved_to_python_scalars(n_taylor_terms, keys):
-    """NumPy and xarray scalars are accepted; ``n_taylor_terms`` becomes an int and the
-    deprecated alias is replaced by ``reference_frequency``, a float in Hz."""
+    """NumPy and xarray scalars are accepted; ``n_taylor_terms`` becomes an int and
+    ``reference_frequency`` a float in Hz."""
     params = {"n_taylor_terms": n_taylor_terms, **keys}
-    if "reference_frequency_hz" in params:
-        with pytest.warns(FutureWarning, match="reference_frequency_hz"):
-            _resolve_continuum_taylor_expansion(params)
-    else:
-        _resolve_continuum_taylor_expansion(params)
+    _resolve_continuum_taylor_expansion(params)
     assert params == {"n_taylor_terms": 2, "reference_frequency": 100.0}
     assert type(params["n_taylor_terms"]) is int
     assert type(params["reference_frequency"]) is float
 
 
-@pytest.mark.filterwarnings("ignore::FutureWarning")
 @pytest.mark.parametrize(
     "params,error,message",
     [
@@ -283,16 +262,12 @@ def test_taylor_expansion_is_resolved_to_python_scalars(n_taylor_terms, keys):
             TypeError,
             "an integer",
         ),
-        ({"n_taylor_terms": 2}, KeyError, "must contain 'reference_frequency'"),
         (
-            {
-                "n_taylor_terms": 2,
-                "reference_frequency": 100.0,
-                "reference_frequency_hz": 101.0,
-            },
-            ValueError,
-            "two different reference frequencies",
+            {"n_taylor_terms": True, "reference_frequency": 100.0},
+            TypeError,
+            "an integer",
         ),
+        ({"n_taylor_terms": 2}, KeyError, "must contain 'reference_frequency'"),
         (
             {"n_taylor_terms": 2, "reference_frequency": 0.0},
             ValueError,
@@ -300,11 +275,6 @@ def test_taylor_expansion_is_resolved_to_python_scalars(n_taylor_terms, keys):
         ),
         (
             {"n_taylor_terms": 2, "reference_frequency": np.nan},
-            ValueError,
-            "finite and positive",
-        ),
-        (
-            {"n_taylor_terms": 2, "reference_frequency_hz": -1.0},
             ValueError,
             "finite and positive",
         ),

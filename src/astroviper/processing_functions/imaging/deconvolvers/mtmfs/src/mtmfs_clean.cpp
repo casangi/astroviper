@@ -404,7 +404,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                      const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
                      T threshold_per_cycle, T mask_threshold,
                      const deconvolvers::DivergenceControl<T>& divergence, std::ptrdiff_t residual_term_stride,
-                     bool record_history) {
+                     bool record_iteration_history) {
     if (max_iter_per_cycle_updated < 0) throw std::invalid_argument("max_iter_per_cycle_updated must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) ||
         !std::isfinite(static_cast<double>(threshold_per_cycle)) ||
@@ -529,19 +529,20 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     };
 
     // The signed peak and the RMS of the Taylor-0 residual in the mask at the
-    // last test (record_history).
+    // last test (record_iteration_history).
     double last_peak = 0.0, last_rms = 0.0;
     const double n_masked =
-        record_history ? static_cast<double>(std::count_if(vec_scale_masks[0].begin(), vec_scale_masks[0].end(),
-                                                           [](T v) { return v != static_cast<T>(0); }))
-                       : 0.0;
+        record_iteration_history
+            ? static_cast<double>(std::count_if(vec_scale_masks[0].begin(), vec_scale_masks[0].end(),
+                                                [](T v) { return v != static_cast<T>(0); }))
+            : 0.0;
     auto check_convergence = [&](int itercount, bool component_selected) -> int {
         double sum_squares = 0.0;
         const PeakResult<T> pr = find_max_abs_mask<T>(mat_r[static_cast<std::size_t>(w.ind2(0, 0))].data(),
                                                       vec_scale_masks[0].data(), nx, ny, sum_squares);
         const T norma = static_cast<T>(1.0 / w.mat_a[0][0]);
         const T rmaxval = std::abs(pr.value * norma);
-        if (record_history) {
+        if (record_iteration_history) {
             last_peak = static_cast<double>(pr.value * norma);
             last_rms = n_masked > 0 ? std::sqrt(sum_squares / n_masked) * std::abs(static_cast<double>(norma)) : 0.0;
         }
@@ -670,7 +671,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             const double scale_size = w.scales[static_cast<std::size_t>(max_scale_index)];
             ++(scale_size == 0.0 ? out.n_point_components : out.n_scale_components);
             stop = check_convergence(itercount, true);
-            if (record_history) {
+            if (record_iteration_history) {
                 out.history_peak.push_back(peak_before);
                 out.history_rms.push_back(last_rms);
                 out.history_l.push_back(global_max_pos[1]);

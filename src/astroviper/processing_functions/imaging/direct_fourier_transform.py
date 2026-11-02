@@ -796,7 +796,7 @@ def check_dft_continuum_parameters(
         'with the gridding_kernel_params type "dft" (the direct Fourier '
         "transform), which makes no uv grids: "
     )
-    if str(continuum_mode).lower() != "mfs":
+    if continuum_mode != "mfs":
         raise ValueError(
             f"continuum_mode {continuum_mode!r} is not available "
             + refusal

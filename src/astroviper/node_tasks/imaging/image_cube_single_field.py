@@ -748,8 +748,8 @@ def image_cube_single_field(
           signed peak of the residual inside the clean mask before the
           component (the peak the threshold test sees; for MT-MFS that of
           Taylor term zero, and for a residual-shaped component of Asp with
-          ``asp_rc_positive_only``, the default, the largest positive
-          residual), the RMS of that residual inside the clean mask
+          ``asp_residual_component_positive_only``, the default, the largest
+          positive residual), the RMS of that residual inside the clean mask
           after it, the model flux after it, and the component: its pixel
           along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an
           Asp residual-shaped component) and its flux, to follow the
@@ -796,7 +796,7 @@ def image_cube_single_field(
           iterations go on from there. They remove the ring residuals Asp
           leaves on resolved emission in far fewer iterations, and take no
           residual below ``threshold_per_cycle``. Further keys
-          (``asp_rc_*``) are described in
+          (``asp_residual_component_*``) are described in
           :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
           Asp only. Default ``True``. No CASA equivalent.
         - ``asp_scale_significance`` : If ``True``, Asp measures the noise of

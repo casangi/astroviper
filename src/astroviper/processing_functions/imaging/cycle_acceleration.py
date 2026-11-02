@@ -108,6 +108,21 @@ def _inner_product(first, second, n_reduction_dims):
     return np.einsum(f"...{axes},...{axes}->...", first, second, dtype=np.float64)
 
 
+def _validate_momentum_coefficient(momentum_coefficient):
+    """Refuse a ``momentum_coefficient`` that is not a real number in ``[0, 1)``."""
+    import numpy as np
+
+    if (
+        isinstance(momentum_coefficient, bool)
+        or not isinstance(momentum_coefficient, int | float | np.integer | np.floating)
+        or not 0.0 <= momentum_coefficient < 1.0
+    ):
+        raise ValueError(
+            "momentum_coefficient must be a real number in [0, 1); received "
+            f"{momentum_coefficient!r}."
+        )
+
+
 def _ramp(momentum_coefficient, cycles):
     """Return the capped coefficient ``min(mu, (j - 1) / (j + 2))`` in float64."""
     import numpy as np
@@ -398,7 +413,7 @@ def nesterov_momentum_model_step(
         If an input is not real floating point or the dtypes differ.
     ValueError
         If the dimensions, sizes, ``plain_step_planes`` or the state do not
-        match.
+        match, or ``momentum_coefficient`` is not a real number in ``[0, 1)``.
     """
     import numpy as np
     import toolviper.utils.logger as logger
@@ -427,7 +442,7 @@ def nesterov_momentum_model_step(
     n_reduction_dims = len(reduction_dims)
     plane_shape = plain.shape + (1,) * n_reduction_dims
     reduction_axes = tuple(range(plain.ndim, increment.ndim))
-    momentum_coefficient = float(momentum_coefficient)
+    _validate_momentum_coefficient(momentum_coefficient)
 
     with np.errstate(invalid="ignore", over="ignore"):
         residual_norm = np.sqrt(

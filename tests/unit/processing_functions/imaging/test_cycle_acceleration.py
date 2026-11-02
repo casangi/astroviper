@@ -5,6 +5,7 @@ The toy problems are image-domain imaging cycles on two independent
 the dirty image ``b = H sky`` and the residual update ``r(theta) = b - H theta``.
 """
 
+from fractions import Fraction
 from types import SimpleNamespace
 
 import numpy as np
@@ -489,6 +490,13 @@ def test_momentum_coefficient_ramps_up_from_every_start_to_the_cap(mu, coefficie
                 rtol=1e-15,
             )
         np.testing.assert_array_equal(state.MOMENTUM_CYCLES, [cycles])
+
+
+@pytest.mark.parametrize("mu", [True, "0.5", 1.0, -0.1, np.nan, Fraction(1, 2)])
+def test_momentum_refuses_a_coefficient_outside_zero_to_one(mu):
+    increment = _pixels([1, 0, 0, 0])
+    with pytest.raises(ValueError, match="momentum_coefficient"):
+        nesterov_momentum_model_step(increment, increment, momentum_coefficient=mu)
 
 
 def test_momentum_is_updated_with_the_current_coefficient():
