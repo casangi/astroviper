@@ -178,6 +178,48 @@ def test_forward_frequency_and_taylor_match_independent_fft(dtype, backend):
     np.testing.assert_array_equal(*outputs)
 
 
+@pytest.mark.parametrize(
+    "stokes,basis",
+    [
+        (["I", "Q"], "linear"),
+        (["I", "V"], "circular"),
+        (["I", "Q", "U", "V"], "linear"),
+        (["I", "Q", "U", "V"], "circular"),
+    ],
+)
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_forward_combines_stokes_planes_into_correlations(stokes, basis, dtype):
+    """With ``new_polarization_basis`` the grid is that of the image turned to
+    the basis by transform_polarization_basis, bit for bit, and the Stokes
+    image is left as it is (here in the reverse of the transform's order)."""
+    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
+
+    real_dtype = np.float32 if dtype == np.complex64 else np.float64
+    sky = np.random.default_rng(7).standard_normal((2, 2, len(stokes), 8, 8))
+    image = xr.Dataset(
+        {"MODEL": (("time", "frequency", "polarization", "l", "m"), sky)},
+        coords={"time": [0, 1], "frequency": [10, 20], "polarization": stokes[::-1]},
+        attrs={"type": "image_dataset", "data_groups": {"model": {"sky": "MODEL"}}},
+    ).astype(real_dtype)
+    original = image.MODEL.copy(deep=True)
+    turned = transform_polarization_basis(image.copy(deep=True), basis)
+    expected = _forward(turned, "frequency", dtype, fft_backend="scipy").OUTPUT
+
+    result = _forward(
+        image,
+        "frequency",
+        dtype,
+        fft_backend="scipy",
+        image_data_variables_keep=["sky"],
+        new_polarization_basis=basis,
+    )
+
+    np.testing.assert_array_equal(result.OUTPUT.values, expected.values)
+    xr.testing.assert_identical(result.MODEL, original)
+
+
 @pytest.mark.parametrize("axis", ["frequency", "taylor_term"])
 @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
 @pytest.mark.parametrize("existing", ["compatible", "dtype", "shape", "dimensions"])

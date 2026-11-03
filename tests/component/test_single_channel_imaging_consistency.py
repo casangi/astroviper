@@ -308,7 +308,8 @@ DECONVOLUTION_CONTROLS = {
     "max_iter_per_cycle": -1,
 }
 # The model, residual and restored image of the two imagers, over the brightest
-# apparent Stokes I flux: 5.3e-16 (their iterations are the same).
+# apparent Stokes I flux: the same bit for bit, with the same iterations
+# (measured on macOS arm64).
 DECONVOLUTION_RTOL = 1e-12
 # Errors of the deconvolution against the truth, per Stokes plane (measured in
 # both imagers; :func:`deconvolution_errors`): the model in the 3 x 3 pixels of
@@ -817,7 +818,7 @@ def assert_same_products(cube, continuum, sky):
     for name in ("primary_beam", "written_primary_beam"):
         difference = np.abs(continuum[name] - cube[name]).max()
         assert difference <= CONTINUUM_PRIMARY_BEAM_ATOL, (name, difference)
-    # the cube's model went through its basis round trip (measured: 2.8e-17)
+    # both write the true model unchanged (measured on macOS arm64)
     for run in (cube, continuum):
         difference = np.abs(run["model"] - sky["true_model"]).max()
         assert difference <= PRODUCT_RTOL * sky["f_ref"]["I"], difference
