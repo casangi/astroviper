@@ -220,6 +220,30 @@ def test_forward_combines_stokes_planes_into_correlations(stokes, basis, dtype):
     xr.testing.assert_identical(result.MODEL, original)
 
 
+def test_forward_refuses_correlations_to_stokes():
+    """Only coefficients 0, ±1 and ±i are added in place; turning correlations
+    to Stokes takes halves and is refused."""
+    image = xr.Dataset(
+        {
+            "MODEL": (
+                ("time", "frequency", "polarization", "l", "m"),
+                np.ones((1, 1, 2, 8, 8)),
+            )
+        },
+        coords={"time": [0], "frequency": [10], "polarization": ["XX", "YY"]},
+        attrs={"type": "image_dataset", "data_groups": {"model": {"sky": "MODEL"}}},
+    )
+
+    with pytest.raises(ValueError, match="is not 0, 1, -1, 1j or -1j"):
+        _forward(
+            image,
+            "frequency",
+            np.complex128,
+            fft_backend="scipy",
+            new_polarization_basis="stokes",
+        )
+
+
 @pytest.mark.parametrize("axis", ["frequency", "taylor_term"])
 @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
 @pytest.mark.parametrize("existing", ["compatible", "dtype", "shape", "dimensions"])
