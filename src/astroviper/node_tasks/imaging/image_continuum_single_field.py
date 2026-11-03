@@ -3761,7 +3761,17 @@ def model_update_continuum_single_field(
 
     # Prepare control parameters
     img_xds = input_data["image"]
-    cycle_control_params = input_params["cycle_control_params"]
+    # Stopping statistics and model updates must use the same clean support.
+    # Resolve the public beam cutoff once into a local control view; measuring
+    # residuals outside that support can keep cleaning running on pixels the
+    # model update cannot address. Preserve the caller's original configuration.
+    cycle_control_params = {
+        **input_params["cycle_control_params"],
+        "primary_beam_limit": input_params.get(
+            "primary_beam_limit",
+            input_params["cycle_control_params"].get("primary_beam_limit", 0.0),
+        ),
+    }
     deconvolver = input_params.get("deconvolver", "hogbom")
     processing_function_threads = input_params.get(
         "processing_function_threads",
@@ -3883,9 +3893,6 @@ def model_update_continuum_single_field(
 
     deconvolve_params = {
         **cycle_control_params,
-        "primary_beam_limit": input_params.get(
-            "primary_beam_limit", cycle_control_params.get("primary_beam_limit", 0.0)
-        ),
         "max_iter_per_cycle_updated": max_iter_per_cycle_updated,
         "threshold_per_cycle": threshold_per_cycle,
     }

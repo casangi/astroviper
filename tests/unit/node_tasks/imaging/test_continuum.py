@@ -2295,3 +2295,62 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
             assert fields["model_flux_negative"][cycle] == pytest.approx(
                 plane[plane < 0].sum(), rel=1e-12
             )
+
+
+@pytest.mark.parametrize(
+    "top_level_limit,control_limit,expected_limit,expected_peak",
+    [
+        (0.2, None, 0.2, 0.05),
+        (0.2, 0.2, 0.2, 0.05),
+        (None, 0.2, 0.2, 0.05),
+        (None, None, 0.0, 5.0),
+        (0.0, None, 0.0, 5.0),
+    ],
+)
+def test_continuum_stopping_and_model_update_share_effective_beam_limit(
+    monkeypatch, top_level_limit, control_limit, expected_limit, expected_peak
+):
+    """An outer residual must affect cycle thresholds only if it can be cleaned."""
+    image, _, _ = make_single_term_continuum_image()
+    image.SKY_RESIDUAL.values.fill(0.05)
+    image.SKY_RESIDUAL.values[..., 0, 0] = 5.0
+    image.PRIMARY_BEAM.values[..., 0, 0] = 0.1
+    image.MAX_SIDELOBE_POINT_SPREAD_FUNCTION.values.fill(0.5)
+    controls = {
+        "max_iter": 10,
+        "max_cycles": 3,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "max_iter_per_cycle": 5,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    if control_limit is not None:
+        controls["primary_beam_limit"] = control_limit
+    original_controls = controls.copy()
+    input_params = {"cycle_control_params": controls}
+    if top_level_limit is not None:
+        input_params["primary_beam_limit"] = top_level_limit
+
+    class BackendReached(Exception):
+        pass
+
+    def inspect_model_update(image_arg, deconvolver, effective_controls, **kwargs):
+        assert effective_controls["primary_beam_limit"] == expected_limit
+        # The real residual statistics and cycle controller must use the same
+        # support as the model update: half of the largest cleanable residual.
+        np.testing.assert_allclose(
+            effective_controls["threshold_per_cycle"], 0.5 * expected_peak
+        )
+        raise BackendReached
+
+    monkeypatch.setattr(
+        continuum_processing, "model_update_mtmfs_single_field", inspect_model_update
+    )
+    with pytest.raises(BackendReached):
+        continuum_node.model_update_continuum_single_field(
+            {"image": image}, input_params
+        )
+    assert input_params["cycle_control_params"] is controls
+    assert controls == original_controls
