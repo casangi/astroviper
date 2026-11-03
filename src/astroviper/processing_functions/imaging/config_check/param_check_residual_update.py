@@ -861,6 +861,41 @@ def check_weight_density_method(params):
         )
 
 
+# ========================================================================
+# Geometry heuristic arguments
+# ========================================================================
+
+
+def check_pixels_per_beam(value):
+    """Require finite, positive sampling across the fitted minor beam axis."""
+    require_finite_real("pixels_per_beam", value, positive=True, scalar=True)
+
+
+def check_beam_level(value, *, name="level"):
+    """A beam boundary must lie strictly between zero and peak power."""
+    level = require_finite_real(name, value, scalar=True)
+    if not 0 < level < 1:
+        raise ValueError(f"{name} must lie in (0, 1).")
+
+
+def check_telescope_prescription(telescope, *, default_robust=False):
+    """Require a supported prescription after observatory metadata is interpreted.
+
+    ngVLA has a beam model but no pipeline robustness prescription. Do not
+    silently substitute another telescope's robustness.
+    """
+    if default_robust:
+        if telescope not in ("alma", "aca", "vla"):
+            raise ValueError(
+                f"no default robust for telescope {telescope!r}; pass robust explicitly"
+            )
+    elif telescope not in ("ALMA", "ACA", "VLA", "EVLA", "NGVLA"):
+        raise ValueError(
+            f"no primary beam model for telescope {telescope!r}; expected ALMA, "
+            "ACA, VLA, EVLA or ngVLA"
+        )
+
+
 def check_delphi_parameters(config):
     """Check supplied Delphi controls before metadata access or its PSF pass.
 
@@ -871,20 +906,18 @@ def check_delphi_parameters(config):
 
     # --- Sampling and stopping policy ---
     # Both controls are positive physical multipliers, not zero sentinels.
-    for name in ("pixels_per_beam", "n_sigma"):
-        if name in config:
-            require_finite_real(name, config[name], positive=True, scalar=True)
+    if "pixels_per_beam" in config:
+        check_pixels_per_beam(config["pixels_per_beam"])
+    if "n_sigma" in config:
+        require_finite_real("n_sigma", config["n_sigma"], positive=True, scalar=True)
 
     # --- Field-of-view boundary ---
     # A beam level strictly between zero and its peak defines a finite radius.
     if "image_edge_primary_beam_limit" in config:
-        level = require_finite_real(
-            "image_edge_primary_beam_limit",
+        check_beam_level(
             config["image_edge_primary_beam_limit"],
-            scalar=True,
+            name="image_edge_primary_beam_limit",
         )
-        if not 0 < level < 1:
-            raise ValueError("image_edge_primary_beam_limit must lie in (0, 1).")
 
     # --- Weighting recipe ---
     # Delphi derives missing Briggs robustness from the telescope metadata.

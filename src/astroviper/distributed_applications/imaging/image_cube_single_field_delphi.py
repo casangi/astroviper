@@ -277,6 +277,7 @@ def image_cube_single_field_delphi(
         float(frequency_coords.min()),
         image_edge_primary_beam_limit,
         primary_beam_params,
+        input_checked=True,
     )
     max_antenna_separation = longest_antenna_separation(metadata["antenna_positions"])
     cell_guess = cell_size_guess(max_antenna_separation, float(frequency_coords.max()))
@@ -319,6 +320,7 @@ def image_cube_single_field_delphi(
     cell = cell_size_from_beam_fit(
         point_spread_function_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"],
         pixels_per_beam,
+        input_checked=True,
     )
     max_cell = max_cell_size_for_uv_coverage(cell_guess)
     if cell > max_cell:

@@ -130,6 +130,7 @@ def _target_files():
         "processing_functions/imaging/degrid_visibility_grid.py",
         "processing_functions/imaging/direct_fourier_transform.py",
         "processing_functions/imaging/cycle_acceleration.py",
+        "processing_functions/imaging/utils/imaging_parameter_heuristics.py",
         "distributed_applications/image_analysis/moments.py",
         "node_tasks/image_analysis/moments.py",
         "processing_functions/image_analysis/moments.py",
