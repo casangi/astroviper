@@ -201,6 +201,7 @@ def point_spread_function_gaussian_fit(
             delta,
             interpolation_method,
             processing_function_threads=processing_function_threads,
+            input_checked=True,
         )
     max_sidelobe = _max_sidelobe_after_gaussian_subtraction(
         img_xds[psf_name].values,
@@ -506,6 +507,8 @@ def psf_gaussian_fit_core(
     delta,
     interpolation_method="linear",
     processing_function_threads: int = 1,
+    *,
+    input_checked=False,
 ):
     """
     core function to fit gaussian to psf
@@ -535,10 +538,17 @@ def psf_gaussian_fit_core(
         concurrently via a ``ThreadPoolExecutor``. Values ``<= 0`` fall
         back to ``os.cpu_count()``. Each slice writes to its own entry in
         the output, so results are independent of the thread count.
+    input_checked : bool, optional
+        Skip fitting-grid checks already performed by the calling layer.
+        Checks and handling of the actual PSF remain active.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_psf_fit_counts,
+        )
+
+        check_psf_fit_counts("sampling", sampling)
     sampling = np.asarray(sampling)
-    if np.any(sampling <= 1):
-        raise ValueError("sampling must contain at least two points per axis")
 
     ellipse_params = np.zeros(image_to_fit.shape[0:3] + (3,), dtype=np.float64)
     if np.all(np.isnan(image_to_fit)):

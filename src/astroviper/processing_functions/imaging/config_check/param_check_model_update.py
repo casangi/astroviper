@@ -71,21 +71,9 @@ def check_model_update(config, *, mode, require_complete=False):
 
     # --- Direct Gaussian-fitting controls ---
     # These are helper arguments, not additional top-level imaging options.
-    for name, minimum in (("npix_window", 1), ("sampling", 2)):
-        if name not in config:
-            continue
-        values = np.asarray(config[name])
-        if values.shape != (2,) or values.dtype.kind not in "iu":
-            raise TypeError(f"{name} must contain two integer counts.")
-        if np.any(values < minimum):
-            message = (
-                "sampling must contain at least two points per axis"
-                if name == "sampling"
-                else "npix_window must be positive"
-            )
-            raise ValueError(message)
-        if name == "npix_window" and np.any(values % 2 == 0):
-            raise ValueError("npix_window must contain odd counts.")
+    for name in ("npix_window", "sampling"):
+        if name in config:
+            check_psf_fit_counts(name, config[name])
     if "cutoff" in config:
         cutoff = require_finite_real("cutoff", config["cutoff"], scalar=True)
         if cutoff < 0:
@@ -1362,3 +1350,25 @@ def check_cycle_heuristic_parameters(config):
         )
         if not 0 < fraction < 1:
             raise ValueError("psf_fraction must lie in (0, 1).")
+
+
+def check_psf_fit_counts(name, value):
+    """Require a usable two-axis fitting grid before interpolation.
+
+    Sampling needs two points per axis to define a spacing. Fitting windows
+    need positive odd counts to retain a central pixel. Refuse fractional
+    counts before NumPy grid construction can interpret or truncate them.
+    """
+    minimum = 2 if name == "sampling" else 1
+    values = np.asarray(value)
+    if values.shape != (2,) or values.dtype.kind not in "iu":
+        raise TypeError(f"{name} must contain two integer counts.")
+    if np.any(values < minimum):
+        message = (
+            "sampling must contain at least two points per axis"
+            if name == "sampling"
+            else "npix_window must be positive"
+        )
+        raise ValueError(message)
+    if name == "npix_window" and np.any(values % 2 == 0):
+        raise ValueError("npix_window must contain odd counts.")

@@ -202,3 +202,13 @@ def test_measured_peak_stays_checked_with_checked_policy():
 
     with pytest.raises(ValueError, match="peak_residual"):
         predicted_imaging_cycles(float("inf"), 1, 0.5, input_checked=True)
+
+
+@pytest.mark.parametrize("sampling", [(1, 3), (2.5, 3), (True, True), (3,), "3"])
+def test_psf_fit_core_rejects_sampling_before_accessing_image(sampling):
+    from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
+        psf_gaussian_fit_core,
+    )
+
+    with pytest.raises((TypeError, ValueError), match="sampling"):
+        psf_gaussian_fit_core(None, None, None, sampling, 0.1, None)
