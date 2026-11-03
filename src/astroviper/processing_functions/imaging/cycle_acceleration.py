@@ -108,21 +108,6 @@ def _inner_product(first, second, n_reduction_dims):
     return np.einsum(f"...{axes},...{axes}->...", first, second, dtype=np.float64)
 
 
-def _validate_momentum_coefficient(momentum_coefficient):
-    """Refuse a ``momentum_coefficient`` that is not a real number in ``[0, 1)``."""
-    import numpy as np
-
-    if (
-        isinstance(momentum_coefficient, bool)
-        or not isinstance(momentum_coefficient, int | float | np.integer | np.floating)
-        or not 0.0 <= momentum_coefficient < 1.0
-    ):
-        raise ValueError(
-            "momentum_coefficient must be a real number in [0, 1); received "
-            f"{momentum_coefficient!r}."
-        )
-
-
 def _ramp(momentum_coefficient, cycles):
     """Return the capped coefficient ``min(mu, (j - 1) / (j + 2))`` in float64."""
     import numpy as np
@@ -326,6 +311,8 @@ def nesterov_momentum_model_step(
     plain_step_planes=None,
     cycle_acceleration_state_xds=None,
     momentum_coefficient=0.5,
+    *,
+    input_checked=False,
 ):
     """Turn a model increment into a Nesterov momentum step.
 
@@ -396,6 +383,12 @@ def nesterov_momentum_model_step(
         and ``"none"`` 33; the paper found models oscillating with constant
         coefficients of 0.7 to 0.9.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     model_step : xarray.DataArray
@@ -415,6 +408,13 @@ def nesterov_momentum_model_step(
         If the dimensions, sizes, ``plain_step_planes`` or the state do not
         match, or ``momentum_coefficient`` is not a real number in ``[0, 1)``.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+            check_momentum_coefficient,
+        )
+
+        check_momentum_coefficient(momentum_coefficient)
+
     import numpy as np
     import toolviper.utils.logger as logger
     import xarray as xr
@@ -442,7 +442,6 @@ def nesterov_momentum_model_step(
     n_reduction_dims = len(reduction_dims)
     plane_shape = plain.shape + (1,) * n_reduction_dims
     reduction_axes = tuple(range(plain.ndim, increment.ndim))
-    _validate_momentum_coefficient(momentum_coefficient)
 
     with np.errstate(invalid="ignore", over="ignore"):
         residual_norm = np.sqrt(

@@ -46,3 +46,13 @@ def test_density_operations_reject_unsupported_configuration_before_data(name, p
             function(None, None, None, params)
         else:
             function(None, None, params)
+
+
+@pytest.mark.parametrize("coefficient", [True, "0.5", float("nan"), -0.1, 1.0])
+def test_momentum_checks_configuration_before_accessing_arrays(coefficient):
+    from astroviper.processing_functions.imaging.cycle_acceleration import (
+        nesterov_momentum_model_step,
+    )
+
+    with pytest.raises(ValueError, match="momentum_coefficient"):
+        nesterov_momentum_model_step(None, None, momentum_coefficient=coefficient)

@@ -139,11 +139,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # --- Momentum coefficient ---
     # Zero selects a plain step; a coefficient at or above one is not supported.
     if "momentum_coefficient" in config:
-        coefficient = require_finite_real(
-            "momentum_coefficient", config["momentum_coefficient"], scalar=True
-        )
-        if not 0 <= coefficient < 1:
-            raise ValueError("momentum_coefficient must lie in [0, 1).")
+        check_momentum_coefficient(config["momentum_coefficient"])
 
     # --- Direct Fourier-transform workflow ---
     # DFT makes images directly, so it cannot supply or cache uv-grid products.
@@ -473,3 +469,19 @@ def check_configuration_consistency(reference, candidate, *, names=None):
             )
         elif not np.array_equal(first, second):
             raise ValueError(f"Workflow configuration changed {name!r} between stages.")
+
+
+def check_momentum_coefficient(value):
+    """Require finite scalar momentum in [0, 1), including for direct calls.
+
+    Zero selects a plain step. The supported momentum recurrence requires a
+    coefficient below one; refuse malformed inputs before creating state.
+    """
+    try:
+        coefficient = require_finite_real("momentum_coefficient", value, scalar=True)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "momentum_coefficient must be a real number in [0, 1)."
+        ) from error
+    if not 0 <= coefficient < 1:
+        raise ValueError("momentum_coefficient must lie in [0, 1).")

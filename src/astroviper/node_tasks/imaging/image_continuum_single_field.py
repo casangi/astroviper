@@ -2990,6 +2990,7 @@ def _accelerate_continuum_model_increment(
             plain_step_planes=(stop_codes != IMAGING_CONTINUE) | entropy_followed,
             cycle_acceleration_state_xds=state_xds,
             momentum_coefficient=input_params["momentum_coefficient"],
+            input_checked=input_params.get("input_checked", False),
         )
     else:
         raise ValueError(
