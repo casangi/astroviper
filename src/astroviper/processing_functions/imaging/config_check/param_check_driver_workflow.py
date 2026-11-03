@@ -100,6 +100,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         "restore",
         "primary_beam_correction",
         "skunk_works",
+        "calculate_parameters_only",
         "overwrite",
         "clear_cache",
         "vizualize_graph",

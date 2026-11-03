@@ -616,7 +616,7 @@ def test_metadata_refuses_several_fields():
 
 @pytest.mark.parametrize("name", ["pixels_per_beam", "n_sigma"])
 def test_delphi_refuses_a_non_positive_input(tmp_path, name):
-    with pytest.raises(ValueError, match=f"{name} must be positive"):
+    with pytest.raises(ValueError, match=f"{name} must be.*positive"):
         delphi_module.image_cube_single_field_delphi(
             "unused.ps.zarr", str(tmp_path / "cube.img.zarr"), **{name: 0}
         )

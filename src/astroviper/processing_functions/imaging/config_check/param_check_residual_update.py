@@ -793,3 +793,38 @@ def check_weight_density_method(params):
         raise ValueError(
             "Weight-density operations require Briggs or uniform weighting; natural and briggs_abs are not supported."
         )
+
+
+def check_delphi_parameters(config):
+    """Check supplied Delphi controls before metadata access or its PSF pass.
+
+    Image geometry and cycle thresholds are derived later and must be checked
+    as a new imaging configuration. This check never resolves defaults.
+    """
+    require_mapping("config", config)
+
+    # --- Sampling and stopping policy ---
+    # Both controls are positive physical multipliers, not zero sentinels.
+    for name in ("pixels_per_beam", "n_sigma"):
+        if name in config:
+            require_finite_real(name, config[name], positive=True, scalar=True)
+
+    # --- Field-of-view boundary ---
+    # A beam level strictly between zero and its peak defines a finite radius.
+    if "image_edge_primary_beam_limit" in config:
+        level = require_finite_real(
+            "image_edge_primary_beam_limit",
+            config["image_edge_primary_beam_limit"],
+            scalar=True,
+        )
+        if not 0 < level < 1:
+            raise ValueError("image_edge_primary_beam_limit must lie in (0, 1).")
+
+    # --- Weighting recipe ---
+    # Delphi derives missing Briggs robustness from the telescope metadata.
+    if config.get("weighting", "briggs") not in ("natural", "uniform", "briggs"):
+        raise ValueError("Delphi weighting must be natural, uniform, or briggs.")
+    if config.get("robust") is not None:
+        robust = require_finite_real("robust", config["robust"], scalar=True)
+        if not -2 <= robust <= 2:
+            raise ValueError("robust must be between -2 and 2.")

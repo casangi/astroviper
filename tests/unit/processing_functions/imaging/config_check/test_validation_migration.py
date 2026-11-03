@@ -158,3 +158,28 @@ def test_psf_node_checks_configuration_before_loading():
             None,
             "missing.ps.zarr",
         )
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("pixels_per_beam", 0),
+        ("pixels_per_beam", float("inf")),
+        ("n_sigma", 0),
+        ("n_sigma", float("nan")),
+        ("image_edge_primary_beam_limit", 0),
+        ("image_edge_primary_beam_limit", 1),
+        ("robust", float("nan")),
+        ("robust", 3),
+    ],
+)
+def test_delphi_rejects_controls_before_metadata_io(tmp_path, name, value):
+    from astroviper.distributed_applications.imaging.image_cube_single_field_delphi import (
+        image_cube_single_field_delphi,
+    )
+
+    output = tmp_path / "never-created.zarr"
+    with pytest.raises(ValueError, match=name):
+        image_cube_single_field_delphi("missing.ps.zarr", str(output), **{name: value})
+    assert not output.exists()
+    assert not (tmp_path / "never-created.zarr.parameters.json").exists()
