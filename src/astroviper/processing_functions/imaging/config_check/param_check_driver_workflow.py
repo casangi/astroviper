@@ -74,7 +74,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # --- Primary-beam cutoff ---
     # The fractional cutoff must be one finite value in the interval [0, 1).
     if "primary_beam_limit" in config:
-        from astroviper.processing_functions.imaging.config_check._primary_beam import (
+        from astroviper.processing_functions.imaging.config_check._predicates import (
             check_primary_beam_limit,
         )
 

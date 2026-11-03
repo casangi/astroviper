@@ -5,6 +5,17 @@ checks. `check_config` calls all three with the same configuration and mode.
 A validator returns `None` on success and raises at the first invalid setting.
 Checks are grouped and described in their owning `param_check_*` module.
 
+Shared imaging rules live in `_predicates.py`: primary-beam cutoffs, Briggs
+robustness, and positive integer Taylor counts. The three parameter-check modules
+call these utilities independently. `_common.py` retains the basic type/numerical
+checks and imaging-mode definitions.
+
+`_spectral.py` validates selected spectral arrays, identifies positive-weight
+channels, and builds the common weighted Taylor design. Spectral SVD and
+approximate Hessian diagnostics retain their numerical acceptance tests and
+error context in their owning checkers. Neither utility imports a parameter-check
+module, inserts defaults, or modifies supplied configuration or arrays.
+
 | Imaging kind | Field layout | Status |
 | --- | --- | --- |
 | `cube` | `single_field` | Supported |

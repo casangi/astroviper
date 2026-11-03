@@ -189,10 +189,3 @@ def _check_explicit_beam_model(model):
         )
     if model.attrs.get("n_sample") is not None:
         require_integer("beam_model n_sample", model.attrs["n_sample"], minimum=2)
-
-
-def check_primary_beam_limit(value):
-    """Reject cutoffs that cannot retain a finite, nonempty beam region."""
-    limit = require_finite_real("primary_beam_limit", value, scalar=True)
-    if not 0 <= limit < 1:
-        raise ValueError("primary_beam_limit must lie in [0, 1).")

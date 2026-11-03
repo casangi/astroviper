@@ -1,7 +1,5 @@
 """Check deconvolver selection, Taylor order, and stopping thresholds."""
 
-from numbers import Integral
-
 import numpy as np
 
 from astroviper.processing_functions.imaging.config_check._common import (
@@ -9,6 +7,10 @@ from astroviper.processing_functions.imaging.config_check._common import (
     require_finite_real,
     require_integer,
     require_mapping,
+)
+from astroviper.processing_functions.imaging.config_check._predicates import (
+    check_primary_beam_limit,
+    check_taylor_count,
 )
 from astroviper.utils.param_docs import shares_param_docs
 
@@ -100,7 +102,7 @@ def check_model_update(config, *, mode, require_complete=False):
     # --- Cube spectral model ---
     # Cube planes are independent images; a multi-term continuum model is invalid.
     if mode.imaging_kind == "cube" and "n_taylor_terms" in image_params:
-        require_integer("n_taylor_terms", image_params["n_taylor_terms"], minimum=1)
+        check_taylor_count(image_params["n_taylor_terms"])
         if image_params["n_taylor_terms"] != 1:
             raise ValueError("Cube imaging supports only n_taylor_terms=1.")
 
@@ -120,15 +122,9 @@ def check_model_update(config, *, mode, require_complete=False):
     if mode.imaging_kind == "continuum" and "n_taylor_terms" in image_params:
         n_taylor_terms = image_params["n_taylor_terms"]
 
-        # --- Taylor-order type ---
-        # A term count must be an integer; Boolean values are not counts.
-        if isinstance(n_taylor_terms, bool) or not isinstance(n_taylor_terms, Integral):
-            raise TypeError("n_taylor_terms must be an integer.")
-
-        # --- Positive Taylor order ---
-        # Every continuum model needs at least its constant term.
-        if n_taylor_terms < 1:
-            raise ValueError("n_taylor_terms must be positive.")
+        # --- Positive integer Taylor order ---
+        # Booleans and fractional counts cannot define a Taylor basis.
+        check_taylor_count(n_taylor_terms)
 
         # --- Single-term deconvolver compatibility ---
         # Högbom and Asp update only the constant term of a continuum model.
@@ -287,14 +283,13 @@ def check_model_update(config, *, mode, require_complete=False):
         "min_psf_fraction",
         "max_psf_fraction",
         "mask_threshold",
-        "primary_beam_limit",
     ):
         if name in controls:
             value = require_finite_real(name, controls[name], scalar=True)
-            if not 0 <= value <= 1 or (name == "primary_beam_limit" and value == 1):
-                raise ValueError(
-                    f"{name} must lie in [0, 1] (primary_beam_limit must be < 1)."
-                )
+            if not 0 <= value <= 1:
+                raise ValueError(f"{name} must lie in [0, 1].")
+    if "primary_beam_limit" in controls:
+        check_primary_beam_limit(controls["primary_beam_limit"])
     if controls.get("min_psf_fraction", 0.05) > controls.get("max_psf_fraction", 0.8):
         raise ValueError("min_psf_fraction must not exceed max_psf_fraction.")
     for name in ("threshold_sigma", "threshold_tolerance", "psf_sidelobe_factor"):
@@ -600,6 +595,11 @@ def check_taylor_hessian_approximation(
     """
     import warnings
 
+    from astroviper.processing_functions.imaging.config_check._spectral import (
+        make_weighted_taylor_design,
+        prepare_spectral_samples,
+    )
+
     diagnostics = {
         **(context or {}),
         "approximation": "frequency_moment_gram",
@@ -619,27 +619,16 @@ def check_taylor_hessian_approximation(
 
     # --- Selected spectral metadata ---
     # Only positive-weight samples constrain the approximate Taylor system.
-    frequencies = require_finite_real(
-        "selected frequencies", frequencies, positive=True
-    )
-    weights = require_finite_real("effective imaging weights", effective_weights)
-    reference = float(
-        require_finite_real(
-            "reference_frequency", reference_frequency, positive=True, scalar=True
+    try:
+        frequencies, weights, reference, usable = prepare_spectral_samples(
+            frequencies,
+            effective_weights,
+            n_taylor_terms=n_taylor_terms,
+            reference_frequency=reference_frequency,
+            precision=precision,
         )
-    )
-    require_integer("n_taylor_terms", n_taylor_terms, minimum=1)
-    if (
-        frequencies.ndim != 1
-        or weights.shape != frequencies.shape
-        or np.any(weights < 0)
-    ):
-        fail(
-            "frequencies and non-negative weights must be matching one-dimensional arrays"
-        )
-    if np.dtype(precision) not in (np.dtype("float32"), np.dtype("float64")):
-        fail("working precision must be float32 or float64")
-    usable = weights > 0
+    except (TypeError, ValueError) as error:
+        fail(str(error))
     if np.unique(frequencies[usable]).size < n_taylor_terms:
         fail("fewer distinct positive-weight frequencies than Taylor terms")
     diagnostics["reference_frequency"] = reference
@@ -651,12 +640,15 @@ def check_taylor_hessian_approximation(
     # sum(q_i * x_i**(k+l)), where x_i = (nu_i - nu_0) / nu_0.
     # Reuse the effective weights already collected before graph construction.
     # A common weight normalization does not affect any relative test below.
-    q = weights[usable] / weights[usable].max()
-    x = (frequencies[usable].astype(np.float64) - reference) / reference
-    with np.errstate(over="ignore", invalid="ignore"):
-        design = np.vander(x, N=n_taylor_terms, increasing=True) * np.sqrt(q)[:, None]
-    if not np.all(np.isfinite(design)):
-        fail("weighted Taylor moments overflow at this reference frequency")
+    try:
+        design, _, _ = make_weighted_taylor_design(
+            frequencies[usable],
+            weights[usable],
+            n_taylor_terms=n_taylor_terms,
+            reference_frequency=reference,
+        )
+    except ValueError as error:
+        fail(str(error))
 
     # Form D**(-1/2) H_hat D**(-1/2) by normalizing columns of A first.
     # This avoids squaring the raw Taylor dynamic range when forming A.T @ A.

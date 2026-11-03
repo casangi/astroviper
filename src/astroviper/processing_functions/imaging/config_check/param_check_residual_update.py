@@ -6,8 +6,11 @@ from astroviper.processing_functions.imaging.config_check._common import (
     imaging_weighting_scope,
     require_boolean,
     require_finite_real,
-    require_integer,
     require_mapping,
+)
+from astroviper.processing_functions.imaging.config_check._predicates import (
+    check_briggs_robust,
+    check_taylor_count,
 )
 from astroviper.utils.param_docs import shares_param_docs
 
@@ -113,13 +116,7 @@ def check_residual_update(config, *, mode, require_complete=False):
     for name in ("n_taylor_terms", "n_psf_taylor_terms"):
         value = image_params.get(name, config.get(name))
         if value is not None:
-            if (
-                np.ndim(value) == 0
-                and np.asarray(value).dtype.kind in "iu"
-                and value < 1
-            ):
-                raise ValueError(f"{name} must be positive.")
-            require_integer(name, value, minimum=1)
+            check_taylor_count(value, name=name)
 
     # --- Explicit helper precision ---
     # Native complex grids have exactly these two supported storage types.
@@ -248,7 +245,7 @@ def check_residual_update(config, *, mode, require_complete=False):
     # --- MVC beam support ---
     # The cutoff is known before a primary-beam image is available.
     if "primary_beam_limit" in config:
-        from astroviper.processing_functions.imaging.config_check._primary_beam import (
+        from astroviper.processing_functions.imaging.config_check._predicates import (
             check_primary_beam_limit,
         )
 
@@ -341,9 +338,7 @@ def check_residual_update(config, *, mode, require_complete=False):
             raise KeyError(
                 "Briggs weighting requires imaging_weights_params['robust']."
             )
-        robust = require_finite_real("robust", weights["robust"], scalar=True)
-        if not -2 <= robust <= 2:
-            raise ValueError("robust must be between -2 and 2.")
+        check_briggs_robust(weights["robust"])
 
     # --- Absolute Briggs noise ---
     # The absolute-noise recipe requires a positive noise scale in Jy.
@@ -625,8 +620,9 @@ def check_spectral_sampling(
     """
     import warnings
 
-    from astroviper.processing_functions.imaging.config_check._common import (
-        require_integer,
+    from astroviper.processing_functions.imaging.config_check._spectral import (
+        make_weighted_taylor_design,
+        prepare_spectral_samples,
     )
 
     # ========================================================================
@@ -656,29 +652,15 @@ def check_spectral_sampling(
     # --- Frequency and weight metadata ---
     # Rank is meaningful only for finite, positive frequencies and valid weights.
     try:
-        frequencies = require_finite_real(
-            "selected frequencies", frequencies, positive=True
+        frequencies, weights, reference_value, usable = prepare_spectral_samples(
+            frequencies,
+            effective_weights,
+            n_taylor_terms=n_taylor_terms,
+            reference_frequency=reference_frequency,
+            precision=precision,
         )
-        weights = require_finite_real("effective imaging weights", effective_weights)
-        reference_value = require_finite_real(
-            "reference_frequency", reference_frequency, positive=True, scalar=True
-        )
-        require_integer("n_taylor_terms", n_taylor_terms, minimum=1)
     except (TypeError, ValueError) as error:
         fail(str(error))
-    if frequencies.ndim != 1 or weights.shape != frequencies.shape:
-        fail(
-            "frequencies and effective weights must be matching one-dimensional arrays"
-        )
-    if np.any(weights < 0):
-        fail("effective imaging weights must be non-negative")
-    if np.dtype(precision) not in (np.dtype("float32"), np.dtype("float64")):
-        fail("working precision must be float32 or float64")
-
-    # Use a scalar numerical value for arithmetic; an xarray scalar's ufunc
-    # dispatch would otherwise try to retain its zero-dimensional coordinates.
-    # The supplied reference object and caller configuration remain unchanged.
-    reference_value = float(reference_value)
     diagnostics["reference_frequency"] = reference_value
     diagnostics["n_taylor_terms"] = int(n_taylor_terms)
 
@@ -688,7 +670,6 @@ def check_spectral_sampling(
 
     # --- Independent usable samples ---
     # Zero-weight channels contribute neither constraints nor frequency support.
-    usable = weights > 0
     usable_frequencies = frequencies[usable]
     diagnostics["usable_channel_count"] = int(usable.sum())
     diagnostics["distinct_frequency_count"] = int(np.unique(usable_frequencies).size)
@@ -702,14 +683,15 @@ def check_spectral_sampling(
     # --- Weighted Taylor design ---
     # A common weight scale cancels from the singular-value ratio and avoids
     # overflowing the square root for otherwise valid large imaging weights.
-    normalized_weights = weights[usable] / weights[usable].max()
-    sqrt_weights = np.sqrt(normalized_weights)
-    x = (usable_frequencies.astype(np.float64) - reference_value) / reference_value
-    with np.errstate(over="ignore", invalid="ignore"):
-        design = np.vander(x, N=n_taylor_terms, increasing=True)
-        design *= sqrt_weights[:, None]
-    if not np.all(np.isfinite(design)):
-        fail("the weighted Taylor design overflows at this reference frequency")
+    try:
+        design, normalized_weights, sqrt_weights = make_weighted_taylor_design(
+            usable_frequencies,
+            weights[usable],
+            n_taylor_terms=n_taylor_terms,
+            reference_frequency=reference_value,
+        )
+    except ValueError as error:
+        fail(str(error))
     left_vectors, singular_values, right_vectors_transposed = np.linalg.svd(
         design, full_matrices=False
     )
@@ -924,9 +906,7 @@ def check_delphi_parameters(config):
     if config.get("weighting", "briggs") not in ("natural", "uniform", "briggs"):
         raise ValueError("Delphi weighting must be natural, uniform, or briggs.")
     if config.get("robust") is not None:
-        robust = require_finite_real("robust", config["robust"], scalar=True)
-        if not -2 <= robust <= 2:
-            raise ValueError("robust must be between -2 and 2.")
+        check_briggs_robust(config["robust"])
 
 
 def check_frequency_matching(value, *, name="matching"):
