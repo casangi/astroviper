@@ -1317,3 +1317,48 @@ def check_deconvolver(deconvolver, *, mode):
             f"Deconvolution algorithm {deconvolver!r} not recognized; {mode.imaging_kind} deconvolver must be one of "
             f"{allowed_deconvolvers}; received {deconvolver!r}."
         )
+
+
+def check_cycle_heuristic_parameters(config):
+    """Validate supplied heuristic policy without checking measured residuals."""
+    require_mapping("heuristic controls", config)
+
+    # --- Shared iteration policy ---
+    # Validate the originals before helpers turn them into Python scalars.
+    from astroviper.processing_functions.imaging.config_check._common import (
+        CUBE_SINGLE_FIELD,
+    )
+
+    controls = {
+        name: config[name]
+        for name in ("gain", "max_iter", "primary_beam_limit")
+        if name in config
+    }
+    check_model_update({"cycle_control_params": controls}, mode=CUBE_SINGLE_FIELD)
+
+    # --- Noise-based stopping ---
+    # A finite positive multiplier preserves the meaning of a noise threshold.
+    if "n_sigma" in config:
+        try:
+            require_finite_real(
+                "n_sigma", config["n_sigma"], positive=True, scalar=True
+            )
+        except ValueError as error:
+            raise ValueError("n_sigma must be positive and finite.") from error
+    if "noisy" in config:
+        require_boolean("noisy", config["noisy"])
+    if config.get("noisy", False):
+        if config.get("thermal_noise") is None:
+            raise ValueError("noisy=True needs a positive thermal_noise")
+        require_finite_real(
+            "thermal_noise", config["thermal_noise"], positive=True, scalar=True
+        )
+
+    # --- Predicted geometric decay ---
+    # A fraction in (0, 1) gives a finite, positive logarithmic decay rate.
+    if "psf_fraction" in config:
+        fraction = require_finite_real(
+            "psf_fraction", config["psf_fraction"], scalar=True
+        )
+        if not 0 < fraction < 1:
+            raise ValueError("psf_fraction must lie in (0, 1).")
