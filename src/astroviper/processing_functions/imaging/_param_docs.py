@@ -138,6 +138,10 @@ _CONTINUUM_MODE_DOC = (
 )
 
 IMAGING_PARAM_DOCS = {
+    "feather.selection": """``xarray`` ``isel`` selection applied to both input images (e.g. a
+frequency channel range or an ``l``/``m`` sub-window). Chunking is determined
+from the selected images.""",
+    "feather.fft_backend": """FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).""",
     "require_complete": """Require all coordinates and cycle controls needed by a distributed driver.
 Lower-level entry points check only the configuration they receive.""",
     "input_checked": """Skip configuration checks already performed by the calling layer.

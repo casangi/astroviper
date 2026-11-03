@@ -312,3 +312,11 @@ spatial Hessians, and native memory layout. A valid configuration cannot prove
 that these runtime objects satisfy their contracts. Metadata-driven beam
 inference and the cached numerical kernel-edge test are single shared
 implementations called during preflight, not duplicate configuration predicates.
+
+## Feather
+
+Feather has a separate validation entry point, without a cube/continuum mode.
+`check_feather_config` checks input paths and output policy before image access;
+`check_feather_inputs` checks the shapes and dtypes of opened `SKY` products
+without loading pixels. The driver retains file access, existence checks, and
+chunking. A missing overwrite key is read as `False` without changing `outim`.

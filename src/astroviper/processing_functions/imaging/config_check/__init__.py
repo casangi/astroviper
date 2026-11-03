@@ -15,6 +15,10 @@ from astroviper.processing_functions.imaging.config_check.check_config import (
 from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
     check_driver_workflow,
 )
+from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+    check_feather_config,
+    check_feather_inputs,
+)
 from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
     check_model_update,
 )
@@ -27,6 +31,8 @@ __all__ = [
     "CUBE_SINGLE_FIELD",
     "CONTINUUM_SINGLE_FIELD",
     "check_config",
+    "check_feather_config",
+    "check_feather_inputs",
     "check_driver_workflow",
     "check_model_update",
     "check_residual_update",

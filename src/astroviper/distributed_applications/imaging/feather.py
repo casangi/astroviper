@@ -28,6 +28,7 @@ import xarray as xr
 from numcodecs import Blosc
 
 import astroviper.node_tasks as node_tasks
+from astroviper.utils.param_docs import shares_param_docs
 
 _sky = "SKY"
 _beam = "BEAM_FIT_PARAMS_SKY"
@@ -49,11 +50,6 @@ def _open_input_image(path, selection):
     """Open an input image (zarr or XRADIO image) lazily and normalize naming."""
     from xradio.image import open_image
 
-    if not isinstance(path, str):
-        raise TypeError(
-            "feather highres/lowres must be string paths to the on-disk images "
-            "(the parallel node task reads each frequency chunk from disk)."
-        )
     if "zarr" in path:
         xds = xr.open_zarr(path).isel(selection)
     else:
@@ -61,6 +57,7 @@ def _open_input_image(path, selection):
     return _rename_beam_to_convention(xds)
 
 
+@shares_param_docs
 def feather(
     outim: dict | None,
     highres: str,
@@ -71,6 +68,8 @@ def feather(
     processing_function_threads: int = 1,
     fft_backend: str = "scipy",
     compressor=None,
+    *,
+    input_checked=False,
 ):
     """Create an image from a single dish and interferometer image (feather).
 
@@ -95,21 +94,30 @@ def feather(
     sdfactor : float, default 1.0
         Single-dish scaling factor applied in the feather combination.
     selection : dict, optional
-        ``xarray`` ``isel`` selection applied to both inputs (e.g. an ``l``/``m``
-        sub-window).  Applied both when sizing the output and when each chunk is
-        loaded.
+        ``xarray`` ``isel`` selection applied to both input images (e.g. a
+        frequency channel range or an ``l``/``m`` sub-window). Chunking is determined
+        from the selected images.
     thread_info : dict, optional
         Thread information as returned by
         :func:`~astroviper.utils.data_partitioning.get_thread_info`; queried
         automatically when ``None``.
     processing_function_threads : int, default 1
-        Number of FFT worker threads used inside each node task.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : {"scipy", "pyfftw"}, default "scipy"
-        FFT backend used by the feather science function. ``scipy`` is the
-        default (it is always available and measurably faster on the cube sizes
-        typical for feather); pass ``"pyfftw"`` to use the FFTW-backed backend.
+        FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).
     compressor : numcodecs compressor
         Compressor applied to each on-disk ``SKY`` chunk.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    Notes
+    -----
+    Supplied configuration is checked before opening images. Shape and dtype
+    checks use the opened image metadata and always run before output creation.
     """
     import dask
     import zarr
@@ -135,19 +143,15 @@ def feather(
     if compressor is None:
         compressor = Blosc(cname="lz4", clevel=5)
 
-    # --- Validate output spec -------------------------------------------------
-    if outim is None or not isinstance(outim, dict):
-        raise ValueError(
-            "outim must be a dictionary with required key 'name' and optional "
-            "key 'overwrite'."
+    # --- Supplied configuration and filesystem policy ---
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+            check_feather_config,
         )
-    if "name" not in outim:
-        raise ValueError("outim dict must have key 'name'.")
-    if "overwrite" not in outim:
-        outim["overwrite"] = False
-    elif not isinstance(outim["overwrite"], bool):
-        raise TypeError("If specified, outim['overwrite'] must be a boolean value")
-    if not outim["overwrite"] and os.path.exists(outim["name"]):
+
+        check_feather_config(outim, highres, lowres)
+    overwrite = outim.get("overwrite", False)
+    if not overwrite and os.path.exists(outim["name"]):
         raise RuntimeError(
             f"Already existing file {outim['name']} will not be overwritten. To "
             "overwrite it, set outim['overwrite'] = True"
@@ -156,8 +160,11 @@ def feather(
     # --- Read input image metadata -------------------------------------------
     sd_xds = _open_input_image(lowres, selection)
     int_xds = _open_input_image(highres, selection)
-    if sd_xds[_sky].shape != int_xds[_sky].shape:
-        raise RuntimeError("Image shapes differ")
+    from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+        check_feather_inputs,
+    )
+
+    check_feather_inputs(int_xds, sd_xds)
 
     # Output adopts the interferometer dtype-or-lower precision, matching the
     # feather science function (feather_core).
@@ -165,16 +172,7 @@ def feather(
         out_dtype = sd_xds[_sky].dtype
     else:
         out_dtype = int_xds[_sky].dtype
-    if out_dtype == np.float64:
-        double_precision = True
-    elif out_dtype == np.float32:
-        double_precision = False
-    else:
-        raise ValueError(
-            "Unsupported image dtype "
-            + str(out_dtype)
-            + "; expected float32 or float64."
-        )
+    double_precision = out_dtype == np.float64
 
     # --- Determine frequency chunking ----------------------------------------
     # Memory for a single-frequency chunk: two input images + one output image.
@@ -228,7 +226,7 @@ def feather(
     # writing anything, if the store written exists.
     try:
         image_store = write_zarr_image_store(
-            featherd_img_xds, outim["name"], overwrite=outim["overwrite"]
+            featherd_img_xds, outim["name"], overwrite=overwrite
         )
     except FileExistsError as exc:
         raise RuntimeError(
