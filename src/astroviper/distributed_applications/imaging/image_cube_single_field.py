@@ -870,20 +870,12 @@ def image_cube_single_field(
     # (through XRADIO's xradio_msv2 engine); the production path loads Zarr
     # processing sets. Checked here, before anything is written.
     input_is_msv2 = is_measurement_set_v2(ps_store)
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_input_storage,
+    )
+
+    check_input_storage(locals(), input_is_msv2=input_is_msv2)
     if input_is_msv2:
-        if not skunk_works:
-            raise ValueError(
-                f"{ps_store} is a Measurement Set v2, which is imaged with "
-                "skunk_works=True only; or convert it with "
-                "xradio.measurement_set.convert_msv2_to_processing_set and image "
-                "the processing set."
-            )
-        if write_visibility_model_to_ps or write_imaging_weights_to_ps:
-            raise ValueError(
-                "write_visibility_model_to_ps and write_imaging_weights_to_ps "
-                f"must be False for a Measurement Set v2 ps_store ({ps_store}): "
-                "an imaging run never writes into its input Measurement Set."
-            )
         from astroviper.node_tasks.imaging.utils import require_msv2_engine
 
         require_msv2_engine()

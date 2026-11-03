@@ -497,3 +497,29 @@ def check_continuum_graph_arguments(append_node, append_input_params):
         raise ValueError("append_input_params was supplied without an append_node.")
     if append_node is not None and append_input_params is None:
         raise ValueError("append_node was supplied without append_input_params.")
+
+
+def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
+    """Check storage capabilities using the format detected by the I/O layer.
+
+    MSv2 is read through the skunk-works engine and is never written by an
+    imaging run. Keep format detection and optional-engine imports at the
+    calling layer; this validator performs no I/O.
+    """
+    if not input_is_msv2:
+        return
+    store = config.get("ps_store", "input")
+    if not allow_msv2:
+        raise ValueError(
+            f"{store} is a Measurement Set v2; convert it with xradio.measurement_set.convert_msv2_to_processing_set and use the processing set."
+        )
+    if not config.get("skunk_works", False):
+        raise ValueError(
+            f"{store} is a Measurement Set v2, which is imaged with skunk_works=True only; or convert it with xradio.measurement_set.convert_msv2_to_processing_set and image the processing set."
+        )
+    if config.get("write_visibility_model_to_ps", False) or config.get(
+        "write_imaging_weights_to_ps", False
+    ):
+        raise ValueError(
+            f"write_visibility_model_to_ps and write_imaging_weights_to_ps must be False for a Measurement Set v2 ps_store ({store}): an imaging run never writes into its input Measurement Set."
+        )

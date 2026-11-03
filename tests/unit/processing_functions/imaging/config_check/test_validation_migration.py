@@ -89,3 +89,33 @@ def test_graph_pair_rejected_before_graph_construction(node, params):
             append_node=node,
             append_input_params=params,
         )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"skunk_works": False},
+        {"skunk_works": True, "write_visibility_model_to_ps": True},
+        {"skunk_works": True, "write_imaging_weights_to_ps": True},
+    ],
+)
+def test_msv2_storage_restrictions(options):
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_input_storage,
+    )
+
+    original = options.copy()
+    with pytest.raises(ValueError, match="Measurement Set"):
+        check_input_storage(options, input_is_msv2=True)
+    check_input_storage(options, input_is_msv2=False)
+    assert options == original
+
+
+def test_msv2_read_only_supported_path():
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_input_storage,
+    )
+
+    check_input_storage({"skunk_works": True}, input_is_msv2=True)
+    with pytest.raises(ValueError, match="convert"):
+        check_input_storage({"skunk_works": True}, input_is_msv2=True, allow_msv2=False)
