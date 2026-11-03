@@ -3707,7 +3707,11 @@ def restore_continuum_image(
             CONTINUUM_SINGLE_FIELD,
             check_driver_workflow,
         )
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_deconvolver,
+        )
 
+        check_deconvolver(deconvolver, mode=CONTINUUM_SINGLE_FIELD)
         check_driver_workflow(
             {**locals(), "restore": True}, mode=CONTINUUM_SINGLE_FIELD
         )
@@ -3720,11 +3724,6 @@ def restore_continuum_image(
     from astroviper.processing_functions.imaging.restore import (
         restore_image as restore_cube_image,
     )
-
-    if deconvolver not in ("hogbom", "asp", "mtmfs"):
-        raise ValueError(
-            f"deconvolver must be 'hogbom', 'asp' or 'mtmfs'; received {deconvolver!r}."
-        )
 
     data_groups = img_xds.attrs.get("data_groups", {})
 

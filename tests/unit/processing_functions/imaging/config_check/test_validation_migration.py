@@ -56,3 +56,13 @@ def test_momentum_checks_configuration_before_accessing_arrays(coefficient):
 
     with pytest.raises(ValueError, match="momentum_coefficient"):
         nesterov_momentum_model_step(None, None, momentum_coefficient=coefficient)
+
+
+@pytest.mark.parametrize("deconvolver", ["MTMFS", "unknown", None])
+def test_restoration_rejects_algorithm_before_accessing_products(deconvolver):
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        restore_continuum_image,
+    )
+
+    with pytest.raises(ValueError, match="deconvolver"):
+        restore_continuum_image(None, deconvolver=deconvolver)

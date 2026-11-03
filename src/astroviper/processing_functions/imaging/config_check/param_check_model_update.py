@@ -106,20 +106,8 @@ def check_model_update(config, *, mode, require_complete=False):
 
     # --- Deconvolver selection ---
     # Each imaging kind has its own set of implemented algorithms.
-    if mode.imaging_kind == "continuum":
-        allowed_deconvolvers = ("hogbom", "asp", "mtmfs")
-    else:
-        allowed_deconvolvers = (
-            "hogbom",
-            "hogbom_many_threads",
-            "asp",
-        )
-
-    if "deconvolver" in config and deconvolver not in allowed_deconvolvers:
-        raise ValueError(
-            f"Deconvolution algorithm {deconvolver!r} not recognized; {mode.imaging_kind} deconvolver must be one of "
-            f"{allowed_deconvolvers}; received {deconvolver!r}."
-        )
+    if "deconvolver" in config:
+        check_deconvolver(deconvolver, mode=mode)
 
     # --- Cube spectral model ---
     # Cube planes are independent images; a multi-term continuum model is invalid.
@@ -1306,3 +1294,26 @@ def check_nonnegative(name, value, *, scalar=False):
     values = require_finite_real(name, value, scalar=scalar)
     if np.any(values < 0):
         raise ValueError(f"{name} must be non-negative.")
+
+
+def check_deconvolver(deconvolver, *, mode):
+    """Require an implemented algorithm for this imaging mode.
+
+    Restoration needs the algorithm name without the iteration controls and
+    Taylor configuration required when actually updating a model.
+    """
+    mode.require_supported()
+    if mode.imaging_kind == "continuum":
+        allowed_deconvolvers = ("hogbom", "asp", "mtmfs")
+    else:
+        allowed_deconvolvers = (
+            "hogbom",
+            "hogbom_many_threads",
+            "asp",
+        )
+
+    if deconvolver not in allowed_deconvolvers:
+        raise ValueError(
+            f"Deconvolution algorithm {deconvolver!r} not recognized; {mode.imaging_kind} deconvolver must be one of "
+            f"{allowed_deconvolvers}; received {deconvolver!r}."
+        )
