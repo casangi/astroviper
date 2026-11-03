@@ -375,7 +375,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
 # ========================================================================
 
 
-def check_channel_partitions(mapping, processing_set, *, image_params):
+def check_channel_partitions(mapping, processing_set, *, image_params, mode):
     """Require exclusive and complete channel coverage before graph construction.
 
     Parameters
@@ -386,16 +386,20 @@ def check_channel_partitions(mapping, processing_set, *, image_params):
         Selected Measurement Set datasets/DataTrees supplying frequency axes.
     image_params : mapping
         The common image frequency axis and, for continuum, Taylor basis.
+    mode : ImagingMode
+        Cube uses nearest-channel assignment; continuum uses exact selection.
     """
 
+    mode.require_supported()
+
     # --- Intended selection ---
-    # Image frequencies define which original channel indices must appear once.
+    # The workflow's selection policy defines which original channels appear once.
     image_frequencies = np.asarray(image_params["frequency_coords"])
     expected = {}
     counts = {}
     for name, child in processing_set.items():
         frequencies = np.asarray(child.frequency.values)
-        selected = selected_frequency_mask(frequencies, image_frequencies)
+        selected = selected_frequency_mask(frequencies, image_frequencies, mode=mode)
         expected[name] = selected
         counts[name] = np.zeros(len(frequencies), dtype=int)
 

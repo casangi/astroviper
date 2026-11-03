@@ -9,6 +9,7 @@ import xarray as xr
 
 from astroviper.processing_functions.imaging.config_check import (
     CONTINUUM_SINGLE_FIELD,
+    CUBE_SINGLE_FIELD,
     check_config,
     check_driver_workflow,
     check_model_update,
@@ -350,20 +351,27 @@ def test_product_checks_reject_invalid_inputs(fault):
         )
 
 
-def test_channel_partitions_are_exclusive_and_complete():
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+def test_channel_partitions_are_exclusive_and_complete(mode):
     processing_set = {"ms": xr.Dataset(coords={"frequency": [1e9, 1.1e9, 1.2e9]})}
     image_params = {"frequency_coords": [1e9, 1.1e9, 1.2e9]}
     mapping = {
         0: {"data_selection": {"ms": {"frequency": slice(0, 2)}}},
         1: {"data_selection": {"ms": {"frequency": slice(2, 3)}}},
     }
-    check_channel_partitions(mapping, processing_set, image_params=image_params)
+    check_channel_partitions(
+        mapping, processing_set, image_params=image_params, mode=mode
+    )
     mapping[1]["data_selection"]["ms"]["frequency"] = slice(1, 3)
     with pytest.raises(ValueError, match="repeated=\\[1\\]"):
-        check_channel_partitions(mapping, processing_set, image_params=image_params)
+        check_channel_partitions(
+            mapping, processing_set, image_params=image_params, mode=mode
+        )
     mapping[1]["data_selection"]["ms"]["frequency"] = slice(3, 3)
     with pytest.raises(ValueError, match="missing=\\[2\\]"):
-        check_channel_partitions(mapping, processing_set, image_params=image_params)
+        check_channel_partitions(
+            mapping, processing_set, image_params=image_params, mode=mode
+        )
 
 
 def test_shared_basis_cannot_change_between_stages():
@@ -406,10 +414,13 @@ def test_frequency_lookup_matches_dense_comparison_without_changing_coordinates(
         frequencies[:, None], requested[None, :], rtol=1e-12, atol=0
     ).any(axis=1)
     np.testing.assert_array_equal(
-        selected_frequency_mask(frequencies, requested), expected
+        selected_frequency_mask(frequencies, requested, mode=CONTINUUM_SINGLE_FIELD),
+        expected,
     )
     np.testing.assert_array_equal(requested, original)
-    assert not selected_frequency_mask(frequencies, []).any()
+    assert not selected_frequency_mask(
+        frequencies, [], mode=CONTINUUM_SINGLE_FIELD
+    ).any()
 
 
 def test_small_uncoupled_taylor_moment_does_not_warn_about_order_zero():
@@ -561,3 +572,36 @@ def test_spectral_sampling_accepts_xarray_scalar_without_changing_it():
     assert diagnostics["spectral_design_rank"] == 2
     assert diagnostics["reference_frequency"] == 1.1e9
     xr.testing.assert_identical(reference, original)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("fault", [None, "missing", "repeated", "extra"])
+def test_cube_partitions_use_nearest_cells_and_preserve_coverage_guards(reverse, fault):
+    # Two source channels average into the first output channel; the shifted
+    # second output channel also contributes. Channels beyond the end cells do not.
+    frequencies = np.array([0.8e9, 1e9 + 5000, 1.02e9, 1.1e9 + 5000, 1.3e9])
+    image_frequencies = np.array([1e9, 1.1e9])
+    if reverse:
+        image_frequencies = image_frequencies[::-1]
+    processing_set = {"ms": xr.Dataset(coords={"frequency": frequencies})}
+    mapping = {
+        0: {"data_selection": {"ms": {"frequency": [1, 2]}}},
+        1: {"data_selection": {"ms": {"frequency": [3]}}},
+    }
+    if fault == "missing":
+        mapping[1]["data_selection"]["ms"]["frequency"] = []
+    elif fault == "repeated":
+        mapping[1]["data_selection"]["ms"]["frequency"] = [2, 3]
+    elif fault == "extra":
+        mapping[0]["data_selection"]["ms"]["frequency"] = [0, 1, 2]
+
+    arguments = {
+        "image_params": {"frequency_coords": image_frequencies},
+        "mode": CUBE_SINGLE_FIELD,
+    }
+    if fault:
+        with pytest.raises(ValueError, match=rf"{fault}=\[\d\]"):
+            check_channel_partitions(mapping, processing_set, **arguments)
+    else:
+        check_channel_partitions(mapping, processing_set, **arguments)
+    np.testing.assert_array_equal(processing_set["ms"].frequency.values, frequencies)

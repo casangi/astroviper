@@ -467,7 +467,9 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
         )
 
         frequencies = np.asarray(source.frequency.values)
-        selected = selected_frequency_mask(frequencies, image["frequency_coords"])
+        selected = selected_frequency_mask(
+            frequencies, image["frequency_coords"], mode=mode
+        )
         if np.any(selected):
             map_visibility_frequencies_to_image(
                 frequencies[selected], image["frequency_coords"], input_checked=True

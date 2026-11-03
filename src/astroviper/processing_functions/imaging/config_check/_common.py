@@ -98,18 +98,27 @@ def imaging_weighting_scope(params, *, mode):
     return "local"
 
 
-def selected_frequency_mask(frequencies, requested_frequencies):
-    """Match requested frequencies without a quadratic channel-pair array.
+def selected_frequency_mask(frequencies, requested_frequencies, *, mode):
+    """Select source channels with the policy of the requested imaging mode.
 
-    Compare the two neighbouring requested values at each insertion position.
-    Sorting this private lookup leaves the supplied coordinate arrays unchanged.
+    Cube imaging includes the nearest-channel half cells, allowing shifted
+    execution blocks and channel averaging. Continuum retains its exact
+    frequency selection. Neither policy changes the supplied coordinates.
     """
     import numpy as np
 
-    requested = np.sort(np.asarray(requested_frequencies))
     frequencies = np.asarray(frequencies)
-    if not requested.size:
+    requested = np.asarray(requested_frequencies)
+    if not frequencies.size or not requested.size:
         return np.zeros(frequencies.shape, dtype=bool)
+    if mode.imaging_kind == "cube":
+        from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
+
+        return map_to_nearest_coordinate(frequencies, requested) >= 0
+
+    # Exact continuum selection uses a sorted lookup rather than a channel-pair
+    # matrix. Sorting this private array preserves the caller's coordinates.
+    requested = np.sort(requested)
     position = np.searchsorted(requested, frequencies)
     lower = requested[np.clip(position - 1, 0, requested.size - 1)]
     upper = requested[np.clip(position, 0, requested.size - 1)]

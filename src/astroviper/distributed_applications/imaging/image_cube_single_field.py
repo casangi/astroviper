@@ -1111,7 +1111,12 @@ def image_cube_single_field(
         check_channel_partitions,
     )
 
-    check_channel_partitions(node_task_data_mapping, ps_xdt, image_params=image_params)
+    check_channel_partitions(
+        node_task_data_mapping,
+        ps_xdt,
+        image_params=image_params,
+        mode=CUBE_SINGLE_FIELD,
+    )
     preflight_start = time.time()
     spectral_diagnostics = preflight_imaging_inputs(
         ps_xdt, locals(), mode=CUBE_SINGLE_FIELD

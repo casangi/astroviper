@@ -205,17 +205,27 @@ def test_nonfinite_unflagged_statistical_weights_fail():
         preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
 
 
-def test_sparse_padding_is_excluded_without_modifying_source_arrays():
+@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
+@pytest.mark.parametrize("padding_weights", ["nan", "zero", "mixed"])
+def test_sparse_padding_is_excluded_without_modifying_source_arrays(
+    mode, padding_weights
+):
     processing_set, config = inputs()
     dataset = processing_set["ms"]
     dataset["TIME_CENTROID"] = (("time", "baseline_id"), [[0.0], [np.nan]])
-    dataset.WEIGHT.values[1] = np.nan
+    dataset.WEIGHT.values[1] = np.nan if padding_weights == "nan" else 0.0
+    if padding_weights == "mixed":
+        dataset.WEIGHT.values[1, :, 0, :] = np.nan
     dataset.UVW.values[1] = np.nan
     snapshot = dataset.copy(deep=True)
-    result = preflight_imaging_inputs(
-        processing_set, config, mode=CONTINUUM_SINGLE_FIELD
-    )
-    assert result["distinct_frequency_count"] == 2
+    if mode == CUBE_SINGLE_FIELD:
+        config["deconvolver"] = "hogbom"
+        config["image_params"]["n_taylor_terms"] = 1
+    result = preflight_imaging_inputs(processing_set, config, mode=mode)
+    if mode == CUBE_SINGLE_FIELD:
+        assert len(result["cube_channel_sampling"]) == 2
+    else:
+        assert result["distinct_frequency_count"] == 2
     xr.testing.assert_identical(dataset, snapshot)
 
 
@@ -227,3 +237,79 @@ def test_real_row_with_nan_weights_is_not_treated_as_padding():
     dataset.UVW.values[1] = np.nan
     with pytest.raises(ValueError, match="unflagged weights"):
         preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
+
+
+@pytest.mark.parametrize("weighting", ["natural", "briggs", "uniform"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_cube_preflight_checks_shifted_channels_with_production_assignment(
+    weighting, reverse
+):
+    processing_set, config = inputs()
+    config["deconvolver"] = "hogbom"
+    config["image_params"]["n_taylor_terms"] = 1
+    config["imaging_weights_params"] = {"weighting": weighting}
+    if weighting == "briggs":
+        config["imaging_weights_params"]["robust"] = 0.0
+    if reverse:
+        config["image_params"]["frequency_coords"] = [1.2e9, 1e9]
+    processing_set["ms"] = processing_set["ms"].assign_coords(
+        frequency=processing_set["ms"].frequency.values + 5000
+    )
+    snapshot = processing_set["ms"].copy(deep=True)
+
+    result = preflight_imaging_inputs(processing_set, config, mode=CUBE_SINGLE_FIELD)
+
+    assert len(result["cube_channel_sampling"]) == 2
+    assert all(
+        channel["distinct_frequency_count"] == 1
+        for channel in result["cube_channel_sampling"]
+    )
+    xr.testing.assert_identical(processing_set["ms"], snapshot)
+
+
+def test_cube_preflight_does_not_skip_bad_weights_in_a_shifted_execution_block():
+    processing_set, config = inputs()
+    config["deconvolver"] = "hogbom"
+    config["image_params"]["n_taylor_terms"] = 1
+    processing_set["shifted"] = (
+        processing_set["ms"]
+        .copy(deep=True)
+        .assign_coords(frequency=processing_set["ms"].frequency.values + 5000)
+    )
+    processing_set["shifted"].WEIGHT.values[0, 0, 0, 0] = np.nan
+
+    with pytest.raises(ValueError, match="unflagged weights"):
+        preflight_imaging_inputs(processing_set, config, mode=CUBE_SINGLE_FIELD)
+
+
+@pytest.mark.parametrize(
+    "fault,message",
+    [
+        ("finite_time", "non-finite UVW"),
+        ("missing_time", "non-finite UVW"),
+        ("positive_weight", "non-finite UVW"),
+        ("negative_weight", "unflagged weights"),
+        ("infinite_weight", "unflagged weights"),
+        ("partial_nan_uvw", "non-finite UVW"),
+    ],
+)
+def test_zero_weight_padding_requires_all_absence_markers(fault, message):
+    processing_set, config = inputs()
+    dataset = processing_set["ms"]
+    dataset["TIME_CENTROID"] = (("time", "baseline_id"), [[0.0], [np.nan]])
+    dataset.WEIGHT.values[1] = 0.0
+    dataset.UVW.values[1] = np.nan
+    if fault == "finite_time":
+        dataset.TIME_CENTROID.values[1] = 1.0
+    elif fault == "missing_time":
+        processing_set["ms"] = dataset.drop_vars("TIME_CENTROID")
+    elif fault == "partial_nan_uvw":
+        dataset.UVW.values[1, 0, 0] = 1.0
+    else:
+        dataset.WEIGHT.values[1, 0, 0, 0] = {
+            "positive_weight": 1.0,
+            "negative_weight": -1.0,
+            "infinite_weight": np.inf,
+        }[fault]
+    with pytest.raises(ValueError, match=message):
+        preflight_imaging_inputs(processing_set, config, mode=CUBE_SINGLE_FIELD)

@@ -76,12 +76,27 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
     # Resolve channels, correlations, fields, and spectral windows once, without
     # loading visibility, weight, flag, or UVW arrays.
     selected_inputs = []
+    image_channel_maps = {}
     for ms_name, child in processing_set.items():
         source = child.ds if hasattr(child, "ds") else child
         check_input_metadata(source, config, mode=mode, measurement_set=ms_name)
         group = source.attrs["data_groups"][group_name]
         frequencies = np.asarray(source.frequency.values)
-        selected = selected_frequency_mask(frequencies, requested_frequencies)
+        if mode.imaging_kind == "cube":
+            from graphviper.graph_tools.coordinate_utils import (
+                map_to_nearest_coordinate,
+            )
+
+            # Use each child's full frequency axis, as graph construction does.
+            # This also preserves the singleton image channel's half-cell width.
+            image_channel_maps[ms_name] = map_to_nearest_coordinate(
+                frequencies, requested_frequencies
+            )
+            selected = image_channel_maps[ms_name] >= 0
+        else:
+            selected = selected_frequency_mask(
+                frequencies, requested_frequencies, mode=mode
+            )
         indices = np.flatnonzero(selected)
         if not indices.size:
             continue
@@ -125,7 +140,15 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
             frequencies,
         ) in selected_inputs:
             if selected_frequency is not None:
-                indices = indices[frequencies[indices] == selected_frequency]
+                if mode.imaging_kind == "cube":
+                    image_channel = np.flatnonzero(
+                        requested_frequencies == selected_frequency
+                    )[0]
+                    indices = indices[
+                        image_channel_maps[ms_name][indices] == image_channel
+                    ]
+                else:
+                    indices = indices[frequencies[indices] == selected_frequency]
             if not indices.size:
                 continue
             selection = {"frequency": indices}
@@ -155,8 +178,10 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
                 uvw = np.ascontiguousarray(block[group["uvw"]].values, dtype=np.float64)
 
                 # XRADIO's sparse time/baseline grid contains absent rows.
-                # All three metadata markers must agree before excluding one;
-                # a real row with corrupt weights or UVW must still fail.
+                # Both missing-coordinate markers and non-contributing weights
+                # must agree. XRADIO padding weights can be zero (e.g. after
+                # sigma-to-weight conversion) or NaN; positive, negative, and
+                # infinite weights must not hide corrupt UVW as an absent row.
                 absent_rows = np.zeros(raw_weights.shape[:2], dtype=bool)
                 if "TIME_CENTROID" in block:
                     absent_rows = (
@@ -164,7 +189,7 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
                             block.TIME_CENTROID.transpose("time", "baseline_id").values
                         )
                         & np.isnan(uvw).all(axis=-1)
-                        & np.isnan(raw_weights).all(axis=(2, 3))
+                        & ((raw_weights == 0) | np.isnan(raw_weights)).all(axis=(2, 3))
                     )
                 sample_flagged = np.any(flags != 0, axis=-1, keepdims=True)
                 sample_flagged |= absent_rows[:, :, None, None]
@@ -342,8 +367,15 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
     # --- Cube channel usability ---
     # Each independently imaged channel needs at least one usable sample.
     diagnostics = []
-    for frequency in requested_frequencies:
-        selected = np.isclose(frequencies, frequency, rtol=1e-12, atol=0)
+    for image_channel, frequency in enumerate(requested_frequencies):
+        # Usability belongs to the output channel that actually receives each
+        # sample, including shifted and averaged visibility channels.
+        selected = np.array(
+            [
+                image_channel_maps[name][index] == image_channel
+                for name, index, _ in samples
+            ]
+        )
         diagnostics.append(
             check_spectral_sampling(
                 frequencies[selected],
