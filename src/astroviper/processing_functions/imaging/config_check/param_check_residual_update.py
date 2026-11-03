@@ -476,6 +476,70 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
             )
 
 
+# ========================================================================
+# Selected visibility data: always checked after reading each metadata block
+# ========================================================================
+
+
+def check_selected_fields(fields, *, mode):
+    """Reject a multi-field selection before reading sample arrays."""
+    mode.require_supported()
+    if mode.field_layout == "single_field" and len(fields) > 1:
+        raise ValueError(
+            f"Single-field imaging selected multiple fields: {sorted(fields)}."
+        )
+
+
+def absent_visibility_rows(weights, uvw, *, time_centroid=None):
+    """Identify padding without modifying the supplied arrays.
+
+    Missing time and UVW markers must agree with non-contributing weights.
+    XRADIO padding weights may be zero or NaN after sigma-to-weight conversion;
+    positive, negative, or infinite weights must not hide corrupt observations.
+    """
+    if time_centroid is None:
+        return np.zeros(weights.shape[:2], dtype=bool)
+    return (
+        ~np.isfinite(time_centroid)
+        & np.isnan(uvw).all(axis=-1)
+        & ((weights == 0) | np.isnan(weights)).all(axis=(2, 3))
+    )
+
+
+def check_statistical_weights(weights, active, *, context):
+    """Require finite, non-negative statistical weights for active samples."""
+    if np.any((~np.isfinite(weights) | (weights < 0)) & active):
+        details = "; ".join(f"{name}={value!r}" for name, value in context.items())
+        raise ValueError(
+            "Spectral-design preflight: unflagged weights must be finite and non-negative; "
+            f"{details}, usable/distinct/rank/condition=unavailable."
+        )
+
+
+def check_visibility_uvw(uvw, *, measurement_set):
+    """Reject invalid UVW after known absent rows have been excluded."""
+    if not np.all(np.isfinite(uvw)):
+        raise ValueError(
+            f"Spectral-design preflight: non-finite UVW coordinates in {measurement_set!r}."
+        )
+
+
+def check_effective_weights(weights, active, *, context):
+    """Check computed imaging weights before accumulating spectral constraints."""
+    if np.any((~np.isfinite(weights) | (weights < 0)) & active):
+        raise ValueError(
+            "Spectral-design preflight: negative or non-finite effective imaging weights "
+            f"in {context['measurement_set']!r}; channel_selection={context['channel_selection']}, "
+            f"polarization={context['polarization']}."
+        )
+
+
+def check_selected_samples(samples):
+    """Require selected samples before constructing spectral diagnostics."""
+    if not samples:
+        raise ValueError("Spectral-design preflight: no selected channels have data.")
+
+
 def check_continuum_beam_metadata(image_params, antenna_xds, *, continuum_mode):
     """Check inferred continuum apertures before output creation.
 

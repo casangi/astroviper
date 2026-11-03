@@ -34,8 +34,14 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
         selected_frequency_mask,
     )
     from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        absent_visibility_rows,
+        check_effective_weights,
         check_input_metadata,
+        check_selected_fields,
+        check_selected_samples,
         check_spectral_sampling,
+        check_statistical_weights,
+        check_visibility_uvw,
     )
     from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
         calculate_briggs_params,
@@ -122,10 +128,7 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
 
     # --- Single-field contract ---
     # Reject multiple selected fields before reading any weight or flag arrays.
-    if len(fields) > 1:
-        raise ValueError(
-            f"Single-field imaging selected multiple fields: {sorted(fields)}."
-        )
+    check_selected_fields(fields, mode=mode)
 
     # --- Selected metadata blocks ---
     # Keep I/O here in the node layer. Each pass reads fresh bounded blocks;
@@ -177,39 +180,39 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
                 )
                 uvw = np.ascontiguousarray(block[group["uvw"]].values, dtype=np.float64)
 
-                # XRADIO's sparse time/baseline grid contains absent rows.
-                # Both missing-coordinate markers and non-contributing weights
-                # must agree. XRADIO padding weights can be zero (e.g. after
-                # sigma-to-weight conversion) or NaN; positive, negative, and
-                # infinite weights must not hide corrupt UVW as an absent row.
-                absent_rows = np.zeros(raw_weights.shape[:2], dtype=bool)
-                if "TIME_CENTROID" in block:
-                    absent_rows = (
-                        ~np.isfinite(
-                            block.TIME_CENTROID.transpose("time", "baseline_id").values
-                        )
-                        & np.isnan(uvw).all(axis=-1)
-                        & ((raw_weights == 0) | np.isnan(raw_weights)).all(axis=(2, 3))
-                    )
+                time_centroid = (
+                    block.TIME_CENTROID.transpose("time", "baseline_id").values
+                    if "TIME_CENTROID" in block
+                    else None
+                )
+                absent_rows = absent_visibility_rows(
+                    raw_weights, uvw, time_centroid=time_centroid
+                )
                 sample_flagged = np.any(flags != 0, axis=-1, keepdims=True)
                 sample_flagged |= absent_rows[:, :, None, None]
                 if np.any(absent_rows):
                     uvw = uvw.copy()
                     uvw[absent_rows] = 0.0  # No sample contributes at these rows.
                 active = np.broadcast_to(~sample_flagged, raw_weights.shape)
-                if np.any((~np.isfinite(raw_weights) | (raw_weights < 0)) & active):
-                    raise ValueError(
-                        f"Spectral-design preflight: unflagged weights must be finite and non-negative; field={sorted(fields)}, spectral_window={sorted(spectral_windows)}, measurement_set={ms_name!r}, channel_selection={indices.tolist()}, polarization={correlation_coords}, nterms={image_params.get('n_taylor_terms', 1)}, reference_frequency={image_params.get('reference_frequency')}, usable/distinct/rank/condition=unavailable."
-                    )
+                check_statistical_weights(
+                    raw_weights,
+                    active,
+                    context={
+                        "field": sorted(fields),
+                        "spectral_window": sorted(spectral_windows),
+                        "measurement_set": ms_name,
+                        "channel_selection": indices.tolist(),
+                        "polarization": correlation_coords,
+                        "nterms": image_params.get("n_taylor_terms", 1),
+                        "reference_frequency": image_params.get("reference_frequency"),
+                    },
+                )
                 raw_weights[np.broadcast_to(sample_flagged, raw_weights.shape)] = np.nan
                 equalized = _equalize_parallel_hand_weights(
                     raw_weights,
                     weighting_params.get("casa_weighting_implementation", False),
                 )
-                if not np.all(np.isfinite(uvw)):
-                    raise ValueError(
-                        f"Spectral-design preflight: non-finite UVW coordinates in {ms_name!r}."
-                    )
+                check_visibility_uvw(uvw, measurement_set=ms_name)
                 baselines = np.ones(block.sizes["baseline_id"], dtype=bool)
                 if (
                     "baseline_antenna1_name" in block
@@ -234,10 +237,15 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
         ms_name, indices, frequencies, uvw, _, flagged, baselines = block
         active = np.broadcast_to(~flagged, effective_weights.shape).copy()
         active[:, ~baselines, :, :] = False
-        if np.any((~np.isfinite(effective_weights) | (effective_weights < 0)) & active):
-            raise ValueError(
-                f"Spectral-design preflight: negative or non-finite effective imaging weights in {ms_name!r}; channel_selection={indices.tolist()}, polarization={correlation_coords}."
-            )
+        check_effective_weights(
+            effective_weights,
+            active,
+            context={
+                "measurement_set": ms_name,
+                "channel_selection": indices.tolist(),
+                "polarization": correlation_coords,
+            },
+        )
         channel_weights = np.where(active, effective_weights, 0).sum(
             axis=(0, 1, 3), dtype=np.float64
         )
@@ -316,8 +324,7 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
                 )
                 accumulate(block, effective)
 
-    if not samples:
-        raise ValueError("Spectral-design preflight: no selected channels have data.")
+    check_selected_samples(samples)
     context = {
         "field": sorted(fields),
         "spectral_window": sorted(spectral_windows),

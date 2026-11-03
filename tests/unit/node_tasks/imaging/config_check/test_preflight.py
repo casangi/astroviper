@@ -313,3 +313,28 @@ def test_zero_weight_padding_requires_all_absence_markers(fault, message):
         }[fault]
     with pytest.raises(ValueError, match=message):
         preflight_imaging_inputs(processing_set, config, mode=CUBE_SINGLE_FIELD)
+
+
+@pytest.mark.parametrize("input_checked", [False, True])
+def test_shared_data_checks_run_even_for_checked_configuration(
+    monkeypatch, input_checked
+):
+    from astroviper.processing_functions.imaging.config_check import (
+        param_check_residual_update,
+    )
+
+    processing_set, config = inputs()
+    config["input_checked"] = input_checked
+
+    class DataValidationReached(Exception):
+        pass
+
+    def reject_new_data(weights, active, *, context):
+        assert context["measurement_set"] == "ms"
+        raise DataValidationReached
+
+    monkeypatch.setattr(
+        param_check_residual_update, "check_statistical_weights", reject_new_data
+    )
+    with pytest.raises(DataValidationReached):
+        preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
