@@ -1192,6 +1192,7 @@ def image_cube_single_field(
 
         if (
             cycle_control_params["max_iter"] > 0
+            and cycle_control_params["max_cycles"] != 0
             and img_xds.attrs["data_groups"]["residual"].get("mask") is None
         ):
             make_mask(

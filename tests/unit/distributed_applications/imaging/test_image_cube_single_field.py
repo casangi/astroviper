@@ -244,21 +244,30 @@ def _assert_restored_without_model_update(img, chan):
 
 
 @pytest.mark.parametrize(
-    "cycle_control_params",
-    [{"max_iter": 0}, {"threshold": NO_UPDATE_THRESHOLD}],
-    ids=["max_iter_0", "threshold_above_the_peak"],
+    "cycle_control_params, mask_source",
+    [
+        ({"max_iter": 0}, "PRIMARY_BEAM > 0.2"),
+        ({"max_cycles": 0}, "PRIMARY_BEAM > 0.2"),
+        ({"threshold": NO_UPDATE_THRESHOLD}, "MASK"),
+    ],
+    ids=["max_iter_0", "max_cycles_0", "threshold_above_the_peak"],
 )
 def test_channel_without_model_update_is_restored(
-    tmp_path, synchronous_dask, cycle_control_params
+    tmp_path, synchronous_dask, cycle_control_params, mask_source
 ):
     """A channel imaged in a node task of its own that makes no model update
-    (``max_iter`` 0, or a threshold above its dirty peak) has a zero model and
-    is restored to its residual, as in continuum imaging. Its model, restored
-    and primary beam corrected images used to keep the image store's NaN fill
-    value."""
+    (``max_iter`` 0, ``max_cycles`` 0, or a threshold above its dirty peak)
+    has a zero model and is restored to its residual, as in continuum
+    imaging. Its masked statistics use the mask a model update would have
+    made when one could run, else the primary beam fallback. Its model,
+    restored and primary beam corrected images used to keep the image
+    store's NaN fill value."""
     ps_store = _simulate_point_source(tmp_path)
     store = str(tmp_path / "cube.img.zarr")
-    _assert_imaged(_image_restored(ps_store, store, 2, **cycle_control_params), 2)
+    result = _image_restored(ps_store, store, 2, **cycle_control_params)
+    _assert_imaged(result, 2)
+    statistics = result["image_statistics"]["sky_residual"]
+    assert statistics.attrs["mask_source"] == mask_source
     img = load_image(store)
     for chan in range(2):
         _assert_restored_without_model_update(img, chan)
