@@ -210,6 +210,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         np.asarray([[0.2]], dtype=dtype),
     )
     residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
+    model_snapshot = image.SKY_MODEL.copy(deep=True)
     calls = []
 
     def native_clean(residual, psf, model, **kwargs):
@@ -223,7 +224,8 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         assert np.shares_memory(residual, image.SKY_RESIDUAL.values)
         assert np.shares_memory(psf, image.POINT_SPREAD_FUNCTION.values)
         assert residual.dtype == psf.dtype == model.dtype == dtype
-        np.testing.assert_array_equal(model, 0.0)
+        # the model of the image, which the components are added to in place
+        np.testing.assert_array_equal(model, model_snapshot.values[0, :, 0])
         residual *= dtype(0.5)
         model[0] = dtype(1.0)
         model[1] = dtype(2.0)
@@ -474,6 +476,47 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
         np.testing.assert_array_equal(fields["scales"], [0.0])
         assert np.isfinite(fields["hessian_condition_number"]).all()
     assert timing.loc[0, "T_mtmfs"] >= 0.0
+
+
+@pytest.mark.parametrize("n_taylor_terms", [2, 3])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_native_mtmfs_adds_its_components_to_the_model(n_taylor_terms, dtype):
+    """The real kernel adds its components to every Taylor term of the image's
+    model in place. From a previous model it makes the iterations and the
+    residual it makes from zeros, and the model minus the previous one is the
+    model made from zeros to rounding; the fluxes booked are those of the
+    model, starting from the previous one's."""
+    image, _ = _native_mtmfs_continuum_image(n_taylor_terms, (8, 8), dtype, "mask")
+    from_zeros = image.copy(deep=True)
+    previous = (
+        np.random.default_rng(3)
+        .uniform(-1.0, 1.0, image.SKY_RESIDUAL.shape)
+        .astype(dtype)
+    )
+    image["SKY_MODEL"] = image.SKY_RESIDUAL.copy(data=previous.copy())
+    params = {"max_iter": 2, "gain": 0.5, "scales": [0.0]}
+
+    statistics, _ = model_update_mtmfs_single_field(image, "mtmfs", dict(params))
+    zero_statistics, _ = model_update_mtmfs_single_field(
+        from_zeros, "mtmfs", dict(params)
+    )
+
+    np.testing.assert_array_equal(image.SKY_RESIDUAL, from_zeros.SKY_RESIDUAL)
+    assert from_zeros.SKY_MODEL.values.any()
+    np.testing.assert_allclose(
+        image.SKY_MODEL.values - previous,
+        from_zeros.SKY_MODEL,
+        rtol=0,
+        atol=8 * np.finfo(dtype).eps,
+    )
+    for key, fields in statistics.data.items():
+        zero_fields = zero_statistics.data[key]
+        assert fields["iter_done"] == zero_fields["iter_done"] == [2]
+        start = float(previous[key.time, 0, key.pol].sum())
+        assert fields["start_model_flux"] == [start]
+        assert fields["model_flux"] == [
+            pytest.approx(start + zero_fields["model_flux"][0], abs=1e-5)
+        ]
 
 
 @pytest.mark.parametrize(
@@ -950,7 +993,7 @@ def test_asp_hands_taylor_term_zero_to_the_cube_asp_kernel(monkeypatch, asp_opti
     assert image.SKY_MODEL.dims == image.SKY_RESIDUAL.dims
     np.testing.assert_array_equal(image.SKY_MODEL.values, expected_model)
     description = image.attrs["data_groups"]["model"]["description"]
-    assert description.endswith("Continuum model increment produced by Asp CLEAN.")
+    assert description.endswith("Continuum model updated by Asp CLEAN.")
     records = {(key.time, key.pol): fields for key, fields in statistics.data.items()}
     assert sorted(records) == [(0, 0), (0, 1), (1, 0), (1, 1)]
     for (time, pol), fields in records.items():

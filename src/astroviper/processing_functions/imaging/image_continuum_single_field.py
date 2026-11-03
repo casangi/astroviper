@@ -2944,7 +2944,12 @@ def _model_update_native_mtmfs(
     record_iteration_history = bool(
         deconvolve_params.get("record_iteration_history", False)
     )
-    model = np.zeros_like(residual)
+    # The components are added to the model in place, as in the cube.
+    model = (
+        img_xds["SKY_MODEL"].transpose(*residual_da.dims).values
+        if "SKY_MODEL" in img_xds
+        else np.zeros_like(residual)
+    )
     imaging_dict = ImagingDict()
     start = time.time()
     for tt in range(ntime):
@@ -2976,8 +2981,9 @@ def _model_update_native_mtmfs(
             model_view = model[tt, :, pp, :, :]
             model_native_layout = model_view.flags.c_contiguous
             model_work = (
-                model_view if model_native_layout else np.zeros_like(residual_work)
+                model_view if model_native_layout else np.ascontiguousarray(model_view)
             )
+            start_model_flux = float(model_work[0].sum())
             mask_work = np.ascontiguousarray(support[tt, pp], dtype=residual_work.dtype)
             selected = support[tt, pp] & np.isfinite(residual_work[0])
             start_peak = float(np.max(np.abs(residual_work[0][selected]), initial=0.0))
@@ -3031,7 +3037,7 @@ def _model_update_native_mtmfs(
                 "stokes": img_xds.coords["polarization"].values[pp],
                 "frequency": float(_continuum_frequency_coord(img_xds)[0]),
                 "time": img_xds.coords["time"].values[tt],
-                "start_model_flux": 0.0,
+                "start_model_flux": start_model_flux,
                 "model_flux": float(result["model_flux"]),
                 "start_peakres": start_peak,
                 "start_peakres_nomask": start_peak_nomask,
@@ -3052,7 +3058,7 @@ def _model_update_native_mtmfs(
                 for field in ITERATION_HISTORY_FIELDS:
                     if field in result:
                         fields[field] = np.asarray(result[field])
-                fields["iteration_model_flux"] = np.cumsum(
+                fields["iteration_model_flux"] = start_model_flux + np.cumsum(
                     fields["iteration_component_flux"]
                 )
             imaging_dict.add(fields, time=tt, pol=pp, chan=0)
@@ -3120,7 +3126,8 @@ def model_update_mtmfs_single_field(
     img_xds : xarray.Dataset
         Globally reduced continuum image dataset. The residual and model images
         are expected to use the ``taylor_term`` dimension, while the point-spread
-        function uses ``psf_taylor_order``.
+        function uses ``psf_taylor_order``. The components are added to its
+        ``SKY_MODEL`` in place, as in the cube, or to zeros when it has none.
 
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
@@ -3210,8 +3217,7 @@ def model_update_mtmfs_single_field(
     Native MT-MFS updates the selected residual Taylor stacks in ``img_xds``
     in place. Their spatial planes are contiguous while the binding explicitly
     honors the Taylor-term stride introduced by the polarization axis, so no
-    residual copy or reshape is made. The model buffer remains a zero-initialized
-    increment for the current model update.
+    residual copy or reshape is made.
     """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
@@ -3401,7 +3407,8 @@ def model_update_mtmfs_single_field(
         else:
             hogbom_xds[variable_name] = data_array.copy(deep=False)
 
-    # Ensure the temporary model variable exists.
+    # The components are added to Taylor term zero of the model in place, as
+    # in the cube, or to zeros when there is no model; it is copied back below.
     if "SKY_MODEL" not in hogbom_xds:
         hogbom_xds["SKY_MODEL"] = xr.zeros_like(hogbom_xds["SKY_RESIDUAL"])
 
@@ -3514,7 +3521,7 @@ def model_update_mtmfs_single_field(
         img_xds,
         data_group_out_name=image_data_group_out_name,
         data_group_out=continuum_model_group,
-        description=f"Continuum model increment produced by {backend_label} CLEAN.",
+        description=f"Continuum model updated by {backend_label} CLEAN.",
     )
 
     T_copy_model = time.time() - start
@@ -3546,21 +3553,22 @@ def accumulate_continuum_model(
 ):
     """Create the accumulated continuum model for the next residual update.
 
-    The model-update backend returns the initial model during the first cycle
-    and a model increment during every later cycle.  This helper normalizes
-    those two cases into one persistent model-state dataset.  It deliberately
-    performs positional array addition, matching the historical driver-side
-    accumulation after validating dimensions and shapes.
+    The model update adds its components to the model in place, so the image
+    it returns holds the model, which is copied as the model state. Cycle
+    acceleration replaces the step of the model update by its own step, which
+    is added to the previous model: positional array addition, after
+    validating dimensions and shapes.
 
     Parameters
     ----------
     model_increment_xds : xarray.Dataset
-        Image dataset returned by the current model-update cycle. It must
-        contain ``SKY_MODEL``. During the first MVC cycle it must also contain
-        the singleton effective ``PRIMARY_BEAM``.
+        Image dataset returned by the current model-update cycle, or with
+        ``previous_model_xds`` the step to add to that model. It must contain
+        ``SKY_MODEL``. Without ``previous_model_xds`` in MVC it must also
+        contain the singleton effective ``PRIMARY_BEAM``.
     previous_model_xds : xarray.Dataset, optional
         Accumulated model returned by the preceding append node. If omitted,
-        the current model is copied as the initial accumulated state.
+        the model of ``model_increment_xds`` is copied as the model state.
     continuum_mode : {"mfs", "mvc"}, default ``"mfs"``
         Continuum execution mode. MVC retains the effective primary beam with
         the accumulated Taylor model.

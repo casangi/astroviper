@@ -183,7 +183,9 @@ def simulate_processing_set(
         Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual
         model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,
         ``spill_efficiency``, ``corr_efficiency``, ``quantization_efficiency``,
-        ``t_cmb`` and ``random_seed``; ``None`` disables noise (unit weights).
+        ``t_cmb`` and ``random_seed`` (the noise of a visibility depends only on
+        the seed and the indices of its time and channel, not on the chunking);
+        ``None`` disables noise (unit weights).
     channel_width : float, Hz, optional
         Channel width used for the noise level.
     integration_time : float, s, optional
@@ -271,15 +273,6 @@ def simulate_processing_set(
     phase_center_chunk = _slice_time_axis(phase_center_ra_dec, 0, time_slice)
     pointing_chunk = _slice_time_axis(pointing_ra_dec, 0, time_slice)
 
-    noise = None
-    if noise_params is not None:
-        noise = dict(noise_params)
-        base_seed = noise.get("random_seed")
-        # a distinct, reproducible stream per task
-        noise["random_seed"] = (
-            None if base_seed is None else int(base_seed) + int(task_id)
-        )
-
     logger.debug(
         f"simulate_processing_set task {task_id}: {len(time_chunk)} times x "
         f"{len(frequency_chunk)} channels"
@@ -298,13 +291,15 @@ def simulate_processing_set(
         beam_params=beam_params,
         pointing_ra_dec=pointing_chunk,
         uvw_params=uvw_params,
-        noise_params=noise,
+        noise_params=noise_params,
         channel_width=channel_width,
         integration_time=integration_time,
         antenna_dish_diameter=antenna_dish_diameter,
         direction_frame=direction_frame,
         processing_function_threads=processing_function_threads,
         implementation=implementation,
+        time_index_offset=time_slice.start or 0,
+        frequency_index_offset=frequency_slice.start or 0,
         gaussian_source_flux=gaussian_flux_chunk,
         gaussian_source_ra_dec=gaussian_source_chunk,
         gaussian_source_shape=gaussian_source_shape,

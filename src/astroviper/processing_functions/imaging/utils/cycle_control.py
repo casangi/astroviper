@@ -2480,10 +2480,9 @@ def build_residual_imaging_dict(
         (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`),
         and the statistics of the residual inside and outside the clean mask
         (:func:`~astroviper.processing_functions.image_analysis.image_statistics.plane_residual_statistics`).
-        With ``record_iteration_history`` also an empty
-        ``iteration_peak_residual`` and ``iteration_residual_rms`` (no
-        iteration ran), so that a merged record holds one iteration history
-        per entry of ``iter_done``.
+        With ``record_iteration_history`` also an empty array for every field
+        of ``ITERATION_HISTORY_FIELDS`` (no iteration ran), so that a merged
+        record holds one iteration history per entry of ``iter_done``.
     """
     entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
         validate_entropy_params(cycle_control_params)

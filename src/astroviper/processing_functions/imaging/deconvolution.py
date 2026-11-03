@@ -1174,11 +1174,13 @@ def hogbom_clean(
         (int: 1 iteration budget spent, 2 threshold reached, 4 diverged, 0
         did not run) and ``diverged`` (bool). The final residual and model
         cubes are the caller-supplied arrays, updated in place. With
-        ``record_iteration_history`` (``deconvolve_params``) also
-        ``iteration_peak_residual`` and ``iteration_residual_rms``, the
-        iteration history: nested lists indexed ``[t][f][p]`` of 1-D float64
-        arrays, one per plane with one value per iteration of the plane
-        (see Notes).
+        ``record_iteration_history`` (``deconvolve_params``) also the
+        iteration history, ``iteration_peak_residual``,
+        ``iteration_residual_rms``, ``iteration_component_l``,
+        ``iteration_component_m``, ``iteration_component_scale`` and
+        ``iteration_component_flux``: nested lists indexed ``[t][f][p]`` of
+        1-D float64 arrays, one per plane with one value per iteration of the
+        plane (see Notes).
 
     Raises
     ------
@@ -1233,7 +1235,11 @@ def hogbom_clean(
     value times the PSF; Jy/beam, as the residual image), and
     ``iteration_residual_rms[k]``, the RMS (about zero) of the residual after
     that subtraction over the pixels the peak search covers (the clean box
-    inside the mask). The RMS costs no extra pass over the image: the peak
+    inside the mask). It also records the component the iteration
+    subtracted: its pixel (``iteration_component_l[k]``,
+    ``iteration_component_m[k]``), its scale (``iteration_component_scale[k]``,
+    0 for a point) and its flux (``iteration_component_flux[k]``). The RMS
+    costs no extra pass over the image: the peak
     search of every iteration already sums the squares of the residual for
     the divergence test, so the RMS after iteration ``k`` is exactly the sum
     found by the search of iteration ``k + 1``; only a plane that spends its
@@ -1601,17 +1607,16 @@ def asp_clean(
         ``diverged``); pixels outside the search region that are not finite are
         zero during the model update and keep their value. The final residual
         and model cubes are the caller-supplied arrays, updated in place.
+        With ``record_iteration_history`` also the iteration history of
+        :func:`hogbom_clean`, with one value per component
+        (``iteration_component_scale`` -1 for a residual-shaped component).
 
     Raises
     ------
     ValueError
         If the input arrays are not 5-D, do not share a floating-point
-        dtype, or have incompatible shapes, or if ``record_iteration_history``
-        is requested: an Asp iteration subtracts a fitted Aspen, not the PSF
-        at a residual peak, so only the Hogbom kernels record the iteration
-        history (see :func:`validate_record_iteration_history`), or if
-        ``exact_psf_subtraction`` is requested (see
-        :func:`validate_exact_psf_subtraction`).
+        dtype, or have incompatible shapes, or if ``exact_psf_subtraction``
+        is requested (see :func:`validate_exact_psf_subtraction`).
     """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
