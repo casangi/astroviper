@@ -400,15 +400,26 @@ def _remove_mvc_visibility_grid_cache(image_store):
         del root[_MVC_VISIBILITY_GRID_CACHE_GROUP]
 
 
-def _mapping_with_task_primary_beams(node_task_data_mapping, pb_cache_mapping):
-    """Attach only each task's own in-memory MVC primary beam to its mapping."""
+def _check_continuum_cache_tasks(node_task_data_mapping, cache_mapping, *, cache_name):
+    """Require a cache entry for every continuum task and no foreign task IDs.
+
+    Compare task ownership only. Product layout checks stay with their consumers,
+    and duplicate-result checks stay with reduction. Neither mapping is modified.
+    """
     expected = {int(task_id) for task_id in node_task_data_mapping}
-    actual = {int(task_id) for task_id in pb_cache_mapping}
+    actual = {int(task_id) for task_id in cache_mapping}
     if actual != expected:
         raise ValueError(
-            "The MVC primary-beam cache does not match the continuum tasks: "
+            f"The {cache_name} cache does not match the continuum tasks: "
             f"expected={sorted(expected)}, received={sorted(actual)}."
         )
+
+
+def _mapping_with_task_primary_beams(node_task_data_mapping, pb_cache_mapping):
+    """Attach only each task's own in-memory MVC primary beam to its mapping."""
+    _check_continuum_cache_tasks(
+        node_task_data_mapping, pb_cache_mapping, cache_name="MVC primary-beam"
+    )
 
     task_mapping = {}
     for task_id, mapping in node_task_data_mapping.items():
@@ -420,13 +431,9 @@ def _mapping_with_task_primary_beams(node_task_data_mapping, pb_cache_mapping):
 
 def _mapping_with_task_weights(node_task_data_mapping, weight_cache_mapping):
     """Attach only each task's own in-memory imaging weights to its mapping."""
-    expected = {int(task_id) for task_id in node_task_data_mapping}
-    actual = {int(task_id) for task_id in weight_cache_mapping}
-    if actual != expected:
-        raise ValueError(
-            "The imaging-weight cache does not match the continuum tasks: "
-            f"expected={sorted(expected)}, received={sorted(actual)}."
-        )
+    _check_continuum_cache_tasks(
+        node_task_data_mapping, weight_cache_mapping, cache_name="imaging-weight"
+    )
 
     task_mapping = {}
     for task_id, mapping in node_task_data_mapping.items():
@@ -441,13 +448,11 @@ def _mapping_with_task_observed_grids(
     observed_visibility_grid_mapping,
 ):
     """Attach only each task's own in-memory MVC observed UV-grid cache."""
-    expected = {int(task_id) for task_id in node_task_data_mapping}
-    actual = {int(task_id) for task_id in observed_visibility_grid_mapping}
-    if actual != expected:
-        raise ValueError(
-            "The MVC visibility-grid cache does not match the continuum tasks: "
-            f"expected={sorted(expected)}, received={sorted(actual)}."
-        )
+    _check_continuum_cache_tasks(
+        node_task_data_mapping,
+        observed_visibility_grid_mapping,
+        cache_name="MVC visibility-grid",
+    )
 
     task_mapping = {}
     for task_id, mapping in node_task_data_mapping.items():
