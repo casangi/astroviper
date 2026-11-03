@@ -265,7 +265,11 @@ def test_checked_processing_call_still_rejects_missing_runtime_products():
     processing = importlib.import_module(
         "astroviper.processing_functions.imaging.image_continuum_single_field"
     )
+    image = xr.Dataset(
+        {"MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (("time", "polarization"), [[0.1]])},
+        attrs={"data_groups": {"residual": {}}},
+    )
     with pytest.raises(KeyError, match="SKY_RESIDUAL"):
         processing.model_update_mtmfs_single_field(
-            xr.Dataset(), "hogbom", {}, input_checked=True
+            image, "hogbom", {}, input_checked=True
         )

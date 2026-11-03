@@ -6,6 +6,10 @@ from astroviper.utils.continuum_cache import (
 )
 from astroviper.utils.param_docs import shares_param_docs
 
+# -----------------------------------------------------------------------------
+# Shared product layouts and coordinate adapters
+# -----------------------------------------------------------------------------
+
 
 def check_continuum_taylor_layout(product, *, name, term_dimension, expected_count):
     """Check the dimensions and Taylor count of an actual continuum product.
@@ -72,61 +76,6 @@ def _continuum_plane_to_frequency(img_xds, data_array, plane_dimension):
         return plane.assign_coords(frequency=frequency_coord)
     axis = plane.dims.index("time") + 1 if "time" in plane.dims else 0
     return plane.expand_dims(frequency=frequency_coord, axis=axis)
-
-
-def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
-    """Return a principal-solution residual copy for MT-MFS restoration."""
-    import numpy as np
-
-    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
-
-    residual_dims = ("time", "taylor_term", "polarization", "l", "m")
-    psf_dims = ("time", "psf_taylor_order", "polarization", "l", "m")
-    missing_residual_dims = [
-        dim for dim in residual_dims if dim not in residual_da.dims
-    ]
-    missing_psf_dims = [dim for dim in psf_dims if dim not in psf_da.dims]
-    if missing_residual_dims:
-        raise ValueError(
-            "MT-MFS restoration requires residual dimensions "
-            f"{residual_dims}; missing {missing_residual_dims}."
-        )
-    if missing_psf_dims:
-        raise ValueError(
-            "MT-MFS restoration requires PSF dimensions "
-            f"{psf_dims}; missing {missing_psf_dims}."
-        )
-
-    residual_ordered = residual_da.transpose(*residual_dims)
-    psf_ordered = psf_da.transpose(*psf_dims)
-    n_taylor_terms = residual_ordered.sizes["taylor_term"]
-    expected_psf_terms = 2 * n_taylor_terms - 1
-    if psf_ordered.sizes["psf_taylor_order"] != expected_psf_terms:
-        raise ValueError(
-            "MT-MFS restoration requires 2 * n_taylor_terms - 1 PSF Taylor "
-            f"orders; received {psf_ordered.sizes['psf_taylor_order']} for "
-            f"n_taylor_terms={n_taylor_terms}."
-        )
-
-    principal_values = np.array(residual_ordered.values, copy=True, order="C")
-    psf_values = psf_ordered.values
-    for time_index in range(residual_ordered.sizes["time"]):
-        for polarization_index in range(residual_ordered.sizes["polarization"]):
-            psf_stack = np.ascontiguousarray(
-                psf_values[time_index, :, polarization_index]
-            )
-            inverse_hessian = mtmfs.hessian(psf_stack)["inverse_hessian"][0]
-            residual_stack = np.ascontiguousarray(
-                principal_values[time_index, :, polarization_index]
-            )
-            finite_pixels = np.all(np.isfinite(residual_stack), axis=0)
-            residual_stack[:, ~finite_pixels] = 0
-            mtmfs.principal_solution(residual_stack, inverse_hessian)
-            residual_stack[:, ~finite_pixels] = np.nan
-            principal_values[time_index, :, polarization_index] = residual_stack
-
-    principal = residual_ordered.copy(data=principal_values)
-    return principal.transpose(*residual_da.dims)
 
 
 ###############################################################################
@@ -2708,6 +2657,159 @@ def build_continuum_residual_imaging_dict(
     return statistics
 
 
+# -----------------------------------------------------------------------------
+# Model-update product validation
+# -----------------------------------------------------------------------------
+
+
+@shares_param_docs
+def check_continuum_model_products(residual, psf, *, deconvolver, model=None):
+    """Check actual model-update products before any image plane is changed.
+
+    Parameters
+    ----------
+    residual, psf : xarray.DataArray
+        Residual Taylor stack and corresponding PSF Taylor-order stack.
+    deconvolver : {"hogbom", "asp", "mtmfs"}
+        Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
+        threaded across planes) requires one Taylor term. Use ``"mtmfs"``
+        for two to four terms. ``"asp"``
+        (C++, adaptive scale pixel) cleans Taylor term zero only and needs
+        ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
+        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
+        pixels of the primary-beam support outside it than the image has
+        outside that support: Asp takes the noise from the median absolute
+        deviation of the pixels outside its mask, and MVC sets the residual to
+        0 outside the support. Without a clean mask that noise is 0, or after
+        the residual-shaped components that of their sidelobes there (a warning
+        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        synthesis) cleans the Taylor terms together and needs
+        ``image_params["n_taylor_terms"]`` from 2 to 4. Other values are
+        refused before anything is written, without substituting another algorithm
+        or Taylor order.
+    model : xarray.DataArray, optional
+        Existing model, when present. Its basis and geometry must match the
+        residual. A first update may create this product after validation.
+
+    Notes
+    -----
+    Checks inspect dimensions, precision, and coordinates without reading image
+    pixels. Configuration validation, masks, and numerical Hessian diagnostics
+    are handled separately. No products are changed or converted.
+    """
+    import numpy as np
+
+    # --- Taylor stacks and backend capacity ---
+    # The actual residual fixes every PSF order even for prechecked configuration.
+    nterms = residual.sizes.get("taylor_term")
+    check_continuum_taylor_layout(
+        residual,
+        name=residual.name,
+        term_dimension="taylor_term",
+        expected_count=nterms,
+    )
+    check_continuum_taylor_layout(
+        psf,
+        name=psf.name,
+        term_dimension="psf_taylor_order",
+        expected_count=2 * nterms - 1,
+    )
+    if deconvolver in ("hogbom", "asp") and nterms != 1:
+        raise ValueError(
+            f"Continuum {deconvolver} requires n_taylor_terms=1. "
+            "Use deconvolver='mtmfs' for 2 to 4 Taylor terms."
+        )
+    if deconvolver == "mtmfs" and not 2 <= nterms <= 4:
+        raise ValueError("Continuum mtmfs requires n_taylor_terms between 2 and 4.")
+
+    # --- Working precision ---
+    # Native residual updates require real floating storage. Matching precision
+    # prevents hidden conversions and applies to both PSF and existing model.
+    if residual.dtype not in (np.dtype("float32"), np.dtype("float64")):
+        raise TypeError("Residual products must use float32 or float64.")
+
+    # --- Model basis and shared product geometry ---
+    # Equal array shapes alone do not guarantee the same sky coordinates.
+    for product in (psf, model):
+        if product is None:
+            continue
+        name = product.name
+        if product.dtype != residual.dtype:
+            raise TypeError(
+                f"{name} and residual must have the same working precision."
+            )
+        if product is model:
+            check_continuum_taylor_layout(
+                model, name=name, term_dimension="taylor_term", expected_count=nterms
+            )
+            if (
+                "taylor_term" in model.coords
+                and "taylor_term" in residual.coords
+                and not np.array_equal(model.taylor_term, residual.taylor_term)
+            ):
+                raise ValueError(
+                    f"{name} and residual have incompatible taylor_term coordinates."
+                )
+        for dimension in ("time", "polarization", "l", "m"):
+            if product.sizes[dimension] != residual.sizes[dimension]:
+                raise ValueError(
+                    f"{name} and residual have incompatible {dimension} geometry."
+                )
+            if (
+                dimension in product.coords
+                and dimension in residual.coords
+                and not np.array_equal(product[dimension], residual[dimension])
+            ):
+                raise ValueError(
+                    f"{name} and residual have incompatible {dimension} coordinates."
+                )
+
+
+def check_continuum_model_controls(controls, residual):
+    """Check derived per-plane limits against an actual residual Taylor stack.
+
+    Parameters
+    ----------
+    controls : mapping
+        Supplied runtime limits. Scalars or (time, 1, polarization) arrays are
+        accepted; supplied values must be finite and nonnegative, with integer
+        dtype for iteration limits.
+    residual : xarray.DataArray
+        Residual whose layout has already been checked. Its time and polarization
+        sizes define the control planes. This function does not load its pixels.
+    """
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.config_check._common import (
+        require_finite_real,
+    )
+
+    # --- Plane correspondence ---
+    # Check all limits before the first plane can be modified by a backend.
+    expected_shape = (residual.sizes["time"], 1, residual.sizes["polarization"])
+    for name in ("threshold_per_cycle", "max_iter_per_cycle_updated"):
+        if name not in controls:
+            continue
+        values = require_finite_real(name, controls[name])
+        if values.ndim != 0 and values.shape != expected_shape:
+            raise ValueError(
+                f"{name} must be scalar or have per-plane shape {expected_shape}."
+            )
+
+        # --- Physical limit values ---
+        # Iteration counts cannot be fractional; neither stopping limit may be
+        # negative. Configuration defaults are resolved by consumers, not here.
+        if np.any(values < 0) or (
+            name == "max_iter_per_cycle_updated" and values.dtype.kind not in "iu"
+        ):
+            raise ValueError(f"{name} contains invalid per-plane limits.")
+
+
+# -----------------------------------------------------------------------------
+# Model-update backends and dispatch
+# -----------------------------------------------------------------------------
+
+
 def _model_update_native_mtmfs(
     img_xds,
     deconvolve_params,
@@ -2719,7 +2821,11 @@ def _model_update_native_mtmfs(
     *,
     input_checked=False,
 ):
-    """Run the native MT-MFS kernel on each time/polarization Taylor stack."""
+    """Run MT-MFS on products validated by ``model_update_mtmfs_single_field``.
+
+    This private adapter has one caller. Product and control validation precede
+    dispatch; writable buffers and native memory layouts are handled here.
+    """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
             CONTINUUM_SINGLE_FIELD,
@@ -2764,29 +2870,6 @@ def _model_update_native_mtmfs(
     psf = psf_da.values
     ntime, n_taylor_terms, npol, nl, nm = residual.shape
 
-    if not 2 <= n_taylor_terms <= 4:
-        raise ValueError(
-            "Native MT-MFS continuum deconvolution requires 2 to 4 Taylor "
-            f"terms; received {n_taylor_terms}."
-        )
-    expected_psf_terms = 2 * n_taylor_terms - 1
-    if psf.shape != (ntime, expected_psf_terms, npol, nl, nm):
-        raise ValueError(
-            "POINT_SPREAD_FUNCTION must have shape "
-            f"(time, {expected_psf_terms}, polarization, l, m) for "
-            f"n_taylor_terms={n_taylor_terms}; received {psf.shape}."
-        )
-    if residual.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
-        raise TypeError(
-            "Native MT-MFS residuals must use float32 or float64; "
-            f"received {residual.dtype}."
-        )
-    if psf.dtype != residual.dtype:
-        raise TypeError(
-            "Native MT-MFS residual and PSF dtypes must match; "
-            f"received {residual.dtype} and {psf.dtype}."
-        )
-
     # A read-only source cannot receive the native kernel's residual update.
     # Give the dataset writable storage while preserving its current layout;
     # individual non-canonical Taylor stacks are handled below.
@@ -2822,11 +2905,6 @@ def _model_update_native_mtmfs(
         if np.ndim(value) == 0:
             return value
         values = np.asarray(value)
-        if values.shape != (ntime, 1, npol):
-            raise ValueError(
-                f"{name} must be scalar or have shape {(ntime, 1, npol)}; "
-                f"received {values.shape}."
-            )
         return values[tt, 0, pp]
 
     # A call without the per-cycle limits (outside the imaging cycle loop) is
@@ -3150,62 +3228,15 @@ def model_update_mtmfs_single_field(
     import pandas as pd
     import xarray as xr
 
-    from astroviper.utils.data_group_tools import (
-        create_data_groups_in_and_out,
-        modify_data_groups_xds,
-    )
-
-    if "SKY_RESIDUAL" not in img_xds:
-        raise KeyError("The continuum image dataset does not contain SKY_RESIDUAL.")
-
-    if "POINT_SPREAD_FUNCTION" not in img_xds:
-        raise KeyError(
-            "The continuum image dataset does not contain POINT_SPREAD_FUNCTION."
-        )
-
-    data_groups = img_xds.attrs.get("data_groups", {})
-
-    if image_data_group_in_name not in data_groups:
-        raise KeyError(
-            f"Input data group {image_data_group_in_name!r} is not present "
-            "in img_xds.attrs['data_groups']."
-        )
-
-    residual_data_group = data_groups[image_data_group_in_name]
-
-    residual_name = residual_data_group.get("sky")
-    psf_name = residual_data_group.get("point_spread_function")
-
-    residual = img_xds["SKY_RESIDUAL"]
-    psf = img_xds["POINT_SPREAD_FUNCTION"]
-
-    if "taylor_term" not in residual.dims:
-        raise ValueError("SKY_RESIDUAL must contain a 'taylor_term' dimension.")
-
-    if "psf_taylor_order" not in psf.dims:
-        raise ValueError(
-            "POINT_SPREAD_FUNCTION must contain a 'psf_taylor_order' dimension."
-        )
-
-    if residual.sizes["taylor_term"] < 1:
-        raise ValueError("SKY_RESIDUAL contains no Taylor terms.")
-
-    if deconvolver == "asp" and residual.sizes["taylor_term"] != 1:
-        raise ValueError(
-            "deconvolver='asp' cleans Taylor term zero only and requires "
-            "SKY_RESIDUAL with one Taylor term; received "
-            f"{residual.sizes['taylor_term']}. Use deconvolver='mtmfs' for 2 to 4 "
-            "Taylor terms."
-        )
-
-    if psf.sizes["psf_taylor_order"] < 1:
-        raise ValueError("POINT_SPREAD_FUNCTION contains no PSF Taylor terms.")
-
     from astroviper.processing_functions.imaging.config_check._common import (
         CONTINUUM_SINGLE_FIELD,
     )
     from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
         check_model_products,
+    )
+    from astroviper.utils.data_group_tools import (
+        create_data_groups_in_and_out,
+        modify_data_groups_xds,
     )
 
     max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
@@ -3230,6 +3261,11 @@ def model_update_mtmfs_single_field(
         product_diagnostics
     )
 
+    residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    residual_name = residual_data_group.get("sky", "SKY_RESIDUAL")
+    psf_name = residual_data_group.get("point_spread_function", "POINT_SPREAD_FUNCTION")
+    residual = img_xds[residual_name]
+
     # make a cube-compatible copy of the per-plane controls
     cube_deconvolve_params = copy.deepcopy(deconvolve_params)
 
@@ -3244,21 +3280,8 @@ def model_update_mtmfs_single_field(
 
         parameter_array = np.asarray(parameter_value)
 
-        # Continuum layout:
-        #     time, taylor_term/frequency-like plane, polarization
-        #
-        # Temporary Högbom layout:
-        #     time, frequency=1, polarization
-        if parameter_array.ndim != 3:
-            raise ValueError(
-                f"{parameter_name} must have three dimensions "
-                "(time, plane, polarization); "
-                f"received shape {parameter_array.shape}."
-            )
-
-        if parameter_array.shape[1] < 1:
-            raise ValueError(f"{parameter_name} contains no image planes.")
-
+        # Limits already have validated (time, 1, polarization) shape. Only
+        # prepare contiguous storage for the cube/native backend adapters.
         cube_deconvolve_params[parameter_name] = np.ascontiguousarray(
             parameter_array[:, 0:1, :]
         )
@@ -3470,12 +3493,7 @@ def model_update_mtmfs_single_field(
 
     if "SKY_MODEL" not in img_xds:
         # Create all model Taylor terms, initialized to zero.
-        img_xds["SKY_MODEL"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
-
-    if "taylor_term" not in img_xds["SKY_MODEL"].dims:
-        raise ValueError(
-            "The continuum SKY_MODEL variable must contain a 'taylor_term' dimension."
-        )
+        img_xds["SKY_MODEL"] = xr.zeros_like(residual)
 
     # Use positional assignment because the Taylor coordinate need not
     # literally contain the value zero.
@@ -3637,6 +3655,61 @@ def accumulate_continuum_model(
 ###############################################################################
 # Restoration and primary-beam correction
 ###############################################################################
+
+
+def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
+    """Return a principal-solution residual copy for MT-MFS restoration."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+
+    residual_dims = ("time", "taylor_term", "polarization", "l", "m")
+    psf_dims = ("time", "psf_taylor_order", "polarization", "l", "m")
+    missing_residual_dims = [
+        dim for dim in residual_dims if dim not in residual_da.dims
+    ]
+    missing_psf_dims = [dim for dim in psf_dims if dim not in psf_da.dims]
+    if missing_residual_dims:
+        raise ValueError(
+            "MT-MFS restoration requires residual dimensions "
+            f"{residual_dims}; missing {missing_residual_dims}."
+        )
+    if missing_psf_dims:
+        raise ValueError(
+            "MT-MFS restoration requires PSF dimensions "
+            f"{psf_dims}; missing {missing_psf_dims}."
+        )
+
+    residual_ordered = residual_da.transpose(*residual_dims)
+    psf_ordered = psf_da.transpose(*psf_dims)
+    n_taylor_terms = residual_ordered.sizes["taylor_term"]
+    expected_psf_terms = 2 * n_taylor_terms - 1
+    if psf_ordered.sizes["psf_taylor_order"] != expected_psf_terms:
+        raise ValueError(
+            "MT-MFS restoration requires 2 * n_taylor_terms - 1 PSF Taylor "
+            f"orders; received {psf_ordered.sizes['psf_taylor_order']} for "
+            f"n_taylor_terms={n_taylor_terms}."
+        )
+
+    principal_values = np.array(residual_ordered.values, copy=True, order="C")
+    psf_values = psf_ordered.values
+    for time_index in range(residual_ordered.sizes["time"]):
+        for polarization_index in range(residual_ordered.sizes["polarization"]):
+            psf_stack = np.ascontiguousarray(
+                psf_values[time_index, :, polarization_index]
+            )
+            inverse_hessian = mtmfs.hessian(psf_stack)["inverse_hessian"][0]
+            residual_stack = np.ascontiguousarray(
+                principal_values[time_index, :, polarization_index]
+            )
+            finite_pixels = np.all(np.isfinite(residual_stack), axis=0)
+            residual_stack[:, ~finite_pixels] = 0
+            mtmfs.principal_solution(residual_stack, inverse_hessian)
+            residual_stack[:, ~finite_pixels] = np.nan
+            principal_values[time_index, :, polarization_index] = residual_stack
+
+    principal = residual_ordered.copy(data=principal_values)
+    return principal.transpose(*residual_da.dims)
 
 
 def restore_continuum_image(

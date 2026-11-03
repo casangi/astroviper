@@ -566,6 +566,7 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         'few planes, e.g. single-channel imaging) or ``"asp"``.'
     ),
     "image_continuum_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
+    "check_continuum_model_products.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
     "residual_update_continuum_single_field.deconvolver": (_CONTINUUM_DECONVOLVER_DOC),
     "model_update_mtmfs_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
     "instrument_polarization_basis": (

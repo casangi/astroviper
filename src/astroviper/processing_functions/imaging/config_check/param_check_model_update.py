@@ -816,30 +816,29 @@ def check_model_products(
     # 1. Product dimensions, Taylor basis, and precision
     # ========================================================================
 
-    # --- Residual dimensions and working precision ---
-    # Continuum producers and consumers share the actual Taylor-stack contract.
-    # Cube products retain their frequency-axis validation here.
+    # --- Runtime product layouts and precision ---
+    # Continuum processing owns its product contract; cube validation stays here.
+    model_name = groups.get(image_data_group_out_name, {}).get("sky", "SKY_MODEL")
     if mode.imaging_kind == "continuum":
         from astroviper.processing_functions.imaging.image_continuum_single_field import (
-            check_continuum_taylor_layout,
+            check_continuum_model_products,
         )
 
-        check_continuum_taylor_layout(
+        check_continuum_model_products(
             residual,
-            name=residual_name,
-            term_dimension="taylor_term",
-            expected_count=config.get("image_params", {}).get(
-                "n_taylor_terms", residual.sizes.get("taylor_term")
-            ),
+            psf,
+            deconvolver=deconvolver,
+            model=img_xds[model_name] if model_name in img_xds else None,
         )
-    elif set(residual.dims) != set(residual_dims) or any(
-        residual.sizes[dim] < 1 for dim in residual.dims
-    ):
-        raise ValueError(
-            f"{residual_name} must have nonempty dimensions {residual_dims}."
-        )
-    if residual.dtype not in (np.dtype("float32"), np.dtype("float64")):
-        raise TypeError("Residual products must use float32 or float64.")
+    else:
+        if set(residual.dims) != set(residual_dims) or any(
+            residual.sizes[dim] < 1 for dim in residual.dims
+        ):
+            raise ValueError(
+                f"{residual_name} must have nonempty dimensions {residual_dims}."
+            )
+        if residual.dtype not in (np.dtype("float32"), np.dtype("float64")):
+            raise TypeError("Residual products must use float32 or float64.")
     if "single_precision_image" in config:
         expected_dtype = np.dtype(
             "float32" if config["single_precision_image"] else "float64"
@@ -857,30 +856,18 @@ def check_model_products(
         if mode.imaging_kind == "continuum"
         else residual.sizes["frequency"]
     )
-    if mode.imaging_kind == "continuum":
-        check_continuum_taylor_layout(
-            psf,
-            name=psf_name,
-            term_dimension="psf_taylor_order",
-            expected_count=expected_psf_count,
-        )
-    elif (
+    if mode.imaging_kind == "cube" and (
         set(psf.dims) != set(psf_dims)
         or psf.sizes.get(psf_dims[1]) != expected_psf_count
     ):
         raise ValueError(
             f"{psf_name} must have dimensions {psf_dims} with exactly {expected_psf_count} spectral/Taylor planes."
         )
-    # The actual products must fit the backend even when configuration checks
-    # were skipped. Check their derived order without revalidating configuration.
-    if mode.imaging_kind == "continuum":
-        if deconvolver in ("hogbom", "asp") and nterms != 1:
-            raise ValueError(
-                f"Continuum {deconvolver} requires n_taylor_terms=1. "
-                "Use deconvolver='mtmfs' for 2 to 4 Taylor terms."
-            )
-        if deconvolver == "mtmfs" and not 2 <= nterms <= 4:
-            raise ValueError("Continuum mtmfs requires n_taylor_terms between 2 and 4.")
+    configured_nterms = config.get("image_params", {}).get("n_taylor_terms", nterms)
+    if mode.imaging_kind == "continuum" and configured_nterms != nterms:
+        raise ValueError(
+            f"Residual has {nterms} Taylor planes; configuration requires exactly {configured_nterms}."
+        )
 
     # --- Taylor-order labels and requested geometry ---
     # Correct counts must also refer to the exact Taylor basis that was checked.
@@ -932,26 +919,25 @@ def check_model_products(
     # --- Shared geometry, coordinates, and precision ---
     # A common shape alone is insufficient if coordinate labels disagree.
     spatial_dims = ("time", "polarization", "l", "m")
-    model_name = groups.get(image_data_group_out_name, {}).get("sky", "SKY_MODEL")
-    for name in (psf_name, model_name):
-        if name not in img_xds:
-            continue  # A first model update creates the model after validation.
-        product = img_xds[name]
-        if product.dtype != residual.dtype:
-            raise TypeError(
-                f"{name} and residual must have the same working precision."
-            )
-        if name == model_name and set(product.dims) != set(residual_dims):
-            raise ValueError(
-                f"{name} must have residual/model dimensions {residual_dims}."
-            )
-        if (
-            name == model_name
-            and product.sizes[term_dimension] != residual.sizes[term_dimension]
-        ):
-            raise ValueError(f"{name} must contain exactly {nterms} Taylor planes.")
-        # Model Taylor labels and cube frequency labels must match the residual.
-        if name == model_name or mode.imaging_kind == "cube":
+    if mode.imaging_kind == "cube":
+        for name in (psf_name, model_name):
+            if name not in img_xds:
+                continue  # A first model update creates the model after validation.
+            product = img_xds[name]
+            if product.dtype != residual.dtype:
+                raise TypeError(
+                    f"{name} and residual must have the same working precision."
+                )
+            if name == model_name and set(product.dims) != set(residual_dims):
+                raise ValueError(
+                    f"{name} must have residual/model dimensions {residual_dims}."
+                )
+            if (
+                name == model_name
+                and product.sizes[term_dimension] != residual.sizes[term_dimension]
+            ):
+                raise ValueError(f"{name} must contain exactly {nterms} Taylor planes.")
+            # Cube frequency labels must match the residual.
             if (
                 term_dimension in product.coords
                 and term_dimension in residual.coords
@@ -962,19 +948,19 @@ def check_model_products(
                 raise ValueError(
                     f"{name} and residual have incompatible {term_dimension} coordinates."
                 )
-        for dim in spatial_dims:
-            if dim not in product.dims or product.sizes[dim] != residual.sizes[dim]:
-                raise ValueError(
-                    f"{name} and residual have incompatible {dim} geometry."
-                )
-            if (
-                dim in product.coords
-                and dim in residual.coords
-                and not np.array_equal(product[dim], residual[dim])
-            ):
-                raise ValueError(
-                    f"{name} and residual have incompatible {dim} coordinates."
-                )
+            for dim in spatial_dims:
+                if dim not in product.dims or product.sizes[dim] != residual.sizes[dim]:
+                    raise ValueError(
+                        f"{name} and residual have incompatible {dim} geometry."
+                    )
+                if (
+                    dim in product.coords
+                    and dim in residual.coords
+                    and not np.array_equal(product[dim], residual[dim])
+                ):
+                    raise ValueError(
+                        f"{name} and residual have incompatible {dim} coordinates."
+                    )
 
     # --- Mask compatibility ---
     # Boolean support masks are allowed; numerical masks use image precision.
@@ -1011,23 +997,30 @@ def check_model_products(
 
     # --- Derived per-plane controls ---
     # Validate every runtime limit before the first image plane can be modified.
-    expected_control_shape = (
-        residual.sizes["time"],
-        1 if mode.imaging_kind == "continuum" else residual.sizes["frequency"],
-        residual.sizes["polarization"],
-    )
-    for name in ("threshold_per_cycle", "max_iter_per_cycle_updated"):
-        if name not in controls:
-            continue
-        values = require_finite_real(name, controls[name])
-        if values.ndim != 0 and values.shape != expected_control_shape:
-            raise ValueError(
-                f"{name} must be scalar or have per-plane shape {expected_control_shape}."
-            )
-        if np.any(values < 0) or (
-            name == "max_iter_per_cycle_updated" and values.dtype.kind not in "iu"
-        ):
-            raise ValueError(f"{name} contains invalid per-plane limits.")
+    if mode.imaging_kind == "continuum":
+        from astroviper.processing_functions.imaging.image_continuum_single_field import (
+            check_continuum_model_controls,
+        )
+
+        check_continuum_model_controls(controls, residual)
+    else:
+        expected_control_shape = (
+            residual.sizes["time"],
+            residual.sizes["frequency"],
+            residual.sizes["polarization"],
+        )
+        for name in ("threshold_per_cycle", "max_iter_per_cycle_updated"):
+            if name not in controls:
+                continue
+            values = require_finite_real(name, controls[name])
+            if values.ndim != 0 and values.shape != expected_control_shape:
+                raise ValueError(
+                    f"{name} must be scalar or have per-plane shape {expected_control_shape}."
+                )
+            if np.any(values < 0) or (
+                name == "max_iter_per_cycle_updated" and values.dtype.kind not in "iu"
+            ):
+                raise ValueError(f"{name} contains invalid per-plane limits.")
 
     # --- Validated effective scales ---
     # Record exactly the native scale values and geometry that were checked.
