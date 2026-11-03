@@ -871,6 +871,8 @@ def prepare_continuum_imaging_weights_global(
     from graphviper.graph_tools import generate_dask_workflow, map, reduce
 
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        check_continuum_briggs_factor_shape,
+        check_continuum_weight_density_products,
         normalize_imaging_weight_params,
     )
     from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
@@ -943,83 +945,9 @@ def prepare_continuum_imaging_weights_global(
 
     global_weight_density_xds = weight_density_result["weight_density"]
 
-    if not isinstance(global_weight_density_xds, xr.Dataset):
-        raise TypeError(
-            "weight_density_result['weight_density'] must be an "
-            f"xarray.Dataset; received "
-            f"{type(global_weight_density_xds).__name__}."
-        )
-
-    required_variables = (
-        "WEIGHT_DENSITY_GRID",
-        "SUM_WEIGHT",
+    check_continuum_weight_density_products(
+        global_weight_density_xds, name="weight_density_result['weight_density']"
     )
-
-    missing_variables = [
-        variable_name
-        for variable_name in required_variables
-        if variable_name not in global_weight_density_xds
-    ]
-
-    if missing_variables:
-        raise KeyError(
-            "The globally reduced weight-density dataset is missing "
-            f"variables {missing_variables}."
-        )
-
-    global_weight_density_da = global_weight_density_xds["WEIGHT_DENSITY_GRID"]
-    global_sum_weight_da = global_weight_density_xds["SUM_WEIGHT"]
-
-    expected_density_dims = (
-        "frequency",
-        "weight_polarization",
-        "u",
-        "v",
-    )
-    expected_sum_weight_dims = (
-        "frequency",
-        "weight_polarization",
-    )
-
-    if global_weight_density_da.dims != expected_density_dims:
-        raise ValueError(
-            "WEIGHT_DENSITY_GRID has dimensions "
-            f"{global_weight_density_da.dims}; expected "
-            f"{expected_density_dims}."
-        )
-
-    if global_sum_weight_da.dims != expected_sum_weight_dims:
-        raise ValueError(
-            "SUM_WEIGHT has dimensions "
-            f"{global_sum_weight_da.dims}; expected "
-            f"{expected_sum_weight_dims}."
-        )
-
-    if (
-        global_weight_density_da.sizes["frequency"]
-        != global_sum_weight_da.sizes["frequency"]
-    ):
-        raise ValueError(
-            "WEIGHT_DENSITY_GRID and SUM_WEIGHT have different frequency-axis lengths."
-        )
-
-    if (
-        global_weight_density_da.sizes["weight_polarization"]
-        != global_sum_weight_da.sizes["weight_polarization"]
-    ):
-        raise ValueError(
-            "WEIGHT_DENSITY_GRID and SUM_WEIGHT have different "
-            "weight-polarization-axis lengths."
-        )
-
-    # Global continuum map tasks accumulate every selected channel directly
-    # into one density plane. Keeping that singleton layout through reduction
-    # avoids materializing a channel-by-UV-grid intermediate on the driver.
-    if not global_weight_density_xds.attrs.get("continuum_frequency_collapsed", False):
-        raise ValueError(
-            "Global continuum weight-density maps must return a frequency-"
-            "collapsed density plane."
-        )
     global_weight_density_da = global_weight_density_xds["WEIGHT_DENSITY_GRID"]
     global_sum_weight_da = global_weight_density_xds["SUM_WEIGHT"]
 
@@ -1054,18 +982,9 @@ def prepare_continuum_imaging_weights_global(
 
     global_briggs_factors = np.asarray(global_briggs_factors)
 
-    expected_factor_shape = (
-        2,
-        global_weight_density_da.sizes["frequency"],
-        global_weight_density_da.sizes["weight_polarization"],
+    check_continuum_briggs_factor_shape(
+        global_briggs_factors, global_weight_density_xds
     )
-
-    if global_briggs_factors.shape != expected_factor_shape:
-        raise ValueError(
-            "calculate_briggs_params returned an unexpected shape: "
-            f"{global_briggs_factors.shape}; expected "
-            f"{expected_factor_shape}."
-        )
 
     if not np.all(np.isfinite(global_briggs_factors)):
         raise ValueError("The global Briggs factors contain non-finite values.")
@@ -1959,6 +1878,10 @@ def combine_continuum_weight_density_chunks(
         "SUM_WEIGHT",
     )
 
+    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        check_continuum_weight_density_products,
+    )
+
     # -------------------------------------------------------------
     # Validate one reducer input and return its density dataset.
     # -------------------------------------------------------------
@@ -1974,90 +1897,9 @@ def combine_continuum_weight_density_chunks(
 
         density_xds = result["weight_density"]
 
-        if not isinstance(density_xds, xr.Dataset):
-            raise TypeError(
-                f"input[{input_index}]['weight_density'] must be an "
-                f"xarray.Dataset; received "
-                f"{type(density_xds).__name__}."
-            )
-
-        missing_variables = [
-            name for name in required_variables if name not in density_xds
-        ]
-
-        if missing_variables:
-            raise KeyError(
-                f"input[{input_index}]['weight_density'] is missing "
-                f"variables {missing_variables}."
-            )
-
-        if "frequency" not in density_xds.coords:
-            raise KeyError(
-                f"input[{input_index}]['weight_density'] does not "
-                "contain a frequency coordinate."
-            )
-
-        frequency = np.asarray(
-            density_xds.coords["frequency"].values,
-            dtype=np.float64,
+        check_continuum_weight_density_products(
+            density_xds, name=f"input[{input_index}]['weight_density']"
         )
-
-        if frequency.ndim != 1:
-            raise ValueError(
-                f"input[{input_index}] frequency coordinate must be "
-                f"one-dimensional; received shape {frequency.shape}."
-            )
-
-        if frequency.size == 0:
-            raise ValueError(f"input[{input_index}] contains no frequency channels.")
-
-        if not np.all(np.isfinite(frequency)):
-            raise ValueError(
-                f"input[{input_index}] frequency coordinate contains non-finite values."
-            )
-
-        if np.unique(frequency).size != frequency.size:
-            raise ValueError(
-                f"input[{input_index}] frequency coordinate contains duplicate values."
-            )
-
-        density = density_xds["WEIGHT_DENSITY_GRID"]
-        sum_weight = density_xds["SUM_WEIGHT"]
-
-        expected_density_dims = (
-            "frequency",
-            "weight_polarization",
-            "u",
-            "v",
-        )
-        expected_sum_weight_dims = (
-            "frequency",
-            "weight_polarization",
-        )
-
-        if density.dims != expected_density_dims:
-            raise ValueError(
-                f"input[{input_index}] WEIGHT_DENSITY_GRID has "
-                f"dimensions {density.dims}; expected "
-                f"{expected_density_dims}."
-            )
-
-        if sum_weight.dims != expected_sum_weight_dims:
-            raise ValueError(
-                f"input[{input_index}] SUM_WEIGHT has dimensions "
-                f"{sum_weight.dims}; expected "
-                f"{expected_sum_weight_dims}."
-            )
-
-        if not density_xds.attrs.get("continuum_frequency_collapsed", False):
-            raise ValueError(
-                f"input[{input_index}] must contain a frequency-collapsed "
-                "continuum weight-density grid."
-            )
-        if frequency.size != 1:
-            raise ValueError(
-                f"input[{input_index}] must contain exactly one frequency plane."
-            )
 
         return density_xds
 

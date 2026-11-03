@@ -7,6 +7,105 @@ import xarray as xr
 from astroviper.utils.param_docs import shares_param_docs
 
 
+def check_continuum_weight_density_products(density_xds, *, name="weight_density"):
+    """Check runtime density products without reading density-grid pixels.
+
+    Parameters
+    ----------
+    density_xds : xarray.Dataset
+        Frequency-collapsed continuum density and summed statistical weights.
+        Briggs factors are checked separately once they have been calculated.
+    name : str, optional
+        Product location included in diagnostics, for example a reducer input.
+
+    Raises
+    ------
+    TypeError
+        If the product is not a Dataset.
+    KeyError
+        If required variables or the frequency coordinate are absent.
+    ValueError
+        If dimensions or the collapsed-frequency layout are inconsistent.
+    """
+    # --- Required density products ---
+    # Reduction and factor preparation consume the same two-variable contract.
+    if not isinstance(density_xds, xr.Dataset):
+        raise TypeError(
+            f"{name} must be an xarray.Dataset; received {type(density_xds).__name__}."
+        )
+    missing = [
+        key for key in ("WEIGHT_DENSITY_GRID", "SUM_WEIGHT") if key not in density_xds
+    ]
+    if missing:
+        raise KeyError(f"{name} is missing required variables {missing}.")
+    if "frequency" not in density_xds.coords:
+        raise KeyError(f"{name} does not contain a frequency coordinate.")
+
+    # --- Storage dimensions ---
+    # Ordered axes are part of the gridder contract. Xarray enforces shared
+    # dimension lengths within a Dataset, so separate axis-length tests add no
+    # further constraint once both variables use these exact dimensions.
+    for variable, dimensions in (
+        ("WEIGHT_DENSITY_GRID", ("frequency", "weight_polarization", "u", "v")),
+        ("SUM_WEIGHT", ("frequency", "weight_polarization")),
+    ):
+        if density_xds[variable].dims != dimensions:
+            raise ValueError(
+                f"{name} {variable} has dimensions {density_xds[variable].dims}; expected {dimensions}."
+            )
+
+    # --- Collapsed continuum frequency axis ---
+    # All selected visibility channels contribute to one stored density plane.
+    # Only the small frequency coordinate is read, never the density grid.
+    frequency = np.asarray(density_xds.coords["frequency"].values, dtype=np.float64)
+    if frequency.ndim != 1:
+        raise ValueError(
+            f"{name} frequency coordinate must be one-dimensional; received shape {frequency.shape}."
+        )
+    if frequency.size == 0:
+        raise ValueError(f"{name} contains no frequency channels.")
+    if not np.all(np.isfinite(frequency)):
+        raise ValueError(f"{name} frequency coordinate contains non-finite values.")
+    if np.unique(frequency).size != frequency.size:
+        raise ValueError(f"{name} frequency coordinate contains duplicate values.")
+    if not density_xds.attrs.get("continuum_frequency_collapsed", False):
+        raise ValueError(
+            f"{name} must contain a frequency-collapsed continuum weight-density grid."
+        )
+    if frequency.size != 1:
+        raise ValueError(f"{name} must contain exactly one frequency plane.")
+
+
+def check_continuum_briggs_factor_shape(factors, density_xds):
+    """Require two factors per density frequency/polarization plane.
+
+    Accept the freshly calculated NumPy array or the stored DataArray. This
+    checks shape only; product-specific dimension and numerical checks remain
+    with preparation and application. No factor values are read or converted.
+
+    Parameters
+    ----------
+    factors : numpy.ndarray or xarray.DataArray
+        Calculated or stored Briggs factors.
+    density_xds : xarray.Dataset
+        Density products whose layout has already been validated.
+
+    Raises
+    ------
+    ValueError
+        If the factors do not have shape (2, frequency, weight_polarization).
+    """
+    expected = (
+        2,
+        density_xds.sizes["frequency"],
+        density_xds.sizes["weight_polarization"],
+    )
+    if factors.shape != expected:
+        raise ValueError(
+            f"BRIGGS_FACTORS has an unexpected shape: {factors.shape}; expected {expected} (exactly two Briggs parameters)."
+        )
+
+
 def _equalize_parallel_hand_weights(
     data_weight: np.ndarray, casa_weighting_implementation: bool
 ) -> np.ndarray:
@@ -630,70 +729,24 @@ def degrid_imaging_weights_continuum(
             "weight_imaging": "WEIGHT_IMAGING",
         }
 
-    if not isinstance(global_weighting_xds, xr.Dataset):
-        raise TypeError(
-            "global_weighting_xds must be an xarray.Dataset; received "
-            f"{type(global_weighting_xds).__name__}."
+    check_continuum_weight_density_products(
+        global_weighting_xds, name="global_weighting_xds"
+    )
+    if "BRIGGS_FACTORS" not in global_weighting_xds:
+        raise KeyError(
+            "global_weighting_xds is missing required variable 'BRIGGS_FACTORS'."
         )
 
     weight_params = imaging_weights_params
-
     weighting = weight_params.get("weighting", "natural")
-
-    required_global_variables = (
-        "WEIGHT_DENSITY_GRID",
-        "SUM_WEIGHT",
-        "BRIGGS_FACTORS",
-    )
-
-    missing_global_variables = [
-        variable_name
-        for variable_name in required_global_variables
-        if variable_name not in global_weighting_xds
-    ]
-
-    if missing_global_variables:
-        raise KeyError(
-            "global_weighting_xds is missing required variables "
-            f"{missing_global_variables}."
-        )
-
-    if "frequency" not in global_weighting_xds.coords:
-        raise KeyError("global_weighting_xds does not contain a frequency coordinate.")
-
     global_density_da = global_weighting_xds["WEIGHT_DENSITY_GRID"]
-    global_sum_weight_da = global_weighting_xds["SUM_WEIGHT"]
     global_briggs_da = global_weighting_xds["BRIGGS_FACTORS"]
 
-    expected_density_dims = (
-        "frequency",
-        "weight_polarization",
-        "u",
-        "v",
-    )
-    expected_sum_weight_dims = (
-        "frequency",
-        "weight_polarization",
-    )
     expected_briggs_dims = (
         "briggs_parameter",
         "frequency",
         "weight_polarization",
     )
-
-    if global_density_da.dims != expected_density_dims:
-        raise ValueError(
-            "WEIGHT_DENSITY_GRID has dimensions "
-            f"{global_density_da.dims}; expected "
-            f"{expected_density_dims}."
-        )
-
-    if global_sum_weight_da.dims != expected_sum_weight_dims:
-        raise ValueError(
-            "SUM_WEIGHT has dimensions "
-            f"{global_sum_weight_da.dims}; expected "
-            f"{expected_sum_weight_dims}."
-        )
 
     if global_briggs_da.dims != expected_briggs_dims:
         raise ValueError(
@@ -702,38 +755,7 @@ def degrid_imaging_weights_continuum(
             f"{expected_briggs_dims}."
         )
 
-    if global_briggs_da.sizes["briggs_parameter"] != 2:
-        raise ValueError(
-            "BRIGGS_FACTORS must contain exactly two Briggs parameters; "
-            f"received "
-            f"{global_briggs_da.sizes['briggs_parameter']}."
-        )
-
-    global_frequency = np.asarray(
-        global_weighting_xds.coords["frequency"].values,
-        dtype=np.float64,
-    )
-    if global_frequency.ndim != 1:
-        raise ValueError(
-            "The global frequency coordinate must be one-dimensional; "
-            f"received shape {global_frequency.shape}."
-        )
-
-    if global_frequency.size == 0:
-        raise ValueError("The global frequency coordinate contains no channels.")
-
-    if not np.all(np.isfinite(global_frequency)):
-        raise ValueError("The global frequency coordinate contains non-finite values.")
-
-    if not global_weighting_xds.attrs.get("continuum_frequency_collapsed", False):
-        raise ValueError(
-            "Global continuum weighting requires a frequency-collapsed density."
-        )
-    if global_frequency.size != 1:
-        raise ValueError(
-            "A frequency-collapsed continuum density must contain exactly one "
-            "stored density plane."
-        )
+    check_continuum_briggs_factor_shape(global_briggs_da, global_weighting_xds)
 
     # ------------------------------------------------------------------
     # Resolve the common image geometry used by the degridder.
@@ -838,33 +860,6 @@ def degrid_imaging_weights_continuum(
         local_density_grid = np.asarray(global_density_da.values)
         local_briggs_factors = np.asarray(global_briggs_da.values)
         frequency_map = np.zeros(local_frequency.size, dtype=np.int64)
-
-        expected_local_density_shape = (
-            1,
-            global_density_da.sizes["weight_polarization"],
-            n_uv[0],
-            n_uv[1],
-        )
-
-        if local_density_grid.shape != expected_local_density_shape:
-            raise ValueError(
-                f"Selected density grid for child {ms_name!r} has shape "
-                f"{local_density_grid.shape}; expected "
-                f"{expected_local_density_shape}."
-            )
-
-        expected_local_briggs_shape = (
-            2,
-            1,
-            global_density_da.sizes["weight_polarization"],
-        )
-
-        if local_briggs_factors.shape != expected_local_briggs_shape:
-            raise ValueError(
-                f"Selected Briggs factors for child {ms_name!r} have "
-                f"shape {local_briggs_factors.shape}; expected "
-                f"{expected_local_briggs_shape}."
-            )
 
         required_input_variables = (
             ms_data_group_in["uvw"],
