@@ -677,7 +677,8 @@ IMAGING_PARAM_DOCS = {
         "``l`` and ``m`` and optionally ``taylor_term``."
     ),
     "model_increment": (
-        "Model increment ``z`` of the model update, which started from an\nempty model."
+        "Model increment ``z`` of the model update: the model it made minus\n"
+        "the model it started from."
     ),
     "cycle_acceleration_state_xds": (
         "State returned by the preceding call, or ``None`` in the first\nimaging cycle."
