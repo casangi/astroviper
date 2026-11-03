@@ -6,7 +6,7 @@ The mask is a ``.npy`` file of 17 x 17 pixels around the point source. In every
 channel the deconvolver must clean the point source and leave the Gaussian in
 the residual: the model of the point source holds its apparent flux within
 8 percent (measured: within 3.6 percent), the model of the Gaussian less than
-3 percent of its own (measured: 0 for Hogbom, at most 1.7 percent for Asp,
+3 percent of its own (measured: 0 for Hogbom, at most 1.6 percent for Asp,
 whose components reach past the mask), the largest model pixel lies in the
 mask and the Gaussian's residual peak is more than 10 times the largest
 residual in the mask (measured: at least 105 times). The mask written is the

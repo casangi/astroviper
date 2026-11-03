@@ -60,7 +60,9 @@ CELL_SIZE = np.array([-1.0e-4, 1.0e-4])  # rad
 UV_EXTENT = 150.0  # metres; well inside the padded uv grid for this cell size
 
 
-def _point_source_processing_set(data_group_name, n_time=8, n_antenna=4):
+def _point_source_processing_set(
+    data_group_name, n_time=8, n_antenna=4, polarization=("XX", "YY")
+):
     """A one-MSv4 processing set observing a 1 Jy unpolarized point source.
 
     The source sits at the phase centre, so every ``XX``/``YY`` visibility is
@@ -71,7 +73,7 @@ def _point_source_processing_set(data_group_name, n_time=8, n_antenna=4):
     antennas = [f"a{i}" for i in range(n_antenna)]
     pairs = [(a, b) for i, a in enumerate(antennas) for b in antennas[i + 1 :]]
     n_baseline = len(pairs)
-    shape = (n_time, n_baseline, 1, 2)
+    shape = (n_time, n_baseline, 1, len(polarization))
 
     uvw = np.zeros((n_time, n_baseline, 3))
     uvw[..., :2] = rng.uniform(-UV_EXTENT, UV_EXTENT, (n_time, n_baseline, 2))
@@ -94,7 +96,7 @@ def _point_source_processing_set(data_group_name, n_time=8, n_antenna=4):
             "baseline_antenna1_name": ("baseline_id", [a for a, _ in pairs]),
             "baseline_antenna2_name": ("baseline_id", [b for _, b in pairs]),
             "frequency": [FREQUENCY],
-            "polarization": ["XX", "YY"],
+            "polarization": list(polarization),
             "uvw_label": ["u", "v", "w"],
         },
         attrs={"data_groups": {data_group_name: dict(data_group)}},
@@ -102,7 +104,7 @@ def _point_source_processing_set(data_group_name, n_time=8, n_antenna=4):
     return xr.DataTree.from_dict({"ms_0": ms_xds})
 
 
-def _empty_image():
+def _empty_image(polarization=("XX", "YY")):
     from xradio.image import make_empty_sky_image
 
     return make_empty_sky_image(
@@ -110,7 +112,7 @@ def _empty_image():
         image_size=IMAGE_SIZE,
         cell_size=CELL_SIZE,
         frequency_coords=[FREQUENCY],
-        pol_coords=["XX", "YY"],
+        pol_coords=list(polarization),
         time_coords=[0],
         do_sky_coords=False,
     )
@@ -203,6 +205,63 @@ def test_residual_update_with_model_uses_the_imaged_data_group(data_group_name):
     )
     residual_peak = float(np.abs(img_xds["SKY_RESIDUAL"]).max())
     assert residual_peak < 1e-2 * dirty_peak
+
+
+@pytest.mark.parametrize(
+    "polarization,basis,stokes",
+    [
+        (["XX", "YY"], "linear", ["I", "Q"]),
+        (["RR", "LL"], "circular", ["I", "V"]),
+        (["XX", "XY", "YX", "YY"], "linear", ["I", "Q", "U", "V"]),
+        (["RR", "RL", "LR", "LL"], "circular", ["I", "Q", "U", "V"]),
+    ],
+)
+@pytest.mark.parametrize("single_precision_image", [True, False])
+def test_residual_update_leaves_the_model_unchanged(
+    polarization, basis, stokes, single_precision_image
+):
+    """The model reaches the next model update as it was: the residual update
+    keeps it out of the image's round trip to the correlation basis and back,
+    which rounds with Q, U or V in the model (here normal deviates in every
+    Stokes plane; uniform ones lie on a grid on which that round trip is
+    exact in double precision)."""
+    ps_xdt = _point_source_processing_set("base", polarization=polarization)
+    image_params = {
+        "image_size": IMAGE_SIZE,
+        "cell_size": CELL_SIZE,
+        "phase_direction": np.array([1.0, 0.5]),
+        "time_coords": [0],
+        "polarization_coords": stokes,
+        "fft_padding": 1.2,
+    }
+    common = dict(
+        processing_set_data_group_name="base",
+        single_precision_image=single_precision_image,
+        fft_backend="scipy",
+    )
+    img_xds, _ = imaging_setup_single_field(
+        ps_xdt,
+        _empty_image(polarization),
+        image_params,
+        {"weighting": "natural"},
+        **common,
+    )
+    common["instrument_polarization_basis"] = basis
+    img_xds, _ = residual_update_cube_single_field(
+        ps_xdt, img_xds, image_params, model_exists=False, **common
+    )
+    img_xds = _add_point_source_model(img_xds)
+    model = img_xds["SKY_MODEL"]
+    model.values[...] = np.random.default_rng(1).standard_normal(model.shape)
+    before = model.copy(deep=True)
+
+    img_xds, _ = residual_update_cube_single_field(
+        ps_xdt, img_xds, image_params, model_exists=True, **common
+    )
+
+    xr.testing.assert_identical(img_xds["SKY_MODEL"], before)
+    assert list(img_xds.polarization.values) == stokes
+    assert img_xds.attrs["data_groups"]["model"]["sky"] == "SKY_MODEL"
 
 
 def test_imaging_setup_uses_the_primary_beam_params():
