@@ -288,6 +288,7 @@ def residual_cycle_continuum_single_field(
                     },
                     image_data_group_in_name=image_data_group_in_name,
                     processing_function_threads=processing_function_threads,
+                    input_checked=True,
                 )
             else:
                 make_visibility_model_continuum_single_field(
@@ -413,6 +414,7 @@ def residual_cycle_continuum_single_field(
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
 
     elif continuum_mode == "mfs":

@@ -1,0 +1,24 @@
+"""Regression tests for validation shared with direct processing-function calls."""
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "add_dft_image_continuum_single_field",
+        "make_dft_undeconvolved_image_continuum_single_field",
+        "make_dft_point_spread_function_continuum_single_field",
+        "make_dft_visibility_model_continuum_single_field",
+    ],
+)
+@pytest.mark.parametrize(
+    "count,frequency",
+    [(1.5, 1e9), (True, 1e9), ("2", 1e9), (1, "1e9"), (1, 0), (1, float("nan"))],
+)
+def test_dft_rejects_original_parameters_before_accessing_data(name, count, frequency):
+    from astroviper.processing_functions.imaging import direct_fourier_transform
+
+    function = getattr(direct_fourier_transform, name)
+    with pytest.raises((TypeError, ValueError)):
+        function(None, None, count, frequency)

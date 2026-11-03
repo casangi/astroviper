@@ -713,6 +713,7 @@ def make_point_spread_function_continuum_single_field(
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
 
     start = time.time()
