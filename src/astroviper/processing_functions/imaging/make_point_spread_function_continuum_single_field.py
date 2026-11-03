@@ -468,7 +468,10 @@ def make_point_spread_function_mvc_single_field(
     # Validate the shared cube nearest-channel policy before gridding.
     for ms_xdt in ps_xdt.values():
         map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values, img_xds.frequency.values, matching="nearest"
+            ms_xdt.frequency.values,
+            img_xds.frequency.values,
+            matching="nearest",
+            input_checked=True,
         )
 
     if complex_dtype is None:

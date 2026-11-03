@@ -276,9 +276,7 @@ def add_visibility_grid_mvc_single_field(
         )
 
     frequency_map = map_visibility_frequencies_to_image(
-        frequency_coord,
-        image_frequency_coord,
-        matching="nearest",
+        frequency_coord, image_frequency_coord, matching="nearest", input_checked=True
     )
     n_image_chan = image_frequency_coord.size
 

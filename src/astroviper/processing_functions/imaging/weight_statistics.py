@@ -349,7 +349,7 @@ def calculate_weight_statistics_single_field(
             for role in ("weight", "weight_imaging", "flag", "uvw")
         ]
         image_channel_map = map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values, image_frequencies
+            ms_xdt.frequency.values, image_frequencies, input_checked=True
         )
         samples_per_time = int(cross.sum()) * ms_xdt.sizes["frequency"] * len(order)
         times_per_block = max(1, BLOCK_SAMPLES // max(samples_per_time, 1))

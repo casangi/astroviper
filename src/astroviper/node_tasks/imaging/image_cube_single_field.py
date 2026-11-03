@@ -116,7 +116,7 @@ def _visibility_to_image_frequency_maps(ps_xdt, img_xds):
 
     return {
         ms_name: map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values, img_xds.frequency.values
+            ms_xdt.frequency.values, img_xds.frequency.values, input_checked=True
         )
         for ms_name, ms_xdt in ps_xdt.items()
     }

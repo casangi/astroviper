@@ -102,7 +102,7 @@ def _frequency_map(ms_xds, img_xds, chan_mode):
         )
 
         frequency_map = map_visibility_frequencies_to_image(
-            ms_xds.frequency.values, img_xds.frequency.values
+            ms_xds.frequency.values, img_xds.frequency.values, input_checked=True
         )
     else:  # continuum: every channel onto image channel 0
         frequency_map = np.zeros(ms_xds.sizes["frequency"], dtype=np.int64)

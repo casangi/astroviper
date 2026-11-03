@@ -316,8 +316,7 @@ def add_visibility_grid_single_field(
 
         n_imag_chan = img_xds.sizes["frequency"]
         frequency_map = map_visibility_frequencies_to_image(
-            ms_xds.frequency.values,
-            img_xds.frequency.values,
+            ms_xds.frequency.values, img_xds.frequency.values, input_checked=True
         )
     else:  # continuum
         n_imag_chan = 1  # Single continuum image collapsed across all channels.

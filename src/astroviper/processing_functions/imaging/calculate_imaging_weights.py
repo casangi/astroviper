@@ -1225,7 +1225,10 @@ def calculate_imaging_weights(
         # Same physical channel assignment as the visibility / PSF gridders,
         # so the weight density is accumulated on the image channel planes.
         frequency_map = map_visibility_frequencies_to_image(
-            freq_chan, img_xds.frequency.values, matching=frequency_matching
+            freq_chan,
+            img_xds.frequency.values,
+            matching=frequency_matching,
+            input_checked=True,
         )
 
         grid_imaging_weights(
@@ -1256,7 +1259,10 @@ def calculate_imaging_weights(
 
         freq_chan = ms_xdt.frequency.values
         frequency_map = map_visibility_frequencies_to_image(
-            freq_chan, img_xds.frequency.values, matching=frequency_matching
+            freq_chan,
+            img_xds.frequency.values,
+            matching=frequency_matching,
+            input_checked=True,
         )
 
         imaging_weights = degrid_imaging_weights(

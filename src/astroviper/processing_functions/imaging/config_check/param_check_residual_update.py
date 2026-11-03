@@ -133,8 +133,8 @@ def check_residual_update(config, *, mode, require_complete=False):
     # --- Direct frequency-mapping policy ---
     # Helpers expose this policy; imaging drivers keep their existing choice.
     for name in ("matching", "frequency_matching"):
-        if name in config and config[name] not in ("nearest", "exact"):
-            raise ValueError(f"{name} must be 'nearest' or 'exact'.")
+        if name in config:
+            check_frequency_matching(config[name], name=name)
 
     # --- Continuum construction ---
     # Continuum residuals can be formed by either the MFS or MVC path.
@@ -470,7 +470,7 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
         selected = selected_frequency_mask(frequencies, image["frequency_coords"])
         if np.any(selected):
             map_visibility_frequencies_to_image(
-                frequencies[selected], image["frequency_coords"]
+                frequencies[selected], image["frequency_coords"], input_checked=True
             )
 
 
@@ -828,3 +828,13 @@ def check_delphi_parameters(config):
         robust = require_finite_real("robust", config["robust"], scalar=True)
         if not -2 <= robust <= 2:
             raise ValueError("robust must be between -2 and 2.")
+
+
+def check_frequency_matching(value, *, name="matching"):
+    """Require the shared cube/continuum frequency-assignment policy.
+
+    Checking this enum does not certify the coordinates: mapping still checks
+    dimensions, finiteness, coverage, and uniqueness against the actual data.
+    """
+    if value not in ("nearest", "exact"):
+        raise ValueError(f"{name} must be 'nearest' or 'exact'.")
