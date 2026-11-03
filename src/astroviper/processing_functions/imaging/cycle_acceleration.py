@@ -165,8 +165,8 @@ def conjugate_gradient_model_step(
     residual_after_model_update : xarray.DataArray
         The deconvolver's own residual after the model update.
     model_increment : xarray.DataArray
-        Model increment ``z`` of the model update, which started from an
-        empty model.
+        Model increment ``z`` of the model update: the model it made minus
+        the model it started from.
     plain_step_planes : xarray.DataArray, optional
         Boolean over the plane dimensions. ``True`` planes take the plain
         increment and restart the search direction. The continuum node task
@@ -370,8 +370,8 @@ def nesterov_momentum_model_step(
         Residual ``r`` before the model update, with dimensions including
         ``l`` and ``m`` and optionally ``taylor_term``.
     model_increment : xarray.DataArray
-        Model increment ``z`` of the model update, which started from an
-        empty model.
+        Model increment ``z`` of the model update: the model it made minus
+        the model it started from.
     plain_step_planes : xarray.DataArray, optional
         Boolean over the plane dimensions. ``True`` planes take the plain
         increment and reset the momentum. The continuum node task lists the
