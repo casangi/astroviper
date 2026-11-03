@@ -240,6 +240,11 @@ def merge_imaging_dicts(
     >>> merged = merge_imaging_dicts([rd1, rd2, rd3])
     >>> # merged now has 3 entries, one for each channel
     """
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_imaging_merge_strategy,
+    )
+
+    check_imaging_merge_strategy(merge_strategy)
     if not imaging_dicts:
         return ImagingDict()
 
@@ -284,8 +289,6 @@ def merge_imaging_dicts(
                                 merged.data[key][field] = field_value
                     else:
                         merged.data[key] = value
-                else:
-                    raise ValueError(f"Unknown merge_strategy: {merge_strategy}")
             else:
                 # No conflict - just add
                 merged.data[key] = value

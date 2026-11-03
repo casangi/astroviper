@@ -528,3 +528,18 @@ def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
         raise ValueError(
             f"write_visibility_model_to_ps and write_imaging_weights_to_ps must be False for a Measurement Set v2 ps_store ({store}): an imaging run never writes into its input Measurement Set."
         )
+
+
+# ========================================================================
+# Convergence-record helper arguments
+# ========================================================================
+
+
+def check_imaging_merge_strategy(merge_strategy):
+    """Require a merge policy before inspecting convergence-record contents.
+
+    Invalid policies are configuration errors even when records are empty or
+    disjoint. Actual duplicate keys remain a runtime check of the merge.
+    """
+    if merge_strategy not in ("update", "latest", "error"):
+        raise ValueError(f"Unknown merge_strategy: {merge_strategy!r}")
