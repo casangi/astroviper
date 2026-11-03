@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import astropy.coordinates as coord
+import astropy.units as u
 import numpy as np
+from astropy.time import Time
 
 from astroviper.utils.measurement_set_tools import baseline_antenna_pairs
+
+# The first GCRS sky offset frame adds its transforms to astropy's global
+# transform graph and resets the graph's caches, which the next transform
+# rebuilds. Neither is thread safe, so both happen here, at import.
+_origin = coord.SkyCoord(0 * u.rad, 0 * u.rad, frame="gcrs")
+_origin.transform_to(_origin.skyoffset_frame())
 
 
 def calculate_antenna_uvw(
@@ -40,10 +49,6 @@ def calculate_antenna_uvw(
     np.ndarray, [n_time, n_antenna, 3]
         Antenna ``(u, v, w)`` in metres.
     """
-    import astropy.coordinates as coord
-    import astropy.units as u
-    from astropy.time import Time
-
     antenna_position = np.asarray(antenna_position, dtype=np.float64)
     n_antenna = antenna_position.shape[0]
     time = np.asarray(time)
