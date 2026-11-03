@@ -1,11 +1,12 @@
 """Figures of the distributed application reports (:mod:`astroviper.utils.report`).
 
-Every function takes plain arrays (or an :class:`xarray.DataArray`) and returns
-a :class:`matplotlib.figure.Figure` made without pyplot, so that a report can
+Every plotting function takes plain arrays (an :class:`xarray.DataArray`, or the
+convergence record of a deconvolution) and returns a
+:class:`matplotlib.figure.Figure` made without pyplot, so that a report can
 draw and close its figures in any process. Images follow the orientation of
 :func:`~astroviper.utils.plotting.generate_plot`: ``data[l, m]`` drawn as
-``data.T`` with ``origin="lower"``, with offsets in arcseconds, east to the
-left.
+``data.T`` with ``origin="lower"``, the sky images with offsets in arcseconds,
+east to the left, the images of a deconvolution with pixel indices.
 
 A Stokes plane keeps its color and marker in every figure
 (:data:`STOKES_STYLES`); a stop code keeps its color whatever codes occur.
@@ -19,10 +20,13 @@ __all__ = [
     "STOKES_STYLES",
     "plot_antenna_positions",
     "plot_deconvolution_summary",
+    "plot_plane_deconvolution_summary",
     "plot_point_spread_function_cross_sections",
+    "plot_signed_images",
     "plot_spectra",
     "plot_stokes_images",
     "plot_uv_coverage",
+    "plot_visibility_comparison",
     "point_spread_function_cross_sections",
 ]
 
@@ -39,6 +43,19 @@ STOKES_STYLES = {
     )
 }
 _GRID = {"color": "#d0d7de", "linewidth": 0.5}
+_INK = "#57606a"
+# The kinds of deconvolution component, each with its style: the iteration
+# history gives every component its scale (-1 a residual-shaped component of
+# Asp, 0 a point, above 0 an Asp Gaussian); the convergence record counts them
+# per model update, the components of Asp's significance stage (counted as
+# points or Asp Gaussians too) and its Hogbom runs as well.
+_COMPONENT_STYLES = {
+    "residual-shaped": {"color": _COLORS[4], "marker": "*"},
+    "Asp Gaussian": {"color": _COLORS[2], "marker": "o"},
+    "significance": {"color": _COLORS[1], "marker": "D"},
+    "point": {"color": _COLORS[0], "marker": "s"},
+    "Hogbom run": {"color": _COLORS[3], "marker": "^"},
+}
 
 
 def _stokes_style(stokes, index):
@@ -562,4 +579,667 @@ def plot_uv_coverage(u, v, title=None, max_points=200_000):
     ax.grid(True, **_GRID)
     if title:
         ax.set_title(title, fontsize=10)
+    return figure
+
+
+def _image_panel(figure, ax, plane, title, cmap, norm, mask=None):
+    """``plane`` drawn as ``plane.T`` with ``origin="lower"``, its color bar
+    (ticks outside the linear part of an asinh scale) and, if given, the
+    outline of ``mask``."""
+    from matplotlib.ticker import FormatStrFormatter
+
+    ax.set_xlabel("l pixel")
+    if not np.isfinite(plane).any():
+        ax.set_title(f"{title} (no finite pixel)", fontsize=10)
+        return
+    image = ax.imshow(
+        plane.T, origin="lower", cmap=cmap, norm=norm, interpolation="nearest"
+    )
+    if mask is not None and np.any(mask) and not np.all(mask):
+        ax.contour(
+            np.asarray(mask, dtype=np.float64).T,
+            levels=[0.5],
+            colors="#1f2328",
+            linewidths=0.8,
+        )
+    colorbar = figure.colorbar(image, ax=ax, shrink=0.8)
+    if hasattr(norm, "linear_width"):
+        colorbar.set_ticks(_asinh_ticks(norm.linear_width, plane))
+    else:  # every tick in full: an exponent above the bar would hit the titles
+        colorbar.ax.yaxis.set_major_formatter(FormatStrFormatter("%.1e"))
+    ax.set_title(title, fontsize=10)
+
+
+def _largest(plane):
+    """The largest finite absolute value, 0 without one."""
+    return float(np.max(np.abs(plane), where=np.isfinite(plane), initial=0.0))
+
+
+def _signed_norm(plane, limit=None):
+    """A linear scale symmetric about 0, to ``limit`` or the largest value."""
+    from matplotlib.colors import Normalize
+
+    limit = (_largest(plane) if limit is None else limit) or 1.0
+    return Normalize(-limit, limit)
+
+
+def plot_signed_images(planes, titles, masks=None, title=None):
+    """Signed images (differences, residuals) side by side, each on a linear
+    scale symmetric about 0, with the outline of its mask.
+
+    Parameters
+    ----------
+    planes : sequence of numpy.ndarray, [n_l, n_m]
+    titles : sequence of str
+        Title of every panel.
+    masks : sequence of (numpy.ndarray of bool, [n_l, n_m], or None), optional
+        The mask outlined on every panel.
+    title : str, optional
+        Figure title.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    figure, axes = _figure(1, len(planes), panel_size=(4.2, 3.6))
+    masks = [None] * len(planes) if masks is None else masks
+    for ax, plane, label, mask in zip(axes[0], planes, titles, masks, strict=True):
+        plane = np.asarray(plane, dtype=np.float64)
+        finite = plane[np.isfinite(plane)]
+        if finite.size and not finite.any():
+            label += " (all zero)"
+        _image_panel(figure, ax, plane, label, "RdBu_r", _signed_norm(plane), mask)
+    axes[0, 0].set_ylabel("m pixel")
+    if title:
+        figure.suptitle(title, fontsize=11)
+    return figure
+
+
+def plot_visibility_comparison(uv_distance, visibility, expected, noise, title=None):
+    """Visibilities against an independent prediction of them, and their noise
+    against the noise their weights give.
+
+    Parameters
+    ----------
+    uv_distance : array_like, [n]
+        Wavelengths.
+    visibility, expected : array_like of complex, [n]
+        The visibilities and their prediction, at the same samples.
+    noise : array_like
+        Noise samples in units of the standard deviation the weights give, for
+        example the real and imaginary parts of the noise times
+        ``sqrt(WEIGHT)``.
+    title : str, optional
+        Figure title.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    uv_distance = np.asarray(uv_distance, dtype=np.float64) / 1e3
+    visibility = np.asarray(visibility, dtype=np.complex128)
+    expected = np.asarray(expected, dtype=np.complex128)
+    noise = np.asarray(noise, dtype=np.float64).ravel()
+    figure, axes = _figure(1, 3, panel_size=(4.6, 3.6))
+
+    ax = axes[0, 0]
+    ax.plot(uv_distance, np.abs(expected), "o", color=_COLORS[0], markersize=5)
+    ax.plot(uv_distance, np.abs(visibility), ".", color=_COLORS[1], markersize=3)
+    ax.legend(["prediction", "visibilities"], fontsize=7)
+    ax.set_xlabel("uv distance (kilo wavelengths)")
+    ax.set_ylabel("amplitude")
+    ax.set_title("visibilities", fontsize=10)
+    ax.grid(True, **_GRID)
+
+    ax = axes[0, 1]
+    difference = np.abs(visibility - expected)
+    equal = difference == 0
+    ax.plot(uv_distance[~equal], difference[~equal], ".", color=_COLORS[0])
+    ax.set_yscale("log")
+    ax.set_xlabel("uv distance (kilo wavelengths)")
+    ax.set_ylabel("|visibility - prediction|")
+    ax.set_title(f"difference ({int(equal.sum())} samples equal)", fontsize=10)
+    ax.grid(True, **_GRID)
+
+    ax = axes[0, 2]
+    edges = np.linspace(-5.0, 5.0, 81)
+    # a density over all the samples, those beyond the axis counted
+    beyond = np.count_nonzero(np.abs(noise) > edges[-1])
+    ax.hist(
+        noise,
+        bins=edges,
+        weights=np.full(noise.size, 1.0 / (noise.size * np.diff(edges)[0])),
+        histtype="step",
+        color=_COLORS[0],
+        linewidth=1.5,
+        label="noise" + (f" ({beyond} beyond ±5)" if beyond else ""),
+    )
+    x = np.linspace(edges[0], edges[-1], 201)
+    ax.plot(
+        x, np.exp(-0.5 * x**2) / np.sqrt(2 * np.pi), "--", color=_INK, label="N(0, 1)"
+    )
+    ax.legend(fontsize=7)
+    ax.set_yscale("log")
+    ax.set_xlabel("noise / standard deviation of the weights")
+    ax.set_title(
+        f"noise: mean {noise.mean():.3f}, standard deviation {noise.std():.3f}",
+        fontsize=10,
+    )
+    ax.grid(True, **_GRID)
+    if title:
+        figure.suptitle(title, fontsize=11)
+    return figure
+
+
+def _record_values(record, name, n):
+    """The first ``n`` values of a field of a convergence record, float, or
+    ``None`` without the field."""
+    if name not in record:
+        return None
+    return np.asarray(
+        [np.nan if value is None else value for value in list(record[name])[:n]],
+        dtype=np.float64,
+    )
+
+
+def _moments(values):
+    """Skew and excess kurtosis."""
+    deviation = values - values.mean()
+    variance = np.mean(deviation**2)
+    if variance == 0:
+        return np.nan, np.nan
+    return (
+        np.mean(deviation**3) / variance**1.5,
+        np.mean(deviation**4) / variance**2 - 3.0,
+    )
+
+
+def _residual_histogram(ax, residual, mask, sigma):
+    """The distribution of the finite residual pixels, in and outside the mask,
+    in units of ``sigma`` (or of their standard deviation), against N(0, 1)."""
+    finite = np.isfinite(residual)
+    unit = sigma or (float(np.std(residual[finite])) if finite.any() else 0.0) or 1.0
+    if mask is None:
+        regions = [("all pixels", residual[finite])]
+    else:
+        regions = [
+            ("in the mask", residual[mask & finite]),
+            ("outside", residual[~mask & finite]),
+        ]
+    edges = np.linspace(-6.0, 6.0, 97)
+    for index, (label, values) in enumerate(regions):
+        if values.size:
+            # a density over all the values, those beyond the axis counted
+            beyond = np.count_nonzero(np.abs(values / unit) > edges[-1])
+            ax.hist(
+                values / unit,
+                bins=edges,
+                weights=np.full(values.size, 1.0 / (values.size * np.diff(edges)[0])),
+                histtype="step",
+                color=_COLORS[index],
+                linewidth=1.5,
+                label=label + (f" ({beyond} beyond ±6)" if beyond else ""),
+            )
+    x = np.linspace(edges[0], edges[-1], 241)
+    ax.plot(
+        x,
+        np.exp(-0.5 * x**2) / np.sqrt(2 * np.pi),
+        "--",
+        color=_INK,
+        linewidth=1,
+        label="N(0, 1)",
+    )
+    ax.set_yscale("log")
+    ax.set_ylim(1e-4, 2.0)
+    ax.set_xlabel("residual / sigma" if sigma else "residual / its standard deviation")
+    ax.set_title("residual distribution", fontsize=10)
+    ax.grid(True, **_GRID)
+    ax.legend(fontsize=7)
+
+
+def _model_update_panels(
+    figure,
+    record,
+    residual,
+    mask,
+    true_flux,
+    threshold,
+    sigma,
+    stop_descriptions,
+    final_entropy,
+):
+    """The panels of the convergence record, one point per model update and,
+    after them, a star for the residual written (``final``)."""
+    from matplotlib.ticker import MaxNLocator
+
+    n = len(record["model_update_stop_code"])
+    update = np.arange(1, n + 1)
+    final = n + 1
+    region = "in the image" if mask is None else "in the mask"
+    inside = residual.ravel() if mask is None else residual[mask]
+    inside = inside[np.isfinite(inside)]
+    axes = figure.subplots(1, 7)
+
+    ax = axes[0]
+    ax.plot(
+        update,
+        np.abs(_record_values(record, "start_peakres", n)),
+        "o-",
+        color=_COLORS[0],
+        markersize=4,
+        label="at the start",
+    )
+    end = _record_values(record, "peakres", n)
+    if end is not None:
+        ax.plot(
+            update,
+            np.abs(end),
+            "o",
+            markerfacecolor="none",
+            color=_COLORS[0],
+            markersize=5,
+            label="at the end",
+        )
+    if inside.size:
+        ax.plot(
+            final,
+            np.abs(inside).max(),
+            "*",
+            color=_COLORS[0],
+            markersize=9,
+            label="final",
+        )
+    ax.hlines(
+        _record_values(record, "threshold_per_cycle", n),
+        update - 0.4,
+        update + 0.4,
+        color=_COLORS[1],
+        linestyle="--",
+        label="threshold_per_cycle",
+    )
+    if threshold:
+        ax.axhline(threshold, color=_INK, linestyle=":", label="threshold")
+    ax.set_yscale("log")
+    ax.set_title(f"|peak residual| {region}", fontsize=10)
+    ax.legend(fontsize=7)
+
+    ax = axes[1]
+    flux = _record_values(record, "model_flux", n)
+    ax.plot(update, flux, "o-", color=_COLORS[0], markersize=4, label="model")
+    if true_flux is not None:
+        ax.axhline(true_flux, color=_INK, linestyle=":", label="truth")
+    negative = _record_values(record, "model_flux_negative", n)
+    label = "model flux"
+    if negative is not None and flux[-1]:
+        label += f" (negative {100 * abs(negative[-1] / flux[-1]):.2f} %)"
+    ax.set_title(label, fontsize=10)
+    ax.legend(fontsize=7)
+
+    ax = axes[2]
+    iterations = _record_values(record, "iter_done", n)
+    codes = np.asarray(record["model_update_stop_code"][:n], dtype=int)
+    descriptions = stop_descriptions or {}
+    known = sorted(descriptions)
+    for code in sorted(set(codes.tolist())):
+        index = known.index(code) if code in known else len(known) + code
+        chosen = codes == code
+        ax.bar(
+            update[chosen],
+            iterations[chosen],
+            color=_COLORS[index % len(_COLORS)],
+            label=f"{code} {descriptions.get(code, '')}".strip(),
+        )
+    ax.set_ylim(0, 1.45 * max(_largest(iterations), 1.0))
+    ax.set_title(f"iterations ({int(np.nansum(iterations))})", fontsize=10)
+    ax.legend(fontsize=6, title="model update stop", title_fontsize=7, loc="upper left")
+
+    ax = axes[3]
+    for kind, name, label in (
+        ("residual-shaped", "n_residual_components", "residual-shaped"),
+        ("Asp Gaussian", "n_scale_components", "Asp Gaussian"),
+        ("significance", "n_significance_components", "significance (a subset)"),
+        ("point", "n_point_components", "point"),
+        ("Hogbom run", "n_hogbom_runs", "Hogbom runs"),
+    ):
+        counts = _record_values(record, name, n)
+        if counts is None or not np.nansum(counts):
+            continue
+        style = _COMPONENT_STYLES[kind]
+        ax.plot(
+            update,
+            np.where(counts > 0, counts, np.nan),
+            marker=style["marker"],
+            color=style["color"],
+            markersize=5,
+            label=f"{label} ({int(np.nansum(counts))})",
+        )
+    ax.set_yscale("log")
+    ax.set_title("components and Hogbom runs per model update", fontsize=10)
+    if ax.get_legend_handles_labels()[0]:
+        ax.set_ylim(top=30 * ax.get_ylim()[1])  # room for the legend
+        ax.legend(fontsize=7)
+
+    ax = axes[4]
+    rms_in = _record_values(record, "start_rms_in_mask", n)
+    ax.plot(update, rms_in, "o-", color=_COLORS[0], markersize=4, label=f"rms {region}")
+    if inside.size:
+        ax.plot(final, np.sqrt(np.mean(inside**2)), "*", color=_COLORS[0], markersize=9)
+    mad = _record_values(record, "start_mad_rms_outside_mask", n)
+    if mask is not None and mad is not None and np.isfinite(mad).any():
+        outside = residual[~mask]
+        outside = outside[np.isfinite(outside)]
+        ax.plot(
+            update, mad, "s-", color=_COLORS[1], markersize=4, label="MAD rms outside"
+        )
+        if outside.size:
+            ax.plot(
+                final,
+                1.4826 * np.median(np.abs(outside - np.median(outside))),
+                "*",
+                color=_COLORS[1],
+                markersize=9,
+            )
+    if sigma:
+        ax.axhline(sigma, color=_INK, linestyle=":", label="sigma")
+    ax.set_yscale("log")
+    ax.set_title("residual at the start (star: final)", fontsize=10)
+    ax.legend(fontsize=7)
+
+    ax = axes[5]
+    moments = _moments(inside) if inside.size else (np.nan, np.nan)
+    for index, (name, label) in enumerate(
+        (
+            ("start_skew_in_mask", "skew"),
+            ("start_excess_kurtosis_in_mask", "excess kurtosis"),
+        )
+    ):
+        values = _record_values(record, name, n)
+        if values is not None:
+            ax.plot(
+                update,
+                values,
+                marker=_MARKERS[index],
+                color=_COLORS[index],
+                markersize=4,
+                label=label,
+            )
+        ax.plot(final, moments[index], "*", color=_COLORS[index], markersize=9)
+    ax.axhline(0.0, color=_INK, linewidth=0.8)
+    ax.set_title(f"residual {region} (star: final)", fontsize=10)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=7)
+
+    ax = axes[6]
+    entropy = _record_values(record, "entropy", n + 1)
+    ax.plot(update, entropy[:n], "o-", color=_COLORS[0], markersize=4)
+    # cube imaging records the closing stop test too
+    final_entropy = entropy[n] if entropy.size > n else final_entropy
+    title = "residual entropy at the start"
+    if final_entropy is not None and np.isfinite(final_entropy):
+        ax.plot(final, final_entropy, "*", color=_COLORS[0], markersize=9)
+        title += " (star: final)"
+    ax.set_title(title, fontsize=10)
+
+    for ax in axes:
+        ax.set_xlim(0.5, final + 0.5)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_xlabel("model update")
+        ax.grid(True, **_GRID)
+
+
+def _iteration_history_panels(figure, record, mask, true_flux, shape):
+    """The panels of the iteration history, one point per component."""
+    from matplotlib.ticker import MaxNLocator
+
+    n = len(record["model_update_stop_code"])
+
+    def flat(name):
+        return np.concatenate(
+            [np.atleast_1d(np.asarray(v, dtype=np.float64)) for v in record[name][:n]]
+        )
+
+    scale = flat("iteration_component_scale")
+    counts = [np.size(v) for v in record["iteration_component_scale"][:n]]
+    boundaries = np.cumsum(counts)[:-1]
+    component = np.arange(scale.size)
+    kinds = np.where(
+        scale < 0, "residual-shaped", np.where(scale > 0, "Asp Gaussian", "point")
+    )
+    present = [kind for kind in _COMPONENT_STYLES if np.any(kinds == kind)]
+    # the most numerous kind first, so that the rarer ones are drawn on top
+    drawn = sorted(present, key=lambda kind: -np.sum(kinds == kind))
+    axes = figure.subplots(1, 6)
+
+    def by_kind(ax, values, size=4):
+        for kind in drawn:
+            chosen = kinds == kind
+            ax.scatter(
+                component[chosen],
+                values[chosen],
+                s=size,
+                color=_COMPONENT_STYLES[kind]["color"],
+                marker=_COMPONENT_STYLES[kind]["marker"],
+                label=f"{kind} ({int(chosen.sum())})",
+                rasterized=True,
+            )
+
+    ax = axes[0]
+    by_kind(ax, np.abs(flat("iteration_peak_residual")))
+    threshold = _record_values(record, "threshold_per_cycle", n)
+    starts = np.concatenate([[0], np.cumsum(counts)])
+    for k in range(n):
+        ax.hlines(
+            threshold[k], starts[k], starts[k + 1], color=_COLORS[1], linestyle="--"
+        )
+    ax.set_yscale("log")
+    ax.set_title("|peak residual| before every component", fontsize=10)
+    ax.legend(fontsize=7, markerscale=2, loc="upper right")
+
+    ax = axes[1]
+    by_kind(ax, flat("iteration_residual_rms"))
+    ax.set_yscale("log")
+    region = "in the image" if mask is None else "in the mask"
+    ax.set_title(f"residual rms {region} after it", fontsize=10)
+
+    ax = axes[2]
+    ax.plot(component, flat("iteration_model_flux"), color=_COLORS[0], linewidth=1.2)
+    if true_flux is not None:
+        ax.axhline(true_flux, color=_INK, linestyle=":")
+    ax.set_title("model flux after it", fontsize=10)
+
+    ax = axes[3]
+    by_kind(ax, scale)
+    ax.set_title("component scale (pixels; -1 residual-shaped)", fontsize=10)
+
+    for ax in axes[:4]:
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+        for boundary in boundaries:
+            ax.axvline(boundary, color="#afb8c1", linewidth=0.6)
+        ax.set_xlabel("component")
+        ax.grid(True, **_GRID)
+
+    ax = axes[4]
+    flux = flat("iteration_component_flux")
+    l_pixel, m_pixel = flat("iteration_component_l"), flat("iteration_component_m")
+    largest = np.abs(flux).max() if flux.size else 1.0
+    for kind in drawn:
+        chosen = kinds == kind
+        ax.scatter(
+            l_pixel[chosen],
+            m_pixel[chosen],
+            s=2 + 30 * np.sqrt(np.abs(flux[chosen]) / largest),
+            color=_COMPONENT_STYLES[kind]["color"],
+            marker=_COMPONENT_STYLES[kind]["marker"],
+            alpha=0.5,
+            rasterized=True,
+        )
+    if mask is not None and mask.any() and not mask.all():
+        ax.contour(
+            np.asarray(mask, dtype=np.float64).T,
+            levels=[0.5],
+            colors="#1f2328",
+            linewidths=0.8,
+        )
+    ax.set_xlim(-0.5, shape[0] - 0.5)
+    ax.set_ylim(-0.5, shape[1] - 0.5)
+    ax.set_aspect("equal")
+    ax.set_xlabel("l pixel")
+    ax.set_ylabel("m pixel")
+    ax.set_title("where the components are", fontsize=10)
+
+    ax = axes[5]
+    totals = [flux[kinds == kind].sum() for kind in present]
+    ax.bar(
+        present, totals, color=[_COMPONENT_STYLES[kind]["color"] for kind in present]
+    )
+    for x, (kind, total) in enumerate(zip(present, totals, strict=True)):
+        ax.annotate(
+            f"{int(np.sum(kinds == kind))}",
+            (x, total),
+            ha="center",
+            va="bottom",
+            fontsize=7,
+        )
+    ax.set_title("net flux and number of components", fontsize=10)
+    ax.tick_params(axis="x", labelsize=7)
+    ax.grid(True, axis="y", **_GRID)
+
+
+def plot_plane_deconvolution_summary(
+    record,
+    model,
+    residual,
+    restored=None,
+    mask=None,
+    truth=None,
+    model_error=None,
+    true_flux=None,
+    threshold=None,
+    sigma=None,
+    stop_descriptions=None,
+    final_entropy=None,
+    title=None,
+):
+    """What the deconvolution of one image plane did: its images, the
+    convergence record of its model updates and, if the record holds it, the
+    iteration history of its components.
+
+    Three rows of panels. The images: the truth at the resolution of the
+    restored image, the restored image, the model, the residual (the clean mask
+    outlined), the model error and the distribution of the residual against
+    that of Gaussian noise. One point per model update: the peak residual at its
+    start and end with ``threshold_per_cycle``, the model flux, the iterations
+    by stop code, the components of every kind, the rms of the residual and its
+    skew, excess kurtosis and entropy; a star marks the residual written. With
+    ``record_iteration_history`` (the ``iteration_*`` fields), one point per
+    component: the peak residual before it, the rms of the residual after it,
+    the model flux, its scale, where the components are and their net flux by
+    kind. Without the history the third row is left out, without a model
+    update the second too.
+
+    Parameters
+    ----------
+    record : dict or None
+        The convergence record of the plane: its fields in the ``"deconvolution"``
+        record the imagers return, each with one value per model update (cube
+        imaging adds the closing stop test to the fields of the residual). The
+        fields ``model_update_stop_code``, ``iter_done``, ``start_peakres``,
+        ``threshold_per_cycle``, ``model_flux``, ``start_rms_in_mask`` and
+        ``entropy`` are needed; the others are drawn when present. A run that
+        made no model update has no record (continuum imaging) or one without
+        ``model_update_stop_code`` (cube imaging).
+    model, residual : numpy.ndarray, [n_l, n_m]
+    restored : numpy.ndarray, [n_l, n_m], optional
+    mask : numpy.ndarray of bool, [n_l, n_m], optional
+        The clean mask; ``None`` for none (the whole image).
+    truth, model_error : numpy.ndarray, [n_l, n_m], optional
+        The true sky at the resolution of the restored image, and the error of
+        the model at that resolution, in the units of the restored image.
+    true_flux : float, optional
+        The flux of the true sky the model holds.
+    threshold : float, optional
+        The stopping threshold.
+    sigma : float, optional
+        The noise of the image; the residual is shown to 5 sigma and its
+        distribution in units of sigma.
+    stop_descriptions : dict, optional
+        ``{code: description}`` of the model update stop codes.
+    final_entropy : float, optional
+        The entropy of the residual written, where the record does not hold it
+        (continuum imaging returns it in its ``"residual_statistics"``).
+    title : str, optional
+        Figure title.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    from matplotlib.colors import AsinhNorm
+    from matplotlib.figure import Figure
+
+    residual = np.asarray(residual, dtype=np.float64)
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+    n = len((record or {}).get("model_update_stop_code", []))
+    history = n > 0 and any(
+        np.size(v) for v in record.get("iteration_component_scale", [])[:n]
+    )
+    n_rows = 1 + (n > 0) + history
+    figure = Figure(figsize=(26.0, 4.2 * n_rows), layout="constrained")
+    rows = figure.subfigures(n_rows, 1, squeeze=False)[:, 0]
+
+    panels = [
+        ("truth at the clean beam", truth, "asinh"),
+        ("restored image", restored, "asinh"),
+        ("model", model, "asinh"),
+        ("residual", residual, "signed"),
+        ("model error", model_error, "signed"),
+    ]
+    panels = [panel for panel in panels if panel[1] is not None]
+    axes = rows[0].subplots(1, len(panels) + 1)
+    for ax, (label, plane, stretch) in zip(axes, panels, strict=False):
+        plane = np.asarray(plane, dtype=np.float64)
+        if stretch == "asinh":
+            _image_panel(
+                rows[0],
+                ax,
+                plane,
+                label,
+                "viridis",
+                AsinhNorm(linear_width=0.01 * (_largest(plane) or 1.0)),
+            )
+        elif label == "residual":
+            limit = 5 * sigma if sigma else None
+            _image_panel(
+                rows[0],
+                ax,
+                plane,
+                "residual" + (" (5 sigma)" if sigma else ""),
+                "RdBu_r",
+                _signed_norm(plane, limit),
+                mask,
+            )
+        else:
+            _image_panel(rows[0], ax, plane, label, "RdBu_r", _signed_norm(plane))
+    axes[0].set_ylabel("m pixel")
+    _residual_histogram(axes[-1], residual, mask, sigma)
+
+    if n:
+        _model_update_panels(
+            rows[1],
+            record,
+            residual,
+            mask,
+            true_flux,
+            threshold,
+            sigma,
+            stop_descriptions,
+            final_entropy,
+        )
+    else:
+        title = f"{title}: no model update" if title else "no model update"
+    if history:
+        _iteration_history_panels(rows[2], record, mask, true_flux, residual.shape)
+    if title:
+        figure.suptitle(title, fontsize=12)
     return figure
