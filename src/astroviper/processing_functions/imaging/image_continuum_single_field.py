@@ -7,6 +7,46 @@ from astroviper.utils.continuum_cache import (
 from astroviper.utils.param_docs import shares_param_docs
 
 
+def check_continuum_taylor_layout(product, *, name, term_dimension, expected_count):
+    """Check the dimensions and Taylor count of an actual continuum product.
+
+    Parameters
+    ----------
+    product : xarray.DataArray
+        Residual/model Taylor stack or PSF Taylor-order stack. Pixel values are
+        neither loaded nor modified; axis order may differ between producers.
+    name : str
+        Product name included in diagnostics.
+    term_dimension : {"taylor_term", "psf_taylor_order"}
+        Spectral basis axis of the supplied product.
+    expected_count : int
+        Exact count required by the configuration or a corresponding residual.
+
+    Raises
+    ------
+    ValueError
+        If the product has missing, extra, or empty dimensions, or an unexpected
+        Taylor count.
+    """
+    # --- Full image layout ---
+    # Every producer must retain time, polarization, and both spatial axes,
+    # including singleton axes. Validation must not transpose or copy pixels.
+    dimensions = ("time", term_dimension, "polarization", "l", "m")
+    if set(product.dims) != set(dimensions) or any(
+        product.sizes[dim] < 1 for dim in product.dims
+    ):
+        raise ValueError(f"{name} must have nonempty dimensions {dimensions}.")
+
+    # --- Exact Taylor count ---
+    # Residuals use the configured term count. PSFs contain all pairwise Taylor
+    # orders, so their caller supplies 2 * residual_terms - 1.
+    count = product.sizes[term_dimension]
+    if count != expected_count:
+        raise ValueError(
+            f"{name} has {count} {term_dimension} planes; expected exactly {expected_count}."
+        )
+
+
 def _continuum_frequency_coord(img_xds):
     """Return the canonical singleton frequency coordinate for Taylor products."""
     import numpy as np

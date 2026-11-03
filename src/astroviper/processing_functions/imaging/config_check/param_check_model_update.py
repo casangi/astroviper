@@ -817,8 +817,22 @@ def check_model_products(
     # ========================================================================
 
     # --- Residual dimensions and working precision ---
-    # Every time, polarization, and spatial plane participates in validation.
-    if set(residual.dims) != set(residual_dims) or any(
+    # Continuum producers and consumers share the actual Taylor-stack contract.
+    # Cube products retain their frequency-axis validation here.
+    if mode.imaging_kind == "continuum":
+        from astroviper.processing_functions.imaging.image_continuum_single_field import (
+            check_continuum_taylor_layout,
+        )
+
+        check_continuum_taylor_layout(
+            residual,
+            name=residual_name,
+            term_dimension="taylor_term",
+            expected_count=config.get("image_params", {}).get(
+                "n_taylor_terms", residual.sizes.get("taylor_term")
+            ),
+        )
+    elif set(residual.dims) != set(residual_dims) or any(
         residual.sizes[dim] < 1 for dim in residual.dims
     ):
         raise ValueError(
@@ -838,17 +852,19 @@ def check_model_products(
     # --- Exact Taylor-product counts ---
     # One common basis fixes the residual/model count and every PSF Taylor order.
     nterms = residual.sizes[term_dimension] if mode.imaging_kind == "continuum" else 1
-    configured_nterms = config.get("image_params", {}).get("n_taylor_terms", nterms)
-    if mode.imaging_kind == "continuum" and configured_nterms != nterms:
-        raise ValueError(
-            f"Residual has {nterms} Taylor planes; configuration requires exactly {configured_nterms}."
-        )
     expected_psf_count = (
         2 * nterms - 1
         if mode.imaging_kind == "continuum"
         else residual.sizes["frequency"]
     )
-    if (
+    if mode.imaging_kind == "continuum":
+        check_continuum_taylor_layout(
+            psf,
+            name=psf_name,
+            term_dimension="psf_taylor_order",
+            expected_count=expected_psf_count,
+        )
+    elif (
         set(psf.dims) != set(psf_dims)
         or psf.sizes.get(psf_dims[1]) != expected_psf_count
     ):

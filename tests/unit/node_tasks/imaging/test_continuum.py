@@ -2354,3 +2354,45 @@ def test_continuum_stopping_and_model_update_share_effective_beam_limit(
         )
     assert input_params["cycle_control_params"] is controls
     assert controls == original_controls
+
+
+@pytest.mark.parametrize("input_checked", [False, True])
+def test_preparation_checks_actual_taylor_layout_with_shared_predicate(
+    monkeypatch, input_checked
+):
+    image = make_runaway_taylor_image()
+    config = {
+        "image_params": {},
+        "n_taylor_terms": 2,
+        "n_psf_taylor_terms": 3,
+        "reference_frequency": 1e9,
+        "image_data_group_in_name": "residual",
+        "gridding_kernel_params": {"type": "dft"},
+    }
+    monkeypatch.setattr(
+        continuum_node,
+        "_resolve_continuum_append_configuration",
+        lambda *args, **kwargs: config,
+    )
+    dft = importlib.import_module(
+        "astroviper.processing_functions.imaging.direct_fourier_transform"
+    )
+    monkeypatch.setattr(dft, "normalize_dft_image", lambda *args, **kwargs: None)
+
+    class LayoutChecked(Exception):
+        pass
+
+    def check(product, **kwargs):
+        assert product.identical(image.SKY_RESIDUAL)
+        assert kwargs == {
+            "name": "SKY_RESIDUAL",
+            "term_dimension": "taylor_term",
+            "expected_count": 2,
+        }
+        raise LayoutChecked
+
+    monkeypatch.setattr(continuum_processing, "check_continuum_taylor_layout", check)
+    with pytest.raises(LayoutChecked):
+        continuum_node._prepare_continuum_image(
+            image, {}, initialize_static_products=True, input_checked=input_checked
+        )

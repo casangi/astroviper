@@ -2451,6 +2451,7 @@ def _prepare_continuum_image(
         make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        check_continuum_taylor_layout,
         finalize_mvc_taylor_normal_equations,
         point_spread_function_gaussian_fit_continuum,
     )
@@ -2510,18 +2511,12 @@ def _prepare_continuum_image(
     if continuum_mode == "mfs":
         residual = img_xds["SKY_RESIDUAL"]
 
-        if "taylor_term" not in residual.dims:
-            raise RuntimeError(
-                "SKY_RESIDUAL does not contain the 'taylor_term' dimension."
-            )
-
-        actual_nterms = img_xds["SKY_RESIDUAL"].sizes["taylor_term"]
-
-        if actual_nterms != n_taylor_terms:
-            raise ValueError(
-                "The residual Taylor stack is inconsistent with n_taylor_terms: "
-                f"received {actual_nterms}, expected {n_taylor_terms}."
-            )
+        check_continuum_taylor_layout(
+            residual,
+            name="SKY_RESIDUAL",
+            term_dimension="taylor_term",
+            expected_count=n_taylor_terms,
+        )
 
         residual.attrs.update(
             {
@@ -2661,19 +2656,12 @@ def _prepare_continuum_image(
 
         psf = img_xds[psf_name]
 
-        if "psf_taylor_order" not in psf.dims:
-            raise RuntimeError(
-                f"{psf_name!r} does not contain the 'psf_taylor_order' dimension."
-            )
-
-        actual_psf_terms = img_xds[psf_name].sizes["psf_taylor_order"]
-
-        if actual_psf_terms != n_psf_taylor_terms:
-            raise ValueError(
-                "The PSF Taylor stack is inconsistent with n_taylor_terms: "
-                f"received {actual_psf_terms}, "
-                f"expected {n_psf_taylor_terms}."
-            )
+        check_continuum_taylor_layout(
+            psf,
+            name=psf_name,
+            term_dimension="psf_taylor_order",
+            expected_count=n_psf_taylor_terms,
+        )
 
         # Update attributes
         img_xds[psf_name].attrs.update(
