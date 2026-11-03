@@ -27,6 +27,8 @@ def point_spread_function_cube_single_field(
     load_data_variables=None,
     task_id=0,
     input_data=None,
+    *,
+    input_checked=False,
 ):
     """Make the point spread function of one frequency chunk of a single-field
     cube, with its beam fit and the weight statistics of every channel.
@@ -181,6 +183,12 @@ def point_spread_function_cube_single_field(
         Pre-loaded ``{ms_name: node}`` visibilities; when given, nothing is
         loaded.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
@@ -195,6 +203,14 @@ def point_spread_function_cube_single_field(
           ``MAX_SIDELOBE_POINT_SPREAD_FUNCTION`` and the variables of
           :func:`~astroviper.processing_functions.imaging.weight_statistics.calculate_weight_statistics_single_field`.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import pandas as pd
@@ -282,6 +298,7 @@ def point_spread_function_cube_single_field(
             psf_fitting_method=psf_fitting_method,
             gridding_kernel_params=gridding_kernel_params,
             primary_beam_params=primary_beam_params,
+            input_checked=True,
         )
         timing_frames.append(timing_chan)
 

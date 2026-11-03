@@ -119,7 +119,10 @@ def test_measurement_set_v2_is_refused(tmp_path):
     (ms_v2 / "table.dat").write_bytes(b"")
     with pytest.raises(ValueError, match="is a Measurement Set v2"):
         psf_module.point_spread_function_cube_single_field(
-            str(ms_v2), _image_params([3e9]), {"weighting": "natural"}
+            str(ms_v2),
+            _image_params([3e9]),
+            {"weighting": "natural"},
+            instrument_polarization_basis="circular",
         )
 
 

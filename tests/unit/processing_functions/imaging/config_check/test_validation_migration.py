@@ -119,3 +119,42 @@ def test_msv2_read_only_supported_path():
     check_input_storage({"skunk_works": True}, input_is_msv2=True)
     with pytest.raises(ValueError, match="convert"):
         check_input_storage({"skunk_works": True}, input_is_msv2=True, allow_msv2=False)
+
+
+def test_psf_driver_checks_nested_configuration_before_io(tmp_path):
+    from astroviper.distributed_applications.imaging.point_spread_function_cube_single_field import (
+        point_spread_function_cube_single_field,
+    )
+
+    image_params = {
+        "image_size": [0, 16],
+        "cell_size": [-1e-5, 1e-5],
+        "phase_direction": [0, 0],
+        "frequency_coords": [1e9],
+        "time_coords": [0],
+        "polarization_coords": ["I", "Q"],
+    }
+    output = tmp_path / "never-created.zarr"
+    with pytest.raises(ValueError, match="image_size"):
+        point_spread_function_cube_single_field(
+            "missing.ps.zarr",
+            image_params,
+            {"weighting": "natural"},
+            image_store=str(output),
+        )
+    assert not output.exists()
+
+
+def test_psf_node_checks_configuration_before_loading():
+    from astroviper.node_tasks.imaging.point_spread_function_cube_single_field import (
+        point_spread_function_cube_single_field,
+    )
+
+    with pytest.raises(ValueError, match="image_size"):
+        point_spread_function_cube_single_field(
+            {"image_size": [0, 16]},
+            {"weighting": "natural"},
+            None,
+            None,
+            "missing.ps.zarr",
+        )
