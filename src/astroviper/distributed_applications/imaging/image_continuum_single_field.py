@@ -3531,12 +3531,13 @@ def image_continuum_single_field(
     timing_distributed_application = {}
     application_start = time.time()
 
-    if is_measurement_set_v2(ps_store):
-        raise ValueError(
-            "Continuum imaging requires an XRADIO Processing Set, not an MSv2 "
-            "directory. Convert it first with "
-            "xradio.measurement_set.convert_msv2_to_processing_set."
-        )
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_input_storage,
+    )
+
+    check_input_storage(
+        locals(), input_is_msv2=is_measurement_set_v2(ps_store), allow_msv2=False
+    )
 
     # The residual update grids in the instrument basis and the model update
     # deconvolves in Stokes, so the requested Stokes planes fix the correlations

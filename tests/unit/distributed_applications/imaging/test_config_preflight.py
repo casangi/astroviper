@@ -140,3 +140,39 @@ def test_approximate_hessian_failure_precedes_psf_and_output(
             deconvolver="mtmfs",
         )
     assert not output.exists()
+
+
+def test_continuum_rejects_msv2_through_shared_storage_check_before_io(
+    monkeypatch, tmp_path
+):
+    from astroviper.distributed_applications.imaging import image_continuum_single_field
+    from astroviper.processing_functions.imaging.config_check import (
+        param_check_driver_workflow,
+    )
+    from tests.unit.processing_functions.imaging.config_check.test_full_validation import (
+        configuration,
+    )
+
+    source = tmp_path / "input.ms"
+    source.mkdir()
+    (source / "table.dat").write_bytes(b"")
+    output = tmp_path / "never-created.img.zarr"
+    original = param_check_driver_workflow.check_input_storage
+    calls = []
+
+    def check_storage(config, **kwargs):
+        calls.append(kwargs)
+        return original(config, **kwargs)
+
+    def forbid_open(*args, **kwargs):
+        raise AssertionError("MSv2 rejection must precede opening the processing set")
+
+    monkeypatch.setattr(
+        param_check_driver_workflow, "check_input_storage", check_storage
+    )
+    monkeypatch.setattr("xradio.measurement_set.open_processing_set", forbid_open)
+    with pytest.raises(ValueError, match="Measurement Set v2"):
+        image_continuum_single_field(str(source), str(output), **configuration())
+    assert calls == [{"input_is_msv2": True, "allow_msv2": False}]
+    assert not output.exists()
+    assert sorted(p.name for p in source.iterdir()) == ["table.dat"]
