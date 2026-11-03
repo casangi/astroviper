@@ -485,3 +485,15 @@ def check_momentum_coefficient(value):
         ) from error
     if not 0 <= coefficient < 1:
         raise ValueError("momentum_coefficient must lie in [0, 1).")
+
+
+def check_continuum_graph_arguments(append_node, append_input_params):
+    """Require an append task and its parameters together before building a graph.
+
+    These are arguments of each new graph construction, so an earlier check of
+    imaging parameters does not cover them.
+    """
+    if append_node is None and append_input_params is not None:
+        raise ValueError("append_input_params was supplied without an append_node.")
+    if append_node is not None and append_input_params is None:
+        raise ValueError("append_node was supplied without append_input_params.")

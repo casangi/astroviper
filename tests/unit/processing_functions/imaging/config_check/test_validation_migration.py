@@ -66,3 +66,26 @@ def test_restoration_rejects_algorithm_before_accessing_products(deconvolver):
 
     with pytest.raises(ValueError, match="deconvolver"):
         restore_continuum_image(None, deconvolver=deconvolver)
+
+
+@pytest.mark.parametrize("node,params", [(None, {}), (lambda: None, None)])
+def test_graph_pair_rejected_before_graph_construction(node, params):
+    from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+        compute_continuum_graph,
+    )
+
+    with pytest.raises(ValueError, match="append_"):
+        compute_continuum_graph(
+            ps_xdt=None,
+            node_task_data_mapping=None,
+            cycle_input_params=None,
+            reduce_input_params=None,
+            disk_chunk_sizes=None,
+            processing_set_data_group_name=None,
+            monitor_resources_seconds=None,
+            task_priorities=None,
+            reduce_mode=None,
+            reduce_n_batch=None,
+            append_node=node,
+            append_input_params=params,
+        )

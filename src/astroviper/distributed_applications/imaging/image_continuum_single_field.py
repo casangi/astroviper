@@ -759,12 +759,11 @@ def compute_continuum_graph(
     import dask
     from graphviper.graph_tools import append, generate_dask_workflow, map, reduce
 
-    # Some sanity checks
-    if append_node is None and append_input_params is not None:
-        raise ValueError("append_input_params was supplied without an append_node.")
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_continuum_graph_arguments,
+    )
 
-    if append_node is not None and append_input_params is None:
-        raise ValueError("append_node was supplied without append_input_params.")
+    check_continuum_graph_arguments(append_node, append_input_params)
 
     timings = {}
 
