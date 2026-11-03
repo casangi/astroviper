@@ -778,3 +778,18 @@ def check_reference_frequency(value, *, allow_one_element=False):
                 "The reference frequency must be scalar, finite and positive."
             ) from error
         raise
+
+
+def check_weight_density_method(params):
+    """Require a density-based method for density gridding and degridding.
+
+    Natural weighting has no density grid. Absolute Briggs weighting uses a
+    different recipe; these continuum helpers implement Briggs and uniform only.
+    General weighting validation remains in ``check_residual_update``.
+    """
+    require_mapping("imaging_weights_params", params)
+    weighting = params.get("weighting", "natural")
+    if weighting not in ("briggs", "uniform"):
+        raise ValueError(
+            "Weight-density operations require Briggs or uniform weighting; natural and briggs_abs are not supported."
+        )

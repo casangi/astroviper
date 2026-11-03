@@ -1842,6 +1842,11 @@ def grid_imaging_weight_density_continuum_node(
         )
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_weight_density_method,
+        )
+
+        check_weight_density_method(imaging_weights_params)
         check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
     import time
@@ -2146,6 +2151,11 @@ def degrid_imaging_weights_continuum_node(
         )
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_weight_density_method,
+        )
+
+        check_weight_density_method(imaging_weights_params)
         check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
     import time

@@ -217,6 +217,11 @@ def grid_imaging_weight_density_continuum(
         )
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_weight_density_method,
+        )
+
+        check_weight_density_method(imaging_weights_params)
 
     import copy
 
@@ -230,26 +235,12 @@ def grid_imaging_weight_density_continuum(
     # ------------------------------------------------------------------
     # Validate and normalize the weighting configuration.
     # ------------------------------------------------------------------
-    if not isinstance(imaging_weights_params, dict):
-        raise TypeError(
-            "imaging_weights_params must be a dictionary; received "
-            f"{type(imaging_weights_params).__name__}."
-        )
-
     weight_params = copy.deepcopy(imaging_weights_params)
 
-    weighting = str(weight_params.get("weighting", "natural")).lower()
+    weighting = weight_params.get("weighting", "natural")
 
-    if weighting == "natural":
-        raise ValueError("Natural weighting does not require a weight-density grid.")
-
-    if weighting not in ("briggs", "uniform"):
-        raise ValueError(
-            "Weight-density gridding supports only Briggs and uniform weighting."
-        )
-
-    casa_weighting_implementation = bool(
-        weight_params.get("casa_weighting_implementation", False)
+    casa_weighting_implementation = weight_params.get(
+        "casa_weighting_implementation", False
     )
 
     # ------------------------------------------------------------------
@@ -612,6 +603,11 @@ def degrid_imaging_weights_continuum(
         )
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_weight_density_method,
+        )
+
+        check_weight_density_method(imaging_weights_params)
 
     import copy
 
@@ -642,13 +638,7 @@ def degrid_imaging_weights_continuum(
 
     weight_params = imaging_weights_params
 
-    weighting = str(weight_params.get("weighting", "natural")).lower()
-
-    if weighting not in ("briggs", "uniform"):
-        raise ValueError(
-            "degrid_imaging_weights_continuum requires Briggs or uniform "
-            f"weighting; normalized weighting is {weighting!r}."
-        )
+    weighting = weight_params.get("weighting", "natural")
 
     required_global_variables = (
         "WEIGHT_DENSITY_GRID",
@@ -811,8 +801,8 @@ def degrid_imaging_weights_continuum(
         overwrite=overwrite,
     )
 
-    casa_weighting_implementation = bool(
-        weight_params.get("casa_weighting_implementation", False)
+    casa_weighting_implementation = weight_params.get(
+        "casa_weighting_implementation", False
     )
 
     datasets_processed = 0

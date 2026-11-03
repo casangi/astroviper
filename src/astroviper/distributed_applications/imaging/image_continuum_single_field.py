@@ -1040,12 +1040,12 @@ def prepare_continuum_imaging_weights_global(
             input_params["imaging_weights_params"]
         )
 
-    if weight_params["weighting"] not in ("briggs", "uniform"):
-        raise ValueError(
-            "Global Briggs-factor calculation requires Briggs or uniform "
-            "weighting. Received weighting="
-            f"{weight_params['weighting']!r}."
+    if not input_params.get("input_checked", False):
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_weight_density_method,
         )
+
+        check_weight_density_method(weight_params)
 
     global_briggs_factors = calculate_briggs_params(
         global_weight_density_grid,
