@@ -633,15 +633,16 @@ class TestCheckImagingWeightsParams(unittest.TestCase):
     def test_natural_global_scope_is_preserved(self):
         """Natural weighting does not rewrite its supplied scope."""
         params = {"weighting": "natural", "weighting_scope": "global"}
-        logger_path = (
-            "astroviper.processing_functions.imaging.check_imaging_parameters."
-            "logger.warning"
-        )
-        with mock.patch(logger_path) as warning:
-            self.assertTrue(check_imaging_weights_params(params))
-
+        self.assertTrue(check_imaging_weights_params(params))
         self.assertEqual(params["weighting_scope"], "global")
-        warning.assert_not_called()
+
+    def test_immutable_mapping_is_supported(self):
+        """The retained wrapper validates without requiring mutable parameters."""
+        from types import MappingProxyType
+
+        params = MappingProxyType({"weighting": "natural"})
+        self.assertTrue(check_imaging_weights_params(params))
+        self.assertEqual(dict(params), {"weighting": "natural"})
 
     def test_briggs_requires_robust_in_range(self):
         """``robust`` outside ``[-2, 2]`` fails the check."""

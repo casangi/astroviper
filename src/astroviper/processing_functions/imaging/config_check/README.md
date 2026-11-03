@@ -313,6 +313,29 @@ that these runtime objects satisfy their contracts. Metadata-driven beam
 inference and the cached numerical kernel-edge test are single shared
 implementations called during preflight, not duplicate configuration predicates.
 
+## Retired legacy checkers
+
+`processing_functions.imaging.check_imaging_parameters` retains only
+`check_imaging_weights_params`, the active compatibility wrapper delegating to
+`check_residual_update`. Its parameters are validated without inserting defaults.
+
+The following functions had no repository callers, tests, documentation examples,
+or exports from the imaging package, and have been removed:
+
+- `check_grid_params`
+- `check_gcf_params`
+- `check_mosaic_pb_params`
+- `check_rotation_params`
+- `check_norm_params`
+- `check_pb_params`
+
+Direct imports of these legacy functions must migrate to the appropriate
+residual-update, model-update, and workflow validators (or `check_config` for
+all three). Their old dictionaries, default insertion, and unit conversions are
+not a compatibility interface: callers must supply the canonical imaging
+configuration. This retirement does not remove the general-purpose
+`astroviper.utils.check_params` utility, which still has active callers.
+
 ## Feather
 
 Feather has a separate validation entry point, without a cube/continuum mode.
