@@ -132,9 +132,9 @@ def test_image_store_name_without_img_zarr_extension(tmp_path):
 
 
 def test_kept_variables_the_run_does_not_make_are_skipped(tmp_path):
-    """A dirty image run (``max_iter=0``) that keeps ``sky_model`` and ``mask``,
-    which only deconvolution makes, writes every variable it does make: the
-    two are skipped instead of failing the write of every channel."""
+    """A dirty image run (``max_iter=0``) that keeps ``mask``, which only
+    deconvolution makes, writes every variable it does make: the mask is
+    skipped instead of failing the write of every channel."""
     ps_store = _simulate_point_source(tmp_path)
     ps_xdt = open_processing_set(ps_store)
     result = distributed_applications.imaging.image_cube_single_field(
@@ -178,6 +178,137 @@ def test_kept_variables_the_run_does_not_make_are_skipped(tmp_path):
     stokes_i = img.SKY_RESIDUAL.values[0, :, 0]  # [frequency, l, m]
     np.testing.assert_allclose(np.nanmax(stokes_i, axis=(1, 2)), [1.0, 1.0], rtol=1e-3)
     assert np.isfinite(img.POINT_SPREAD_FUNCTION.values).all()
+
+
+#: A threshold (Jy) above the 1 Jy/beam dirty peak of the point source.
+NO_UPDATE_THRESHOLD = 100.0
+
+
+def _image_restored(
+    ps_store, image_store, n_tasks, clean_mask=None, **cycle_control_params
+):
+    """The driver on the point source in ``n_tasks`` node tasks, restored and
+    primary beam corrected, keeping the model, the mask and the primary
+    beam."""
+    ps_xdt = open_processing_set(ps_store)
+    return distributed_applications.imaging.image_cube_single_field(
+        ps_store=ps_store,
+        image_store=image_store,
+        image_params={
+            "image_size": [64, 64],
+            "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600),
+            "phase_direction": PC,
+            "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
+            "polarization_coords": ["I", "V"],
+            "time_coords": [0],
+            "fft_padding": 1.2,
+        },
+        instrument_polarization_basis="circular",
+        imaging_weights_params={"weighting": "natural"},
+        cycle_control_params={
+            "max_iter": 40,
+            "max_cycles": 2,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": 20,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+            "primary_beam_limit": 0.2,
+            **cycle_control_params,
+        },
+        image_data_variables_keep=["sky_residual", "sky_model", "mask", "primary_beam"],
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        n_mapping_parallelism={"frequency": n_tasks},
+        restore=True,
+        primary_beam_correction=True,
+        clean_mask=clean_mask,
+    )
+
+
+def _assert_restored_without_model_update(img, chan):
+    """Channel ``chan`` has a zero model, its residual as the restored image
+    and the residual divided by the primary beam as the primary beam corrected
+    one (NaN below the cutoff)."""
+    residual = img.SKY_RESIDUAL.values[:, chan]
+    primary_beam = img.PRIMARY_BEAM.values[:, chan]
+    corrected = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[:, chan]
+    inside = primary_beam >= 0.2
+    assert (img.SKY_MODEL.values[:, chan] == 0).all()
+    np.testing.assert_array_equal(img.SKY_RESTORED.values[:, chan], residual)
+    np.testing.assert_array_equal(
+        corrected[inside], residual[inside] / primary_beam[inside]
+    )
+    assert np.isnan(corrected[~inside]).all()
+
+
+@pytest.mark.parametrize(
+    "cycle_control_params, mask_source",
+    [
+        ({"max_iter": 0}, "PRIMARY_BEAM > 0.2"),
+        ({"max_cycles": 0}, "PRIMARY_BEAM > 0.2"),
+        ({"threshold": NO_UPDATE_THRESHOLD}, "MASK"),
+    ],
+    ids=["max_iter_0", "max_cycles_0", "threshold_above_the_peak"],
+)
+def test_channel_without_model_update_is_restored(
+    tmp_path, synchronous_dask, cycle_control_params, mask_source
+):
+    """A channel imaged in a node task of its own that makes no model update
+    (``max_iter`` 0, ``max_cycles`` 0, or a threshold above its dirty peak)
+    has a zero model and is restored to its residual, as in continuum
+    imaging. Its masked statistics use the mask a model update would have
+    made when one could run, else the primary beam fallback. Its model,
+    restored and primary beam corrected images used to keep the image
+    store's NaN fill value."""
+    ps_store = _simulate_point_source(tmp_path)
+    store = str(tmp_path / "cube.img.zarr")
+    result = _image_restored(ps_store, store, 2, **cycle_control_params)
+    _assert_imaged(result, 2)
+    statistics = result["image_statistics"]["sky_residual"]
+    assert statistics.attrs["mask_source"] == mask_source
+    img = load_image(store)
+    for chan in range(2):
+        _assert_restored_without_model_update(img, chan)
+
+
+@pytest.mark.parametrize("box_mask", [False, True], ids=["no_mask", "box_mask"])
+@pytest.mark.parametrize("without_update", [0, 1], ids=["first", "second"])
+def test_chunk_keeps_every_channel_when_one_makes_no_model_update(
+    tmp_path, synchronous_dask, without_update, box_mask
+):
+    """One node task of two channels, one of which makes no model update (its
+    threshold is above its dirty peak), with the primary beam mask or a clean
+    mask: both come out exactly as when each is imaged in a node task of its
+    own, the one without update with a zero model restored to its residual.
+    The chunk takes its variables from its first channel, so a first channel
+    without update lost the other's model and restored images (the image
+    store's NaN fill value), and a second one failed the task: "channel 1
+    result is missing variable 'SKY_MODEL' present for the chunk's first
+    channel" ('MASK' with the primary beam mask, which only the model update
+    made)."""
+    ps_store = _simulate_point_source(tmp_path)
+    clean_mask = None
+    if box_mask:
+        clean_mask = str(tmp_path / "mask.npy")
+        box = np.zeros((64, 64), dtype=bool)
+        box[24:40, 24:40] = True
+        np.save(clean_mask, box)
+    threshold = [[0.1, 0.1], [0.1, 0.1]]
+    threshold[without_update] = [NO_UPDATE_THRESHOLD] * 2
+    stores = {
+        n_tasks: str(tmp_path / f"{n_tasks}_tasks.img.zarr") for n_tasks in (1, 2)
+    }
+    for n_tasks, store in stores.items():
+        result = _image_restored(
+            ps_store, store, n_tasks, clean_mask=clean_mask, threshold=threshold
+        )
+        _assert_imaged(result, n_tasks)
+    _assert_images_equal(stores[1], stores[2])
+    img = load_image(stores[1])
+    _assert_restored_without_model_update(img, without_update)
+    assert img.SKY_MODEL.values[:, 1 - without_update].max() > 0.5
 
 
 #: Frequency offset (Hz) of the second execution block, of the order of those

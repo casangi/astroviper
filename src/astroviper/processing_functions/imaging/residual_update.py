@@ -359,7 +359,7 @@ def residual_update_cube_single_field(
         written into it in place on every non-first cycle.
     img_xds : xarray.Dataset
         Image dataset holding the sky model (input) and residual image (output).
-        Modified in place.
+        Modified in place; the model is left as it is.
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
@@ -528,34 +528,12 @@ def residual_update_cube_single_field(
         # Delete the SKY_RESIDUAL so the gridded residual image is rebuilt below.
         img_xds.xr_img.delete_data_variables(variables=[residual_data_group["sky"]])
 
-        # Stokes to correlation (instrument) basis for the model visibilities.
-        start = time.time()
-        img_xds = transform_polarization_basis(
-            img_xds,
-            new_polarization_basis=instrument_polarization_basis,
-            overwrite=True,
-        )
-        T_transform_pol += time.time() - start
-
-        if direct_fourier_transform:
-            from astroviper.processing_functions.imaging.direct_fourier_transform import (
-                make_dft_visibility_model_single_field,
-            )
-
-            start = time.time()
-            make_dft_visibility_model_single_field(
-                ps_xdt,
-                img_xds,
-                ms_data_group_in_name=ps_data_group_name,
-                ms_data_group_out_name="model",
-                ms_data_group_out_modified={
-                    "correlated_data": "VISIBILITY_MODEL",
-                },
-                image_data_group_in_name=image_data_group_in_name,
-                processing_function_threads=processing_function_threads,
-            )
-            T_degrid += time.time() - start
-        else:
+        # The model stays in the Stokes basis, out of the dataset's round trip
+        # to the correlation basis and back, which rounds with Q, U or V in
+        # it, and is put back below. Its uv grid is made from its Stokes
+        # planes, combined into the correlations as they are padded, before
+        # the dataset turns to that basis (which relabels the grid).
+        if not direct_fourier_transform:
             start = time.time()
             img_xds = fft_norm_img_xds(
                 img_xds,
@@ -570,9 +548,51 @@ def residual_update_cube_single_field(
                 fft_backend=fft_backend,
                 complex_dtype=complex_dtype,
                 gridding_kernel=cgk_1D,
+                new_polarization_basis=instrument_polarization_basis,
             )
             T_fft_degrid += time.time() - start
+        model_name = img_xds.attrs["data_groups"][image_data_group_in_name]["sky"]
+        model = img_xds[model_name]
+        del img_xds[model_name]
 
+        # The dataset in the correlation (instrument) basis of the gridding.
+        start = time.time()
+        img_xds = transform_polarization_basis(
+            img_xds,
+            new_polarization_basis=instrument_polarization_basis,
+            overwrite=True,
+        )
+        T_transform_pol += time.time() - start
+
+        if direct_fourier_transform:
+            from astroviper.processing_functions.imaging.direct_fourier_transform import (
+                make_dft_visibility_model_single_field,
+            )
+
+            # The direct Fourier transform reads a copy of the model in the
+            # correlation basis.
+            start = time.time()
+            img_xds[model_name] = transform_polarization_basis(
+                model.to_dataset().copy(deep=True),
+                new_polarization_basis=instrument_polarization_basis,
+                overwrite=True,
+            )[model_name]
+            T_transform_pol += time.time() - start
+            start = time.time()
+            make_dft_visibility_model_single_field(
+                ps_xdt,
+                img_xds,
+                ms_data_group_in_name=ps_data_group_name,
+                ms_data_group_out_name="model",
+                ms_data_group_out_modified={
+                    "correlated_data": "VISIBILITY_MODEL",
+                },
+                image_data_group_in_name=image_data_group_in_name,
+                processing_function_threads=processing_function_threads,
+            )
+            T_degrid += time.time() - start
+            del img_xds[model_name]
+        else:
             start = time.time()
             make_visibility_model_single_field(
                 ps_xdt,
@@ -689,6 +709,8 @@ def residual_update_cube_single_field(
     img_xds = transform_polarization_basis(
         img_xds, new_polarization_basis="stokes", overwrite=True
     )
+    if model_exists:
+        img_xds[model_name] = model
     T_transform_pol += time.time() - start
     logger.debug(
         "Memory usage after transform polarization " + str(get_rss_gb()) + " GB"

@@ -367,9 +367,9 @@ def _select_chunk_writer(
     ``write(chunk_xds, chunk_task_coords)``.
 
     A variable of ``image_data_variables_keep`` that the run does not make
-    (``sky_model`` or ``mask`` of a run without deconvolution, for example)
-    is skipped: only the kept variables a chunk holds are written, and the
-    others keep the fill value of the image store.
+    (``mask`` of a run without deconvolution, for example) is skipped: only
+    the kept variables a chunk holds are written, and the others keep the
+    fill value of the image store.
     """
     if graph_mode and output_image_format == "fits":
         # FITS performance path: pwrite the chunk's contiguous channel block

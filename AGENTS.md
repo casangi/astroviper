@@ -251,7 +251,10 @@ image-sized PSF.
 **Polarization.** The residual update grids and degrids in the instrument
 (correlation) basis and the model update deconvolves in the Stokes basis;
 `transform_polarization_basis` converts the image dataset at the boundary
-between the two. Two modes are supported, fixed by
+between the two, except the cube's model, as a round trip to the correlations
+and back rounds: its uv grid is made from its Stokes planes, combined into the
+correlations as they are padded (`fft_norm_img_xds`'s
+`new_polarization_basis`). Two modes are supported, fixed by
 `image_params["polarization_coords"]`
 (`processing_functions/imaging/utils/imaging_polarization.py`): the two parallel
 hands give `["I", "Q"]` (linear feeds) or `["I", "V"]` (circular feeds), and
