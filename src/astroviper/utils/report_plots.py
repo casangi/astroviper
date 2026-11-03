@@ -744,10 +744,10 @@ def _record_values(record, name, n):
 
 def _moments(values):
     """Skew and excess kurtosis."""
+    if values.min() == values.max():
+        return np.nan, np.nan
     deviation = values - values.mean()
     variance = np.mean(deviation**2)
-    if variance == 0:
-        return np.nan, np.nan
     return (
         np.mean(deviation**3) / variance**1.5,
         np.mean(deviation**4) / variance**2 - 3.0,

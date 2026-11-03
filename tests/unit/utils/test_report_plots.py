@@ -583,8 +583,9 @@ def test_plane_deconvolution_summary_without_iterations():
 
 def test_plane_deconvolution_summary_of_degenerate_planes():
     """An all-NaN plane, a mask of no pixel, NaN pixels, iteration counts of
-    None and an all-NaN residual draw without a warning; the final stars are
-    those of the finite pixels."""
+    None, an all-NaN residual and a constant one draw without a warning; the
+    final stars are those of the finite pixels, and a constant residual has no
+    skew or kurtosis."""
     import warnings
 
     plane = np.random.default_rng(1).normal(size=(32, 32))
@@ -616,6 +617,15 @@ def test_plane_deconvolution_summary_of_degenerate_planes():
             idle, np.abs(plane), np.full_like(plane, np.nan)
         )
         assert figure.subfigs[1].axes[2].get_ylim() == (0.0, 1.45)
+        figure = plot_plane_deconvolution_summary(
+            record, np.abs(plane), np.full_like(plane, 0.1)
+        )
+        moments = [
+            line.get_ydata()[0]
+            for line in figure.subfigs[1].axes[5].lines
+            if line.get_marker() == "*"
+        ]
+        np.testing.assert_array_equal(moments, [np.nan, np.nan])
 
 
 def test_signed_images_and_visibility_comparison():
@@ -638,8 +648,9 @@ def test_signed_images_and_visibility_comparison():
     )
     assert [*vertices.min(axis=0), *vertices.max(axis=0)] == [1.5, 0.5, 5.5, 8.5]
     assert figure.axes[2].get_title() == "c (all zero)"
-    figure = plot_signed_images([np.where(mask, np.nan, 0.0)], ["d"])
+    figure = plot_signed_images([np.where(mask, np.nan, 0.0)], ["d"], title="signed")
     assert figure.axes[0].get_title() == "d (all zero)"
+    assert figure.get_suptitle() == "signed"
 
     expected = rng.normal(size=50) + 1j * rng.normal(size=50)
     visibility = expected.copy()
@@ -647,8 +658,11 @@ def test_signed_images_and_visibility_comparison():
     uv_distance = np.linspace(1e3, 1e5, 50)
     noise = rng.normal(size=500)
     noise[0] = 7.0
-    figure = plot_visibility_comparison(uv_distance, visibility, expected, noise)
+    figure = plot_visibility_comparison(
+        uv_distance, visibility, expected, noise, title="comparison"
+    )
     _assert_pyplot_free(figure, 3)
+    assert figure.get_suptitle() == "comparison"
     # the noise as a density over all the samples, against N(0, 1)
     ax = figure.axes[2]
     assert _legend(ax) == ["noise (1 beyond ±5)", "N(0, 1)"]
