@@ -13,6 +13,74 @@ from astroviper.utils.data_group_tools import (
 FWHM_factor = 2.0 * np.sqrt(2.0 * np.log(2.0))
 
 
+# -----------------------------------------------------------------------------
+# Runtime restoration product roles
+# -----------------------------------------------------------------------------
+
+
+def resolve_restoration_product(img_xds, data_group_name, role, *, fallback=None):
+    """Resolve a required restoration role without reading or modifying pixels.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image products and their data-group registrations.
+    data_group_name : str
+        Group containing the requested role.
+    role : str
+        Logical role, such as sky, restoring-beam parameters, or primary beam.
+    fallback : str, optional
+        Explicit compatibility variable used only when the role is unregistered.
+        Continuum permits legacy PSF and restoring-beam registrations; cube
+        restoration requires its registered roles. A missing registered variable
+        never falls back to another product.
+
+    Returns
+    -------
+    str
+        Existing variable name. No data-group entries or defaults are inserted.
+
+    Raises
+    ------
+    KeyError
+        If the data group, required role, or referenced variable is missing.
+    """
+    # --- Required data group ---
+    groups = img_xds.attrs.get("data_groups", {})
+    if data_group_name not in groups:
+        raise KeyError(
+            f"Restoration data group {data_group_name!r} is missing. "
+            f"Available groups are {list(groups)}."
+        )
+
+    # --- Registered role or explicitly supported legacy product ---
+    variable_name = groups[data_group_name].get(role)
+    if variable_name is None:
+        if fallback is None:
+            raise KeyError(
+                f"Restoration data group {data_group_name!r} does not define {role!r}."
+            )
+        if fallback not in img_xds:
+            raise KeyError(
+                f"Restoration data group {data_group_name!r} does not define {role!r}, "
+                f"and {fallback!r} is absent."
+            )
+        variable_name = fallback
+
+    # --- Actual product availability ---
+    if variable_name not in img_xds:
+        raise KeyError(
+            f"Restoration variable {variable_name!r} for role {role!r} "
+            f"in data group {data_group_name!r} is missing."
+        )
+    return variable_name
+
+
+# -----------------------------------------------------------------------------
+# Clean-beam kernels and plane restoration
+# -----------------------------------------------------------------------------
+
+
 def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtype):
     """Unit-peak elliptical Gaussian on an ``(ny, nx)`` pixel grid, centered.
 
@@ -402,49 +470,34 @@ def restore_image(
 
     start = time.time()
 
-    # Resolve the residual group as the "input" and build the restored output
-    # group from it (so the restored group inherits the residual roles and just
-    # overrides the sky variable).
-    residual_group, restored_group = create_data_groups_in_and_out(
+    # Resolve every required runtime product before building output metadata.
+    # A cube consumes the fitted beam directly and does not require a PSF.
+    residual_sky_name = resolve_restoration_product(
+        img_xds, image_data_group_in_residual_name, "sky"
+    )
+    model_sky_name = resolve_restoration_product(
+        img_xds, image_data_group_in_model_name, "sky"
+    )
+    beam_name = resolve_restoration_product(
+        img_xds, image_data_group_in_residual_name, beam_fit_params_key
+    )
+    correct = bool(primary_beam_correction)
+    if correct:
+        primary_beam_name = resolve_restoration_product(
+            img_xds, image_data_group_in_residual_name, primary_beam_key
+        )
+
+    # The restored output inherits the residual roles and replaces only sky.
+    _, restored_group = create_data_groups_in_and_out(
         img_xds,
         data_group_in_name=image_data_group_in_residual_name,
         data_group_out_name=image_data_group_out_restore_name,
         data_group_out_modified=image_data_group_out_modified,
         overwrite=overwrite,
     )
-
-    # The model is the second input group; resolve it directly.
-    assert image_data_group_in_model_name in img_xds.attrs["data_groups"], (
-        "Model data group "
-        + image_data_group_in_model_name
-        + " not found in img_xds data_groups: "
-        + str(list(img_xds.attrs["data_groups"].keys()))
-    )
-    model_group = img_xds.attrs["data_groups"][image_data_group_in_model_name]
-
-    assert beam_fit_params_key in residual_group, (
-        "Beam-fit parameters '"
-        + beam_fit_params_key
-        + "' not found in the residual data group '"
-        + image_data_group_in_residual_name
-        + "'. Run point_spread_function_gaussian_fit first."
-    )
-
-    residual_sky_name = residual_group["sky"]
-    model_sky_name = model_group["sky"]
-    beam_name = residual_group[beam_fit_params_key]
     restored_sky_name = restored_group["sky"]
-
-    correct = bool(primary_beam_correction)
     if correct:
-        assert primary_beam_key in residual_group, (
-            "Data group '"
-            + image_data_group_in_residual_name
-            + "' has no "
-            + primary_beam_key
-            + " entry; run make_primary_beam_single_field first."
-        )
-        primary_beam = img_xds[residual_group[primary_beam_key]].values
+        primary_beam = img_xds[primary_beam_name].values
         corrected_sky_name = "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
         restored_group["sky_primary_beam_corrected"] = corrected_sky_name
         T_correct = 0.0

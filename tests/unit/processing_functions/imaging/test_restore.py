@@ -517,7 +517,7 @@ class TestPrimaryBeamCorrectionInRestore:
     def test_needs_the_primary_beam(self):
         residual, model = self._inputs()
         xds = _make_restore_xds(beams=self.beams, residual=residual, model=model)
-        with pytest.raises(AssertionError, match="primary_beam"):
+        with pytest.raises(KeyError, match="primary_beam"):
             restore_image(xds, primary_beam_correction=True)
 
 

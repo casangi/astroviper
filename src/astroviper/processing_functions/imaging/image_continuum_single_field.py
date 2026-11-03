@@ -3833,53 +3833,23 @@ def restore_continuum_image(
 
     import xarray as xr
 
-    # Alias the existing cube routine to avoid colliding with this wrapper.
+    from astroviper.processing_functions.imaging.restore import (
+        resolve_restoration_product,
+    )
     from astroviper.processing_functions.imaging.restore import (
         restore_image as restore_cube_image,
     )
 
-    data_groups = img_xds.attrs.get("data_groups", {})
-
     # ------------------------------------------------------------------
-    # Resolve the residual and model variables.
+    # Resolve the residual and model variables using the shared role contract.
+    # Taylor-axis checks and cube-view construction remain local to continuum.
     # ------------------------------------------------------------------
-    if image_data_group_in_residual_name not in data_groups:
-        raise KeyError(
-            "Residual data group "
-            f"{image_data_group_in_residual_name!r} is missing. "
-            f"Available groups are {list(data_groups)}."
-        )
-
-    if image_data_group_in_model_name not in data_groups:
-        raise KeyError(
-            "Model data group "
-            f"{image_data_group_in_model_name!r} is missing. "
-            f"Available groups are {list(data_groups)}."
-        )
-
-    residual_group = data_groups[image_data_group_in_residual_name]
-    model_group = data_groups[image_data_group_in_model_name]
-
-    residual_name = residual_group.get("sky")
-    model_name = model_group.get("sky")
-
-    if residual_name is None:
-        raise KeyError(
-            f"Residual data group "
-            f"{image_data_group_in_residual_name!r} does not define 'sky'."
-        )
-
-    if model_name is None:
-        raise KeyError(
-            f"Model data group "
-            f"{image_data_group_in_model_name!r} does not define 'sky'."
-        )
-
-    if residual_name not in img_xds:
-        raise KeyError(f"Residual variable {residual_name!r} is missing from img_xds.")
-
-    if model_name not in img_xds:
-        raise KeyError(f"Model variable {model_name!r} is missing from img_xds.")
+    residual_name = resolve_restoration_product(
+        img_xds, image_data_group_in_residual_name, "sky"
+    )
+    model_name = resolve_restoration_product(
+        img_xds, image_data_group_in_model_name, "sky"
+    )
 
     residual_da = img_xds[residual_name]
     model_da = img_xds[model_name]
@@ -3900,20 +3870,12 @@ def restore_continuum_image(
     # ------------------------------------------------------------------
     # Resolve the PSF.
     # ------------------------------------------------------------------
-    psf_name = residual_group.get("point_spread_function")
-
-    if psf_name is None:
-        # Permit older datasets where the logical registration is missing.
-        if "POINT_SPREAD_FUNCTION" in img_xds:
-            psf_name = "POINT_SPREAD_FUNCTION"
-        else:
-            raise KeyError(
-                "The residual data group does not define "
-                "'point_spread_function', and POINT_SPREAD_FUNCTION is absent."
-            )
-
-    if psf_name not in img_xds:
-        raise KeyError(f"Point-spread-function variable {psf_name!r} is missing.")
+    psf_name = resolve_restoration_product(
+        img_xds,
+        image_data_group_in_residual_name,
+        "point_spread_function",
+        fallback="POINT_SPREAD_FUNCTION",
+    )
 
     psf_da = img_xds[psf_name]
 
@@ -3927,19 +3889,12 @@ def restore_continuum_image(
     # Resolve the fitted restoring beam.
     # ------------------------------------------------------------------
     beam_fit_key = "beam_fit_params_point_spread_function"
-    beam_name = residual_group.get(beam_fit_key)
-
-    if beam_name is None:
-        if "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" in img_xds:
-            beam_name = "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
-        else:
-            raise KeyError(
-                f"The residual data group does not define {beam_fit_key!r}, "
-                "and BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION is absent."
-            )
-
-    if beam_name not in img_xds:
-        raise KeyError(f"Restoring-beam variable {beam_name!r} is missing.")
+    beam_name = resolve_restoration_product(
+        img_xds,
+        image_data_group_in_residual_name,
+        beam_fit_key,
+        fallback="BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    )
 
     beam_da = img_xds[beam_name]
 
@@ -4056,16 +4011,9 @@ def restore_continuum_image(
     # The continuum primary beam is already reduced to the reference-frequency
     # plane. Present it to the shared restoration backend as a one-channel cube.
     if primary_beam_correction:
-        primary_beam_name = residual_group.get(primary_beam_key)
-        if primary_beam_name is None:
-            raise KeyError(
-                f"Residual data group {image_data_group_in_residual_name!r} "
-                f"does not define {primary_beam_key!r}."
-            )
-        if primary_beam_name not in img_xds:
-            raise KeyError(
-                f"Primary-beam variable {primary_beam_name!r} is missing from img_xds."
-            )
+        primary_beam_name = resolve_restoration_product(
+            img_xds, image_data_group_in_residual_name, primary_beam_key
+        )
 
         primary_beam_da = img_xds[primary_beam_name]
         if "frequency" in primary_beam_da.dims:
