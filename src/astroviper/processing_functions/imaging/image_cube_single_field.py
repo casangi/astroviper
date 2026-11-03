@@ -1175,10 +1175,50 @@ def image_cube_single_field(
     # The PSF of twice the image size is freed before the restore.
     subtraction_psf_cube = deconvolve_params = None
 
-    # Restore: convolve the model with the clean beam and add the residual. Only
-    # possible once a model exists; the model/residual/beam-fit all live on
-    # img_xds at this point. restore_image self-times and returns a one-row
-    # timing frame (``T_restore``) folded in like the other steps.
+    if not model_exists:
+        # No model update ran. Make what one without components would have
+        # left, so that every channel of a node task holds the same
+        # variables: a zero model, as continuum imaging writes, and, when a
+        # model update could run, the mask it would have made.
+        import xarray as xr
+
+        from astroviper.processing_functions.image_analysis.make_mask import (
+            make_mask,
+        )
+        from astroviper.utils.data_group_tools import (
+            create_data_groups_in_and_out,
+            modify_data_groups_xds,
+        )
+
+        if (
+            cycle_control_params["max_iter"] > 0
+            and cycle_control_params["max_cycles"] != 0
+            and img_xds.attrs["data_groups"]["residual"].get("mask") is None
+        ):
+            make_mask(
+                img_xds,
+                primary_beam_limit=cycle_control_params.get("primary_beam_limit", 0.0),
+                image_data_group_in_name="residual",
+                image_data_group_out_name="residual",
+                combine_mask=False,
+                overwrite=False,
+            )
+        residual_group, model_group = create_data_groups_in_and_out(
+            img_xds,
+            data_group_in_name="residual",
+            data_group_out_name="model",
+            data_group_out_modified={"sky": "SKY_MODEL"},
+            overwrite=True,
+        )
+        img_xds[model_group["sky"]] = xr.zeros_like(img_xds[residual_group["sky"]])
+        modify_data_groups_xds(
+            img_xds, "model", model_group, description="Created model."
+        )
+
+    # Restore: convolve the model with the clean beam and add the residual
+    # (a zero model restores to the residual); the model/residual/beam-fit all
+    # live on img_xds at this point. restore_image self-times and returns a
+    # one-row timing frame (``T_restore``) folded in like the other steps.
     timing["T_restore"] = 0.0
     # The primary beam corrected restored image is made in the same pass as
     # the restored image: the model is divided by the primary beam before its
@@ -1186,10 +1226,8 @@ def image_cube_single_field(
     # restore may overwrite it. The deconvolver's primary_beam_limit is the
     # blanking cutoff when set, else the CASA pblimit default of 0.2.
     timing["T_correct_sky_by_primary_beam"] = 0.0
-    correct = (
-        primary_beam_correction and restore and cycle_control_params["max_iter"] > 0
-    )
-    if restore and model_exists:
+    correct = primary_beam_correction and restore
+    if restore:
         from astroviper.processing_functions.imaging.restore import restore_image
 
         img_xds, restore_return_df = restore_image(
