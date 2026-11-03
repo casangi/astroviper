@@ -157,13 +157,17 @@ def test_the_dft_cube_cleans_the_point_sources(tmp_path, point_sources_ps):
 @pytest.mark.parametrize(
     ("gridding_kernel_params", "keep", "match"),
     [
-        ({"type": "dft", "support": 7}, None, "do not apply to the type 'dft'"),
+        (
+            {"type": "dft", "support": 7},
+            None,
+            "DFT accepts only gridding_kernel_params=",
+        ),
         (
             {"type": "dft", "oversampling": 100, "interpolation": "nearest"},
             None,
-            "do not apply to the type 'dft'",
+            "DFT accepts only gridding_kernel_params=",
         ),
-        ({"type": "fft"}, None, "is not one of"),
+        ({"type": "fft"}, None, r"gridding_kernel_params\['type'\] must be one of"),
         ({"type": "dft"}, ["sky_residual", "visibility"], "uv grids"),
         ({"type": "dft"}, ["uv_sampling", "sky_model"], "uv grids"),
     ],

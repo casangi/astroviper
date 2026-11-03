@@ -394,7 +394,9 @@ def test_subtraction_psf_of_twice_the_size_holds_the_image_psf(simulated):
 def test_refused_kernel_keys_with_the_dft(simulated):
     store, _ = simulated("small_100GHz", False)
     for extra in ({"support": 7}, {"oversampling": 100}, {"interpolation": "linear"}):
-        with pytest.raises(ValueError, match="do not apply to the type 'dft'"):
+        with pytest.raises(
+            ValueError, match="DFT accepts only gridding_kernel_params="
+        ):
             _image(store, "small_100GHz", {**DFT, **extra})
 
 

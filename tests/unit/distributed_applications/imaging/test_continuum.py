@@ -1171,7 +1171,7 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
     ("deconvolver", "error", "message"),
     [
         ("hogbom_many_threads", AssertionError, None),
-        ("asp", ValueError, "deconvolver='asp' cleans Taylor term zero"),
+        ("asp", ValueError, "Continuum asp requires n_taylor_terms=1"),
     ],
 )
 def test_tw_hydra_refused_deconvolvers_write_nothing(
