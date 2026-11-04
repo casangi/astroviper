@@ -3907,15 +3907,29 @@ def _mtmfs_principal_residual_for_restoration(residual_da, psf_da):
     return principal.transpose(*residual_da.dims)
 
 
-def _restored_spectral_products(restored_da, restoration_residual_da):
+def _restored_spectral_products(
+    restored_da,
+    restoration_residual_da,
+    *,
+    flat_noise_restored_zero_da=None,
+    flat_noise_residual_zero_da=None,
+):
     """Derive CASA-style alpha, alpha error, and beta image products.
 
-    The products use the restored Taylor coefficients and the residuals that
-    entered restoration. For MT-MFS these are the principal-solution
-    residuals, not the stored Taylor right-hand sides. As in CASA, pixels are
-    selected where restored Taylor term zero exceeds one tenth of the peak
-    Taylor-zero residual in that time/polarization plane. Invalid pixels are
-    represented by NaN because xarray does not attach CASA lattice masks.
+    Product values use flat-sky restored Taylor coefficients and their
+    corresponding corrected residuals when those are supplied. Their validity
+    mask instead uses the flat-noise Taylor-zero restored image and the
+    flat-noise principal Taylor-zero residual, avoiding amplification of edge
+    noise by primary-beam division. Each time/polarization plane is selected
+    independently using the absolute signal and residual, so negative Q, U,
+    or V emission is treated symmetrically with positive emission. For MT-MFS
+    the residuals are principal-solution residuals, not the stored Taylor
+    right-hand sides. Invalid pixels are represented by NaN because xarray
+    does not attach CASA lattice masks.
+
+    The optional flat-noise inputs are zeroth-order four-dimensional arrays.
+    Omitting them preserves the helper's standalone behavior by using the
+    zeroth-order planes of ``restored_da`` and ``restoration_residual_da``.
     """
     import numpy as np
     import xarray as xr
@@ -3928,11 +3942,18 @@ def _restored_spectral_products(restored_da, restoration_residual_da):
     restored_one = restored_da.isel(taylor_term=1, drop=True)
     residual_zero = restoration_residual_da.isel(taylor_term=0, drop=True)
     residual_one = restoration_residual_da.isel(taylor_term=1, drop=True)
-    spectral_threshold = residual_zero.max(dim=spatial_dims, skipna=True) / 10.0
+    if flat_noise_restored_zero_da is None:
+        flat_noise_restored_zero_da = restored_zero
+    if flat_noise_residual_zero_da is None:
+        flat_noise_residual_zero_da = residual_zero
+    spectral_threshold = (
+        abs(flat_noise_residual_zero_da).max(dim=spatial_dims, skipna=True) / 10.0
+    )
     valid = (
         np.isfinite(restored_zero)
         & np.isfinite(restored_one)
-        & (restored_zero > spectral_threshold)
+        & np.isfinite(flat_noise_restored_zero_da)
+        & (abs(flat_noise_restored_zero_da) > spectral_threshold)
         & (restored_zero != 0.0)
     )
 
@@ -3949,13 +3970,17 @@ def _restored_spectral_products(restored_da, restoration_residual_da):
         "type": "spectral_index",
         "units": "dimensionless",
         "description": "Spectral index alpha derived from restored tt1 / tt0.",
-        "spectral_product_threshold": "peak principal tt0 residual / 10",
+        "spectral_product_threshold": (
+            "abs(flat-noise tt0) > peak abs flat-noise principal tt0 residual / 10"
+        ),
     }
     alpha_error.attrs = {
         "type": "spectral_index_error",
         "units": "dimensionless",
         "description": "CASA-style propagated spectral-index error.",
-        "spectral_product_threshold": "peak principal tt0 residual / 10",
+        "spectral_product_threshold": (
+            "abs(flat-noise tt0) > peak abs flat-noise principal tt0 residual / 10"
+        ),
     }
     products = {"ALPHA": alpha, "ALPHA_ERROR": alpha_error}
 
@@ -3970,7 +3995,9 @@ def _restored_spectral_products(restored_da, restoration_residual_da):
             "type": "spectral_curvature",
             "units": "dimensionless",
             "description": "Spectral curvature beta derived from restored Taylor terms.",
-            "spectral_product_threshold": "peak principal tt0 residual / 10",
+            "spectral_product_threshold": (
+                "abs(flat-noise tt0) > peak abs flat-noise principal tt0 residual / 10"
+            ),
         }
         products["BETA"] = beta
 
@@ -4049,10 +4076,11 @@ def restore_continuum_image(
     Every Taylor coefficient is restored independently with the same fitted
     clean beam. MFS first divides the apparent model and residual Taylor
     polynomials by ``PRIMARY_BEAM_TAYLOR``; MVC retains its common-primary-beam
-    correction. Spectral products use the primary-beam-corrected Taylor stack
-    whenever it is calculated, because that stack represents the inferred
-    on-sky emission; otherwise they use the apparent restored stack. Invalid
-    pixels are represented by NaN rather than a CASA lattice mask.
+    correction. Spectral-product values use the primary-beam-corrected Taylor
+    stack whenever it is calculated, because that stack represents the
+    inferred on-sky emission; their validity mask remains in the flat-noise
+    convention so primary-beam-amplified edge noise cannot set its threshold.
+    Invalid pixels are represented by NaN rather than a CASA lattice mask.
 
     Parameters
     ----------
@@ -4117,8 +4145,12 @@ def restore_continuum_image(
     model and residual coefficients are corrected before clean-beam
     convolution. When corrected Taylor images are available, ``ALPHA`` and
     ``BETA`` are therefore formed from those images, and ``ALPHA_ERROR`` uses
-    the corresponding corrected residual coefficients."""
+    the corresponding corrected residual coefficients. Validity is determined
+    per time/polarization plane from the absolute flat-noise Taylor-zero image
+    and one tenth of the peak absolute flat-noise principal Taylor-zero
+    residual."""
 
+    import numpy as np
     import pandas as pd
 
     from astroviper.processing_functions.imaging.restore import (
@@ -4470,14 +4502,41 @@ def restore_continuum_image(
                 *restoration_residual_da.dims
             )
         else:
-            primary_beam_inside = common_primary_beam_taylor >= primary_beam_limit
+            primary_beam_inside = (
+                np.isfinite(common_primary_beam_taylor)
+                & (common_primary_beam_taylor > 0.0)
+                & (common_primary_beam_taylor >= primary_beam_limit)
+            )
             spectral_residual_da = (
                 (residual_ordered / common_primary_beam_taylor)
                 .where(primary_beam_inside)
                 .transpose(*restoration_residual_da.dims)
             )
+
+    flat_noise_residual_zero_da = restoration_residual_da.isel(taylor_term=0, drop=True)
+    flat_noise_restored_zero_da = None
+    if spectral_restored_da is not None:
+        if apparent_da is not None:
+            flat_noise_restored_zero_da = apparent_da.isel(taylor_term=0, drop=True)
+        elif corrected_da is not None:
+            correction_beam_zero = (
+                mfs_primary_beam_taylor
+                if continuum_mode == "mfs"
+                else common_primary_beam_taylor
+            ).isel(taylor_term=0, drop=True)
+            # Corrected-only output deliberately avoids constructing another
+            # full restored Taylor stack; only its tt0 flat-noise proxy is
+            # needed for the spectral-product validity mask.
+            flat_noise_restored_zero_da = (
+                corrected_da.isel(taylor_term=0, drop=True) * correction_beam_zero
+            )
     spectral_products = (
-        _restored_spectral_products(spectral_restored_da, spectral_residual_da)
+        _restored_spectral_products(
+            spectral_restored_da,
+            spectral_residual_da,
+            flat_noise_restored_zero_da=flat_noise_restored_zero_da,
+            flat_noise_residual_zero_da=flat_noise_residual_zero_da,
+        )
         if spectral_restored_da is not None
         else {}
     )

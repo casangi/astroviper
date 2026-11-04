@@ -155,7 +155,11 @@ def _assert_restoration_values(image, primary_beam_limit=0.2):
         )
         correction_beam = primary_beam_taylor.isel(taylor_term=0, drop=True)
     else:
-        inside = primary_beam >= primary_beam_limit
+        inside = (
+            np.isfinite(primary_beam)
+            & (primary_beam > 0.0)
+            & (primary_beam >= primary_beam_limit)
+        )
         corrected_model_stack = xr.where(inside, model / primary_beam, 0.0)
         corrected_residual_stack = (residual / primary_beam).where(inside)
         correction_beam = primary_beam
@@ -179,7 +183,11 @@ def _assert_restoration_values(image, primary_beam_limit=0.2):
                 beam_plane = correction_beam.isel(beam_index).values
                 beam_parameters = fitted_beam.isel(beam_index).values
 
-                inside = beam_plane >= primary_beam_limit
+                inside = (
+                    np.isfinite(beam_plane)
+                    & (beam_plane > 0.0)
+                    & (beam_plane >= primary_beam_limit)
+                )
                 divided_model = corrected_model_stack.isel(index).values
                 corrected_residual_plane = corrected_residual_stack.isel(index).values
                 expected_corrected = np.full_like(corrected_residual_plane, np.nan)
@@ -204,13 +212,16 @@ def _assert_restoration_values(image, primary_beam_limit=0.2):
 
     residual_zero = corrected_residual.isel(taylor_term=0, drop=True)
     residual_one = corrected_residual.isel(taylor_term=1, drop=True)
-    threshold = residual_zero.max(dim=("l", "m")) / 10.0
+    flat_noise_residual_zero = residual.isel(taylor_term=0, drop=True)
+    threshold = abs(flat_noise_residual_zero).max(dim=("l", "m")) / 10.0
     restored_zero = corrected_reference.isel(taylor_term=0, drop=True)
     restored_one = corrected_reference.isel(taylor_term=1, drop=True)
+    flat_noise_restored_zero = restored_zero * correction_beam
     valid = (
         np.isfinite(restored_zero)
         & np.isfinite(restored_one)
-        & (restored_zero > threshold)
+        & np.isfinite(flat_noise_restored_zero)
+        & (abs(flat_noise_restored_zero) > threshold)
         & (restored_zero != 0.0)
     )
     expected_alpha = xr.where(valid, restored_one / restored_zero, np.nan)

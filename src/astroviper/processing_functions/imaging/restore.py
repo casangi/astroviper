@@ -152,7 +152,8 @@ def primary_beam_corrected_plane(
     apparent sky ``I P`` gives the true sky convolved with the clean beam,
     ``I * B``, exactly. Pixels where the primary beam is below
     ``primary_beam_limit`` are blanked with NaN, and the model is taken as
-    zero there before the convolution.
+    zero there before the convolution. Non-finite and non-positive beam
+    values are always blanked, including when ``primary_beam_limit`` is zero.
 
     CASA's ``pbcor`` divides the restored image instead, ``(M * B + R) / P``,
     which differs from this wherever the primary beam changes across the
@@ -182,7 +183,11 @@ def primary_beam_corrected_plane(
         The corrected plane, at the dtype of the residual plane (``out`` when
         given).
     """
-    inside = primary_beam_plane >= primary_beam_limit
+    inside = (
+        np.isfinite(primary_beam_plane)
+        & (primary_beam_plane > 0.0)
+        & (primary_beam_plane >= primary_beam_limit)
+    )
     if out is None:
         out = np.empty(residual_plane.shape, dtype=residual_plane.dtype)
     # the model divided by the primary beam inside the cutoff, zero outside
@@ -271,10 +276,10 @@ def _divide_taylor_polynomials(
 
     ``I_t = (J_t - sum(A_p I_(t-p), p=1..t)) / A_0``.
 
-    Pixels whose zeroth-order beam is non-finite or below ``limit`` receive
-    ``outside_value`` in every output coefficient. Restored residuals use NaN;
-    models use zero so masked model pixels do not contaminate the clean-beam
-    FFT.
+    Pixels whose zeroth-order beam is non-finite, non-positive, or below
+    ``limit`` receive ``outside_value`` in every output coefficient. Restored
+    residuals use NaN; models use zero so masked model pixels do not
+    contaminate the clean-beam FFT.
     """
     if outside_value is None:
         outside_value = np.nan
@@ -308,7 +313,7 @@ def _divide_taylor_polynomials(
     beam_values = np.asarray(primary_beam.values)
     intrinsic = np.empty_like(apparent_values)
     beam_zero = beam_values[:, 0]
-    supported = np.isfinite(beam_zero) & (beam_zero >= float(limit))
+    supported = np.isfinite(beam_zero) & (beam_zero > 0.0) & (beam_zero >= float(limit))
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         for order in range(apparent.sizes["taylor_term"]):
             coefficient = apparent_values[:, order].copy()

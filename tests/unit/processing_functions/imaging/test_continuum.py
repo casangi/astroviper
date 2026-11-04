@@ -22,6 +22,7 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
 )
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     _convert_mvc_cubes_to_taylor_normal_equations,
+    _restored_spectral_products,
     accumulate_continuum_model,
     apply_mvc_primary_beam_convention,
     finalize_mvc_taylor_normal_equations,
@@ -444,6 +445,54 @@ def test_corrected_only_continuum_restoration_matches_the_both_product_path():
     )
 
 
+def test_spectral_product_mask_uses_flat_noise_taylor_zero_per_polarization():
+    """Flat-sky edge noise and negative polarization do not erase valid alpha."""
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    coords = {
+        "time": [0],
+        "taylor_term": [0, 1],
+        "polarization": ["I", "Q"],
+        "l": [0, 1],
+        "m": [0, 1],
+    }
+    restored = np.zeros((1, 2, 2, 2, 2), dtype=np.float64)
+    restored[0, 0, :, 0, 0] = (20.0, -20.0)
+    restored[0, 1, :, 0, 0] = (-14.0, 14.0)
+    corrected_residual = np.ones_like(restored)
+    # Primary-beam division can turn modest flat-noise edge residuals into a
+    # large flat-sky value. It must not determine the spectral-product mask.
+    corrected_residual[0, 0, :, 1, 1] = 300.0
+    flat_noise_restored_zero = np.zeros((1, 2, 2, 2), dtype=np.float64)
+    flat_noise_restored_zero[0, :, 0, 0] = (20.0, -20.0)
+    flat_noise_residual_zero = np.ones_like(flat_noise_restored_zero)
+    flat_noise_residual_zero[:, :, 1, 1] = 3.0
+
+    products = _restored_spectral_products(
+        xr.DataArray(restored, dims=dims, coords=coords),
+        xr.DataArray(corrected_residual, dims=dims, coords=coords),
+        flat_noise_restored_zero_da=xr.DataArray(
+            flat_noise_restored_zero,
+            dims=("time", "polarization", "l", "m"),
+            coords={
+                key: value for key, value in coords.items() if key != "taylor_term"
+            },
+        ),
+        flat_noise_residual_zero_da=xr.DataArray(
+            flat_noise_residual_zero,
+            dims=("time", "polarization", "l", "m"),
+            coords={
+                key: value for key, value in coords.items() if key != "taylor_term"
+            },
+        ),
+    )
+
+    np.testing.assert_allclose(products["ALPHA"].values[0, :, 0, 0], -0.7)
+    assert np.isnan(products["ALPHA"].values[0, :, 1, 1]).all()
+    assert products["ALPHA"].attrs["spectral_product_threshold"] == (
+        "abs(flat-noise tt0) > peak abs flat-noise principal tt0 residual / 10"
+    )
+
+
 def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore():
     """MFS restores intrinsic coefficients obtained from J(x) = A(x) I(x)."""
     from astroviper.processing_functions.imaging.restore import _restore_image_arrays
@@ -512,6 +561,29 @@ def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore()
         taylor_term=1
     ) / result.SKY_RESTORED_FLAT_SKY.isel(taylor_term=0)
     np.testing.assert_allclose(result.ALPHA, expected_alpha, equal_nan=True)
+
+
+def test_mfs_taylor_division_excludes_zero_beam_at_zero_limit():
+    """MFS correction never divides by zero even when its cutoff is zero."""
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    apparent = xr.DataArray(np.ones((1, 2, 1, 2, 2)), dims=dims)
+    beam = xr.ones_like(apparent)
+    beam.data[:, 0, :, 0, 0] = 0.0
+    beam.data[:, 0, :, 0, 1] = np.nan
+
+    divided = _divide_taylor_polynomials(apparent, beam, limit=0.0)
+    model_divided = _divide_taylor_polynomials(
+        apparent,
+        beam,
+        limit=0.0,
+        outside_value=0.0,
+    )
+
+    assert np.isnan(divided.values[..., 0, 0]).all()
+    assert np.isnan(divided.values[..., 0, 1]).all()
+    assert (model_divided.values[..., 0, 0] == 0.0).all()
+    assert (model_divided.values[..., 0, 1] == 0.0).all()
+    assert np.isfinite(divided.values[..., 1, :]).all()
 
 
 @pytest.mark.parametrize(
