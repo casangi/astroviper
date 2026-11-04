@@ -1147,6 +1147,90 @@ def test_native_mtmfs_node_books_a_diverged_model_update(
     assert controller.diverged_model_updates[0, 0, 0] == diverged_model_updates
 
 
+@pytest.mark.parametrize(
+    "mvc_model_update_approximation",
+    ["local_beam_moments", "channel_psf"],
+)
+def test_mvc_stops_when_exact_taylor_zero_residual_grows_threefold(
+    monkeypatch, mvc_model_update_approximation
+):
+    """Both MVC Hessian approximations stop before another runaway update.
+
+    The first append establishes the exact Taylor-zero residual peak. The
+    second represents the following map/reduce residual refresh and raises it
+    by a factor of 3.1. The append returns stop code 5 without invoking the
+    model-update kernel again, and emits the required unusable-image warning.
+    """
+    from astroviper.processing_functions.imaging.utils import (
+        CycleController,
+        StopCode,
+    )
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        IMAGING_DIVERGENCE,
+        MODEL_UPDATE_CONTINUE,
+    )
+
+    params = {
+        "max_iter": 100,
+        "max_cycles": -1,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "max_iter_per_cycle": 1,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    controller = CycleController(**params)
+    backend_calls = 0
+
+    def backend(image, deconvolver, controls, **kwargs):
+        nonlocal backend_calls
+        backend_calls += 1
+        result = ImagingDict()
+        result.add(
+            {
+                "iter_done": 1,
+                "peakres": 0.5,
+                "masksum": image.sizes["l"] * image.sizes["m"],
+                "stop_code": StopCode(0, 1),
+            },
+            time=0,
+            pol=0,
+            chan=0,
+        )
+        image["SKY_MODEL"] = xr.zeros_like(image.SKY_RESIDUAL)
+        return result, None
+
+    warnings = []
+    monkeypatch.setattr(
+        continuum_processing, "model_update_mtmfs_single_field", backend
+    )
+    monkeypatch.setattr("toolviper.utils.logger.warning", warnings.append)
+    common = {
+        "continuum_mode": "mvc",
+        "mvc_model_update_approximation": mvc_model_update_approximation,
+        "controller": controller,
+        "deconvolver": "mtmfs",
+        "cycle_control_params": params,
+    }
+    first_image = make_runaway_taylor_image()
+    first = continuum_node.model_update_continuum_single_field(
+        {"image": first_image}, common
+    )
+    second_image = make_runaway_taylor_image()
+    second_image["SKY_RESIDUAL"] *= 3.1
+    second = continuum_node.model_update_continuum_single_field(
+        {"image": second_image},
+        {**common, "is_first_cycle": False, "deconvolution": first["deconvolution"]},
+    )
+
+    assert backend_calls == 1
+    assert second["residual_converged"]
+    assert second["stopcode"] == StopCode(IMAGING_DIVERGENCE, MODEL_UPDATE_CONTINUE)
+    assert controller.refreshed_residual_divergence_stopped[0, 0, 0]
+    assert any("not scientifically usable" in warning for warning in warnings)
+
+
 @pytest.mark.parametrize("primary_beam_limit", [None, 0.2])
 def test_native_mtmfs_imaging_cycles_clean_what_the_stop_test_measures(
     primary_beam_limit,

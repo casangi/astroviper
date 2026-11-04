@@ -233,6 +233,20 @@ emission, distant PSF sidelobes, strongly frequency-dependent PSFs, or poorly
 conditioned spectral coverage near the primary-beam cutoff. Neither MVC
 approximation is guaranteed for diffuse emission near the beam edge.
 
+### Refreshed-residual divergence safeguard
+
+Both MVC model-update approximations are guarded at the boundary between
+imaging cycles. After each map/reduce residual update, the append node compares
+the exact Taylor-zero residual peak with the preceding refreshed peak for each
+time and polarization plane. A rise by more than a factor of three stops that
+plane with imaging stop code 5 before another model update is attempted and
+logs that the result is not scientifically usable. This CASA-style check acts
+on the visibility-refreshed residual, not the approximate residual maintained
+inside the model update; it limits a runaway but does not make the underlying
+MVC approximation valid. Asp is excluded because a healthy change of active
+scale can transiently raise its peak and its scale-aware safeguards remain in
+force.
+
 ## Model update and residual restoration
 
 Högbom updates Taylor term zero. MT-MFS jointly updates all Taylor terms using

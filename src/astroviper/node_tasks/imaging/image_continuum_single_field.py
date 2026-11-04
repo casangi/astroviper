@@ -3860,6 +3860,25 @@ def model_update_continuum_single_field(
             "t_residual_update",
             residual_timing["T_image_cube_task"].max(),
         )
+    # MVC's minor-cycle Hessian is approximate. Compare successive exact,
+    # visibility-refreshed Taylor-zero residuals and stop a runaway before
+    # another model update. Asp is excluded because a healthy scale change can
+    # transiently raise its peak; its own scale-aware safeguards remain active.
+    if input_params.get("continuum_mode", "mfs") == "mvc" and deconvolver != "asp":
+        diverged = controller.check_refreshed_residual_divergence(residual_imaging_dict)
+        if diverged:
+            details = ", ".join(
+                f"(time={idx[0]}, polarization={idx[2]}): {previous:.6g} -> "
+                f"{current:.6g}"
+                for idx, previous, current in diverged
+            )
+            logger.warning(
+                "MVC stopped because the exact refreshed Taylor-term-zero "
+                "residual peak grew by more than a factor of 3 in one imaging "
+                f"cycle ({details}). This is a divergence safeguard, not a "
+                "converged solution; the resulting image is not scientifically "
+                "usable."
+            )
     stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
     if stopcode.imaging != 0:
         import xarray as xr
