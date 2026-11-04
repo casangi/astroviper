@@ -21,6 +21,7 @@ import xarray as xr
 from astroviper.processing_functions.imaging.restore import (
     _elliptical_gaussian_kernel,
     _inverse_rfft2,
+    _restore_image_arrays,
     restore_image,
 )
 
@@ -483,6 +484,50 @@ class TestPrimaryBeamCorrectionInRestore:
             reference["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values,
         )
         assert "SKY_MODEL" not in consumed
+
+    def test_corrected_only_core_matches_cube_primary_beam_output(self):
+        """Selecting only the corrected core output preserves cube numerics."""
+        residual, model = self._inputs()
+        xds = _with_primary_beam(
+            _make_restore_xds(beams=self.beams, residual=residual, model=model)
+        )
+        reference = restore_image(xds, primary_beam_correction=True)[0]
+
+        products, _ = _restore_image_arrays(
+            residual,
+            model,
+            xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values,
+            self.delta,
+            primary_beam=xds.PRIMARY_BEAM.values,
+            primary_beam_limit=0.2,
+            output="primary_beam_corrected",
+        )
+
+        assert set(products) == {"primary_beam_corrected"}
+        np.testing.assert_array_equal(
+            products["primary_beam_corrected"],
+            reference.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values,
+        )
+
+    def test_zero_limit_excludes_zero_and_nonfinite_primary_beam_pixels(self):
+        """A zero cutoff cannot feed zero-beam NaNs through the model FFT."""
+        residual, model = self._inputs()
+        xds = _with_primary_beam(
+            _make_restore_xds(beams=self.beams, residual=residual, model=model)
+        )
+        primary_beam = xds.PRIMARY_BEAM.values
+        primary_beam[..., 0, 0] = np.nan
+
+        out, _ = restore_image(
+            xds,
+            primary_beam_correction=True,
+            primary_beam_limit=0.0,
+        )
+        corrected = out.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values
+        supported = np.isfinite(primary_beam) & (primary_beam > 0.0)
+
+        assert np.isfinite(corrected[supported]).all()
+        assert np.isnan(corrected[~supported]).all()
 
     def test_limit_dtype_and_missing_beam(self):
         residual, model = self._inputs(dtype=np.float64)

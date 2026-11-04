@@ -34,6 +34,7 @@ from astroviper.utils.continuum_cache import (
 from astroviper.utils.continuum_cache import (
     MFS_VISIBILITY_GRID_CACHE_GROUP as _MFS_VISIBILITY_GRID_CACHE_GROUP,
 )
+from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
 from astroviper.utils.continuum_cache import (
     MVC_VISIBILITY_GRID_CACHE_GROUP as _MVC_VISIBILITY_GRID_CACHE_GROUP,
 )
@@ -679,6 +680,10 @@ def _continuum_image_for_disk(img_xds, image_data_variables_keep):
 
     registry = imaging_data_variables_and_dims_double_precision
     requested_names = {registry[key]["name"] for key in image_data_variables_keep}
+    # The MVC PB Taylor fit is a compact diagnostic product requested as part
+    # of the continuum result, not a configurable intermediate/cache variable.
+    if "PRIMARY_BEAM_TAYLOR" in img_xds:
+        requested_names.add("PRIMARY_BEAM_TAYLOR")
     output = img_xds.copy(deep=False)
     # The XRADIO deletion accessor mutates its dataset in place; isolate the
     # attributes while retaining zero-copy views of the large arrays.
@@ -1333,15 +1338,21 @@ def combine_continuum_chunks(input_data, input_params):
     ``POINT_SPREAD_FUNCTION`` in place of the two grids.
 
     MVC supplies a mode-specific additive list. Every imaging cycle reduces
-    ``MVC_RESIDUAL_TAYLOR_NUMERATOR``, ``MVC_RESIDUAL_WEIGHT_SUM``,
-    ``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``, ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``,
-    and ``MVC_RESIDUAL_BEAM_CHANNEL_COUNT``; the
-    first cycle additionally reduces ``MVC_PSF_TAYLOR_NUMERATOR``,
-    ``MVC_PSF_WEIGHT_SUM``, and ``MVC_PRIMARY_BEAM_WEIGHTED_SUM``. None of
-    these products has a frequency dimension.
+    ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and ``MVC_RESIDUAL_WEIGHT_SUM``; the first
+    cycle additionally reduces ``MVC_PSF_TAYLOR_NUMERATOR``,
+    ``MVC_PSF_WEIGHT_SUM``, ``MVC_PRIMARY_BEAM_WEIGHTED_SUM``,
+    ``MVC_PRIMARY_BEAM_TAYLOR_NUMERATOR``, and
+    ``MVC_PRIMARY_BEAM_FIT_WEIGHT_MOMENTS``. For ``local_beam_moments`` it also
+    reduces the squared-beam moments, beam-free spectral moments, and valid
+    channel count in that first cycle. The append node caches these static
+    quantities, so later cycles neither recreate nor reduce their image-sized
+    arrays. None of these products has a frequency dimension.
 
     MFS also carries ``PRIMARY_BEAM_REFERENCE`` with dimensions
-    ``(time, polarization, l, m)`` as a non-additive static product.
+    ``(time, polarization, l, m)`` as a non-additive static product. On the
+    first cycle it additively reduces ``MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR`` and
+    ``MFS_PRIMARY_BEAM_FIT_MOMENTS`` so the append node can fit the wideband PB
+    polynomial without reducing a channel-sized beam cube.
 
     All remaining dataset variables (for example metadata, coordinates, primary
     beam products, and other non-additive quantities) are copied from the first
@@ -2745,6 +2756,25 @@ def _validate_cycle_acceleration(cycle_acceleration, momentum_coefficient):
     _validate_momentum_coefficient(momentum_coefficient)
 
 
+def _validate_continuum_output_keys(image_data_variables_keep):
+    """Reject cube-era restored-image keys that continuum no longer produces."""
+    legacy_messages = {
+        "sky_restored": (
+            "continuum imaging no longer writes the apparent/flat-noise restored "
+            "product; set restore=True to write 'sky_restored_flat_sky'"
+        ),
+        "sky_restored_primary_beam_corrected": (
+            "use 'sky_restored_flat_sky' instead; restore=True retains it automatically"
+        ),
+    }
+    for key in image_data_variables_keep:
+        if key in legacy_messages:
+            raise ValueError(
+                f"image_data_variables_keep contains legacy continuum key {key!r}: "
+                f"{legacy_messages[key]}."
+            )
+
+
 def _warn_on_disabled_momentum(previous_state_xds, state_xds):
     """Warn when Nesterov momentum has switched off on further planes."""
     import toolviper.utils.logger as logger
@@ -2779,9 +2809,9 @@ def image_continuum_single_field(
     cycle_control_params: dict[str, Any],
     gridder: str = "anti_alias",
     deconvolver: str = "hogbom",
-    primary_beam_correction: bool = False,
     primary_beam_limit: float = 0.2,
     continuum_mode: str = "mfs",
+    mvc_model_update_approximation: str = "local_beam_moments",
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json requires list/str (not nullable); never mutated
     field_name: str | None = None,
@@ -2889,18 +2919,16 @@ def image_continuum_single_field(
         Path or URL of the input Processing Set.
     image_store : str
         Path/URL of the on-disk Zarr image cube.
-    primary_beam_correction : bool
-        If ``True`` write the primary beam corrected restored sky to the
-        ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
-        by the (power) primary beam and convolved with the clean beam, plus
-        the residual divided by the primary beam; pixels below the primary
-        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
-        ``restore``.
     restore : bool
-        If ``True`` produce a restored image after deconvolution: the model
-        convolved with the clean beam (the Gaussian fit to the PSF) plus the
-        residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
+        If ``True`` restore every Taylor coefficient after deconvolution and
+        always produce the intrinsic, primary-beam-corrected Taylor image in
+        ``SKY_RESTORED_FLAT_SKY``. This is the sole restored sky product for
+        both MFS and MVC; the apparent ``SKY_RESTORED_FLAT_NOISE`` image is not
+        written. Pixels below ``primary_beam_limit`` are blanked with NaN. With
+        at least two Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``;
+        with at least three, also write ``BETA``. ``ALPHA_ERROR`` is CASA's
+        pixel-residual diagnostic, not a statistically calibrated one-sigma
+        uncertainty.
     scan_intents : list of str or str, optional
         Scan intent or intents passed to
         :func:`xradio.measurement_set.open_processing_set` when opening the
@@ -2974,14 +3002,29 @@ def image_continuum_single_field(
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
-        index. Its reference-frequency primary beam corrects the Taylor-zero
-        restored product, but not the higher Taylor coefficients. ``"mvc"`` forms
+        index. Wideband primary-beam correction fits the beam in the same Taylor
+        basis and divides the apparent-sky polynomial by the beam polynomial
+        before restoration, removing that contribution from corrected spectral
+        products.
+        ``"mvc"`` forms
         channel images and common-beam Taylor equations, and predicts
         ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
         the intrinsic spectrum under the common-beam convention, so
         ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
         match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
         parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
+    mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, optional
+        MVC approximation used to construct the Taylor residuals and PSFs.
+        The default ``"local_beam_moments"`` is the least-squares-consistent
+        operator used by the main MVC path.
+        ``"channel_psf"`` retains the frequency-dependent channel PSFs while
+        approximating the channel-to-common-beam ratio as one and is retained
+        as the CASA-comparison option. On wide bands at low effective primary-
+        beam response it can satisfy the Taylor-zero stopping threshold while
+        silently biasing compact-source flux and spectral index.
+        ``"local_beam_moments"`` retains local frequency-dependent primary-beam
+        moments while approximating the channel PSFs by a common response. The
+        setting is ignored by MFS.
     deconvolver : str
         Deconvolution algorithm for the model update. ``"hogbom"`` (C++,
         threaded across planes) cleans Taylor term zero only. ``"asp"``
@@ -3015,6 +3058,8 @@ def image_continuum_single_field(
     image_data_variables_keep : list of str
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        Restoration automatically retains its mode-specific restored Taylor
+        product and the derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.
     compressor : object, optional
         Output Zarr compressor.
     processing_set_data_group_name : str
@@ -3579,8 +3624,8 @@ def image_continuum_single_field(
     if n_mapping_parallelism is not None:
         _validate_n_mapping_parallelism(n_mapping_parallelism)
 
-    if primary_beam_correction and not restore:
-        raise ValueError("primary_beam_correction requires restore=True.")
+    _validate_continuum_output_keys(image_data_variables_keep)
+
     if not 0.0 <= primary_beam_limit <= 1.0:
         raise ValueError("primary_beam_limit must be between 0 and 1.")
 
@@ -3607,6 +3652,16 @@ def image_continuum_single_field(
             "wideband_primary_beam_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {wideband_primary_beam_memory_mode!r}."
         )
+    mvc_model_update_approximation = str(mvc_model_update_approximation).lower()
+    if mvc_model_update_approximation not in (
+        "channel_psf",
+        "local_beam_moments",
+    ):
+        raise ValueError(
+            "mvc_model_update_approximation must be 'channel_psf' or "
+            "'local_beam_moments'; received "
+            f"{mvc_model_update_approximation!r}."
+        )
     if weight_memory_mode == "in_place" and skunk_works:
         raise NotImplementedError(
             "weight_memory_mode='in_place' is not yet supported with skunk_works=True."
@@ -3624,6 +3679,15 @@ def image_continuum_single_field(
         raise ValueError(
             f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
+    # Continuum restoration always writes its intrinsic PB-corrected product.
+    # Retain the apparent/flat-noise product as well only when the caller asks
+    # for it explicitly.
+    primary_beam_correction = bool(restore)
+    restoration_output = (
+        "both"
+        if restore and "sky_restored_flat_noise" in image_data_variables_keep
+        else "primary_beam_corrected"
+    )
     # Work with an application-local copy: continuum setup may augment the
     # image parameters with metadata derived from the Processing Set.
     image_params = dict(image_params)
@@ -3668,16 +3732,20 @@ def image_continuum_single_field(
             f"{imaging_weights_params['weighting']!r}."
         )
 
-    # When restoring, the restored sky must be created on disk and written, so
-    # ensure it is in the keep list (without mutating the caller's list).
-    if restore and "sky_restored" not in image_data_variables_keep:
-        image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
-    if (
-        primary_beam_correction
-        and "sky_restored_primary_beam_corrected" not in image_data_variables_keep
+    # When restoring, ensure the derived spectral products are written without
+    # retaining the intermediate apparent restored Taylor image.
+    if restore:
+        spectral_products = ("alpha", "alpha_error", "beta")
+        image_data_variables_keep = list(image_data_variables_keep) + [
+            product
+            for product in spectral_products
+            if product not in image_data_variables_keep
+        ]
+    if primary_beam_correction and (
+        "sky_restored_flat_sky" not in image_data_variables_keep
     ):
         image_data_variables_keep = list(image_data_variables_keep) + [
-            "sky_restored_primary_beam_corrected"
+            "sky_restored_flat_sky"
         ]
 
     # One public primary-beam limit controls CLEAN support, MVC correction,
@@ -3840,12 +3908,15 @@ def image_continuum_single_field(
     input_params["is_first_cycle"] = True
     input_params["deconvolver"] = deconvolver
     input_params["primary_beam_correction"] = bool(primary_beam_correction)
+    input_params["restoration_output"] = restoration_output
     input_params["primary_beam_limit"] = float(primary_beam_limit)
     input_params["continuum_mode"] = continuum_mode
+    input_params["mvc_model_update_approximation"] = mvc_model_update_approximation
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
+    input_params["make_primary_beam_taylor"] = bool(restore)
     input_params["skunk_works"] = skunk_works
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
@@ -4125,11 +4196,36 @@ def image_continuum_single_field(
                         ("POINT_SPREAD_FUNCTION", "UV_SAMPLING_NORMALIZATION")
                         if is_first_cycle
                         else ()
+                    )
+                    + (
+                        (
+                            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                            "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+                        )
+                        if is_first_cycle and restore
+                        else ()
                     ),
                 }
             elif continuum_mode == "mfs":
                 if is_first_cycle:
-                    reduce_input_params = {"continuum_mode": "mfs"}
+                    primary_beam_fit_variables = (
+                        (
+                            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                            "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+                        )
+                        if restore
+                        else ()
+                    )
+                    reduce_input_params = {
+                        "continuum_mode": "mfs",
+                        "additive_variables": (
+                            "VISIBILITY",
+                            "VISIBILITY_NORMALIZATION",
+                            "UV_SAMPLING",
+                            "UV_SAMPLING_NORMALIZATION",
+                        )
+                        + primary_beam_fit_variables,
+                    }
                 else:
                     reduce_input_params = {
                         "continuum_mode": "mfs",
@@ -4139,30 +4235,31 @@ def image_continuum_single_field(
                         ),
                     }
             else:
+                mvc_residual_additive_variables = (
+                    "MVC_RESIDUAL_TAYLOR_NUMERATOR",
+                    "MVC_RESIDUAL_WEIGHT_SUM",
+                )
+                if (
+                    is_first_cycle
+                    and mvc_model_update_approximation == "local_beam_moments"
+                ):
+                    mvc_residual_additive_variables += MVC_LOCAL_BEAM_STATIC_VARIABLES
                 if is_first_cycle:
                     reduce_input_params = {
                         "continuum_mode": "mvc",
-                        "additive_variables": (
-                            "MVC_RESIDUAL_TAYLOR_NUMERATOR",
-                            "MVC_RESIDUAL_WEIGHT_SUM",
-                            "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM",
-                            "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM",
-                            "MVC_RESIDUAL_BEAM_CHANNEL_COUNT",
+                        "additive_variables": mvc_residual_additive_variables
+                        + (
                             "MVC_PSF_TAYLOR_NUMERATOR",
                             "MVC_PSF_WEIGHT_SUM",
                             "MVC_PRIMARY_BEAM_WEIGHTED_SUM",
+                            "MVC_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                            "MVC_PRIMARY_BEAM_FIT_WEIGHT_MOMENTS",
                         ),
                     }
                 else:
                     reduce_input_params = {
                         "continuum_mode": "mvc",
-                        "additive_variables": (
-                            "MVC_RESIDUAL_TAYLOR_NUMERATOR",
-                            "MVC_RESIDUAL_WEIGHT_SUM",
-                            "MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM",
-                            "MVC_RESIDUAL_WEIGHT_TAYLOR_SUM",
-                            "MVC_RESIDUAL_BEAM_CHANNEL_COUNT",
-                        ),
+                        "additive_variables": mvc_residual_additive_variables,
                     }
 
             # ---------------------------------------------------------
@@ -4183,12 +4280,15 @@ def image_continuum_single_field(
                 "single_precision_image": single_precision_image,
                 "instrument_polarization_basis": instrument_polarization_basis,
                 "continuum_mode": continuum_mode,
+                "mvc_model_update_approximation": mvc_model_update_approximation,
                 "visibility_memory_mode": visibility_memory_mode,
                 "image_store": image_store,
                 "primary_beam_limit": primary_beam_limit,
+                "make_primary_beam_taylor": bool(restore),
                 "clean_mask": clean_mask_array,
                 "restore": restore,
                 "primary_beam_correction": primary_beam_correction,
+                "restoration_output": restoration_output,
                 "cycle_acceleration": cycle_acceleration,
                 "momentum_coefficient": momentum_coefficient,
             }

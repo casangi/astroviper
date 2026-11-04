@@ -15,11 +15,12 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
 )
+from tests.utils.continuum_images import make_continuum_image
 
 
 def _image():
     dims = ("time", "taylor_term", "polarization", "l", "m")
-    return xr.Dataset(
+    image = xr.Dataset(
         {
             "SKY_RESIDUAL": (dims, np.ones((1, 2, 1, 2, 2))),
             "SKY_MODEL": (dims, np.zeros((1, 2, 1, 2, 2))),
@@ -40,6 +41,37 @@ def _image():
             }
         },
     )
+    image["SKY_RESIDUAL"].attrs["continuum_mode"] = "mfs"
+    return image
+
+
+def test_restore_requires_or_infers_consistent_continuum_mode():
+    """Restoration infers one mode and rejects absent or contradictory metadata."""
+    image = make_continuum_image()
+    assert restore_continuum_image(image)[0].attrs["data_groups"]["restored"]
+
+    mvc_image = make_continuum_image(continuum_mode="mvc")
+    restored_mvc, _ = restore_continuum_image(
+        mvc_image,
+        primary_beam_correction=True,
+    )
+    assert "SKY_RESTORED_FLAT_SKY" in restored_mvc
+
+    image = make_continuum_image()
+    image["SKY_RESIDUAL"].attrs.pop("continuum_mode")
+    image.attrs.pop("continuum_imaging")
+    with pytest.raises(ValueError, match="continuum_mode is required"):
+        restore_continuum_image(image)
+
+    image.attrs["continuum_imaging"] = {"continuum_mode": "mfs"}
+    restore_continuum_image(image)
+
+    with pytest.raises(ValueError, match="conflicts with image metadata"):
+        restore_continuum_image(image, continuum_mode="mvc")
+
+    image["SKY_RESIDUAL"].attrs["continuum_mode"] = "mvc"
+    with pytest.raises(ValueError, match="Conflicting continuum_mode metadata"):
+        restore_continuum_image(image)
 
 
 @pytest.mark.parametrize("group", ["residual", "model"])

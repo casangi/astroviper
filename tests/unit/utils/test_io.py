@@ -39,6 +39,17 @@ class TestImageDataGroupsForKeptVariables:
         groups = image_data_groups_for_kept_variables(["sky_restored"])
         assert groups == {"restored": {"sky": "SKY_RESTORED"}}
 
+    def test_continuum_spectral_products_join_the_restored_group(self):
+        """Alpha, its error, and beta have stable public registry roles."""
+        groups = image_data_groups_for_kept_variables(["alpha", "alpha_error", "beta"])
+        assert groups == {
+            "restored": {
+                "alpha": "ALPHA",
+                "alpha_error": "ALPHA_ERROR",
+                "beta": "BETA",
+            }
+        }
+
     def test_variables_without_membership_are_skipped(self):
         # sky_dirty has no data-group membership; only sky_residual registers.
         groups = image_data_groups_for_kept_variables(["sky_dirty", "sky_residual"])

@@ -135,6 +135,7 @@ def test_mvc_rejects_empty_psf_plane_independently_of_residual_weights():
         ("reference_frequency", np.inf),
         ("primary_beam_limit", -0.1),
         ("primary_beam_limit", np.nan),
+        ("mvc_model_update_approximation", "invalid"),
     ],
 )
 def test_mvc_rejects_invalid_equation_parameters(parameter, value):
@@ -258,7 +259,7 @@ def test_model_accumulation_rejects_incompatible_state(continuum_mode, fault):
 )
 def test_pb_correction_rejects_invalid_final_products(fault):
     """An unreduced channel beam must not broadcast a continuum image to a cube."""
-    image = make_continuum_image()
+    image = make_continuum_image(continuum_mode="mvc")
     if fault == "channel_beam":
         image["PRIMARY_BEAM"] = image.PRIMARY_BEAM.expand_dims(
             frequency=[100.0, 110.0], axis=1
@@ -277,4 +278,5 @@ def test_pb_correction_rejects_invalid_final_products(fault):
             image,
             primary_beam_correction=True,
             primary_beam_limit=primary_beam_limit,
+            continuum_mode="mvc",
         )

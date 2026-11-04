@@ -222,7 +222,10 @@ def test_mfs_with_the_dft_equals_the_cube_on_one_channel(tmp_path, processing_se
     )
 
 
-def test_the_reduce_adds_the_taylor_images_of_the_map_tasks(tmp_path, processing_sets):
+@pytest.mark.parametrize("restore", [False, True], ids=["no_restore", "restore"])
+def test_the_reduce_adds_the_taylor_images_of_the_map_tasks(
+    tmp_path, processing_sets, restore
+):
     """Two map tasks give the products of one, to rounding: the Taylor residuals
     and PSFs of the tasks are added before their normalization, in every cycle,
     and every task predicts the model (MT-MFS, two Taylor terms; measured on Linux
@@ -232,19 +235,29 @@ def test_the_reduce_adds_the_taylor_images_of_the_map_tasks(tmp_path, processing
     image_params = _image_params(store, ["I", "Q"], n_taylor_terms=2)
     stores = {}
     for n_tasks in (1, 2):
-        stores[n_tasks] = tmp_path / f"tasks{n_tasks}.img.zarr"
+        stores[n_tasks] = tmp_path / f"tasks{n_tasks}_{restore}.img.zarr"
         _continuum(
             store,
             stores[n_tasks],
             image_params,
             deconvolver="mtmfs",
             n_mapping_parallelism={"frequency": n_tasks},
+            restore=restore,
         )
     one, two = (load_image(str(stores[n])) for n in (1, 2))
-    for name in ("POINT_SPREAD_FUNCTION", "SKY_RESIDUAL", "SKY_MODEL"):
+    products = ["POINT_SPREAD_FUNCTION", "SKY_RESIDUAL", "SKY_MODEL"]
+    if restore:
+        products.append("SKY_RESTORED_FLAT_SKY")
+    for name in products:
         assert one[name].dims == two[name].dims, name
         assert one[name].shape == two[name].shape, name
-        assert _relative_difference(two[name].values, one[name].values) <= 1e-12
+        difference = _relative_difference(
+            np.nan_to_num(two[name].values), np.nan_to_num(one[name].values)
+        )
+        tolerance = 2e-10 if name == "SKY_RESTORED_FLAT_SKY" else 1e-12
+        assert difference <= tolerance, (name, difference)
+    assert ("PRIMARY_BEAM_TAYLOR" in one) is restore
+    assert ("PRIMARY_BEAM_TAYLOR" in two) is restore
     # the second Taylor term of the model is predicted, too
     assert np.abs(one["SKY_MODEL"].isel(taylor_term=1).values).max() > 0
 
