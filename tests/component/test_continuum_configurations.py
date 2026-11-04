@@ -445,3 +445,79 @@ def test_restoration_retains_only_available_spectral_products(
         assert ("ALPHA" in stored) is (n_taylor_terms >= 2)
         assert ("ALPHA_ERROR" in stored) is (n_taylor_terms >= 2)
         assert ("BETA" in stored) is (n_taylor_terms >= 3)
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("restore", [False, True])
+@pytest.mark.parametrize("n_taylor_terms", [2, 3, 4])
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_hogbom_multi_term_rejection_precedes_every_write(
+    tmp_path,
+    continuum_input,
+    monkeypatch,
+    continuum_mode,
+    restore,
+    n_taylor_terms,
+    existing_output,
+):
+    """H5 rejects before writing input weights, creating output, or overwriting it."""
+    from importlib import import_module
+
+    import astroviper.utils.io as image_io
+
+    store, params, _, _ = continuum_input
+    params = {**params, "n_taylor_terms": n_taylor_terms}
+    output = tmp_path / "refused.img.zarr"
+    if existing_output:
+        output.mkdir()
+        (output / "keep.bin").write_bytes(b"existing output must survive H5 rejection")
+
+    def snapshot(path):
+        return {
+            str(file.relative_to(path)): file.read_bytes()
+            for file in path.rglob("*")
+            if file.is_file()
+        }
+
+    input_before = snapshot(store)
+    output_before = snapshot(output)
+
+    def unexpected_output_write(*args, **kwargs):
+        pytest.fail("Imaging write reached before rejecting multi-term Hogbom")
+
+    monkeypatch.setattr(image_io, "write_zarr_image_store", unexpected_output_write)
+    node = import_module("astroviper.node_tasks.imaging.image_continuum_single_field")
+    monkeypatch.setattr(
+        node, "_write_continuum_weights_in_place", unexpected_output_write
+    )
+    with pytest.raises(ValueError, match="Continuum hogbom requires n_taylor_terms=1"):
+        image_continuum_single_field(
+            ps_store=str(store),
+            image_store=str(output),
+            image_params=params,
+            imaging_weights_params={
+                "weighting": "briggs",
+                "robust": 0.5,
+                "weighting_scope": "global",
+            },
+            cycle_control_params={
+                "max_iter": 1,
+                "max_cycles": 1,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            deconvolver="hogbom",
+            restore=restore,
+            continuum_mode=continuum_mode,
+            processing_set_data_group_name="base",
+            weight_memory_mode="in_place",
+            write_imaging_weights_to_ps=True,
+            overwrite=True,
+        )
+    assert snapshot(store) == input_before
+    assert snapshot(output) == output_before
+    assert output.exists() is existing_output
