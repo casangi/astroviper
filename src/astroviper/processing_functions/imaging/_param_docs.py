@@ -669,7 +669,9 @@ IMAGING_PARAM_DOCS = {
         "both MFS and MVC; the apparent ``SKY_RESTORED_FLAT_NOISE`` image is not\n"
         "written. Pixels below ``primary_beam_limit`` are blanked with NaN. With\n"
         "at least two Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``;\n"
-        "with at least three, also write ``BETA``."
+        "with at least three, also write ``BETA``. ``ALPHA_ERROR`` is CASA's\n"
+        "pixel-residual diagnostic, not a statistically calibrated one-sigma\n"
+        "uncertainty."
     ),
     "clean_mask": (
         'Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:\n'

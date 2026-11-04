@@ -2926,7 +2926,9 @@ def image_continuum_single_field(
         both MFS and MVC; the apparent ``SKY_RESTORED_FLAT_NOISE`` image is not
         written. Pixels below ``primary_beam_limit`` are blanked with NaN. With
         at least two Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``;
-        with at least three, also write ``BETA``.
+        with at least three, also write ``BETA``. ``ALPHA_ERROR`` is CASA's
+        pixel-residual diagnostic, not a statistically calibrated one-sigma
+        uncertainty.
     scan_intents : list of str or str, optional
         Scan intent or intents passed to
         :func:`xradio.measurement_set.open_processing_set` when opening the

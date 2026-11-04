@@ -3930,6 +3930,14 @@ def _restored_spectral_products(
     The optional flat-noise inputs are zeroth-order four-dimensional arrays.
     Omitting them preserves the helper's standalone behavior by using the
     zeroth-order planes of ``restored_da`` and ``restoration_residual_da``.
+
+    ``ALPHA_ERROR`` uses CASA's residual-based diagnostic,
+
+    ``sqrt(R1**2 + alpha**2 * R0**2) / abs(I0)``.
+
+    It is a pixel-residual measure, not a statistically calibrated one-sigma
+    uncertainty. This algebraic form remains finite when ``I1`` and therefore
+    ``alpha`` are zero.
     """
     import numpy as np
     import xarray as xr
@@ -3959,8 +3967,8 @@ def _restored_spectral_products(
 
     with np.errstate(divide="ignore", invalid="ignore"):
         alpha = xr.where(valid, restored_one / restored_zero, np.nan)
-        alpha_error = abs(alpha) * np.sqrt(
-            (residual_zero / restored_zero) ** 2 + (residual_one / restored_one) ** 2
+        alpha_error = np.sqrt(residual_one**2 + (alpha * residual_zero) ** 2) / abs(
+            restored_zero
         )
     alpha_error = xr.where(valid & np.isfinite(alpha_error), alpha_error, np.nan)
 
@@ -3977,7 +3985,10 @@ def _restored_spectral_products(
     alpha_error.attrs = {
         "type": "spectral_index_error",
         "units": "dimensionless",
-        "description": "CASA-style propagated spectral-index error.",
+        "description": (
+            "CASA-style residual-based spectral-index diagnostic; not a "
+            "calibrated one-sigma uncertainty."
+        ),
         "spectral_product_threshold": (
             "abs(flat-noise tt0) > peak abs flat-noise principal tt0 residual / 10"
         ),
@@ -4145,10 +4156,11 @@ def restore_continuum_image(
     model and residual coefficients are corrected before clean-beam
     convolution. When corrected Taylor images are available, ``ALPHA`` and
     ``BETA`` are therefore formed from those images, and ``ALPHA_ERROR`` uses
-    the corresponding corrected residual coefficients. Validity is determined
-    per time/polarization plane from the absolute flat-noise Taylor-zero image
-    and one tenth of the peak absolute flat-noise principal Taylor-zero
-    residual."""
+    the corresponding corrected residual coefficients. ``ALPHA_ERROR`` is a
+    CASA-style pixel-residual diagnostic, not a statistically calibrated
+    one-sigma uncertainty. Validity is determined per time/polarization plane
+    from the absolute flat-noise Taylor-zero image and one tenth of the peak
+    absolute flat-noise principal Taylor-zero residual."""
 
     import numpy as np
     import pandas as pd

@@ -493,6 +493,28 @@ def test_spectral_product_mask_uses_flat_noise_taylor_zero_per_polarization():
     )
 
 
+def test_spectral_index_error_is_finite_when_taylor_one_is_zero():
+    """The residual diagnostic has no numerical singularity at zero alpha."""
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    restored = np.zeros((1, 2, 1, 2, 2), dtype=np.float64)
+    restored[:, 0] = 10.0
+    residual = np.empty_like(restored)
+    residual[:, 0] = 1.0
+    residual[:, 1] = 2.0
+
+    products = _restored_spectral_products(
+        xr.DataArray(restored, dims=dims),
+        xr.DataArray(residual, dims=dims),
+    )
+
+    np.testing.assert_array_equal(products["ALPHA"], 0.0)
+    np.testing.assert_allclose(products["ALPHA_ERROR"], 0.2)
+    assert products["ALPHA_ERROR"].attrs["description"] == (
+        "CASA-style residual-based spectral-index diagnostic; not a calibrated "
+        "one-sigma uncertainty."
+    )
+
+
 def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore():
     """MFS restores intrinsic coefficients obtained from J(x) = A(x) I(x)."""
     from astroviper.processing_functions.imaging.restore import _restore_image_arrays

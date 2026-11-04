@@ -227,10 +227,8 @@ def _assert_restoration_values(image, primary_beam_limit=0.2):
     expected_alpha = xr.where(valid, restored_one / restored_zero, np.nan)
     expected_alpha_error = xr.where(
         valid,
-        abs(expected_alpha)
-        * np.sqrt(
-            (residual_zero / restored_zero) ** 2 + (residual_one / restored_one) ** 2
-        ),
+        np.sqrt(residual_one**2 + (expected_alpha * residual_zero) ** 2)
+        / abs(restored_zero),
         np.nan,
     )
     xr.testing.assert_allclose(image.ALPHA, expected_alpha)
