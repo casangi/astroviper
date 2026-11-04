@@ -1439,6 +1439,7 @@ def test_mvc_channel_cutoff_excludes_exact_boundary_without_renormalizing(dtype)
         n_taylor_terms=1,
         reference_frequency=100.0,
         primary_beam_limit=float(limit),
+        mvc_model_update_approximation="channel_psf",
     )
     expected_beam = (float(pb.values.ravel()[2]) + 1.0) / 4.0
     # CASA excludes channels at or below the strict PB cutoff from the
