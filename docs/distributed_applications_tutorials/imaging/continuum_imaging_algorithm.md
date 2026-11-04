@@ -133,11 +133,13 @@ $$
 $$
 
 This Hessian is direction dependent and is not an ordinary convolution. MVC
-therefore provides two convolutional model-update approximations.
+therefore provides two convolutional model-update approximations. The default,
+`local_beam_moments`, preserves the least-squares operator used by the main MVC
+path. `channel_psf` remains available as the CASA-comparison option.
 
 ### `channel_psf`
 
-This is the Memo I/CASA-style approximation. It assumes that
+This optional mode is the Memo I/CASA-style approximation. It assumes that
 $A_\nu/\bar A\simeq1$ over the useful beam support. The normalized Taylor
 residuals are
 

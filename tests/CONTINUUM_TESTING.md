@@ -35,9 +35,9 @@ Paths below are relative to `tests/`.
   spectral-index and single-field off-axis point-source cases. MFS and MVC must
   recover the two Taylor coefficients and the primary-beam-corrected one-Jy
   flux without CASA or stored visibility data. MVC additionally verifies that
-  `local_beam_moments` recovers the off-axis spectral index; the processing-level
-  regression contrasts this with the documented `channel_psf`/CASA bias at the
-  same realistic Taylor-zero stopping threshold.
+  the default `local_beam_moments` recovers the off-axis spectral index; the
+  processing-level regression contrasts this with the documented optional
+  `channel_psf`/CASA bias at the same realistic Taylor-zero stopping threshold.
 - `component/test_single_channel_imaging_consistency.py`: MFS with one Taylor
   term against the cube imager on one generated channel with four
   correlations (the 7 m array field of RADPS Memo 13a), with the one model

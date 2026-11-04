@@ -2811,7 +2811,7 @@ def image_continuum_single_field(
     deconvolver: str = "hogbom",
     primary_beam_limit: float = 0.2,
     continuum_mode: str = "mfs",
-    mvc_model_update_approximation: str = "channel_psf",
+    mvc_model_update_approximation: str = "local_beam_moments",
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json requires list/str (not nullable); never mutated
     field_name: str | None = None,
@@ -3013,8 +3013,11 @@ def image_continuum_single_field(
         parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
     mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, optional
         MVC approximation used to construct the Taylor residuals and PSFs.
+        The default ``"local_beam_moments"`` is the least-squares-consistent
+        operator used by the main MVC path.
         ``"channel_psf"`` retains the frequency-dependent channel PSFs while
-        approximating the channel-to-common-beam ratio as one.
+        approximating the channel-to-common-beam ratio as one and is retained
+        as the CASA-comparison option.
         ``"local_beam_moments"`` retains local frequency-dependent primary-beam
         moments while approximating the channel PSFs by a common response. The
         setting is ignored by MFS.

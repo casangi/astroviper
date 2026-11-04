@@ -274,7 +274,7 @@ def test_continuum_public_api_matches_shared_imaging_names_and_defaults():
     assert "primary_beam_correction" not in parameters
     assert "primary_beam_limit" in parameters
     assert "continuum_mode" in parameters
-    assert parameters["mvc_model_update_approximation"].default == "channel_psf"
+    assert parameters["mvc_model_update_approximation"].default == "local_beam_moments"
     assert "wideband_primary_beam_memory_mode" in parameters
 
 
@@ -743,7 +743,7 @@ def _run_tw_hydra_continuum(
     weighting,
     *,
     deconvolver="hogbom",
-    mvc_model_update_approximation="channel_psf",
+    mvc_model_update_approximation="local_beam_moments",
     cycle_control_params=None,
     image_param_overrides=None,
     image_params=None,

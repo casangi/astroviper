@@ -799,6 +799,7 @@ def test_mvc_conversion_uses_psf_weights_for_common_response():
         n_taylor_terms=1,
         reference_frequency=1.0e9,
         primary_beam_limit=0.2,
+        mvc_model_update_approximation="channel_psf",
     )
 
     np.testing.assert_allclose(
@@ -1162,6 +1163,7 @@ def test_mvc_residual_uses_casa_cancelled_primary_beam_moments(channel_pb):
         channel_beam,
         weight,
         weight,
+        mvc_model_update_approximation="channel_psf",
         **options,
     )
     prediction = apply_mvc_primary_beam_convention(
@@ -1171,7 +1173,13 @@ def test_mvc_residual_uses_casa_cancelled_primary_beam_moments(channel_pb):
     )
     residual, _, _ = finalize_mvc_taylor_normal_equations(
         make_mvc_taylor_normal_equation_contributions(
-            -prediction, None, channel_beam, weight, None, **options
+            -prediction,
+            None,
+            channel_beam,
+            weight,
+            None,
+            mvc_model_update_approximation="channel_psf",
+            **options,
         ),
         effective_primary_beam=effective_beam,
     )
@@ -2090,6 +2098,7 @@ def test_mvc_clips_channel_beams_in_casa_taylor_products(clipped_pb):
         n_taylor_terms=1,
         reference_frequency=1e9,
         primary_beam_limit=0.2,
+        mvc_model_update_approximation="channel_psf",
     )
     np.testing.assert_allclose(pb.squeeze(), 0.25)
     np.testing.assert_allclose(psf.squeeze(), 2.0)

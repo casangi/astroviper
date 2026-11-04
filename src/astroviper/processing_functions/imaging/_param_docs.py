@@ -613,8 +613,11 @@ IMAGING_PARAM_DOCS = {
     ),
     "mvc_model_update_approximation": (
         "MVC approximation used to construct the Taylor residuals and PSFs.\n"
+        'The default ``"local_beam_moments"`` is the least-squares-consistent\n'
+        "operator used by the main MVC path.\n"
         '``"channel_psf"`` retains the frequency-dependent channel PSFs while\n'
-        "approximating the channel-to-common-beam ratio as one.\n"
+        "approximating the channel-to-common-beam ratio as one and is retained\n"
+        "as the CASA-comparison option.\n"
         '``"local_beam_moments"`` retains local frequency-dependent primary-beam\n'
         "moments while approximating the channel PSFs by a common response. The\n"
         "setting is ignored by MFS."

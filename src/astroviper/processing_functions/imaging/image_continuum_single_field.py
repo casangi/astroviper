@@ -1233,7 +1233,7 @@ def make_mvc_taylor_normal_equation_contributions(
     n_taylor_terms,
     reference_frequency,
     primary_beam_limit=0.2,
-    mvc_model_update_approximation="channel_psf",
+    mvc_model_update_approximation="local_beam_moments",
     include_local_beam_static=True,
 ):
     """Form additive MVC Taylor products for one map-task frequency chunk.
@@ -1274,7 +1274,7 @@ def make_mvc_taylor_normal_equation_contributions(
         and Gram moments but uses the cutoff to determine local Taylor support.
         Final products are zero where the effective beam is at or below the
         cutoff.
-    mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, default "channel_psf"
+    mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, default "local_beam_moments"
         MVC approximation used to construct the Taylor residuals and PSFs.
         ``"channel_psf"`` retains channel-dependent PSFs while approximating
         :math:`A_\\nu/A \\simeq 1`. ``"local_beam_moments"`` retains local
@@ -1676,7 +1676,7 @@ def finalize_mvc_taylor_normal_equations(
     )
 
     mvc_model_update_approximation = contributions.attrs.get(
-        "mvc_model_update_approximation", "channel_psf"
+        "mvc_model_update_approximation", "local_beam_moments"
     )
     if mvc_model_update_approximation == "local_beam_moments":
         # Apply the spatially varying preconditioner Abar C G^-1 to the
@@ -1759,7 +1759,7 @@ def finalize_mvc_taylor_normal_equations(
         "n_taylor_terms": contributions.attrs.get("n_taylor_terms"),
         "primary_beam_limit": primary_beam_limit,
         "mvc_model_update_approximation": contributions.attrs.get(
-            "mvc_model_update_approximation", "channel_psf"
+            "mvc_model_update_approximation", "local_beam_moments"
         ),
     }
     effective_primary_beam.attrs = {
@@ -1767,7 +1767,7 @@ def finalize_mvc_taylor_normal_equations(
         "continuum_mode": "mvc",
         "primary_beam_limit": primary_beam_limit,
         "mvc_model_update_approximation": contributions.attrs.get(
-            "mvc_model_update_approximation", "channel_psf"
+            "mvc_model_update_approximation", "local_beam_moments"
         ),
     }
     if psf_taylor is not None:
@@ -1780,7 +1780,7 @@ def finalize_mvc_taylor_normal_equations(
             "n_psf_taylor_terms": psf_taylor.sizes["psf_taylor_order"],
             "primary_beam_limit": primary_beam_limit,
             "mvc_model_update_approximation": contributions.attrs.get(
-                "mvc_model_update_approximation", "channel_psf"
+                "mvc_model_update_approximation", "local_beam_moments"
             ),
         }
 
@@ -1797,7 +1797,7 @@ def _convert_mvc_cubes_to_taylor_normal_equations(
     n_taylor_terms,
     reference_frequency,
     primary_beam_limit=0.2,
-    mvc_model_update_approximation="channel_psf",
+    mvc_model_update_approximation="local_beam_moments",
 ):
     """Convert complete MVC channel cubes into Taylor normal equations for tests.
 
@@ -2273,7 +2273,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
-    mvc_model_update_approximation="channel_psf",
+    mvc_model_update_approximation="local_beam_moments",
     gridding_kernel_params=None,
 ):
     """Perform one continuum imaging-cycle update for a single frequency chunk.
@@ -2430,8 +2430,11 @@ def residual_update_continuum_single_field(
 
     mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, optional
         MVC approximation used to construct the Taylor residuals and PSFs.
+        The default ``"local_beam_moments"`` is the least-squares-consistent
+        operator used by the main MVC path.
         ``"channel_psf"`` retains the frequency-dependent channel PSFs while
-        approximating the channel-to-common-beam ratio as one.
+        approximating the channel-to-common-beam ratio as one and is retained
+        as the CASA-comparison option.
         ``"local_beam_moments"`` retains local frequency-dependent primary-beam
         moments while approximating the channel PSFs by a common response. The
         setting is ignored by MFS.

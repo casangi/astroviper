@@ -1024,7 +1024,7 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
     primary_beam_limit=0.2,
-    mvc_model_update_approximation="channel_psf",
+    mvc_model_update_approximation="local_beam_moments",
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
@@ -1239,8 +1239,11 @@ def residual_update_continuum_single_field(
 
     mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, optional
         MVC approximation used to construct the Taylor residuals and PSFs.
+        The default ``"local_beam_moments"`` is the least-squares-consistent
+        operator used by the main MVC path.
         ``"channel_psf"`` retains the frequency-dependent channel PSFs while
-        approximating the channel-to-common-beam ratio as one.
+        approximating the channel-to-common-beam ratio as one and is retained
+        as the CASA-comparison option.
         ``"local_beam_moments"`` retains local frequency-dependent primary-beam
         moments while approximating the channel PSFs by a common response. The
         setting is ignored by MFS.
@@ -2484,7 +2487,7 @@ def _prepare_continuum_image(
     make_primary_beam_taylor = bool(input_params.get("make_primary_beam_taylor", True))
     mvc_model_update_approximation = input_params.get(
         "mvc_model_update_approximation",
-        "channel_psf",
+        "local_beam_moments",
     )
 
     if continuum_mode not in ("mfs", "mvc"):
