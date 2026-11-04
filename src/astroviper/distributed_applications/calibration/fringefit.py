@@ -23,11 +23,11 @@ from astroviper.processing_functions.calibration.fringe_functions import (
 
 from astroviper.node_tasks.calibration.fringefit_tasks import (
     _fringe_fft_node_task,
+    _fringe_fft_mbd_node_task,
     _fringe_global_node_task
 )
 
 from .utils import make_cal_map
-
 
 def _fringefit_fft_single(
     ps: ProcessingSetXdt,
@@ -35,7 +35,7 @@ def _fringefit_fft_single(
     sub_selection: dict,
     ref_ant: str,
 ):
-    """Fringefits a single something. I should probably know what for something."""
+    """Fringefits a single spectral window via the FFT method (only)"""
     input_params = {}
     input_params["data_sub_selection"] = sub_selection
     input_params["ps"] = ps
@@ -54,6 +54,32 @@ def _fringefit_fft_single(
     return res
 
 
+def _fringfit_fft_multi(
+    ps: ProcessingSetXdt,
+    node_task_data_mapping: dict,
+    sub_selection: dict,
+    ref_ant: str,
+):
+    """Fringefits multiple spectral windows via the FFT method (only)"""
+    # FIXME: This is copied from the singe spectral window case; they can surely be merged!
+    input_params = {}
+    input_params["data_sub_selection"] = sub_selection
+    input_params["ps"] = ps
+    input_params["ref_ant"] = ref_ant
+    graph = map(
+        input_data=ps,
+        node_task_data_mapping=node_task_data_mapping,
+        node_task=_fringe_fft_mbd_node_task,
+        input_params=input_params,
+        in_memory_compute=False,
+    )
+    # print(f"{graph=}")
+    dask_graph = generate_dask_workflow(graph)
+    # Strip the singleton list wrapper at source
+    [res] = dask.compute(dask_graph)
+    return res
+
+    
 def fringefit_fft_ps(ps: ProcessingSetXdt, ref_ant: str, unixtime: float, interval: float):
     """Fringefits a ProcessingSetXdt for a time slice, handling each spw separately.
 

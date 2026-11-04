@@ -2,15 +2,12 @@ import xarray as xr
 import numpy as np
 from typing import (Union, Mapping)
 from xradio.measurement_set.measurement_set_xdt import MeasurementSetXdt
-
+from astroviper.distributed_applications.calibration.utils import power_of_two_grid
 
 def square_up_last_dimension(v):
     s = v.shape[:-1] + (2, 2)
     v2 = np.reshape(v, s)
     return v2
-
-
-
 
 class SingleFringeJones:
     def __init__(self, q):
@@ -68,6 +65,7 @@ class SingleFringeJones:
         # Both antenna?_name values are n_baseline long
         baseline_antenna1_name = xds.baseline_antenna1_name.values
         baseline_antenna2_name = xds.baseline_antenna2_name.values
+        baseline_id = xds.baseline_id.values
         # We make a map of antenna name to number.
         # Note that we need the names from the cal table but the baseline_id
         # from the xds itself.
@@ -76,29 +74,44 @@ class SingleFringeJones:
         # Now we make n_baseline long list of left indices
         # FIXME: if there's an antenna in the xds that isn't in the cal table
         # this will asplode
-        left_indices = [ant_num_map[n] for n in baseline_antenna1_name]
-        # And the same for right indices
-        right_indices = [ant_num_map[n] for n in baseline_antenna2_name]
-        return left_indices, right_indices
+        left_indices, right_indices = [], []
+        bl_found = []
+        unfound1, unfound2 = set(), set()
+        for b, n1, n2 in zip(baseline_id, baseline_antenna1_name, baseline_antenna2_name):
+            a1 = ant_num_map.get(n1, -1)
+            a2 = ant_num_map.get(n2, -1)
+            if a1<0 and n1 not in unfound1:
+                unfound1.add(n1)
+            elif a2<0 and n2 not in unfound2:
+                unfound2.add(n1)
+            else:
+                left_indices.append(a1)
+                right_indices.append(a2)
+                bl_found.append(b)
+        unfound = unfound1 & unfound2
+        if unfound:
+            print(f"No calibration entries for {', '.join(unfound)}")
+        return np.array(bl_found), np.array(left_indices), np.array(right_indices)
 
     def apply_cal(self, xds):
         if len(xds.time.values) == 0:
             return xds
+        bl_found, left_indices, right_indices = self.get_ant_to_baseline_maps(xds)
         antenna_jones = self.calc_antenna_jones(xds)
-        left_indices, right_indices = self.get_ant_to_baseline_maps(xds)
-        # v has shape (n_time, n_baseline, n_freq, 2, 2)
+        # v has shape (n_time, n_baselines, n_freq, 2, 2)
         v = square_up_last_dimension(xds.VISIBILITY.values)
         # Jones matrices for each visibility for left and right antennas on a baseline
         left_jones = self.get_left_jones(antenna_jones, left_indices)
         right_jones = self.get_right_jones(antenna_jones, right_indices)
-        # We have a very concise and pleasant form for calibration:
-        v2 = left_jones @ v @ right_jones
+        # We have a fairly pleasant form for calibration:
+        print(f"{xds.name=} {left_jones.shape=} {v.shape=} {right_jones.shape=}")
+        v2 = left_jones @ v[:, bl_found, :, :] @ right_jones
         # Reshape the visibilities back to (n_time, n_baseline, n_freq, 4)
         s3 = v2.shape[:-2] + (4,)
         v2 = v2.reshape(s3)
         coords = {
             "time": xds.time,
-            "baseline_id": xds.baseline_id,
+            "baseline_id": bl_found, # Is this allowed?
             "frequency": xds.frequency,
             "polarization": xds.polarization,
         }

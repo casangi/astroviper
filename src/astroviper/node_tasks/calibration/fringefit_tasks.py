@@ -12,16 +12,16 @@ from astroviper.distributed_applications.calibration.fringe_cal_xds import make_
 
 # Kring magic: scipy.special.ive is the "exponentially-scaled modified
 # Bessel function of the first kind"
-def kring_G(gamma):
+def kring_G(gamma : float) -> float:
     t1 = ive(0, gamma) + ive(1, gamma)
     t2 = np.sqrt(np.pi*gamma/2.0)
     return t1*t2
 
-def kring_f(k, lhs):
+def kring_f(k : float, lhs : float) -> float:
     gamma = (k**2)/4
     return kring_G(gamma)**2 - lhs
 
-def getFourierSpacings(xds, npad=1):
+def getFourierSpacings(xds: xr.Dataset, npad:int=1):
     f = xds.frequency.values
     df = (f[-1] - f[0]) / (len(f) - 1)
     dF = len(f) * df
@@ -33,7 +33,10 @@ def getFourierSpacings(xds, npad=1):
     drate = 1 / dT / npad
     return (ddelay, drate)
 
-def aips_snr(peak, xcount, sumw_, sumww_):
+def aips_snr(peak : float,
+             xcount : int,
+             sumw_ : float,
+             sumww_ :float) -> float:
     x = np.pi / 2 * peak / sumw_
     if x > (0.99 * np.pi / 2):
         snr = 9999
@@ -44,7 +47,10 @@ def aips_snr(peak, xcount, sumw_, sumww_):
         snr = np.tan(x) ** 1.163 * scaling
     return snr
 
-def kring_snr(peak, xcount, sumw_, sumww_):
+def kring_snr(peak : float,
+              xcount : int,
+              sumw_ : float,
+              sumww_: float) -> float:
     n = xcount
     if n == 0:
         snr = 0
@@ -66,74 +72,105 @@ def kring_snr(peak, xcount, sumw_, sumww_):
             snr = 0
     return snr
 
-# FIXME: We should push some of this down to the processing functions module
+def get_ref_baselines(xds : xa.DataSet) -> list[int]:
+    ref_baselines = xds.baseline_id[
+        (xds.baseline_id.baseline_antenna1_name == ref_ant).compute()
+        | (xds.baseline_id.baseline_antenna2_name == ref_ant).compute()
+    ]
+    return ref_baselines
+
+def weight_phasors(vis, weights, flags):
+    ang = np.angle(vis)
+    normed = np.exp(1j * ang) * weights  # May want a new name...
+    normed = np.where(np.isnan(normed), 0, normed)
+    return normed
+
 def _fringe_fft_node_task(input_params: dict):
     ps = input_params["ps"]
     data_selection = input_params["data_selection"]
     ref_ant = input_params["ref_ant"]
     npad = 8  
-    # FIXME: for now we do single band
+    # FIXME: for now we do single xds data
     xdses = [ps[k] for k in data_selection.keys() if ps[k].time.size > 0]
     if len(xdses) > 1:
         raise RuntimeError("We only do single xdses so far")
     xds = xdses[0]
-    name = xds.name 
+    name = xds.name
     q = make_empty_cal_xds(xds)
-    q.ref_antenna[0] = ref_ant
     pol_hands = "RL"  # FIXME: we should support data_sub_selection['polarization']
     par_hands = [p+p for p in pol_hands]
+    baseline_id = xds.baseline_id # Which we also need to pass in
     xds2 = xds.sel(polarization=par_hands).isel(**data_selection[name])
     ddelay, drate = getFourierSpacings(xds2, npad)
-    ref_baselines = xds2.baseline_id[
-        (xds2.baseline_id.baseline_antenna1_name == ref_ant).compute()
-        | (xds2.baseline_id.baseline_antenna2_name == ref_ant).compute()
-    ]
+    ref_baselines = get_ref_baselines(xds2, refant)
     vis = xds2.VISIBILITY[:, ref_baselines, :]
     flags = xds2.FLAG[:, ref_baselines, :]
     weights = xds2.WEIGHT[:, ref_baselines, :]
-
-    ang = np.angle(vis)
-    normed = np.exp(1j * ang) * weights  # May want a new name...
-    normed = np.where(np.isnan(normed), 0, normed)
-    normed[flags] = 0
+    summed_w = weights.sum(index=(0,2)), skipna=True)
+    summed_ww = (weights*weights).sum(index=(0,2)), skipna=True)
+    xcounts = (np.logical_not(vis[:, i, :, pol_index].isnull())).sum(axis=(0,2))
+    normed = weight_phasors(vis, weights, flags)
     s = list(normed.shape)
-    nt = s[0]
-    nf = s[2]
-    s2 = (npad * nt, npad * nf)  # Pad in time  # Pad in frequency
+    nt, nf = s[0], s[2]
+    s2 = (npad * nt, npad * nf)  # Pad in time and frequency
     # FIXME: We should be using weights here!
     fftvis = np.fft.fftshift(np.fft.fft2(normed, axes=(0, 2), s=s2), axes=(0, 2))
+
+    freqs = xds2.frequency
+    # xds.polarization has polarization values along a polarization axis.
+    # Your guess is as good as mine why.
+    vis_pols = xds2.polarization
+    baseline_antenna1_name = xds2.baseline_antenna1_name
+    baseline_antenna2_name = xds2.baseline_antenna2_name
+    # Everything after this point should work fine for single _or_
+    # multiple bands It's just grovelling over the FFT! And a lot of
+    # bookkeeping! Which requires quite a lot of metadata! Which is
+    # going to suck when we have to aggregate it by hand for the
+    # multiband case!
+    
+    return fft_to_caltable(fftvis, freqs, )
+
+# Honestly, we need so much metadata that we basically need most of what is in an xds
+# so we might as well bite the bullet and do something like make_combined_xds(xdses)
+# and go back to living a better life.
+def fft_to_caltable(fftvis, freqs, baseline_id, pol_hands,
+                    vis_pols,
+                    antenna_xds,
+                    baseline_antenna1_name,
+                    baseline_antenna2_name,
+                    summed_w, summed_ww, xcounts,
+                    ddelay, drate):
+    
+    ref_freq = freqs.reference_frequency["data"]
     for p_ind, pol_hand in enumerate(pol_hands):
         par_pol = pol_hand + pol_hand
-        pt = xds.antenna_xds.polarization_type
+        # antenna_xds.polarization_type
+        pt = antenna_xds.polarization_type
         receptor_indices = (pt==pol_hand).argmax(dim='receptor_label')
         receptor_labels = (pt==pol_hand).idxmax(dim='receptor_label')
-        pol_index = (xds2.polarization==par_pol).argmax(dim='polarization')
-        q.CALPARAM_PHASE.loc[
-            dict(antenna_name=ref_ant)
-        ] = 0
-        q.CALPARAM_DELAY.loc[
-            dict(antenna_name=ref_ant)
-        ] = 0
-        q.CALPARAM_RATE.loc[
-            dict(antenna_name=ref_ant)
-        ] = 0
-        q.SNR.loc[dict(antenna_name=ref_ant)] = 2 * [1e9]
+        pol_index = (vis_pols==par_pol).argmax(dim='polarization')
+        # Set ref_ant values:
+        loc_dict = dict(antenna_name=ref_ant)
+        q.CALPARAM_PHASE.loc[loc_dict] = 0
+        q.CALPARAM_DELAY.loc[loc_dict] = 0
+        q.CALPARAM_RATE.loc[loc_dict] = 0
+        q.SNR.loc[loc_dict] = 2 * [1e9]
         for i, bl in enumerate(ref_baselines):
-            if not bl:
-                continue
+            if not bl: continue
             ant1 = xds2.baseline_antenna1_name.values[bl]
             ant2 = xds2.baseline_antenna2_name.values[bl]
+            if ant1 == ref_ant and ant2 == ref_ant:
+                continue
             if ant2 == ref_ant:
-                ant = ant1
-                sign = +1
+                ant, sign = ant1, +1
             else:
-                ant = ant2
-                sign = -1
+                ant, sign = ant2, -1
             receptor_ind = receptor_indices.loc[ant].values
             receptor_label = receptor_labels.loc[ant].values
-            these_weights = weights[:, i, :, pol_index]
-            sumw_ = these_weights.sum(skipna=True)
-            sumww_ = (these_weights * these_weights).sum(skipna=True)
+
+            sumw_ = summed_w[i, pol_index]
+            sumww_ = summed_ww[i, pol_index]
+            xcount = xcounts[i, pol_index]
             ft = fftvis[:, i, :, pol_index].squeeze()
             a = np.abs(ft)
             # Deduce parameter values from FT
@@ -143,34 +180,57 @@ def _fringe_fft_node_task(input_params: dict):
             phi0 = np.angle(ft[ind]) # NB: another sign choice!
             # The dimensions are time *then* frequency, so delay is y; rate is x.
             delay = sign * (iy - ny / 2) * ddelay
-            ref_freq = xds2.frequency.reference_frequency["data"]
             phi0 -= (
-                2 * np.pi * (delay * (xds2.frequency.values[0] - ref_freq))
+                2 * np.pi * (delay * (freqs.values[0] - ref_freq))
             )  # We'll fix the sign convention empirically
             phi0 *= sign
             rate = sign * (ix - nx / 2) * drate / ref_freq
             # Calculate SNR of choice:
             peak = a[ind]
-            xcount = (np.logical_not(vis[:, i, :, pol_index].isnull())).sum()
-            if True: # FIXME!
+            if False: # FIXME!
                 snr = aips_snr(peak, xcount, sumw_, sumww_)
-            if False: # Kring SNR
+            if else: # Kring SNR
                 snr = kring_snr(peak, xcount, sumw_, sumww_)
-            # print(f"{name} {bl.values=}, {receptor_label=}")
             # Fill the table.
-            q.CALPARAM_PHASE.loc[
-                dict(antenna_name=ant, receptor_label=receptor_label)
-            ] = phi0
-            q.CALPARAM_DELAY.loc[
-                dict(antenna_name=ant, receptor_label=receptor_label)
-            ] = delay
-            q.CALPARAM_RATE.loc[
-                dict(antenna_name=ant, receptor_label=receptor_label)
-            ] = rate
-            q.SNR.loc[
-                dict(antenna_name=ant, receptor_label=receptor_label)
-            ] = snr
+            loc_dict = dict(antenna_name=ant, receptor_label=receptor_label)
+            q.CALPARAM_PHASE.loc[loc_dict] = phi0
+            q.CALPARAM_DELAY.loc[loc_dict] = delay
+            q.CALPARAM_RATE.loc[loc_dict] = rate
+            q.SNR.loc[loc_dict] = snr
     return q
+    
+
+def _fringefit_mbd_node_task(input_params: dict):
+    all_vis = []
+    all_times = []
+    for xds in ps5:
+        # FIXME: we should do this for a reference antenna and *all* the baselines to it
+        baselines = (xds.baseline_antenna1_name.compute()==ant1) & (xds.baseline_antenna2_name.compute()==ant2)
+        vis = xds.VISIBILITY_CORRECTED[:, baselines, :, xds.polarization==pol].squeeze()
+        # Upper and lower bands share a DC edge in the visibilities for EVN
+        # data, but the value there is of no use to anyone. The other edge
+        # isn't either, and we need to wipe them so our merge onto a big
+        # grid works nicely.
+        vis[:,0] = np.nan
+        vis[:,-1] = np.nan
+        vis /= np.abs(vis)
+        all_vis.append(vis)
+        all_times.append(xds.time.values)
+        if not np.all(all_times[0]==all_times[i] for i in range(1, len(all_times)-1)):
+            raise ValueError("Times don't agree")
+
+    # Interpolate each spectral window onto the unified grid
+    big_coords = make_uniform_freq_grid(ps5)
+    big_vis_subs = [vis.interp_like(big_coords) for vis in all_vis]
+    big_vis = xa.merge(big_vis_subs, compat='no_conflicts')
+    # FFT and search
+    bgf = np.fft.fftshift(np.fft.fft2(bv))
+    a = np.abs(bgf)
+    ind = np.unravel_index(np.argmax(a), a.shape)
+    print(f"{ant1}-{ant2} {ind=} {a[ind]=}")
+    # TODO: calculate the actual values!
+    
+
 
 
 def _fringe_global_node_task(input_params: dict):
@@ -189,7 +249,7 @@ def _fringe_global_node_task(input_params: dict):
     xds = xdses[0] 
     spw_name = xds.frequency.attrs['spectral_window_name']
     cal = cal_map[spw_name]
-    print(f"{cal['CALPARAM_DELAY']=}")
+    # print(f"{cal['CALPARAM_DELAY']=}")
     nvis = np.prod(xds.VISIBILITY.shape)
     if nvis==0:
         raise ValueError("No data to process")
@@ -425,11 +485,8 @@ class XDSNewtonSolver():
                     receptor_label = receptor_labels.loc[n]
                     cal[i, 0] = self.cal_q['CALPARAM_PHASE'].sel({'antenna_name': n,
                                                                   'receptor_label': receptor_label}).values
-                    delays = self.cal_q['CALPARAM_DELAY'].sel({'antenna_name': n,
-                                                               'receptor_label': receptor_label}).values.squeeze()
-                    print(f"{i=}, {delays=}")
-                    cal[i, 1] = delays
-                    print(f"{cal[i, 1]=}")
+                    cal[i, 1] = self.cal_q['CALPARAM_DELAY'].sel({'antenna_name': n,
+                                                                  'receptor_label': receptor_label}).values.squeeze()
                     cal[i, 2] = self.cal_q['CALPARAM_RATE'].sel({'antenna_name': n,
                                                                  'receptor_label': receptor_label}).values
                     i += 1
