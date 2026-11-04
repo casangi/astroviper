@@ -309,6 +309,14 @@ def _divide_taylor_polynomials(
                 f"PRIMARY_BEAM_TAYLOR {dimension!r} size does not match the image."
             )
 
+    # This triangular division is exact for coefficients of the full formal
+    # Taylor series. In MFS, however, J and A are independent finite-order
+    # weighted fits over the selected band. Fitting, truncating, and dividing
+    # do not commute: omitted orders can alias differently into the retained
+    # coefficients and bias I_0, alpha, and especially beta. The effect grows
+    # with fractional bandwidth and off-axis beam chromaticity, and can be much
+    # larger when the reference frequency is away from the weighted band
+    # centre; a flat intrinsic spectrum remains exact.
     apparent_values = np.asarray(apparent.values)
     beam_values = np.asarray(primary_beam.values)
     intrinsic = np.empty_like(apparent_values)
