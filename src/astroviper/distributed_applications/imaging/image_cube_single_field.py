@@ -975,9 +975,9 @@ def image_cube_single_field(
             f"{len(image_params['polarization_coords'])})"
         )
     # max_cycles (an integer, or "auto" with max_psf_fraction < 1),
-    # threshold_tolerance (a finite number >= 0), record_iteration_history and
-    # exact_psf_subtraction (Hogbom only) are checked again in every node task;
-    # checked here too so that a bad value leaves no image behind.
+    # threshold_tolerance (a finite number >= 0), record_iteration_history (a
+    # bool) and exact_psf_subtraction (Hogbom only) are checked again in every
+    # node task; checked here too so that a bad value leaves no image behind.
     validate_max_cycles(
         cycle_control_params.get("max_cycles", -1),
         cycle_control_params.get("max_psf_fraction"),

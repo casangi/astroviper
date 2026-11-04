@@ -103,6 +103,8 @@ def simulate_processing_set(
     processing_function_threads: int = 1,
     implementation: str = "cpp",
     random_seed: int | None = None,
+    time_index_offset: int = 0,
+    frequency_index_offset: int = 0,
     gaussian_source_flux: np.ndarray | None = None,
     gaussian_source_ra_dec: np.ndarray | None = None,
     gaussian_source_shape: np.ndarray | None = None,
@@ -220,7 +222,9 @@ def simulate_processing_set(
         Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual
         model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,
         ``spill_efficiency``, ``corr_efficiency``, ``quantization_efficiency``,
-        ``t_cmb`` and ``random_seed``; ``None`` disables noise (unit weights).
+        ``t_cmb`` and ``random_seed`` (the noise of a visibility depends only on
+        the seed and the indices of its time and channel, not on the chunking);
+        ``None`` disables noise (unit weights).
     channel_width : float, Hz, optional
         Channel width used for the noise level; defaults to the channel spacing.
     integration_time : float, s, optional
@@ -240,8 +244,13 @@ def simulate_processing_set(
         Visibility kernel implementation: ``"cpp"`` (multithreaded C++, default) or
         ``"numpy"`` (vectorised NumPy reference).
     random_seed : int, optional
-        Overrides ``noise_params["random_seed"]`` (used by node tasks to derive a
-        seed per task).
+        Overrides ``noise_params["random_seed"]``.
+    time_index_offset, frequency_index_offset : int
+        Indices of ``time[0]`` and ``frequency[0]`` in the full time and
+        frequency axes of the simulation (default 0).  They key the noise of
+        each time and channel (see
+        :func:`~astroviper.processing_functions.simulation.calculate_noise.calculate_noise`),
+        so a block simulated on its own gets the noise it has in the whole.
     sky_model_image : xarray.Dataset, optional
         A sky image added to the components: an XRADIO image (the path of a
         FITS, CASA or Zarr image for the distributed application and the node
@@ -397,6 +406,8 @@ def simulate_processing_set(
             noise,
             auto_correlations=uvw_params["auto_correlations"],
             random_seed=seed,
+            time_index_offset=time_index_offset,
+            frequency_index_offset=frequency_index_offset,
         )
         visibility = visibility + noise_values
     else:

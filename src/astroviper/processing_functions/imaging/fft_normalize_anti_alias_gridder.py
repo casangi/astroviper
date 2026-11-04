@@ -396,10 +396,20 @@ def fft_norm_img_xds(
     data_variables_to_process=None,
     complex_dtype=np.complex128,
     gridding_kernel=None,
+    new_polarization_basis=None,
 ):
     """Forward-transform a model sky image into a model UV grid.
 
     Options are data_variables_to_process = ["primary_beam", "point_spread_function", "sky"]
+
+    With ``new_polarization_basis`` (``"linear"`` or ``"circular"``) the
+    Stokes planes of the image are combined into the correlations of that
+    basis as they are padded, as
+    :func:`~astroviper.processing_functions.image_analysis.transform_polarization_basis.transform_polarization_basis`
+    combines them, so the grid holds those correlations while the image is
+    left in Stokes. The polarization coordinate, which the grid shares with
+    the image, is not changed: turning the dataset to that basis relabels it
+    (that transform leaves uv grids as they are).
 
     The image is divided by the gridding kernel's correction function before
     the transform (``gridding_kernel``, the
@@ -428,6 +438,7 @@ def fft_norm_img_xds(
         data_variables_to_process=data_variables_to_process,
         complex_dtype=complex_dtype,
         gridding_kernel=gridding_kernel,
+        new_polarization_basis=new_polarization_basis,
     )
 
 
@@ -708,6 +719,30 @@ def add_padding(src, dst):
     return dst
 
 
+def _add_padding_combined(planes, coefficients, dst):
+    """:func:`add_padding` of the combination of ``planes`` (2-D arrays of one
+    shape) with ``coefficients``, each 0, 1, -1, 1j or -1j: the planes are
+    added to the centre of ``dst`` in place, without temporaries, in their
+    order."""
+    dst[...] = 0
+    centre = dst[_centre_slices(dst.shape[-2:], planes[0].shape)]
+    for plane, coefficient in zip(planes, coefficients, strict=True):
+        if coefficient == 0:
+            continue
+        part, sign = (
+            (centre.real, coefficient.real)
+            if coefficient.imag == 0
+            else (centre.imag, coefficient.imag)
+        )
+        if sign == 1:
+            part += plane
+        elif sign == -1:
+            part -= plane
+        else:
+            raise ValueError(f"Coefficient {coefficient} is not 0, 1, -1, 1j or -1j.")
+    return dst
+
+
 def fft_norm_continuum_img_xds(
     img_xds,
     image_params,
@@ -811,6 +846,7 @@ def _fft_norm_image_planes(
     data_variables_to_process,
     complex_dtype,
     gridding_kernel,
+    new_polarization_basis=None,
 ):
     """Transform frequency or Taylor planes with shared allocation and FFT rules.
 
@@ -886,6 +922,18 @@ def _fft_norm_image_planes(
         )
 
         raw_image = image_da.values
+        matrix = None
+        if new_polarization_basis is not None:
+            from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+                get_transformation_matrix,
+            )
+
+            labels = list(image_da.polarization.values)
+            matrix, in_labels, _ = get_transformation_matrix(
+                labels, new_polarization_basis
+            )
+            # the planes in the order of the matrix's columns
+            in_planes = [labels.index(label) for label in in_labels]
 
         n_time = image_da.sizes["time"]
         n_planes = image_da.sizes[plane_dim]
@@ -962,7 +1010,14 @@ def _fft_norm_image_planes(
             for plane_index in range(n_planes):
                 for pol in range(n_pol):
                     plane = out_arr[t, plane_index, pol]
-                    add_padding(raw_image[t, plane_index, pol], plane)
+                    if matrix is None:
+                        add_padding(raw_image[t, plane_index, pol], plane)
+                    else:
+                        _add_padding_combined(
+                            [raw_image[t, plane_index, j] for j in in_planes],
+                            matrix[pol],
+                            plane,
+                        )
                     centre = plane[crop_l, crop_m]
                     centre /= kernel_crop_l
                     centre /= kernel_crop_m

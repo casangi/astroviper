@@ -71,9 +71,8 @@ def model_update_cube_single_field(
         carries the reason the deconvolver ended its model update as the
         model update stop code (iteration control: ``MODEL_UPDATE_*`` of
         :mod:`~astroviper.processing_functions.imaging.utils.cycle_control`).
-        With ``record_iteration_history`` every
-        plane also carries its ``iteration_peak_residual`` and
-        ``iteration_residual_rms``.
+        With ``record_iteration_history`` every plane also carries its
+        iteration history (``ITERATION_HISTORY_FIELDS``).
     return_df : pandas.DataFrame
         One-row timing frame with the ``T_make_mask`` and ``T_deconvolve``
         columns.

@@ -339,6 +339,7 @@ def test_mfs_append_accumulates_before_preparing_fourier_model(monkeypatch):
             "fft_backend": "scipy",
             "gridding_kernel_params": {"type": "exponential_semicircle"},
         },
+        previous,
     )
 
     np.testing.assert_array_equal(model_xds["SKY_MODEL"], 2.5)
@@ -374,10 +375,35 @@ def test_mvc_append_returns_accumulated_image_model_without_global_fft(monkeypat
             "model_xds": previous,
             "continuum_mode": "mvc",
         },
+        previous,
     )
 
     np.testing.assert_array_equal(model_xds["SKY_MODEL"], 2.5)
     assert model_uv_xds is None
+
+
+def test_append_copies_the_model_without_an_accelerated_step(monkeypatch):
+    """The model update adds its components to the previous model in place,
+    so without an accelerated step the state is a copy of its model."""
+    model = _model_dataset(2.5)
+    monkeypatch.setattr(
+        continuum_processing,
+        "prepare_model_uv_continuum_single_field",
+        lambda model_xds, **kwargs: None,
+    )
+
+    model_xds, _ = continuum_node._prepare_post_update_continuum_model_state(
+        model,
+        {
+            "is_first_cycle": False,
+            "model_xds": _model_dataset(2.0),
+            "continuum_mode": "mfs",
+            "image_params": {},
+        },
+    )
+
+    np.testing.assert_array_equal(model_xds["SKY_MODEL"], 2.5)
+    assert not np.shares_memory(model_xds["SKY_MODEL"].values, model.SKY_MODEL.values)
 
 
 def _static_products():
@@ -489,7 +515,7 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda image, input_params: (xr.Dataset(), None),
+        lambda image, input_params, previous_model_xds: (xr.Dataset(), None),
     )
     result = continuum_node.continuum_cycle_append_node(
         {
@@ -536,7 +562,7 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda image, input_params: (xr.Dataset(), None),
+        lambda image, input_params, previous_model_xds: (xr.Dataset(), None),
     )
 
     continuum_node.continuum_cycle_append_node(
@@ -914,7 +940,8 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
 def test_continuum_node_updates_controller_and_cumulative_flux(
     monkeypatch, deconvolver
 ):
-    """Both backends report cumulative flux from the previous Taylor-0 model."""
+    """Both backends add to a copy of the previous model in place, as the cube
+    does, and report its cumulative fluxes, which are booked unchanged."""
     from astroviper.processing_functions.imaging.utils import (
         CycleController,
         StopCode,
@@ -979,9 +1006,12 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         assert selected_deconvolver == deconvolver
         assert controls["max_iter_per_cycle_updated"].shape == (1, 1, 2)
         assert controls["threshold_per_cycle"].shape == (1, 1, 2)
-        image_arg["SKY_MODEL"] = xr.zeros_like(image_arg.SKY_RESIDUAL)
-        image_arg.SKY_MODEL.loc[{"taylor_term": 0}] = 1.0
-        image_arg.SKY_MODEL.loc[{"taylor_term": 1}] = -0.25
+        xr.testing.assert_identical(image_arg.SKY_MODEL, previous_model.SKY_MODEL)
+        model = image_arg.SKY_MODEL.values
+        assert not np.shares_memory(model, previous_model.SKY_MODEL.values)
+        start_flux = model[0, 0].sum(axis=(-2, -1))
+        model[0, 0] += 1.0
+        model[0, 1] -= 0.25
         result = ImagingDict()
         for pol, iterations in enumerate((1, 2)):
             result.add(
@@ -989,8 +1019,10 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
                     "iter_done": iterations,
                     "peakres": 0.5,
                     "masksum": 16,
-                    "start_model_flux": 0.0,
-                    "model_flux": float(16 * (pol + 1)),
+                    "start_model_flux": float(start_flux[pol]),
+                    "model_flux": float(model[0, 0, pol].sum()),
+                    "model_flux_positive": float(model[0, 0, pol].sum()),
+                    "model_flux_negative": 0.0,
                     "max_psf_sidelobe": 0.1 * (pol + 1),
                     "stop_code": StopCode(
                         imaging=IMAGING_CONTINUE,
@@ -1043,13 +1075,16 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         assert np.isfinite(fields["hessian_condition_number"]).all()
         previous_flux = 16.0 * (pol + 2)
         assert fields["start_model_flux"] == [previous_flux]
-        assert fields["model_flux"] == [previous_flux + 16.0 * (pol + 1)]
-        # the signed fluxes of the accumulated model (previous + increment of
-        # 1 per Taylor-0 pixel), and the residual statistics and times of the cycle
+        # the fluxes of the previous model plus 1 per Taylor-0 pixel, and the
+        # residual statistics and times of the cycle
+        assert fields["model_flux"] == [previous_flux + 16.0]
         assert fields["model_flux_positive"] == [previous_flux + 16.0]
         assert fields["model_flux_negative"] == [0.0]
         assert fields["start_rms_in_mask"] == [1.0]
         assert fields["t_model_update"][0] > 0
+    increment = (result["image"].SKY_MODEL - previous_model.SKY_MODEL).values
+    np.testing.assert_array_equal(increment[0, 0], 1.0)
+    np.testing.assert_array_equal(increment[0, 1], -0.25)
 
 
 @pytest.mark.parametrize(
@@ -1403,6 +1438,7 @@ def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch)
             "continuum_mode": "mfs",
             "image_params": {},
         },
+        previous,
     )
 
     np.testing.assert_array_equal(accumulated.SKY_MODEL.isel(taylor_term=0), 3.0)
@@ -1683,6 +1719,7 @@ def test_finalization_passes_mtmfs_to_restoration(monkeypatch):
 
     def fake_restore(image, **kwargs):
         received.update(kwargs)
+        image["SKY_RESTORED_FLAT_NOISE"] = image["SKY_RESIDUAL"].copy()
         return image, pd.DataFrame({"T_restore": [0.0]})
 
     monkeypatch.setattr(continuum_processing, "restore_continuum_image", fake_restore)
@@ -1721,7 +1758,8 @@ def _acceleration_image(seed, scale=1.0):
 def _run_accelerated_append(
     monkeypatch, input_params, seed=0, converged=False, scale=1.0
 ):
-    """Run an MVC append whose model update gives ``z = r / 4`` and ``B z = z / 2``."""
+    """Run an MVC append whose model update adds ``z = r / 4`` to the model,
+    with ``B z = z / 2``."""
     from astroviper.processing_functions.imaging.utils import CycleController
 
     image = _acceleration_image(seed, scale)
@@ -1731,8 +1769,13 @@ def _run_accelerated_append(
 
     def fake_model_update(input_data, input_params):
         image = input_data["image"]
-        image["SKY_MODEL"] = (0.0 if converged else 0.25) * image.SKY_RESIDUAL
-        image.SKY_RESIDUAL.values -= 0.5 * image.SKY_MODEL.values
+        increment = (0.0 if converged else 0.25) * image.SKY_RESIDUAL
+        previous = input_params.get("model_xds")
+        # added to the previous model in place, as the model update does
+        image["SKY_MODEL"] = (
+            increment if previous is None else previous.SKY_MODEL + increment
+        )
+        image.SKY_RESIDUAL.values -= 0.5 * increment.values
         return {
             "image": image,
             "controller": controller,
@@ -1783,8 +1826,9 @@ def test_default_append_does_not_enter_cycle_acceleration(monkeypatch, params):
     )
     captured = {}
 
-    def prepare(model_increment_xds, input_params):
-        captured["increment"] = model_increment_xds
+    def prepare(model_update_xds, input_params, previous_model_xds):
+        captured["model"] = model_update_xds
+        captured["previous"] = previous_model_xds
         return xr.Dataset(), None
 
     monkeypatch.setattr(
@@ -1795,7 +1839,8 @@ def test_default_append_does_not_enter_cycle_acceleration(monkeypatch, params):
         {"image": image}, {"is_first_cycle": False, "model_xds": xr.Dataset(), **params}
     )
 
-    assert captured["increment"] is image
+    assert captured["model"] is image
+    assert captured["previous"] is None
     assert "cycle_acceleration_state_xds" not in result
     assert list(result["timing_model_update"]) == [
         "T_model_update",
@@ -2100,7 +2145,10 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda model_increment_xds, input_params: (xr.Dataset(), None),
+        lambda model_update_xds, input_params, previous_model_xds: (
+            xr.Dataset(),
+            None,
+        ),
     )
     result = continuum_node.continuum_cycle_append_node(
         {"image": image},
@@ -2128,15 +2176,15 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
 def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
     monkeypatch, cycle_acceleration
 ):
-    """The model update books ``model_flux`` as the flux of the previous model
-    plus that of its increment ``z``; the accelerated step replaces ``z``, so
-    each model update's ``model_flux`` is the ``start_model_flux`` of the
-    next and, like its ``model_flux_positive`` and ``model_flux_negative``,
-    that of the model after its step. Two MVC imaging cycles, with residuals
-    of both signs, through the real model update and model accumulation, with a
-    model update giving ``z = r / 4`` and ``B z = z / 2``: the conjugate
-    gradient's first step is ``8 z = 2 r``, momentum's second step
-    ``z + mu_2 v``."""
+    """The model update adds its increment ``z`` to the previous model in
+    place and books ``model_flux`` as the flux of that model; the accelerated
+    step replaces ``z``, so each model update's ``model_flux`` is the
+    ``start_model_flux`` of the next and, like its ``model_flux_positive`` and
+    ``model_flux_negative``, that of the model after its step. Two MVC imaging
+    cycles, with residuals of both signs, through the real model update and
+    model accumulation, with a model update giving ``z = r / 4`` and
+    ``B z = z / 2``: the conjugate gradient's first step is ``8 z = 2 r``,
+    momentum's second step ``z + mu_2 v``."""
     from astroviper.processing_functions.imaging.utils import (
         CycleController,
         StopCode,
@@ -2165,10 +2213,14 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
         return sky_model.isel(time=0, taylor_term=0).sum(("l", "m")).values
 
     def backend(image_arg, deconvolver, controls, **kwargs):
-        image_arg["SKY_MODEL"] = 0.25 * image_arg.SKY_RESIDUAL
-        image_arg.SKY_RESIDUAL.values -= 0.5 * image_arg.SKY_MODEL.values
-        increment_flux = taylor_zero_flux(image_arg.SKY_MODEL)
-        increment = image_arg.SKY_MODEL.isel(time=0, taylor_term=0).values
+        if "SKY_MODEL" not in image_arg:
+            image_arg["SKY_MODEL"] = xr.zeros_like(image_arg.SKY_RESIDUAL)
+        start_flux = taylor_zero_flux(image_arg.SKY_MODEL)
+        increment = 0.25 * image_arg.SKY_RESIDUAL
+        image_arg.SKY_MODEL.values += increment.values
+        image_arg.SKY_RESIDUAL.values -= 0.5 * increment.values
+        model_flux = taylor_zero_flux(image_arg.SKY_MODEL)
+        model = image_arg.SKY_MODEL.isel(time=0, taylor_term=0).values
         result = ImagingDict()
         for pol in range(2):
             result.add(
@@ -2178,10 +2230,10 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
                         np.abs(image_arg.SKY_RESIDUAL[0, 0, pol]).max().values
                     ),
                     "masksum": 16,
-                    "start_model_flux": 0.0,
-                    "model_flux": float(increment_flux[pol]),
-                    "model_flux_positive": float(np.sum(increment[pol].clip(min=0))),
-                    "model_flux_negative": float(np.sum(increment[pol].clip(max=0))),
+                    "start_model_flux": float(start_flux[pol]),
+                    "model_flux": float(model_flux[pol]),
+                    "model_flux_positive": float(np.sum(model[pol].clip(min=0))),
+                    "model_flux_negative": float(np.sum(model[pol].clip(max=0))),
                     "stop_code": StopCode(
                         imaging=IMAGING_CONTINUE,
                         model_update=MODEL_UPDATE_MAX_ITER_PER_CYCLE,

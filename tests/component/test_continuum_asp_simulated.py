@@ -23,7 +23,7 @@ times the effective primary beam of the image (the model of continuum
 imaging is the sky seen through that beam, in MFS and MVC alike) within
 5 percent (measured: within 2.2 percent), the Stokes I residual must stay
 below 3 percent of the point source's apparent flux (measured: at most
-1.3 percent), and the cycle controller must have booked every model update.
+1.4 percent), and the cycle controller must have booked every model update.
 A second test gives the application an explicit ``clean_mask`` around the
 point source only.
 """
@@ -288,12 +288,12 @@ def test_continuum_asp_with_an_explicit_clean_mask(
     """An explicit ``clean_mask`` (a ``.npy`` file) of 17 x 17 pixels around
     the point source only: Asp cleans the point source and leaves the Gaussian
     in the residual. The model of the point source holds its apparent flux
-    within 8 percent (measured: within 5.2 percent), the model of the Gaussian
+    within 8 percent (measured: within 5.1 percent), the model of the Gaussian
     less than 3 percent of its own (measured: at most 1.3 percent; the wings
     of Asp components reach past the mask), the residual in the mask stays
     below 3 percent of the point source's apparent flux (measured: at most
     1.9 percent) and the Gaussian's residual peak is more than 10 times the
-    largest residual in the mask (measured: at least 13 times). With the Asp
+    largest residual in the mask (measured: at least 14 times). With the Asp
     options on, the noise of the significance test per scale is measured on
     the pixels outside the mask (in MVC these include the pixels outside the
     primary-beam support, where the residual is 0), and the application logs

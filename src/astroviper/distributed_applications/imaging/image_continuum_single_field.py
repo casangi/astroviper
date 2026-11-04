@@ -3672,9 +3672,15 @@ def image_continuum_single_field(
         raise ValueError(
             f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
         )
-    # Continuum restoration always writes only its intrinsic PB-corrected
-    # product; there is no separate PB-correction switch.
+    # Continuum restoration always writes its intrinsic PB-corrected product.
+    # Retain the apparent/flat-noise product as well only when the caller asks
+    # for it explicitly.
     primary_beam_correction = bool(restore)
+    restoration_output = (
+        "both"
+        if restore and "sky_restored_flat_noise" in image_data_variables_keep
+        else "primary_beam_corrected"
+    )
     # Work with an application-local copy: continuum setup may augment the
     # image parameters with metadata derived from the Processing Set.
     image_params = dict(image_params)
@@ -3895,6 +3901,7 @@ def image_continuum_single_field(
     input_params["is_first_cycle"] = True
     input_params["deconvolver"] = deconvolver
     input_params["primary_beam_correction"] = bool(primary_beam_correction)
+    input_params["restoration_output"] = restoration_output
     input_params["primary_beam_limit"] = float(primary_beam_limit)
     input_params["continuum_mode"] = continuum_mode
     input_params["mvc_model_update_approximation"] = mvc_model_update_approximation
@@ -4274,6 +4281,7 @@ def image_continuum_single_field(
                 "clean_mask": clean_mask_array,
                 "restore": restore,
                 "primary_beam_correction": primary_beam_correction,
+                "restoration_output": restoration_output,
                 "cycle_acceleration": cycle_acceleration,
                 "momentum_coefficient": momentum_coefficient,
             }

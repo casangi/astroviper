@@ -2945,7 +2945,9 @@ def _prepare_continuum_image(
     return img_xds, static_xds, psf_fit_return_df
 
 
-def _prepare_post_update_continuum_model_state(model_increment_xds, input_params):
+def _prepare_post_update_continuum_model_state(
+    model_update_xds, input_params, previous_model_xds=None
+):
     """Accumulate the model and prepare MFS Fourier state inside the append node.
 
     The distributed application supplies the previous image-domain model as
@@ -2955,10 +2957,15 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
 
     Parameters
     ----------
-    model_increment_xds : xarray.Dataset
-        Image dataset produced by the current model-update cycle.
+    model_update_xds : xarray.Dataset
+        Image dataset produced by the current model-update cycle. Its
+        ``SKY_MODEL`` is the model, to which the model update added its
+        components in place, or with ``previous_model_xds`` the accelerated
+        step to add to that model.
     input_params : dict
         Append-node configuration. Later cycles must provide ``model_xds``.
+    previous_model_xds : xarray.Dataset, optional
+        The model the accelerated step is added to.
 
     Returns
     -------
@@ -2973,16 +2980,15 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
     )
 
     is_first_cycle = bool(input_params.get("is_first_cycle", True))
-    previous_model_xds = input_params.get("model_xds")
 
-    if not is_first_cycle and previous_model_xds is None:
+    if not is_first_cycle and input_params.get("model_xds") is None:
         raise KeyError(
             "Later continuum append nodes require input_params['model_xds']."
         )
 
     continuum_mode = input_params.get("continuum_mode", "mfs")
     model_xds = accumulate_continuum_model(
-        model_increment_xds,
+        model_update_xds,
         previous_model_xds=previous_model_xds,
         continuum_mode=continuum_mode,
     )
@@ -3039,14 +3045,17 @@ def _stop_codes_after_model_update(controller, deconvolution):
 
 
 def _accelerate_continuum_model_increment(
-    model_increment_xds,
+    model_update_xds,
     residual_before_model_update,
     controller,
     deconvolution,
     input_params,
 ):
-    """Replace the model increment by the accelerated model step.
+    """Replace the model of the model update by the accelerated model step.
 
+    The model update added its components to the previous model
+    (``input_params["model_xds"]``, none in the first imaging cycle) in place;
+    its increment is its model minus that model, positionally.
     The plain increment is taken where the controller's stop test, made on
     the residual the model update ended with
     (:func:`_stop_codes_after_model_update`), would stop a plane: by the
@@ -3074,21 +3083,29 @@ def _accelerate_continuum_model_increment(
     )
     entropy_followed = np.isfinite(controller.max_entropy[:, 0, :])
     state_xds = input_params.get("cycle_acceleration_state_xds")
+    model_increment = model_update_xds["SKY_MODEL"]
+    previous_model_xds = input_params.get("model_xds")
+    if previous_model_xds is not None:
+        previous_model = previous_model_xds["SKY_MODEL"]
+        model_increment = model_increment.copy(
+            data=model_increment.values
+            - previous_model.transpose(*model_increment.dims).values
+        )
     if input_params["cycle_acceleration"] == "conjugate_gradient":
-        residual_name = model_increment_xds.attrs["data_groups"][
+        residual_name = model_update_xds.attrs["data_groups"][
             input_params.get("image_data_group_in_name", "residual")
         ]["sky"]
         model_step, state_xds = conjugate_gradient_model_step(
             residual_before_model_update,
-            model_increment_xds[residual_name],
-            model_increment_xds["SKY_MODEL"],
+            model_update_xds[residual_name],
+            model_increment,
             plain_step_planes=(stop_codes == IMAGING_THRESHOLD) | entropy_followed,
             cycle_acceleration_state_xds=state_xds,
         )
     elif input_params["cycle_acceleration"] == "nesterov_momentum":
         model_step, state_xds = nesterov_momentum_model_step(
             residual_before_model_update,
-            model_increment_xds["SKY_MODEL"],
+            model_increment,
             plain_step_planes=(stop_codes != IMAGING_CONTINUE) | entropy_followed,
             cycle_acceleration_state_xds=state_xds,
             momentum_coefficient=input_params["momentum_coefficient"],
@@ -3098,18 +3115,18 @@ def _accelerate_continuum_model_increment(
             "cycle_acceleration must be 'none', 'conjugate_gradient' or "
             f"'nesterov_momentum'; received {input_params['cycle_acceleration']!r}."
         )
-    return model_increment_xds.assign(SKY_MODEL=model_step), state_xds
+    return model_update_xds.assign(SKY_MODEL=model_step), state_xds
 
 
 def _book_accelerated_model_flux(deconvolve_dict, model_step, previous_model_xds):
     """Book the flux of the accelerated model step in the convergence record.
 
-    The model update books ``model_flux`` as the flux of the previous model
-    plus that of its increment (:func:`_add_previous_continuum_model_flux`).
-    The acceleration adds another step to the model instead, so the latest
-    ``model_flux`` of each plane is set to its latest ``start_model_flux``
-    plus the Taylor-term-zero flux of ``model_step``: the flux of the model
-    the next model update starts from. The latest ``model_flux_positive``
+    The model update books ``model_flux`` as the flux of the model it made.
+    The acceleration adds another step to the previous model instead, so the
+    latest ``model_flux`` of each plane is set to its latest
+    ``start_model_flux`` (the flux of the previous model) plus the
+    Taylor-term-zero flux of ``model_step``: the flux of the model the next
+    model update starts from. The latest ``model_flux_positive``
     and ``model_flux_negative`` become those of that model, the previous
     model (``None`` in the first imaging cycle) plus ``model_step``. Every
     plane of a model update has an entry in ``deconvolve_dict``; entries
@@ -3157,91 +3174,6 @@ def _book_accelerated_model_flux(deconvolve_dict, model_step, previous_model_xds
                 signed = fields[field]
                 signed = signed if isinstance(signed, list) else [signed]
                 fields[field] = signed[:-1] + [float(values[key.time, key.pol])]
-
-
-def _add_previous_continuum_model_flux(
-    deconvolve_dict, previous_model_xds, model_increment=None
-):
-    """Convert per-cycle continuum model increments to cumulative diagnostics.
-
-    The model fluxes and the model flux of every iteration gain the flux of
-    the previous model, and with ``model_increment`` (the model this model
-    update made) the positive and negative model fluxes become those of the
-    previous model plus the increment.
-    """
-    if previous_model_xds is None:
-        return
-    if "SKY_MODEL" not in previous_model_xds:
-        raise KeyError("previous continuum model does not contain 'SKY_MODEL'.")
-
-    import numpy as np
-
-    previous_model = previous_model_xds["SKY_MODEL"]
-    required_dims = ("time", "taylor_term", "polarization", "l", "m")
-    missing_dims = [dim for dim in required_dims if dim not in previous_model.dims]
-    if missing_dims:
-        raise ValueError(
-            "The previous continuum model cannot provide per-plane fluxes; "
-            f"missing dimensions {missing_dims}."
-        )
-    previous_taylor_zero = previous_model.transpose(*required_dims).isel(
-        taylor_term=0, drop=True
-    )
-    previous_flux = np.sum(previous_taylor_zero.values, axis=(-2, -1))
-    model_flux_by_sign = None
-    if model_increment is not None:
-        from astroviper.processing_functions.image_analysis.image_statistics import (
-            cube_flux_by_sign,
-        )
-
-        increment_taylor_zero = model_increment.isel(
-            {
-                dim: 0
-                for dim in ("taylor_term", "frequency")
-                if dim in model_increment.dims
-            },
-            drop=True,
-        ).transpose("time", "polarization", "l", "m")
-        model_flux_by_sign = cube_flux_by_sign(
-            previous_taylor_zero.values + increment_taylor_zero.values
-        )
-
-    for key, fields in deconvolve_dict.data.items():
-        if key.time >= previous_flux.shape[0] or key.pol >= previous_flux.shape[1]:
-            raise ValueError(
-                "Continuum deconvolution statistics refer to a model plane "
-                f"outside the previous model: time={key.time}, pol={key.pol}."
-            )
-        offset = float(previous_flux[key.time, key.pol])
-        model_flux = fields.get("model_flux")
-        if model_flux is None:
-            continue
-        model_flux = model_flux if isinstance(model_flux, list) else [model_flux]
-        fields["model_flux"] = [float(value) + offset for value in model_flux]
-
-        start_model_flux = fields.get("start_model_flux")
-        if start_model_flux is None:
-            fields["start_model_flux"] = [offset] * len(model_flux)
-        else:
-            start_model_flux = (
-                start_model_flux
-                if isinstance(start_model_flux, list)
-                else [start_model_flux]
-            )
-            fields["start_model_flux"] = [
-                float(value) + offset for value in start_model_flux
-            ]
-        if "iteration_model_flux" in fields:
-            fields["iteration_model_flux"] = [
-                np.asarray(values) + offset for values in fields["iteration_model_flux"]
-            ]
-        if model_flux_by_sign is not None:
-            for field, values in zip(
-                ("model_flux_positive", "model_flux_negative"),
-                model_flux_by_sign,
-                strict=True,
-            ):
-                fields[field] = [float(values[key.time, key.pol])]
 
 
 def _prepare_cached_mfs_residual_grid(input_data, input_params):
@@ -3490,24 +3422,27 @@ def continuum_cycle_append_node(
         model_update_input_params,
     )
 
-    model_increment_xds = return_dict["image"]
+    # The model, or with cycle acceleration the step to add to the previous one.
+    model_update_xds = return_dict["image"]
+    previous_model_xds = None
     if cycle_acceleration != "none":
         start = time.time()
         if not return_dict.get("residual_converged", False):
-            model_increment_xds, return_dict["cycle_acceleration_state_xds"] = (
+            model_update_xds, return_dict["cycle_acceleration_state_xds"] = (
                 _accelerate_continuum_model_increment(
-                    model_increment_xds,
+                    model_update_xds,
                     residual_before_model_update,
                     return_dict["controller"],
                     return_dict["deconvolution"],
                     input_params,
                 )
             )
+            previous_model_xds = input_params.get("model_xds")
             if return_dict.get("deconvolution") is not None:
                 _book_accelerated_model_flux(
                     return_dict["deconvolution"],
-                    model_increment_xds["SKY_MODEL"],
-                    input_params.get("model_xds"),
+                    model_update_xds["SKY_MODEL"],
+                    previous_model_xds,
                 )
         del residual_before_model_update
         T_cycle_acceleration += time.time() - start
@@ -3521,8 +3456,9 @@ def continuum_cycle_append_node(
         model_uv_xds = input_params.get("model_uv_xds")
     else:
         model_xds, model_uv_xds = _prepare_post_update_continuum_model_state(
-            model_increment_xds,
+            model_update_xds,
             input_params,
+            previous_model_xds,
         )
     T_prepare_model_state = time.time() - start
 
@@ -3646,10 +3582,13 @@ def continuum_finalize_node(
         )
 
         continuum_mode = str(input_params.get("continuum_mode", "mfs")).lower()
-        restoration_output = (
-            "primary_beam_corrected"
-            if input_params.get("primary_beam_correction", False)
-            else "apparent"
+        restoration_output = input_params.get(
+            "restoration_output",
+            (
+                "primary_beam_corrected"
+                if input_params.get("primary_beam_correction", False)
+                else "apparent"
+            ),
         )
         img_xds, restore_timing_df = restore_continuum_image(
             img_xds,
@@ -3672,17 +3611,28 @@ def continuum_finalize_node(
             continuum_mode=continuum_mode,
         )
 
-        if restoration_output == "primary_beam_corrected":
+        if restoration_output in {"primary_beam_corrected", "both"}:
             corrected_name = "SKY_RESTORED_FLAT_SKY"
             if corrected_name not in img_xds:
                 raise RuntimeError(
                     "Continuum restoration did not create its intrinsic "
                     "PB-corrected Taylor image."
                 )
-            if "SKY_RESTORED_FLAT_NOISE" in img_xds:
+            if (
+                restoration_output == "primary_beam_corrected"
+                and "SKY_RESTORED_FLAT_NOISE" in img_xds
+            ):
                 raise RuntimeError(
                     "Continuum restoration created an apparent Taylor image."
                 )
+        if (
+            restoration_output in {"apparent", "both"}
+            and "SKY_RESTORED_FLAT_NOISE" not in img_xds
+        ):
+            raise RuntimeError(
+                "Continuum restoration did not create its apparent "
+                "flat-noise Taylor image."
+            )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
 
@@ -3775,6 +3725,11 @@ def model_update_continuum_single_field(
         ``cycle_acceleration``
             With ``"conjugate_gradient"``, Högbom and Asp write their updated
             residual back into the image. Defaults to ``"none"``.
+
+        ``model_xds``
+            The model of the preceding imaging cycle. The model update adds
+            its components to a copy of it, as the cube's adds them to its
+            model; without it the model starts from zero.
 
     Returns
     -------
@@ -3949,9 +3904,19 @@ def model_update_continuum_single_field(
     # -------------------------------------------------------------
     # Run the model-update processing function.
     #
-    # img_xds is already in memory and is modified in place.
+    # img_xds is already in memory and is modified in place. The model
+    # update adds its components to a copy of the previous model, as the
+    # cube's adds them to its model.
     # -------------------------------------------------------------
     start = time.time()
+
+    previous_model_xds = input_params.get("model_xds")
+    if previous_model_xds is not None:
+        residual = img_xds["SKY_RESIDUAL"]
+        previous_model = previous_model_xds["SKY_MODEL"].transpose(*residual.dims)
+        model = residual.copy(data=previous_model.values.copy())
+        model.attrs = previous_model.attrs.copy()
+        img_xds["SKY_MODEL"] = model
 
     (
         deconvolve_dict,
@@ -3967,11 +3932,6 @@ def model_update_continuum_single_field(
         write_back_deconvolver_residual=(
             input_params.get("cycle_acceleration", "none") == "conjugate_gradient"
         ),
-    )
-    _add_previous_continuum_model_flux(
-        deconvolve_dict,
-        input_params.get("model_xds"),
-        img_xds["SKY_MODEL"],
     )
     copy_residual_statistics(deconvolve_dict, residual_imaging_dict)
 
