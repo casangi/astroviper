@@ -3604,14 +3604,7 @@ def continuum_finalize_node(
         )
 
         continuum_mode = input_params.get("continuum_mode", "mfs")
-        restoration_output = input_params.get(
-            "restoration_output",
-            (
-                "primary_beam_corrected"
-                if input_params.get("primary_beam_correction", False)
-                else "apparent"
-            ),
-        )
+        restoration_output = input_params.get("restoration_output", "apparent")
         img_xds, restore_timing_df = restore_continuum_image(
             img_xds,
             image_data_group_in_residual_name=(
@@ -3626,36 +3619,12 @@ def continuum_finalize_node(
                 "processing_function_threads",
                 1,
             ),
-            primary_beam_correction=input_params.get("primary_beam_correction", False),
             primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
             deconvolver=input_params.get("deconvolver", "hogbom"),
             restoration_output=restoration_output,
             continuum_mode=continuum_mode,
             input_checked=True,
         )
-
-        if restoration_output in {"primary_beam_corrected", "both"}:
-            corrected_name = "SKY_RESTORED_FLAT_SKY"
-            if corrected_name not in img_xds:
-                raise RuntimeError(
-                    "Continuum restoration did not create its intrinsic "
-                    "PB-corrected Taylor image."
-                )
-            if (
-                restoration_output == "primary_beam_corrected"
-                and "SKY_RESTORED_FLAT_NOISE" in img_xds
-            ):
-                raise RuntimeError(
-                    "Continuum restoration created an apparent Taylor image."
-                )
-        if (
-            restoration_output in {"apparent", "both"}
-            and "SKY_RESTORED_FLAT_NOISE" not in img_xds
-        ):
-            raise RuntimeError(
-                "Continuum restoration did not create its apparent "
-                "flat-noise Taylor image."
-            )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
 

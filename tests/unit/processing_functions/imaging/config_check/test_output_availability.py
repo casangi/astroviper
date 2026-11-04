@@ -113,7 +113,11 @@ def test_available_products_preserve_configuration(mode, kept, nterms, correct):
         "image_data_variables_keep": kept,
         "image_params": {"n_taylor_terms": nterms},
         "restore": True,
-        "primary_beam_correction": correct,
+        **(
+            {"primary_beam_correction": correct}
+            if mode.imaging_kind == "cube"
+            else {"restoration_output": "both"}
+        ),
     }
     before = deepcopy(config)
     check_driver_workflow(config, mode=mode)

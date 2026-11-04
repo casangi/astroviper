@@ -276,7 +276,7 @@ def test_pb_correction_rejects_invalid_final_products(fault):
     with pytest.raises(KeyError if fault.startswith("missing") else ValueError):
         restore_continuum_image(
             image,
-            primary_beam_correction=True,
+            restoration_output="both",
             primary_beam_limit=primary_beam_limit,
             continuum_mode="mvc",
         )

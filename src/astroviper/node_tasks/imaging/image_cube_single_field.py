@@ -881,15 +881,11 @@ def image_cube_single_field(
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     primary_beam_correction : bool, optional
-        If ``True`` write the primary beam corrected restored sky to the
+        If ``True`` write the primary-beam-corrected restored cube to
         ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable. Cube imaging and
-        MVC divide the model and residual by their channel or common (power)
-        primary beam before restoration. MFS instead divides the apparent
-        Taylor polynomials by the fitted primary-beam Taylor polynomial.
-        Pixels below the zeroth-order primary-
-        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
-        ``restore``.
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``). Divide the model and residual
+        by the channel power primary beam before clean-beam convolution. Pixels
+        below ``primary_beam_limit`` are blanked with NaN. Requires ``restore``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``

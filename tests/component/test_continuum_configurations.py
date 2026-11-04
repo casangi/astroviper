@@ -398,8 +398,12 @@ def test_continuum_uses_writer_resolved_path(
 
 
 @pytest.mark.parametrize("n_taylor_terms", [1, 2, 3])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize(
+    "restoration_output", ["apparent", "primary_beam_corrected", "both"]
+)
 def test_restoration_retains_only_available_spectral_products(
-    tmp_path, continuum_input, n_taylor_terms
+    tmp_path, continuum_input, n_taylor_terms, continuum_mode, restoration_output
 ):
     """The driver writes each promised spectral product and allocates no absent one."""
     store, params, _, _ = continuum_input
@@ -423,7 +427,8 @@ def test_restoration_retains_only_available_spectral_products(
             },
             deconvolver="hogbom" if n_taylor_terms == 1 else "mtmfs",
             restore=True,
-            continuum_mode="mfs",
+            continuum_mode=continuum_mode,
+            restoration_output=restoration_output,
             processing_set_data_group_name="base",
             n_mapping_parallelism={"frequency": 2},
             weight_memory_mode="in_memory",
@@ -431,7 +436,12 @@ def test_restoration_retains_only_available_spectral_products(
             single_precision_image=False,
         )
     with xr.open_zarr(output) as stored:
-        assert "SKY_RESTORED_FLAT_SKY" in stored
+        assert ("SKY_RESTORED_FLAT_SKY" in stored) is (
+            restoration_output in {"primary_beam_corrected", "both"}
+        )
+        assert ("SKY_RESTORED_FLAT_NOISE" in stored) is (
+            restoration_output in {"apparent", "both"}
+        )
         assert ("ALPHA" in stored) is (n_taylor_terms >= 2)
         assert ("ALPHA_ERROR" in stored) is (n_taylor_terms >= 2)
         assert ("BETA" in stored) is (n_taylor_terms >= 3)

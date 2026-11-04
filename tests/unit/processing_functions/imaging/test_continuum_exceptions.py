@@ -53,7 +53,7 @@ def test_restore_requires_or_infers_consistent_continuum_mode():
     mvc_image = make_continuum_image(continuum_mode="mvc")
     restored_mvc, _ = restore_continuum_image(
         mvc_image,
-        primary_beam_correction=True,
+        restoration_output="both",
     )
     assert "SKY_RESTORED_FLAT_SKY" in restored_mvc
 

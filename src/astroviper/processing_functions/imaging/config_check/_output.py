@@ -157,6 +157,20 @@ def check_kept_variables(config, *, mode=None, fits=False, require_image=True):
                 "sky_restored_primary_beam_corrected requires primary_beam_correction=True."
             )
 
+        # --- Selected continuum restoration products ---
+        # A keep request must agree with the single restoration selector; never
+        # change the requested computation merely to satisfy the output list.
+        if mode.imaging_kind == "continuum" and "restoration_output" in config:
+            output = config["restoration_output"]
+            for key, allowed in (
+                ("sky_restored_flat_noise", ("apparent", "both")),
+                ("sky_restored_flat_sky", ("primary_beam_corrected", "both")),
+            ):
+                if key in requested and output not in allowed:
+                    raise ValueError(
+                        f"{key} is unavailable with restoration_output={output!r}."
+                    )
+
         # --- Spectral coefficient availability ---
         # Alpha needs coefficients zero and one; beta also needs coefficient two.
         nterms = config.get("image_params", {}).get(

@@ -64,33 +64,36 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     ):
         raise ValueError("Continuum imaging supports only compute_backend='dask'.")
 
-    # --- Restoration and primary-beam correction ---
-    # The corrected output is a restored image, so restoration must be enabled.
-    primary_beam_correction = config.get("primary_beam_correction", False)
-    restore = config.get("restore", False)
-    if primary_beam_correction and not restore:
+    # --- Cube restoration and primary-beam correction ---
+    # Cube keeps its correction switch. Continuum has one product selector,
+    # so a second switch must not silently contradict or override that choice.
+    if mode.imaging_kind == "continuum" and "primary_beam_correction" in config:
+        raise ValueError(
+            "Continuum uses restoration_output; primary_beam_correction is not accepted."
+        )
+    if (
+        mode.imaging_kind == "cube"
+        and config.get("primary_beam_correction", False)
+        and not config.get("restore", False)
+    ):
         raise ValueError("primary_beam_correction requires restore=True.")
 
     # --- Continuum restoration products ---
-    # A corrected product needs the primary beam; an explicit request must not
-    # be silently replaced by an apparent-sky restoration.
-    restoration_output = config.get("restoration_output")
-    if restoration_output is not None:
-        if not isinstance(restoration_output, str) or restoration_output not in (
+    # The selector alone determines whether to compute apparent, corrected, or
+    # both Taylor stacks. No independent correction flag is needed.
+    if "restoration_output" in config:
+        if mode.imaging_kind != "continuum":
+            raise ValueError(
+                "restoration_output is continuum-only; cube uses primary_beam_correction."
+            )
+        output = config["restoration_output"]
+        if not isinstance(output, str) or output not in (
             "apparent",
             "primary_beam_corrected",
             "both",
         ):
             raise ValueError(
                 "restoration_output must be 'apparent', 'primary_beam_corrected', or 'both'."
-            )
-        if (
-            restoration_output in ("primary_beam_corrected", "both")
-            and not primary_beam_correction
-        ):
-            raise ValueError(
-                "A primary-beam-corrected restoration_output requires "
-                "primary_beam_correction=True."
             )
 
     # --- Primary-beam cutoff ---

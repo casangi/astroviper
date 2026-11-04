@@ -648,15 +648,32 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).'
     ),
     "primary_beam_correction": (
-        "If ``True`` write the primary beam corrected restored sky to the\n"
+        "If ``True`` write the primary-beam-corrected restored cube to\n"
         "``sky_restored_primary_beam_corrected``\n"
-        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable. Cube imaging and\n"
-        "MVC divide the model and residual by their channel or common (power)\n"
-        "primary beam before restoration. MFS instead divides the apparent\n"
-        "Taylor polynomials by the fitted primary-beam Taylor polynomial.\n"
-        "Pixels below the zeroth-order primary-\n"
-        "beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires\n"
-        "``restore``."
+        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``). Divide the model and residual\n"
+        "by the channel power primary beam before clean-beam convolution. Pixels\n"
+        "below ``primary_beam_limit`` are blanked with NaN. Requires ``restore``."
+    ),
+    "restore_continuum_image.continuum_mode": (
+        "Continuum construction convention. When omitted, infer it from the\n"
+        "residual or image metadata. An explicit value must agree with any\n"
+        "stored metadata. MFS corrects the Taylor polynomial as a whole; MVC\n"
+        "divides each coefficient by its already-constructed common primary\n"
+        "beam."
+    ),
+    "restore_continuum_image.deconvolver": (
+        "Deconvolver that produced the model. MT-MFS restoration applies the\n"
+        "Taylor Hessian's principal solution to a private copy of every residual\n"
+        "Taylor term before restoration. The stored residual remains unchanged."
+    ),
+    "restoration_output": (
+        'Restored continuum products to compute: ``"apparent"`` writes\n'
+        '``SKY_RESTORED_FLAT_NOISE``, ``"primary_beam_corrected"`` writes\n'
+        '``SKY_RESTORED_FLAT_SKY``, and ``"both"`` writes both Taylor stacks.\n'
+        "This selector is the sole continuum correction/output control. MFS\n"
+        "corrects the model and residual Taylor polynomials before convolution;\n"
+        "MVC divides by the common power primary beam. Corrected pixels below\n"
+        "``primary_beam_limit`` are blanked with NaN."
     ),
     "psf_fitting_method": (
         'Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or\n'
@@ -671,8 +688,8 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
     "image_continuum_single_field.image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
-        "Restoration automatically retains its mode-specific restored Taylor\n"
-        "product and the "
+        "Restoration automatically retains its selected restored Taylor\n"
+        "products and the "
         'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.\n'
         "Restored and spectral products require ``restore=True``. Alpha products\n"
         "require at least two Taylor terms; beta requires at least three.\n"
@@ -680,14 +697,10 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
     ),
     "image_continuum_single_field.restore": (
         "If ``True`` restore every Taylor coefficient after deconvolution and\n"
-        "always produce the intrinsic, primary-beam-corrected Taylor image in\n"
-        "``SKY_RESTORED_FLAT_SKY``. This is the sole restored sky product for\n"
-        "both MFS and MVC; the apparent ``SKY_RESTORED_FLAT_NOISE`` image is not\n"
-        "written. Pixels below ``primary_beam_limit`` are blanked with NaN. With\n"
-        "at least two Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``;\n"
-        "with at least three, also write ``BETA``. ``ALPHA_ERROR`` is CASA's\n"
-        "pixel-residual diagnostic, not a statistically calibrated one-sigma\n"
-        "uncertainty."
+        "write the products selected by ``restoration_output``. With at least\n"
+        "two Taylor terms also write ``ALPHA`` and ``ALPHA_ERROR``; with at least\n"
+        "three also write ``BETA``. ``ALPHA_ERROR`` is a pixel-residual diagnostic,\n"
+        "not a statistically calibrated one-sigma uncertainty."
     ),
     "clean_mask": (
         'Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:\n'

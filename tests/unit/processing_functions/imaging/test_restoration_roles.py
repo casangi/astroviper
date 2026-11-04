@@ -92,7 +92,7 @@ def test_bad_registered_products_fail_before_restoration_writes(kind, group, rol
             restore_image(image, primary_beam_correction=True, consume_model=True)
         else:
             restore_continuum_image(
-                image, primary_beam_correction=True, input_checked=True
+                image, restoration_output="both", input_checked=True
             )
     xr.testing.assert_identical(image, snapshot)
 
@@ -111,7 +111,11 @@ def test_primary_beam_role_is_required_only_for_correction(kind):
         image.attrs["data_groups"]["residual"]["primary_beam_taylor"] = (
             "MISSING_UNUSED_BEAM"
         )
-    restored, _ = restore(image, primary_beam_correction=False)
+    restored, _ = (
+        restore(image, primary_beam_correction=False)
+        if kind == "cube"
+        else restore(image, restoration_output="apparent")
+    )
     restored_group = restored.attrs["data_groups"]["restored"]
     assert np.all(np.isfinite(restored[restored_group["sky"]]))
     assert "sky_primary_beam_corrected" not in restored_group

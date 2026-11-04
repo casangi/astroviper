@@ -2583,6 +2583,7 @@ def image_continuum_single_field(
     disk_chunk_sizes: dict[str, int] | str | None = None,
     fft_backend: str = "pyfftw",
     restore: bool = False,
+    restoration_output: str = "primary_beam_corrected",
     gridding_kernel_params: dict[str, Any] | None = None,
     skunk_works: bool = False,
     compute_backend: str = "dask",
@@ -2665,14 +2666,10 @@ def image_continuum_single_field(
         Path/URL of the on-disk Zarr image cube.
     restore : bool
         If ``True`` restore every Taylor coefficient after deconvolution and
-        always produce the intrinsic, primary-beam-corrected Taylor image in
-        ``SKY_RESTORED_FLAT_SKY``. This is the sole restored sky product for
-        both MFS and MVC; the apparent ``SKY_RESTORED_FLAT_NOISE`` image is not
-        written. Pixels below ``primary_beam_limit`` are blanked with NaN. With
-        at least two Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``;
-        with at least three, also write ``BETA``. ``ALPHA_ERROR`` is CASA's
-        pixel-residual diagnostic, not a statistically calibrated one-sigma
-        uncertainty.
+        write the products selected by ``restoration_output``. With at least
+        two Taylor terms also write ``ALPHA`` and ``ALPHA_ERROR``; with at least
+        three also write ``BETA``. ``ALPHA_ERROR`` is a pixel-residual diagnostic,
+        not a statistically calibrated one-sigma uncertainty.
     scan_intents : list of str or str, optional
         Scan intent or intents passed to
         :func:`xradio.measurement_set.open_processing_set` when opening the
@@ -2804,8 +2801,8 @@ def image_continuum_single_field(
     image_data_variables_keep : list of str
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
-        Restoration automatically retains its mode-specific restored Taylor
-        product and the derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.
+        Restoration automatically retains its selected restored Taylor
+        products and the derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.
         Restored and spectral products require ``restore=True``. Alpha products
         require at least two Taylor terms; beta requires at least three.
         Unavailable products are rejected before input reads or graph construction.
@@ -3089,6 +3086,15 @@ def image_continuum_single_field(
         C++ grid/degrid kernels. With ``gridding_kernel_params={"type":
         "dft"}`` MFS uses the exact direct Fourier transform with the w term
         instead.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, default "primary_beam_corrected"
+        Restored continuum products to compute: ``"apparent"`` writes
+        ``SKY_RESTORED_FLAT_NOISE``, ``"primary_beam_corrected"`` writes
+        ``SKY_RESTORED_FLAT_SKY``, and ``"both"`` writes both Taylor stacks.
+        This selector is the sole continuum correction/output control. MFS
+        corrects the model and residual Taylor polynomials before convolution;
+        MVC divides by the common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN.
+
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -3376,14 +3382,6 @@ def image_continuum_single_field(
 
     # Validation ran at the entry boundary. Preserve the supplied configuration
     # while selecting the execution path and loading the actual CLEAN mask.
-    # Restoration always produces the intrinsic sky; retain the flat-noise
-    # image as well when it is explicitly requested.
-    primary_beam_correction = restore
-    restoration_output = (
-        "both"
-        if restore and "sky_restored_flat_noise" in image_data_variables_keep
-        else "primary_beam_corrected"
-    )
     image_params = dict(image_params)
     direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
     clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
@@ -3410,11 +3408,14 @@ def image_continuum_single_field(
             for product in spectral_products
             if product not in image_data_variables_keep
         ]
-    if primary_beam_correction and (
-        "sky_restored_flat_sky" not in image_data_variables_keep
-    ):
+    if restore:
+        restored_products = {
+            "apparent": ("sky_restored_flat_noise",),
+            "primary_beam_corrected": ("sky_restored_flat_sky",),
+            "both": ("sky_restored_flat_noise", "sky_restored_flat_sky"),
+        }[restoration_output]
         image_data_variables_keep = list(image_data_variables_keep) + [
-            "sky_restored_flat_sky"
+            key for key in restored_products if key not in image_data_variables_keep
         ]
 
     # Every driver step is timed into ``timing_distributed_application``; the
@@ -3594,7 +3595,6 @@ def image_continuum_single_field(
     input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["is_first_cycle"] = True
     input_params["deconvolver"] = deconvolver
-    input_params["primary_beam_correction"] = bool(primary_beam_correction)
     input_params["restoration_output"] = restoration_output
     input_params["primary_beam_limit"] = float(primary_beam_limit)
     input_params["continuum_mode"] = continuum_mode
@@ -3984,7 +3984,6 @@ def image_continuum_single_field(
                 "clean_mask": clean_mask_array,
                 "spectral_diagnostics": spectral_diagnostics,
                 "restore": restore,
-                "primary_beam_correction": primary_beam_correction,
                 "restoration_output": restoration_output,
                 "cycle_acceleration": cycle_acceleration,
                 "momentum_coefficient": momentum_coefficient,

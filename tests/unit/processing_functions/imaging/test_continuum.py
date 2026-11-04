@@ -360,7 +360,7 @@ def test_primary_beam_correction_restores_every_taylor_term():
 
     result, _ = restore_continuum_image(
         image,
-        primary_beam_correction=True,
+        restoration_output="both",
         primary_beam_limit=0.2,
         continuum_mode="mvc",
     )
@@ -404,14 +404,12 @@ def test_corrected_only_continuum_restoration_matches_the_both_product_path():
 
     both, _ = restore_continuum_image(
         both_image,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         restoration_output="both",
         continuum_mode="mvc",
     )
     corrected_only, _ = restore_continuum_image(
         corrected_only_image,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         restoration_output="primary_beam_corrected",
         continuum_mode="mvc",
@@ -553,7 +551,6 @@ def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore()
 
     result, _ = restore_continuum_image(
         image,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         restoration_output="both",
         continuum_mode="mfs",

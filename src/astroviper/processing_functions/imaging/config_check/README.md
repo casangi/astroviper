@@ -62,6 +62,21 @@ Unsupported requested features raise, including multifield execution,
 `field_name`, continuum MPI, continuum graph visualization, and cube global
 weighting. The cube Dask graph visualization and cube MPI setup remain supported.
 
+Continuum restoration uses `restoration_output` as its sole product selector:
+`apparent` writes `SKY_RESTORED_FLAT_NOISE`, `primary_beam_corrected` writes
+`SKY_RESTORED_FLAT_SKY`, and `both` writes both Taylor stacks. The distributed
+driver defaults to corrected output when `restore=True`; direct restoration
+calls default to apparent output. Continuum no longer accepts
+`primary_beam_correction` in function arguments or node configuration. Cube
+imaging retains that Boolean switch.
+
+Output requests must match the selected workflow and restoration products.
+Restored images and spectral products require `restore=True`; alpha products
+need at least two Taylor terms and beta at least three. Continuum-only keys are
+refused by cube imaging, and a continuum keep list cannot override
+`restoration_output`. All these relationships are checked before graph or output
+creation without changing the supplied configuration.
+
 The workflow checker also logs the MVC/Asp significance warning when significance
 is enabled without an explicit clean mask. The diagnostic runs at the unchecked
 entry boundary; checked downstream calls do not repeat it. Actual noise estimation

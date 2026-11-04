@@ -57,7 +57,11 @@ def test_validators_accept_read_only_config_and_preserve_values(check, mode):
             "cycle_control_params": MappingProxyType(controls),
             "deconvolver": "mtmfs" if mode.imaging_kind == "continuum" else "asp",
             "restore": True,
-            "primary_beam_correction": True,
+            **(
+                {"restoration_output": "both"}
+                if mode.imaging_kind == "continuum"
+                else {"primary_beam_correction": True}
+            ),
             "primary_beam_limit": 0.2,
             "memory_mode": "in_memory",
         }
@@ -158,7 +162,7 @@ def test_model_thresholds(name, value, error):
 @pytest.mark.parametrize(
     "options,message",
     [
-        ({"primary_beam_correction": True, "restore": False}, "requires restore"),
+        ({"primary_beam_correction": True, "restore": False}, "restoration_output"),
         ({"primary_beam_limit": 1.0}, "primary_beam_limit"),
         ({"primary_beam_limit": -0.1}, "primary_beam_limit"),
         ({"primary_beam_limit": np.nan}, "primary_beam_limit"),
@@ -187,7 +191,7 @@ def test_workflow_check_does_not_validate_residual_or_model_settings():
         "image_params": {"frequency_coords": [0.0], "n_taylor_terms": 2},
         "deconvolver": "unsupported",
         "restore": True,
-        "primary_beam_correction": True,
+        "restoration_output": "both",
     }
     check_driver_workflow(config, mode=CONTINUUM_SINGLE_FIELD)
     with pytest.raises(ValueError, match="frequency_coords"):

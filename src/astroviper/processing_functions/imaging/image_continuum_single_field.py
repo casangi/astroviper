@@ -4280,17 +4280,17 @@ def _resolve_restoration_continuum_mode(img_xds, residual_da, continuum_mode):
     return continuum_mode
 
 
+@shares_param_docs
 def restore_continuum_image(
     img_xds,
     image_data_group_in_residual_name="residual",
     image_data_group_in_model_name="model",
     image_data_group_out_restore_name="restored",
     processing_function_threads=1,
-    primary_beam_correction=False,
     primary_beam_limit=0.2,
     primary_beam_key="primary_beam",
     deconvolver="hogbom",
-    restoration_output=None,
+    restoration_output="apparent",
     continuum_mode=None,
     input_checked=False,
 ):
@@ -4327,12 +4327,8 @@ def restore_continuum_image(
         Name under which the restored image is registered.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the shared restoration core.
-
-    primary_beam_correction : bool, optional
-        If ``True``, also produce primary-beam-corrected restored Taylor images
-        using Taylor-polynomial division for MFS or the shared single-beam
-        convention for MVC.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     primary_beam_limit : float, optional
         Primary-beam cutoff below which the corrected image is blanked.
@@ -4345,10 +4341,14 @@ def restore_continuum_image(
         Taylor Hessian's principal solution to a private copy of every residual
         Taylor term before restoration. The stored residual remains unchanged.
 
-    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
-        Product or products to calculate. The default preserves the historical
-        processing-function behavior: ``"both"`` when
-        ``primary_beam_correction`` is true and ``"apparent"`` otherwise.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, default "apparent"
+        Restored continuum products to compute: ``"apparent"`` writes
+        ``SKY_RESTORED_FLAT_NOISE``, ``"primary_beam_corrected"`` writes
+        ``SKY_RESTORED_FLAT_SKY``, and ``"both"`` writes both Taylor stacks.
+        This selector is the sole continuum correction/output control. MFS
+        corrects the model and residual Taylor polynomials before convolution;
+        MVC divides by the common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN.
 
     continuum_mode : {"mfs", "mvc"} or None, optional
         Continuum construction convention. When omitted, infer it from the
@@ -4358,8 +4358,10 @@ def restore_continuum_image(
         beam.
 
     input_checked : bool, optional
-        Whether an upper layer has validated this unchanged configuration.
-        Direct calls default to False.
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
 
     Returns
     -------
@@ -4480,8 +4482,6 @@ def restore_continuum_image(
 
     beam_da = img_xds[beam_name]
 
-    if restoration_output is None:
-        restoration_output = "both" if primary_beam_correction else "apparent"
     needs_primary_beam = restoration_output in {"primary_beam_corrected", "both"}
 
     image_dims = ("time", "taylor_term", "polarization", "l", "m")

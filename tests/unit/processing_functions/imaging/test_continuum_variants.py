@@ -149,7 +149,7 @@ def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype
         image[name] = image[name].astype(dtype)
     snapshot = image.copy(deep=True)
 
-    result, timing = restore_continuum_image(image, primary_beam_correction=True)
+    result, timing = restore_continuum_image(image, restoration_output="both")
 
     assert result.SKY_RESTORED_FLAT_NOISE.sizes["l"] == image_shape[0]
     assert result.SKY_RESTORED_FLAT_NOISE.sizes["m"] == image_shape[1]
@@ -1366,7 +1366,7 @@ def test_pb_correction_cutoff_includes_exact_boundary(dtype):
 
     result, _ = restore_continuum_image(
         image,
-        primary_beam_correction=True,
+        restoration_output="both",
         primary_beam_limit=float(limit),
         continuum_mode="mvc",
     )

@@ -52,11 +52,10 @@ def test_static_moment_switch_requires_boolean(value):
         )
 
 
-@pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both", None])
+@pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both"])
 def test_restoration_output_is_validated_without_mutation(output):
     config = {
         "restore": True,
-        "primary_beam_correction": True,
         "restoration_output": output,
     }
     before = deepcopy(config)
@@ -64,13 +63,15 @@ def test_restoration_output_is_validated_without_mutation(output):
     assert config == before
 
 
-@pytest.mark.parametrize("output", ["APPARENT", "invalid", 1, ["both"]])
+@pytest.mark.parametrize("output", ["APPARENT", "invalid", None, 1, ["both"]])
 def test_restoration_output_rejected_before_accessing_image(output):
     with pytest.raises(ValueError, match="restoration_output"):
         restore_continuum_image(None, restoration_output=output)
 
 
-@pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
-def test_corrected_output_requires_primary_beam_correction(output):
-    with pytest.raises(ValueError, match="requires primary_beam_correction"):
-        restore_continuum_image(None, restoration_output=output)
+@pytest.mark.parametrize("value", [True, False])
+def test_continuum_refuses_the_removed_correction_switch(value):
+    with pytest.raises(ValueError, match="restoration_output"):
+        check_driver_workflow(
+            {"primary_beam_correction": value}, mode=CONTINUUM_SINGLE_FIELD
+        )
