@@ -1570,6 +1570,7 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency(
         image,
         image_params=image_params,
         reference_frequency=1.5e9,
+        n_taylor_terms=2,
         float_dtype=np.float64,
         image_data_group_in_name="residual",
         make_primary_beam_taylor=make_primary_beam_taylor,
@@ -1674,8 +1675,9 @@ def test_mfs_primary_beam_taylor_inputs_reuse_channel_imaging_weights(monkeypatc
 
     result = _convert_primary_beam_to_reference_frequency(
         image,
-        image_params={"image_size": [1, 1], "n_taylor_terms": 2},
+        image_params={"image_size": [1, 1]},
         reference_frequency=1.0e9,
+        n_taylor_terms=2,
         float_dtype=np.float64,
         channel_imaging_weight_sums=spectral_weights,
     )

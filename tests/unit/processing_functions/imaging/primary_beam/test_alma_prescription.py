@@ -323,6 +323,7 @@ def test_channel_and_reference_paths_share_the_casa_prescription(diameter, dtype
         channel,
         image_params=params,
         reference_frequency=100e9,
+        n_taylor_terms=1,
         float_dtype=dtype,
         make_primary_beam_taylor=False,
     )

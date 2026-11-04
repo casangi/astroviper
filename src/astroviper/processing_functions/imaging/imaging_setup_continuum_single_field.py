@@ -215,6 +215,7 @@ def _convert_primary_beam_to_reference_frequency(
     *,
     image_params,
     reference_frequency,
+    n_taylor_terms,
     float_dtype,
     image_data_group_in_name="residual",
     make_primary_beam_taylor=True,
@@ -236,6 +237,10 @@ def _convert_primary_beam_to_reference_frequency(
     global append node solves the fit after all frequency partitions have been
     reduced. No channel-sized beam cube is carried through the distributed
     reduction. Runs without restoration skip that projection.
+
+    ``n_taylor_terms`` and ``reference_frequency`` are the supplied Taylor basis
+    already validated at the setup boundary. Do not infer a different order or
+    repeat configuration validation while constructing these runtime products.
     """
     import numpy as np
     import xarray as xr
@@ -252,15 +257,6 @@ def _convert_primary_beam_to_reference_frequency(
     image_data_group = data_groups[image_data_group_in_name]
 
     reference_frequency = float(reference_frequency)
-    from astroviper.processing_functions.imaging.config_check import (
-        CONTINUUM_SINGLE_FIELD,
-        check_residual_update,
-    )
-
-    check_residual_update(
-        {"reference_frequency": reference_frequency}, mode=CONTINUUM_SINGLE_FIELD
-    )
-
     dish_diameters = image_params.get("list_dish_diameters")
     blockage_diameters = image_params.get("list_blockage_diameters")
     if dish_diameters is None:
@@ -283,10 +279,6 @@ def _convert_primary_beam_to_reference_frequency(
         if dim in img_xds.coords
     }
     if make_primary_beam_taylor:
-        n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
-        if n_taylor_terms < 1:
-            raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
-
         channel_frequencies = np.asarray(img_xds.frequency.values, dtype=np.float64)
         if channel_frequencies.ndim != 1 or channel_frequencies.size == 0:
             raise ValueError("MFS primary-beam fitting requires channel frequencies.")
@@ -789,6 +781,7 @@ def imaging_setup_continuum_single_field(
             img_xds,
             image_params=image_params,
             reference_frequency=reference_frequency,
+            n_taylor_terms=n_taylor_terms,
             float_dtype=float_dtype,
             image_data_group_in_name=image_data_group_out_name,
             make_primary_beam_taylor=make_primary_beam_taylor,

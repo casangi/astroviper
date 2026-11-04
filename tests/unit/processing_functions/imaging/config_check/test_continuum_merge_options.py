@@ -27,7 +27,9 @@ def test_mvc_options_preserve_supplied_configuration(approximation, include_stat
     assert config == before
 
 
-@pytest.mark.parametrize("value", ["CHANNEL_PSF", "invalid", None, 1, ["channel_psf"]])
+@pytest.mark.parametrize(
+    "value", ["CHANNEL_PSF", "Local_Beam_Moments", "invalid", None, 1, ["channel_psf"]]
+)
 def test_mvc_approximation_rejected_before_accessing_arrays(value):
     with pytest.raises(ValueError, match="mvc_model_update_approximation"):
         make_mvc_taylor_normal_equation_contributions(
