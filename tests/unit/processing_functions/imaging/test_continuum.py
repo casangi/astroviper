@@ -38,6 +38,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
 )
 from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
     _convert_primary_beam_to_reference_frequency,
+    _mfs_channel_imaging_weight_sums,
 )
 from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
     add_uv_sampling_grid_continuum_single_field,
@@ -1572,6 +1573,16 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency(
         float_dtype=np.float64,
         image_data_group_in_name="residual",
         make_primary_beam_taylor=make_primary_beam_taylor,
+        channel_imaging_weight_sums=xr.DataArray(
+            np.ones((2, 1)),
+            dims=("frequency", "polarization"),
+            coords={
+                "frequency": image.frequency,
+                "polarization": image.polarization,
+            },
+        )
+        if make_primary_beam_taylor
+        else None,
     )
     assert "PRIMARY_BEAM_REFERENCE" in result
     assert ("MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR" in result) is (make_primary_beam_taylor)
@@ -1581,6 +1592,138 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency(
     if make_primary_beam_taylor:
         assert result.MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR.shape == (1, 2, 1, 8, 8)
         assert result.MFS_PRIMARY_BEAM_FIT_MOMENTS.shape == (1, 3, 1)
+
+
+def test_mfs_channel_imaging_weight_sums_accumulate_children_and_nan_flags():
+    """MFS spectral weights sum the gridded samples across children and channels."""
+
+    def child(frequency, weight):
+        return xr.Dataset(
+            {
+                "WEIGHT_IMAGING": (
+                    ("time", "baseline_id", "frequency", "polarization"),
+                    np.asarray(weight, dtype=np.float64),
+                )
+            },
+            coords={
+                "frequency": frequency,
+                "polarization": ["XX", "YY"],
+            },
+            attrs={"data_groups": {"base": {"weight_imaging": "WEIGHT_IMAGING"}}},
+        )
+
+    processing_set = {
+        "first": child(
+            [90.0, 110.0],
+            [[[[1.0, 2.0], [3.0, np.nan]], [[4.0, 5.0], [6.0, 7.0]]]],
+        ),
+        "second": child(
+            [90.0, 110.0],
+            [[[[8.0, 9.0], [10.0, 11.0]]]],
+        ),
+    }
+    image = xr.Dataset(
+        coords={
+            "frequency": [90.0, 110.0],
+            "polarization": ["XX", "YY"],
+        }
+    )
+
+    actual = _mfs_channel_imaging_weight_sums(processing_set, image, "base")
+
+    np.testing.assert_array_equal(actual, [[13.0, 16.0], [19.0, 18.0]])
+    assert actual.attrs["description"].startswith("Post-flagging")
+
+
+def test_mfs_primary_beam_taylor_inputs_reuse_channel_imaging_weights(monkeypatch):
+    """PB fit moments and right-hand sides use the apparent-sky weights s_nu."""
+    import astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam as continuum_beam
+
+    frequency = np.asarray([0.8e9, 1.0e9, 1.2e9])
+    polarization = ["XX", "YY"]
+    channel_beam = np.asarray(
+        [
+            [[0.75], [0.8]],
+            [[1.0], [1.0]],
+            [[1.1], [1.3]],
+        ]
+    ).reshape(3, 2, 1, 1)
+
+    def evaluate_primary_beam(frequencies, polarizations, *args, **kwargs):
+        frequencies = np.asarray(frequencies)
+        if frequencies.size == frequency.size:
+            return channel_beam[None, ...]
+        return np.ones((1, 1, len(polarizations), 1, 1))
+
+    monkeypatch.setattr(continuum_beam, "evaluate_primary_beam", evaluate_primary_beam)
+    image = xr.Dataset(
+        coords={
+            "time": [0],
+            "frequency": frequency,
+            "polarization": polarization,
+            "l": [0.0],
+            "m": [0.0],
+        },
+        attrs={"data_groups": {"residual": {}}},
+    )
+    spectral_weights = xr.DataArray(
+        [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]],
+        dims=("frequency", "polarization"),
+        coords={"frequency": frequency, "polarization": polarization},
+    )
+
+    result = _convert_primary_beam_to_reference_frequency(
+        image,
+        image_params={"image_size": [1, 1], "n_taylor_terms": 2},
+        reference_frequency_hz=1.0e9,
+        float_dtype=np.float64,
+        channel_imaging_weight_sums=spectral_weights,
+    )
+
+    x = (frequency - 1.0e9) / 1.0e9
+    expected_numerator = np.stack(
+        [
+            np.sum(
+                spectral_weights.values * channel_beam[..., 0, 0] * x[:, None] ** order,
+                axis=0,
+            )
+            for order in range(2)
+        ]
+    )
+    expected_moments = np.stack(
+        [
+            np.sum(spectral_weights.values * x[:, None] ** order, axis=0)
+            for order in range(3)
+        ]
+    )
+    np.testing.assert_allclose(
+        result.MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR.values.squeeze((0, 3, 4)),
+        expected_numerator,
+    )
+    np.testing.assert_allclose(
+        result.MFS_PRIMARY_BEAM_FIT_MOMENTS.values.squeeze(0), expected_moments
+    )
+    expected_coefficients = np.stack(
+        [
+            np.linalg.solve(
+                np.asarray(
+                    [
+                        [expected_moments[row + column, pol] for column in range(2)]
+                        for row in range(2)
+                    ]
+                ),
+                expected_numerator[:, pol],
+            )
+            for pol in range(2)
+        ],
+        axis=1,
+    )
+    fitted = fit_mfs_primary_beam_taylor(result, primary_beam_limit=0.2)
+    np.testing.assert_allclose(fitted.values.squeeze((0, 3, 4)), expected_coefficients)
+    assert (
+        result.MFS_PRIMARY_BEAM_FIT_MOMENTS.attrs["spectral_weighting"]
+        == "post_flagging_imaging_weight_sum"
+    )
 
 
 def _taylor_model(value=1.0):

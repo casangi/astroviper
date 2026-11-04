@@ -106,6 +106,127 @@ def _attach_continuum_metadata(
     return img_xds
 
 
+def _mfs_channel_imaging_weight_sums(
+    ps_xdt,
+    img_xds,
+    processing_set_data_group_name,
+):
+    """Sum the imaging weights that contribute to each MFS image channel.
+
+    The MFS primary-beam polynomial must use the same spectral weights as the
+    apparent-sky Taylor fit. Imaging weights already encode visibility flags as
+    ``NaN``; summing their finite values therefore produces CASA's ``s_nu``
+    (``weightlist``) directly from the samples used by the gridder. Processing
+    children and visibility channels that map to the same image channel are
+    accumulated into one value per correlation.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree or mapping
+        Prepared processing-set partition. Auto-correlations must already have
+        been removed and every child must contain registered imaging weights.
+    img_xds : xarray.Dataset
+        MFS image whose frequency and correlation coordinates define the output.
+    processing_set_data_group_name : str
+        Data group that registers ``weight_imaging`` in every processing child.
+
+    Returns
+    -------
+    xarray.DataArray
+        Imaging-weight sums with dimensions ``(frequency, polarization)``.
+    """
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
+    )
+
+    image_frequencies = np.asarray(img_xds.frequency.values, dtype=np.float64)
+    image_polarizations = np.asarray(img_xds.polarization.values).astype(str)
+    weight_sums = np.zeros(
+        (image_frequencies.size, image_polarizations.size), dtype=np.float64
+    )
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        data_groups = ms_xdt.attrs.get("data_groups", {})
+        if processing_set_data_group_name not in data_groups:
+            raise KeyError(
+                f"Data group {processing_set_data_group_name!r} is missing "
+                f"from processing-set child {ms_name!r}."
+            )
+        data_group = data_groups[processing_set_data_group_name]
+        weight_name = data_group.get("weight_imaging")
+        if weight_name is None or weight_name not in ms_xdt:
+            raise KeyError(
+                f"Imaging weights are missing from processing-set child {ms_name!r}."
+            )
+
+        weight = ms_xdt[weight_name]
+        required_dims = {"time", "frequency", "polarization"}
+        if weight.ndim != 4 or not required_dims.issubset(weight.dims):
+            raise ValueError(
+                f"Imaging weights in child {ms_name!r} must have time, baseline, "
+                "frequency, and polarization dimensions; received "
+                f"{weight.dims}."
+            )
+        baseline_dims = [dim for dim in weight.dims if dim not in required_dims]
+        if len(baseline_dims) != 1:
+            raise ValueError(
+                f"Imaging weights in child {ms_name!r} must have exactly one "
+                f"baseline dimension; received {weight.dims}."
+            )
+        weight = weight.transpose("time", baseline_dims[0], "frequency", "polarization")
+
+        child_polarizations = np.asarray(weight.polarization.values).astype(str)
+        polarization_map = []
+        for polarization in child_polarizations:
+            matches = np.flatnonzero(image_polarizations == polarization)
+            if matches.size != 1:
+                raise ValueError(
+                    f"Polarization {polarization!r} from processing-set child "
+                    f"{ms_name!r} does not match exactly one image polarization."
+                )
+            polarization_map.append(int(matches[0]))
+
+        frequency_map = map_visibility_frequencies_to_image(
+            weight.frequency.values,
+            image_frequencies,
+            matching="nearest",
+        )
+        values = np.asarray(weight.values)
+        if np.any(np.isinf(values)):
+            raise ValueError(
+                f"Imaging weights in processing-set child {ms_name!r} contain "
+                "infinite values."
+            )
+        per_visibility_channel = np.nansum(values, axis=(0, 1), dtype=np.float64)
+        for child_pol, image_pol in enumerate(polarization_map):
+            np.add.at(
+                weight_sums[:, image_pol],
+                frequency_map,
+                per_visibility_channel[:, child_pol],
+            )
+
+    if not np.all(np.isfinite(weight_sums)):
+        raise ValueError("MFS channel imaging-weight sums must be finite.")
+
+    return xr.DataArray(
+        weight_sums,
+        dims=("frequency", "polarization"),
+        coords={
+            "frequency": img_xds.frequency,
+            "polarization": img_xds.polarization,
+        },
+        name="MFS_CHANNEL_IMAGING_WEIGHT_SUM",
+        attrs={
+            "description": (
+                "Post-flagging imaging-weight sum used by the MFS primary-beam "
+                "Taylor fit."
+            )
+        },
+    )
+
+
 def _convert_primary_beam_to_reference_frequency(
     img_xds,
     *,
@@ -114,6 +235,7 @@ def _convert_primary_beam_to_reference_frequency(
     float_dtype,
     image_data_group_in_name="residual",
     make_primary_beam_taylor=True,
+    channel_imaging_weight_sums=None,
 ):
     """Build the static and polynomial primary-beam products needed by MFS.
 
@@ -123,11 +245,14 @@ def _convert_primary_beam_to_reference_frequency(
     imaging weights, so it is retained as a non-additive static product.
 
     When ``make_primary_beam_taylor`` is true, the frequency-dependent beam is
-    additionally projected onto the same Taylor basis as the apparent sky.
-    This task-local function stores only additive polynomial-fit numerators and
-    spectral moments; the global append node solves the fit after all frequency
-    partitions have been reduced. No channel-sized beam cube is carried through
-    the distributed reduction. Runs without restoration skip that projection.
+    additionally projected onto the same Taylor basis and with the same
+    post-flagging imaging-weight sums ``s_nu`` as the apparent sky. This is the
+    CASA ``widebandpbcor`` weighted polynomial fit, with AstroViper deriving its
+    ``weightlist`` directly from ``WEIGHT_IMAGING``. This task-local function
+    stores only additive polynomial-fit numerators and spectral moments; the
+    global append node solves the fit after all frequency partitions have been
+    reduced. No channel-sized beam cube is carried through the distributed
+    reduction. Runs without restoration skip that projection.
     """
     import numpy as np
     import xarray as xr
@@ -178,6 +303,45 @@ def _convert_primary_beam_to_reference_frequency(
             raise ValueError("MFS primary-beam fitting requires channel frequencies.")
         if not np.all(np.isfinite(channel_frequencies)):
             raise ValueError("MFS primary-beam frequencies must be finite.")
+        if channel_imaging_weight_sums is None:
+            raise ValueError(
+                "channel_imaging_weight_sums is required when constructing the "
+                "MFS primary-beam Taylor fit."
+            )
+        if set(channel_imaging_weight_sums.dims) != {
+            "frequency",
+            "polarization",
+        }:
+            raise ValueError(
+                "channel_imaging_weight_sums must have frequency and polarization "
+                "dimensions."
+            )
+        channel_imaging_weight_sums = channel_imaging_weight_sums.transpose(
+            "frequency", "polarization"
+        )
+        if not np.array_equal(
+            channel_imaging_weight_sums.frequency.values,
+            img_xds.frequency.values,
+        ):
+            raise ValueError(
+                "channel_imaging_weight_sums frequency coordinates must match the "
+                "MFS image."
+            )
+        if not np.array_equal(
+            channel_imaging_weight_sums.polarization.values,
+            img_xds.polarization.values,
+        ):
+            raise ValueError(
+                "channel_imaging_weight_sums polarization coordinates must match "
+                "the MFS image."
+            )
+        spectral_weights = np.asarray(
+            channel_imaging_weight_sums.values, dtype=np.float64
+        )
+        if not np.all(np.isfinite(spectral_weights)) or np.any(spectral_weights < 0):
+            raise ValueError(
+                "MFS channel imaging-weight sums must be finite and non-negative."
+            )
 
         channel_data = evaluate_primary_beam(
             channel_frequencies,
@@ -197,19 +361,27 @@ def _convert_primary_beam_to_reference_frequency(
         numerator = np.stack(
             [
                 np.sum(
-                    channel_data * x_frequency[None, :, None, None, None] ** order,
+                    channel_data
+                    * spectral_weights[None, :, :, None, None]
+                    * x_frequency[None, :, None, None, None] ** order,
                     axis=1,
                 )
                 for order in range(n_taylor_terms)
             ],
             axis=1,
         )
-        moments = np.asarray(
-            [np.sum(x_frequency**order) for order in range(n_moments)],
-            dtype=np.float64,
+        moments = np.stack(
+            [
+                np.sum(
+                    spectral_weights * x_frequency[:, None] ** order,
+                    axis=0,
+                )
+                for order in range(n_moments)
+            ],
+            axis=0,
         )
         moments = np.broadcast_to(
-            moments[None, :, None],
+            moments[None, :, :],
             (img_xds.sizes["time"], n_moments, img_xds.sizes["polarization"]),
         ).copy()
         img_xds["MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR"] = xr.DataArray(
@@ -220,8 +392,11 @@ def _convert_primary_beam_to_reference_frequency(
                 "taylor_term": np.arange(n_taylor_terms, dtype=np.int64),
             },
             attrs={
-                "description": "Additive MFS primary-beam Taylor-fit numerator.",
+                "description": (
+                    "Additive imaging-weighted MFS primary-beam Taylor-fit numerator."
+                ),
                 "reference_frequency_hz": reference_frequency_hz,
+                "spectral_weighting": "post_flagging_imaging_weight_sum",
             },
         )
         img_xds["MFS_PRIMARY_BEAM_FIT_MOMENTS"] = xr.DataArray(
@@ -234,8 +409,11 @@ def _convert_primary_beam_to_reference_frequency(
             }
             | {"psf_taylor_order": np.arange(n_moments, dtype=np.int64)},
             attrs={
-                "description": "Additive MFS primary-beam Taylor-fit moments.",
+                "description": (
+                    "Additive imaging-weighted MFS primary-beam Taylor-fit moments."
+                ),
                 "reference_frequency_hz": reference_frequency_hz,
+                "spectral_weighting": "post_flagging_imaging_weight_sum",
             },
         )
     reference_data = evaluate_primary_beam(
@@ -597,6 +775,13 @@ def imaging_setup_continuum_single_field(
     #
     if continuum_mode == "mfs":
         start = time.time()
+        channel_imaging_weight_sums = None
+        if make_primary_beam_taylor:
+            channel_imaging_weight_sums = _mfs_channel_imaging_weight_sums(
+                ps_xdt,
+                img_xds,
+                processing_set_data_group_name,
+            )
         img_xds = _convert_primary_beam_to_reference_frequency(
             img_xds,
             image_params=image_params,
@@ -604,6 +789,7 @@ def imaging_setup_continuum_single_field(
             float_dtype=float_dtype,
             image_data_group_in_name=image_data_group_out_name,
             make_primary_beam_taylor=make_primary_beam_taylor,
+            channel_imaging_weight_sums=channel_imaging_weight_sums,
         )
         primary_beam_return_df = pd.DataFrame({"T_primary_beam": [time.time() - start]})
     else:
