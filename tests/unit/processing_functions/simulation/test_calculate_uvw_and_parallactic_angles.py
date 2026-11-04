@@ -1,5 +1,9 @@
 """uvw and parallactic-angle processing functions vs the legacy SIRIUS fixtures."""
 
+import subprocess
+import sys
+import textwrap
+
 import numpy as np
 import pytest
 
@@ -78,6 +82,68 @@ def test_antenna_uvw_w_points_to_phase_center():
         f["phase_center_ra_dec"],
     )
     np.testing.assert_allclose(ant_uvw[0, a1] - ant_uvw[0, a2], uvw[0], atol=1e-9)
+
+
+def test_threads_computing_the_first_uvw_at_once_get_the_serial_uvw():
+    """No thread raises, and each gets the uvw of a serial call.
+
+    astropy adds the GCRS sky offset frame to its global transform graph on
+    first use, once per process, so each trial runs in a fresh interpreter. The
+    threads meet in ``SkyCoord.skyoffset_frame``, which calculate_uvw calls to
+    make that frame, and are released under a forced switch interval.
+    """
+    code = textwrap.dedent(
+        """
+        import sys
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        import astropy.units as u
+        import numpy as np
+        from astropy.coordinates import EarthLocation, SkyCoord
+        from astropy.time import Time
+
+        from astroviper.processing_functions.simulation.calculate_uvw import (
+            calculate_uvw,
+        )
+
+        n_thread = 12
+        site = np.array([-1601185.4, -5041977.5, 3554875.9])
+        antenna = site + np.array([[0.0, 0, 0], [100, 50, 0], [-80, 120, 30]])
+        time = 1570129200.0 + 60.0 * np.arange(n_thread)
+        phase_center = [5.2336, 0.7116] + 0.001 * np.arange(n_thread)[:, None]
+
+
+        def uvw(i):
+            return calculate_uvw(
+                antenna, site, time[i : i + 1], phase_center[i], direction_frame="fk5"
+            )[0]
+
+
+        # the IERS table is loaded once, before the threads
+        EarthLocation(*site * u.m).get_gcrs_posvel(Time(time, format="unix"))
+        skyoffset_frame = SkyCoord.skyoffset_frame
+        barrier = Barrier(n_thread, action=lambda: sys.setswitchinterval(1e-6))
+
+
+        def skyoffset_frame_together(self, rotation=None):
+            barrier.wait()
+            return skyoffset_frame(self, rotation)
+
+
+        SkyCoord.skyoffset_frame = skyoffset_frame_together
+        with ThreadPoolExecutor(n_thread) as pool:
+            threaded = list(pool.map(uvw, range(n_thread)))
+        SkyCoord.skyoffset_frame = skyoffset_frame
+        for i in range(n_thread):
+            np.testing.assert_array_equal(threaded[i], uvw(i))
+        """
+    )
+    for _ in range(3):
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=300
+        )
+        assert result.returncode == 0, result.stderr
 
 
 def test_parallactic_angles_match_legacy():

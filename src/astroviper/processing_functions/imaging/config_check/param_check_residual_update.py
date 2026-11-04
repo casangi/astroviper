@@ -68,6 +68,27 @@ def check_residual_update(config, *, mode, require_complete=False):
     if "gridder" in config and config["gridder"] != "anti_alias":
         raise ValueError("Single-field imaging supports only gridder='anti_alias'.")
 
+    # --- MVC model-update approximation ---
+    # Each approximation needs its own static products; reject unknown names
+    # before creating them rather than silently changing the selected model.
+    if "mvc_model_update_approximation" in config:
+        approximation = config["mvc_model_update_approximation"]
+        if not isinstance(approximation, str) or approximation not in (
+            "channel_psf",
+            "local_beam_moments",
+        ):
+            raise ValueError(
+                "mvc_model_update_approximation must be 'channel_psf' or "
+                "'local_beam_moments'."
+            )
+
+    # --- Reusable MVC moments ---
+    # This switch determines whether static moments are computed this cycle.
+    if "include_local_beam_static" in config:
+        require_boolean(
+            "include_local_beam_static", config["include_local_beam_static"]
+        )
+
     # ========================================================================
     # 2. Image and spectral configuration
     # ========================================================================

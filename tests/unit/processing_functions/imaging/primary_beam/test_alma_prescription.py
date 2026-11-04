@@ -320,7 +320,11 @@ def test_channel_and_reference_paths_share_the_casa_prescription(diameter, dtype
     )
     expected = channel.PRIMARY_BEAM.isel(frequency=1).values.copy()
     reference = _convert_primary_beam_to_reference_frequency(
-        channel, image_params=params, reference_frequency=100e9, float_dtype=dtype
+        channel,
+        image_params=params,
+        reference_frequency=100e9,
+        float_dtype=dtype,
+        make_primary_beam_taylor=False,
     )
     np.testing.assert_array_equal(reference.PRIMARY_BEAM_REFERENCE.values, expected)
     assert reference.PRIMARY_BEAM_REFERENCE.dtype == np.dtype(dtype)

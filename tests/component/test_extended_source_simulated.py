@@ -407,7 +407,6 @@ def run_image(
             "sky_residual",
             "point_spread_function",
             "beam_fit_params_point_spread_function",
-            *(["sky_restored"] if restore else []),
         ],
         "single_precision_image": False,
         "n_mapping_parallelism": {"frequency": 1},
@@ -420,6 +419,9 @@ def run_image(
     }
     with dask.config.set(scheduler="synchronous"):
         if imager == "cube":
+            arguments["image_data_variables_keep"] += (
+                ["sky_restored"] if restore else []
+            )
             result = image_cube_single_field(
                 image_params=image_params,
                 imaging_weights_params={"weighting": "natural"},
@@ -432,6 +434,9 @@ def run_image(
             )
             stops = result["deconvolution"]
         else:
+            arguments["image_data_variables_keep"] += (
+                ["sky_restored_flat_noise"] if restore else []
+            )
             result = image_continuum_single_field(
                 image_params={
                     **image_params,
@@ -448,7 +453,6 @@ def run_image(
                 cycle_control_params=controls,
                 continuum_mode="mfs",
                 primary_beam_limit=PRIMARY_BEAM_LIMIT,
-                primary_beam_correction=False,
                 **arguments,
             )
             # with the statistics of the residual its last stop test checked
@@ -485,10 +489,11 @@ def run_image(
         ),
         "beam": beam.isel({dim: 0 for dim in beam.dims if dim != label}).values,
     }
+    restored_name = "SKY_RESTORED" if imager == "cube" else "SKY_RESTORED_FLAT_NOISE"
     for name, variable in (
         ("model", "SKY_MODEL"),
         ("residual", "SKY_RESIDUAL"),
-        ("restored", "SKY_RESTORED"),
+        ("restored", restored_name),
         ("psf", "POINT_SPREAD_FUNCTION"),
     ):
         if variable in image:

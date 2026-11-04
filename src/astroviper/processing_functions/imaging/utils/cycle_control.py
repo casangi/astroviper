@@ -66,7 +66,7 @@ IMAGING_CONTINUE = 0  # Continue imaging cycles
 IMAGING_MAX_ITER = 1  # Reached total iteration limit (max_iter)
 IMAGING_THRESHOLD = 2  # Peak residual below global threshold
 IMAGING_NO_PROGRESS = 4  # Model updates no longer do any iteration
-IMAGING_DIVERGENCE = 5  # Last max_cycles_divergence model updates diverged
+IMAGING_DIVERGENCE = 5  # Model update or refreshed residual diverged
 IMAGING_ZERO_MASK = 7  # Zero mask (no valid pixels)
 IMAGING_MAX_CYCLES = 9  # Reached imaging cycle limit (max_cycles)
 IMAGING_ENTROPY = 10  # Entropy of the residual passed its maximum (entropy_stop)
@@ -97,7 +97,7 @@ IMAGING_STOP_DESCRIPTIONS = {
     IMAGING_MAX_ITER: "Reached max_iter",
     IMAGING_THRESHOLD: "Reached threshold (peak residual within the mask)",
     IMAGING_NO_PROGRESS: "No progress (model updates did no iterations)",
-    IMAGING_DIVERGENCE: "Model updates diverged max_cycles_divergence times in a row",
+    IMAGING_DIVERGENCE: "Imaging cycles diverged",
     IMAGING_ZERO_MASK: "Zero mask",
     IMAGING_MAX_CYCLES: "Reached max_cycles",
     IMAGING_ENTROPY: "Residual entropy passed its maximum",
@@ -815,6 +815,14 @@ class CycleController:
         Per-plane flag, set once the divergence stop has ended the imaging
         cycles of the plane. Such a plane gets no more iterations and keeps
         the stop code ``IMAGING_DIVERGENCE``.
+    previous_refreshed_peak_residual : numpy.ndarray or None
+        Absolute Taylor-zero residual peak measured after the preceding exact
+        residual update, per plane. Continuum MVC uses it to detect a runaway
+        model update before starting another one. Allocated lazily only when
+        that check is requested.
+    refreshed_residual_divergence_stopped : numpy.ndarray or None
+        Per-plane flag set when an exact refreshed residual peak exceeds a
+        configured multiple of the preceding refreshed peak.
     entropy_stop : bool
         Whether the entropy of the residual stops the imaging cycles of a
         plane (see :meth:`check_convergence`).
@@ -990,6 +998,8 @@ class CycleController:
         self.max_cycles_divergence = int(max_cycles_divergence)
         self.diverged_model_updates = None
         self.divergence_stopped = None
+        self.previous_refreshed_peak_residual = None
+        self.refreshed_residual_divergence_stopped = None
         self.max_cycles = validate_max_cycles(max_cycles, max_psf_fraction)
         self.max_cycles_auto = None
 
@@ -1092,7 +1102,7 @@ class CycleController:
                 for n, c in zip(needed, self.max_iter_remaining.shape, strict=False)
             )
             sl = tuple(slice(0, d) for d in self.max_iter_remaining.shape)
-            for attr, fill, dtype in (
+            state_arrays = [
                 ("max_iter_remaining", self._max_iter, int),
                 ("stop_code_imaging", IMAGING_CONTINUE, int),
                 ("stop_code_model_update", MODEL_UPDATE_CONTINUE, int),
@@ -1101,7 +1111,15 @@ class CycleController:
                 ("entropy_stopped", False, bool),
                 ("diverged_model_updates", 0, int),
                 ("divergence_stopped", False, bool),
-            ):
+            ]
+            if self.previous_refreshed_peak_residual is not None:
+                state_arrays.extend(
+                    [
+                        ("previous_refreshed_peak_residual", np.nan, float),
+                        ("refreshed_residual_divergence_stopped", False, bool),
+                    ]
+                )
+            for attr, fill, dtype in state_arrays:
                 new = np.full(grown, fill, dtype=dtype)
                 new[sl] = getattr(self, attr)
                 setattr(self, attr, new)
@@ -1131,6 +1149,79 @@ class CycleController:
             max(k.pol for k in keys) + 1,
         )
         self._ensure_shape(needed)
+
+    def check_refreshed_residual_divergence(
+        self,
+        imaging_dict: ImagingDict,
+        factor: float = 3.0,
+        time: int | None = None,
+        pol: int | None = None,
+        chan: int | None = None,
+    ) -> list[tuple[tuple[int, int, int], float, float]]:
+        """Stop planes whose exact residual peak grows by more than ``factor``.
+
+        This is the CASA-style major-cycle safeguard: it compares consecutive
+        residual peaks measured after the visibility residual has been
+        recomputed, rather than the approximate residual maintained inside a
+        model update. Continuum MVC calls it for its synthetic Taylor-term-zero
+        plane. The first refreshed residual only establishes the baseline.
+
+        Parameters
+        ----------
+        imaging_dict : ImagingDict
+            Statistics of an exact refreshed residual.
+        factor : float, optional
+            Strict growth factor that marks divergence. Must be finite and
+            greater than one; the default is 3.
+        time, pol, chan : int, optional
+            Restrict the comparison to selected planes.
+
+        Returns
+        -------
+        list of tuple
+            Newly stopped ``((time, chan, pol), previous, current)`` records.
+            A stopped plane remains stopped on later calls.
+        """
+        if (
+            isinstance(factor, bool)
+            or not isinstance(factor, int | float | np.integer | np.floating)
+            or not np.isfinite(factor)
+            or factor <= 1
+        ):
+            raise ValueError(
+                "refreshed residual divergence factor must be a finite number "
+                f"greater than one; got {factor!r}."
+            )
+
+        self._ensure_state(imaging_dict)
+        if self.max_iter_remaining is None:
+            return []
+        if self.previous_refreshed_peak_residual is None:
+            self.previous_refreshed_peak_residual = np.full(
+                self.max_iter_remaining.shape, np.nan, dtype=float
+            )
+            self.refreshed_residual_divergence_stopped = np.zeros(
+                self.max_iter_remaining.shape, dtype=bool
+            )
+        newly_stopped = []
+        for key, fields in imaging_dict.data.items():
+            if not self._matches(key, time, pol, chan):
+                continue
+            idx = self._key_index(key)
+            current = abs(self._latest(fields, "peakres", np.nan))
+            previous = self.previous_refreshed_peak_residual[idx]
+            if (
+                not self.refreshed_residual_divergence_stopped[idx]
+                and np.isfinite(previous)
+                and np.isfinite(current)
+                and current > float(factor) * previous
+            ):
+                self.refreshed_residual_divergence_stopped[idx] = True
+                self.divergence_stopped[idx] = True
+                newly_stopped.append((idx, float(previous), float(current)))
+            if np.isfinite(current):
+                self.previous_refreshed_peak_residual[idx] = current
+        return newly_stopped
 
     def calculate_per_cycle_limits(
         self,
@@ -1434,10 +1525,11 @@ class CycleController:
            (``model_update_ran`` False), so it notices the fall one model
            update after the maximum; the model of that last model update is
            kept.
-        5. Divergence (stopcode 5), only with ``max_cycles_divergence`` > 0:
-           the plane's last ``max_cycles_divergence`` model updates all ended
-           diverged. The stop is final for the plane: it gets no more
-           iterations and keeps this stop code.
+        5. Divergence (stopcode 5): either the plane's last
+           ``max_cycles_divergence`` model updates all ended diverged, or
+           :meth:`check_refreshed_residual_divergence` marked its exact
+           refreshed residual as a runaway. The stop is final for the plane:
+           it gets no more iterations and keeps this stop code.
         6. Imaging cycle limit (stopcode 9): max_cycles == 0 (if not -1). A
            ``max_cycles="auto"`` has to be resolved first
            (:meth:`resolve_max_cycles`).
@@ -1904,6 +1996,9 @@ class CycleController:
             self.entropy_stopped[...] = False
             self.diverged_model_updates[...] = 0
             self.divergence_stopped[...] = False
+            if self.previous_refreshed_peak_residual is not None:
+                self.previous_refreshed_peak_residual[...] = np.nan
+                self.refreshed_residual_divergence_stopped[...] = False
         self.cycles_done = 0
         self.total_iter_done = 0
         self.stopcode = StopCode(
@@ -1925,6 +2020,9 @@ class CycleController:
             self.entropy_stopped[...] = False
             self.diverged_model_updates[...] = 0
             self.divergence_stopped[...] = False
+            if self.previous_refreshed_peak_residual is not None:
+                self.previous_refreshed_peak_residual[...] = np.nan
+                self.refreshed_residual_divergence_stopped[...] = False
 
     def get_state(self) -> dict[str, Any]:
         """Get current state of the cycle controller as a dictionary.

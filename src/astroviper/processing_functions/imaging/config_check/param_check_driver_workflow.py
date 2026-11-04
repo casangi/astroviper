@@ -71,6 +71,28 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     if primary_beam_correction and not restore:
         raise ValueError("primary_beam_correction requires restore=True.")
 
+    # --- Continuum restoration products ---
+    # A corrected product needs the primary beam; an explicit request must not
+    # be silently replaced by an apparent-sky restoration.
+    restoration_output = config.get("restoration_output")
+    if restoration_output is not None:
+        if not isinstance(restoration_output, str) or restoration_output not in (
+            "apparent",
+            "primary_beam_corrected",
+            "both",
+        ):
+            raise ValueError(
+                "restoration_output must be 'apparent', 'primary_beam_corrected', or 'both'."
+            )
+        if (
+            restoration_output in ("primary_beam_corrected", "both")
+            and not primary_beam_correction
+        ):
+            raise ValueError(
+                "A primary-beam-corrected restoration_output requires "
+                "primary_beam_correction=True."
+            )
+
     # --- Primary-beam cutoff ---
     # The fractional cutoff must be one finite value in the interval [0, 1).
     if "primary_beam_limit" in config:

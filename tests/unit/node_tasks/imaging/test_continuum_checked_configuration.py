@@ -37,7 +37,8 @@ def test_actual_preparation_checks_only_unchecked_configuration(
         checks[name] = Mock(wraps=getattr(config_check, name))
         monkeypatch.setattr(config_check, name, checks[name])
     runtime = Mock(side_effect=RuntimeReached)
-    monkeypatch.setattr(processing, "finalize_mvc_taylor_normal_equations", runtime)
+    # Primary-beam Taylor fitting is now the first runtime product consumer.
+    monkeypatch.setattr(processing, "fit_mvc_primary_beam_taylor", runtime)
     params = {
         "continuum_mode": "mvc",
         "deconvolver": "hogbom",
@@ -78,7 +79,7 @@ def test_checked_configuration_still_requires_actual_mvc_products(entry):
         "continuum_mode": "mvc",
         "image_params": {"n_taylor_terms": 1, "reference_frequency": 1e9},
     }
-    with pytest.raises(KeyError, match="MVC_RESIDUAL_WEIGHT_SUM"):
+    with pytest.raises(KeyError, match="MVC primary-beam Taylor fit is missing"):
         if entry == "append":
             node.continuum_cycle_append_node(
                 {"image": xr.Dataset()}, params, input_checked=True

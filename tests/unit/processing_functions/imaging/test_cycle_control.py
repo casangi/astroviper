@@ -22,6 +22,7 @@ from astroviper.processing_functions.image_analysis.image_statistics import (
 )
 from astroviper.processing_functions.imaging.utils.cycle_control import (  # Stop codes; Utility functions; Main class
     IMAGING_CONTINUE,
+    IMAGING_DIVERGENCE,
     IMAGING_MAX_CYCLES,
     IMAGING_MAX_ITER,
     IMAGING_THRESHOLD,
@@ -2678,6 +2679,89 @@ class TestModelUpdateStopCode(unittest.TestCase):
         self.assertFalse(controller.divergence_stopped.any())
         self.assertEqual(int(controller.diverged_model_updates.max()), 0)
         self.assertEqual(controller.get_state()["max_cycles_divergence"], 1)
+
+
+class TestRefreshedResidualDivergence(unittest.TestCase):
+    """A CASA-style threefold rise in an exact residual stops only that plane."""
+
+    @staticmethod
+    def _residual(*peaks):
+        from astroviper.processing_functions.imaging.utils import ImagingDict
+
+        residual = ImagingDict()
+        for pol, peak in enumerate(peaks):
+            residual.add(
+                {"peakres": peak, "masksum": 16, "iter_done": 0},
+                time=0,
+                chan=0,
+                pol=pol,
+            )
+        return residual
+
+    @staticmethod
+    def _controller():
+        return CycleController(max_iter=100, max_cycles=-1, threshold=0.0)
+
+    def test_threefold_rise_is_strict_and_per_plane(self):
+        controller = self._controller()
+        controller.ensure_planes(1, 1, 2)
+        # Cube and MFS controllers pay no storage cost unless the MVC check is
+        # explicitly invoked.
+        self.assertIsNone(controller.previous_refreshed_peak_residual)
+        self.assertEqual(
+            controller.check_refreshed_residual_divergence(self._residual(1.0, 2.0)),
+            [],
+        )
+        # Exactly threefold is permitted; only a larger rise is a runaway.
+        self.assertEqual(
+            controller.check_refreshed_residual_divergence(self._residual(3.0, 2.5)),
+            [],
+        )
+        stopped = controller.check_refreshed_residual_divergence(
+            self._residual(9.1, 2.0)
+        )
+        self.assertEqual(stopped, [((0, 0, 0), 3.0, 9.1)])
+
+        stopcode, _ = controller.check_convergence(self._residual(9.1, 2.0))
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(
+            controller.stop_code_imaging[0, 0].tolist(),
+            [IMAGING_DIVERGENCE, IMAGING_CONTINUE],
+        )
+
+    def test_empty_statistics_do_not_allocate_state(self):
+        from astroviper.processing_functions.imaging.utils import ImagingDict
+
+        controller = self._controller()
+        self.assertEqual(
+            controller.check_refreshed_residual_divergence(ImagingDict()), []
+        )
+        self.assertIsNone(controller.previous_refreshed_peak_residual)
+
+    def test_stop_is_final_and_reset_clears_the_baseline(self):
+        controller = self._controller()
+        controller.check_refreshed_residual_divergence(self._residual(1.0))
+        controller.check_refreshed_residual_divergence(self._residual(4.0))
+        self.assertTrue(controller.refreshed_residual_divergence_stopped[0, 0, 0])
+
+        # Later measurements update the diagnostic peak but cannot revoke or
+        # duplicate the final divergence stop.
+        self.assertEqual(
+            controller.check_refreshed_residual_divergence(self._residual(0.1)),
+            [],
+        )
+        controller.reset()
+        self.assertFalse(controller.divergence_stopped.any())
+        self.assertFalse(controller.refreshed_residual_divergence_stopped.any())
+        self.assertTrue(np.isnan(controller.previous_refreshed_peak_residual).all())
+
+    def test_invalid_growth_factors_are_refused(self):
+        controller = self._controller()
+        for factor in (1.0, 0.0, np.inf, np.nan, True, "3"):
+            with self.assertRaises(ValueError):
+                controller.check_refreshed_residual_divergence(
+                    self._residual(1.0), factor=factor
+                )
 
 
 class TestRecordModelUpdate(unittest.TestCase):
