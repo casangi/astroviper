@@ -36,8 +36,6 @@ def convert_direction_frame(
     out_frame: str,
     times: Time,
     location: EarthLocation = None,
-    target_times: Time = None,
-    ephemeris: bool = False,
     interpolate: bool = False,
     time_resolution: float = 300.0,
 ) -> tuple:
@@ -46,12 +44,6 @@ def convert_direction_frame(
 
     For each sample astropy applies the full ERFA chain (Earth rotation,
     polar motion, precession, nutation, aberration) at times[i] for location.
-
-    If ephemeris=True the input (v0, v1) live on a coarse time grid (times)
-    and are first interpolated to target_times in ICRS before converting.
-    Interpolation must happen in ICRS — not after conversion — because ALTAZ
-    changes non-linearly with Earth's rotation even for a fixed source.
-    Use is_ephemeris_ms() to determine this automatically from the MS.
 
     Parameters
     ----------
@@ -62,10 +54,6 @@ def convert_direction_frame(
     out_frame       : "ALTAZ", "ICRS", "FK5", "FK4", "GALACTIC", "HADEC"
     times           : astropy Time (N,)  one timestamp per sample
     location        : astropy EarthLocation  required for ALTAZ / HADEC
-    target_times    : astropy Time (M,)  dense timestamps to interpolate onto;
-                      required when ephemeris=True
-    ephemeris       : if True, interpolate (v0, v1) from times to target_times
-                      in ICRS before converting; use is_ephemeris_ms() to set
     interpolate     : if True, use ErfaAstromInterpolator for a large speedup
                       by interpolating Earth orientation parameters on a coarser
                       time grid instead of every sample. Precision remains at
@@ -101,12 +89,6 @@ def convert_direction_frame(
     loc_needed = fin in _LOCATION_DEPENDENT or fout in _LOCATION_DEPENDENT
     if loc_needed and location is None:
         raise ValueError(f"location is required for {_LOCATION_DEPENDENT} frames.")
-
-    if ephemeris:
-        if target_times is None:
-            raise ValueError("target_times is required when ephemeris=True.")
-        v0, v1 = interpolate_direction_to_times(v0, v1, times, target_times)
-        times = target_times
 
     # Build location-dependent frames once over the full time array.
     # Astropy broadcasts (v0[i], v1[i]) against times[i] internally via ERFA.
