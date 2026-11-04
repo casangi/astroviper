@@ -3017,7 +3017,9 @@ def image_continuum_single_field(
         operator used by the main MVC path.
         ``"channel_psf"`` retains the frequency-dependent channel PSFs while
         approximating the channel-to-common-beam ratio as one and is retained
-        as the CASA-comparison option.
+        as the CASA-comparison option. On wide bands at low effective primary-
+        beam response it can satisfy the Taylor-zero stopping threshold while
+        silently biasing compact-source flux and spectral index.
         ``"local_beam_moments"`` retains local frequency-dependent primary-beam
         moments while approximating the channel PSFs by a common response. The
         setting is ignored by MFS.

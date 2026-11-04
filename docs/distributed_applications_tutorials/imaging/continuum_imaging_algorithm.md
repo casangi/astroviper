@@ -161,6 +161,20 @@ the safer approximation for diffuse emission whose response includes extended
 or frequency-dependent sidelobes. It can bias the spectrum of compact sources
 towards the primary-beam edge, where the beam ratio is chromatic.
 
+This bias can be silent: the Taylor-zero residual can satisfy the stopping
+threshold while the recovered Taylor-zero flux and spectral index remain
+wrong. In measured compact-source tests, this occurred for fractional
+half-bandwidths of about 25 percent or more once the effective primary beam
+$\bar A$ fell below roughly 0.35. Over a narrower, approximately 12.5-percent
+half-bandwidth, Taylor zero remained within about two percent of the expected
+flux and a two-term solution retained its spectral index down to
+$\bar A\simeq0.28$; a three-term solution required about $\bar A\simeq0.35$.
+These values describe the tested configurations rather than a guaranteed
+boundary: uv coverage, Taylor order, stopping threshold and channel clipping
+also affect the result. Use the default `local_beam_moments` for general MVC
+imaging; select `channel_psf` explicitly for CASA comparison or when its
+near-centre diffuse-emission approximation is desired.
+
 ### `local_beam_moments`
 
 This approximation retains local frequency-dependent primary-beam moments. It

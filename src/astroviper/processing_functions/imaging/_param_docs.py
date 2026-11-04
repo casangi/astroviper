@@ -617,7 +617,9 @@ IMAGING_PARAM_DOCS = {
         "operator used by the main MVC path.\n"
         '``"channel_psf"`` retains the frequency-dependent channel PSFs while\n'
         "approximating the channel-to-common-beam ratio as one and is retained\n"
-        "as the CASA-comparison option.\n"
+        "as the CASA-comparison option. On wide bands at low effective primary-\n"
+        "beam response it can satisfy the Taylor-zero stopping threshold while\n"
+        "silently biasing compact-source flux and spectral index.\n"
         '``"local_beam_moments"`` retains local frequency-dependent primary-beam\n'
         "moments while approximating the channel PSFs by a common response. The\n"
         "setting is ignored by MFS."
