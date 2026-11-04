@@ -673,7 +673,10 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
         "Restoration automatically retains its mode-specific restored Taylor\n"
         "product and the "
-        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.'
+        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.\n'
+        "Restored and spectral products require ``restore=True``. Alpha products\n"
+        "require at least two Taylor terms; beta requires at least three.\n"
+        "Unavailable products are rejected before input reads or graph construction."
     ),
     "image_continuum_single_field.restore": (
         "If ``True`` restore every Taylor coefficient after deconvolution and\n"

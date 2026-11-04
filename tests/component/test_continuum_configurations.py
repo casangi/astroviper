@@ -395,3 +395,43 @@ def test_continuum_uses_writer_resolved_path(
     assert np.isfinite(image.SKY_RESIDUAL).all()
     assert "SKY_RESTORED_FLAT_SKY" in image
     assert not any("CACHE" in name or "MVC_" in name for name in image.data_vars)
+
+
+@pytest.mark.parametrize("n_taylor_terms", [1, 2, 3])
+def test_restoration_retains_only_available_spectral_products(
+    tmp_path, continuum_input, n_taylor_terms
+):
+    """The driver writes each promised spectral product and allocates no absent one."""
+    store, params, _, _ = continuum_input
+    params = {**params, "n_taylor_terms": n_taylor_terms}
+    output = tmp_path / f"restored_{n_taylor_terms}_terms.img.zarr"
+    with dask.config.set(scheduler="synchronous"):
+        image_continuum_single_field(
+            ps_store=str(store),
+            image_store=str(output),
+            image_params=params,
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params={
+                "max_iter": 1,
+                "max_cycles": 0,
+                "threshold": 1e30,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            deconvolver="hogbom" if n_taylor_terms == 1 else "mtmfs",
+            restore=True,
+            continuum_mode="mfs",
+            processing_set_data_group_name="base",
+            n_mapping_parallelism={"frequency": 2},
+            weight_memory_mode="in_memory",
+            processing_function_threads=1,
+            single_precision_image=False,
+        )
+    with xr.open_zarr(output) as stored:
+        assert "SKY_RESTORED_FLAT_SKY" in stored
+        assert ("ALPHA" in stored) is (n_taylor_terms >= 2)
+        assert ("ALPHA_ERROR" in stored) is (n_taylor_terms >= 2)
+        assert ("BETA" in stored) is (n_taylor_terms >= 3)

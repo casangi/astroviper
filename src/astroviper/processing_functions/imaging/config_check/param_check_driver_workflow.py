@@ -284,7 +284,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     image_params = require_mapping("image_params", config.get("image_params", {}))
     if output_format == "fits":
         check_fits_coordinates(image_params)
-    check_kept_variables(config, fits=output_format == "fits")
+    check_kept_variables(config, mode=mode, fits=output_format == "fits")
     check_output_layout(config)
     check_output_codec(config)
 

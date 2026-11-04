@@ -82,13 +82,16 @@ def check_fits_coordinates(image_params):
             raise ValueError("FITS direction_reference must be FK5 or ICRS.")
 
 
-def check_kept_variables(config, *, fits=False, require_image=True):
+def check_kept_variables(config, *, mode=None, fits=False, require_image=True):
     """Check the requested variable registry and the FITS representation.
 
     Parameters
     ----------
     config : mapping
         Output configuration, including restoration switches.
+    mode : ImagingMode or None
+        Workflow whose output capabilities must be checked. None checks only
+        registry membership and storage representation for direct writer calls.
     fits : bool
         Whether to require the fixed FITS writer's image/beam dimensions.
     """
@@ -112,6 +115,58 @@ def check_kept_variables(config, *, fits=False, require_image=True):
         raise ValueError(
             "image_data_variables_keep contains an unknown imaging variable."
         )
+    # --- Workflow product capabilities ---
+    # Shared registry membership does not mean every imager produces the key.
+    # Reject impossible requests before allocating stores or constructing graphs.
+    if mode is not None:
+        continuum_products = {
+            "sky_restored_flat_noise",
+            "sky_restored_flat_sky",
+            "alpha",
+            "alpha_error",
+            "beta",
+        }
+        cube_restored = {"sky_restored", "sky_restored_primary_beam_corrected"}
+        requested = set(kept)
+        if mode.imaging_kind == "cube":
+            unsupported = requested & continuum_products
+            if unsupported:
+                raise ValueError(
+                    f"Cube imaging cannot produce continuum-only variables {sorted(unsupported)}."
+                )
+        elif requested & cube_restored:
+            raise ValueError(
+                "Legacy continuum output keys are not produced; use "
+                "'sky_restored_flat_noise' or 'sky_restored_flat_sky' instead."
+            )
+
+        # --- Restoration-dependent products ---
+        # The keep list must not promise images that the disabled step cannot make.
+        restored_products = requested & (continuum_products | cube_restored)
+        if "restore" in config and not config["restore"] and restored_products:
+            raise ValueError(
+                f"Requested variables {sorted(restored_products)} require restore=True."
+            )
+        if (
+            mode.imaging_kind == "cube"
+            and "sky_restored_primary_beam_corrected" in requested
+            and "primary_beam_correction" in config
+            and not config["primary_beam_correction"]
+        ):
+            raise ValueError(
+                "sky_restored_primary_beam_corrected requires primary_beam_correction=True."
+            )
+
+        # --- Spectral coefficient availability ---
+        # Alpha needs coefficients zero and one; beta also needs coefficient two.
+        nterms = config.get("image_params", {}).get(
+            "n_taylor_terms", config.get("n_taylor_terms")
+        )
+        if nterms is not None:
+            for key, minimum in (("alpha", 2), ("alpha_error", 2), ("beta", 3)):
+                if key in requested and nterms < minimum:
+                    raise ValueError(f"{key} requires n_taylor_terms >= {minimum}.")
+
     if not fits:
         return
 

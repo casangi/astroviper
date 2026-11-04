@@ -2516,25 +2516,6 @@ def _validate_cycle_acceleration(cycle_acceleration, momentum_coefficient):
         raise ValueError(str(error)) from error
 
 
-def _validate_continuum_output_keys(image_data_variables_keep):
-    """Reject cube-era restored-image keys that continuum no longer produces."""
-    legacy_messages = {
-        "sky_restored": (
-            "continuum imaging no longer writes the apparent/flat-noise restored "
-            "product; set restore=True to write 'sky_restored_flat_sky'"
-        ),
-        "sky_restored_primary_beam_corrected": (
-            "use 'sky_restored_flat_sky' instead; restore=True retains it automatically"
-        ),
-    }
-    for key in image_data_variables_keep:
-        if key in legacy_messages:
-            raise ValueError(
-                f"image_data_variables_keep contains legacy continuum key {key!r}: "
-                f"{legacy_messages[key]}."
-            )
-
-
 def _warn_on_disabled_momentum(previous_state_xds, state_xds):
     """Warn when Nesterov momentum has switched off on further planes."""
     import toolviper.utils.logger as logger
@@ -2825,6 +2806,9 @@ def image_continuum_single_field(
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
         Restoration automatically retains its mode-specific restored Taylor
         product and the derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.
+        Restored and spectral products require ``restore=True``. Alpha products
+        require at least two Taylor terms; beta requires at least three.
+        Unavailable products are rejected before input reads or graph construction.
     compressor : object, optional
         Output Zarr compressor.
     processing_set_data_group_name : str
@@ -3417,7 +3401,10 @@ def image_continuum_single_field(
     # When restoring, ensure the derived spectral products are written without
     # retaining the intermediate apparent restored Taylor image.
     if restore:
-        spectral_products = ("alpha", "alpha_error", "beta")
+        n_taylor_terms = image_params["n_taylor_terms"]
+        spectral_products = ("alpha", "alpha_error") if n_taylor_terms >= 2 else ()
+        if n_taylor_terms >= 3:
+            spectral_products += ("beta",)
         image_data_variables_keep = list(image_data_variables_keep) + [
             product
             for product in spectral_products
