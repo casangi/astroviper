@@ -375,3 +375,82 @@ def test_continuum_uses_writer_resolved_path(
     assert np.isfinite(image.SKY_RESIDUAL).all()
     assert "SKY_RESTORED_FLAT_SKY" in image
     assert not any("CACHE" in name or "MVC_" in name for name in image.data_vars)
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("max_cycles", [0, 2])
+@pytest.mark.parametrize("restore", [False, True])
+def test_restoration_state_enters_only_the_final_graph(
+    tmp_path, continuum_input, monkeypatch, continuum_mode, max_cycles, restore
+):
+    """Iteration payloads exclude beam polynomials and repeated static returns."""
+    from importlib import import_module
+
+    driver = import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+    cycle_graph = driver.compute_continuum_graph
+    final_graph = driver.compute_continuum_finalization_graph
+    cycles, finals = [], []
+
+    def inspect_cycle(**kwargs):
+        append_params = kwargs["append_input_params"]
+        assert "restoration_xds" not in append_params
+        if "static_xds" in append_params:
+            assert "PRIMARY_BEAM_TAYLOR" not in append_params["static_xds"]
+        result, timing = cycle_graph(**kwargs)
+        assert "PRIMARY_BEAM_TAYLOR" not in result["image"]
+        first = append_params["is_first_cycle"]
+        assert ("static_xds" in result) is first
+        assert ("restoration_xds" in result) is (
+            first and (restore or continuum_mode == "mvc")
+        )
+        if first and continuum_mode == "mvc":
+            cache = result["static_xds"]
+            assert cache.MVC_RESIDUAL_BEAM_SUPPORTED.dtype == np.bool_
+            assert "MVC_RESIDUAL_BEAM_CHANNEL_COUNT" not in cache
+        if first and continuum_mode == "mfs" and restore:
+            assert set(result["restoration_xds"].sizes) == {"frequency", "polarization"}
+        cycles.append(first)
+        return result, timing
+
+    def inspect_final(data, params):
+        assert data.keys() == {"image"}
+        assert "PRIMARY_BEAM_TAYLOR" not in params["static_xds"]
+        finals.append(True)
+        return final_graph(data, params)
+
+    monkeypatch.setattr(driver, "compute_continuum_graph", inspect_cycle)
+    monkeypatch.setattr(driver, "compute_continuum_finalization_graph", inspect_final)
+    store, params, _, _ = continuum_input
+    with dask.config.set(scheduler="synchronous"):
+        result = image_continuum_single_field(
+            ps_store=str(store),
+            image_store=str(tmp_path / "final.img.zarr"),
+            image_params=params,
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params={
+                "max_iter": 4,
+                "max_cycles": max_cycles,
+                "max_iter_per_cycle": 2,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            continuum_mode=continuum_mode,
+            deconvolver="mtmfs",
+            restore=restore,
+            processing_set_data_group_name="base",
+            weight_memory_mode="in_memory",
+            n_mapping_parallelism={"frequency": 2},
+            single_precision_image=False,
+            processing_function_threads=1,
+        )
+    assert len(cycles) == result["n_cycles"] + 1
+    assert finals == [True]
+    assert ("PRIMARY_BEAM_TAYLOR" in result["image"]) is (
+        restore or continuum_mode == "mvc"
+    )
+    assert "PRIMARY_BEAM_TAYLOR" not in result["static_xds"]

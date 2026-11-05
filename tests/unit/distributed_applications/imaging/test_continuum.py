@@ -1732,9 +1732,10 @@ def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
     )
 
     assert result["n_cycles"] == 2
-    assert len(result["timing_graphs"]) == result["n_cycles"] + 1
+    assert len(result["timing_graphs"]) == result["n_cycles"] + 2
     assert result["timing_graphs"][0]["stage"].startswith("imaging cycle 1")
-    assert result["timing_graphs"][-1]["stage"] == "final residual"
+    assert result["timing_graphs"][-2]["stage"] == "final residual"
+    assert result["timing_graphs"][-1]["stage"] == "finalization"
     assert result["timing_graphs"][-1]["stage_kind"] == "final"
     assert result["timing_graphs"][-1]["includes_restoration"] is False
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
@@ -2195,7 +2196,7 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     )
 
     assert result["n_cycles"] == 2
-    assert len(result["timing_graphs"]) == result["n_cycles"] + 3
+    assert len(result["timing_graphs"]) == result["n_cycles"] + 4
     assert [record["stage"] for record in result["timing_graphs"][:2]] == [
         "global weight density",
         "global weight degridding",
@@ -2204,7 +2205,8 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
         "weighting",
         "weighting",
     ]
-    assert result["timing_graphs"][-1]["stage"] == "final residual + restoration"
+    assert result["timing_graphs"][-2]["stage"] == "final residual"
+    assert result["timing_graphs"][-1]["stage"] == "restoration"
     assert result["timing_graphs"][-1]["stage_kind"] == "final"
     assert result["timing_graphs"][-1]["includes_restoration"] is True
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
@@ -2752,7 +2754,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         IMAGING_MAX_CYCLES if max_iter == 100 else IMAGING_MAX_ITER
     )
     assert result["controller"].cycles_done == result["n_cycles"] == expected_updates
-    assert len(result["timing_graphs"]) == expected_updates + 1
+    assert len(result["timing_graphs"]) == expected_updates + 2
     assert result["controller"].total_iter_done > 0
     assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8
     assert result["residual_statistics"].data

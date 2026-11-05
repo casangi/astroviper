@@ -139,6 +139,19 @@ _CONTINUUM_MODE_DOC = (
 )
 
 IMAGING_PARAM_DOCS = {
+    "make_primary_beam_taylor": (
+        "Collect the first-cycle inputs needed for primary-beam Taylor products.\n"
+        "Distributed MFS retains compact channel/correlation weight sums and fits\n"
+        "the beam only at final restoration. MVC keeps its final diagnostic\n"
+        "outside the iterative image and static cache."
+    ),
+    "lookup_frequency_max": (
+        "Upper frequency in Hz used to build the physical Airy interpolation\n"
+        "table. Supply the maximum frequency of the complete task when evaluating\n"
+        "its channels separately, preserving the same beam samples as a batched\n"
+        "evaluation. None uses the maximum of freq_chan. The CASA Airy model\n"
+        "uses its own per-channel tables and does not need this bound."
+    ),
     "image_params": _IMAGE_PARAMS_DOC,
     "make_primary_beam_single_field.image_params": _PRIMARY_BEAM_IMAGE_PARAMS_DOC,
     "make_continuum_primary_beam_single_field.image_params": (
