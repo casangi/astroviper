@@ -1728,6 +1728,30 @@ class TestMaskCoverage:
         fitted = (dirty[box] * response).sum() / (response**2).sum()
         np.testing.assert_allclose(amplitude, gain * fitted, rtol=1e-9)
 
+    def test_cut_keeps_the_scale_the_search_passed(self):
+        """The share need not fall with the width: next to a hole in the mask
+        narrower Gaussians than the scale tested fall short too."""
+        n = 128
+        psf = _centered_psf(n, n, 2.0)
+        dirty = _linear_convolution(_gauss(n, n, 64, 64, 15.0), psf)
+        mask = np.zeros_like(dirty)
+        mask[44:85, 44:85] = 1.0
+        mask[64, 65] = 0.0
+        out, *_ = self._clean(psf, dirty, mask, 1)
+        ((i, j, sigma, _),) = out["components"]
+        assert sigma >= aspclean.psf_gaussian_width(psf)
+        assert _mask_coverage(mask, i, j, sigma) >= 0.99
+
+    def test_soft_mask_counts_the_same_in_the_search_and_after_the_fit(self):
+        """A fit at the scale tested is not cut for pixels the search counted."""
+        n = 128
+        psf = _centered_psf(n, n, 2.0)
+        dirty = _linear_convolution(_gauss(n, n, 64, 64, 4.7), psf)
+        mask = np.full_like(dirty, 0.5)
+        mask[59:70, 59:70] = 1.0
+        out, *_ = self._clean(psf, dirty, mask, 1, asp_min_mask_coverage=0.7)
+        assert out["components"][0, 2] > 4.5
+
     def test_no_gaussian_keeps_the_share_a_point_does(self):
         """Next to a hole in the mask the narrow fit loses its share to the
         hole, and so does every narrower Gaussian."""

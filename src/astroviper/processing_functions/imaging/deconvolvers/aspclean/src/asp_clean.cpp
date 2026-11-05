@@ -943,7 +943,7 @@ private:
         for (int j = blc1_; j <= trc1_; ++j) {
             double row = 0.0;
             for (int i = blc0_; i <= trc0_; ++i)
-                row += initScaleMasks_[0](i, j) * rx[static_cast<std::size_t>(i)];
+                row += maskMat_(i, j) * rx[static_cast<std::size_t>(i)];
             onMask += ry[static_cast<std::size_t>(j)] * row;
         }
         return onMask / (std::accumulate(rx.begin(), rx.end(), 0.0) *
@@ -1186,8 +1186,10 @@ private:
         // it back; the amplitude that fits is where the gradient, linear in
         // the amplitude, vanishes.
         const double least = options_.asp_min_mask_coverage;
-        if (scale >= 0.4 && maskCoverage(posI, posJ, scale) < least) {
-            double lo = 0.0, hi = scale;
+        if (maskCoverage(posI, posJ, scale) < least) {
+            const double tested = initScaleSizes_[optimumScale];
+            double lo = tested < scale && maskCoverage(posI, posJ, tested) >= least ? tested : 0.0;
+            double hi = scale;
             for (int step = 0; step < 12; ++step) {
                 const double mid = 0.5 * (lo + hi);
                 if (maskCoverage(posI, posJ, mid) < least)
@@ -1200,6 +1202,7 @@ private:
             obj({0.0, scale}, gradAt0);
             obj({1.0, scale}, gradAt1);
             amp = gradAt0[0] / (gradAt0[0] - gradAt1[0]) * rescale;
+            timing_.t_fit += lap(clock);
         }
         if (scale < 0.4) {
             scale = 0.0;
