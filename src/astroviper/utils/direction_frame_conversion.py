@@ -9,7 +9,6 @@ from astropy.coordinates import (
     SkyCoord,
 )
 from astropy.coordinates.erfa_astrom import (
-    ErfaAstrom,
     ErfaAstromInterpolator,
     erfa_astrom,
 )
