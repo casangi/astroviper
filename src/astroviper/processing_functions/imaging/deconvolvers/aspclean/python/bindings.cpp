@@ -162,7 +162,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                bool asp_residual_component_floor_at_threshold,
                                bool asp_residual_component_positive_only,
                                double asp_significance_gain, double asp_no_change_tolerance,
-                               bool record_iteration_history) {
+                               bool record_iteration_history, double asp_min_mask_coverage) {
     aspclean::AspOptions options;
     options.asp_scale_significance = asp_scale_significance;
     options.asp_significance = asp_significance;
@@ -177,6 +177,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
     options.asp_significance_gain = asp_significance_gain;
     options.asp_no_change_tolerance = asp_no_change_tolerance;
     options.record_iteration_history = record_iteration_history;
+    options.asp_min_mask_coverage = asp_min_mask_coverage;
     if (residual.ndim() != 2)
         throw std::runtime_error("residual must be a 2D array [ny, nx]");
     auto dt = residual.dtype();
@@ -353,7 +354,7 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     bool asp_residual_component_floor_at_threshold,
                                     bool asp_residual_component_positive_only,
                                     double asp_significance_gain, double asp_no_change_tolerance,
-                                    bool record_iteration_history) {
+                                    bool record_iteration_history, double asp_min_mask_coverage) {
     aspclean::AspOptions options;
     options.asp_scale_significance = asp_scale_significance;
     options.asp_significance = asp_significance;
@@ -367,6 +368,7 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
     options.asp_significance_gain = asp_significance_gain;
     options.asp_no_change_tolerance = asp_no_change_tolerance;
     options.record_iteration_history = record_iteration_history;
+    options.asp_min_mask_coverage = asp_min_mask_coverage;
     if (residual.ndim() != 5)
         throw std::runtime_error(
             "residual must be a 5D array [time, frequency, polarization, y, x]");
@@ -468,8 +470,10 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "Hogbom run unless the RMS of the residual has fallen, by less than "
           "a factor 1.5, since its start (CASA and LibRA); off, the model "
           "update goes on to its threshold or iteration limit. Options beyond "
-          "CASA and LibRA (all off by default here, see AspOptions in "
-          "asp_clean.hpp): asp_residual_components cleans first with components "
+          "CASA and LibRA (all off by default here but asp_min_mask_coverage, "
+          "see AspOptions in asp_clean.hpp): asp_min_mask_coverage is the least "
+          "share of the flux of a Gaussian component on the mask, in [0, 1). "
+          "asp_residual_components cleans first with components "
           "shaped by the residual (Ma, Zhang & Zhang 2026), C = R tanh((sR - "
           "T) / eps) on the mask pixels with sR >= T, T = max(frac |R_peak|, "
           "asp_residual_component_noise_floor x noise, and the threshold with "
@@ -505,7 +509,8 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("asp_residual_component_floor_at_threshold") = true,
           py::arg("asp_residual_component_positive_only") = false,
           py::arg("asp_significance_gain") = 0.0, py::arg("asp_no_change_tolerance") = 0.0,
-          py::arg("record_iteration_history") = false);
+          py::arg("record_iteration_history") = false,
+          py::arg("asp_min_mask_coverage") = 0.99);
 
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp model update independently on every (time, frequency, "
@@ -536,7 +541,8 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("asp_residual_component_floor_at_threshold") = true,
           py::arg("asp_residual_component_positive_only") = false,
           py::arg("asp_significance_gain") = 0.0, py::arg("asp_no_change_tolerance") = 0.0,
-          py::arg("record_iteration_history") = false);
+          py::arg("record_iteration_history") = false,
+          py::arg("asp_min_mask_coverage") = 0.99);
 
     m.def("psf_gaussian_width", &psf_width_helper,
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "
