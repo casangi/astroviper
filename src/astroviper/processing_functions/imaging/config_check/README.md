@@ -98,6 +98,12 @@ and fit within half the smallest image axis. No scale is dropped. Briggs robust
 is in `[-2, 2]`; absolute-Briggs noise must be positive. `uniform` remains an
 unchanged public weighting value and uses its production kernel recipe.
 
+Natural weighting is independent of density scope and always uses the local
+execution path. The scope resolver returns `local` for natural weighting even
+when the supplied scope is `global`; it does not rewrite the caller's mapping.
+Supplied scope values still undergo enum validation. No global weight-density
+or Briggs-factor graph is constructed for natural weighting.
+
 ## Coordinate-only spectral preflight
 
 After opening input metadata and making channel partitions, both distributed

@@ -345,10 +345,15 @@ def check_residual_update(config, *, mode, require_complete=False):
         raise ValueError("weighting must be natural, uniform, briggs, or briggs_abs.")
 
     # --- Weight-density scope ---
+    # Validate the supplied value even when natural weighting does not use it.
+    # Resolution selects execution without rewriting the caller's dictionary.
+    if "weighting_scope" in weights and weights["weighting_scope"] not in (
+        "local",
+        "global",
+    ):
+        raise ValueError("weighting_scope must be 'local' or 'global'.")
     # Absolute Briggs uses per-channel density; continuum Briggs may use global.
     scope = imaging_weighting_scope(weights, mode=mode)
-    if scope not in ("local", "global"):
-        raise ValueError("weighting_scope must be 'local' or 'global'.")
     if weighting == "briggs_abs" and scope == "global":
         raise ValueError("briggs_abs requires weighting_scope='local'.")
 

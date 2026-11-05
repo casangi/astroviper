@@ -3392,6 +3392,8 @@ def image_continuum_single_field(
     )
 
     weighting = imaging_weights_params.get("weighting", "natural")
+    # Resolve execution separately from the supplied configuration: natural
+    # weighting always takes the local path and never builds density graphs.
     weighting_scope = imaging_weighting_scope(
         imaging_weights_params, mode=CONTINUUM_SINGLE_FIELD
     )

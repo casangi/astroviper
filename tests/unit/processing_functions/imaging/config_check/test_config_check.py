@@ -111,6 +111,35 @@ def test_mode_specific_residual_checks():
     check_residual_update(config, mode=CONTINUUM_SINGLE_FIELD)
 
 
+@pytest.mark.parametrize("scope", [None, "local", "global"])
+def test_natural_weighting_resolves_to_local_without_mutating_config(scope):
+    from astroviper.processing_functions.imaging.config_check._common import (
+        imaging_weighting_scope,
+    )
+
+    params = {"weighting": "natural"}
+    if scope is not None:
+        params["weighting_scope"] = scope
+    original = deepcopy(params)
+    check_residual_update(
+        {"imaging_weights_params": params}, mode=CONTINUUM_SINGLE_FIELD
+    )
+    assert (
+        imaging_weighting_scope(MappingProxyType(params), mode=CONTINUUM_SINGLE_FIELD)
+        == "local"
+    )
+    assert params == original
+
+
+@pytest.mark.parametrize("scope", [None, "GLOBAL", "invalid", False, 0])
+def test_natural_weighting_does_not_conceal_invalid_scope(scope):
+    params = {"weighting": "natural", "weighting_scope": scope}
+    with pytest.raises(ValueError, match="weighting_scope"):
+        check_residual_update(
+            {"imaging_weights_params": params}, mode=CONTINUUM_SINGLE_FIELD
+        )
+
+
 @pytest.mark.parametrize(
     "deconvolver,nterms,error",
     [

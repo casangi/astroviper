@@ -2441,6 +2441,48 @@ def test_wideband_natural_and_absolute_briggs_weights_default_to_the_local_densi
     xr.testing.assert_equal(images["default"], images["local"])
 
 
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("weight_memory_mode", ["in_memory", "in_place"])
+@pytest.mark.parametrize("restore", [False, True])
+def test_natural_weighting_scopes_are_equivalent_without_global_density_graphs(
+    tmp_path, wideband_store, monkeypatch, continuum_mode, weight_memory_mode, restore
+):
+    from importlib import import_module
+
+    driver = import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+
+    def forbidden_global_density(*args, **kwargs):
+        raise AssertionError("Natural weighting must not prepare global weight density")
+
+    monkeypatch.setattr(
+        driver, "prepare_continuum_imaging_weights_global", forbidden_global_density
+    )
+    processing_set = open_processing_set(str(wideband_store))
+    images = {}
+    for scope in ("default", "local", "global"):
+        params = {"weighting": "natural"}
+        if scope != "default":
+            params["weighting_scope"] = scope
+        original = dict(params)
+        _, image = _run_tw_hydra_continuum(
+            wideband_store,
+            tmp_path / f"natural_{scope}.img.zarr",
+            processing_set,
+            2,
+            continuum_mode,
+            params,
+            restore=restore,
+            weight_memory_mode=weight_memory_mode,
+        )
+        images[scope] = image.load()
+        image.close()
+        assert params == original
+    xr.testing.assert_equal(images["default"], images["local"])
+    xr.testing.assert_equal(images["global"], images["local"])
+
+
 def test_tw_hydra_direct_max_iter_zero_dirty_image(tmp_path, tw_hydra_store):
     """The public continuum application accepts a genuine zero-iteration run."""
     processing_set = open_processing_set(str(tw_hydra_store))

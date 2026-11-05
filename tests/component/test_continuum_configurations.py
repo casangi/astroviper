@@ -64,6 +64,8 @@ def _run(
     cache_mode,
     reduce_mode,
     read_output=None,
+    *,
+    weighting="briggs",
 ):
     with dask.config.set(scheduler="synchronous"):
         result = image_continuum_single_field(
@@ -71,9 +73,9 @@ def _run(
             image_store=str(output),
             image_params=params,
             imaging_weights_params=dict(
-                weighting="briggs",
+                weighting=weighting,
                 robust=0.5,
-                weighting_scope=scope,
+                **({"weighting_scope": scope} if scope is not None else {}),
                 casa_weighting_implementation=casa,
             ),
             cycle_control_params=dict(
@@ -122,6 +124,45 @@ def _run(
     assert spectral["spectral_design_rank_precision"] == "float64"
     assert "taylor_hessian_approximation" not in spectral
     return result, image
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("casa", [False, True])
+def test_natural_scopes_preserve_cleaned_and_restored_images(
+    tmp_path, continuum_input, monkeypatch, continuum_mode, casa
+):
+    from importlib import import_module
+
+    driver = import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+
+    def forbidden_global_density(*args, **kwargs):
+        raise AssertionError("Natural weighting must use the local execution path")
+
+    monkeypatch.setattr(
+        driver, "prepare_continuum_imaging_weights_global", forbidden_global_density
+    )
+    store, params, mask_path, _ = continuum_input
+    images = {}
+    for scope in (None, "local", "global"):
+        result, images[scope] = _run(
+            store,
+            params,
+            mask_path,
+            tmp_path / f"natural_{scope}.img.zarr",
+            continuum_mode,
+            scope,
+            casa,
+            "in_memory",
+            "tree",
+            weighting="natural",
+        )
+        assert result["n_cycles"] > 0
+        assert np.isfinite(images[scope].SKY_MODEL).all()
+        assert np.max(np.abs(images[scope].SKY_MODEL.values)) > 0
+    xr.testing.assert_equal(images[None], images["local"])
+    xr.testing.assert_equal(images["global"], images["local"])
 
 
 def _circular_clean_beam_convolution(plane, beam_parameters, cell_size):

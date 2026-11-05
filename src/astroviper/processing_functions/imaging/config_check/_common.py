@@ -87,7 +87,27 @@ def require_boolean(name, value):
 
 
 def imaging_weighting_scope(params, *, mode):
-    """Read the documented scope default without inserting it into the config."""
+    """Resolve the execution scope without modifying the supplied configuration.
+
+    Natural weighting needs no uv-density grid and always uses the local path,
+    independently of a supplied local/global scope. Other methods retain their
+    explicit scope or the mode-specific default. Validate supplied values before
+    calling this resolver so irrelevant settings cannot conceal malformed input.
+
+    Parameters
+    ----------
+    params : mapping
+        Validated imaging-weight configuration.
+    mode : ImagingMode
+        Imaging kind that determines density-weighting defaults.
+
+    Returns
+    -------
+    str
+        Effective local/global execution scope, without changing ``params``.
+    """
+    if params.get("weighting", "natural") == "natural":
+        return "local"
     if "weighting_scope" in params:
         return params["weighting_scope"]
     if mode.imaging_kind == "continuum" and params.get("weighting", "natural") in (
