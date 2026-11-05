@@ -23,7 +23,9 @@ _IMAGE_PARAMS_DOC = (
     "``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is\n"
     '``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image\n'
     'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
-    "correlations (see ``instrument_polarization_basis``)."
+    "correlations (see ``instrument_polarization_basis``). The labels must be a\n"
+    "nonempty one-dimensional vector. An xarray DataArray must have exactly\n"
+    "the dimension ``polarization``; other dimension names are rejected."
 )
 
 _CONTINUUM_IMAGE_PARAMS_DOC = (

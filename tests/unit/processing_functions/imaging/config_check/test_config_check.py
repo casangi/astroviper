@@ -5,6 +5,7 @@ from types import MappingProxyType
 
 import numpy as np
 import pytest
+import xarray as xr
 
 from astroviper.processing_functions.imaging.config_check import (
     CONTINUUM_SINGLE_FIELD,
@@ -109,6 +110,64 @@ def test_mode_specific_residual_checks():
     with pytest.raises(ValueError, match="Cube"):
         check_residual_update(config, mode=CUBE_SINGLE_FIELD)
     check_residual_update(config, mode=CONTINUUM_SINGLE_FIELD)
+
+
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+@pytest.mark.parametrize("representation", ["list", "numpy", "xarray"])
+def test_polarization_coordinate_representations_preserve_the_input(
+    mode, representation
+):
+    coordinates = ["I", "Q"]
+    if representation == "numpy":
+        coordinates = np.array(coordinates)
+        coordinates.setflags(write=False)
+    elif representation == "xarray":
+        coordinates = xr.DataArray(
+            coordinates, dims="polarization", attrs={"source": "caller"}
+        )
+    original = deepcopy(coordinates)
+    check_residual_update(
+        {"image_params": {"polarization_coords": coordinates}}, mode=mode
+    )
+    if representation == "xarray":
+        xr.testing.assert_identical(coordinates, original)
+    else:
+        np.testing.assert_array_equal(coordinates, original)
+
+
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+@pytest.mark.parametrize("dimension", ["dim_0", "stokes"])
+def test_polarization_dataarray_requires_the_canonical_dimension(mode, dimension):
+    coordinates = xr.DataArray(["I", "Q"], dims=dimension)
+    original = coordinates.copy(deep=True)
+    with pytest.raises(
+        ValueError, match="polarization_coords DataArray must have dimensions"
+    ):
+        check_residual_update(
+            {"image_params": {"polarization_coords": coordinates}}, mode=mode
+        )
+    xr.testing.assert_identical(coordinates, original)
+
+
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+@pytest.mark.parametrize(
+    "coordinates,error",
+    [
+        ([], ValueError),
+        ("I", ValueError),
+        ([["I", "Q"]], ValueError),
+        ([1, 2], TypeError),
+        (["I", "XX"], ValueError),
+        (xr.DataArray([["I", "Q"]], dims=("time", "polarization")), ValueError),
+    ],
+)
+def test_polarization_coordinates_require_a_supported_label_vector(
+    mode, coordinates, error
+):
+    with pytest.raises(error, match="polarization_coords"):
+        check_residual_update(
+            {"image_params": {"polarization_coords": coordinates}}, mode=mode
+        )
 
 
 @pytest.mark.parametrize("scope", [None, "local", "global"])

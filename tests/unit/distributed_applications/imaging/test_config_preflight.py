@@ -51,17 +51,13 @@ def test_generated_continuum_image_records_coordinate_and_actual_product_checks(
     assert result["input_validation"] == validation
 
 
-def test_generated_cube_records_channel_preflight(tmp_path, generated_store):
+def _run_cube(store, output, image_params, *, single_precision_image):
+    """Run the cube entry point with a fixed zero-iteration configuration."""
     import dask
     import xarray as xr
 
-    from astroviper.distributed_applications.imaging.image_cube_single_field import (
-        image_cube_single_field,
-    )
+    from astroviper.distributed_applications.imaging import image_cube_single_field
 
-    processing_set = open_processing_set(str(generated_store))
-    image_params = continuum_tests._tw_hydra_image_params(processing_set)
-    image_params["n_taylor_terms"] = 1
     controls = {
         "max_iter": 0,
         "max_cycles": 0,
@@ -72,21 +68,34 @@ def test_generated_cube_records_channel_preflight(tmp_path, generated_store):
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
-    output = tmp_path / "cube.img.zarr"
     with dask.config.set(scheduler="synchronous"):
         result = image_cube_single_field(
-            str(generated_store),
+            str(store),
             str(output),
             image_params,
             {"weighting": "natural"},
             controls,
             processing_set_data_group_name="base",
             n_mapping_parallelism={"frequency": 2},
-            single_precision_image=True,
+            single_precision_image=single_precision_image,
+            processing_function_threads=1,
         )
-    image = xr.open_zarr(output)
+    return result, xr.open_zarr(output)
+
+
+def test_generated_cube_records_channel_preflight(tmp_path, generated_store):
+    processing_set = open_processing_set(str(generated_store))
+    image_params = continuum_tests._tw_hydra_image_params(processing_set)
+    image_params["n_taylor_terms"] = 1
+    result, image = _run_cube(
+        generated_store,
+        tmp_path / "cube.img.zarr",
+        image_params,
+        single_precision_image=True,
+    )
     assert len(image.attrs["input_validation"]["cube_channel_sampling"]) == 4
     assert result["input_validation"] == image.attrs["input_validation"]
+    image.close()
 
 
 def test_spectral_failure_leaves_no_output_or_graph(
@@ -177,3 +186,103 @@ def test_continuum_rejects_msv2_through_shared_storage_check_before_io(
     assert calls == [{"input_is_msv2": True, "allow_msv2": False}]
     assert not output.exists()
     assert sorted(p.name for p in source.iterdir()) == ["table.dat"]
+
+
+@pytest.mark.parametrize("workflow", ["cube", "mfs", "mvc"])
+@pytest.mark.parametrize("dimension", ["dim_0", "stokes"])
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_bad_polarization_dimensions_fail_before_io(
+    monkeypatch, tmp_path, workflow, dimension, existing_output
+):
+    import xarray as xr
+
+    from astroviper.distributed_applications.imaging import (
+        image_continuum_single_field,
+        image_cube_single_field,
+    )
+    from tests.unit.processing_functions.imaging.config_check.test_full_validation import (
+        configuration,
+    )
+
+    config = configuration()
+    coordinates = xr.DataArray(["I", "Q"], dims=dimension)
+    original = coordinates.copy(deep=True)
+    config["image_params"]["polarization_coords"] = coordinates
+    if workflow == "cube":
+        config["image_params"]["n_taylor_terms"] = 1
+        config["deconvolver"] = "hogbom"
+        driver = image_cube_single_field
+    else:
+        config["continuum_mode"] = workflow
+        driver = image_continuum_single_field
+    output = tmp_path / "rejected.img.zarr"
+    if existing_output:
+        output.mkdir()
+        (output / "sentinel").write_bytes(b"preserve existing output")
+
+    def forbidden_io(*args, **kwargs):
+        raise AssertionError("Invalid polarization dimensions must fail before I/O")
+
+    monkeypatch.setattr("xradio.measurement_set.open_processing_set", forbidden_io)
+    monkeypatch.setattr("astroviper.utils.io.write_zarr_image_store", forbidden_io)
+    monkeypatch.setattr(
+        "astroviper.utils.io.create_empty_data_variables_on_disk", forbidden_io
+    )
+    with pytest.raises(
+        ValueError, match="polarization_coords DataArray must have dimensions"
+    ):
+        driver(str(tmp_path / "never-opened.ps.zarr"), str(output), **config)
+    if existing_output:
+        assert (output / "sentinel").read_bytes() == b"preserve existing output"
+        assert list(output.iterdir()) == [output / "sentinel"]
+    else:
+        assert not output.exists()
+    xr.testing.assert_identical(coordinates, original)
+
+
+@pytest.mark.parametrize("workflow", ["cube", "mfs", "mvc"])
+def test_accepted_polarization_containers_produce_identical_images(
+    tmp_path, generated_store, workflow
+):
+    import numpy as np
+    import xarray as xr
+
+    processing_set = open_processing_set(str(generated_store))
+    images = []
+    for coordinates in (
+        ["I", "Q"],
+        np.array(["I", "Q"]),
+        xr.DataArray(["I", "Q"], dims="polarization"),
+    ):
+        original = (
+            coordinates.copy(deep=True)
+            if isinstance(coordinates, xr.DataArray)
+            else np.array(coordinates, copy=True)
+        )
+        params = continuum_tests._tw_hydra_image_params(
+            processing_set, {"polarization_coords": coordinates}
+        )
+        output = tmp_path / f"polarization-{len(images)}.img.zarr"
+        if workflow == "cube":
+            params["n_taylor_terms"] = 1
+            _, image = _run_cube(
+                generated_store, output, params, single_precision_image=False
+            )
+        else:
+            _, image = continuum_tests._run_tw_hydra_continuum(
+                generated_store,
+                output,
+                processing_set,
+                2,
+                workflow,
+                {"weighting": "natural"},
+                image_params=params,
+            )
+        images.append(image.load())
+        image.close()
+        if isinstance(coordinates, xr.DataArray):
+            xr.testing.assert_identical(coordinates, original)
+        else:
+            np.testing.assert_array_equal(coordinates, original)
+    xr.testing.assert_equal(images[0], images[1])
+    xr.testing.assert_equal(images[0], images[2])

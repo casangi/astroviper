@@ -106,6 +106,12 @@ or Briggs-factor graph is constructed for natural weighting.
 
 ## Coordinate-only spectral preflight
 
+Polarization coordinates must be a nonempty one-dimensional vector of supported
+Stokes labels. Lists and NumPy arrays are accepted; an xarray DataArray must
+have exactly `dims=("polarization",)`. Cube and continuum apply this contract
+at the shared configuration boundary before opening input data or creating
+output. The checker neither renames dimensions nor changes caller coordinates.
+
 After opening input metadata and making channel partitions, both distributed
 imaging drivers check partition exclusivity, selected-channel coverage, and a
 common Taylor basis. The node-layer metadata helper inspects coordinates,

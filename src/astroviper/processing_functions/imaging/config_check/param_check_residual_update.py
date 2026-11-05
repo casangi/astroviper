@@ -254,6 +254,34 @@ def check_residual_update(config, *, mode, require_complete=False):
     # 4. Feeds, polarization, and primary beams
     # ========================================================================
 
+    # --- Polarization coordinate representation ---
+    # Image construction must create the canonical polarization axis. A labeled
+    # input must name that axis explicitly; accepting another dimension here
+    # would make image layout depend on the container rather than the labels.
+    # Inspect the supplied coordinates without renaming or modifying them.
+    if "polarization_coords" in image_params:
+        import xarray as xr
+
+        coordinates = image_params["polarization_coords"]
+        if isinstance(coordinates, xr.DataArray) and coordinates.dims != (
+            "polarization",
+        ):
+            raise ValueError(
+                "polarization_coords DataArray must have dimensions ('polarization',); "
+                f"received {coordinates.dims}."
+            )
+        labels = np.asarray(coordinates)
+        if labels.ndim != 1 or labels.size == 0:
+            raise ValueError(
+                "polarization_coords must be a nonempty one-dimensional vector."
+            )
+        if any(not isinstance(label, str) for label in labels):
+            raise TypeError("polarization_coords must contain Stokes label strings.")
+        if not np.isin(labels, ("I", "Q", "U", "V")).all():
+            raise ValueError(
+                "polarization_coords contains an unsupported Stokes label."
+            )
+
     # --- Instrument feeds ---
     # A direct model-preparation call may supply the basis without Stokes labels.
     if "instrument_polarization_basis" in config and config[
