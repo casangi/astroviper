@@ -1253,6 +1253,16 @@ class TestAspClean:
         # the unmasked source is essentially fully cleaned
         assert abs(resid[0, 0, 0, 22, 22]) < 0.5
 
+    def test_min_mask_coverage_reaches_the_kernel(self):
+        resid, psf, model = (np.zeros((1, 1, 1, 16, 16)) for _ in range(3))
+        with pytest.raises(ValueError, match="asp_min_mask_coverage"):
+            asp_clean(
+                resid,
+                psf,
+                model,
+                {"gain": 0.1, "max_iter": 1, "asp_min_mask_coverage": 1.0},
+            )
+
     def test_rejects_non_5d(self):
         arr = np.zeros((16, 16), dtype=np.float32)
         with pytest.raises(ValueError, match="5D"):

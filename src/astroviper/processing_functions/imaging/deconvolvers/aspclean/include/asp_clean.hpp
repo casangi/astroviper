@@ -34,9 +34,9 @@
 //    only;
 //  * a Gaussian component is centred on the mask and keeps
 //    asp_min_mask_coverage of its flux on it, in the search and after the
-//    fit. CASA thresholds mask (*) scale at 0.99, the test of MatrixCleaner,
-//    whose scales sum to 1; Asp's sum to sqrt(2 pi) sigma, so there the test
-//    lets a Gaussian go outside the mask.
+//    fit. CASA thresholds mask (*) scale, as MatrixCleaner does with scales
+//    that sum to 1; Asp's sum to sqrt(2 pi) sigma, so there the test lets a
+//    Gaussian go outside the mask.
 // A residual pixel outside the search region (mask not above 0.99) that is
 // not finite is zero during the model update and gets its value back
 // afterwards.

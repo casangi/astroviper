@@ -1182,7 +1182,9 @@ private:
 
         double amp = x[0] * rescale;
         double scale = std::fabs(x[1]);
-        // The fit can widen a Gaussian past the scale the search tested.
+        // The fit can widen a Gaussian past the scale the search tested: cut
+        // it back; the amplitude that fits is where the gradient, linear in
+        // the amplitude, vanishes.
         const double least = options_.asp_min_mask_coverage;
         if (scale >= 0.4 && maskCoverage(posI, posJ, scale) < least) {
             double lo = 0.0, hi = scale;
