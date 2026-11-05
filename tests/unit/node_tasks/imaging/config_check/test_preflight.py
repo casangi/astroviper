@@ -1,4 +1,4 @@
-"""Streaming preflight uses selected flags and the production weight kernels."""
+"""Coordinate preflight leaves every bulk input array lazy."""
 
 import numpy as np
 import pytest
@@ -106,6 +106,7 @@ def test_structure_preflight_does_not_load_visibility_or_weight_arrays():
     check_input_metadata(source, config, mode=CUBE_SINGLE_FIELD)
 
 
+@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
 @pytest.mark.parametrize(
     "weighting,scope",
     [
@@ -113,11 +114,15 @@ def test_structure_preflight_does_not_load_visibility_or_weight_arrays():
         ("natural", "global"),
         ("briggs", "local"),
         ("briggs", "global"),
+        ("uniform", "local"),
         ("uniform", "global"),
         ("briggs_abs", "local"),
     ],
 )
-def test_preflight_uses_actual_weighting_and_preserves_input(weighting, scope):
+def test_full_preflight_uses_only_metadata(mode, weighting, scope, monkeypatch):
+    import dask.array as da
+    from dask import delayed
+
     processing_set, config = inputs()
     config["imaging_weights_params"] = {
         "weighting": weighting,
@@ -125,99 +130,59 @@ def test_preflight_uses_actual_weighting_and_preserves_input(weighting, scope):
         "robust": 0.5,
         "briggs_abs_noise": 1.0,
     }
-    snapshot = processing_set["ms"].copy(deep=True)
-    result = preflight_imaging_inputs(
-        processing_set, config, mode=CONTINUUM_SINGLE_FIELD
+    if mode == CUBE_SINGLE_FIELD:
+        config["deconvolver"] = "hogbom"
+        config["image_params"]["n_taylor_terms"] = 1
+    source = processing_set["ms"]
+    source["TIME_CENTROID"] = (("time", "baseline_id"), np.zeros((2, 1)))
+
+    def forbidden_work(*args, **kwargs):
+        raise AssertionError("Coordinate preflight performed bulk imaging work")
+
+    for name in ("VISIBILITY", "WEIGHT", "FLAG", "UVW", "TIME_CENTROID"):
+        variable = source[name]
+        source[name] = xr.DataArray(
+            da.from_delayed(
+                delayed(forbidden_work)(), shape=variable.shape, dtype=variable.dtype
+            ),
+            dims=variable.dims,
+        )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights.grid_imaging_weights",
+        forbidden_work,
     )
-    assert result["spectral_design_rank"] == 2
-    assert result["distinct_frequency_count"] == 2
-    approximation = result["taylor_hessian_approximation"]
-    assert approximation["approximation"] == "frequency_moment_gram"
-    assert approximation["order_zero_noise_amplification"] == pytest.approx(1.0)
-    assert approximation["field"] == ["target"]
-    assert (
-        approximation["spatial_blocks"]["representation"]
-        == "periodic_spatial_fourier_blocks"
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.config_check.param_check_model_update.check_taylor_hessian_approximation",
+        forbidden_work,
     )
-    assert (
-        approximation["spatial_blocks"]["resolution_recipe"]
-        == "wavelength_over_longest_usable_projected_baseline"
+    snapshot = source.copy(deep=False)
+    result = preflight_imaging_inputs(processing_set, config, mode=mode)
+    channels = (
+        result["cube_channel_sampling"] if mode == CUBE_SINGLE_FIELD else [result]
     )
-    xr.testing.assert_identical(processing_set["ms"], snapshot)
+    for channel in channels:
+        assert channel["weight_assumption"] == "equal"
+        assert channel["support_assumption"] == "selected_frequency_coordinates"
+        assert channel["spectral_design_rank_precision"] == "float64"
+        assert "taylor_hessian_approximation" not in channel
+    # Comparing lazy graphs/metadata must not evaluate the deliberately unreadable data.
+    assert source.identical(snapshot)
 
 
-@pytest.mark.parametrize("excluded", ["flagged", "zero_weight"])
-def test_gaussian_resolution_ignores_unusable_long_baselines(excluded):
+@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
+@pytest.mark.parametrize("fault", ["flagged", "zero_weight", "nan_weight", "nan_uvw"])
+def test_nominal_support_does_not_depend_on_bulk_sample_values(mode, fault):
     processing_set, config = inputs()
     source = processing_set["ms"]
-    source.UVW.values[1, 0] = [1e9, 0, 0]
-    if excluded == "flagged":
-        source.FLAG.values[1] = True
+    if fault == "flagged":
+        source.FLAG.values[:, :, 1] = True
+    elif fault == "zero_weight":
+        source.WEIGHT.values[:, :, 1] = 0
+    elif fault == "nan_weight":
+        source.WEIGHT.values[:, :, 1] = np.nan
     else:
-        source.WEIGHT.values[1] = 0
-    result = preflight_imaging_inputs(
-        processing_set, config, mode=CONTINUUM_SINGLE_FIELD
-    )
-    widths = result["taylor_hessian_approximation"]["spatial_blocks"][
-        "gaussian_fwhm_radians"
-    ]
-    assert widths == pytest.approx(
-        [299792458 / (1.2e9 * np.hypot(10, 5)), 299792458 / (1e9 * np.hypot(10, 5))]
-    )
-
-
-def test_flagged_channel_does_not_count_toward_taylor_rank():
-    processing_set, config = inputs()
-    processing_set["ms"].FLAG.values[:, :, 1, 0] = True
-    with pytest.raises(ValueError, match="distinct_frequency_count.*1"):
-        preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
-
-
-@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
-def test_single_term_workflows_do_not_request_multiterm_hessian_approximation(mode):
-    processing_set, config = inputs()
-    config["deconvolver"] = "hogbom"
-    config["image_params"]["n_taylor_terms"] = 1
-    result = preflight_imaging_inputs(processing_set, config, mode=mode)
-    if mode == CUBE_SINGLE_FIELD:
-        assert len(result["cube_channel_sampling"]) == 2
-    assert "taylor_hessian_approximation" not in result
-
-
-def test_zero_weights_are_not_nan_samples():
-    processing_set, config = inputs()
-    processing_set["ms"].WEIGHT.values[:, :, 1, :] = 0
-    with pytest.raises(ValueError, match="fewer distinct"):
-        preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
-
-
-def test_cube_rejects_a_channel_without_usable_weight():
-    processing_set, config = inputs()
-    processing_set["ms"].WEIGHT.values[:, :, 1, :] = 0
-    with pytest.raises(ValueError, match="no selected channel has positive"):
-        preflight_imaging_inputs(processing_set, config, mode=CUBE_SINGLE_FIELD)
-
-
-def test_nonfinite_unflagged_statistical_weights_fail():
-    processing_set, config = inputs()
-    processing_set["ms"].WEIGHT.values[0, 0, 0, 0] = np.nan
-    with pytest.raises(ValueError, match="unflagged weights"):
-        preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
-
-
-@pytest.mark.parametrize("mode", [CONTINUUM_SINGLE_FIELD, CUBE_SINGLE_FIELD])
-@pytest.mark.parametrize("padding_weights", ["nan", "zero", "mixed"])
-def test_sparse_padding_is_excluded_without_modifying_source_arrays(
-    mode, padding_weights
-):
-    processing_set, config = inputs()
-    dataset = processing_set["ms"]
-    dataset["TIME_CENTROID"] = (("time", "baseline_id"), [[0.0], [np.nan]])
-    dataset.WEIGHT.values[1] = np.nan if padding_weights == "nan" else 0.0
-    if padding_weights == "mixed":
-        dataset.WEIGHT.values[1, :, 0, :] = np.nan
-    dataset.UVW.values[1] = np.nan
-    snapshot = dataset.copy(deep=True)
+        source.UVW.values[:] = np.nan
+    snapshot = source.copy(deep=True)
     if mode == CUBE_SINGLE_FIELD:
         config["deconvolver"] = "hogbom"
         config["image_params"]["n_taylor_terms"] = 1
@@ -226,115 +191,54 @@ def test_sparse_padding_is_excluded_without_modifying_source_arrays(
         assert len(result["cube_channel_sampling"]) == 2
     else:
         assert result["distinct_frequency_count"] == 2
-    xr.testing.assert_identical(dataset, snapshot)
+        assert result["spectral_design_rank"] == 2
+    xr.testing.assert_identical(source, snapshot)
 
 
-def test_real_row_with_nan_weights_is_not_treated_as_padding():
-    processing_set, config = inputs()
-    dataset = processing_set["ms"]
-    dataset["TIME_CENTROID"] = (("time", "baseline_id"), [[0.0], [1.0]])
-    dataset.WEIGHT.values[1] = np.nan
-    dataset.UVW.values[1] = np.nan
-    with pytest.raises(ValueError, match="unflagged weights"):
-        preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
-
-
-@pytest.mark.parametrize("weighting", ["natural", "briggs", "uniform"])
 @pytest.mark.parametrize("reverse", [False, True])
-def test_cube_preflight_checks_shifted_channels_with_production_assignment(
-    weighting, reverse
-):
+def test_cube_preflight_preserves_nearest_channel_assignment(reverse):
     processing_set, config = inputs()
     config["deconvolver"] = "hogbom"
     config["image_params"]["n_taylor_terms"] = 1
-    config["imaging_weights_params"] = {"weighting": weighting}
-    if weighting == "briggs":
-        config["imaging_weights_params"]["robust"] = 0.0
     if reverse:
         config["image_params"]["frequency_coords"] = [1.2e9, 1e9]
     processing_set["ms"] = processing_set["ms"].assign_coords(
         frequency=processing_set["ms"].frequency.values + 5000
     )
-    snapshot = processing_set["ms"].copy(deep=True)
-
     result = preflight_imaging_inputs(processing_set, config, mode=CUBE_SINGLE_FIELD)
-
     assert len(result["cube_channel_sampling"]) == 2
     assert all(
         channel["distinct_frequency_count"] == 1
         for channel in result["cube_channel_sampling"]
     )
-    xr.testing.assert_identical(processing_set["ms"], snapshot)
 
 
-def test_cube_preflight_does_not_skip_bad_weights_in_a_shifted_execution_block():
+def test_repeated_measurement_sets_preserve_rank_decision_and_threshold():
     processing_set, config = inputs()
-    config["deconvolver"] = "hogbom"
-    config["image_params"]["n_taylor_terms"] = 1
-    processing_set["shifted"] = (
-        processing_set["ms"]
-        .copy(deep=True)
-        .assign_coords(frequency=processing_set["ms"].frequency.values + 5000)
+    first = preflight_imaging_inputs(
+        processing_set, config, mode=CONTINUUM_SINGLE_FIELD
     )
-    processing_set["shifted"].WEIGHT.values[0, 0, 0, 0] = np.nan
+    processing_set["other"] = processing_set["ms"].copy(deep=True)
+    repeated = preflight_imaging_inputs(
+        processing_set, config, mode=CONTINUUM_SINGLE_FIELD
+    )
+    assert repeated["spectral_design_rank"] == first["spectral_design_rank"]
+    assert (
+        repeated["spectral_design_rank_tolerance"]
+        == first["spectral_design_rank_tolerance"]
+    )
+    assert repeated["distinct_frequency_count"] == first["distinct_frequency_count"]
 
-    with pytest.raises(ValueError, match="unflagged weights"):
-        preflight_imaging_inputs(processing_set, config, mode=CUBE_SINGLE_FIELD)
 
-
-@pytest.mark.parametrize(
-    "fault,message",
-    [
-        ("finite_time", "non-finite UVW"),
-        ("missing_time", "non-finite UVW"),
-        ("positive_weight", "non-finite UVW"),
-        ("negative_weight", "unflagged weights"),
-        ("infinite_weight", "unflagged weights"),
-        ("partial_nan_uvw", "non-finite UVW"),
-    ],
-)
-def test_zero_weight_padding_requires_all_absence_markers(fault, message):
+def test_insufficient_nominal_frequency_coverage_is_rejected():
     processing_set, config = inputs()
-    dataset = processing_set["ms"]
-    dataset["TIME_CENTROID"] = (("time", "baseline_id"), [[0.0], [np.nan]])
-    dataset.WEIGHT.values[1] = 0.0
-    dataset.UVW.values[1] = np.nan
-    if fault == "finite_time":
-        dataset.TIME_CENTROID.values[1] = 1.0
-    elif fault == "missing_time":
-        processing_set["ms"] = dataset.drop_vars("TIME_CENTROID")
-    elif fault == "partial_nan_uvw":
-        dataset.UVW.values[1, 0, 0] = 1.0
-    else:
-        dataset.WEIGHT.values[1, 0, 0, 0] = {
-            "positive_weight": 1.0,
-            "negative_weight": -1.0,
-            "infinite_weight": np.inf,
-        }[fault]
-    with pytest.raises(ValueError, match=message):
-        preflight_imaging_inputs(processing_set, config, mode=CUBE_SINGLE_FIELD)
+    config["image_params"]["n_taylor_terms"] = 3
+    with pytest.raises(ValueError, match="fewer distinct"):
+        preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
 
 
-@pytest.mark.parametrize("input_checked", [False, True])
-def test_shared_data_checks_run_even_for_checked_configuration(
-    monkeypatch, input_checked
-):
-    from astroviper.processing_functions.imaging.config_check import (
-        param_check_residual_update,
-    )
-
+def test_multiple_selected_fields_are_rejected():
     processing_set, config = inputs()
-    config["input_checked"] = input_checked
-
-    class DataValidationReached(Exception):
-        pass
-
-    def reject_new_data(weights, active, *, context):
-        assert context["measurement_set"] == "ms"
-        raise DataValidationReached
-
-    monkeypatch.setattr(
-        param_check_residual_update, "check_statistical_weights", reject_new_data
-    )
-    with pytest.raises(DataValidationReached):
+    processing_set["ms"].attrs["partition_info"]["field_name"] = ["one", "two"]
+    with pytest.raises(ValueError, match="multiple fields"):
         preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)

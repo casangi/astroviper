@@ -98,87 +98,82 @@ and fit within half the smallest image axis. No scale is dropped. Briggs robust
 is in `[-2, 2]`; absolute-Briggs noise must be positive. `uniform` remains an
 unchanged public weighting value and uses its production kernel recipe.
 
-## Data-dependent preflight
+## Coordinate-only spectral preflight
 
 After opening input metadata and making channel partitions, both distributed
-drivers check partition exclusivity, complete selected-channel coverage, and a
-common Taylor basis. A node-layer helper then reads selected weights, flags, and
-UVW in time blocks; it never reads visibility arrays or writes input data. It
-uses the production correlation equalization and density/degridding kernels,
-including local or global weighting, and excludes flagged samples and
-self-correlations from spectral support. This additional metadata pass occurs
-before output creation and graph construction. Local density uses one frequency
-at a time; global density uses two metadata passes.
+imaging drivers check partition exclusivity, selected-channel coverage, and a
+common Taylor basis. The node-layer metadata helper inspects coordinates,
+attributes, shapes, and dtypes. It does not load visibility, statistical-weight,
+flag, time-centroid, or UVW arrays, calculate imaging weights, or construct PSFs.
 
-`check_spectral_sampling` constructs `sqrt(weight) * x**order`, with
-`x=(frequency-reference_frequency)/reference_frequency`, and normalizes by a
-common weight scale before SVD. It requires at least `nterms` distinct usable
-frequencies and full numerical rank. The rank tolerance is
-`max(design.shape) * eps * largest_singular_value` for the configured working
-precision. A full-rank design warns when fitting the additional Taylor terms
-amplifies order-zero noise by more than three relative to a constant-only fit.
-A reference outside the usable frequency range also warns.
-Errors include field, spectral window, selected channels, polarization, Taylor
-order, reference frequency, usable counts, rank, and conditioning context.
-Cube preflight requires positive effective weight in every requested channel.
+Preflight approximates every selected frequency sample with `q_nu = 1`. For
+`x_nu = (frequency_nu - reference_frequency) / reference_frequency`, the Taylor
+design is `A_nu,k = x_nu**k`. Its support is nominal: an available coordinate is
+not evidence of usable data after flags and weighting. Diagnostics record
+`weight_assumption="equal"` and
+`support_assumption="selected_frequency_coordinates"` explicitly.
 
-### Order-zero spectral noise diagnostic
+At least `n_taylor_terms` distinct selected frequencies are required. Rank is
+assessed after combining repeated frequencies and scaling every design column
+to unit Euclidean norm. With `D_kk = norm(A[:, k])` and `B = A D^-1`, the systems
+`A c = b` and `B z = b`, `z = D c`, have the same exact rank. Normalization tests
+column independence without treating a small high-order Taylor column as noise.
+A zero column cannot constrain its coefficient and is rejected.
 
-The smallest singular value can describe a poorly constrained slope or curvature
-without implying a poorly constrained order-zero intensity. We therefore target
-order zero directly. Let `q = weight / max(weight)`, `W = sum(q)`, and let `h` be
-the first row of the pseudoinverse of the weighted Taylor design `A`. Then
-`delta_c0 = h @ delta_b`. For independent unweighted channel noise with equal
-standard deviation `sigma`, the order-zero variance is
-`sigma**2 * sum(q * h**2)`. The constant-only weighted average has variance
-`sigma**2 * sum(q**2) / W**2`. Their standard-deviation ratio is
+The SVD of `B` is computed in float64. Its numerical-rank threshold is
+`max(M, n_taylor_terms) * eps64 * largest_singular_value(B)`, with `M` distinct
+frequencies. The smallest singular value is the spectral-norm distance to loss
+of full column rank. The threshold is a conventional approximation to SVD
+roundoff resolution, not an uncertainty bound for the imaging pipeline, and is
+independent of image storage precision. Repeated observations add weight but no
+independent constraints: combining proportional rows preserves `A.T @ A` and
+makes duplication of an entire input leave this rank decision unchanged.
 
-`G0 = W * sqrt(sum(q * h**2)) / sqrt(sum(q**2))`.
+`check_spectral_sampling` also accepts caller-supplied weights when those are
+already available; it performs no I/O or weight preparation. Its original-basis
+singular values and condition number describe physical Taylor coefficients and
+are diagnostic, not rejection thresholds. Rank singular values, normalization,
+float64 precision, and tolerance are recorded separately. Error context includes
+field, spectral window, selected channels, polarization, Taylor order, and
+reference frequency. Cube preflight checks nominal source-coordinate coverage
+for each requested output channel using the production nearest-channel mapping.
+Neither cube nor continuum metadata preflight determines positive-weight support.
 
-Absolute flux and noise cancel. The first pseudoinverse row is calculated from
-the thin SVD already used for rank checking; no visibility reads or extra
-weight/flag passes are required. We avoid normal equations, which square the
-condition number. The threshold `G0 > 3` produces a warning, not a rejection.
+### Order-zero spectral noise estimate
+
+For independent equal-variance channel noise, let `h` be the first row of the
+pseudoinverse of `A`. Under equal weights, the order-zero variance is
+`sigma**2 * sum(h**2)`; a constant-only average has variance `sigma**2 / N`.
+Their standard-deviation ratio is `G0 = sqrt(N) * norm(h)`.
+
+More generally, for supplied `q = weight / max(weight)` and `W = sum(q)`, the
+same independent unweighted-channel noise assumption gives
+`G0 = W * sqrt(sum(q * h**2)) / sqrt(sum(q**2))`. Every original sample is
+retained for this propagation; grouping frequencies for rank does not alter
+the independent-noise model. With `A = B D`, use `A^+ = D^-1 B^+` to recover
+`h` from a column-normalized SVD without forming normal equations.
+
+Absolute flux and noise cancel. `G0 > 3` produces a warning, not a rejection.
 Three is an explicit noise-amplification policy motivated by a three-sigma
-residual target; it does not establish equivalence to CLEAN stopping depth or
-predict the final image residual. Unequal channel noise, correlations, spectral
-model bias, and spatial imaging effects are outside this diagnostic. Numerical
-rank deficiency still rejects the requested full Taylor fit separately.
+residual target; it does not predict the final residual or CLEAN stopping depth.
+With preflight unit weights, this is an equal-weight estimate only. Actual
+weighting, flags, unequal noise, correlations, spectral model bias, and spatial
+imaging effects are outside that early estimate. A reference outside the selected
+frequency range also warns.
 
-### PSF-free Hessian approximation at the distributed entry point
+### Hessian diagnostics from supplied arrays
 
-Before output creation and imaging-graph execution, MT-MFS preflight also calls
-`check_taylor_hessian_approximation` using the selected frequencies and effective
-weights already collected above. Local guards use the point-scale spectral
-estimate `H_hat = A.T @ A`, or `H_hat_kl = sum(q_i * x_i**(k+l))`. Spatial
-interactions between delta components are assessed separately with Gaussian
-channel PSF blocks, as described below. There are no visibility reads, additional
-metadata passes, or image-sized preflight allocations.
+`check_taylor_hessian_approximation` is a standalone diagnostic for callers that
+already have spectral weights and projected-baseline estimates. The distributed
+coordinate-only preflight does not invoke it or collect those arrays. It checks
+the column-equilibrated spectral Gram matrix and Gaussian spatial blocks using
+its supplied inputs. Its local pivot/eigenvalue thresholds use the requested
+working precision; noise amplification assumes covariance proportional to the
+approximate Hessian. These are different assumptions from spectral `G0`.
 
-The early checks mirror the later Hessian checks:
-
-1. Reject an approximate Cholesky failure or relative pivots at or below
-   `100 * eps`, matching the native diagonal-relative safety margin.
-2. Reject eigenvalues of the equilibrated approximation at or below
-   `nterms * eps * largest_absolute_eigenvalue`, because the approximate full
-   Taylor solve is numerically unresolved at the requested working precision.
-3. Warn when `sqrt(H_hat_00 * inverse(H_hat)_00) > 3`, assuming residual
-   covariance proportional to `H_hat`. Flux and absolute noise cancel.
-
-To avoid squaring the raw Taylor dynamic range, normalize the columns of `A`
-before forming the equilibrated Gram matrix. Compute order-zero amplification
-with a Cholesky solve rather than an explicit inverse. These local checks do not
-describe spatial coupling; the additional Gaussian block diagnostic does.
-Passing preflight does not certify a later actual Hessian: Gaussian PSFs omit
-sidelobes, sampling gaps, gridding effects, and per-plane differences hidden by
-weight aggregation. All actual-PSF checks remain active in the append node.
-
-The result is stored as `spectral_design.taylor_hessian_approximation`, including
-the approximation name, equilibrated matrix, pivots, eigenvalues, thresholds,
-noise amplification, and its explicit covariance assumption. This approximation
-uses a different noise assumption from spectral `G0`, which assumes equal noise
-in the unweighted channels. Cube and single-term Högbom workflows do not request
-this additional MT-MFS approximation.
+Actual-product validation checks the measured PSF-derived Hessians once the
+imaging tasks have formed them. Neither the coordinate rank test nor an optional
+Gaussian diagnostic certifies those later products.
 
 ### Shared spatial-block Hessian diagnostic
 
@@ -192,8 +187,8 @@ matrix at each spatial frequency is `H_kl(u) = Fourier(P_(k+l))(u)`.
 - **Gaussian preflight:** for channel `i`, take a peak-one circular Gaussian with
   `FWHM_i = c / (frequency_i * Bmax_i)` radians. `Bmax_i` is the longest projected
   baseline in metres with positive effective weight after flags and correlation
-  selection. It is collected in the existing metadata pass and combined across
-  Measurement Sets at the same frequency. Convert FWHM to `sigma_i`, and form
+  selection. The caller supplies this information from already available data;
+  obtaining it is outside coordinate-only preflight. Convert FWHM to `sigma_i`, and form
   the Taylor Fourier PSFs from
   `sum_i q_i * x_i**order * sigma_i**2 * exp(-2*pi**2*sigma_i**2*|u|**2)`.
   The Gaussian area factor is retained; only a common normalization cancels.

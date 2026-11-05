@@ -55,7 +55,11 @@ frequency axes.
 
 Input metadata and generated task boundaries are checked before output writes
 or graph execution when they become available. Continuum beam inference needs
-only antenna metadata and now runs before the first output write. Kernel-design
+only antenna metadata and runs before the first output write. Spectral preflight
+uses selected frequency coordinates and equal sample weights, with a
+column-normalized float64 rank test. It reads no bulk weights, flags, UVW, or
+visibility arrays; its support and noise diagnostics are nominal equal-weight
+estimates. Kernel-design
 preflight reuses the production kernel cache. Direct entry points use
 `input_checked=False`; validated callers pass `True` through the stack. Configuration predicates live in the parameter-check package; legacy helpers
 reuse those predicates. Actual-product, cache-consistency, and native-buffer

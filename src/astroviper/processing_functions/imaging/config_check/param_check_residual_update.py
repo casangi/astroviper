@@ -451,7 +451,7 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
             )
 
     # --- Numerical storage ---
-    # Inspect dtypes only; finite-value checks still run on selected blocks.
+    # Inspect dtypes only; finite-value predicates require loaded sample arrays.
     for role, kinds in (
         ("correlated_data", "c"),
         ("weight", "iuf"),
@@ -493,7 +493,7 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
 
 
 # ========================================================================
-# Selected visibility data: always checked after reading each metadata block
+# Selected visibility data predicates: require loaded sample arrays
 # ========================================================================
 
 
@@ -553,7 +553,9 @@ def check_effective_weights(weights, active, *, context):
 def check_selected_samples(samples):
     """Require selected samples before constructing spectral diagnostics."""
     if not samples:
-        raise ValueError("Spectral-design preflight: no selected channels have data.")
+        raise ValueError(
+            "Spectral-design preflight: no source channels match the requested frequency selection."
+        )
 
 
 def check_continuum_beam_metadata(image_params, antenna_xds, *, continuum_mode):
@@ -615,15 +617,18 @@ def check_spectral_sampling(
     Parameters
     ----------
     frequencies, effective_weights : array-like
-        Selected channel frequencies in Hz and summed effective imaging weights.
-        Flags and correlation selection must already have been applied. Repeated
-        frequencies are permitted, but do not add independent Taylor samples.
+        Selected frequencies in Hz and nonnegative relative sample weights.
+        Metadata-only preflight supplies unit weights: flags and actual imaging
+        weights are not known at that stage. Callers with prepared weights may
+        supply them directly. Repeated frequencies add weight, not independent
+        Taylor constraints. Neither input is modified.
     n_taylor_terms : int
         Number of Taylor terms required by the model.
     reference_frequency : float
         Reference frequency in Hz.
     precision : {"float32", "float64"}
-        Working image precision used for the numerical-rank tolerance.
+        Requested image precision, recorded as context. Numerical rank is
+        assessed in float64, independently of the image storage precision.
     context : mapping, optional
         Field, spectral-window, channel-selection, and polarization identifiers.
 
@@ -633,6 +638,9 @@ def check_spectral_sampling(
         Channel counts, numerical rank, singular values, frequency range, and
         explicitly named 2-norm spectral-design condition number and reciprocal,
         plus order-zero noise amplification relative to a constant-only fit.
+        Rank singular values and their tolerance describe the column-normalized
+        distinct-frequency design. Condition numbers describe the original
+        Taylor basis and are diagnostic, not rejection thresholds.
 
     Raises
     ------
@@ -701,9 +709,74 @@ def check_spectral_sampling(
         float(usable_frequencies.max()),
     ]
 
-    # --- Weighted Taylor design ---
-    # A common weight scale cancels from the singular-value ratio and avoids
-    # overflowing the square root for otherwise valid large imaging weights.
+    # --- Enough independent frequency constraints ---
+    # A degree-(p-1) polynomial needs at least p distinct frequency constraints.
+    # Repeating a frequency cannot remove an exact null direction. Reject an
+    # underdetermined request rather than changing its Taylor order or basis.
+    if diagnostics["distinct_frequency_count"] < n_taylor_terms:
+        fail("fewer distinct positive-weight frequencies than requested Taylor terms")
+
+    # --- Distinct-frequency design ---
+    # Combine weights only for rank assessment. Equal-frequency rows are
+    # proportional, and replacing them by one row with their summed weight
+    # preserves A.T @ A. Repeating the complete input therefore leaves both
+    # the normalized design and its rank tolerance unchanged.
+    unique_frequencies, inverse = np.unique(usable_frequencies, return_inverse=True)
+    usable_weights = weights[usable].astype(np.float64)
+    usable_weights = usable_weights / usable_weights.max()
+    combined_weights = np.zeros(unique_frequencies.size, dtype=np.float64)
+    np.add.at(combined_weights, inverse, usable_weights)
+    try:
+        rank_design, _, _ = make_weighted_taylor_design(
+            unique_frequencies,
+            combined_weights,
+            n_taylor_terms=n_taylor_terms,
+            reference_frequency=reference_value,
+        )
+    except ValueError as error:
+        fail(str(error))
+
+    # --- Column normalization ---
+    # A_ik = sqrt(q_i) * x_i**k maps physical coefficients c to observations.
+    # With D_kk = ||A_:k||_2 and B = A D^-1, Ac = Bz for z = Dc. Nonzero
+    # column scaling preserves rank while separating polynomial dependence from
+    # the naturally different magnitudes of intensity, slope, and curvature.
+    # Scaling by each column's maximum first keeps its norm representable.
+    column_maximum = np.max(np.abs(rank_design), axis=0)
+    if np.any(column_maximum == 0):
+        fail("a Taylor design column has no representable frequency constraint")
+    scaled_design = rank_design / column_maximum
+    scaled_design /= np.linalg.norm(scaled_design, axis=0)
+    rank_singular_values = np.linalg.svd(scaled_design, compute_uv=False)
+
+    # --- Numerical resolution of the diagnostic ---
+    # For B = U Sigma V.T, subtracting sigma_min * u_min * v_min.T removes
+    # its weakest direction. Thus sigma_min is the spectral-norm distance to
+    # loss of full column rank. Compare it with max(M, p) * eps64 * ||B||_2,
+    # where M is the number of distinct frequencies and p the Taylor count.
+    # This conventional SVD rank tolerance accounts approximately for roundoff
+    # in the float64 diagnostic. The dimension factor is a numerical convention,
+    # not a derived uncertainty bound for the imaging pipeline. Image precision,
+    # visibility noise, flags, weighting, and spatial PSFs require their own
+    # diagnostics; passing this check does not certify coefficient accuracy.
+    tolerance = (
+        max(scaled_design.shape) * np.finfo(np.float64).eps * rank_singular_values[0]
+    )
+    rank = int(np.count_nonzero(rank_singular_values > tolerance))
+    diagnostics.update(
+        spectral_design_rank=rank,
+        spectral_design_rank_singular_values=rank_singular_values.tolist(),
+        spectral_design_rank_tolerance=float(tolerance),
+        spectral_design_rank_precision="float64",
+        spectral_design_rank_scaling="unit_column_norm",
+        working_precision=np.dtype(precision).name,
+    )
+    if rank != n_taylor_terms:
+        fail("the column-normalized Taylor design is numerically rank deficient")
+
+    # --- Conditioning in the physical Taylor basis ---
+    # Retain every original sample for noise propagation: grouping repeated
+    # frequencies for rank must not change the assumed independent noise model.
     try:
         design, normalized_weights, sqrt_weights = make_weighted_taylor_design(
             usable_frequencies,
@@ -713,52 +786,15 @@ def check_spectral_sampling(
         )
     except ValueError as error:
         fail(str(error))
-    left_vectors, singular_values, right_vectors_transposed = np.linalg.svd(
-        design, full_matrices=False
-    )
-
-    # --- Numerical-rank tolerance ---
-    # The smallest singular value is the spectral-norm distance to a matrix
-    # that loses column rank: removing sigma_min * u_min * v_min.T makes that
-    # direction unconstrained. If this distance is within numerical uncertainty,
-    # we cannot reliably distinguish the direction from zero and reject the fit.
-    # Model that uncertainty as C(N, p) * eps * ||design||_2, where N is the
-    # usable channel count, p is the Taylor order, and ||design||_2 = sigma_max.
-    # Choosing C(N, p) = max(N, p) gives NumPy's conventional matrix_rank
-    # threshold. This dimension factor is a heuristic, not a uniquely derived
-    # error bound (https://numpy.org/doc/stable/reference/generated/numpy.linalg.matrix_rank.html).
-    # Although the SVD runs in float64, eps uses the requested imaging precision:
-    # this is a downstream acceptance policy, not an error bound for this SVD
-    # or a proven accuracy guarantee for the complete imaging calculation.
-    epsilon = np.finfo(precision).eps
-    tolerance = max(design.shape) * epsilon * singular_values[0]
-    rank = int(np.count_nonzero(singular_values > tolerance))
-    reciprocal_condition = (
-        float(singular_values[-1] / singular_values[0])
-        if rank == n_taylor_terms
-        else 0.0
-    )
+    singular_values = np.linalg.svd(design, compute_uv=False)
+    reciprocal_condition = float(singular_values[-1] / singular_values[0])
     diagnostics.update(
-        spectral_design_rank=rank,
         spectral_design_singular_values=singular_values.tolist(),
         spectral_design_reciprocal_condition_number=reciprocal_condition,
         spectral_design_condition_number=(
             1.0 / reciprocal_condition if reciprocal_condition else None
         ),
-        working_precision=np.dtype(precision).name,
-        spectral_design_rank_tolerance=float(tolerance),
     )
-
-    # --- Enough independent frequency constraints ---
-    # Fitting p Taylor coefficients requires at least p independent equations.
-    # Each distinct positive-weight frequency supplies at most one; repeated
-    # frequencies add weight but no independent constraint, and zero-weight
-    # channels supply none. With fewer than p, the coefficients are not unique
-    # even in exact arithmetic. Reject instead of silently lowering the order.
-    if diagnostics["distinct_frequency_count"] < n_taylor_terms:
-        fail("fewer distinct positive-weight frequencies than requested Taylor terms")
-    if rank != n_taylor_terms:
-        fail("the weighted Taylor design is numerically rank deficient")
 
     # ========================================================================
     # 3. Noise amplification and reference placement
@@ -777,7 +813,19 @@ def check_spectral_sampling(
     # G_0 = W * sqrt(sum(q_i * h_i**2)) / sqrt(sum(q_i**2)).
     # Absolute flux and noise cancel. Compute h from the thin SVD, avoiding
     # normal equations, which square the condition number.
-    order_zero_row = (right_vectors_transposed[:, 0] / singular_values) @ left_vectors.T
+    # Solve in normalized coefficient coordinates and transform back: since
+    # A = B D, A^+ = D^-1 B^+. This preserves the original coefficient/noise
+    # meaning while avoiding division by raw tiny higher-order columns.
+    sample_maximum = np.max(np.abs(design), axis=0)
+    normalized_design = design / sample_maximum
+    sample_norm = np.linalg.norm(normalized_design, axis=0)
+    normalized_design /= sample_norm
+    left_vectors, scaled_values, right_vectors_transposed = np.linalg.svd(
+        normalized_design, full_matrices=False
+    )
+    order_zero_row = (
+        (right_vectors_transposed[:, 0] / scaled_values) @ left_vectors.T
+    ) / (sample_maximum[0] * sample_norm[0])
     noise_amplification = float(
         normalized_weights.sum()
         * np.linalg.norm(order_zero_row * sqrt_weights)

@@ -22,7 +22,7 @@ def generated_store(tmp_path_factory):
         {"weighting": "briggs", "robust": 0.5, "weighting_scope": "local"},
     ],
 )
-def test_generated_continuum_image_records_both_preflight_stages(
+def test_generated_continuum_image_records_coordinate_and_actual_product_checks(
     tmp_path, generated_store, continuum_mode, weighting
 ):
     processing_set = open_processing_set(str(generated_store))
@@ -37,13 +37,11 @@ def test_generated_continuum_image_records_both_preflight_stages(
     )
     validation = image.attrs["input_validation"]
     assert validation["spectral_design"]["spectral_design_rank"] == 2
-    approximation = validation["spectral_design"]["taylor_hessian_approximation"]
-    assert approximation["approximation"] == "frequency_moment_gram"
-    assert approximation["order_zero_noise_amplification"] >= 1.0 - 1e-12
-    assert (
-        approximation["spatial_blocks"]["approximation"]
-        == "circular_gaussian_channel_psfs"
-    )
+    spectral = validation["spectral_design"]
+    assert spectral["weight_assumption"] == "equal"
+    assert spectral["support_assumption"] == "selected_frequency_coordinates"
+    assert spectral["spectral_design_rank_precision"] == "float64"
+    assert "taylor_hessian_approximation" not in spectral
     assert validation["model_products"]["effective_scales"] == [0.0]
     assert validation["model_products"]["taylor_hessian_condition_number"]
     assert (
@@ -115,31 +113,34 @@ def test_spectral_failure_leaves_no_output_or_graph(
     assert not output.exists()
 
 
-def test_approximate_hessian_failure_precedes_psf_and_output(
-    monkeypatch, tmp_path, generated_store
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_driver_never_requests_a_bulk_gaussian_preflight(
+    monkeypatch, tmp_path, generated_store, continuum_mode
 ):
-    def reject(*args, **kwargs):
-        raise ValueError(
-            "Approximate Taylor-Hessian preflight: unsafe spectral moments"
+    def forbidden(*args, **kwargs):
+        raise AssertionError(
+            "Coordinate preflight requested a Gaussian PSF approximation"
         )
 
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.config_check.param_check_model_update.check_taylor_hessian_approximation",
-        reject,
+        forbidden,
     )
-    output = tmp_path / "rejected-hessian.img.zarr"
+    output = tmp_path / "coordinate-preflight.img.zarr"
     processing_set = open_processing_set(str(generated_store))
-    with pytest.raises(ValueError, match="Approximate Taylor-Hessian preflight"):
-        continuum_tests._run_tw_hydra_continuum(
-            generated_store,
-            output,
-            processing_set,
-            2,
-            "mfs",
-            {"weighting": "natural"},
-            deconvolver="mtmfs",
-        )
-    assert not output.exists()
+    _, image = continuum_tests._run_tw_hydra_continuum(
+        generated_store,
+        output,
+        processing_set,
+        2,
+        continuum_mode,
+        {"weighting": "natural"},
+        deconvolver="mtmfs",
+    )
+    assert output.exists()
+    assert image.attrs["input_validation"]["model_products"][
+        "taylor_hessian_condition_number"
+    ]
 
 
 def test_continuum_rejects_msv2_through_shared_storage_check_before_io(

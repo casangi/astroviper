@@ -115,6 +115,12 @@ def _run(
         )
     with xr.open_zarr(output if read_output is None else read_output) as stored:
         image = stored.load()
+    spectral = image.attrs["input_validation"]["spectral_design"]
+    assert spectral["weight_assumption"] == "equal"
+    assert spectral["support_assumption"] == "selected_frequency_coordinates"
+    assert spectral["spectral_design_rank"] == params["n_taylor_terms"]
+    assert spectral["spectral_design_rank_precision"] == "float64"
+    assert "taylor_hessian_approximation" not in spectral
     return result, image
 
 

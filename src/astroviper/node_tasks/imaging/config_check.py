@@ -1,54 +1,44 @@
-"""Read only the visibility metadata needed for imaging preflight."""
+"""Inspect selected imaging coordinates and structure without reading sample arrays."""
 
 
 def preflight_imaging_inputs(processing_set, config, *, mode):
-    """Check actual selected imaging weights before creating output or graphs.
+    """Check nominal spectral support using metadata and equal sample weights.
 
     Parameters
     ----------
     processing_set : xarray.DataTree or mapping
-        Lazy input Measurement Sets. Visibility data are never loaded here.
+        Lazy input Measurement Sets. Only coordinates, attributes, shapes, and
+        dtypes are inspected; visibility, weight, flag, time-centroid, and UVW
+        arrays remain unloaded.
     config : mapping
-        Validated image, weighting, polarization, and data-group configuration.
+        Validated image, polarization, and data-group configuration.
     mode : ImagingMode
         Imaging kind and field layout.
 
     Returns
     -------
     dict
-        Spectral-design diagnostics based on the same weight kernels as imaging.
+        Equal-weight spectral diagnostics, including their approximation and
+        scope. Cube diagnostics describe each requested channel separately.
 
     Notes
     -----
-    Weight/flag/UVW data are read in bounded time blocks. Global Briggs uses
-    two passes over the selected metadata; local Briggs processes one frequency
-    at a time so the density grid never grows with the channel count.
+    The approximation q_nu = 1 tests the nominal selected frequency coverage.
+    It does not certify actual positive-weight support after flags, the final
+    coefficient errors, or a PSF Hessian. No density gridding or spatial-PSF
+    approximation is performed here. Data-dependent checks require arrays
+    produced or loaded by the imaging tasks.
     """
     import numpy as np
 
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
-        _equalize_parallel_hand_weights,
-    )
     from astroviper.processing_functions.imaging.config_check._common import (
-        imaging_weighting_scope,
         selected_frequency_mask,
     )
     from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
-        absent_visibility_rows,
-        check_effective_weights,
         check_input_metadata,
         check_selected_fields,
         check_selected_samples,
         check_spectral_sampling,
-        check_statistical_weights,
-        check_visibility_uvw,
-    )
-    from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
-        calculate_briggs_params,
-    )
-    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
-        degrid_imaging_weights,
-        grid_imaging_weights,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
         correlation_selection,
@@ -56,337 +46,100 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
     )
 
     image_params = config["image_params"]
-    weighting_params = config["imaging_weights_params"]
     requested_frequencies = np.asarray(image_params["frequency_coords"])
     correlation_coords = correlations_for_stokes(
         image_params["polarization_coords"],
         config.get("instrument_polarization_basis", "linear"),
     )
     group_name = config.get("processing_set_data_group_name", "corrected")
-    weighting = weighting_params.get("weighting", "natural")
-    scope = imaging_weighting_scope(weighting_params, mode=mode)
-    truncate_uv_cells = mode.imaging_kind == "continuum"
-    image_size = np.asarray(image_params["image_size"], dtype=np.int64)
-    cell_size = np.asarray(image_params["cell_size"], dtype=np.float64)
-    threads = config.get("processing_function_threads", 1)
-    samples = {}
-    longest_projected_baselines = {}
-    needs_spatial_preflight = (
-        mode.imaging_kind == "continuum"
-        and config.get("deconvolver", "hogbom") == "mtmfs"
-    )
     fields = set()
     spectral_windows = set()
+    samples = []
+    output_channels = []
 
-    # --- Selection and coordinate metadata ---
-    # Resolve channels, correlations, fields, and spectral windows once, without
-    # loading visibility, weight, flag, or UVW arrays.
-    selected_inputs = []
-    image_channel_maps = {}
+    # --- Input structure and selected frequency coordinates ---
+    # Channel mapping follows imaging's coordinate selection. Array values are
+    # irrelevant to this equal-weight approximation and must remain lazy.
     for ms_name, child in processing_set.items():
         source = child.ds if hasattr(child, "ds") else child
         check_input_metadata(source, config, mode=mode, measurement_set=ms_name)
-        group = source.attrs["data_groups"][group_name]
         frequencies = np.asarray(source.frequency.values)
         if mode.imaging_kind == "cube":
             from graphviper.graph_tools.coordinate_utils import (
                 map_to_nearest_coordinate,
             )
 
-            # Use each child's full frequency axis, as graph construction does.
-            # This also preserves the singleton image channel's half-cell width.
-            image_channel_maps[ms_name] = map_to_nearest_coordinate(
+            image_channels = map_to_nearest_coordinate(
                 frequencies, requested_frequencies
             )
-            selected = image_channel_maps[ms_name] >= 0
+            indices = np.flatnonzero(image_channels >= 0)
+            output_channels.extend(image_channels[indices].tolist())
         else:
-            selected = selected_frequency_mask(
-                frequencies, requested_frequencies, mode=mode
+            indices = np.flatnonzero(
+                selected_frequency_mask(frequencies, requested_frequencies, mode=mode)
             )
-        indices = np.flatnonzero(selected)
         if not indices.size:
             continue
-        pol_selection = correlation_selection(
-            source.polarization.values, correlation_coords, ms_name
-        )
+        correlation_selection(source.polarization.values, correlation_coords, ms_name)
         partition_info = (
             child.xr_ms.get_partition_info(data_group_name=group_name)
             if hasattr(child, "xr_ms")
             else source.attrs.get("partition_info", {})
         )
-        for name in np.atleast_1d(partition_info.get("field_name", [])):
-            fields.add(str(name))
-        for name in np.atleast_1d(
-            partition_info.get(
-                "spectral_window_name", partition_info.get("spectral_window_id", [])
+        fields.update(
+            str(name) for name in np.atleast_1d(partition_info.get("field_name", []))
+        )
+        spectral_windows.update(
+            str(name)
+            for name in np.atleast_1d(
+                partition_info.get(
+                    "spectral_window_name", partition_info.get("spectral_window_id", [])
+                )
             )
-        ):
-            spectral_windows.add(str(name))
-        selected_inputs.append(
-            (ms_name, source, group, indices, pol_selection, frequencies)
+        )
+        samples.extend(
+            (ms_name, int(index), float(frequencies[index])) for index in indices
         )
 
-    # --- Single-field contract ---
-    # Reject multiple selected fields before reading any weight or flag arrays.
+    # --- Selection contract ---
+    # Missing coordinates and mixed fields are known without inspecting flags.
     check_selected_fields(fields, mode=mode)
-
-    # --- Selected metadata blocks ---
-    # Keep I/O here in the node layer. Each pass reads fresh bounded blocks;
-    # flagging and equalization never modify the source Processing Set.
-    def blocks(selected_frequency=None):
-        for (
-            ms_name,
-            source,
-            group,
-            indices,
-            pol_selection,
-            frequencies,
-        ) in selected_inputs:
-            if selected_frequency is not None:
-                if mode.imaging_kind == "cube":
-                    image_channel = np.flatnonzero(
-                        requested_frequencies == selected_frequency
-                    )[0]
-                    indices = indices[
-                        image_channel_maps[ms_name][indices] == image_channel
-                    ]
-                else:
-                    indices = indices[frequencies[indices] == selected_frequency]
-            if not indices.size:
-                continue
-            selection = {"frequency": indices}
-            if pol_selection is not None:
-                selection["polarization"] = pol_selection
-            selected_source = source.isel(selection)
-            values_per_time = max(
-                1,
-                selected_source.sizes["baseline_id"]
-                * len(indices)
-                * len(correlation_coords),
-            )
-            times_per_block = max(1, (64 * 1024**2) // (values_per_time * 24))
-            for start in range(0, source.sizes["time"], times_per_block):
-                block = selected_source.isel(time=slice(start, start + times_per_block))
-                raw_weights = np.array(
-                    block[group["weight"]]
-                    .transpose("time", "baseline_id", "frequency", "polarization")
-                    .values,
-                    copy=True,
-                )
-                flags = np.asarray(
-                    block[group["flag"]]
-                    .transpose("time", "baseline_id", "frequency", "polarization")
-                    .values
-                )
-                uvw = np.ascontiguousarray(block[group["uvw"]].values, dtype=np.float64)
-
-                time_centroid = (
-                    block.TIME_CENTROID.transpose("time", "baseline_id").values
-                    if "TIME_CENTROID" in block
-                    else None
-                )
-                absent_rows = absent_visibility_rows(
-                    raw_weights, uvw, time_centroid=time_centroid
-                )
-                sample_flagged = np.any(flags != 0, axis=-1, keepdims=True)
-                sample_flagged |= absent_rows[:, :, None, None]
-                if np.any(absent_rows):
-                    uvw = uvw.copy()
-                    uvw[absent_rows] = 0.0  # No sample contributes at these rows.
-                active = np.broadcast_to(~sample_flagged, raw_weights.shape)
-                check_statistical_weights(
-                    raw_weights,
-                    active,
-                    context={
-                        "field": sorted(fields),
-                        "spectral_window": sorted(spectral_windows),
-                        "measurement_set": ms_name,
-                        "channel_selection": indices.tolist(),
-                        "polarization": correlation_coords,
-                        "nterms": image_params.get("n_taylor_terms", 1),
-                        "reference_frequency": image_params.get("reference_frequency"),
-                    },
-                )
-                raw_weights[np.broadcast_to(sample_flagged, raw_weights.shape)] = np.nan
-                equalized = _equalize_parallel_hand_weights(
-                    raw_weights,
-                    weighting_params.get("casa_weighting_implementation", False),
-                )
-                check_visibility_uvw(uvw, measurement_set=ms_name)
-                baselines = np.ones(block.sizes["baseline_id"], dtype=bool)
-                if (
-                    "baseline_antenna1_name" in block
-                    and "baseline_antenna2_name" in block
-                ):
-                    baselines = np.asarray(
-                        block.baseline_antenna1_name != block.baseline_antenna2_name
-                    )
-                yield (
-                    ms_name,
-                    indices,
-                    frequencies[indices],
-                    uvw,
-                    np.ascontiguousarray(equalized, dtype=np.float64),
-                    sample_flagged,
-                    baselines,
-                )
-
-    # --- Effective-weight accumulation ---
-    # Flagged samples and auto-correlations do not contribute Taylor constraints.
-    def accumulate(block, effective_weights):
-        ms_name, indices, frequencies, uvw, _, flagged, baselines = block
-        active = np.broadcast_to(~flagged, effective_weights.shape).copy()
-        active[:, ~baselines, :, :] = False
-        check_effective_weights(
-            effective_weights,
-            active,
-            context={
-                "measurement_set": ms_name,
-                "channel_selection": indices.tolist(),
-                "polarization": correlation_coords,
-            },
-        )
-        channel_weights = np.where(active, effective_weights, 0).sum(
-            axis=(0, 1, 3), dtype=np.float64
-        )
-        # Gaussian preflight uses resolution lambda / Bmax at each frequency.
-        # Accumulate only usable projected baselines in the existing metadata
-        # pass; flagged, zero-weight, and autocorrelation samples cannot define
-        # the resolution. No visibility reads or additional pass are needed.
-        if needs_spatial_preflight:
-            positive_samples = np.any(active & (effective_weights > 0), axis=-1)
-            projected_lengths = np.hypot(uvw[:, :, 0], uvw[:, :, 1])
-            channel_baselines = np.where(
-                positive_samples, projected_lengths[:, :, None], 0
-            ).max(axis=(0, 1))
-            for frequency, longest_baseline in zip(
-                frequencies, channel_baselines, strict=True
-            ):
-                longest_projected_baselines[float(frequency)] = max(
-                    longest_projected_baselines.get(float(frequency), 0.0),
-                    float(longest_baseline),
-                )
-        for index, frequency, weight in zip(
-            indices, frequencies, channel_weights, strict=True
-        ):
-            key = (ms_name, int(index), float(frequency))
-            samples[key] = samples.get(key, 0.0) + float(weight)
-
-    # --- Natural weighting ---
-    # This is exactly the flagged, equalized statistical weight used by imaging.
-    if weighting == "natural":
-        for block in blocks():
-            accumulate(block, block[4])
-
-    # --- Briggs and uniform weighting ---
-    # Use the production gridding/degridding kernels. The same recipe handles
-    # one global density plane or independent per-frequency density planes.
-    else:
-        density_frequencies = (
-            [None] if scope == "global" else np.unique(requested_frequencies)
-        )
-        for selected_frequency in density_frequencies:
-            density = np.zeros((1, 1, *image_size), dtype=np.float64)
-            sum_weight = np.zeros((1, 1), dtype=np.float64)
-            for block in blocks(selected_frequency):
-                _, _, frequencies, uvw, weights, _, _ = block
-                grid_imaging_weights(
-                    density,
-                    sum_weight,
-                    uvw,
-                    weights,
-                    frequencies,
-                    image_size,
-                    cell_size,
-                    processing_function_threads=threads,
-                    frequency_map=np.zeros(len(frequencies), dtype=np.int64),
-                    truncate_uv_cells=truncate_uv_cells,
-                )
-            if not np.any(sum_weight > 0):
-                # Preserve zero-weight channels in the final rank diagnostic.
-                for block in blocks(selected_frequency):
-                    accumulate(block, np.zeros_like(block[4]))
-                continue
-            factors = calculate_briggs_params(density, sum_weight, weighting_params)
-            for block in blocks(selected_frequency):
-                _, _, frequencies, uvw, weights, _, _ = block
-                effective = degrid_imaging_weights(
-                    density,
-                    uvw,
-                    weights,
-                    factors,
-                    frequencies,
-                    image_size,
-                    cell_size,
-                    processing_function_threads=threads,
-                    frequency_map=np.zeros(len(frequencies), dtype=np.int64),
-                    truncate_uv_cells=truncate_uv_cells,
-                )
-                accumulate(block, effective)
-
     check_selected_samples(samples)
     context = {
         "field": sorted(fields),
         "spectral_window": sorted(spectral_windows),
         "channel_selection": [[name, index] for name, index, _ in samples],
-        "polarization": image_params["polarization_coords"],
+        "polarization": np.asarray(image_params["polarization_coords"]).tolist(),
+        "weight_assumption": "equal",
+        "support_assumption": "selected_frequency_coordinates",
     }
     frequencies = np.array([frequency for _, _, frequency in samples])
-    weights = np.array(list(samples.values()))
+    unit_weights = np.ones(frequencies.size, dtype=np.float64)
     precision = "float32" if config.get("single_precision_image", True) else "float64"
+
+    # --- Equal-weight continuum approximation ---
+    # The rank diagnostic is float64 regardless of requested image precision.
     if mode.imaging_kind == "continuum":
-        diagnostics = check_spectral_sampling(
+        return check_spectral_sampling(
             frequencies,
-            weights,
+            unit_weights,
             n_taylor_terms=image_params["n_taylor_terms"],
             reference_frequency=image_params["reference_frequency"],
             precision=precision,
             context=context,
         )
-        # The driver calls this before output creation or graph execution.
-        # Reuse the same selected metadata for Gaussian spatial PSF blocks;
-        # the append node will still validate the actual PSF-derived Hessians.
-        if config.get("deconvolver", "hogbom") == "mtmfs":
-            from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
-                check_taylor_hessian_approximation,
-            )
 
-            diagnostics["taylor_hessian_approximation"] = (
-                check_taylor_hessian_approximation(
-                    frequencies,
-                    weights,
-                    n_taylor_terms=image_params["n_taylor_terms"],
-                    reference_frequency=image_params["reference_frequency"],
-                    longest_projected_baselines=np.array(
-                        [
-                            longest_projected_baselines[float(frequency)]
-                            for frequency in frequencies
-                        ]
-                    ),
-                    image_size=image_params["image_size"],
-                    cell_size=image_params["cell_size"],
-                    precision=precision,
-                    context=context,
-                )
-            )
-        return diagnostics
-
-    # --- Cube channel usability ---
-    # Each independently imaged channel needs at least one usable sample.
+    # --- Nominal cube channel coverage ---
+    # A requested channel needs source coordinates assigned to it. This is not
+    # a test for unflagged, positive-weight data, which metadata cannot establish.
+    output_channels = np.asarray(output_channels)
     diagnostics = []
     for image_channel, frequency in enumerate(requested_frequencies):
-        # Usability belongs to the output channel that actually receives each
-        # sample, including shifted and averaged visibility channels.
-        selected = np.array(
-            [
-                image_channel_maps[name][index] == image_channel
-                for name, index, _ in samples
-            ]
-        )
+        selected = output_channels == image_channel
         diagnostics.append(
             check_spectral_sampling(
                 frequencies[selected],
-                weights[selected],
+                unit_weights[selected],
                 n_taylor_terms=1,
                 reference_frequency=float(frequency),
                 precision=precision,

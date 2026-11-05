@@ -587,7 +587,10 @@ def check_taylor_hessian_approximation(
 
     Notes
     -----
-    Local spectral guards use H_hat = A.T @ A. Spatial delta-component
+    This standalone diagnostic uses caller-supplied weights and resolution
+    estimates. Coordinate-only distributed preflight does not collect these
+    arrays or invoke this function. Local spectral guards use H_hat = A.T @ A.
+    Spatial delta-component
     interactions are separately diagnosed with natural-resolution channel
     Gaussian PSFs on a coarse Fourier grid. Sidelobes, actual sampling gaps,
     gridding effects, and per-plane differences hidden by aggregated weights
@@ -638,7 +641,8 @@ def check_taylor_hessian_approximation(
     # --- Frequency-moment Hessian ---
     # At point scale, spectral curvature is approximated by H_hat_kl =
     # sum(q_i * x_i**(k+l)), where x_i = (nu_i - nu_0) / nu_0.
-    # Reuse the effective weights already collected before graph construction.
+    # Use the effective weights supplied by the caller without reading data or
+    # preparing an imaging-weight density grid.
     # A common weight normalization does not affect any relative test below.
     try:
         design, _, _ = make_weighted_taylor_design(
