@@ -1,0 +1,622 @@
+"""Full-stack tests of the simulate_processing_set distributed application."""
+
+import numpy as np
+import pandas as pd
+import pytest
+from astropy.coordinates import SkyCoord
+from xradio.measurement_set import load_processing_set, open_processing_set
+from xradio.schema.check import check_datatree
+
+import astroviper.distributed_applications as distributed_applications
+from astroviper.processing_functions.simulation import (
+    simulate_processing_set as simulate_processing_set_pf,
+)
+from astroviper.processing_functions.simulation.calculate_noise import (
+    DEFAULT_NOISE_PARAMS,
+)
+from astroviper.utils.beam_models import (
+    airy_disk_model,
+    read_aperture_polynomial_coefficients,
+)
+from astroviper.utils.telescope_layout import (
+    observatory_position,
+    read_telescope_layout,
+)
+
+PHASE_CENTER = SkyCoord(ra="19h59m28.5s", dec="+40d44m01.5s", frame="fk5")
+SOURCE = SkyCoord(ra="19h59m50.51793355s", dec="+40d48m11.3694551s", frame="fk5")
+PC = np.array([[PHASE_CENTER.ra.rad, PHASE_CENTER.dec.rad]])
+SRC = np.array([[[SOURCE.ra.rad, SOURCE.dec.rad]]])
+TIME_PARAMS = {
+    "time_start": "2019-10-03T19:00:00.000",
+    "time_delta": 1800.0,
+    "n_samples": 4,
+}
+FREQ_PARAMS = {
+    "freq_start": 3e9,
+    "freq_delta": 0.2e9,
+    "n_channels": 3,
+    "channel_width": 1e7,
+    "spectral_window_name": "SBand",
+}
+
+
+def run(tmp_path, **overrides):
+    ant = read_telescope_layout("vla.d", antenna_selection=list(range(8)))
+    kwargs = dict(
+        ps_store=str(tmp_path / "vla_sim.ps.zarr"),
+        antenna_xds=ant,
+        time_params=TIME_PARAMS,
+        frequency_params=FREQ_PARAMS,
+        polarization=["RR", "LL"],
+        point_source_flux=np.array([1.0, 0, 0, 1.0])[None, None, None, :],
+        point_source_ra_dec=SRC,
+        phase_center_ra_dec=PC,
+        beam_models=[airy_disk_model("vla_nvss")],
+        beam_model_map=np.zeros(8, int),
+        n_time_chunks=2,
+        n_frequency_chunks=3,
+        overwrite=True,
+    )
+    kwargs.update(overrides)
+    return distributed_applications.simulation.simulate_processing_set(**kwargs), kwargs
+
+
+def test_full_stack_matches_processing_function(tmp_path):
+    result, kwargs = run(tmp_path)
+    assert isinstance(result["timing_node_tasks"], pd.DataFrame)
+    assert len(result["timing_node_tasks"]) == 6
+    assert list(result["timing_node_tasks"]["task_id"]) == list(range(6))
+    assert result["ms_name"] == "VLA_SBand"
+    assert result["timing_distributed_application"]["T_total"] > 0
+
+    ps_xdt = open_processing_set(result["ps_store"])
+    issues = check_datatree(ps_xdt)  # XRADIO MSv4 schema checker
+    assert str(issues) == "No schema issues found", str(issues)
+    ms = load_processing_set(result["ps_store"])["VLA_SBand"].ds
+    assert ms.sizes == {
+        "time": 4,
+        "baseline_id": 28,
+        "frequency": 3,
+        "polarization": 2,
+        "uvw_label": 3,
+    }
+    assert not np.isnan(ms.VISIBILITY.values).any()
+    assert list(ms.polarization.values) == ["RR", "LL"]
+    assert ms.frequency.attrs["spectral_window_name"] == "SBand"
+    assert ms.frequency.attrs["channel_width"]["data"] == 1e7
+    assert ms.time.attrs["integration_time"]["data"] == 1800.0
+    assert ms.field_name.values[0] == "field_0"
+    np.testing.assert_array_equal(ms.WEIGHT.values, 1.0)
+    assert not ms.FLAG.values.any()
+
+    # identical to the processing function on the full axes
+    ant = kwargs["antenna_xds"]
+    ref, _ = simulate_processing_set_pf(
+        ms.time.values, ms.frequency.values, ["RR", "LL"], ant.ANTENNA_POSITION.values,
+        observatory_position("VLA"), kwargs["point_source_flux"], SRC, PC, [airy_disk_model("vla_nvss")], np.zeros(8, int),
+    )  # fmt: skip
+    np.testing.assert_allclose(ms.VISIBILITY.values, ref.VISIBILITY.values, atol=1e-12)
+    np.testing.assert_allclose(ms.UVW.values, ref.UVW.values, atol=1e-9)
+    # antenna and field sub-datasets
+    field = ps_xdt["VLA_SBand"]["field_and_source_base_xds"].ds
+    np.testing.assert_allclose(field.FIELD_PHASE_CENTER_DIRECTION.values, PC)
+    assert field.FIELD_PHASE_CENTER_DIRECTION.attrs["frame"] == "icrs"
+    assert ps_xdt["VLA_SBand"]["antenna_xds"].ds.sizes["antenna_name"] == 8
+
+
+def test_mosaic_fields_noise_and_zernike(tmp_path):
+    pc2 = PC + np.array([[0.0, 2e-4]])
+    phase_centers = np.concatenate([PC, PC, pc2, pc2])
+    zpc = read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup")
+    result, kwargs = run(
+        tmp_path,
+        phase_center_ra_dec=phase_centers,
+        field_name=["A", "A", "B", "B"],
+        polarization=["RR", "RL", "LR", "LL"],
+        beam_models=[zpc, airy_disk_model("vla_nvss")],
+        beam_model_map=np.array([0, 0, 0, 0, 1, 1, 1, 1]),
+        beam_params={"image_size": [128, 128], "mueller_selection": np.arange(16)},
+        noise_params={"t_receiver": 50.0, "random_seed": 3},
+        n_time_chunks=2,
+        n_frequency_chunks=1,
+        ms_name="mosaic",
+    )
+    ps_xdt = open_processing_set(result["ps_store"])
+    issues = check_datatree(ps_xdt)  # XRADIO MSv4 schema checker
+    assert str(issues) == "No schema issues found", str(issues)
+    ms = load_processing_set(result["ps_store"])["mosaic"].ds
+    assert list(ms.field_name.values) == ["A", "A", "B", "B"]
+    field = ps_xdt["mosaic"]["field_and_source_base_xds"].ds
+    assert list(field.field_name.values) == ["A", "B"]
+    np.testing.assert_allclose(
+        field.FIELD_PHASE_CENTER_DIRECTION.values, np.concatenate([PC, pc2])
+    )
+    assert ms.sizes["polarization"] == 4
+    assert np.all(ms.WEIGHT.values > 0) and np.all(ms.WEIGHT.values < 1e6)
+    assert not np.isnan(ms.VISIBILITY.values).any()
+    # noise is reproducible for a fixed seed
+    result2, _ = run(
+        tmp_path,
+        ps_store=str(tmp_path / "again.ps.zarr"),
+        phase_center_ra_dec=phase_centers,
+        field_name=["A", "A", "B", "B"],
+        polarization=["RR", "RL", "LR", "LL"],
+        beam_models=[zpc, airy_disk_model("vla_nvss")],
+        beam_model_map=np.array([0, 0, 0, 0, 1, 1, 1, 1]),
+        beam_params={"image_size": [128, 128], "mueller_selection": np.arange(16)},
+        noise_params={"t_receiver": 50.0, "random_seed": 3},
+        n_time_chunks=2,
+        n_frequency_chunks=1,
+        ms_name="mosaic",
+    )
+    ms2 = load_processing_set(result2["ps_store"])["mosaic"].ds
+    np.testing.assert_array_equal(ms.VISIBILITY.values, ms2.VISIBILITY.values)
+
+
+def test_noise_collecting_area_is_the_antenna_dish_diameter(tmp_path):
+    """ALMA 7 m and 12 m antennas with the 10.7 m effective diameter beam model: the
+    weights follow the radiometer equation with each baseline's physical apertures."""
+    alma_all = read_telescope_layout("alma.all")
+    dish = alma_all.ANTENNA_DISH_DIAMETER.values
+    i7, i12 = np.flatnonzero(dish == 7.0), np.flatnonzero(dish == 12.0)
+    ant = alma_all.isel(antenna_name=[i7[0], i12[0], i7[1], i12[1]])
+    assert airy_disk_model("alma")["dish_diameter"] == 10.7
+    result, kwargs = run(
+        tmp_path,
+        antenna_xds=ant,
+        polarization=["XX", "YY"],
+        beam_models=[airy_disk_model("alma")],
+        beam_model_map=np.zeros(4, int),
+        noise_params={"random_seed": 5},
+        n_time_chunks=2,
+        n_frequency_chunks=1,
+    )
+    ms = load_processing_set(result["ps_store"])[result["ms_name"]].ds
+    diameter = ant.ANTENNA_DISH_DIAMETER
+    d1 = diameter.sel(antenna_name=ms.baseline_antenna1_name.values).values
+    d2 = diameter.sel(antenna_name=ms.baseline_antenna2_name.values).values
+    assert {*(d1 * d2)} == {49.0, 84.0, 144.0}
+    p = DEFAULT_NOISE_PARAMS
+    t_sys = p["t_receiver"] + p["t_atmos"] * (1 - p["spill_efficiency"]) + p["t_cmb"]
+    effective_area = p["ant_efficiency"] * np.pi * d1 * d2 / 4
+    sigma = (
+        np.sqrt(2)
+        * 1.380649e-23
+        * t_sys
+        * 1e26
+        / (
+            p["corr_efficiency"]
+            * p["quantization_efficiency"]
+            * effective_area
+            * np.sqrt(FREQ_PARAMS["channel_width"] * TIME_PARAMS["time_delta"])
+        )
+    )
+    np.testing.assert_allclose(
+        ms.WEIGHT.values,
+        np.broadcast_to(1 / sigma[None, :, None, None] ** 2, ms.WEIGHT.shape),
+        rtol=1e-12,
+    )
+    with pytest.raises(ValueError, match="ANTENNA_DISH_DIAMETER"):
+        run(
+            tmp_path,
+            **{**kwargs, "antenna_xds": ant.drop_vars("ANTENNA_DISH_DIAMETER")},
+        )
+
+
+def simulated_noise(tmp_path, name, **overrides):
+    """VISIBILITY of a sky without flux, which is the noise alone."""
+    result, _ = run(
+        tmp_path,
+        ps_store=str(tmp_path / f"{name}.ps.zarr"),
+        point_source_flux=np.zeros((1, 1, 1, 4)),
+        **overrides,
+    )
+    ms = load_processing_set(result["ps_store"])[result["ms_name"]].ds
+    return ms.VISIBILITY.values
+
+
+def test_noise_does_not_depend_on_the_chunking(tmp_path):
+    """One seed gives the same noise for any chunking (which, when not given,
+    follows the CPU count)."""
+    noise = [
+        simulated_noise(
+            tmp_path,
+            f"chunks_{n_time_chunks}x{n_frequency_chunks}",
+            noise_params={"random_seed": 7},
+            n_time_chunks=n_time_chunks,
+            n_frequency_chunks=n_frequency_chunks,
+        )
+        for n_time_chunks, n_frequency_chunks in [(1, 1), (4, 1), (2, 3)]
+    ]
+    assert np.all(noise[0] != 0)
+    np.testing.assert_array_equal(noise[1], noise[0])
+    np.testing.assert_array_equal(noise[2], noise[0])
+
+
+def test_noise_of_nearby_seeds_is_independent(tmp_path):
+    """With one time per task, seeds 1 and 2 share no noise value (no row of
+    one is a shifted row of the other) and no row of one correlates with any
+    row of the other."""
+    noise = [
+        simulated_noise(
+            tmp_path,
+            f"seed_{seed}",
+            noise_params={"random_seed": seed},
+            n_time_chunks=4,
+            n_frequency_chunks=1,
+        )
+        for seed in (1, 2)
+    ]
+    assert not np.isin(noise[1], noise[0]).any()
+    rows = [np.concatenate([r.real.ravel(), r.imag.ravel()]) for n in noise for r in n]
+    cross = np.corrcoef(rows)[:4, 4:]
+    assert np.abs(cross).max() < 4 / np.sqrt(rows[0].size)
+
+
+def test_automatic_chunking_and_validation_errors(tmp_path):
+    result, _ = run(
+        tmp_path,
+        n_time_chunks=None,
+        n_frequency_chunks=None,
+        thread_info={"n_threads": 2, "memory_per_thread": 4.0},
+    )
+    assert len(result["timing_node_tasks"]) >= 1
+    with pytest.raises(ValueError):
+        run(tmp_path, beam_model_map=np.zeros(3, int))
+    with pytest.raises(ValueError):
+        run(tmp_path, point_source_flux=np.ones((1, 2, 1, 4)))  # time axis 2 != 1 or 4
+    with pytest.raises(ValueError):
+        run(tmp_path, polarization=["RR", "XX"])
+    with pytest.raises(FileExistsError):
+        run(tmp_path, overwrite=False)
+    with pytest.raises(AssertionError):  # toolviper schema: unknown implementation
+        run(tmp_path, implementation="fortran")
+
+
+def test_disk_sources_through_the_driver_match_the_processing_function(tmp_path):
+    """Limb-darkened disks are sliced per chunk and reach the processing function unchanged."""
+    from astroviper.processing_functions.simulation import (
+        limb_darkened_disk_uv_response,
+    )
+
+    arcsec = np.pi / (180 * 3600)
+    disk_flux = np.array([[[[2.0, 0, 0, 2.0]]], [[[0.5, 0, 0, 0.5]]]])
+    disk_ra_dec = np.concatenate([SRC, SRC + 1e-4], axis=1)  # [1, 2, 2]
+    disk_shape = np.array(
+        [[300 * arcsec, 200 * arcsec, 0.4], [120 * arcsec, 120 * arcsec, 0.0]]
+    )
+    limb_darkening = [1.0, -1.0]
+    result, kwargs = run(
+        tmp_path,
+        point_source_flux=np.zeros((1, 1, 1, 4)),
+        disk_source_flux=disk_flux,
+        disk_source_ra_dec=disk_ra_dec,
+        disk_source_shape=disk_shape,
+        disk_source_limb_darkening=limb_darkening,
+    )
+    ms = load_processing_set(result["ps_store"])["VLA_SBand"].ds
+    assert (
+        "2 limb-darkened disk source(s)"
+        in ms.attrs["data_groups"]["base"]["description"]
+    )
+    ant = kwargs["antenna_xds"]
+    ref, _ = simulate_processing_set_pf(
+        ms.time.values, ms.frequency.values, ["RR", "LL"], ant.ANTENNA_POSITION.values,
+        observatory_position("VLA"), np.zeros((1, 1, 1, 4)), SRC, PC, [airy_disk_model("vla_nvss")], np.zeros(8, int),
+        disk_source_flux=disk_flux, disk_source_ra_dec=disk_ra_dec, disk_source_shape=disk_shape,
+        disk_source_limb_darkening=np.array(limb_darkening),
+    )  # fmt: skip
+    np.testing.assert_allclose(ms.VISIBILITY.values, ref.VISIBILITY.values, atol=1e-12)
+    # the disks are resolved: the response departs from unity on the longer baselines
+    u = ms.UVW.values[..., 0, None] * ms.frequency.values / 299792458.0
+    v = ms.UVW.values[..., 1, None] * ms.frequency.values / 299792458.0
+    assert limb_darkened_disk_uv_response(u, v, *disk_shape[0], 1.0).min() < 0.9
+
+    with pytest.raises(ValueError, match="disk_source_shape"):
+        run(tmp_path, disk_source_flux=disk_flux, disk_source_ra_dec=disk_ra_dec,
+            disk_source_shape=disk_shape[:1])  # fmt: skip
+    with pytest.raises(ValueError, match="limb_darkening"):
+        run(tmp_path, disk_source_flux=disk_flux, disk_source_ra_dec=disk_ra_dec,
+            disk_source_shape=disk_shape, disk_source_limb_darkening=[0.0, -3.0])  # fmt: skip
+    with pytest.raises(ValueError, match="given together"):
+        run(tmp_path, disk_source_flux=disk_flux)
+
+
+def test_sky_components_through_the_driver(tmp_path):
+    """The unified component list is validated once, sliced per chunk and reaches the kernel intact."""
+    from astroviper.processing_functions.simulation import (
+        normalize_sky_components,
+        sky_components_from_arrays,
+    )
+
+    arcsec = np.pi / (180 * 3600)
+    n_time, n_frequency = TIME_PARAMS["n_samples"], FREQ_PARAMS["n_channels"]
+    # a time- and frequency-dependent point source, a SkyCoord-positioned annulus and
+    # an m-ring given through the list; the bulk point-source arrays stay usable alongside
+    spectrum = (
+        np.ones((n_time, n_frequency, 4)) * np.arange(1, n_time + 1)[:, None, None]
+    )
+    spectrum[..., 1:3] = 0.0
+    components = [
+        {"kind": "point", "flux": spectrum, "ra_dec": SRC[0, 0]},
+        {"kind": "annulus", "flux": 2.0, "ra_dec": SOURCE, "radius": 200 * arcsec,
+         "inner_radius": 120 * arcsec, "inclination": 0.4, "pa": 1.0, "fwhm": 20 * arcsec},
+        {"kind": "m_ring", "flux": [1.0, 0.0, 0.0, 0.8], "ra_dec": SRC[0, 0] + 1e-4,
+         "radius": 150 * arcsec, "beta": [0.3j], "fwhm": 40 * arcsec},
+    ]  # fmt: skip
+    result, kwargs = run(
+        tmp_path,
+        point_source_flux=np.array([0.5, 0, 0, 0.5])[None, None, None, :],
+        point_source_ra_dec=SRC + 2e-4,
+        sky_components=components,
+    )
+    ms = load_processing_set(result["ps_store"])["VLA_SBand"].ds
+    description = ms.attrs["data_groups"]["base"]["description"]
+    assert "2 point source(s), 1 annulus source(s), 1 m-ring source(s)" in description
+    ant = kwargs["antenna_xds"]
+    all_components = sky_components_from_arrays(
+        "point", kwargs["point_source_flux"], kwargs["point_source_ra_dec"]
+    ) + normalize_sky_components(components, n_time, n_frequency, "icrs")
+    ref, _ = simulate_processing_set_pf(
+        ms.time.values, ms.frequency.values, ["RR", "LL"], ant.ANTENNA_POSITION.values,
+        observatory_position("VLA"), None, None, PC, [airy_disk_model("vla_nvss")], np.zeros(8, int),
+        sky_components=all_components,
+    )  # fmt: skip
+    np.testing.assert_allclose(ms.VISIBILITY.values, ref.VISIBILITY.values, atol=1e-12)
+    assert np.abs(ms.VISIBILITY.values).max() > 3.0  # the sources are there
+    # the chunks saw different times: the point-source spectrum ramps with time
+    first = np.abs(ms.VISIBILITY.values[0, :, 0, 0]).mean()
+    last = np.abs(ms.VISIBILITY.values[-1, :, 0, 0]).mean()
+    assert last > first
+
+    with pytest.raises(ValueError, match="no sources"):
+        run(tmp_path, point_source_flux=None, point_source_ra_dec=None)
+    with pytest.raises(ValueError, match="unknown sky component kind"):
+        run(
+            tmp_path,
+            sky_components=[{"kind": "blob", "flux": 1.0, "ra_dec": SRC[0, 0]}],
+        )
+    with pytest.raises(ValueError, match="frequency axis"):
+        run(
+            tmp_path,
+            sky_components=[
+                {"kind": "point", "flux": np.ones((5, 4)), "ra_dec": SRC[0, 0]}
+            ],
+        )
+
+
+def test_sky_image_output(tmp_path):
+    """sky_image_params writes the simulated sky on the imager's grid as Stokes planes in Jy/pixel."""
+    from xradio.image import load_image
+
+    from astroviper.utils.coordinate_transforms import celestial_coord_to_sin_pixel
+
+    arcsec = np.pi / (180 * 3600)
+    image_size = [96, 96]
+    cell_size = [-10 * arcsec, 10 * arcsec]
+    second = PC[0]  # at the phase centre, far from the point source
+    components = [
+        # circular basis [RR, RL, LR, LL]: I = 2, Q = 0.4, U = 0, V = 1
+        {"kind": "point", "flux": [3.0, 0.4, 0.4, 1.0], "ra_dec": SRC[0, 0]},
+        {"kind": "gaussian", "flux": 2.0, "ra_dec": second, "major": 60 * arcsec,
+         "minor": 40 * arcsec, "pa": 0.3},
+    ]  # fmt: skip
+    store = str(tmp_path / "sky.img.zarr")
+    sky_image_params = {
+        "image_store": store,
+        "image_size": image_size,
+        "cell_size": cell_size,
+        "polarization_coords": ["I", "Q", "U", "V"],
+    }
+    result, _ = run(
+        tmp_path,
+        point_source_flux=None,
+        point_source_ra_dec=None,
+        sky_components=components,
+        sky_image_params=sky_image_params,
+    )
+    assert result["sky_image_store"] == store
+    assert result["timing_distributed_application"]["T_write_sky_image"] >= 0.0
+    img = load_image(store)
+    assert img.SKY.dims == ("time", "frequency", "polarization", "l", "m")
+    assert list(img.polarization.values) == ["I", "Q", "U", "V"]
+    assert img.sizes["frequency"] == FREQ_PARAMS["n_channels"]
+    assert (img.sizes["l"], img.sizes["m"]) == tuple(image_size)
+    assert img.attrs["data_groups"]["base"]["sky"] == "SKY"
+    sky = img.SKY.values[0]  # [frequency, polarization, l, m]
+    # the point source sits on the pixel the imaging convention predicts, with its Stokes fluxes
+    i, j = np.round(
+        celestial_coord_to_sin_pixel(PC[0], image_size, cell_size, SRC[0, 0])
+    ).astype(int)
+    np.testing.assert_allclose(sky[:, :, i, j], [[2.0, 0.4, 0.0, 1.0]] * 3, atol=1e-12)
+    # the (unpolarised) Gaussian integrates to its flux in Stokes I only
+    rest = sky.copy()
+    rest[:, :, i, j] = 0.0
+    np.testing.assert_allclose(
+        rest.sum(axis=(2, 3)), [[2.0, 0.0, 0.0, 0.0]] * 3, atol=1e-3
+    )
+    # the store is a readable XRADIO image with the simulated frequency axis
+    ms = load_processing_set(result["ps_store"])["VLA_SBand"].ds
+    np.testing.assert_allclose(img.frequency.values, ms.frequency.values)
+    with pytest.raises(ValueError, match="polarization_coords"):
+        run(
+            tmp_path,
+            sky_image_params={**sky_image_params, "polarization_coords": ["XX"]},
+        )
+    with pytest.raises(ValueError, match="unknown keys"):
+        run(tmp_path, sky_image_params={**sky_image_params, "cellsize": 1.0})
+    with pytest.raises(ValueError, match="time_index"):
+        run(tmp_path, sky_image_params={**sky_image_params, "time_index": 99})
+
+
+def test_sky_image_store_is_the_store_written(tmp_path):
+    """A ``.zarr`` sky image name is written as given by earlier XRADIO versions
+    and as ``.img.zarr`` by later ones; ``sky_image_store`` names that store."""
+    from xradio.image import load_image
+
+    arcsec = np.pi / (180 * 3600)
+    result, _ = run(
+        tmp_path,
+        sky_image_params={
+            "image_store": str(tmp_path / "sky.zarr"),
+            "image_size": [16, 16],
+            # 640 arcsec field: holds the point source ~250 arcsec off centre
+            "cell_size": [-40 * arcsec, 40 * arcsec],
+        },
+    )
+    assert result["sky_image_store"] in (
+        str(tmp_path / "sky.zarr"),
+        str(tmp_path / "sky.img.zarr"),
+    )
+    img = load_image(result["sky_image_store"])
+    assert list(img.polarization.values) == ["I"]
+    # RR = LL = 1 Jy: Stokes I = 1 Jy in every channel
+    np.testing.assert_allclose(img.SKY.values.sum(axis=(2, 3, 4)), [[1.0] * 3])
+
+
+def test_sky_model_image_through_the_driver(tmp_path):
+    """A sky image store simulates through the node tasks as a point source at
+    its one non-zero pixel."""
+    from xradio.image import make_empty_sky_image, write_image
+
+    from astroviper.utils.coordinate_transforms import inverse_sin_project
+
+    arcsec = np.pi / (180 * 3600)
+    image = make_empty_sky_image(
+        phase_center=PC[0],
+        image_size=[64, 64],
+        cell_size=[-10 * arcsec, 10 * arcsec],
+        frequency_coords=[3.2e9],
+        pol_coords=["I"],
+        time_coords=[0],
+    )
+    sky = np.zeros((1, 1, 1, 64, 64))
+    sky[0, 0, 0, 40, 20] = 2.0
+    image["SKY"] = (("time", "frequency", "polarization", "l", "m"), sky)
+    store = str(tmp_path / "model.img.zarr")
+    write_image(image, store, out_format="zarr", overwrite=True)
+    lm = np.array([[image.l.values[40], image.m.values[20]]])
+    point, _ = run(
+        tmp_path,
+        point_source_flux=np.array([2.0, 0, 0, 2.0])[None, None, None, :],
+        point_source_ra_dec=inverse_sin_project(PC[0], lm)[None],
+        noise_params=None,
+    )
+    pixel, _ = run(
+        tmp_path,
+        ps_store=str(tmp_path / "model.ps.zarr"),
+        point_source_flux=None,
+        point_source_ra_dec=None,
+        sky_model_image=store,
+        noise_params=None,
+    )
+    point_ms = load_processing_set(point["ps_store"])["VLA_SBand"].ds
+    pixel_ms = load_processing_set(pixel["ps_store"])["VLA_SBand"].ds
+    np.testing.assert_allclose(
+        pixel_ms.VISIBILITY.values, point_ms.VISIBILITY.values, rtol=0, atol=1e-9
+    )
+    assert pixel_ms.attrs["data_groups"]["base"]["description"].startswith(
+        "Simulated visibilities of a sky image with"
+    )
+    with pytest.raises(ValueError, match="no w term"):
+        run(
+            tmp_path,
+            sky_model_image=store,
+            sky_model_image_predict={"predict": "gridded"},
+        )
+
+
+def _report_text(path):
+    with open(path, encoding="utf-8") as file:
+        return file.read()
+
+
+def test_html_report_of_a_monitored_single_task_run(tmp_path):
+    """One map task (no reduce node): the timing frame is still a frame, with
+    the monitor's series and the identity of the task; the HTML report has
+    every section."""
+    pytest.importorskip("psutil")
+    arcsec = np.pi / (180 * 3600)
+    result, _ = run(
+        tmp_path,
+        point_source_flux=None,
+        point_source_ra_dec=None,
+        sky_components=[
+            {"kind": "point", "flux": 1.0, "ra_dec": SRC[0, 0]},
+            {
+                "kind": "gaussian",
+                "flux": [1.0, 0.0, 0.0, 0.6],
+                "ra_dec": PC[0],
+                "major": 60 * arcsec,
+                "minor": 40 * arcsec,
+                "pa": 0.3,
+            },
+        ],  # fmt: skip
+        noise_params={"random_seed": 3},
+        n_time_chunks=1,
+        n_frequency_chunks=1,
+        monitor_resources_seconds=0.02,
+        report="html",
+    )
+    timing = result["timing_node_tasks"]
+    assert isinstance(timing, pd.DataFrame) and len(timing) == 1
+    for column in ("cpu_percent", "memory_rss_bytes", "start_unixtime", "hostname"):
+        assert column in timing, column
+    driver = result["timing_distributed_application"]
+    assert (
+        driver["application_start_unixtime"]
+        <= driver["compute_start_unixtime"]
+        <= driver["compute_end_unixtime"]
+        <= driver["application_end_unixtime"]
+    )
+    assert result["report"] == str(tmp_path / "vla_sim_report.html")
+    text = _report_text(result["report"])
+    for heading in (
+        "Processing",
+        "Observation",
+        "Antennas",
+        "uv coverage",
+        "Noise",
+        "Point spread function",
+        "Sky components",
+    ):
+        assert f">{heading}</h" in text, heading
+    assert "Cluster CPU" in text
+    assert "shortest baseline" in text and "longest baseline" in text
+    assert text.count("data:image/png;base64,") >= 9
+    assert (
+        tmp_path / "vla_sim_report_files" / "point_spread_function.img.zarr"
+    ).exists()
+
+
+def test_pdf_and_notebook_reports(tmp_path, monkeypatch):
+    """Without noise the report says so; with sky_image_params it draws the
+    sky image of the simulation; "notebook" displays the report."""
+    import IPython.display
+
+    arcsec = np.pi / (180 * 3600)
+    sky_image_params = {
+        "image_store": str(tmp_path / "sky.img.zarr"),
+        "image_size": [64, 64],
+        "cell_size": [-10 * arcsec, 10 * arcsec],
+    }
+    result, _ = run(tmp_path, sky_image_params=sky_image_params, report="pdf")
+    assert result["report"] == str(tmp_path / "vla_sim_report.pdf")
+    with open(result["report"], "rb") as file:
+        assert file.read(4) == b"%PDF"
+
+    shown = []
+    monkeypatch.setattr(IPython.display, "display", shown.append)
+    result, _ = run(tmp_path, sky_image_params=sky_image_params, report="notebook")
+    assert result["report"] is None
+    (html,) = (shown[0].data,)
+    assert "No noise was simulated" in html
+    assert "the sky image of the simulation" in html
+    assert "Cluster CPU, memory and I/O were not recorded" in html
+
+
+def test_unknown_report_format_is_refused(tmp_path):
+    with pytest.raises(AssertionError):  # the param.json schema
+        run(tmp_path, report="docx")
+    assert not (tmp_path / "vla_sim.ps.zarr").exists()

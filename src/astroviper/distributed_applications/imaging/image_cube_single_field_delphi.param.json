@@ -1,0 +1,21 @@
+{
+    "image_cube_single_field_delphi": {
+        "ps_store": { "required": true, "type": ["str"] },
+        "image_store": { "required": true, "type": ["str"] },
+        "pixels_per_beam": { "type": ["int", "float"], "min": 0 },
+        "image_edge_primary_beam_limit": { "type": ["int", "float"], "min": 0, "max": 1 },
+        "weighting": { "type": ["str"], "allowed": ["briggs", "natural", "uniform"] },
+        "robust": { "type": ["int", "float"], "nullable": true, "min": -2, "max": 2 },
+        "n_sigma": { "type": ["int", "float"], "min": 0 },
+        "processing_set_data_group_name": { "type": ["str"] },
+        "field_name": { "type": ["str"], "nullable": true },
+        "scan_intents": { "type": ["list", "str"], "nullable": true },
+        "calculate_parameters_only": { "type": "boolean" },
+        "parameters_file": { "type": ["str"], "nullable": true },
+        "overwrite": { "type": "boolean" },
+        "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
+        "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
+        "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
+        "processing_function_threads": { "type": ["int"], "min": 1 }
+    }
+}

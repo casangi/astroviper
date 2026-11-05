@@ -1,0 +1,43 @@
+# Verify the shared imaging-parameter docstrings stay in sync with the central
+# registry (src/astroviper/processing_functions/imaging/_param_docs.py).
+# The codegen runs as a standalone script and only needs libcst, so no package
+# build / C++ compile is required.
+# Runs on pull requests and merges to main; on branch pushes the same check
+# already runs as the imaging-param-docs hook in the pre-commit workflow.
+name: Imaging parameter docs
+
+on:
+  pull_request:
+    paths:
+      - 'src/astroviper/distributed_applications/imaging/**.py'
+      - 'src/astroviper/node_tasks/imaging/**.py'
+      - 'src/astroviper/processing_functions/imaging/**.py'
+      - 'src/astroviper/utils/param_docs.py'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/astroviper/distributed_applications/imaging/**.py'
+      - 'src/astroviper/node_tasks/imaging/**.py'
+      - 'src/astroviper/processing_functions/imaging/**.py'
+      - 'src/astroviper/utils/param_docs.py'
+
+permissions:
+  contents: read
+
+jobs:
+  param-docs-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install libcst
+        run: python -m pip install --upgrade pip libcst
+      - name: Check imaging parameter docstrings are in sync with the registry
+        run: |
+          python src/astroviper/utils/param_docs.py check \
+            || (echo "::error::Imaging parameter docstrings are out of sync. Run \`python -m astroviper.utils.param_docs sync\` and commit." && exit 1)

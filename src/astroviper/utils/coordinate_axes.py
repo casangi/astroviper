@@ -10,14 +10,12 @@ rules consistently.
 
 from __future__ import annotations
 
-from typing import Tuple
-
 import numpy as np
 
 
 def prepare_world_to_pixel_interp(
     axis_coord: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Normalize a world axis into interpolation inputs compatible with ``np.interp``.
 
     Parameters

@@ -1,0 +1,254 @@
+"""
+Module to hold the ImagingDict class. The ImagingDict class is a convenience
+class around a regular nested dictionary, allowing for more flexible indexing
+and seaerching. By keeping it as a dict underneath, it remains generic
+and lightweight.
+
+History Tracking (Added 2025-12-10):
+-------------------------------------
+The ImagingDict.add() method now maintains convergence history by tracking
+certain fields as lists (appending values) while keeping others as single
+values (replacing). This enables convergence visualization and monitoring
+deconvolution progress across imaging cycles.
+"""
+
+from collections import OrderedDict, namedtuple
+
+from astroviper.processing_functions.image_analysis.image_statistics import (
+    RESIDUAL_STATISTICS,
+)
+
+# Define the key structure
+# A namedtuple is used for the keys to ensure immutability and easy comparison
+# It can be treated as a regular tuple for indexing and comparisons
+Key = namedtuple("Key", ["time", "pol", "chan"])
+
+# The iteration history of the model updates (record_iteration_history): per
+# cycle a 1-D array with one value per iteration of that cycle's model update,
+# for every deconvolver.
+ITERATION_HISTORY_FIELDS = (
+    "iteration_peak_residual",  # Signed peak residual in the mask before the iteration
+    "iteration_residual_rms",  # RMS of the residual in the mask after the iteration
+    "iteration_model_flux",  # Model flux after the iteration (Jy)
+    "iteration_component_l",  # Pixel of the component along l
+    "iteration_component_m",  # Pixel of the component along m
+    "iteration_component_scale",  # Scale of the component in pixels (0: a point)
+    "iteration_component_flux",  # Flux of the component (Jy)
+)
+
+# The components of each kind a model update subtracted, per plane: points
+# and scale components for every deconvolver, the rest for Asp (its residual
+# shaped and significance components, its Hogbom runs and what started them).
+COMPONENT_COUNT_FIELDS = (
+    "n_point_components",
+    "n_scale_components",
+    "n_residual_components",
+    "n_significance_components",
+    "n_hogbom_runs",
+    "n_switch_no_change",
+    "n_switch_point_scales",
+    "n_switch_fused",
+)
+
+# The sums of the positive and of the negative model pixels after each model
+# update.
+MODEL_FLUX_SIGN_FIELDS = ("model_flux_positive", "model_flux_negative")
+
+# Seconds of the residual update a cycle starts with and of its model update.
+CYCLE_TIMING_FIELDS = ("t_residual_update", "t_model_update")
+
+# Fields that accumulate as lists (per-cycle measurements). The residual
+# statistics (RESIDUAL_STATISTICS) are those of the residual each model
+# update leaves and of the residual of the closing stop test, and with the
+# prefix ``start_`` those of the residual each model update started from.
+FIELD_ACCUM = {
+    "peakres",  # Peak residual value (Jy)
+    "peakres_nomask",  # Peak residual without mask (Jy)
+    "iter_done",  # Iterations done in this cycle
+    "masksum",  # Sum of mask values (valid pixels)
+    "model_flux",  # Cumulative model flux (Jy)
+    "start_peakres",  # Peak residual at start of each cycle (Jy)
+    "start_peakres_nomask",  # Peak residual (no mask) at start of each cycle (Jy)
+    "start_model_flux",  # Model flux at start of each cycle (Jy)
+    "entropy",  # Entropy of the residual at the start of each cycle
+    "residual_snr",  # Peak / RMS of the residual at the start of each cycle
+    "model_update_stop_code",  # Stop code of the deconvolver in each model update
+    "threshold_per_cycle",  # Threshold each model update cleaned to (Jy)
+    *RESIDUAL_STATISTICS,
+    *(f"start_{field}" for field in RESIDUAL_STATISTICS),
+    *ITERATION_HISTORY_FIELDS,
+    *COMPONENT_COUNT_FIELDS,
+    *MODEL_FLUX_SIGN_FIELDS,
+    *CYCLE_TIMING_FIELDS,
+}
+
+# Fields that remain single values (constant parameters)
+FIELD_SINGLE_VALUE = {
+    "max_psf_sidelobe",  # PSF characteristic (doesn't change per cycle)
+    "gain",  # CLEAN gain parameter (constant)
+    "max_iter",  # Max iterations requested (parameter, not measurement)
+    "threshold",  # Threshold used (parameter, not measurement)
+    "max_cycles_auto",  # Imaging cycles max_cycles="auto" gives the plane
+}
+
+
+class ImagingDict:
+    def __init__(self):
+        self._data = OrderedDict()
+
+    @property
+    def data(self):
+        return self._data
+
+    @data.setter
+    def data(self, value):
+        self._data = value
+
+    def add(self, value, time, pol, chan):
+        """
+        Add value to ImagingDict with history tracking.
+
+        For fields in FIELD_ACCUM (peakres, iter_done, masksum, peakres_nomask),
+        values are appended to lists. For fields in FIELD_SINGLE_VALUE
+        (max_psf_sidelobe, gain, max_iter, threshold), values replace previous values.
+
+        Parameters:
+        -----------
+        value : dict
+            Dictionary of field values to add
+        time : int
+            Time index
+        pol : int
+            Polarization index
+        chan : int
+            Channel index
+        """
+        key = Key(time, pol, chan)
+
+        if key not in self.data:
+            # First time seeing this key - initialize
+            self.data[key] = {}
+            for field, field_value in value.items():
+                if field in FIELD_ACCUM:
+                    # Initialize as single-element list
+                    self.data[key][field] = [field_value]
+                else:
+                    # Store as single value
+                    self.data[key][field] = field_value
+        else:
+            # Key exists - update with history tracking
+            for field, field_value in value.items():
+                if field in FIELD_ACCUM:
+                    # Append to history
+                    if field in self.data[key]:
+                        # Handle backward compatibility: convert to list if needed
+                        if not isinstance(self.data[key][field], list):
+                            self.data[key][field] = [self.data[key][field]]
+                        self.data[key][field].append(field_value)
+                    else:
+                        # First occurrence of this field
+                        self.data[key][field] = [field_value]
+                else:
+                    # Replace single value
+                    self.data[key][field] = field_value
+
+    def sel(self, time=None, pol=None, chan=None):
+        """Get all items matching the given criteria"""
+        matches = []
+        for key, value in self.data.items():
+            if (
+                (time is None or key.time == time)
+                and (pol is None or key.pol == pol)
+                and (chan is None or key.chan == chan)
+            ):
+                matches.append(value)
+
+        if len(matches) == 1:
+            return matches[0]
+        return matches if matches else None
+
+    def to_dict(self):
+        return self.data
+
+    def __repr__(self):
+        lines = []
+        for key, value in self.data.items():
+            lines.append(f"  {key}: {value}")
+        return "\n".join(lines)
+
+
+def ends_with_stop_test(iter_done, start_peakres):
+    """Whether a plane's record ends with the closing stop test of the imaging
+    cycle loop: an entry without iterations after one entry per model update
+    (``start_peakres``, which only a model update reports)."""
+    return len(start_peakres) == len(iter_done) - 1 and iter_done[-1] == 0
+
+
+def imaging_dict_to_dataframe(imaging_dict):
+    """Flatten a deconvolution :class:`ImagingDict` to one row per plane.
+
+    Used by the benchmark result saving (and any post-run analysis) to persist
+    the per-plane convergence record in a tabular, feather-friendly form.
+
+    Parameters
+    ----------
+    imaging_dict : ImagingDict
+        The merged per-plane deconvolution dict returned by
+        ``image_cube_single_field`` (``Key(time, pol, chan)`` ->
+        parameters, per-cycle history lists and the stop code).
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per ``(time, pol, chan)`` plane. Scalar fields become plain
+        columns (a ``StopCode`` namedtuple becomes ``stop_code_imaging`` /
+        ``stop_code_model_update``); per-cycle history lists (``iter_done``,
+        ``peakres``, ...) are kept as list-valued columns AND summarized into
+        the derived columns ``n_cycles`` (the imaging cycles, i.e. the model
+        updates: the entries of ``iter_done`` without the closing stop test
+        of the record of the imaging cycle loop, see
+        :func:`ends_with_stop_test`), ``iter_total`` (total
+        CLEAN iterations over all cycles -- 0 means the plane was never
+        deconvolved), ``peakres_start`` / ``peakres_final`` (for that record
+        the absolute peak of the written residual inside the clean mask, 0
+        for an empty mask; the entries of the model updates hold the signed
+        value at the absolute peak, not a number for an empty mask) and
+        ``model_flux_final``. The fields only a model update reports
+        (``start_peakres``, ``start_model_flux``, ``model_flux``,
+        ``model_update_stop_code``, ...) have
+        one entry per model update, one fewer than ``iter_done`` and
+        ``peakres`` in that record. The iteration history
+        (``ITERATION_HISTORY_FIELDS``; only with ``record_iteration_history``)
+        is a list of one 1-D array per cycle, which feather stores as a list
+        of lists. Empty for an empty dict.
+    """
+    import pandas as pd
+
+    rows = []
+    for key, value in imaging_dict.data.items():
+        row = {"time_index": key.time, "pol": key.pol, "chan": key.chan}
+        for field, field_value in value.items():
+            if isinstance(field_value, tuple) and hasattr(field_value, "_fields"):
+                for name in field_value._fields:
+                    row[f"{field}_{name}"] = getattr(field_value, name)
+            elif isinstance(field_value, list):
+                row[field] = list(field_value)
+            else:
+                row[field] = field_value
+        iter_done = value.get("iter_done") or []
+        start_peakres = value.get("start_peakres") or []
+        row["n_cycles"] = len(iter_done) - ends_with_stop_test(iter_done, start_peakres)
+        row["iter_total"] = int(sum(iter_done)) if iter_done else 0
+        peakres = value.get("peakres") or []
+        row["peakres_start"] = start_peakres[0] if start_peakres else None
+        row["peakres_final"] = peakres[-1] if peakres else None
+        model_flux = value.get("model_flux") or []
+        row["model_flux_final"] = model_flux[-1] if model_flux else None
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame(
+            columns=["time_index", "pol", "chan", "n_cycles", "iter_total"]
+        )
+    return pd.DataFrame(rows).sort_values(
+        ["time_index", "pol", "chan"], ignore_index=True
+    )

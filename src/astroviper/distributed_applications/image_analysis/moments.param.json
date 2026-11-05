@@ -1,0 +1,30 @@
+{
+    "moments": {
+        "input_image_store": { "required": true, "type": ["str"] },
+        "moments_image_store": { "required": true, "type": ["str"] },
+        "moments": { "type": ["list", "str", "int"] },
+        "moment_axis": {
+            "type": ["str"],
+            "allowed": ["l", "m", "frequency", "polarization", "time"]
+        },
+        "image_data_group_in_name": { "type": ["str"] },
+        "image_data_group_in_role": { "type": ["str"] },
+        "include_pixel_range": {
+            "type": ["list", "int", "float"],
+            "nullable": true
+        },
+        "exclude_pixel_range": {
+            "type": ["list", "int", "float"],
+            "nullable": true
+        },
+        "use_mask": { "type": "boolean" },
+        "selection": { "type": ["dict"], "nullable": true },
+        "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
+        "thread_info": { "type": ["dict"], "nullable": true },
+        "compressor": { "nullable": true },
+        "overwrite": { "type": "boolean" },
+        "memory_budget_gb": { "type": ["float", "int"], "nullable": true, "min": 0 },
+        "monitor_resources_seconds": { "type": ["float", "int"], "nullable": true, "min": 0 },
+        "dimension_flags": { "type": ["dict"], "nullable": true }
+    }
+}

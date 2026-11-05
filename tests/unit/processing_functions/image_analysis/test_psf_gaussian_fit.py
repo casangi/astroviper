@@ -1,0 +1,870 @@
+import numpy as np
+import pytest
+import xarray as xr
+
+from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
+    FWHM_factor,
+    _max_sidelobe_after_gaussian_subtraction,
+    extract_main_lobe,
+    psf_gaussian_fit_core,
+)
+from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
+    point_spread_function_gaussian_fit as psf_gaussian_fit,
+)
+
+
+def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
+    # Create a simple 2D circular Gaussian as test data
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
+    data = np.zeros(shape)
+    dims = ["time", "frequency", "polarization", "l", "m"]
+    data_coords = {
+        "time": np.arange(shape[0]),
+        "frequency": np.arange(shape[1]),
+        "polarization": np.arange(shape[2]),
+        "l": np.linspace(-1, 1, shape[-2]),
+        "m": np.linspace(-1, 1, shape[-1]),
+    }
+    if rm_coord is None:
+        data[0, 0, 0, :, :] = gaussian
+    elif rm_coord == "l" or rm_coord == "m":
+        shape = shape[:-2] + (shape[-2],)  # Adjust shape if a coordinate is removed
+        dims.remove(rm_coord)
+        data_coords.pop(rm_coord)
+        data = np.zeros(shape)
+
+    # Processing-function unit tests operate on numpy-backed xarray
+    # structures (no Dask arrays).
+    psf = xr.DataArray(data, dims=dims, coords=data_coords)
+
+    beam_data = np.zeros((1, shape[1], shape[2], 3))
+    beam_dims = ["time", "frequency", "polarization", "beam_params_label"]
+    beam_coords = {
+        "time": np.arange(shape[0]),
+        "frequency": np.arange(shape[1]),
+        "polarization": np.arange(shape[2]),
+        "beam_params_label": np.arange(3),
+    }
+    beam = xr.DataArray(beam_data, dims=beam_dims, coords=beam_coords)
+
+    test_dataset = xr.Dataset(
+        {"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": beam}
+    )
+    # The public fit function resolves data variables through this data group.
+    test_dataset.attrs["data_groups"] = {
+        "image": {"point_spread_function": "POINT_SPREAD_FUNCTION"}
+    }
+    return test_dataset
+
+
+def test_psf_gaussian_fit_output_structure():
+    """test fit_psf_gaussian fit gives expected output structure and values"""
+    test_dataset = create_test_xds()
+    result = psf_gaussian_fit(test_dataset)
+    print(result)
+    # sigma = 0.2 -> fwhm = 2* sigma*sqrt(2*ln(2)) = 0.2*2.35482
+    truth_values = [0.47096, 0.47096, 0.0]
+    assert "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" in result
+    # The fit writes the parameters along a ``beam_params`` dimension and adds a
+    # ``beam_params_label`` coordinate ("major", "minor", "pa") to the dataset.
+    assert "beam_params" in result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].dims
+    assert result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].sizes["beam_params"] == 3
+    params = result["beam_params_label"]
+    assert params.shape[-1] == 3
+    # Check that the fitted widths (major, minor) are positive
+    assert np.all(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[..., :-1] > 0)
+    assert np.allclose(
+        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :],
+        truth_values,
+        rtol=1e-3,
+        atol=5,
+    )
+
+
+def test_psf_gaussian_fit_custom_window():
+    """test npix_window and sampling parameters"""
+    test_dataset = create_test_xds(shape=(1, 1, 1, 15, 15))
+    truth_values = [0.47096, 0.47096, 0.0]
+    # result = psf_gaussian_fit(test_dataset, npix_window=[7, 7], sampling=[7, 7])
+    result = psf_gaussian_fit(test_dataset, npix_window=[15, 15], sampling=[9, 9])
+    params = result["beam_params_label"]
+    assert params.shape == (3,)
+    assert np.all(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[..., :-1] > 0)
+    assert np.allclose(
+        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :],
+        truth_values,
+        rtol=1e-3,
+        atol=5,
+    )
+
+
+def test_invalid_npix_window_type():
+    """test npix_window type checking"""
+    ds = create_test_xds()
+    with pytest.raises((TypeError, ValueError)):
+        psf_gaussian_fit(ds, npix_window="invalid")
+
+
+def test_negative_npix_window():
+    """test npix_window value checking"""
+    ds = create_test_xds()
+    with pytest.raises((ValueError, AssertionError)):
+        psf_gaussian_fit(ds, npix_window=[-5, 9])
+
+
+def test_single_value_npix_window():
+    """test single value npix_window"""
+    ds = create_test_xds()
+    with pytest.raises((TypeError, AssertionError)):
+        psf_gaussian_fit(ds, npix_window=7)
+
+
+def test_non_integer_npix_window():
+    """test non-integer npix_window"""
+    ds = create_test_xds()
+    with pytest.raises((TypeError, AssertionError)):
+        psf_gaussian_fit(ds, npix_window=[5.5, 9])
+
+
+def test_even_npix_window():
+    """npix_window must be odd so the window stays centered on the peak"""
+    ds = create_test_xds()
+    with pytest.raises((ValueError, AssertionError)):
+        psf_gaussian_fit(ds, npix_window=[40, 40])
+    with pytest.raises((ValueError, AssertionError)):
+        psf_gaussian_fit(ds, npix_window=[41, 40])
+
+
+def test_zero_sampling():
+    """test sampling value checking"""
+    ds = create_test_xds()
+    with pytest.raises((ValueError, AssertionError)):
+        psf_gaussian_fit(ds, sampling=[0, 9])
+
+
+def test_single_point_sampling():
+    """A resampled axis needs at least two points to define an interval."""
+    ds = create_test_xds()
+    with pytest.raises(ValueError, match="at least two points"):
+        psf_gaussian_fit(ds, sampling=[1, 9])
+
+
+def test_single_value_sampling():
+    """test single value sampling"""
+    ds = create_test_xds()
+    with pytest.raises((TypeError, AssertionError)):
+        psf_gaussian_fit(ds, sampling=5)
+
+
+def test_non_integer_sampling():
+    """test non-integer sampling"""
+    ds = create_test_xds()
+    with pytest.raises((TypeError, AssertionError)):
+        psf_gaussian_fit(ds, sampling=[5.5, 9])
+
+
+def test_invalid_cutoff():
+    """test invalid cutoff value"""
+    ds = create_test_xds()
+    # Negative cutoff may not make sense
+    with pytest.raises((ValueError, AssertionError)):
+        psf_gaussian_fit(ds, cutoff=-0.1)
+
+
+def test_missing_psf_variable():
+    """test missing POINT_SPREAD_FUNCTION variable"""
+    ds = create_test_xds()
+    del ds["POINT_SPREAD_FUNCTION"]
+    with pytest.raises(KeyError):
+        psf_gaussian_fit(ds)
+
+
+def test_all_nan_input():
+    """test all NaN input data"""
+    ds = create_test_xds()
+    ds["POINT_SPREAD_FUNCTION"].data[:] = np.nan
+    result = psf_gaussian_fit(ds)
+    assert np.all(np.isnan(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].values))
+
+
+def test_all_zero_input():
+    """test all zero input data"""
+    ds = create_test_xds()
+    ds["POINT_SPREAD_FUNCTION"].data[:] = 0
+    result = psf_gaussian_fit(ds)
+    # Depending on implementation, may be all zeros or NaNs
+    assert np.all(
+        (result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data == 0)
+        | np.isnan(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data)
+    )
+
+
+def test_no_l_coordinate():
+    """test missing 'l' coordinate"""
+    ds = create_test_xds(rm_coord="l")
+    with pytest.raises(KeyError):
+        psf_gaussian_fit(ds)
+
+
+def test_no_m_coordinate():
+    """test missing 'm' coordinate"""
+    ds = create_test_xds(rm_coord="m")
+    with pytest.raises(KeyError):
+        psf_gaussian_fit(ds)
+
+
+def test_oversampling():
+    """test oversampling case"""
+    ds = create_test_xds(shape=(1, 1, 1, 100, 100))
+    result = psf_gaussian_fit(ds, npix_window=[41, 41], sampling=[51, 51])
+    truth_values = [0.47096, 0.47096, 0.0]
+    assert np.allclose(
+        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :],
+        truth_values,
+        rtol=1e-3,
+        atol=5,
+    )
+
+
+def create_rotated_gaussian(shape, angle_deg):
+    """Create a dataset with a rotated 2D Gaussian"""
+    # Create a 2D Gaussian rotated by angle_deg (counterclockwise from y to x)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    theta = np.deg2rad(angle_deg)
+    a = (np.cos(theta) ** 2) / (2 * 0.2**2) + (np.sin(theta) ** 2) / (2 * 0.1**2)
+    b = -np.sin(2 * theta) / (4 * 0.2**2) + np.sin(2 * theta) / (4 * 0.1**2)
+    c = (np.sin(theta) ** 2) / (2 * 0.2**2) + (np.cos(theta) ** 2) / (2 * 0.1**2)
+    gaussian = np.exp(-(a * xv**2 + 2 * b * xv * yv + c * yv**2))
+    data = np.zeros((1, 1, 1, shape[-2], shape[-1]))
+    data[0, 0, 0, :, :] = gaussian
+    psf = xr.DataArray(
+        data,
+        dims=["time", "frequency", "polarization", "l", "m"],
+        coords={"l": np.arange(shape[-2]), "m": np.arange(shape[-1])},
+    )
+    beam_data = np.zeros((1, 1, 1, 3))
+    beam = xr.DataArray(
+        beam_data, dims=["time", "frequency", "polarization", "beam_params_label"]
+    )
+    rotated_dataset = xr.Dataset(
+        {"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": beam}
+    )
+    rotated_dataset.attrs["data_groups"] = {
+        "image": {"point_spread_function": "POINT_SPREAD_FUNCTION"}
+    }
+    return rotated_dataset
+
+
+def test_psf_gaussian_fit_orientation():
+    """test position angle of fitted results"""
+    import matplotlib.pyplot as plt
+
+    for angle in [-135, -90, -45, -33, 33, 45, 90, 135]:
+        ds = create_rotated_gaussian((1, 1, 1, 200, 200), angle)
+        # Plot the input ellipse (rotated Gaussian)
+        input_img = ds["POINT_SPREAD_FUNCTION"][0, 0, 0].values
+
+        # for verfication purpose only
+        plt.figure()
+        plt.imshow(input_img, origin="lower", cmap="viridis")
+        plt.title(f"Input Rotated Gaussian, angle={angle} deg")
+        plt.colorbar(label="Amplitude")
+        plt.xlabel("m (x)")
+        plt.ylabel("l (y)")
+        plt.tight_layout()
+        # plt.show(block=True)
+        plt.show(block=False)
+        result = psf_gaussian_fit(ds, npix_window=(21, 21), sampling=(55, 55))
+        measured_angle = -np.rad2deg(
+            float(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 2])
+        )
+        # Allow for 180-degree ambiguity and some tolerance
+        measured_angle -= 90
+        if measured_angle < -90:
+            measured_angle += 180
+        if measured_angle > 90:
+            measured_angle -= 180
+        angle_mod = (measured_angle + 180) % 180
+        expected_mod = (angle + 180) % 180
+        print(
+            f"angle={angle}, measured_angle={measured_angle}, angle_mod={angle_mod}, expected_mod={expected_mod}"
+        )
+        assert np.isclose(
+            expected_mod,
+            angle_mod,
+            atol=5,
+        ), f"Expected {angle}, got {measured_angle}"
+
+
+def _make_multi_slice_cube(shape=(2, 3, 2, 81, 81), sigmas=None):
+    """Build a (time, chan, pol, l, m) cube of centred Gaussians with varying widths."""
+    n_t, n_c, n_p, nl, nm = shape
+    x = np.linspace(-1, 1, nl)
+    y = np.linspace(-1, 1, nm)
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    data = np.zeros(shape)
+    if sigmas is None:
+        rng = np.random.default_rng(0)
+        sigmas = 0.15 + 0.05 * rng.random((n_t, n_c, n_p))
+    for t in range(n_t):
+        for c in range(n_c):
+            for p in range(n_p):
+                s = sigmas[t, c, p]
+                data[t, c, p, :, :] = np.exp(-(xv**2 + yv**2) / (2 * s**2))
+    return data, x, y
+
+
+def test_psf_gaussian_fit_core_threaded_matches_serial():
+    """Threaded execution must yield identical results to the serial path."""
+    data, x, y = _make_multi_slice_cube(shape=(2, 3, 2, 81, 81))
+    blc = np.array([20, 20])
+    trc = np.array([60, 60])
+    sampling = np.array([41, 41])
+    cutoff = 0.1
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+
+    serial = psf_gaussian_fit_core(
+        data.copy(), blc, trc, sampling, cutoff, delta, processing_function_threads=1
+    )
+    threaded = psf_gaussian_fit_core(
+        data.copy(), blc, trc, sampling, cutoff, delta, processing_function_threads=4
+    )
+    auto = psf_gaussian_fit_core(
+        data.copy(), blc, trc, sampling, cutoff, delta, processing_function_threads=0
+    )
+
+    assert serial.shape == (2, 3, 2, 3)
+    np.testing.assert_allclose(threaded, serial, rtol=0, atol=0)
+    np.testing.assert_allclose(auto, serial, rtol=0, atol=0)
+    # Every slice should have produced positive widths.
+    assert np.all(serial[..., :2] > 0)
+
+
+def test_psf_gaussian_fit_core_processing_function_threads_exceeds_tasks():
+    """processing_function_threads larger than the number of slices must still succeed."""
+    data, x, y = _make_multi_slice_cube(shape=(1, 1, 1, 61, 61))
+    blc = np.array([10, 10])
+    trc = np.array([50, 50])
+    sampling = np.array([31, 31])
+    cutoff = 0.1
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+
+    result = psf_gaussian_fit_core(
+        data, blc, trc, sampling, cutoff, delta, processing_function_threads=16
+    )
+    assert result.shape == (1, 1, 1, 3)
+    assert np.all(result[0, 0, 0, :2] > 0)
+
+
+def test_psf_gaussian_fit_core_simple_gaussian():
+    # Create a simple 2D Gaussian
+    shape = (1, 1, 1, 100, 100)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
+    data = np.zeros(shape)
+    data[0, 0, 0, :, :] = gaussian
+    npix_window = np.array([41, 41])
+    blc = np.array([50 - npix_window[0] // 2, 30 - npix_window[1] // 2])
+    trc = np.array([50 + npix_window[0] // 2, 30 + npix_window[1] // 2])
+    sampling = np.array([41, 41])
+    cutoff = 0.1
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+    result = psf_gaussian_fit_core(data, blc, trc, sampling, cutoff, delta)
+    assert result.shape == (1, 1, 1, 3)
+    assert np.all(result[0, 0, 0, :2] > 0)
+    assert np.isfinite(result[0, 0, 0, 2])
+
+
+def test_psf_gaussian_fit_core_uses_resampled_interval_scale():
+    """Resampling must preserve the physical FWHM of the original pixel grid."""
+    window_size = 17
+    sampling_size = 55
+    delta = np.array([0.2, 0.2])
+    sigma_pixels = 2.0
+    offsets = np.arange(window_size) - window_size // 2
+    l_grid, m_grid = np.meshgrid(offsets, offsets, indexing="ij")
+    gaussian = np.exp(-(l_grid**2 + m_grid**2) / (2.0 * sigma_pixels**2))[
+        None, None, None
+    ]
+
+    result = psf_gaussian_fit_core(
+        gaussian,
+        np.array([0, 0]),
+        np.array([window_size - 1, window_size - 1]),
+        np.array([sampling_size, sampling_size]),
+        0.35,
+        delta,
+        interpolation_method="splinef2d",
+    )
+
+    expected_fwhm = sigma_pixels * delta[0] * FWHM_factor
+    np.testing.assert_allclose(
+        result[0, 0, 0, :2], expected_fwhm, rtol=2.0e-3, atol=0.0
+    )
+
+
+def test_psf_gaussian_fit_core_all_nan():
+    # All NaN input
+    data = np.full((1, 1, 1, 9, 9), np.nan)
+    blc = np.array([0, 0])
+    trc = np.array([9, 9])
+    sampling = np.array([9, 9])
+    cutoff = 0.1
+    delta = np.array([1.0, 1.0])
+    result = psf_gaussian_fit_core(data, blc, trc, sampling, cutoff, delta)
+    assert np.all(np.isnan(result))
+
+
+def test_psf_gaussian_fit_core_all_zero():
+    # All zero input
+    data = np.zeros((1, 1, 1, 9, 9))
+    blc = np.array([0, 0])
+    trc = np.array([9, 9])
+    sampling = np.array([9, 9])
+    cutoff = 0.1
+    delta = np.array([1.0, 1.0])
+    result = psf_gaussian_fit_core(data, blc, trc, sampling, cutoff, delta)
+    assert np.all(result == 0)
+
+
+def test_extract_main_lobe():
+    """
+    Test the extraction of the main lobe from a PSF image.
+    """
+    # Simple test case with a main lobe with sidelobes
+
+    shape = (1, 1, 1, 100, 100)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
+    sidelobe1 = 0.3 * np.exp(-((xv - 0.5) ** 2 + (yv - 0.5) ** 2) / (2 * 0.1**2))
+    sidelobe2 = 0.2 * np.exp(-((xv + 0.5) ** 2 + (yv + 0.5) ** 2) / (2 * 0.1**2))
+    psf_image = gaussian + sidelobe1 + sidelobe2
+
+    # for verification purposes, plot the psf_image
+    import matplotlib.pyplot as plt
+
+    plt.imshow(psf_image, origin="lower", cmap="gray")
+    plt.colorbar()
+    plt.title("PSF Image")
+    plt.show(block=False)  # change to True to pause the test to see the plot
+
+    data = np.zeros(shape)
+    data[0, 0, 0, :, :] = psf_image
+    npix_window = np.array([41, 41])
+    cutoff = 0.1
+    main_lobe_only, blc, trc, __ = extract_main_lobe(npix_window, cutoff, data)
+    print("test_extract_main_lobe: blc, trc=", blc, trc)
+    # blc/trc are now per-slice arrays of shape (time, frequency, polarization, 2).
+    assert blc.shape == (1, 1, 1, 2)
+    assert trc.shape == (1, 1, 1, 2)
+    # Check that the main lobe is extracted correctly by comparing total main lobe pixels
+    # with model main lobe (gaussian) pixels with cutoff applied
+    total_main_lobe = np.sum(main_lobe_only)
+    model_main_lobe = np.sum(gaussian[gaussian >= cutoff * np.max(gaussian)])
+    assert np.isclose(total_main_lobe, model_main_lobe, rtol=0.1)
+    assert blc[0, 0, 0, 0] < trc[0, 0, 0, 0] and blc[0, 0, 0, 1] < trc[0, 0, 0, 1]
+    # Check that sidelobes are zeroed out
+    assert np.all(
+        main_lobe_only[0, 0, 0, :, :][psf_image < cutoff * np.max(psf_image)] == 0
+    )
+
+
+def test_extract_main_lobe_offset_peak():
+    """
+    Test the case where the psf peak is not at the center of the image
+    """
+    shape = (1, 1, 1, 100, 100)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    gaussian = np.exp(-((xv - 0.1) ** 2 + (yv) ** 2) / (2 * 0.2**2))
+    sidelobe1 = 0.3 * np.exp(-((xv - 0.5) ** 2 + (yv - 0.5) ** 2) / (2 * 0.1**2))
+    sidelobe2 = 0.2 * np.exp(-((xv + 0.5) ** 2 + (yv + 0.5) ** 2) / (2 * 0.1**2))
+    psf_image = gaussian + sidelobe1 + sidelobe2
+
+    # for verification purposes, plot the psf_image (set plt.show(block=True) to pause the test)
+    import matplotlib.pyplot as plt
+
+    plt.imshow(psf_image, origin="lower", cmap="gray")
+    plt.colorbar()
+    plt.title("PSF Image with Offset Peak")
+    plt.show(block=False)  # change to True to pause the test to see the plot
+
+    data = np.zeros(shape)
+    data[0, 0, 0, :, :] = psf_image
+    npix_window = np.array([41, 41])
+    cutoff = 0.1
+    main_lobe_only, blc, trc, __ = extract_main_lobe(npix_window, cutoff, data)
+    print("test_extract_main_lobe_offset_peak: blc, trc=", blc, trc)
+    # blc/trc are now per-slice arrays of shape (time, frequency, polarization, 2).
+    assert blc.shape == (1, 1, 1, 2)
+    assert trc.shape == (1, 1, 1, 2)
+    # Check that the main lobe is extracted correctly by comparing total main lobe pixels
+    # with model main lobe (gaussian) pixels with cutoff applied
+    total_main_lobe = np.sum(main_lobe_only)
+    model_main_lobe = np.sum(gaussian[gaussian >= cutoff * np.max(gaussian)])
+    assert np.isclose(total_main_lobe, model_main_lobe, rtol=0.1)
+    assert blc[0, 0, 0, 0] < trc[0, 0, 0, 0] and blc[0, 0, 0, 1] < trc[0, 0, 0, 1]
+    # Check that sidelobes are zeroed out
+    assert np.all(
+        main_lobe_only[0, 0, 0, :, :][psf_image < cutoff * np.max(psf_image)] == 0
+    )
+
+
+def test_extract_main_lobe_per_slice_independent():
+    """extract_main_lobe must return an independent bounding box per slice."""
+    shape = (1, 2, 1, 81, 81)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    data = np.zeros(shape)
+    # Two channels with very different widths -> different main-lobe sizes.
+    data[0, 0, 0] = np.exp(-(xv**2 + yv**2) / (2 * 0.1**2))  # narrow
+    data[0, 1, 0] = np.exp(-(xv**2 + yv**2) / (2 * 0.3**2))  # wide
+    npix_window = np.array([61, 61])
+    cutoff = 0.1
+    main_lobe_only, blc, trc, max_sidelobe = extract_main_lobe(
+        npix_window, cutoff, data
+    )
+    assert blc.shape == (1, 2, 1, 2)
+    assert trc.shape == (1, 2, 1, 2)
+    assert max_sidelobe.shape == (1, 2, 1)
+    # The wider Gaussian must yield a strictly larger main-lobe bounding box.
+    size_narrow = trc[0, 0, 0] - blc[0, 0, 0]
+    size_wide = trc[0, 1, 0] - blc[0, 1, 0]
+    assert np.all(size_wide > size_narrow)
+
+
+def test_extract_main_lobe_uses_largest_absolute_sidelobe():
+    """A negative sidelobe controls the model update safety threshold."""
+    data = np.zeros((1, 1, 1, 9, 9), dtype=np.float64)
+    data[0, 0, 0, 4, 4] = 1.0
+    data[0, 0, 0, 1, 1] = 0.2
+    data[0, 0, 0, 7, 7] = -0.4
+
+    _, _, _, max_sidelobe = extract_main_lobe(np.array([9, 9]), 0.35, data)
+
+    np.testing.assert_allclose(max_sidelobe, [[[0.4]]])
+
+
+def test_gaussian_subtraction_removes_main_beam_before_sidelobe_measurement():
+    """A fitted main beam is removed while a separate sidelobe remains."""
+    axis = np.arange(51) - 25
+    l_grid, m_grid = np.meshgrid(axis, axis, indexing="ij")
+    sigma = 4.0
+    psf = np.exp(-0.5 * (l_grid**2 + m_grid**2) / sigma**2)
+    psf[5, 5] += 0.25
+    data = psf[None, None, None, ...]
+    beam = np.array([[[[sigma * FWHM_factor, sigma * FWHM_factor, 0.0]]]])
+
+    result = _max_sidelobe_after_gaussian_subtraction(
+        data,
+        beam,
+        np.array([1.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(result, [[[0.25]]], atol=1e-12)
+
+
+@pytest.mark.parametrize("pa", [0.0, 0.35, np.pi / 4, np.pi / 2, 2.225])
+@pytest.mark.parametrize("cell", [(-1.0, 1.0), (-1.0, 1.7)])
+@pytest.mark.parametrize("sidelobe", [0.0, 0.2, -0.2])
+def test_gaussian_subtraction_respects_elliptical_beam_pa(pa, cell, sidelobe):
+    """An angular ellipse leaves only the independently added sidelobe."""
+    # Construct the PSF from its angular covariance, independently of the
+    # production Gaussian projections and restoration kernel. The fitted PA
+    # convention places the major axis along (sin(pa), -cos(pa)).
+    major_direction = np.array([np.sin(pa), -np.cos(pa)])
+    minor_direction = np.array([np.cos(pa), np.sin(pa)])
+    sigma_major, sigma_minor = 5.0, 2.5
+    covariance = sigma_major**2 * np.outer(
+        major_direction, major_direction
+    ) + sigma_minor**2 * np.outer(minor_direction, minor_direction)
+    l_grid, m_grid = np.meshgrid(
+        (np.arange(121) - 60) * abs(cell[0]),
+        (np.arange(101) - 50) * abs(cell[1]),
+        indexing="ij",
+    )
+    offsets = np.stack([l_grid, m_grid], axis=-1)
+    exponent = np.einsum(
+        "...i,ij,...j->...", offsets, np.linalg.inv(covariance), offsets
+    )
+    psf = np.exp(-0.5 * exponent)
+    psf[5, 5] += sidelobe
+    beam = np.array([[[[sigma_major * FWHM_factor, sigma_minor * FWHM_factor, pa]]]])
+
+    result = _max_sidelobe_after_gaussian_subtraction(
+        psf[None, None, None], beam, np.asarray(cell)
+    )
+
+    np.testing.assert_allclose(result, [[[abs(sidelobe)]]], rtol=0, atol=1e-12)
+
+
+def test_gaussian_subtraction_keeps_negative_sidelobe_magnitude():
+    """CASA-style sidelobes include the magnitude of the PSF minimum."""
+    data = np.zeros((1, 1, 1, 21, 21), dtype=np.float64)
+    data[0, 0, 0, 10, 10] = 1.0
+    data[0, 0, 0, 2, 2] = -0.4
+    beam = np.array([[[[FWHM_factor, FWHM_factor, 0.0]]]])
+
+    result = _max_sidelobe_after_gaussian_subtraction(
+        data,
+        beam,
+        np.array([1.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(result, [[[0.4]]])
+
+
+def _max_sidelobe_reference(psf_image, ellipse_params, delta, fallback):
+    """The sidelobe measurement written with meshgrids and whole-plane
+    expressions, as before it was done in place: the in-place version must
+    give the same numbers bit for bit."""
+    output = np.zeros(psf_image.shape[:3], dtype=np.float64)
+    for index in np.ndindex(psf_image.shape[:3]):
+        psf_2d = psf_image[index]
+        finite = np.isfinite(psf_2d)
+        beam = ellipse_params[index]
+        valid_beam = np.all(np.isfinite(beam)) and np.all(beam[:2] > 0.0)
+        finite_psf = np.where(finite, psf_2d, 0.0)
+        peak_l, peak_m = np.unravel_index(np.argmax(finite_psf), psf_2d.shape)
+        peak = finite_psf[peak_l, peak_m]
+        if not np.any(finite) or not valid_beam or peak <= 0.0:
+            output[index] = fallback[index]
+            continue
+        l_grid, m_grid = np.meshgrid(
+            (np.arange(psf_2d.shape[0]) - peak_l) * abs(delta[0]),
+            (np.arange(psf_2d.shape[1]) - peak_m) * abs(delta[1]),
+            indexing="ij",
+        )
+        theta = 0.5 * np.pi - beam[2]
+        major = l_grid * np.cos(theta) - m_grid * np.sin(theta)
+        minor = l_grid * np.sin(theta) + m_grid * np.cos(theta)
+        fitted = peak * np.exp(
+            -0.5
+            * (
+                (major / (beam[0] / FWHM_factor)) ** 2
+                + (minor / (beam[1] / FWHM_factor)) ** 2
+            )
+        )
+        delobed_maximum = np.max(np.where(finite, psf_2d - fitted, -np.inf))
+        original_minimum = np.min(np.where(finite, psf_2d, np.inf))
+        output[index] = max(abs(original_minimum), abs(delobed_maximum))
+    return output
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+def test_gaussian_subtraction_matches_whole_plane_formula(dtype):
+    """Bitwise the same as the whole-plane formula, slice by slice, with
+    non-finite pixels, a zero slice and an invalid beam falling back."""
+    rng = np.random.default_rng(7)
+    n_l, n_m = 61, 47
+    l_grid, m_grid = np.meshgrid(
+        np.arange(n_l) - 30.3, np.arange(n_m) - 22.6, indexing="ij"
+    )
+    psf = np.empty((1, 3, 2, n_l, n_m), dtype=dtype)
+    beam = np.empty((1, 3, 2, 3))
+    for index in np.ndindex(psf.shape[:3]):
+        sigma_l, sigma_m = rng.uniform(2.0, 6.0, size=2)
+        psf[index] = np.exp(
+            -0.5 * ((l_grid / sigma_l) ** 2 + (m_grid / sigma_m) ** 2)
+        ) + 0.05 * rng.standard_normal((n_l, n_m))
+        beam[index] = [
+            FWHM_factor * max(sigma_l, sigma_m) * 0.05,
+            FWHM_factor * min(sigma_l, sigma_m) * 0.05,
+            rng.uniform(-np.pi, np.pi),
+        ]
+    psf[0, 0, 1, 3, 4] = np.nan
+    psf[0, 0, 1, 50, 9] = np.inf
+    psf[0, 1, 0, 20:25, 30] = -np.inf
+    psf[0, 1, 1] = 0.0  # no positive peak: fallback
+    beam[0, 2, 0, 0] = np.nan  # invalid beam: fallback
+    delta = np.array([-0.05, 0.07])
+    fallback = rng.uniform(0.1, 0.2, size=psf.shape[:3])
+
+    result = _max_sidelobe_after_gaussian_subtraction(
+        psf, beam, delta, fallback=fallback
+    )
+
+    np.testing.assert_array_equal(
+        result, _max_sidelobe_reference(psf, beam, delta, fallback)
+    )
+    assert result[0, 1, 1] == fallback[0, 1, 1]
+    assert result[0, 2, 0] == fallback[0, 2, 0]
+
+
+def test_gaussian_subtraction_peak_memory():
+    """The sidelobe measurement holds two planes and a mask at its peak,
+    whether or not NumPy reuses the temporaries of chained expressions (the
+    whole-plane formula held eight planes, nine without that reuse)."""
+    import tracemalloc
+
+    n = 600
+    plane_bytes = n * n * 8
+    psf = np.zeros((1, 1, 2, n, n))
+    axis = np.arange(n) - n // 2
+    psf[..., :, :] = np.exp(-0.5 * (axis[:, None] ** 2 + axis[None, :] ** 2) / 9.0)
+    psf[0, 0, 1, 0, 0] = np.nan
+    beam = np.tile([3.0 * FWHM_factor, 3.0 * FWHM_factor, 0.0], (1, 1, 2, 1))
+
+    # Leave tracing that someone else started (e.g. pytest -X tracemalloc) on.
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        _max_sidelobe_after_gaussian_subtraction(psf, beam, np.array([1.0, 1.0]))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        if not was_tracing:
+            tracemalloc.stop()
+
+    assert (peak - before) / plane_bytes < 2.5, (peak - before) / plane_bytes
+
+
+def test_psf_gaussian_fit_core_per_slice_boxes():
+    """Per-slice blc/trc arrays must fit each slice with its own window."""
+    shape = (1, 2, 1, 81, 81)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    data = np.zeros(shape)
+    data[0, 0, 0] = np.exp(-(xv**2 + yv**2) / (2 * 0.1**2))  # narrow
+    data[0, 1, 0] = np.exp(-(xv**2 + yv**2) / (2 * 0.3**2))  # wide
+    sampling = np.array([41, 41])
+    cutoff = 0.1
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+
+    _, blc, trc, _ = extract_main_lobe(np.array([61, 61]), cutoff, data)
+    result = psf_gaussian_fit_core(data, blc, trc, sampling, cutoff, delta)
+
+    assert result.shape == (1, 2, 1, 3)
+    # Wider input Gaussian -> larger fitted major axis.
+    assert result[0, 1, 0, 0] > result[0, 0, 0, 0]
+    # Each slice is recovered close to its analytic FWHM (sigma * FWHM_factor).
+    assert np.isclose(result[0, 0, 0, 0], 0.1 * FWHM_factor, rtol=0.15)
+    assert np.isclose(result[0, 1, 0, 0], 0.3 * FWHM_factor, rtol=0.15)
+
+
+def test_psf_gaussian_fit_core_broadcasts_single_box():
+    """A single [l, m] box must match an explicit per-slice array of that box."""
+    data, x, y = _make_multi_slice_cube(shape=(2, 2, 2, 81, 81))
+    sampling = np.array([41, 41])
+    cutoff = 0.1
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+
+    blc = np.array([20, 20])
+    trc = np.array([60, 60])
+    broadcast = psf_gaussian_fit_core(data.copy(), blc, trc, sampling, cutoff, delta)
+
+    blc_full = np.broadcast_to(blc, (2, 2, 2, 2)).copy()
+    trc_full = np.broadcast_to(trc, (2, 2, 2, 2)).copy()
+    per_slice = psf_gaussian_fit_core(
+        data.copy(), blc_full, trc_full, sampling, cutoff, delta
+    )
+    np.testing.assert_allclose(broadcast, per_slice, rtol=0, atol=0)
+
+
+# def test_psf_gaussian_fit_core_rotated_gaussian():
+#     # Rotated Gaussian
+#     shape = (1, 1, 1, 21, 21)
+#     angle_deg = 45
+#     x = np.linspace(-1, 1, shape[-2])
+#     y = np.linspace(-1, 1, shape[-1])
+#     xv, yv = np.meshgrid(x, y, indexing="ij")
+#     theta = np.deg2rad(angle_deg)
+#     a = (np.cos(theta) ** 2) / (2 * 0.2**2) + (np.sin(theta) ** 2) / (2 * 0.1**2)
+#     b = -np.sin(2 * theta) / (4 * 0.2**2) + np.sin(2 * theta) / (4 * 0.1**2)
+#     c = (np.sin(theta) ** 2) / (2 * 0.2**2) + (np.cos(theta) ** 2) / (2 * 0.1**2)
+#     gaussian = np.exp(-(a * xv**2 + 2 * b * xv * yv + c * yv**2))
+#     data = np.zeros(shape)
+#     data[0, 0, 0, :, :] = gaussian
+#     npix_window = np.array([21, 21])
+#     sampling = np.array([21, 21])
+#     cutoff = 0.1
+#     delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+#     result = psf_gaussian_fit_core(data, npix_window, sampling, cutoff, delta)
+#     measured_angle = result[0, 0, 0, 2]
+#     # Allow for 180-degree ambiguity
+#     angle_mod = (np.rad2deg(measured_angle) + 180) % 180
+#     expected_mod = (angle_deg + 180) % 180
+#     print(f"angle_deg={angle_deg}, measured_angle={np.rad2deg(measured_angle)}")
+#     assert np.isclose(angle_mod, expected_mod, atol=10)
+
+
+@pytest.mark.parametrize("pa", [0.0, 0.35, 1.429, -1.491, 2.4])
+@pytest.mark.parametrize("cell", [(1.0, 1.0), (1.0, 1.7)])
+@pytest.mark.parametrize("sampling", [(55, 55), (47, 63), (54, 64)])
+def test_rotated_beam_preserves_angular_geometry(pa, cell, sampling):
+    """Known angular ellipses survive rectangular support and resampling.
+
+    Construct the truth directly in angular coordinates, independently of the
+    fitter and restoration kernel. Check position angle as well as both widths;
+    beam area alone can conceal the anisotropic coordinate-conversion defect.
+    """
+    major, minor = 12.291, 6.902
+    scale = 1.0e-6
+    l = (np.arange(81) - 40) * cell[0] * scale
+    m = (np.arange(81) - 40) * cell[1] * scale
+    along = np.sin(pa) * l[:, None] - np.cos(pa) * m[None, :]
+    across = np.cos(pa) * l[:, None] + np.sin(pa) * m[None, :]
+    psf = np.exp(
+        -4.0
+        * np.log(2.0)
+        * ((along / (major * scale)) ** 2 + (across / (minor * scale)) ** 2)
+    )
+    ds = xr.Dataset(
+        {
+            "POINT_SPREAD_FUNCTION": (
+                ("time", "frequency", "polarization", "l", "m"),
+                psf[None, None, None],
+            )
+        },
+        coords={
+            "time": [0.0],
+            "frequency": [1.0],
+            "polarization": ["I"],
+            "l": -l,
+            "m": m,
+        },
+    )
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    modify_data_groups_xds(
+        ds,
+        "image",
+        {"point_spread_function": "POINT_SPREAD_FUNCTION"},
+        description="Known angular Gaussian for beam geometry regression.",
+    )
+    result = psf_gaussian_fit(ds, sampling=sampling)
+    beam = result.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values.ravel()
+    np.testing.assert_allclose(beam[:2] / scale, [major, minor], rtol=5e-3)
+    angle_error = (beam[2] - pa + np.pi / 2) % np.pi - np.pi / 2
+    assert abs(angle_error) < 5e-3
+
+
+@pytest.mark.parametrize(
+    "success, parameters", [(False, [2.0, 1.0, 0.0]), (True, [np.nan, 1.0, 0.0])]
+)
+def test_failed_optimizer_preserves_nan_beam(monkeypatch, success, parameters):
+    """Unusable fits must not enter the covariance eigensolver."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit.optimize.minimize",
+        lambda *args, **kwargs: SimpleNamespace(
+            success=success, x=np.array(parameters)
+        ),
+    )
+    result = psf_gaussian_fit(create_test_xds())
+    assert np.all(np.isnan(result.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION))

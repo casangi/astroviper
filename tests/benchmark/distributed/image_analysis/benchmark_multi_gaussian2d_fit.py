@@ -16,15 +16,16 @@ if __name__ == "__main__":
 
 import argparse
 import time
-import numpy as np
-import xarray as xr
+
 import dask
 import dask.array as da
+import numpy as np
+import xarray as xr
 
-from astroviper.distributed.image_analysis.multi_gaussian2d_fit import (
+from astroviper.distributed_applications.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,
 )
-from astroviper.distributed.model.component_models import make_gauss2d
+from astroviper.distributed_applications.model.component_models import make_gauss2d
 
 try:
     from dask.distributed import Client

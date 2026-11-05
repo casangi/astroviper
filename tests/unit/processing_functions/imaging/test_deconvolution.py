@@ -1,0 +1,1585 @@
+"""
+Unit tests for :mod:`astroviper.processing_functions.imaging.deconvolution`.
+
+These tests exercise the Python-level orchestration of the CLEAN
+pipeline:
+
+- :func:`_validate_deconvolve_params`: parameter validation and defaults.
+- :func:`_plane_peak_abs_signed`: signed peak-residual helper.
+- :func:`progress_callback`: logging cadence.
+- :func:`get_phase_center`: phase-center extraction from coordinates.
+- :func:`hogbom_clean`: 5-D cube wrapper around ``hogbom.clean_cube``.
+- :func:`deconvolve`: the end-to-end xarray-driven entry point.
+
+All tests construct synthetic inputs so they run without downloading
+test data. The cube-driven tests require the compiled Hogbom extension;
+the pure-Python ones do not.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+import xarray as xr
+
+from astroviper.processing_functions.imaging.deconvolution import (
+    _divergence_factors,
+    _plane_peak_abs_signed,
+    _validate_deconvolve_params,
+    asp_clean,
+    deconvolve,
+    get_phase_center,
+    hogbom_clean,
+    hogbom_clean_many_threads,
+    validate_exact_psf_subtraction,
+)
+from astroviper.processing_functions.imaging.utils.cycle_control import (
+    IMAGING_CONTINUE,
+    MODEL_UPDATE_DIVERGENCE,
+    MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+    CycleController,
+    StopCode,
+    merge_imaging_dicts,
+)
+from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
+
+try:
+    from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
+        hogbom,
+    )
+
+    HOGBOM_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    HOGBOM_AVAILABLE = False
+
+try:
+    from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
+        aspclean,
+    )
+
+    ASP_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    ASP_AVAILABLE = False
+
+
+requires_hogbom = pytest.mark.skipif(
+    not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
+)
+
+requires_asp = pytest.mark.skipif(
+    not ASP_AVAILABLE, reason="Asp extension not compiled/available"
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _delta_psf_cube(nt, nf, npol, ny, nx, dtype=np.float32):
+    psf = np.zeros((nt, nf, npol, ny, nx), dtype=dtype)
+    psf[..., ny // 2, nx // 2] = 1.0
+    return psf
+
+
+def _make_img_xds(
+    nt=1,
+    nf=1,
+    npol=1,
+    ny=32,
+    nx=32,
+    sources=None,
+    psf_npol=None,
+    with_mask=False,
+    dtype=np.float32,
+):
+    """
+    Build a minimal image Dataset matching what :func:`deconvolve`
+    expects.
+
+    The dataset has two data variables — ``RESIDUAL`` and
+    ``POINT_SPREAD_FUNCTION`` — wired up as a ``"residual"`` data
+    group. The residual contains point sources (via ``sources``) and
+    the PSF is a delta at the centre pixel.
+
+    Parameters
+    ----------
+    sources : dict, optional
+        Maps ``(tt, nn, pp)`` -> list of ``(iy, ix, amp)``. Defaults to
+        a single source at the centre of every plane.
+    psf_npol : int, optional
+        PSF polarization count (defaults to ``npol``). Set to ``1`` to
+        exercise the broadcast path.
+    with_mask : bool
+        If True, attach a ``MASK_RESIDUAL`` data variable.
+    """
+    if psf_npol is None:
+        psf_npol = npol
+
+    resid = np.zeros((nt, nf, npol, ny, nx), dtype=dtype)
+    if sources is None:
+        sources = {
+            (t, f, p): [(ny // 2, nx // 2, 1.0 + 0.1 * (t * nf * npol + f * npol + p))]
+            for t in range(nt)
+            for f in range(nf)
+            for p in range(npol)
+        }
+    for (tt, nn, pp), src_list in sources.items():
+        for iy, ix, amp in src_list:
+            resid[tt, nn, pp, iy, ix] = amp
+
+    psf = _delta_psf_cube(nt, nf, psf_npol, ny, nx, dtype=dtype)
+
+    coords = {
+        "time": np.arange(nt, dtype=np.float64),
+        "frequency": 1.0e9 + 1.0e6 * np.arange(nf),
+        "polarization": ["I", "Q", "U", "V"][:npol],
+        "l": np.linspace(-0.01, 0.01, nx),
+        "m": np.linspace(-0.01, 0.01, ny),
+    }
+
+    data_vars = {
+        "RESIDUAL": (["time", "frequency", "polarization", "l", "m"], resid),
+        "POINT_SPREAD_FUNCTION": (
+            ["time", "frequency", "polarization", "l", "m"],
+            psf,
+        ),
+        # The deconvolve return-dict builder records the per-plane peak PSF
+        # sidelobe, so the data group must carry a
+        # MAX_SIDELOBE_POINT_SPREAD_FUNCTION (time, frequency, polarization)
+        # variable (produced in production by point_spread_function_gaussian_fit).
+        "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+            ["time", "frequency", "polarization"],
+            np.full((nt, nf, npol), 0.2, dtype=dtype),
+        ),
+    }
+
+    if with_mask:
+        # Boolean mask, matching the in-memory MASK produced by make_mask in
+        # production and required by the hogbom binding.
+        mask = np.ones((nt, nf, npol, ny, nx), dtype=bool)
+        data_vars["MASK_RESIDUAL"] = (
+            ["time", "frequency", "polarization", "l", "m"],
+            mask,
+        )
+
+    xds = xr.Dataset(data_vars, coords=coords)
+
+    # The (y, x) dimensions are named ``l``/``m`` in astroviper image
+    # datasets. ``deconvolve`` / ``imgstats`` operate on the trailing
+    # two axes of the values array, so dimension naming is not
+    # inspected; we only need the data_groups attribute.
+    residual_group = {
+        "sky": "RESIDUAL",
+        "point_spread_function": "POINT_SPREAD_FUNCTION",
+        "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+    }
+    if with_mask:
+        residual_group["mask"] = "MASK_RESIDUAL"
+    xds.attrs["data_groups"] = {"residual": residual_group}
+    return xds
+
+
+# ---------------------------------------------------------------------------
+# _validate_deconvolve_params
+# ---------------------------------------------------------------------------
+
+
+class TestValidateDeconvolveParams:
+    def test_none_returns_defaults(self):
+        result = _validate_deconvolve_params(None)
+        assert result == {
+            "gain": 0.1,
+            "max_iter": 1000,
+            "threshold": 0.0,
+            "primary_beam_limit": 0.0,
+            "clean_box": (-1, -1, -1, -1),
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+            "max_iter_divergence": 1,
+            "record_iteration_history": False,
+            "exact_psf_subtraction": False,
+            "asp_stop_after_hogbom_run": False,
+            "asp_residual_components": True,
+            "asp_scale_significance": True,
+        }
+
+    def test_empty_dict_returns_defaults(self):
+        assert _validate_deconvolve_params({}) == {
+            "gain": 0.1,
+            "max_iter": 1000,
+            "threshold": 0.0,
+            "primary_beam_limit": 0.0,
+            "clean_box": (-1, -1, -1, -1),
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+            "max_iter_divergence": 1,
+            "record_iteration_history": False,
+            "exact_psf_subtraction": False,
+            "asp_stop_after_hogbom_run": False,
+            "asp_residual_components": True,
+            "asp_scale_significance": True,
+        }
+
+    def test_partial_params_filled(self):
+        result = _validate_deconvolve_params({"gain": 0.05})
+        assert result["gain"] == 0.05
+        assert result["max_iter"] == 1000
+        assert result["threshold"] == 0.0
+        assert result["clean_box"] == (-1, -1, -1, -1)
+        assert result["min_psf_fraction"] == 0.05
+        assert result["max_psf_fraction"] == 0.8
+
+    def test_full_valid_params_preserved(self):
+        params = {
+            "gain": 0.3,
+            "max_iter": 42,
+            "threshold": 1e-6,
+            "clean_box": (1, 2, 3, 4),
+            "min_psf_fraction": 0.1,
+            "max_psf_fraction": 0.7,
+        }
+        result = _validate_deconvolve_params(params)
+        assert result == params
+
+    @pytest.mark.parametrize("gain", [0.01, 0.1, 0.5, 1.0])
+    def test_gain_accepts_valid(self, gain):
+        result = _validate_deconvolve_params({"gain": gain})
+        assert result["gain"] == gain
+
+    @pytest.mark.parametrize("gain", [0.0, -0.1, 1.1, 2.0])
+    def test_gain_rejects_invalid(self, gain):
+        with pytest.raises(ValueError, match="CLEAN gain"):
+            _validate_deconvolve_params({"gain": gain})
+
+    @pytest.mark.parametrize("max_iter", [1, 100, 1000])
+    def test_niter_accepts_valid(self, max_iter):
+        result = _validate_deconvolve_params({"max_iter": max_iter})
+        assert result["max_iter"] == max_iter
+
+    @pytest.mark.parametrize("max_iter", [0, -1, 1.5, "100", None])
+    def test_niter_rejects_invalid(self, max_iter):
+        with pytest.raises(ValueError, match="positive integer"):
+            _validate_deconvolve_params({"max_iter": max_iter})
+
+    @pytest.mark.parametrize("threshold", [None, 0.0, 1e-6, 1.0])
+    def test_threshold_accepts_valid(self, threshold):
+        result = _validate_deconvolve_params({"threshold": threshold})
+        assert result["threshold"] == threshold
+
+    def test_threshold_rejects_negative(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            _validate_deconvolve_params({"threshold": -0.1})
+
+    def test_threshold_accepts_one_value_per_stokes_plane(self):
+        result = _validate_deconvolve_params({"threshold": [1e-3, 0.0, 2e-4, 2e-4]})
+        assert result["threshold"] == [1e-3, 0.0, 2e-4, 2e-4]
+        with pytest.raises(ValueError, match="non-negative"):
+            _validate_deconvolve_params({"threshold": [1e-3, -1e-4]})
+
+    @pytest.mark.parametrize(
+        "box",
+        [None, (-1, -1, -1, -1), (0, 10, 0, 10), (5, 15, 10, 20)],
+    )
+    def test_clean_box_accepts_valid(self, box):
+        result = _validate_deconvolve_params({"clean_box": box})
+        assert result["clean_box"] == box
+
+    @pytest.mark.parametrize(
+        "box",
+        [(0, 10), (0, 10, 0), (0, 10, 0, 10, 0), "invalid", []],
+    )
+    def test_clean_box_rejects_invalid(self, box):
+        with pytest.raises(ValueError, match="4-tuple"):
+            _validate_deconvolve_params({"clean_box": box})
+
+    def test_max_iter_divergence_defaults_to_1(self):
+        assert _validate_deconvolve_params(None)["max_iter_divergence"] == 1
+
+    @pytest.mark.parametrize("value", [-1, 1, 30, 5000, np.int32(7)])
+    def test_max_iter_divergence_accepts_valid(self, value):
+        out = _validate_deconvolve_params({"max_iter_divergence": value})
+        assert out["max_iter_divergence"] == value
+
+    @pytest.mark.parametrize("value", [0, -2, 2.5, True, "30", None])
+    def test_max_iter_divergence_rejects_invalid(self, value):
+        with pytest.raises(ValueError, match="max_iter_divergence"):
+            _validate_deconvolve_params({"max_iter_divergence": value})
+
+    def test_does_not_mutate_other_keys(self):
+        params = {"gain": 0.2, "extra": "ignored"}
+        result = _validate_deconvolve_params(params)
+        assert result["extra"] == "ignored"
+
+
+# ---------------------------------------------------------------------------
+# _plane_peak_abs_signed
+# ---------------------------------------------------------------------------
+
+
+class TestPlanePeakAbsSigned:
+    def test_returns_signed_peak(self):
+        arr = np.zeros((8, 8), dtype=np.float32)
+        arr[3, 3] = 5.0
+        arr[4, 4] = -7.0
+        assert _plane_peak_abs_signed(arr) == pytest.approx(-7.0)
+
+    def test_no_mask_when_all_positive(self):
+        arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        assert _plane_peak_abs_signed(arr) == pytest.approx(4.0)
+
+    def test_with_mask_excludes_pixels(self):
+        arr = np.array([[1.0, 2.0], [3.0, -10.0]], dtype=np.float32)
+        mask = np.ones_like(arr)
+        mask[1, 1] = 0.0  # exclude the largest magnitude
+        assert _plane_peak_abs_signed(arr, mask=mask) == pytest.approx(3.0)
+
+    def test_mask_all_false_returns_nan(self):
+        arr = np.ones((4, 4), dtype=np.float32)
+        mask = np.zeros_like(arr)
+        result = _plane_peak_abs_signed(arr, mask=mask)
+        assert np.isnan(result)
+
+    def test_mask_threshold_is_half(self):
+        """Mask values must exceed 0.5 to count as valid."""
+        arr = np.array([[0.0, 5.0], [0.0, 0.0]], dtype=np.float32)
+        mask = np.array([[0.0, 0.5], [0.0, 0.0]], dtype=np.float32)
+        result = _plane_peak_abs_signed(arr, mask=mask)
+        # 0.5 is NOT > 0.5, so the 5.0 pixel is excluded.
+        assert np.isnan(result)
+
+
+# ---------------------------------------------------------------------------
+# get_phase_center
+# ---------------------------------------------------------------------------
+
+
+class TestGetPhaseCenter:
+    def test_reads_centre_pixel(self):
+        ny, nx = 4, 4
+        ra = np.arange(ny * nx, dtype=np.float64).reshape(ny, nx)
+        dec = -ra
+
+        xds = xr.Dataset(
+            coords={
+                "right_ascension": (["l", "m"], ra),
+                "declination": (["l", "m"], dec),
+            }
+        )
+        result = get_phase_center(xds)
+        # Centre pixel is (ny//2, nx//2).
+        expected_ra = ra[ny // 2, nx // 2]
+        expected_dec = dec[ny // 2, nx // 2]
+        assert result == f"{expected_ra},{expected_dec}"
+
+
+# ---------------------------------------------------------------------------
+# hogbom_clean (5D cube wrapper)
+# ---------------------------------------------------------------------------
+
+
+@requires_hogbom
+class TestHogbomCleanCube:
+    def test_basic_cube_cleaned(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 16, 16
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        resid[0, 0, 0, 8, 8] = 2.5
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+        model = np.zeros_like(resid)
+
+        result = hogbom_clean(
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 10,
+                "threshold": 0.1,
+            },
+        )
+
+        assert result["iterations_performed"].shape == (nt, nf, npol)
+        assert model[0, 0, 0, 8, 8] == pytest.approx(2.5, abs=1e-6)
+        assert np.allclose(resid, 0.0, atol=1e-6)
+
+    def test_multiplane_threaded_matches_serial(self):
+        nt, nf, npol, ny, nx = 2, 2, 2, 16, 16
+        rng = np.random.default_rng(7)
+        base = rng.standard_normal((nt, nf, npol, ny, nx)).astype(np.float32)
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+
+        resid_a = base.copy()
+        model_a = np.zeros_like(resid_a)
+        hogbom_clean(
+            resid_a,
+            psf,
+            model_a,
+            {"gain": 0.2, "max_iter": 20, "threshold": 0.05},
+            processing_function_threads=1,
+        )
+
+        resid_b = base.copy()
+        model_b = np.zeros_like(resid_b)
+        hogbom_clean(
+            resid_b,
+            psf,
+            model_b,
+            {"gain": 0.2, "max_iter": 20, "threshold": 0.05},
+            processing_function_threads=4,
+        )
+
+        assert np.array_equal(model_a, model_b)
+        assert np.array_equal(resid_a, resid_b)
+
+    def test_broadcast_psf(self):
+        nt, nf, npol, ny, nx = 1, 1, 3, 16, 16
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        for p in range(npol):
+            resid[0, 0, p, 8, 8] = 1.0 + p
+        psf = _delta_psf_cube(nt, nf, 1, ny, nx)
+        model = np.zeros_like(resid)
+
+        hogbom_clean(
+            resid,
+            psf,
+            model,
+            {"gain": 1.0, "max_iter": 5, "threshold": 0.1},
+        )
+
+        for p in range(npol):
+            assert model[0, 0, p, 8, 8] == pytest.approx(1.0 + p, abs=1e-6)
+
+    def test_mask_cube_respected(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 16, 16
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        resid[0, 0, 0, 5, 5] = 10.0
+        resid[0, 0, 0, 10, 10] = 3.0
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+        model = np.zeros_like(resid)
+
+        # The hogbom binding requires a boolean mask (matching the in-memory
+        # MASK produced by make_mask in production).
+        mask = np.ones((nt, nf, npol, ny, nx), dtype=bool)
+        mask[0, 0, 0, 5, 5] = False
+
+        hogbom_clean(
+            resid,
+            psf,
+            model,
+            {"gain": 1.0, "max_iter": 5, "threshold": 0.1},
+            mask_cube=mask,
+        )
+
+        # Masked source should survive; other source should be cleaned.
+        assert resid[0, 0, 0, 5, 5] == pytest.approx(10.0, abs=1e-6)
+        assert model[0, 0, 0, 10, 10] == pytest.approx(3.0, abs=1e-6)
+
+    def test_selected_nan_stops_the_plane_unconverged(self):
+        """A selected pixel that is not a number makes the peak NaN, so the
+        plane is neither cleaned nor reported as converged."""
+        resid = np.zeros((1, 2, 1, 16, 16), dtype=np.float32)
+        resid[0, 0] = np.nan  # every selected pixel
+        resid[0, 1, 0, 8, 8] = 2.5
+        resid[0, 1, 0, 3, 3] = np.nan  # one selected pixel
+        model = np.zeros_like(resid)
+
+        result = hogbom_clean(
+            resid,
+            _delta_psf_cube(1, 2, 1, 16, 16),
+            model,
+            {"gain": 1.0, "max_iter": 10, "threshold": 0.1},
+            mask_cube=np.ones(resid.shape, dtype=bool),
+        )
+
+        assert np.isnan(result["final_peak"]).all()
+        assert not result["converged"].any()
+        assert not result["iterations_performed"].any()
+        assert not model.any()
+
+    def test_search_region_without_selected_pixel_is_not_cleaned(self):
+        """A search region without a selected pixel has peak 0, so the kernel
+        stops on the threshold test without cleaning."""
+        resid = np.ones((1, 1, 1, 16, 16), dtype=np.float32)
+        model = np.zeros_like(resid)
+        mask = np.zeros(resid.shape, dtype=bool)
+        mask[0, 0, 0, 2, 2] = True  # outside the clean box
+
+        result = hogbom_clean(
+            resid,
+            _delta_psf_cube(1, 1, 1, 16, 16),
+            model,
+            {"max_iter": 10, "threshold": 0.0, "clean_box": (5, 12, 5, 12)},
+            mask_cube=mask,
+        )
+
+        assert result["iterations_performed"].item() == 0
+        assert result["final_peak"].item() == 0.0
+        assert not model.any()
+
+    def test_clean_box_excluding_brighter_emission_does_not_diverge(self):
+        """The peak and the RMS are taken over the clean box, so brighter
+        emission outside it does not trip the divergence test."""
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        resid[0, 0, 0, 2, 2] = 10.0  # outside the clean box
+        resid[0, 0, 0, 8, 8] = 1.0
+        model = np.zeros_like(resid)
+
+        result = hogbom_clean(
+            resid,
+            _delta_psf_cube(1, 1, 1, 16, 16),
+            model,
+            {
+                "gain": 0.5,
+                "max_iter": 20,
+                "threshold": 0.01,
+                "clean_box": (5, 12, 5, 12),
+            },
+        )
+
+        assert not result["diverged"].item()
+        assert result["converged"].item()
+        assert result["final_peak"].item() == pytest.approx(0.5**7)
+        assert resid[0, 0, 0, 2, 2] == 10.0
+
+    def test_rejects_non_5d(self):
+        arr = np.zeros((16, 16), dtype=np.float32)
+        with pytest.raises(ValueError, match="5D"):
+            hogbom_clean(arr, arr, arr)
+
+    def test_rejects_shape_mismatch(self):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        model = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
+        with pytest.raises(ValueError, match="same shape"):
+            hogbom_clean(resid, psf, model)
+
+    def test_rejects_psf_spatial_mismatch(self):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
+        model = np.zeros_like(resid)
+        with pytest.raises(ValueError, match="time, frequency, y, x"):
+            hogbom_clean(resid, psf, model)
+
+    def test_rejects_bad_psf_pol(self):
+        resid = np.zeros((1, 1, 3, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 2, 16, 16), dtype=np.float32)
+        model = np.zeros_like(resid)
+        with pytest.raises(ValueError, match="polarization"):
+            hogbom_clean(resid, psf, model)
+
+    def test_rejects_bad_mask_shape(self):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = _delta_psf_cube(1, 1, 1, 16, 16)
+        model = np.zeros_like(resid)
+        bad_mask = np.ones((1, 1, 1, 8, 8), dtype=np.float32)
+        with pytest.raises(ValueError, match="mask_cube"):
+            hogbom_clean(resid, psf, model, mask_cube=bad_mask)
+
+
+# ---------------------------------------------------------------------------
+# deconvolve (end-to-end)
+# ---------------------------------------------------------------------------
+
+
+def _chain_problem(ny=8, nx=64, sidelobe=2.04, dtype=np.float64):
+    """A point source and a PSF with one sidelobe of ``-sidelobe`` one pixel to
+    the right: with loop gain ``g`` the peak moves right and grows by exactly
+    ``g * sidelobe`` at every iteration (see test_hogbom_stop_tests.py)."""
+    residual = np.zeros((1, 1, 1, ny, nx), dtype=dtype)
+    residual[0, 0, 0, ny // 2, 2] = 1.0
+    psf = np.zeros((1, 1, 1, ny, nx), dtype=dtype)
+    psf[0, 0, 0, ny // 2, nx // 2] = 1.0
+    psf[0, 0, 0, ny // 2, nx // 2 + 1] = -sidelobe
+    return residual, psf
+
+
+def _spreading_problem(n=32, dtype=np.float64):
+    """A point source and a PSF with 24 sidelobes of -0.3 on a square ring:
+    a subtraction at gain 0.9 lowers the peak (1 -> 0.27) and raises the RMS
+    of the residual 1.33 times (see test_aspclean.py)."""
+    residual = np.zeros((1, 1, 1, n, n), dtype=dtype)
+    residual[0, 0, 0, n // 2, n // 2] = 1.0
+    psf = np.zeros((1, 1, 1, n, n), dtype=dtype)
+    c = n // 2
+    psf[..., c - 3 : c + 4, c - 3 : c + 4] = -0.3
+    psf[..., c - 2 : c + 3, c - 2 : c + 3] = 0.0
+    psf[..., c, c] = 1.0
+    return residual, psf
+
+
+class TestDivergenceFactors:
+    @pytest.mark.parametrize("gain", [0.05, 0.1, 0.5, 1.0])
+    def test_limits_scale_with_the_gain(self, gain):
+        rms_factor, peak_factor = _divergence_factors(gain)
+        assert rms_factor == pytest.approx(1 + gain / 10)
+        assert peak_factor == pytest.approx(1 + gain)
+        assert 1 < rms_factor < peak_factor
+
+
+@requires_hogbom
+@pytest.mark.parametrize("clean", [hogbom_clean, hogbom_clean_many_threads])
+class TestHogbomDivergence:
+    def test_diverging_plane_is_stopped(self, clean):
+        # gain 0.5: the soft limit is 1.05 times the lowest RMS, the hard limit
+        # 1.5 times the starting peak. After the first iteration the RMS of
+        # the chain is 1.136 times its starting value and it rises from there,
+        # so with a count of 5 the plane stops at iteration 5.
+        residual, psf = _chain_problem()
+        result = clean(
+            residual_cube=residual,
+            psf_cube=psf,
+            model_cube=np.zeros_like(residual),
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "max_iter_divergence": 5,
+            },
+        )
+        assert result["iterations_performed"].item() == 5
+        assert bool(result["diverged"].item()) is True
+        assert result["stop_code"].item() == MODEL_UPDATE_DIVERGENCE
+
+    def test_default_stops_at_the_first_rise(self, clean):
+        # Default max_iter_divergence = 1.
+        residual, psf = _chain_problem()
+        result = clean(
+            residual_cube=residual,
+            psf_cube=psf,
+            model_cube=np.zeros_like(residual),
+            deconvolve_params={"gain": 0.5, "max_iter": 40, "threshold": 0.0},
+        )
+        assert result["iterations_performed"].item() == 1
+        assert bool(result["diverged"].item()) is True
+
+    def test_large_count_lets_the_hard_limit_act(self, clean):
+        # The peak passes 1.5 times its starting value at iteration 21, long
+        # before the soft limit has counted to 1000.
+        residual, psf = _chain_problem()
+        result = clean(
+            residual_cube=residual,
+            psf_cube=psf,
+            model_cube=np.zeros_like(residual),
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "max_iter_divergence": 1000,
+            },
+        )
+        assert result["iterations_performed"].item() == 21
+        assert bool(result["diverged"].item()) is True
+
+    def test_minus_one_disables_the_test(self, clean):
+        residual, psf = _chain_problem()
+        result = clean(
+            residual_cube=residual,
+            psf_cube=psf,
+            model_cube=np.zeros_like(residual),
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 25,
+                "threshold": 0.0,
+                "max_iter_divergence": -1,
+            },
+        )
+        assert result["iterations_performed"].item() == 25
+        assert bool(result["diverged"].item()) is False
+
+    def test_zero_plane_does_no_iterations(self, clean):
+        residual = np.zeros((1, 1, 2, 8, 64))
+        psf = _delta_psf_cube(1, 1, 2, 8, 64, dtype=np.float64)
+        model = np.zeros_like(residual)
+        result = clean(
+            residual_cube=residual,
+            psf_cube=psf,
+            model_cube=model,
+            deconvolve_params={"gain": 0.1, "max_iter": 500, "threshold": 0.0},
+        )
+        np.testing.assert_array_equal(result["iterations_performed"].ravel(), [0, 0])
+        assert not result["diverged"].any()
+        assert not model.any()
+
+
+@requires_hogbom
+class TestDeconvolveReportsDivergence:
+    @staticmethod
+    def _xds(sidelobe):
+        # _make_img_xds builds square images
+        xds = _make_img_xds(ny=64, nx=64, dtype=np.float64)
+        residual, psf = _chain_problem(ny=64, nx=64, sidelobe=sidelobe)
+        # the dataset dims are (time, frequency, polarization, l, m)
+        xds["RESIDUAL"].values[...] = residual
+        xds["POINT_SPREAD_FUNCTION"].values[...] = psf
+        return xds
+
+    def test_diverged_model_update_reaches_the_controller(self):
+        xds = self._xds(sidelobe=2.04)
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "max_iter_divergence": 5,
+            },
+        )
+        (entry,) = imaging_dict.data.values()
+        assert entry["iter_done"] == [5]
+        # placeholder set by the deconvolver ...
+        assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
+        # ... and kept by the controller, which lets the imaging cycles go on:
+        # the next residual update recomputes the true residual.
+        controller = CycleController(max_iter=40, threshold=0.0, gain=0.5)
+        controller.update_counts(imaging_dict)
+        stopcode, _ = controller.check_convergence(imaging_dict, model_update_ran=True)
+        assert stopcode.imaging == IMAGING_CONTINUE
+        assert entry["stop_code"].model_update == MODEL_UPDATE_DIVERGENCE
+        assert controller.stop_code_model_update[0, 0, 0] == MODEL_UPDATE_DIVERGENCE
+        assert controller.max_iter_remaining[0, 0, 0] == 35
+
+    def test_healthy_model_update_reports_its_stop_code(self):
+        xds = self._xds(sidelobe=0.0)
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={"gain": 0.5, "max_iter": 10, "threshold": 0.0},
+        )
+        (entry,) = imaging_dict.data.values()
+        assert entry["iter_done"] == [10]
+        assert entry["stop_code"] == StopCode(
+            IMAGING_CONTINUE, MODEL_UPDATE_MAX_ITER_PER_CYCLE
+        )
+        controller = CycleController(max_iter=40, threshold=0.0, gain=0.5)
+        controller.check_convergence(imaging_dict, model_update_ran=True)
+        assert entry["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
+        assert controller.stop_code_model_update[0, 0, 0] == (
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE
+        )
+
+    def test_every_model_update_records_its_stop_code(self):
+        """``stop_code`` keeps the code of the last model update, the
+        ``model_update_stop_code`` history that of every model update."""
+        first = deconvolve(
+            img_xds=self._xds(sidelobe=2.04),
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "max_iter_divergence": 5,
+            },
+        )
+        second = deconvolve(
+            img_xds=self._xds(sidelobe=0.0),
+            deconvolve_params={"gain": 0.5, "max_iter": 10, "threshold": 0.0},
+        )
+        (entry,) = first.data.values()
+        assert entry["model_update_stop_code"] == [MODEL_UPDATE_DIVERGENCE]
+        (entry,) = merge_imaging_dicts([first, second]).data.values()
+        assert entry["model_update_stop_code"] == [
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+        ]
+        assert entry["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
+
+
+@requires_hogbom
+class TestDeconvolve:
+    def test_basic_single_plane(self):
+        xds = _make_img_xds()
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 5,
+                "threshold": 0.05,
+            },
+        )
+
+        assert isinstance(imaging_dict, ImagingDict)
+        assert len(imaging_dict.data) == 1  # 1 time * 1 freq * 1 pol
+        entry = list(imaging_dict.data.values())[0]
+        for field in (
+            "iter_done",
+            "max_iter",
+            "threshold_per_cycle",
+            "gain",
+            "peakres",
+            "peakres_nomask",
+            "masksum",
+            "model_flux",
+            "start_model_flux",
+            "start_peakres",
+            "start_peakres_nomask",
+            "stokes",
+            "frequency",
+            "time",
+        ):
+            assert field in entry
+
+        # Model variable created in place.
+        assert "SKY_MODEL" in xds.data_vars
+        # Source cleaned into model.
+        model = xds["SKY_MODEL"].values
+        assert model[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=1e-5)
+
+    def test_multi_pol_returndict_entries(self):
+        nt, nf, npol = 1, 1, 4
+        xds = _make_img_xds(nt=nt, nf=nf, npol=npol)
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 5,
+                "threshold": 0.05,
+            },
+        )
+        assert len(imaging_dict.data) == nt * nf * npol
+        for p in range(npol):
+            entry = imaging_dict.sel(pol=p)
+            assert isinstance(entry, dict)
+            assert entry["stokes"] == ["I", "Q", "U", "V"][p]
+
+    def test_multi_chan_returndict_frequencies(self):
+        nt, nf, npol = 1, 3, 1
+        xds = _make_img_xds(nt=nt, nf=nf, npol=npol)
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 5,
+                "threshold": 0.05,
+            },
+        )
+        assert len(imaging_dict.data) == nt * nf * npol
+        freqs = [float(imaging_dict.sel(chan=c)["frequency"]) for c in range(nf)]
+        assert len(set(freqs)) == nf
+
+    def test_rejects_psf_pol_mismatch(self):
+        """Residual polarization != PSF polarization raises (unless PSF has
+        exactly one polarization, which ``deconvolve`` handles by
+        broadcasting). Here we force npol_psf == 2 with npol == 3 to
+        trigger the error path."""
+        xds = _make_img_xds(npol=3, psf_npol=3)
+        # Swap in a PSF with mismatched polarization dim size by
+        # constructing a new array on a separate pol coord.
+        psf_arr = np.zeros(
+            (
+                xds.sizes["time"],
+                xds.sizes["frequency"],
+                2,
+                xds.sizes["l"],
+                xds.sizes["m"],
+            ),
+            dtype=np.float32,
+        )
+        psf_arr[..., xds.sizes["l"] // 2, xds.sizes["m"] // 2] = 1.0
+        # Build a second dataset carrying only the bad PSF, then merge in
+        # by deleting+re-adding so xarray accepts the new size.
+        del xds["POINT_SPREAD_FUNCTION"]
+        xds = xds.assign_coords({"psf_pol": ["I", "Q"]})
+        xds["POINT_SPREAD_FUNCTION"] = (
+            ["time", "frequency", "psf_pol", "l", "m"],
+            psf_arr,
+        )
+        with pytest.raises((ValueError, KeyError)):
+            deconvolve(img_xds=xds)
+
+    def test_rejects_unknown_algorithm(self):
+        xds = _make_img_xds()
+        with pytest.raises(ValueError, match="not recognized"):
+            deconvolve(img_xds=xds, algorithm="clark")
+
+    def test_hogbom_rejects_non_boolean_registered_mask(self):
+        """The shared entry point preserves the binding's strict mask dtype."""
+        xds = _make_img_xds(with_mask=True)
+        xds["MASK_RESIDUAL"] = xds.MASK_RESIDUAL.astype(np.float32)
+
+        with pytest.raises(RuntimeError, match="mask.*wrong dtype"):
+            deconvolve(img_xds=xds, algorithm="hogbom")
+
+    def test_hogbom_rejects_non_contiguous_registered_mask(self):
+        """The shared entry point leaves mask layout validation to the binding."""
+        xds = _make_img_xds(with_mask=True)
+        mask = np.asfortranarray(xds.MASK_RESIDUAL.values)
+        assert not mask.flags.c_contiguous
+        xds["MASK_RESIDUAL"] = (xds.MASK_RESIDUAL.dims, mask)
+
+        with pytest.raises(RuntimeError, match="mask.*contiguous"):
+            deconvolve(img_xds=xds, algorithm="hogbom")
+
+    def test_processing_function_threads_parameter_passes_through(self):
+        """processing_function_threads > 1 must not change the result for a deterministic
+        input (same-input-same-output contract)."""
+        xds_a = _make_img_xds(nt=1, nf=2, npol=2, ny=16, nx=16)
+        xds_b = _make_img_xds(nt=1, nf=2, npol=2, ny=16, nx=16)
+
+        deconvolve(
+            img_xds=xds_a,
+            deconvolve_params={
+                "gain": 0.2,
+                "max_iter": 10,
+                "threshold": 0.05,
+            },
+            processing_function_threads=1,
+        )
+        deconvolve(
+            img_xds=xds_b,
+            deconvolve_params={
+                "gain": 0.2,
+                "max_iter": 10,
+                "threshold": 0.05,
+            },
+            processing_function_threads=4,
+        )
+
+        assert np.array_equal(xds_a["RESIDUAL"].values, xds_b["RESIDUAL"].values)
+        assert np.array_equal(xds_a["SKY_MODEL"].values, xds_b["SKY_MODEL"].values)
+
+    def test_returndict_consistency(self):
+        xds = _make_img_xds(nt=1, nf=1, npol=1)
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 20,
+                "threshold": 0.001,
+            },
+        )
+        entry = list(imaging_dict.data.values())[0]
+
+        # start_peakres must be >= peakres (peak should decrease).
+        start = (
+            entry["start_peakres"][-1]
+            if isinstance(entry["start_peakres"], list)
+            else entry["start_peakres"]
+        )
+        end = (
+            entry["peakres"][-1]
+            if isinstance(entry["peakres"], list)
+            else entry["peakres"]
+        )
+        assert abs(end) <= abs(start) + 1e-6
+
+        # iter_done within bounds.
+        iter_done = (
+            entry["iter_done"][-1]
+            if isinstance(entry["iter_done"], list)
+            else entry["iter_done"]
+        )
+        assert 0 <= iter_done <= entry["max_iter"]
+
+    def test_deconvolve_with_mask(self):
+        xds = _make_img_xds(nt=1, nf=1, npol=1, with_mask=True)
+        # Zero the mask at the source location; CLEAN should not touch it.
+        xds["MASK_RESIDUAL"].values[0, 0, 0, 16, 16] = 0.0
+
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 5,
+                "threshold": 0.05,
+            },
+        )
+        # Source should survive since the pixel is masked out.
+        assert xds["RESIDUAL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=1e-6)
+        assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(0.0, abs=1e-6)
+        assert isinstance(imaging_dict, ImagingDict)
+
+
+# ---------------------------------------------------------------------------
+# asp_clean (5-D cube wrapper around aspclean.clean_cube)
+# ---------------------------------------------------------------------------
+
+
+# Asp as CASA and LibRA run it: without the residual-shaped components and the
+# test of significance per scale that asp_clean turns on by default.
+PLAIN_ASP = {"asp_residual_components": False, "asp_scale_significance": False}
+
+
+@requires_asp
+class TestAspClean:
+    @staticmethod
+    def _gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0):
+        from astroviper.processing_functions.imaging.deconvolvers import aspclean
+
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        g = np.exp(-(((xx - nx // 2) ** 2 + (yy - ny // 2) ** 2) / (2 * sig**2)))
+        psf = np.zeros((nt, nf, npol, ny, nx), dtype=np.float64)
+        psf[...] = g
+        return psf, aspclean
+
+    def test_basic_cube_point_source(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 32, 32
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        resid[0, 0, 0, 16, 16] = 5.0
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+        model = np.zeros_like(resid)
+
+        result = asp_clean(
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 50,
+                "threshold": 0.01,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
+            },
+        )
+        assert result["iterations_performed"].shape == (nt, nf, npol)
+        assert result["peak_residual"].shape == (nt, nf, npol)
+        # point source essentially cleaned into the model at its pixel
+        assert np.max(np.abs(resid)) < 0.05
+        assert model[0, 0, 0, 16, 16] == pytest.approx(5.0, abs=0.1)
+
+    def test_extended_source_flux_recovered_and_invariant(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 64, 64
+        psf, aspclean = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        sky = 3.0 * np.exp(-(((xx - 36) ** 2 + (yy - 30) ** 2) / (2 * 4.0**2)))
+        dirty = aspclean.convolve_centered(sky, psf[0, 0, 0])
+        # Independent C-contiguous copy so the reference `dirty` is not the
+        # same buffer that asp_clean mutates in place.
+        resid = dirty[None, None, None].copy()
+        model = np.zeros_like(resid)
+
+        asp_clean(
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            deconvolve_params={
+                "gain": 0.1,
+                "max_iter": 200,
+                "threshold": 0.01,
+                "asp_fused_threshold": 0.1,
+            },
+        )
+        # residual reduced and most flux recovered
+        assert np.max(np.abs(resid[0, 0, 0])) < 0.2 * np.max(np.abs(dirty))
+        assert 0.6 < model.sum() / sky.sum() < 1.2
+        # Reconstruction invariant: residual == dirty - model (*) psf. This is
+        # exact except for the per-step box clamping near the image edges (a
+        # faithful property of the CASA algorithm), so a tight-but-not-machine
+        # tolerance is used.
+        recon = aspclean.convolve_centered(model[0, 0, 0], psf[0, 0, 0])
+        err = np.max(np.abs(resid[0, 0, 0] + recon - dirty))
+        assert err / np.max(np.abs(dirty)) < 1e-5
+
+    def test_stop_after_hogbom_run_reaches_the_kernel(self):
+        """``asp_stop_after_hogbom_run`` is handed to the kernel: off by
+        default, the model update of a resolved disk goes on to its iteration
+        limit; on, it ends after its Hogbom run, as in CASA."""
+        nt, nf, npol, ny, nx = 1, 1, 1, 64, 64
+        psf, aspclean = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        sky = 3.0 * (np.hypot(xx - 32, yy - 32) < 10.0)
+        dirty = aspclean.convolve_centered(sky, psf[0, 0, 0])
+        results = {}
+        for stop in (None, False, True):
+            resid = dirty[None, None, None].copy()
+            model = np.zeros_like(resid)
+            # the Hogbom runs of the Asp iterations, without the ring cleaning
+            params = {"gain": 0.1, "max_iter": 400, "threshold": 1e-4, **PLAIN_ASP}
+            if stop is not None:
+                params["asp_stop_after_hogbom_run"] = stop
+            results[stop] = asp_clean(resid, psf, model, params)
+        assert results[None]["stop_code"][0, 0, 0] == 1  # the iteration limit
+        assert results[None]["iterations_performed"][0, 0, 0] == 400
+        assert results[False]["iterations_performed"][0, 0, 0] == 400
+        assert results[True]["stop_code"][0, 0, 0] == 5  # a test of Asp
+        assert results[True]["iterations_performed"][0, 0, 0] < 400
+
+    def test_stop_after_hogbom_run_must_be_a_bool(self):
+        from astroviper.processing_functions.imaging.deconvolution import (
+            _validate_deconvolve_params,
+        )
+
+        with pytest.raises(
+            ValueError, match="asp_stop_after_hogbom_run must be a bool"
+        ):
+            _validate_deconvolve_params({"asp_stop_after_hogbom_run": 1})
+        assert _validate_deconvolve_params({})["asp_stop_after_hogbom_run"] is False
+
+    @pytest.mark.parametrize(
+        "key", ["asp_residual_components", "asp_scale_significance"]
+    )
+    def test_ring_cleaning_switches_are_bools_and_on(self, key):
+        from astroviper.processing_functions.imaging.deconvolution import (
+            _validate_deconvolve_params,
+        )
+
+        with pytest.raises(ValueError, match=f"{key} must be a bool"):
+            _validate_deconvolve_params({key: 1})
+        assert _validate_deconvolve_params({})[key] is True
+
+    def test_ring_cleaning_options_reach_the_kernel(self, monkeypatch):
+        """The ``asp_*`` ring-cleaning keys of ``deconvolve_params`` are
+        handed to the kernel; residual-shaped components from positive
+        residual only and the test of significance per scale are on by
+        default (off in the kernel)."""
+        nt, nf, npol, ny, nx = 1, 1, 1, 32, 32
+        psf, aspclean = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
+        calls = []
+        clean_cube = aspclean.clean_cube
+
+        def spy(*args, **kwargs):
+            calls.append(kwargs)
+            return clean_cube(*args, **kwargs)
+
+        monkeypatch.setattr(aspclean, "clean_cube", spy)
+        options = {
+            "asp_residual_components": False,
+            "asp_scale_significance": False,
+            "asp_significance": 2.5,
+            "asp_residual_component_noise_floor": 3.0,
+            "asp_residual_component_min_fraction": 0.4,
+            "asp_residual_component_max_epsilon_fraction": 5.0,
+            "asp_residual_component_switch_factor": 2.0,
+            "asp_residual_component_floor_at_threshold": False,
+            "asp_residual_component_positive_only": False,
+            "asp_significance_gain": 0.5,
+        }
+        for extra in ({}, options):
+            resid = np.zeros((nt, nf, npol, ny, nx))
+            resid[0, 0, 0, 16, 16] = 1.0
+            params = {"gain": 0.1, "max_iter": 20, "threshold": 0.01, **extra}
+            asp_clean(resid, psf, np.zeros_like(resid), params)
+        default, given = calls
+        assert default["asp_residual_components"] is True
+        assert default["asp_scale_significance"] is True
+        assert default["asp_residual_component_switch_factor"] == 1.0
+        assert default["asp_residual_component_floor_at_threshold"] is True
+        assert default["asp_residual_component_positive_only"] is True
+        assert default["asp_significance_gain"] == 0.3
+        for key, value in options.items():
+            assert given[key] == value
+
+    def test_threaded_matches_serial(self):
+        nt, nf, npol, ny, nx = 1, 2, 2, 32, 32
+        rng = np.random.default_rng(11)
+        base = rng.standard_normal((nt, nf, npol, ny, nx)).astype(np.float64)
+        psf, _ = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
+
+        ra, ma = base.copy(), np.zeros_like(base)
+        asp_clean(
+            ra,
+            psf,
+            ma,
+            {
+                "gain": 0.2,
+                "max_iter": 40,
+                "threshold": 0.05,
+                "asp_fused_threshold": 0.1,
+            },
+            processing_function_threads=1,
+        )
+        rb, mb = base.copy(), np.zeros_like(base)
+        asp_clean(
+            rb,
+            psf,
+            mb,
+            {
+                "gain": 0.2,
+                "max_iter": 40,
+                "threshold": 0.05,
+                "asp_fused_threshold": 0.1,
+            },
+            processing_function_threads=4,
+        )
+
+        assert np.array_equal(ra, rb)
+        assert np.array_equal(ma, mb)
+
+    def test_broadcast_psf(self):
+        nt, nf, npol, ny, nx = 1, 1, 3, 32, 32
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        for p in range(npol):
+            resid[0, 0, p, 16, 16] = 1.0 + p
+        psf = _delta_psf_cube(nt, nf, 1, ny, nx)
+        model = np.zeros_like(resid)
+        out = asp_clean(
+            resid,
+            psf,
+            model,
+            {
+                "gain": 0.5,
+                "max_iter": 40,
+                "threshold": 0.01,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
+            },
+        )
+        assert out["model_flux"].shape == (nt, nf, npol)
+        assert np.all(np.asarray(out["model_flux"]) > 0)
+
+    def test_bool_mask_converted_and_respected(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 32, 32
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        resid[0, 0, 0, 6, 6] = 10.0
+        resid[0, 0, 0, 22, 22] = 4.0
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+        model = np.zeros_like(resid)
+
+        # bool mask zeroing a box around the strong source (Asp wants a
+        # numeric mask; asp_clean must convert without mutating the input).
+        mask = np.ones((nt, nf, npol, ny, nx), dtype=bool)
+        mask[0, 0, 0, 0:12, 0:12] = False
+
+        # Restrict to small scales so a large-scale component just outside the
+        # masked box cannot leak flux into it.
+        asp_clean(
+            resid,
+            psf,
+            model,
+            {
+                "gain": 0.5,
+                "max_iter": 60,
+                "threshold": 0.01,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
+                "asp_largest_scale": 2,
+            },
+            mask_cube=mask,
+        )
+
+        assert mask.dtype == np.bool_  # input mask untouched
+        # No component centres are placed in the masked box, so the masked
+        # strong source is preserved and the model deep inside the box is
+        # negligible (only faint Gaussian tails from edge components bleed in).
+        assert resid[0, 0, 0, 6, 6] == pytest.approx(10.0, abs=0.05)
+        assert np.max(np.abs(model[0, 0, 0, 0:6, 0:6])) < 0.05
+        # the unmasked source is essentially fully cleaned
+        assert abs(resid[0, 0, 0, 22, 22]) < 0.5
+
+    def test_rejects_non_5d(self):
+        arr = np.zeros((16, 16), dtype=np.float32)
+        with pytest.raises(ValueError, match="5D"):
+            asp_clean(arr, arr, arr)
+
+    def test_rejects_shape_mismatch(self):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        model = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
+        with pytest.raises(ValueError, match="same shape"):
+            asp_clean(resid, psf, model)
+
+    def test_rejects_bad_psf_pol(self):
+        resid = np.zeros((1, 1, 3, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 2, 16, 16), dtype=np.float32)
+        model = np.zeros_like(resid)
+        with pytest.raises(ValueError, match="polarization"):
+            asp_clean(resid, psf, model)
+
+    @pytest.mark.parametrize(
+        ("max_iter_divergence", "iterations", "diverged"),
+        [(1, 6, True), (-1, 40, False)],
+    )
+    def test_divergence_test_follows_max_iter_divergence(
+        self, max_iter_divergence, iterations, diverged
+    ):
+        """The model update stops once the RMS is above (1 + gain) times its
+        lowest value; without the test nothing stops the runaway."""
+        residual, psf = _spreading_problem()
+        result = asp_clean(
+            residual,
+            psf,
+            np.zeros_like(residual),
+            {
+                "gain": 0.9,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "asp_psf_width": 1.0,
+                "asp_largest_scale": 0,
+                "max_iter_divergence": max_iter_divergence,
+                **PLAIN_ASP,
+            },
+        )
+        assert result["iterations_performed"].item() == iterations
+        assert result["diverged"].item() == diverged
+        assert (result["retval"].item() == -3) == diverged
+
+    def test_divergence_test_stops_the_runaway_with_ring_cleaning(self):
+        """With the residual-shaped components and the test of significance
+        per scale (the defaults) the same runaway stops as diverged too."""
+        residual, psf = _spreading_problem()
+        result = asp_clean(
+            residual,
+            psf,
+            np.zeros_like(residual),
+            {
+                "gain": 0.9,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "asp_psf_width": 1.0,
+                "asp_largest_scale": 0,
+            },
+        )
+        assert result["iterations_performed"].item() < 10
+        assert result["diverged"].item()
+        assert result["retval"].item() == -3
+
+    def test_plane_with_nan_in_the_search_region_gets_no_iterations(self):
+        residual, psf = _spreading_problem()
+        residual[0, 0, 0, 3, 3] = np.nan
+        model = np.zeros_like(residual)
+        result = asp_clean(
+            residual,
+            psf,
+            model,
+            {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "asp_psf_width": 1.0},
+        )
+        assert result["iterations_performed"].item() == 0
+        assert not result["diverged"].item()
+        assert not model.any()
+
+    @pytest.mark.parametrize("mask_dtype", [bool, np.float64])
+    def test_nan_outside_the_mask_changes_nothing(self, mask_dtype):
+        out = []
+        for value in (0.0, np.nan):
+            residual, psf = _spreading_problem()
+            mask = np.zeros(residual.shape, dtype=mask_dtype)
+            mask[..., 8:24, 8:24] = 1
+            residual[0, 0, 0, 0, 0] = value
+            model = np.zeros_like(residual)
+            result = asp_clean(
+                residual,
+                psf,
+                model,
+                {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "asp_psf_width": 1.0},
+                mask_cube=mask,
+            )
+            out.append((result, residual, model))
+        (ref, _, model_ref), (result, residual, model) = out
+        assert (
+            result["iterations_performed"].item() == ref["iterations_performed"].item()
+        )
+        assert result["retval"].item() == ref["retval"].item()
+        np.testing.assert_array_equal(model, model_ref)
+        assert np.isnan(residual[0, 0, 0, 0, 0])
+
+    def test_rms_limit_takes_the_hard_factor_and_no_peak_limit(self, monkeypatch):
+        captured = {}
+
+        def clean_cube(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        monkeypatch.setattr(aspclean, "clean_cube", clean_cube)
+        residual, psf = _spreading_problem()
+        asp_clean(residual, psf, np.zeros_like(residual), {"gain": 0.2})
+        assert captured["max_iter_divergence"] == 1
+        assert captured["divergence_rms_factor"] == _divergence_factors(0.2)[1]
+        assert captured["divergence_peak_factor"] == np.inf
+
+
+# ---------------------------------------------------------------------------
+# deconvolve end-to-end with algorithm="asp"
+# ---------------------------------------------------------------------------
+
+
+@requires_asp
+class TestDeconvolveAsp:
+    def test_basic_single_plane(self):
+        xds = _make_img_xds()
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            algorithm="asp",
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 50,
+                "threshold": 0.01,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
+            },
+        )
+        assert isinstance(imaging_dict, ImagingDict)
+        assert "SKY_MODEL" in xds.data_vars
+        # the point source is cleaned into the model
+        assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=0.1)
+        assert np.max(np.abs(xds["RESIDUAL"].values)) < 0.1
+
+    @pytest.mark.parametrize("algorithm", ["aspclean", "asp_clean", "ASP"])
+    def test_algorithm_names_are_exact(self, algorithm):
+        with pytest.raises(ValueError, match="not recognized"):
+            deconvolve(img_xds=_make_img_xds(nt=1, nf=1, npol=1), algorithm=algorithm)
+
+    def test_multi_plane_returndict_entries(self):
+        nt, nf, npol = 1, 2, 2
+        xds = _make_img_xds(nt=nt, nf=nf, npol=npol)
+        rd = deconvolve(
+            img_xds=xds,
+            algorithm="asp",
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 30,
+                "threshold": 0.01,
+                "asp_fused_threshold": 0.5,
+                "asp_psf_width": 1.0,
+            },
+        )
+        assert len(rd.data) == nt * nf * npol
+
+    def test_diverged_model_update_reaches_the_controller(self):
+        xds = _make_img_xds(dtype=np.float64)
+        residual, psf = _spreading_problem()
+        xds["RESIDUAL"].values[...] = residual
+        xds["POINT_SPREAD_FUNCTION"].values[...] = psf
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            algorithm="asp",
+            deconvolve_params={
+                "gain": 0.9,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "asp_psf_width": 1.0,
+                "asp_largest_scale": 0,
+                **PLAIN_ASP,
+            },
+        )
+        (entry,) = imaging_dict.data.values()
+        assert entry["iter_done"] == [6]
+        assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
+
+
+# ---------------------------------------------------------------------------
+# exact_psf_subtraction: the PSF of twice the image size
+# ---------------------------------------------------------------------------
+
+
+def _subtraction_psf_cube(xds, seed=0):
+    """A PSF of twice the image size of ``xds``: peak 1 at its centre and
+    seeded sidelobes out to its edge."""
+    nt, nf, npol, n_l, n_m = xds["POINT_SPREAD_FUNCTION"].shape
+    rng = np.random.default_rng(seed)
+    psf = 0.05 * rng.standard_normal((nt, nf, npol, 2 * n_l, 2 * n_m))
+    psf[..., n_l, n_m] = 1.0
+    return psf.astype(xds["POINT_SPREAD_FUNCTION"].dtype)
+
+
+def _exact_xds(npol=2):
+    sources = {
+        (0, 0, p): [(4, 5, 1.0), (27, 22, -0.7 + 0.1 * p), (14, 30, 0.4)]
+        for p in range(npol)
+    }
+    return _make_img_xds(npol=npol, sources=sources, with_mask=True)
+
+
+EXACT_PARAMS = {
+    "gain": 0.1,
+    "max_iter": 60,
+    "threshold": 0.0,
+    "max_iter_divergence": -1,
+}
+
+
+class TestExactPsfSubtraction:
+    @pytest.mark.parametrize("value", [False, True, np.bool_(True), np.bool_(False)])
+    @pytest.mark.parametrize("deconvolver", ["hogbom", "hogbom_many_threads"])
+    def test_accepted(self, value, deconvolver):
+        validate_exact_psf_subtraction(deconvolver, value)
+        assert (
+            _validate_deconvolve_params({"exact_psf_subtraction": value})[
+                "exact_psf_subtraction"
+            ]
+            is value
+        )
+
+    @pytest.mark.parametrize("value", [1, 0, "yes", None])
+    def test_must_be_a_bool(self, value):
+        with pytest.raises(ValueError, match="exact_psf_subtraction must be a bool"):
+            validate_exact_psf_subtraction("hogbom", value)
+        with pytest.raises(ValueError, match="exact_psf_subtraction must be a bool"):
+            _validate_deconvolve_params({"exact_psf_subtraction": value})
+
+    def test_asp_is_refused(self):
+        validate_exact_psf_subtraction("asp", False)
+        with pytest.raises(ValueError, match="Hogbom deconvolvers"):
+            validate_exact_psf_subtraction("asp", True)
+
+    @requires_asp
+    def test_deconvolve_refuses_asp_before_the_model_is_made(self):
+        xds = _exact_xds()
+        params = {**EXACT_PARAMS, "exact_psf_subtraction": True}
+        params["subtraction_psf_cube"] = _subtraction_psf_cube(xds)
+        with pytest.raises(ValueError, match="exact_psf_subtraction is supported"):
+            deconvolve(img_xds=xds, algorithm="asp", deconvolve_params=params)
+        assert "SKY_MODEL" not in xds
+        cube = xds["RESIDUAL"].values
+        with pytest.raises(ValueError, match="exact_psf_subtraction is supported"):
+            asp_clean(
+                cube.copy(),
+                xds["POINT_SPREAD_FUNCTION"].values,
+                np.zeros_like(cube),
+                deconvolve_params={"max_iter": 10, "exact_psf_subtraction": True},
+            )
+
+    @requires_hogbom
+    @pytest.mark.parametrize(
+        "cube",
+        [None, "image_sized", "one_plane", "2n_plus_one"],
+    )
+    def test_deconvolve_needs_the_subtraction_psf(self, cube):
+        xds = _exact_xds()
+        psf = xds["POINT_SPREAD_FUNCTION"].values
+        params = {**EXACT_PARAMS, "exact_psf_subtraction": True}
+        if cube == "image_sized":
+            params["subtraction_psf_cube"] = psf.copy()
+        elif cube == "one_plane":
+            params["subtraction_psf_cube"] = _subtraction_psf_cube(xds)[:, :, :1]
+        elif cube == "2n_plus_one":
+            params["subtraction_psf_cube"] = np.pad(
+                _subtraction_psf_cube(xds), ((0, 0),) * 3 + ((0, 1), (0, 0))
+            )
+        with pytest.raises(ValueError, match="subtraction_psf_cube"):
+            deconvolve(img_xds=xds, deconvolve_params=params)
+        assert "SKY_MODEL" not in xds
+
+    @requires_hogbom
+    @pytest.mark.parametrize(
+        ("algorithm", "clean"),
+        [("hogbom", hogbom_clean), ("hogbom_many_threads", hogbom_clean_many_threads)],
+    )
+    def test_deconvolve_subtracts_the_psf_of_twice_the_image_size(
+        self, algorithm, clean
+    ):
+        xds = _exact_xds()
+        subtraction_psf = _subtraction_psf_cube(xds)
+        residual = xds["RESIDUAL"].values.copy()
+        mask = xds["MASK_RESIDUAL"].values.copy()
+        psf = xds["POINT_SPREAD_FUNCTION"].values.copy()
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            algorithm=algorithm,
+            deconvolve_params={
+                **EXACT_PARAMS,
+                "exact_psf_subtraction": True,
+                "subtraction_psf_cube": subtraction_psf,
+            },
+        )
+        model = np.zeros_like(residual)
+        direct = clean(residual, subtraction_psf, model, dict(EXACT_PARAMS), 1, mask)
+        assert np.array_equal(xds["RESIDUAL"].values, residual)
+        assert np.array_equal(xds["SKY_MODEL"].values, model)
+        assert [entry["iter_done"] for entry in imaging_dict.data.values()] == [
+            [n] for n in direct["iterations_performed"].reshape(-1).tolist()
+        ]
+        # the image-sized PSF is left as it was, and the default subtracts it
+        assert np.array_equal(xds["POINT_SPREAD_FUNCTION"].values, psf)
+        default = _exact_xds()
+        deconvolve(img_xds=default, algorithm=algorithm, deconvolve_params=EXACT_PARAMS)
+        assert not np.array_equal(default["RESIDUAL"].values, residual)
+
+    @requires_hogbom
+    @pytest.mark.parametrize("clean", [hogbom_clean, hogbom_clean_many_threads])
+    @pytest.mark.parametrize("psf_shape", [(17, 16), (32, 16), (33, 32)])
+    def test_hogbom_clean_takes_the_image_size_or_twice_it(self, clean, psf_shape):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, *psf_shape), dtype=np.float32)
+        with pytest.raises(ValueError, match="twice its"):
+            clean(resid, psf, np.zeros_like(resid))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__, "-v"])

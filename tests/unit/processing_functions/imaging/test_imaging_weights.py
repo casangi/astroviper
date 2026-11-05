@@ -1,0 +1,764 @@
+"""Unit tests for ``calculate_imaging_weights`` and ``_equalize_parallel_hand_weights``.
+
+Coverage:
+  * Parallel-hand weight equalization (CASA arithmetic mean vs. formal
+    error-propagation form) across the supported polarization counts.
+  * Natural weighting end-to-end on a small DataTree (output shape/values,
+    flag handling, multi-MS support, data-group registration, in-place
+    mutation of the input weight array, overwrite guard).
+  * Dispatch:
+      - ``uniform`` is rewritten to ``briggs`` with ``robust = -2.0``.
+      - ``casa_weighting_implementation`` defaults to ``False`` via the
+        parameter checker.
+  * Briggs path with the gridder/Briggs internals mocked out so the tests
+    do not depend on the C++ kernels or numerical gridding behaviour.
+"""
+
+import unittest
+from unittest import mock
+
+import numpy as np
+import pytest
+import xarray as xr
+
+from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+    _equalize_parallel_hand_weights,
+    calculate_imaging_weights,
+    grid_imaging_weight_density_continuum,
+)
+from astroviper.processing_functions.imaging.check_imaging_parameters import (
+    check_imaging_weights_params,
+)
+from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+    degrid_imaging_weights,
+)
+
+_MS_DIMS = ("time", "baseline", "frequency", "polarization")
+_GRID_MOD_PATH = (
+    "astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights"
+)
+_BRIGGS_MOD_PATH = (
+    "astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting"
+)
+
+
+def test_degrid_imaging_weights_rejects_non_native_float_density_grid():
+    """The Python/C++ boundary rejects rather than converts non-native floats."""
+    density = np.zeros((1, 1, 4, 4), dtype=">f8")
+    density[0, 0, 2, 2] = 3.0
+
+    with pytest.raises(TypeError, match="native float32 or float64"):
+        degrid_imaging_weights(
+            density,
+            np.zeros((1, 1, 3), dtype=np.float64),
+            np.ones((1, 1, 1, 1), dtype=np.float64),
+            np.ones((2, 1, 1), dtype=np.float64),
+            np.asarray([1.0e9], dtype=np.float64),
+            np.asarray([4, 4], dtype=np.int64),
+            np.asarray([1.0e-5, 1.0e-5], dtype=np.float64),
+            processing_function_threads=1,
+        )
+
+
+def test_degrid_imaging_weights_rejects_non_float_density_grid():
+    """Density grids with integer storage fail before reaching the C++ kernel."""
+    with pytest.raises(TypeError, match="native float32 or float64"):
+        degrid_imaging_weights(
+            np.zeros((1, 1, 4, 4), dtype=np.int64),
+            np.zeros((1, 1, 3), dtype=np.float64),
+            np.ones((1, 1, 1, 1), dtype=np.float64),
+            np.ones((2, 1, 1), dtype=np.float64),
+            np.asarray([1.0e9], dtype=np.float64),
+            np.asarray([4, 4], dtype=np.int64),
+            np.asarray([1.0e-5, 1.0e-5], dtype=np.float64),
+            processing_function_threads=1,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fixture builders
+# ---------------------------------------------------------------------------
+def _make_ms_ds(
+    n_time=1,
+    n_baseline=4,
+    n_chan=2,
+    n_pol=2,
+    weight_per_pol=None,
+    flag_fill=0,
+    seed=0,
+):
+    """Build a minimal MS-like ``xr.Dataset`` wired with a ``base`` data group.
+
+    Parameters
+    ----------
+    weight_per_pol : sequence of float, optional
+        If given, weights are constant along (time, baseline, chan) and
+        vary per polarization. Must have length ``n_pol``. If ``None``,
+        weights are drawn uniformly in ``[0.5, 2.0)``.
+    flag_fill : int
+        Value to fill the FLAG array with (``0`` = unflagged).
+    """
+    shape = (n_time, n_baseline, n_chan, n_pol)
+    rng = np.random.default_rng(seed)
+    if weight_per_pol is None:
+        weight = rng.uniform(0.5, 2.0, shape).astype(np.float64)
+    else:
+        weight = np.broadcast_to(
+            np.asarray(weight_per_pol, dtype=np.float64), shape
+        ).copy()
+    flag = np.full(shape, flag_fill, dtype=np.int8)
+    uvw = rng.uniform(-100.0, 100.0, (n_time, n_baseline, 3))
+    freq = np.linspace(1.0e9, 1.1e9, n_chan)
+
+    ds = xr.Dataset(
+        data_vars={
+            "WEIGHT": (_MS_DIMS, weight),
+            "FLAG": (_MS_DIMS, flag),
+            "UVW": (("time", "baseline", "uvw_label"), uvw),
+        },
+        coords={"frequency": freq},
+    )
+    ds.attrs["data_groups"] = {
+        "base": {"weight": "WEIGHT", "flag": "FLAG", "uvw": "UVW"}
+    }
+    return ds
+
+
+def _make_ps_xdt(n_ms=1, **kwargs):
+    """Wrap one or more MS datasets in a Processing Set ``DataTree``."""
+    ps_xdt = xr.DataTree()
+    for i in range(n_ms):
+        ps_xdt[f"ms_{i}"] = xr.DataTree(dataset=_make_ms_ds(seed=i, **kwargs))
+    return ps_xdt
+
+
+def _make_img_xds(n_l=8, n_m=8, n_chan=2, delta=1.0e-5):
+    """Minimal image-like ``xr.Dataset`` used only for the Briggs dispatch.
+
+    The function under test reads ``sizes['l']``, ``sizes['m']``,
+    ``sizes['frequency']`` and calls ``img_xds.xr_img.get_lm_cell_size()``.
+    The latter accessor is registered as a side-effect of importing
+    ``xradio.image.image_xds`` inside the test that needs it.
+    """
+    l_coord = (np.arange(n_l) - n_l / 2) * delta
+    m_coord = (np.arange(n_m) - n_m / 2) * delta
+    freq = np.linspace(1.0e9, 1.1e9, n_chan)
+    img_xds = xr.Dataset(
+        coords={"l": l_coord, "m": m_coord, "frequency": freq},
+    )
+    # Required by the xradio xr_img accessor (see IMAGE_DATASET_TYPES).
+    img_xds.attrs["type"] = "image_dataset"
+    return img_xds
+
+
+# ---------------------------------------------------------------------------
+# _equalize_parallel_hand_weights
+# ---------------------------------------------------------------------------
+class TestEqualizeParallelHandWeights(unittest.TestCase):
+    """Pure-numpy tests for the parallel-hand equalization helper."""
+
+    def test_n_pol_2_casa_is_arithmetic_mean(self):
+        """``casa=True`` averages the two parallel-hand weights."""
+        w = np.broadcast_to(np.array([2.0, 6.0]), (3, 4, 1, 2)).copy()
+        out = _equalize_parallel_hand_weights(w, casa_weighting_implementation=True)
+        self.assertEqual(out.shape, (3, 4, 1, 1))
+        np.testing.assert_allclose(out, np.full((3, 4, 1, 1), 4.0))
+
+    def test_n_pol_2_non_casa_is_error_propagation(self):
+        """``casa=False`` uses ``2*w0*w1/(w0+w1)`` (i.e. w_I/2)."""
+        w = np.broadcast_to(np.array([2.0, 6.0]), (3, 4, 1, 2)).copy()
+        out = _equalize_parallel_hand_weights(w, casa_weighting_implementation=False)
+        # 2*2*6 / (2+6) = 24/8 = 3.0
+        np.testing.assert_allclose(out, np.full((3, 4, 1, 1), 3.0))
+
+    def test_n_pol_4_uses_pol0_and_pol3_for_parallel_hands(self):
+        """For 4 pols, pol indices 0 and 3 are the parallel hands;
+        the cross-hands (indices 1, 2) are ignored by the helper."""
+        # pol 0 = 2, pol 1 = 999 (cross), pol 2 = 999 (cross), pol 3 = 6.
+        w = np.broadcast_to(np.array([2.0, 999.0, 999.0, 6.0]), (2, 3, 1, 4)).copy()
+        out_casa = _equalize_parallel_hand_weights(
+            w, casa_weighting_implementation=True
+        )
+        out_err = _equalize_parallel_hand_weights(
+            w, casa_weighting_implementation=False
+        )
+        self.assertEqual(out_casa.shape, (2, 3, 1, 1))
+        np.testing.assert_allclose(out_casa, np.full((2, 3, 1, 1), 4.0))
+        np.testing.assert_allclose(out_err, np.full((2, 3, 1, 1), 3.0))
+
+    def test_equal_weights_make_both_formulas_agree(self):
+        """The two formulas are identical when ``w_xx == w_yy``."""
+        w = np.full((2, 2, 1, 2), 5.0)
+        out_casa = _equalize_parallel_hand_weights(w, True)
+        out_err = _equalize_parallel_hand_weights(w, False)
+        np.testing.assert_allclose(out_casa, out_err)
+        np.testing.assert_allclose(out_casa, np.full((2, 2, 1, 1), 5.0))
+
+    def test_non_casa_is_strictly_less_than_arithmetic_mean(self):
+        """Per Moellenbrock 2025: harmonic-mean-style form is always
+        ≤ arithmetic mean, with equality iff the weights are equal."""
+        w = np.broadcast_to(np.array([1.0, 10.0]), (1, 1, 1, 2)).copy()
+        out_casa = _equalize_parallel_hand_weights(w, True)
+        out_err = _equalize_parallel_hand_weights(w, False)
+        self.assertTrue(np.all(out_err < out_casa))
+
+    def test_n_pol_1_passes_through_unchanged(self):
+        """Single-correlation data is returned unchanged
+        (the natural Stokes-I assumption requires no equalization)."""
+        w = np.full((2, 2, 1, 1), 7.0)
+        out = _equalize_parallel_hand_weights(w, False)
+        self.assertEqual(out.shape, (2, 2, 1, 1))
+        np.testing.assert_array_equal(out, w)
+
+    def test_n_pol_3_passes_through_unchanged(self):
+        """Unsupported polarization counts are returned unchanged."""
+        w = np.full((1, 1, 1, 3), 1.0)
+        out = _equalize_parallel_hand_weights(w, True)
+        np.testing.assert_array_equal(out, w)
+
+    def test_nan_in_parallel_hand_propagates(self):
+        """NaN in either parallel-hand correlation gives NaN out."""
+        w = np.array([[[[np.nan, 5.0]]]])
+        out_casa = _equalize_parallel_hand_weights(w, True)
+        out_err = _equalize_parallel_hand_weights(w, False)
+        self.assertTrue(np.isnan(out_casa).all())
+        self.assertTrue(np.isnan(out_err).all())
+
+    def test_input_array_not_mutated(self):
+        """The helper returns a new array; it does not mutate its input."""
+        w = np.broadcast_to(np.array([2.0, 6.0]), (1, 1, 1, 2)).copy()
+        original = w.copy()
+        _ = _equalize_parallel_hand_weights(w, True)
+        np.testing.assert_array_equal(w, original)
+
+
+# ---------------------------------------------------------------------------
+# Natural-weighting path
+# ---------------------------------------------------------------------------
+class TestCalculateImagingWeightsNatural(unittest.TestCase):
+    """End-to-end tests of the natural-weighting branch.
+
+    ``img_xds`` is unused on the natural path, so we pass ``None``.
+    """
+
+    def test_writes_weight_imaging_with_input_dims(self):
+        """Output variable is added with the same dims/shape as WEIGHT."""
+        ps_xdt = _make_ps_xdt(weight_per_pol=[2.0, 6.0])
+        calculate_imaging_weights(
+            ps_xdt, None, imaging_weights_params={"weighting": "natural"}
+        )
+        ms = ps_xdt["ms_0"]
+        self.assertIn("WEIGHT_IMAGING", ms.ds.data_vars)
+        self.assertEqual(ms["WEIGHT_IMAGING"].dims, ms["WEIGHT"].dims)
+        self.assertEqual(ms["WEIGHT_IMAGING"].shape, ms["WEIGHT"].shape)
+
+    def test_casa_implementation_uses_arithmetic_mean(self):
+        """With ``casa_weighting_implementation=True`` the output equals the
+        arithmetic mean of the two parallel-hand weights, tiled to ``n_pol``."""
+        ps_xdt = _make_ps_xdt(weight_per_pol=[2.0, 6.0])
+        calculate_imaging_weights(
+            ps_xdt,
+            None,
+            imaging_weights_params={
+                "weighting": "natural",
+                "casa_weighting_implementation": True,
+            },
+        )
+        out = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        np.testing.assert_allclose(out, np.full_like(out, 4.0))
+
+    def test_error_propagation_is_default(self):
+        """No explicit casa flag → the formal error-propagation form is used."""
+        ps_xdt = _make_ps_xdt(weight_per_pol=[2.0, 6.0])
+        calculate_imaging_weights(
+            ps_xdt, None, imaging_weights_params={"weighting": "natural"}
+        )
+        out = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        # 2*2*6 / (2+6) = 3.0
+        np.testing.assert_allclose(out, np.full_like(out, 3.0))
+
+    def test_4_pol_input_tiles_to_4_pol_output(self):
+        """For 4 pols the equalized weight is broadcast across all four
+        polarizations on output."""
+        ps_xdt = _make_ps_xdt(n_pol=4, weight_per_pol=[2.0, 100.0, 100.0, 6.0])
+        calculate_imaging_weights(
+            ps_xdt,
+            None,
+            imaging_weights_params={
+                "weighting": "natural",
+                "casa_weighting_implementation": True,
+            },
+        )
+        out = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        self.assertEqual(out.shape[-1], 4)
+        np.testing.assert_allclose(out, np.full_like(out, 4.0))
+
+    def test_flagged_samples_propagate_nan(self):
+        """A flagged correlation injects NaN into the equalized output."""
+        ds = _make_ms_ds(weight_per_pol=[2.0, 6.0], flag_fill=0)
+        # Flag pol 0 at (t=0, b=0, f=0).
+        ds["FLAG"].values[0, 0, 0, 0] = 1
+        ps_xdt = xr.DataTree()
+        ps_xdt["ms_0"] = xr.DataTree(dataset=ds)
+
+        calculate_imaging_weights(
+            ps_xdt, None, imaging_weights_params={"weighting": "natural"}
+        )
+        out = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        # NaN at the flagged (t,b,f) is broadcast to all output polarizations
+        # because the equalization collapses the pol axis.
+        self.assertTrue(np.all(np.isnan(out[0, 0, 0, :])))
+        # Other samples remain finite (3.0 from the error-propagation form).
+        self.assertTrue(np.all(np.isfinite(out[0, 1, :, :])))
+
+    def test_registers_imaging_data_group(self):
+        """The new ``imaging`` data group is added on every MS."""
+        ps_xdt = _make_ps_xdt(n_ms=2)
+        calculate_imaging_weights(
+            ps_xdt, None, imaging_weights_params={"weighting": "natural"}
+        )
+        for _, ms in ps_xdt.items():
+            groups = ms.ds.attrs["data_groups"]
+            self.assertIn("imaging", groups)
+            self.assertEqual(groups["imaging"]["weight_imaging"], "WEIGHT_IMAGING")
+            # Audit-trail fields from modify_data_groups_xds.
+            self.assertIn("date", groups["imaging"])
+            self.assertIn("description", groups["imaging"])
+
+    def test_return_weight_density_grid_ignored_on_natural(self):
+        """Natural weighting always returns ``None`` even when the flag is set."""
+        ps_xdt = _make_ps_xdt()
+        result = calculate_imaging_weights(
+            ps_xdt,
+            None,
+            imaging_weights_params={"weighting": "natural"},
+            return_weight_density_grid=True,
+        )
+        self.assertIsNone(result)
+
+    def test_processes_every_ms_in_processing_set(self):
+        """A multi-MS DataTree gets WEIGHT_IMAGING populated on every child."""
+        ps_xdt = _make_ps_xdt(n_ms=3, weight_per_pol=[2.0, 6.0])
+        calculate_imaging_weights(
+            ps_xdt, None, imaging_weights_params={"weighting": "natural"}
+        )
+        for _, ms in ps_xdt.items():
+            self.assertIn("WEIGHT_IMAGING", ms.ds.data_vars)
+            out = ms["WEIGHT_IMAGING"].values
+            np.testing.assert_allclose(out, np.full_like(out, 3.0))
+
+    def test_overwrite_false_second_call_raises(self):
+        """Re-running on a dataset that already has the output variable
+        raises (guard against accidental clobber)."""
+        ps_xdt = _make_ps_xdt()
+        calculate_imaging_weights(
+            ps_xdt, None, imaging_weights_params={"weighting": "natural"}
+        )
+        with self.assertRaises(AssertionError):
+            calculate_imaging_weights(
+                ps_xdt,
+                None,
+                imaging_weights_params={"weighting": "natural"},
+                overwrite=False,
+            )
+
+    def test_overwrite_true_second_call_succeeds(self):
+        """``overwrite=True`` allows the output variable to be replaced."""
+        ps_xdt = _make_ps_xdt(weight_per_pol=[2.0, 6.0])
+        calculate_imaging_weights(
+            ps_xdt, None, imaging_weights_params={"weighting": "natural"}
+        )
+        # Second call with overwrite=True must not raise.
+        calculate_imaging_weights(
+            ps_xdt,
+            None,
+            imaging_weights_params={"weighting": "natural"},
+            overwrite=True,
+        )
+
+    def test_flag_mutates_input_weight_in_place(self):
+        """Documented memory-constrained design: flagged samples in the
+        *input* WEIGHT array are overwritten with NaN by this function."""
+        ds = _make_ms_ds(weight_per_pol=[2.0, 6.0])
+        ds["FLAG"].values[0, 0, 0, 0] = 1
+        ps_xdt = xr.DataTree()
+        ps_xdt["ms_0"] = xr.DataTree(dataset=ds)
+
+        # Pre-condition: WEIGHT is finite everywhere.
+        self.assertTrue(np.all(np.isfinite(ds["WEIGHT"].values)))
+        calculate_imaging_weights(
+            ps_xdt, None, imaging_weights_params={"weighting": "natural"}
+        )
+        # Post-condition: the flagged cell is now NaN in the input array.
+        self.assertTrue(np.isnan(ds["WEIGHT"].values[0, 0, 0, 0]))
+
+
+# ---------------------------------------------------------------------------
+# Briggs / uniform dispatch (gridder mocked)
+# ---------------------------------------------------------------------------
+class TestCalculateImagingWeightsDispatch(unittest.TestCase):
+    """Dispatch and Briggs-path behaviour, with the C-level gridder mocked."""
+
+    def setUp(self):
+        # Ensure the xr_img accessor is registered for img_xds.xr_img.
+        import xradio.image.image_xds  # noqa: F401
+
+        self.img_xds = _make_img_xds()
+        # Patch the gridder, Briggs-factor, and degridder symbols as imported
+        # into the calculate_imaging_weights module.
+        self.grid_patch = mock.patch(f"{_GRID_MOD_PATH}.grid_imaging_weights")
+        self.briggs_patch = mock.patch(f"{_BRIGGS_MOD_PATH}.calculate_briggs_params")
+        self.degrid_patch = mock.patch(f"{_GRID_MOD_PATH}.degrid_imaging_weights")
+
+        self.grid_mock = self.grid_patch.start()
+        self.briggs_mock = self.briggs_patch.start()
+        self.degrid_mock = self.degrid_patch.start()
+        self.addCleanup(self.grid_patch.stop)
+        self.addCleanup(self.briggs_patch.stop)
+        self.addCleanup(self.degrid_patch.stop)
+
+        # Degrid: return the equalized data_weight unchanged so the caller's
+        # tile(..., n_pol) produces an output of the correct shape.
+        self.degrid_mock.side_effect = (
+            lambda grid, uvw, dw, briggs, freq, n_uv, dlm, processing_function_threads=1, frequency_map=None, *, truncate_uv_cells=False: (
+                dw
+            )
+        )
+        self.briggs_mock.return_value = np.zeros((2, 1, 1))
+
+    def test_uniform_dispatches_to_briggs_with_robust_neg_2(self):
+        """``weighting="uniform"`` is rewritten to ``briggs`` with ``robust=-2.0``
+        before the Briggs-factor calculation runs."""
+        ps_xdt = _make_ps_xdt()
+        calculate_imaging_weights(
+            ps_xdt,
+            self.img_xds,
+            imaging_weights_params={"weighting": "uniform"},
+        )
+
+        self.briggs_mock.assert_called_once()
+        params_arg = self.briggs_mock.call_args[0][2]
+        self.assertEqual(params_arg["weighting"], "briggs")
+        self.assertEqual(params_arg["robust"], -2.0)
+
+    def test_briggs_default_casa_implementation_is_false(self):
+        """The Briggs path does not crash when the caller omits
+        ``casa_weighting_implementation``; the param checker fills the default."""
+        ps_xdt = _make_ps_xdt()
+        calculate_imaging_weights(
+            ps_xdt,
+            self.img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+        )
+        # The Briggs path writes WEIGHT_IMAGING on every MS.
+        for _, ms in ps_xdt.items():
+            self.assertIn("WEIGHT_IMAGING", ms.ds.data_vars)
+
+    def test_briggs_path_grids_then_degrids(self):
+        """The Briggs branch always grids once per MS, computes factors once,
+        then degrids once per MS."""
+        ps_xdt = _make_ps_xdt(n_ms=2)
+        calculate_imaging_weights(
+            ps_xdt,
+            self.img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+        )
+        self.assertEqual(self.grid_mock.call_count, 2)
+        self.assertEqual(self.briggs_mock.call_count, 1)
+        self.assertEqual(self.degrid_mock.call_count, 2)
+
+    def test_truncate_uv_cells_is_forwarded_to_grid_and_degrid(self):
+        """CASA continuum cell assignment reaches both C++ wrappers."""
+        ps_xdt = _make_ps_xdt()
+        calculate_imaging_weights(
+            ps_xdt,
+            self.img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            truncate_uv_cells=True,
+        )
+
+        self.assertTrue(self.grid_mock.call_args.kwargs["truncate_uv_cells"])
+        self.assertTrue(self.degrid_mock.call_args.kwargs["truncate_uv_cells"])
+
+    def test_return_weight_density_grid_briggs(self):
+        """With ``return_weight_density_grid=True`` on the Briggs path, the
+        density grid is returned with shape ``(n_chan, 1, n_u, n_v)``."""
+        ps_xdt = _make_ps_xdt()
+        result = calculate_imaging_weights(
+            ps_xdt,
+            self.img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            return_weight_density_grid=True,
+        )
+        self.assertIsInstance(result, np.ndarray)
+        n_chan = self.img_xds.sizes["frequency"]
+        n_l = self.img_xds.sizes["l"]
+        n_m = self.img_xds.sizes["m"]
+        self.assertEqual(result.shape, (n_chan, 1, n_l, n_m))
+
+    def test_single_precision_gridding_uses_float32_grid(self):
+        """``single_precision_gridding=True`` allocates a float32 density grid."""
+        ps_xdt = _make_ps_xdt()
+        result = calculate_imaging_weights(
+            ps_xdt,
+            self.img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            single_precision_gridding=True,
+            return_weight_density_grid=True,
+        )
+        self.assertEqual(result.dtype, np.float32)
+
+
+class TestGridContinuumWeightDensity(unittest.TestCase):
+    """Frequency-partition handling in distributed global weighting."""
+
+    def setUp(self):
+        """Register the image accessor used to obtain cell sizes."""
+        import xradio.image.image_xds  # noqa: F401
+
+    def test_children_collapse_disjoint_frequency_subsets(self):
+        """Multiple MS children accumulate into one continuum density plane."""
+        image_frequencies = np.array([1.00e9, 1.05e9, 1.10e9, 1.15e9])
+        ps_xdt = xr.DataTree()
+        for name, indices in (
+            ("low", [0, 1]),
+            ("high", [2, 3]),
+        ):
+            dataset = _make_ms_ds(
+                n_baseline=1,
+                n_chan=len(indices),
+                weight_per_pol=[2.0, 6.0],
+            ).assign_coords(frequency=image_frequencies[indices])
+            dataset["UVW"].values[...] = 0.0
+            ps_xdt[name] = xr.DataTree(dataset=dataset)
+
+        image = _make_img_xds(n_chan=image_frequencies.size).assign_coords(
+            frequency=image_frequencies
+        )
+        result = grid_imaging_weight_density_continuum(
+            ps_xdt,
+            image,
+            {
+                "weighting": "briggs",
+                "robust": 0.5,
+                "casa_weighting_implementation": True,
+            },
+        )
+
+        np.testing.assert_array_equal(
+            result.frequency.values, [np.mean(image_frequencies)]
+        )
+        self.assertEqual(result.sizes["frequency"], 1)
+        self.assertTrue(result.attrs["continuum_frequency_collapsed"])
+        self.assertTrue(np.all(result.SUM_WEIGHT.values > 0.0))
+        self.assertGreater(np.count_nonzero(result.WEIGHT_DENSITY_GRID.values), 0)
+        self.assertEqual(result.attrs["n_processing_set_datasets_gridded"], 2)
+
+    def test_direct_continuum_plane_matches_channel_contribution_sum(self):
+        """Direct collapse equals the sum of independently gridded channels."""
+        ps_xdt = _make_ps_xdt(n_time=2, n_baseline=5, n_chan=3)
+        image = _make_img_xds(n_l=16, n_m=16, n_chan=3)
+
+        for casa_implementation in (False, True):
+            with self.subTest(casa_implementation=casa_implementation):
+                params = {
+                    "weighting": "briggs",
+                    "robust": 0.5,
+                    "casa_weighting_implementation": casa_implementation,
+                }
+                actual = grid_imaging_weight_density_continuum(
+                    ps_xdt,
+                    image,
+                    params,
+                )
+                channel_results = []
+                for channel in range(3):
+                    channel_ps = xr.DataTree.from_dict(
+                        {
+                            "ms_0": ps_xdt["ms_0"].dataset.isel(
+                                frequency=slice(channel, channel + 1)
+                            )
+                        }
+                    )
+                    channel_results.append(
+                        grid_imaging_weight_density_continuum(
+                            channel_ps,
+                            image,
+                            params,
+                        )
+                    )
+
+                self.assertEqual(actual.sizes["frequency"], 1)
+                self.assertTrue(actual.attrs["continuum_frequency_collapsed"])
+                self.assertEqual(actual.attrs["n_input_frequency_channels"], 3)
+                np.testing.assert_allclose(
+                    actual.WEIGHT_DENSITY_GRID,
+                    sum(
+                        result.WEIGHT_DENSITY_GRID.values for result in channel_results
+                    ),
+                    rtol=1.0e-14,
+                    atol=0.0,
+                )
+                np.testing.assert_allclose(
+                    actual.SUM_WEIGHT,
+                    sum(result.SUM_WEIGHT.values for result in channel_results),
+                    rtol=1.0e-14,
+                    atol=0.0,
+                )
+
+
+# ---------------------------------------------------------------------------
+# Parameter checker
+# ---------------------------------------------------------------------------
+class TestCheckImagingWeightsParams(unittest.TestCase):
+    """Validation behaviour for ``check_imaging_weights_params``."""
+
+    def test_casa_implementation_defaults_to_false(self):
+        """When omitted, the checker writes ``casa_weighting_implementation=False``."""
+        params = {"weighting": "natural"}
+        self.assertTrue(check_imaging_weights_params(params))
+        self.assertIn("casa_weighting_implementation", params)
+        self.assertFalse(params["casa_weighting_implementation"])
+
+    def test_casa_implementation_explicit_true_is_preserved(self):
+        """An explicit ``True`` is not overwritten by the default."""
+        params = {"weighting": "natural", "casa_weighting_implementation": True}
+        self.assertTrue(check_imaging_weights_params(params))
+        self.assertTrue(params["casa_weighting_implementation"])
+
+    def test_weighting_scope_defaults_to_local(self):
+        """The checker writes the local weighting scope when it is omitted."""
+        params = {"weighting": "briggs", "robust": 0.0}
+        self.assertTrue(check_imaging_weights_params(params))
+        self.assertEqual(params["weighting_scope"], "local")
+
+    def test_natural_global_scope_is_rewritten_to_local(self):
+        """Natural weighting warns and canonicalizes its irrelevant scope."""
+        params = {"weighting": "natural", "weighting_scope": "global"}
+        logger_path = (
+            "astroviper.processing_functions.imaging.check_imaging_parameters."
+            "logger.warning"
+        )
+        with mock.patch(logger_path) as warning:
+            self.assertTrue(check_imaging_weights_params(params))
+
+        self.assertEqual(params["weighting_scope"], "local")
+        warning.assert_called_once()
+
+    def test_briggs_requires_robust_in_range(self):
+        """``robust`` outside ``[-2, 2]`` fails the check."""
+        params = {"weighting": "briggs", "robust": 5.0}
+        self.assertFalse(check_imaging_weights_params(params))
+
+    def test_uniform_is_accepted(self):
+        """``weighting='uniform'`` is a valid input to the parameter checker
+        (dispatch to Briggs is then handled by ``calculate_imaging_weights``)."""
+        params = {"weighting": "uniform"}
+        self.assertTrue(check_imaging_weights_params(params))
+
+
+# ---------------------------------------------------------------------------
+# Briggs path with the real kernels: physical channel mapping
+# ---------------------------------------------------------------------------
+class TestCalculateImagingWeightsFrequencyMap(unittest.TestCase):
+    """The weight density is accumulated on the *image* channel planes, using
+    the same physical-frequency map as the visibility and PSF gridders."""
+
+    def setUp(self):
+        import xradio.image.image_xds  # noqa: F401
+
+    def _partitioned_inputs(self):
+        # Two MS channels that sit on planes 1 and 3 of a four-channel image.
+        ms_ds = _make_ms_ds(n_chan=2).assign_coords(frequency=[1.1e9, 1.3e9])
+        ms_ds["UVW"].values[...] = 0.0  # every sample lands on the grid centre
+        ps_xdt = xr.DataTree()
+        ps_xdt["ms_0"] = xr.DataTree(dataset=ms_ds)
+        img_xds = _make_img_xds(n_chan=4).assign_coords(
+            frequency=np.linspace(1.0e9, 1.3e9, 4)
+        )
+        return ps_xdt, img_xds
+
+    def test_briggs_grids_ms_channels_onto_image_planes(self):
+        ps_xdt, img_xds = self._partitioned_inputs()
+
+        weight_density_grid = calculate_imaging_weights(
+            ps_xdt,
+            img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            return_weight_density_grid=True,
+        )
+
+        self.assertEqual(weight_density_grid.shape[0], 4)
+        np.testing.assert_array_equal(weight_density_grid[[0, 2]], 0.0)
+        self.assertTrue(np.all(weight_density_grid[[1, 3]].sum(axis=(1, 2, 3)) > 0))
+        imaging_weight = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        self.assertEqual(imaging_weight.shape[2], 2)
+        self.assertTrue(np.all(np.isfinite(imaging_weight)))
+        self.assertTrue(np.all(imaging_weight > 0.0))
+
+    def test_briggs_rejects_ms_channel_off_the_image_axis(self):
+        ps_xdt, img_xds = self._partitioned_inputs()
+        ps_xdt["ms_0"] = xr.DataTree(
+            dataset=ps_xdt["ms_0"].to_dataset().assign_coords(frequency=[1.1e9, 1.36e9])
+        )
+
+        with self.assertRaisesRegex(ValueError, "half an image channel width"):
+            calculate_imaging_weights(
+                ps_xdt,
+                img_xds,
+                imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Four correlations: a flagged correlation drops the sample for all of them
+# ---------------------------------------------------------------------------
+class TestFlaggedCorrelationsOfFourCorrelationData(unittest.TestCase):
+    def test_flagged_cross_hand_gives_nan_weight(self):
+        w = np.ones((1, 4, 1, 4))
+        w[0, 1, 0, 1] = np.nan  # XY flagged
+        w[0, 2, 0, 2] = np.nan  # YX flagged
+        w[0, 3, 0, 3] = np.nan  # YY flagged
+        for casa_weighting_implementation in (True, False):
+            out = _equalize_parallel_hand_weights(
+                w.copy(), casa_weighting_implementation
+            )
+            self.assertEqual(out.shape, (1, 4, 1, 1))
+            self.assertEqual(out[0, 0, 0, 0], 1.0)
+            self.assertTrue(np.isnan(out[0, 1:, 0, 0]).all())
+
+    def test_unflagged_cross_hands_do_not_change_the_weights(self):
+        rng = np.random.default_rng(1)
+        w = rng.uniform(0.5, 2.0, (2, 3, 2, 4))
+        two = w[..., [0, 3]]
+        for casa_weighting_implementation in (True, False):
+            np.testing.assert_array_equal(
+                _equalize_parallel_hand_weights(
+                    w.copy(), casa_weighting_implementation
+                ),
+                _equalize_parallel_hand_weights(
+                    two.copy(), casa_weighting_implementation
+                ),
+            )
+
+    def test_natural_weights_drop_the_sample_for_every_correlation(self):
+        ps_xdt = _make_ps_xdt(n_pol=4, weight_per_pol=[1.0, 1.0, 1.0, 1.0])
+        ms = ps_xdt["ms_0"]
+        ms["FLAG"].values[0, 1, 0, 2] = 1  # one cross hand of one sample
+        calculate_imaging_weights(
+            ps_xdt,
+            _make_img_xds(),
+            imaging_weights_params={"weighting": "natural"},
+            ms_data_group_in_name="base",
+            ms_data_group_out_name="base",
+        )
+        weight_imaging = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        self.assertEqual(weight_imaging.shape[-1], 4)
+        self.assertTrue(np.isnan(weight_imaging[0, 1, 0, :]).all())
+        unflagged = np.ones(weight_imaging.shape, dtype=bool)
+        unflagged[0, 1, 0, :] = False
+        np.testing.assert_array_equal(weight_imaging[unflagged], 1.0)

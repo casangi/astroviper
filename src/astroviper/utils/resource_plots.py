@@ -1,0 +1,1664 @@
+"""Plots of the per-task resource-usage series recorded by graphviper's monitor.
+
+When a distributed application is run with ``monitor_resources_seconds`` set
+(e.g. :func:`~astroviper.distributed_applications.imaging.image_cube_single_field.image_cube_single_field`),
+its ``return_dict["timing_node_tasks"]`` frame carries one sampled series per
+node task as list-valued columns: ``time_seconds`` (relative to the task's own
+start), ``cpu_percent`` (whole worker process incl. OpenMP threads, so >100%
+is normal), ``memory_rss_bytes``, the cumulative syscall-level I/O counters
+``read_chars`` / ``write_chars`` (Linux only; unlike ``read_bytes`` /
+``write_bytes`` these count network filesystems such as Lustre), the scalar
+``sample_interval_seconds`` and the wall-clock anchor ``start_unixtime``.
+
+Four complementary views:
+
+* :func:`plot_task_resource_usage` -- tasks aligned at their OWN start
+  (t=0 = task start): a subsample of individual task curves plus the average
+  over the tasks still running at each t. "What does a typical task do?"
+* :func:`plot_cluster_resource_usage` -- tasks placed at their wall-clock
+  position via ``start_unixtime`` and SUMMED over the tasks running at each
+  moment: busy cores, total RSS, aggregate I/O rate. "What was the whole
+  cluster doing at each moment of the run?"
+* :func:`plot_task_stream` -- a Dask-dashboard-style per-worker-process
+  timeline: one lane per worker slot, each task drawn as load / science /
+  write segments, plus a running-task utilization panel, a printed
+  efficiency decomposition and -- when the driver-step timings are available
+  -- a strip of the application's own setup (everything before compute:
+  creating/writing the empty image, opening the processing set, graph
+  construction), compute and finalize (metadata consolidation) phases, so
+  the timeline accounts for the entire ``image_cube_single_field`` call.
+  Unlike the two views above it needs only the
+  wall-clock anchor ``start_unixtime`` (recorded by the node task itself),
+  NOT the monitor's sampled series, so it works with
+  ``monitor_resources_seconds=None``.
+
+All accept the full return dict or the ``timing_node_tasks`` frame directly,
+and skip gracefully (with a printed note) when the needed columns are absent.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+__all__ = [
+    "plot_task_resource_usage",
+    "plot_cluster_resource_usage",
+    "plot_task_stream",
+    "plot_application_task_stream",
+    "assign_task_stream_lanes",
+    "IMAGING_TASK_STREAM_COLUMNS",
+]
+
+# The node task timing columns plot_task_stream draws by default, those of the
+# imaging node task: the task's total time, the columns of its load segment
+# and the column of its write segment.
+IMAGING_TASK_STREAM_COLUMNS = {
+    "task": "T_image_cube_task",
+    "load": ("T_make_empty_image", "T_load"),
+    "write": "T_write",
+}
+
+# Task-stream palette (colorblind-safe Okabe-Ito).
+_LOAD_COLOR, _SCIENCE_COLOR, _WRITE_COLOR = "#0072B2", "#009E73", "#E69F00"
+_POST_COLOR = "#CC79A7"
+_PRE_COLOR = "#7f7f7f"
+
+# Driver ("distributed application") setup steps in execution order, keyed by
+# the T_* entries of ``timing_distributed_application``.  Kept in sync with
+# DISTRIBUTED_APPLICATION_TIMING_PHASES in
+# astroviper.distributed_applications.imaging.image_cube_single_field (listed
+# here rather than imported so this plotting utility stays free of imaging
+# imports; unknown/absent keys are simply skipped, so partial dicts render).
+_DRIVER_PRE_STEPS = [
+    ("create empty image xds", "T_make_empty_image_xds"),
+    ("write empty image", "T_write_empty_image"),
+    ("chunks + parallel coords", "T_determine_chunks_and_parallel_coords"),
+    ("create empty data vars", "T_create_empty_data_variables"),
+    ("open processing set", "T_open_processing_set"),
+    ("interpolate data coords", "T_interpolate_data_coords"),
+    ("build map/reduce graph", "T_create_map_reduce_graph"),
+    ("generate dask graph", "T_generate_dask_graph"),
+]
+_DRIVER_POST_STEPS = [("consolidate metadata", "T_consolidate_metadata")]
+_DRIVER_SETUP_LABEL = "setup"
+_DRIVER_COMPUTE_LABEL = "compute (task stream below)"
+_DRIVER_UNTIMED_LABEL = "driver (untimed)"
+# Everything before compute is drawn as ONE light-red "setup" segment (its
+# per-step breakdown goes to the printed summary and the HTML tooltip); the
+# compute window is near-white so it reads as "see the panels below", the
+# finalize steps get pale colors from the palette, untimed gaps gray.
+_DRIVER_SETUP_COLOR = "#fbb4ae"
+_DRIVER_STEP_COLORS = [
+    "#8dd3c7",
+    "#bebada",
+    "#80b1d3",
+    "#fdb462",
+    "#b3de69",
+    "#fccde5",
+    "#bc80bd",
+    "#ccebc5",
+    "#ffed6f",
+]
+_DRIVER_COMPUTE_COLOR = "#eef3fa"
+_DRIVER_UNTIMED_COLOR = "#d9d9d9"
+
+
+def _driver_timeline(driver_timing, compute_start, compute_end, t0_abs):
+    """Place the driver's setup/finalize steps on the run's wall clock.
+
+    ``driver_timing`` is the application's ``timing_distributed_application``
+    dict (or the same keys pulled from a benchmark overall row).  EVERYTHING
+    before the measured compute start is drawn as one "setup" segment (starting
+    at the absolute ``application_start_unixtime`` anchor when recorded --
+    since 2026-08-31 -- else at compute start minus the summed pre-compute step
+    timers); the post-compute steps run forward from the compute end, with any
+    leftover time before the ``application_end_unixtime`` anchor shown as an
+    "(untimed)" gray segment, so the timeline spans the ENTIRE application
+    call.
+
+    Returns ``(segments, app_start_rel, app_end_rel, color_of, setup_detail)``
+    -- segments as ``(label, start, end)`` in seconds relative to ``t0_abs``
+    (the first task start), ``color_of`` mapping each label to its color and
+    ``setup_detail`` the per-step ``(label, seconds)`` breakdown of the setup
+    segment -- or None when ``driver_timing`` or the compute anchors are
+    unavailable.
+    """
+    if not driver_timing or compute_start is None or compute_end is None:
+        return None
+
+    def get(key):
+        value = driver_timing.get(key)
+        if value is None:
+            return None
+        value = float(value)
+        return None if np.isnan(value) else value
+
+    pre = [(lbl, get(k)) for lbl, k in _DRIVER_PRE_STEPS if get(k) is not None]
+    post = [(lbl, get(k)) for lbl, k in _DRIVER_POST_STEPS if get(k) is not None]
+    if not pre and not post:
+        return None
+
+    rel_cs, rel_ce = compute_start - t0_abs, compute_end - t0_abs
+    setup_start = rel_cs - sum(dur for _, dur in pre)
+    app_start = get("application_start_unixtime")
+    app_start_rel = setup_start if app_start is None else app_start - t0_abs
+    setup_detail = list(pre)
+    if app_start is not None and setup_start - app_start_rel > 0.05:
+        setup_detail.insert(0, (_DRIVER_UNTIMED_LABEL, setup_start - app_start_rel))
+    segments = []
+    if rel_cs - app_start_rel > 0:
+        segments.append((_DRIVER_SETUP_LABEL, app_start_rel, rel_cs))
+    segments.append((_DRIVER_COMPUTE_LABEL, rel_cs, rel_ce))
+    cursor = rel_ce
+    for lbl, dur in post:
+        segments.append((lbl, cursor, cursor + dur))
+        cursor += dur
+    app_end = get("application_end_unixtime")
+    app_end_rel = cursor if app_end is None else app_end - t0_abs
+    if app_end is not None and app_end_rel - cursor > 0.05:
+        segments.append((_DRIVER_UNTIMED_LABEL, cursor, app_end_rel))
+
+    color_of, palette = {}, iter(_DRIVER_STEP_COLORS * 3)
+    for lbl, _, _ in segments:
+        if lbl not in color_of:
+            if lbl == _DRIVER_SETUP_LABEL:
+                color_of[lbl] = _DRIVER_SETUP_COLOR
+            elif lbl == _DRIVER_COMPUTE_LABEL:
+                color_of[lbl] = _DRIVER_COMPUTE_COLOR
+            elif lbl == _DRIVER_UNTIMED_LABEL:
+                color_of[lbl] = _DRIVER_UNTIMED_COLOR
+            else:
+                color_of[lbl] = next(palette)
+    return segments, app_start_rel, app_end_rel, color_of, setup_detail
+
+
+def _with_imaging_task_columns(tasks, task_columns):
+    """A copy of ``tasks`` with the ``task_columns`` timings under the imager's
+    column names, which the task stream draws."""
+    columns = {**IMAGING_TASK_STREAM_COLUMNS, **task_columns}
+    tasks = tasks.copy()
+    tasks["T_image_cube_task"] = tasks[columns["task"]]
+    tasks["T_make_empty_image"] = 0.0
+    load = list(columns["load"])
+    tasks["T_load"] = tasks[load].sum(axis=1) if load else 0.0
+    tasks["T_write"] = tasks[columns["write"]] if columns["write"] else 0.0
+    return tasks
+
+
+def _as_timing_frame(source):
+    """Accept an application return dict or the timing_node_tasks frame."""
+    if isinstance(source, dict):
+        source = source["timing_node_tasks"]
+    if not isinstance(source, pd.DataFrame):
+        raise TypeError(
+            "expected the application return dict or its 'timing_node_tasks' "
+            f"DataFrame, got {type(source).__name__}"
+        )
+    return source.reset_index(drop=True)
+
+
+def _plot_task_series(
+    df,
+    column,
+    ylabel,
+    title,
+    scale=1.0,
+    ax=None,
+    color="tab:blue",
+    label_prefix="",
+    max_task_lines=200,
+    subtract_first=False,
+):
+    """One task-aligned series: a subsample of tasks as faint lines plus the
+    average over ALL tasks (at each t, over the tasks still running at t).
+
+    ``subtract_first`` rebases each task's series to its first sample -- needed
+    for the I/O counters, which are cumulative over the WORKER PROCESS lifetime
+    (a task run late in a sweep starts far into its worker's counter).
+
+    The y-axis is clipped to the 99.5th percentile of the plotted values (or
+    the average's peak if larger): psutil's first cpu_percent samples over a
+    near-zero interval can spike absurdly and would flatten the whole plot.
+    """
+    import matplotlib.pyplot as plt
+
+    if column not in df or df[column].isna().all():
+        print(
+            f"No {column!r} series recorded (monitoring off, psutil missing, "
+            "or counter unavailable on this platform)."
+        )
+        return None
+    created_ax = ax is None
+    if created_ax:
+        _, ax = plt.subplots(figsize=(10, 6))
+    interval = float(df["sample_interval_seconds"].iloc[0])
+    grid = np.arange(0.0, max(t[-1] for t in df["time_seconds"]) + interval, interval)
+    total, count = np.zeros_like(grid), np.zeros_like(grid)
+    show = set(range(0, len(df), max(1, len(df) // max_task_lines)))
+    shown_values = []
+    first = True
+    for i, row in df.iterrows():
+        t = np.asarray(row["time_seconds"], dtype=float)
+        v = np.asarray(row[column], dtype=float) * scale
+        if subtract_first:
+            v = v - v[0]
+        if i in show:
+            ax.plot(
+                t,
+                v,
+                color=color,
+                alpha=0.15,
+                linewidth=0.8,
+                label=(f"{label_prefix}node tasks (subsample)" if first else None),
+            )
+            shown_values.append(v)
+            first = False
+        mask = grid <= t[-1]
+        total[mask] += np.interp(grid[mask], t, v)
+        count[mask] += 1
+    mean = np.divide(total, count, out=np.full_like(total, np.nan), where=count > 0)
+    ax.plot(
+        grid,
+        mean,
+        color=color,
+        linewidth=2.5,
+        label=f"{label_prefix}average over running tasks ({len(df)} tasks)",
+    )
+    top = 1.1 * float(
+        max(np.nanpercentile(np.concatenate(shown_values), 99.5), np.nanmax(mean))
+    )
+    if not created_ax:  # shared axes (read+write): never shrink the other series
+        top = max(top, float(ax.get_ylim()[1]))
+    ax.set_ylim(bottom=0.0, top=top)
+    ax.set_xlabel("Time since task start (s)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, color="lightgray", alpha=0.5)
+    ax.legend()
+    return ax
+
+
+def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
+    """Task-aligned CPU / memory / I/O plots (one figure each).
+
+    Every task's clock starts at its own beginning; the bold curve is the
+    average over the tasks still running at each instant, so it is not diluted
+    by tasks that already finished.
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame
+        The application return dict, or its ``timing_node_tasks`` frame.
+    max_task_lines : int, optional
+        How many individual task curves to draw behind the average.
+    save_prefix : str, optional
+        If set, save ``<prefix>task_cpu/memory/io.png``.
+
+    Returns
+    -------
+    dict
+        ``{"cpu": ax, "memory": ax, "io": ax}`` (values are None for series
+        that were not recorded).
+    """
+
+    df = _as_timing_frame(source)
+    axes = {}
+
+    axes["cpu"] = _plot_task_series(
+        df,
+        "cpu_percent",
+        "CPU (%)",
+        "Node-task CPU usage (per worker process, all threads)",
+        max_task_lines=max_task_lines,
+    )
+    axes["memory"] = _plot_task_series(
+        df,
+        "memory_rss_bytes",
+        "Resident memory (GiB)",
+        "Node-task memory usage",
+        scale=1 / 2**30,
+        max_task_lines=max_task_lines,
+    )
+    # I/O counters are cumulative over the worker process -> rebase per task.
+    io_title = "Node-task I/O (syscall-level, counts network filesystems)"
+    axes["io"] = _plot_task_series(
+        df,
+        "read_chars",
+        "I/O since task start (GiB)",
+        io_title,
+        scale=1 / 2**30,
+        color="tab:blue",
+        label_prefix="read: ",
+        max_task_lines=max_task_lines,
+        subtract_first=True,
+    )
+    if axes["io"] is not None:
+        _plot_task_series(
+            df,
+            "write_chars",
+            "I/O since task start (GiB)",
+            io_title,
+            scale=1 / 2**30,
+            ax=axes["io"],
+            color="tab:orange",
+            label_prefix="write: ",
+            max_task_lines=max_task_lines,
+            subtract_first=True,
+        )
+
+    if save_prefix is not None:
+        for name, ax in axes.items():
+            if ax is not None:
+                ax.figure.savefig(f"{save_prefix}task_{name}.png")
+    return axes
+
+
+def plot_cluster_resource_usage(
+    source, core_capacity=None, memory_capacity_gib=None, save_prefix=None
+):
+    """Cluster-wide CPU / memory / I/O over the RUN's wall clock.
+
+    Each task's series is placed at its actual wall-clock position using
+    ``start_unixtime`` and the quantities are SUMMED over the tasks running at
+    each instant: busy cores (sum of cpu_percent/100), total RSS of
+    task-running worker processes (idle workers are not counted), and the
+    aggregate read/write rate (GiB/s, from the per-task derivative of the
+    cumulative counters). Every figure also shows the number of concurrently
+    running tasks on a right-hand axis.
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame
+        The application return dict, or its ``timing_node_tasks`` frame.
+        Needs the ``start_unixtime`` column (graphviper monitor >= 2026-07-13);
+        cross-node placement relies on NTP-synced node clocks.
+    core_capacity : int, optional
+        Total cores of the allocation; drawn as a dashed capacity line.
+    memory_capacity_gib : float, optional
+        Total memory of the allocation (GiB); drawn as a dashed capacity line.
+    save_prefix : str, optional
+        If set, save ``<prefix>cluster_cpu/memory/io.png``.
+
+    Returns
+    -------
+    dict
+        ``{"cpu": ax, "memory": ax, "io": ax}`` (``io`` is None when the I/O
+        counters were not recorded), or None when ``start_unixtime`` is absent.
+    """
+    import matplotlib.pyplot as plt
+
+    df = _as_timing_frame(source)
+    if "cpu_percent" not in df.columns:
+        print(
+            "plot_cluster_resource_usage: no resource series recorded "
+            "(monitoring off or psutil missing); skipping."
+        )
+        return None
+    if "start_unixtime" not in df.columns or df["start_unixtime"].isna().all():
+        print(
+            "plot_cluster_resource_usage: no start_unixtime column (recorded "
+            "with an older graphviper); tasks cannot be placed on the run's "
+            "wall clock -- use plot_task_resource_usage instead."
+        )
+        return None
+
+    interval = float(df["sample_interval_seconds"].iloc[0])
+    starts = df["start_unixtime"].to_numpy(dtype=float)
+    rel_end = np.array([t[-1] for t in df["time_seconds"]], dtype=float)
+    run_t0 = starts.min()
+    grid = np.arange(0.0, (starts + rel_end).max() - run_t0 + interval, interval)
+
+    have_io = "read_chars" in df.columns and not df["read_chars"].isna().all()
+    acc = {k: np.zeros_like(grid) for k in ("cores", "rss", "read_rate", "write_rate")}
+    n_running = np.zeros_like(grid)
+
+    for i, row in df.iterrows():
+        t_rel = np.asarray(row["time_seconds"], dtype=float)
+        offset = starts[i] - run_t0
+        mask = (grid >= offset) & (grid <= offset + t_rel[-1])
+        g = grid[mask] - offset
+        n_running[mask] += 1
+        acc["cores"][mask] += (
+            np.interp(g, t_rel, np.asarray(row["cpu_percent"], dtype=float)) / 100.0
+        )
+        acc["rss"][mask] += (
+            np.interp(g, t_rel, np.asarray(row["memory_rss_bytes"], dtype=float))
+            / 2**30
+        )
+        if have_io:
+            for col, key in (
+                ("read_chars", "read_rate"),
+                ("write_chars", "write_rate"),
+            ):
+                c = np.asarray(row[col], dtype=float)
+                rate = np.gradient(c, t_rel) / 2**30 if len(c) > 1 else np.zeros(1)
+                acc[key][mask] += np.interp(g, t_rel, rate)
+
+    def _figure(title, ylabel, curves, capacity=None):
+        fig, ax = plt.subplots(figsize=(11, 6))
+        for label, y, color in curves:
+            ax.plot(grid, y, color=color, linewidth=1.5, label=label)
+        if capacity is not None:
+            ax.axhline(capacity[1], color="gray", linestyle="--", label=capacity[0])
+        ax2 = ax.twinx()
+        ax2.plot(grid, n_running, color="lightgray", linewidth=1, zorder=0)
+        ax2.set_ylabel("Running tasks", color="gray")
+        ax.set_xlabel("Wall-clock time since first task start (s)")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, color="lightgray", alpha=0.5)
+        ax.set_zorder(ax2.get_zorder() + 1)
+        ax.patch.set_visible(False)
+        ax.legend(loc="upper right")
+        return ax
+
+    axes = {}
+    axes["cpu"] = _figure(
+        "Cluster CPU usage over the run",
+        "Busy cores (sum of task CPU% / 100)",
+        [("busy cores", acc["cores"], "tab:blue")],
+        capacity=(
+            None
+            if core_capacity is None
+            else (f"capacity ({core_capacity} cores)", core_capacity)
+        ),
+    )
+    axes["memory"] = _figure(
+        "Cluster memory usage over the run (task-running workers only)",
+        "Total resident memory (GiB)",
+        [("total RSS", acc["rss"], "tab:blue")],
+        capacity=(
+            None
+            if memory_capacity_gib is None
+            else (f"capacity ({memory_capacity_gib:g} GiB)", memory_capacity_gib)
+        ),
+    )
+    if have_io:
+        axes["io"] = _figure(
+            "Cluster I/O rate over the run (syscall-level, counts network filesystems)",
+            "Aggregate I/O rate (GiB/s)",
+            [
+                ("read", acc["read_rate"], "tab:blue"),
+                ("write", acc["write_rate"], "tab:orange"),
+            ],
+        )
+    else:
+        axes["io"] = None
+        print("(no read_chars/write_chars series; skipping the cluster I/O plot)")
+
+    if save_prefix is not None:
+        for name, ax in axes.items():
+            if ax is not None:
+                ax.figure.savefig(f"{save_prefix}cluster_{name}.png")
+    return axes
+
+
+def assign_task_stream_lanes(tasks):
+    """Assign each task to a per-host worker lane; returns
+    ``(frame, hosts, n_lanes)`` where the frame gains ``start``/``end``
+    (seconds since the first task) and ``host_idx``/``lane``/``row`` columns
+    (row = global y position in the stream).
+
+    When the frame carries the recorded execution identity
+    (``process_pid`` + ``thread_native_id``, written by astroviper's node task
+    and reduce since 2026-07-28), a lane IS one (process, thread) slot --
+    exact, and reduce rows recorded with the same identity land on the lane
+    they truly ran on. Older frames without identity fall back to first-fit
+    interval packing within each host (valid because every worker slot runs
+    one task at a time).
+    """
+    t = tasks.copy()
+    if "task_failed_phase" in t.columns and t["task_failed_phase"].notna().any():
+        print(
+            f"note: {t['task_failed_phase'].notna().sum()} failed tasks included "
+            "in the stream (their spans are real wall time)"
+        )
+    t0 = t["start_unixtime"].min()
+    t["start"] = t["start_unixtime"] - t0
+    t["end"] = t["start"] + t["T_image_cube_task"]
+    hosts = sorted(t["hostname"].unique())
+    t["host_idx"] = t["hostname"].map(hosts.index)
+    t["lane"] = -1
+    lane_offset, offsets = {}, 0
+
+    has_identity = (
+        {"process_pid", "thread_native_id"} <= set(t.columns)
+        and t["process_pid"].notna().all()
+        and t["thread_native_id"].notna().all()
+    )
+    for h in hosts:
+        idx = t.index[t["hostname"] == h]
+        if has_identity:
+            # True lanes: one per (process, thread), ordered by first activity.
+            sub = t.loc[idx]
+            first = (
+                sub.groupby(["process_pid", "thread_native_id"])["start"]
+                .min()
+                .sort_values()
+            )
+            lane_of = {key: ln for ln, key in enumerate(first.index)}
+            t.loc[idx, "lane"] = [
+                lane_of[(p, th)]
+                for p, th in zip(
+                    sub["process_pid"], sub["thread_native_id"], strict=False
+                )
+            ]
+            n_lanes_h = len(lane_of)
+        else:
+            busy_until = []  # per-lane end time
+            order = t.loc[idx].sort_values("start").index
+            for i in order:
+                s = t.at[i, "start"]
+                for ln, bu in enumerate(busy_until):
+                    if bu <= s + 1e-6:
+                        t.at[i, "lane"] = ln
+                        busy_until[ln] = t.at[i, "end"]
+                        break
+                else:
+                    t.at[i, "lane"] = len(busy_until)
+                    busy_until.append(t.at[i, "end"])
+            n_lanes_h = len(busy_until)
+        lane_offset[h] = offsets
+        offsets += n_lanes_h
+    t["row"] = [
+        lane_offset[h] + ln for h, ln in zip(t["hostname"], t["lane"], strict=False)
+    ]
+    return t, hosts, offsets
+
+
+def plot_application_task_stream(source, title=None, save_path=None):
+    """Plot every distributed graph in one vertically stacked task stream.
+
+    Unlike :func:`plot_task_stream`, which deliberately retains the historical
+    final-graph view, this diagnostic consumes ``source["timing_graphs"]`` and
+    gives each graph its own panel.  Panels are independently time-scaled so
+    short weighting graphs remain readable beside longer imaging-cycle graphs.
+
+    Parameters
+    ----------
+    source : dict
+        Continuum application result containing ``timing_graphs``. Each record
+        supplies ``stage``, structured ``stage_kind``,
+        ``timing_node_tasks`` and compute-window anchors.
+    title : str, optional
+        Overall figure title.
+    save_path : str, optional
+        PNG path. The figure is returned whether or not it is saved.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        Stacked task-stream figure, or ``None`` when no graph records can be
+        plotted.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    if not isinstance(source, dict):
+        raise TypeError(
+            "plot_application_task_stream expects an application result dict"
+        )
+    graph_records = source.get("timing_graphs")
+    if not graph_records:
+        print("plot_application_task_stream: no timing_graphs records; skipping.")
+        return None
+
+    prepared = []
+    required = {"hostname", "start_unixtime", "T_image_cube_task"}
+    for record in graph_records:
+        tasks = record.get("timing_node_tasks")
+        if not isinstance(tasks, pd.DataFrame) or tasks.empty:
+            continue
+        if not required.issubset(tasks.columns):
+            print(
+                "plot_application_task_stream: graph "
+                f"{record.get('stage', '<unnamed>')!r} lacks "
+                f"{sorted(required - set(tasks.columns))}; skipping."
+            )
+            continue
+        tasks = tasks.copy()
+        for column in ("T_make_empty_image", "T_load", "T_write"):
+            if column not in tasks:
+                tasks[column] = 0.0
+        stream, hosts, n_lanes = assign_task_stream_lanes(tasks)
+        prepared.append((record, stream, hosts, n_lanes))
+
+    if not prepared:
+        return None
+
+    heights = [max(2.2, 0.42 * n_lanes + 1.2) for _, _, _, n_lanes in prepared]
+    fig, axes = plt.subplots(
+        len(prepared),
+        1,
+        figsize=(16, sum(heights)),
+        squeeze=False,
+        gridspec_kw={"height_ratios": heights, "hspace": 0.55},
+    )
+    axes = axes[:, 0]
+
+    for graph_index, (record, stream, _hosts, n_lanes) in enumerate(prepared, start=1):
+        ax = axes[graph_index - 1]
+        first_task = float(stream["start_unixtime"].min())
+        compute_start = record.get("compute_start_unixtime")
+        compute_end = record.get("compute_end_unixtime")
+        offset = max(0.0, first_task - float(compute_start or first_task))
+        stream = stream.copy()
+        stream["start"] += offset
+        stream["end"] += offset
+        task_end = float(stream["end"].max())
+        graph_duration = record.get("T_compute")
+        if (
+            graph_duration is None
+            and compute_start is not None
+            and compute_end is not None
+        ):
+            graph_duration = float(compute_end) - float(compute_start)
+        graph_duration = max(float(graph_duration or task_end), task_end)
+
+        if offset > 0:
+            ax.axvspan(0, offset, color=_PRE_COLOR, alpha=0.18, lw=0)
+        if graph_duration > task_end:
+            ax.axvspan(task_end, graph_duration, color=_POST_COLOR, alpha=0.20, lw=0)
+
+        for _, row in stream.iterrows():
+            y = row["row"] - 0.42
+            load_end = row["start"] + row["T_make_empty_image"] + row["T_load"]
+            write_start = max(load_end, row["end"] - row["T_write"])
+            for start, end, color in (
+                (row["start"], load_end, _LOAD_COLOR),
+                (load_end, write_start, _SCIENCE_COLOR),
+                (write_start, row["end"], _WRITE_COLOR),
+            ):
+                if end > start:
+                    ax.add_patch(
+                        plt.Rectangle((start, y), end - start, 0.84, color=color, lw=0)
+                    )
+
+        stage = str(record.get("stage", f"graph {graph_index}"))
+        stage_kind = record.get("stage_kind")
+        if stage_kind == "imaging_cycle":
+            post_label = "reduce + model update"
+        elif stage_kind == "final" and record.get("includes_restoration", False):
+            post_label = "reduce + restoration"
+        elif stage_kind == "final":
+            post_label = "reduce + finalization"
+        else:
+            post_label = "reduce / gather"
+        if graph_duration - task_end > 0.04 * graph_duration:
+            ax.text(
+                0.5 * (task_end + graph_duration),
+                max(n_lanes - 0.5, 0),
+                post_label,
+                ha="center",
+                va="top",
+                fontsize=8,
+                color="#8a4a6d",
+            )
+
+        bounds = stream.groupby("host_idx")["row"].max().sort_index()
+        for bound in bounds.values[:-1]:
+            ax.axhline(bound + 0.5, color="#dddddd", lw=0.4)
+        ax.set_yticks(range(n_lanes), [f"worker {i + 1}" for i in range(n_lanes)])
+        ax.set_ylim(-0.6, n_lanes - 0.4)
+        ax.set_xlim(0, graph_duration * 1.005 if graph_duration else 1)
+        ax.set_title(
+            f"Graph {graph_index}: {stage} — {len(stream)} tasks, "
+            f"{graph_duration:.1f} s",
+            loc="left",
+            fontsize=10,
+        )
+        ax.set_xlabel("time since this graph's compute started (s)")
+        ax.grid(axis="x", color="lightgray", alpha=0.4)
+
+    axes[0].legend(
+        handles=[
+            Patch(color=_LOAD_COLOR, label="load"),
+            Patch(color=_SCIENCE_COLOR, label="science"),
+            Patch(color=_WRITE_COLOR, label="write"),
+            Patch(color=_PRE_COLOR, alpha=0.3, label="before first map task"),
+            Patch(color=_POST_COLOR, alpha=0.3, label="reduce / append / gather"),
+        ],
+        loc="upper right",
+        fontsize=8,
+        ncols=5,
+    )
+    fig.suptitle(title or "Continuum application task streams by graph", fontsize=14)
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print("wrote", save_path)
+    return fig
+
+
+def _write_task_stream_html(
+    t,
+    hosts,
+    n_lanes,
+    n_workers,
+    ev_t,
+    running,
+    pre_rel,
+    post_end_rel,
+    makespan,
+    ideal,
+    T_compute,
+    pre_label,
+    post_label,
+    title,
+    html_path,
+    driver=None,
+    add_time_labels=False,
+):
+    """Write a standalone interactive HTML task stream: the same panels as
+    the matplotlib figure (including the driver strip when ``driver`` -- the
+    :func:`_driver_timeline` result -- is given), drawn as inline SVG with a
+    JavaScript tooltip that shows a bar's timing details on hover. Pure SVG +
+    vanilla JS -- no extra dependencies, works offline. One <rect> per task
+    segment, so the file grows with the task count (~a few MB for a 15k-task
+    run)."""
+    import html as _html
+
+    # ---- geometry (pixels) ----
+    left, top = 190, 44
+    bottom = 166 if add_time_labels else 72  # room for the t_0..t_3 marks
+    inner_w = 1500
+    util_h, gap = 110, 16
+    driver_h, dgap = (36, 14) if driver is not None else (0, 0)
+    top_u = top + driver_h + dgap  # top of the utilization panel
+    lane_px = max(3.0, min(14.0, 9000.0 / max(n_lanes, 1)))
+    stream_h = lane_px * n_lanes
+    width = left + inner_w + 20
+    height = top_u + util_h + gap + stream_h + bottom
+
+    x0 = min(pre_rel, 0.0) if pre_rel is not None else 0.0
+    x1 = (
+        post_end_rel
+        if post_end_rel is not None
+        else max(T_compute or 0.0, makespan, float(t["end"].max()))
+    )
+    app_total = None
+    if driver is not None:
+        d_segs, app_start_rel, app_end_rel, d_colors, d_setup = driver
+        app_total = app_end_rel - app_start_rel
+        x0 = min(x0, app_start_rel)
+        x1 = max(x1, app_end_rel)
+    x1 *= 1.005
+    sx = inner_w / (x1 - x0)
+
+    def X(sec):
+        return left + (sec - x0) * sx
+
+    def Y(row):  # stream panel: row 0 at the bottom, like the matplotlib figure
+        return top_u + util_h + gap + stream_h - (row + 1) * lane_px
+
+    out = [
+        f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+        f"<title>{_html.escape(title or 'task stream')}</title>",
+        """<style>
+body { font-family: sans-serif; margin: 12px; }
+rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
+#tt { position: fixed; display: none; background: #fffef5; border: 1px solid
+      #888; border-radius: 3px; padding: 5px 8px; font-size: 18px;
+      pointer-events: none; box-shadow: 2px 2px 5px rgba(0,0,0,0.25);
+      white-space: pre; z-index: 10; }
+.axis { font-size: 22px; fill: #333; }
+.host { font-size: 18px; fill: #333; }
+.note { font-size: 22px; fill: #555; }
+.tm { font-weight: bold; pointer-events: none; }
+.dt { font-weight: bold; pointer-events: none; fill: #fff;
+      stroke: #555; stroke-width: 2.5px; paint-order: stroke; }
+</style></head><body>""",
+        f"<h3 style='margin:4px 0;font-size:30px'>{_html.escape(title or 'task stream')}</h3>",
+        f"<div style='font-size:22px;color:#444;margin-bottom:6px'>"
+        f"ideal {ideal:.0f} s | task window {makespan:.0f} s"
+        + (f" | T_compute {T_compute:.0f} s" if T_compute else "")
+        + (f" | application {app_total:.0f} s" if app_total is not None else "")
+        + " &mdash; hover a bar for that task's timing</div>",
+        f'<svg width="{width}" height="{height:.0f}" '
+        f'xmlns="http://www.w3.org/2000/svg">',
+    ]
+
+    # ---- driver strip (application setup/finalize steps) ----
+    if driver is not None:
+        out.append(
+            f'<text class="axis" x="{left - 8}" '
+            f'y="{top + driver_h / 2 + 8:.0f}" text-anchor="end">driver</text>'
+        )
+        for lbl, s, e in d_segs:
+            text = f"driver: {lbl} · {e - s:.1f} s"
+            if lbl == _DRIVER_SETUP_LABEL:  # per-step breakdown on hover
+                text += "".join(f"\n  {sl} · {dur:.1f} s" for sl, dur in d_setup)
+            info = _html.escape(text).replace("\n", "&#10;")
+            out.append(
+                f'<rect x="{X(s):.1f}" y="{top}" '
+                f'width="{max((e - s) * sx, 0.5):.1f}" height="{driver_h}" '
+                f'fill="{d_colors[lbl]}" data-i="{info}"/>'
+            )
+            if (e - s) * sx > 13 * len(lbl) + 16:  # name the wide segments
+                out.append(
+                    f'<text class="note" x="{X((s + e) / 2):.1f}" '
+                    f'y="{top + driver_h / 2 + 8:.0f}" text-anchor="middle">'
+                    f"{_html.escape(lbl)}</text>"
+                )
+
+    # Pre/post shaded regions, spanning the utilization + stream panels.
+    panels_y0, panels_y1 = top_u, top_u + util_h + gap + stream_h
+
+    def _vspan(a, b, color, opacity):
+        out.append(
+            f'<rect x="{X(a):.1f}" y="{panels_y0}" '
+            f'width="{(b - a) * sx:.1f}" height="{panels_y1 - panels_y0:.1f}" '
+            f'fill="{color}" fill-opacity="{opacity}"/>'
+        )
+
+    if pre_rel is not None:
+        _vspan(pre_rel, 0.0, _PRE_COLOR, 0.20)
+        _vspan(makespan, post_end_rel, _POST_COLOR, 0.25)
+    elif T_compute:
+        _vspan(makespan, T_compute, _POST_COLOR, 0.25)
+
+    # ---- utilization panel ----
+    r_max = max(float(np.max(running)), float(n_workers))
+
+    def uy(v):
+        return top_u + util_h - v / (1.08 * r_max) * util_h
+
+    pts = [f"{X(ev_t[0]):.1f},{uy(0):.1f}"]
+    for i in range(len(ev_t)):  # step-after curve
+        y = f"{uy(running[i]):.1f}"
+        pts.append(f"{X(ev_t[i]):.1f},{pts[-1].split(',')[1]}")
+        pts.append(f"{X(ev_t[i]):.1f},{y}")
+    out.append(
+        f'<polyline points="{" ".join(pts)}" fill="none" '
+        f'stroke="{_LOAD_COLOR}" stroke-width="1"/>'
+    )
+    out.append(
+        f'<line x1="{left}" y1="{uy(n_workers):.1f}" x2="{left + inner_w}" '
+        f'y2="{uy(n_workers):.1f}" stroke="#666" stroke-dasharray="5,4"/>'
+    )
+    out.append(
+        f'<text class="note" x="{left + 4}" y="{uy(n_workers) - 4:.1f}">'
+        f"{n_workers} workers</text>"
+    )
+    out.append(
+        f'<text class="axis" x="{left - 8}" y="{top_u + util_h / 2:.0f}" '
+        f'text-anchor="end">running<tspan x="{left - 8}" dy="24">tasks'
+        f"</tspan></text>"
+    )
+
+    # ---- stream panel: one rect per segment, timing in data-i ----
+    def _rect(s, e, row, color, info):
+        if e <= s:
+            return
+        h = lane_px * 0.9
+        info = _html.escape(info).replace("\n", "&#10;")
+        out.append(
+            f'<rect x="{X(s):.1f}" y="{Y(row) + lane_px * 0.05:.1f}" '
+            f'width="{max((e - s) * sx, 0.5):.1f}" height="{h:.1f}" '
+            f'fill="{color}" data-i="{info}"/>'
+        )
+
+    def _tau(r):  # Δτ_i duration mark centered on a task bar (map or reduce)
+        fs = max(8.0, min(22.0, lane_px + 6.0))
+        y = Y(r["row"]) + lane_px / 2 + fs / 3
+        y -= 0.30 * lane_px * int(r.get("tau_level", 0))  # de-collision dodge
+        out.append(
+            f'<text class="dt" x="{X((r["start"] + r["end"]) / 2):.1f}" '
+            f'y="{y:.1f}" '
+            f'text-anchor="middle" font-size="{fs:.0f}">'
+            f'Δτ<tspan dy="{fs / 4:.0f}" font-size="{0.75 * fs:.0f}">'
+            f"{int(r['tau_index'])}</tspan></text>"
+        )
+
+    for _, r in t.iterrows():
+        host = str(r["hostname"]).split(".")[0]
+        task = r.get("task_id")
+        task = "" if task is None or pd.isna(task) else f"task {int(task)} · "
+        failed = ""
+        if "task_failed_phase" in t.columns and pd.notna(r.get("task_failed_phase")):
+            failed = f" — FAILED in {r['task_failed_phase']}"
+        span = (
+            f"{task}{host}{failed}\nwindow {r['start']:.1f} – {r['end']:.1f} s"
+            f" (task total {r['end'] - r['start']:.1f} s)"
+        )
+        if r["kind"] == "reduce":
+            _rect(
+                r["start"],
+                r["end"],
+                r["row"],
+                _POST_COLOR,
+                f"reduce node · {r['end'] - r['start']:.1f} s\n{span}",
+            )
+            if add_time_labels:
+                _tau(r)
+            continue
+        load_end = r["start"] + r["T_make_empty_image"] + r["T_load"]
+        write_start = r["end"] - r["T_write"]
+        _rect(
+            r["start"],
+            load_end,
+            r["row"],
+            _LOAD_COLOR,
+            f"load · {load_end - r['start']:.1f} s\n{span}",
+        )
+        _rect(
+            load_end,
+            write_start,
+            r["row"],
+            _SCIENCE_COLOR,
+            f"science · {write_start - load_end:.1f} s\n{span}",
+        )
+        _rect(
+            write_start,
+            r["end"],
+            r["row"],
+            _WRITE_COLOR,
+            f"write · {r['end'] - write_start:.1f} s\n{span}",
+        )
+        if add_time_labels:
+            _tau(r)
+
+    # Host separators + sparse host labels (same sparsity as the PNG).
+    bounds = t.groupby("host_idx")["row"].max().sort_index()
+    for b in bounds.values[:-1]:
+        y = Y(b + 0.5) + lane_px / 2
+        out.append(
+            f'<line x1="{left}" y1="{y:.1f}" x2="{left + inner_w}" '
+            f'y2="{y:.1f}" stroke="#ddd" stroke-width="0.6"/>'
+        )
+    step = max(1, len(hosts) // 24)
+    for hi in range(0, len(hosts), step):
+        rows = t.loc[t["host_idx"] == hi, "row"]
+        out.append(
+            f'<text class="host" x="{left - 6}" '
+            f'y="{Y(rows.mean()) + lane_px / 2 + 6:.1f}" '
+            f'text-anchor="end">{_html.escape(hosts[hi].split(".")[0])}'
+            f"</text>"
+        )
+
+    # X axis: ticks at a "nice" interval targeting ~12 of them.
+    raw = (x1 - x0) / 12
+    mag = 10 ** np.floor(np.log10(raw))
+    tick = float(min((m for m in (1, 2, 5, 10) if m * mag >= raw), default=10) * mag)
+    ax_y = panels_y1
+    out.append(
+        f'<line x1="{left}" y1="{ax_y:.1f}" x2="{left + inner_w}" '
+        f'y2="{ax_y:.1f}" stroke="#333"/>'
+    )
+    v = np.ceil(x0 / tick) * tick
+    while v <= x1:
+        out.append(
+            f'<line x1="{X(v):.1f}" y1="{ax_y:.1f}" x2="{X(v):.1f}" '
+            f'y2="{ax_y + 5:.1f}" stroke="#333"/>'
+        )
+        out.append(
+            f'<text class="axis" x="{X(v):.1f}" y="{ax_y + 28:.1f}" '
+            f'text-anchor="middle">{v + 0.0:g}</text>'
+        )
+        v += tick
+    if add_time_labels:  # bold t_0..t_3 efficiency-derivation marks
+        marks = [(0.0, "1"), (makespan, "2")]
+        if driver is not None:
+            marks.append((app_start_rel, "0"))
+        t3 = post_end_rel if post_end_rel is not None else (T_compute or None)
+        if t3 is not None:
+            marks.append((t3, "3"))
+        marks.sort(key=lambda m: m[0])
+        last_x = None  # nearly coincident marks (e.g. t_2/t_3) dodge to a 2nd row
+        for x, sub in marks:
+            dodged = last_x is not None and (X(x) - X(last_x)) < 44
+            out.append(
+                f'<text class="axis tm" x="{X(x):.1f}" '
+                f'y="{ax_y + (104 if dodged else 66):.1f}" '
+                f'text-anchor="middle" font-size="28" font-style="italic">t'
+                f'<tspan dy="6" font-size="20">{sub}</tspan></text>'
+            )
+            last_x = None if dodged else x
+    out.append(
+        f'<text class="axis" x="{left + inner_w / 2:.0f}" '
+        f'y="{ax_y + (150 if add_time_labels else 56):.1f}" '
+        f'text-anchor="middle">time since first task start (s)</text>'
+    )
+
+    # Legend.
+    lx = left
+    entries = [
+        ("load", _LOAD_COLOR),
+        ("science", _SCIENCE_COLOR),
+        ("write", _WRITE_COLOR),
+        ("reduce node", _POST_COLOR),
+        (pre_label, _PRE_COLOR),
+        (post_label, _POST_COLOR),
+    ]
+    for label, color in entries:
+        out.append(
+            f'<rect x="{lx}" y="12" width="20" height="20" fill="{color}"'
+            f' fill-opacity="0.8"/>'
+        )
+        out.append(
+            f'<text class="axis" x="{lx + 26}" y="29">{_html.escape(label)}</text>'
+        )
+        lx += 26 + 12 * len(label) + 30
+
+    out.append("</svg>")
+    out.append("""<div id="tt"></div><script>
+const tt = document.getElementById('tt');
+document.querySelector('svg').addEventListener('mousemove', e => {
+  const d = e.target.dataset && e.target.dataset.i;
+  if (!d) { tt.style.display = 'none'; return; }
+  tt.textContent = d;
+  tt.style.display = 'block';
+  tt.style.left = Math.min(e.clientX + 14, window.innerWidth - 320) + 'px';
+  tt.style.top = (e.clientY + 14) + 'px';
+});
+document.querySelector('svg').addEventListener('mouseleave',
+  () => { tt.style.display = 'none'; });
+</script></body></html>""")
+
+    with open(html_path, "w") as f:
+        f.write("\n".join(out))
+    print("wrote", html_path)
+    return html_path
+
+
+def plot_task_stream(
+    source,
+    reduce_frame=None,
+    compute_start=None,
+    compute_end=None,
+    T_compute=None,
+    n_workers=None,
+    driver_timing=None,
+    anchor_source=None,
+    add_time_labels=False,
+    title=None,
+    save_path=None,
+    html_path=None,
+    task_columns=None,
+):
+    """Dask-dashboard-style task stream: per-worker-process timeline of a run.
+
+    Reconstructs one lane per worker slot from the per-task wall-clock anchor
+    ``start_unixtime`` and the ``T_*`` phase durations, draws each task as
+    load (blue) / science (green) / write (orange) segments -- white gaps are
+    worker slots with nothing to do -- with a running-task utilization panel
+    on top, and prints the efficiency decomposition (ideal time, ramp-up,
+    straggler tail, pre/post-map regions). Works for both compute backends.
+
+    When the driver-step timings are available (``driver_timing``, picked up
+    automatically from a return dict), a thin DRIVER strip is added above the
+    utilization panel: one light-red SETUP segment covering everything before
+    compute (creating/writing the empty image, opening the processing set,
+    building the map/reduce and dask graphs -- broken down per step in the
+    printed summary and in the HTML tooltip), the compute window, and the
+    finalize steps (consolidating metadata), placed on the same wall clock, so
+    the plot accounts for the ENTIRE time :func:`image_cube_single_field` was
+    running, not just the task window.
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame
+        The application return dict, or its ``timing_node_tasks`` frame.
+        Needs the ``start_unixtime`` column (recorded by the node task since
+        2026-07-28 -- with or without resource monitoring); cross-node
+        placement relies on NTP-synced node clocks. When the full return dict
+        is given, the reduce-node rows (``timing_reduce_nodes``) and the
+        compute-window anchors (``timing_distributed_application``'s
+        ``compute_start_unixtime`` / ``compute_end_unixtime`` /
+        ``T_compute_dask_graph``) are picked up automatically.
+    reduce_frame : pandas.DataFrame, optional
+        Reduce-node timing rows (``hostname``, ``start_unixtime``,
+        ``end_unixtime`` + optional execution identity); overrides the ones
+        from the return dict. Reduce nodes are drawn on the worker lane they
+        actually ran on.
+    compute_start, compute_end : float, optional
+        Unixtime of the compute call's start/end; overrides the return dict's
+        anchors. These expose the PRE-first-task gap (worker imports + graph
+        submission) and the POST-last-task region that a first-task-relative
+        plot misses.
+    T_compute : float, optional
+        Wall time of the compute call (seconds); overrides the return dict's
+        ``T_compute_dask_graph``.
+    n_workers : int, optional
+        Known worker-slot count of the cluster; default reconstructs it by
+        packing the map tasks into lanes.
+    driver_timing : dict, optional
+        The application's ``timing_distributed_application`` dict (its ``T_*``
+        step durations plus, since 2026-08-31, the absolute
+        ``application_start_unixtime`` / ``application_end_unixtime`` anchors);
+        overrides the one from the return dict.  Enables the driver strip and
+        the application-total line of the printed decomposition; needs the
+        compute anchors to be placeable on the wall clock.
+    anchor_source : str, optional
+        Provenance note for the compute anchors, echoed in the printout.
+    add_time_labels : bool, optional
+        Annotate the timeline with the bold time marks used when deriving the
+        efficiencies: below the x-axis ``t_0`` (start of the driver setup;
+        needs the driver strip), ``t_1`` (first task start, x = 0), ``t_2``
+        (end of the mapping stage) and ``t_3`` (end of the reduce / post-map
+        region), plus each task's duration label ``Δτ_i`` centered on its bar
+        -- map AND measured reduce tasks alike (map tasks keep their recorded
+        task number, reduce tasks are numbered on in start order), matching
+        the paper's ``W = Σ Δτ_i``. Meant for small pedagogical runs (e.g.
+        the tutorial notebook) -- with thousands of tasks the per-task labels
+        overlap. Applied to the interactive HTML twin as well. Default False.
+    title : str, optional
+        Figure title prefix (e.g. a run name); default "task stream".
+    save_path : str, optional
+        If set, save the figure there (PNG) and print the path.
+    html_path : str, optional
+        If set, also write a standalone INTERACTIVE version there: the same
+        two panels as inline SVG with a hover tooltip giving each bar's
+        timing (segment duration, task id, host, task window, total task
+        time). Pure SVG + vanilla JavaScript -- no extra dependencies, works
+        offline; one SVG element per task segment, so the file grows with the
+        task count (~a few MB for a 15k-task run).
+    task_columns : dict, optional
+        The node task timing columns drawn, for node tasks other than the
+        imager's: ``"task"`` (the task's total time), ``"load"`` (the columns
+        summed into the load segment) and ``"write"`` (the write segment;
+        ``None`` for none), e.g. ``{"task": "T_simulate_task", "load": [],
+        "write": "T_write"}``. Missing keys keep the imager's columns
+        (:data:`IMAGING_TASK_STREAM_COLUMNS`); ``None`` (default) draws the
+        imager's.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        The figure, or None when ``start_unixtime`` is absent (run recorded
+        before the anchor existed).
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    tasks = _as_timing_frame(source)
+    if "start_unixtime" not in tasks.columns or tasks["start_unixtime"].isna().all():
+        print(
+            "plot_task_stream: no start_unixtime column (run recorded before "
+            "the wall-clock anchor was added); cannot place tasks on the run "
+            "timeline -- skipping."
+        )
+        return None
+    if task_columns is not None:
+        tasks = _with_imaging_task_columns(tasks, task_columns)
+    if isinstance(source, dict):
+        if reduce_frame is None and source.get("timing_reduce_nodes"):
+            reduce_frame = pd.DataFrame(source["timing_reduce_nodes"])
+        timing = source.get("timing_distributed_application") or {}
+        if compute_start is None and timing.get("compute_start_unixtime") is not None:
+            compute_start = float(timing["compute_start_unixtime"])
+            compute_end = float(timing["compute_end_unixtime"])
+            anchor_source = anchor_source or "measured"
+        if T_compute is None:
+            T_compute = timing.get("T_compute_dask_graph")
+        if driver_timing is None and timing:
+            driver_timing = timing
+
+    pre_label = "pre-map: worker imports + graph submit"
+    post_label = "post-map: reduce residue + gather/save"
+    # Fold measured reduce nodes (when recorded) into the lane assignment: they
+    # run on the same worker processes (dask) / the manager (MPI), one at a
+    # time, so they share the per-host lane pool with the map tasks.
+    tasks = tasks.copy()
+    tasks["kind"] = "map"
+    map_only = tasks
+    if reduce_frame is not None and len(reduce_frame):
+        red_rows = pd.DataFrame(
+            {
+                "hostname": reduce_frame["hostname"],
+                "start_unixtime": reduce_frame["start_unixtime"],
+                "T_image_cube_task": (
+                    reduce_frame["end_unixtime"] - reduce_frame["start_unixtime"]
+                ),
+                "T_make_empty_image": 0.0,
+                "T_load": 0.0,
+                "T_write": 0.0,
+                "kind": "reduce",
+            }
+        )
+        # Carry the recorded execution identity through (recorded on BOTH map
+        # tasks and reduce nodes since 2026-07-28), so each reduce lands on
+        # the worker lane it actually ran on -- including a dedicated lane for
+        # the MPI manager, which runs no map tasks.
+        for col in ("process_pid", "thread_native_id", "worker_name"):
+            if col in reduce_frame.columns:
+                red_rows[col] = reduce_frame[col].values
+        tasks = pd.concat([tasks, red_rows], ignore_index=True)
+    t, hosts, n_lanes = assign_task_stream_lanes(tasks)
+    # Δτ index over ALL tasks in START order: map tasks numbered as they
+    # started, then the reduce tasks numbered on, also in start order. Used by
+    # the add_time_labels marks and consistent with the paper's W = Σ Δτ_i,
+    # which includes the reduce tasks. The index is a label, not a channel id:
+    # the scheduler does not dispatch tasks in task_id order, so numbering by
+    # task_id put Δτ_0 wherever channel 0 happened to run (e.g. in the second
+    # wave) instead of on the first task started.
+    m = t["kind"] == "map"
+    map_order = t.loc[m].sort_values("start_unixtime", kind="stable").index
+    t.loc[map_order, "tau_index"] = np.arange(len(map_order))
+    nxt = len(map_order)
+    red_order = t.loc[~m].sort_values("start_unixtime", kind="stable").index
+    t.loc[red_order, "tau_index"] = np.arange(nxt, nxt + len(red_order))
+    t["tau_index"] = t["tau_index"].astype(int)
+    tm = t[t["kind"] == "map"]
+    tr = t[t["kind"] == "reduce"]
+    makespan = tm["end"].max()
+    # Worker count: recorded geometry when known, else a MAP-ONLY packing pass
+    # (in the combined packing, reduce nodes borrow idle map lanes and bump map
+    # tasks into overflow lanes, so combined lane counts overstate the workers).
+    # This is the parallelism p of the paper's Performance Measures section.
+    n_workers = n_workers or assign_task_stream_lanes(map_only)[2]
+    # Total work W = Σ Δτ_i over ALL tasks (map + measured reduce) and the
+    # ideal time T_ideal = W / p.
+    work = float(tm["T_image_cube_task"].sum() + tr["T_image_cube_task"].sum())
+    ideal = work / n_workers
+
+    # Utilization curve from start/end events (map tasks only; reduce gets its
+    # own curve below when recorded).
+    events = np.concatenate([tm["start"].values, tm["end"].values])
+    deltas = np.concatenate([np.ones(len(tm)), -np.ones(len(tm))])
+    order = np.argsort(events, kind="stable")
+    ev_t, running = events[order], np.cumsum(deltas[order])
+
+    # Efficiency decomposition. With absolute compute anchors the
+    # PRE-first-task and POST-last-task shares of T_compute are measured;
+    # otherwise fall back to attributing everything after the window.
+    busy = tm["T_image_cube_task"].sum()
+    in_window_loss = makespan - busy / n_workers  # vs the MAP work only
+    t0_abs = tasks["start_unixtime"].min()
+    pre_rel = post_end_rel = None
+    if compute_start is not None:
+        pre_rel = compute_start - t0_abs  # negative seconds
+        post_end_rel = compute_end - t0_abs
+    post = (T_compute - makespan) if T_compute else None
+    driver = _driver_timeline(driver_timing, compute_start, compute_end, t0_abs)
+    # t_3 of the efficiency derivation: end of the reduce / post-map region
+    # (falls back to T_compute when the absolute anchors are missing).
+    t3_rel = post_end_rel if post_end_rel is not None else (T_compute or None)
+    if driver_timing and driver is None:
+        print(
+            "plot_task_stream: driver timings given but no absolute compute "
+            "anchors; cannot place the driver strip on the run timeline."
+        )
+    summary = []  # the printed decomposition, echoed at the top of the figure
+
+    def _p(line):
+        print(line)
+        summary.append(line)
+
+    if title:
+        print(f"run: {title}")
+    _p(
+        f"  parallelism p              : {n_workers} workers ({len(hosts)} "
+        f"hosts, {n_lanes} reconstructed lanes)"
+    )
+    _p(
+        f"  T_ideal = W / p            : {ideal:8.1f} s "
+        f"(W = Σ Δτ_i = {work:.1f} s over {len(tm)} map + {len(tr)} reduce "
+        f"tasks)"
+    )
+    _p(
+        f"  task-window makespan       : {makespan:8.1f} s "
+        f"(+{in_window_loss:.1f} s ramp/gaps/tail, "
+        f"{100 * busy / (n_workers * makespan):.1f}% busy inside window)"
+    )
+    if T_compute:
+        if pre_rel is not None:
+            _p(
+                f"  T_compute (map+reduce)     : {T_compute:8.1f} s = "
+                f"{-pre_rel:.1f} s PRE first task ({pre_label}) + "
+                f"{makespan:.1f} s task window + "
+                f"{post_end_rel - makespan:.1f} s POST ({post_label})"
+                + (f"   [anchors: {anchor_source}]" if anchor_source else "")
+            )
+        else:
+            _p(
+                f"  T_compute (map+reduce)     : {T_compute:8.1f} s "
+                f"(+{post:.1f} s outside the task window)"
+            )
+    if driver is not None:
+        d_segs, app_start_rel, app_end_rel, d_colors, d_setup = driver
+        app_total = app_end_rel - app_start_rel
+        setup = pre_rel - app_start_rel
+        finalize = app_end_rel - post_end_rel
+        compute_span = post_end_rel - pre_rel
+        _p(
+            f"  application total          : {app_total:8.1f} s = "
+            f"{setup:.1f} s driver setup + {compute_span:.1f} s compute + "
+            f"{finalize:.1f} s finalize (entire distributed application call)"
+        )
+        steps = " | ".join(
+            [f"{lbl} {dur:.1f}" for lbl, dur in d_setup if dur >= 0.1]
+            + [
+                f"{lbl} {e - s:.1f}"
+                for lbl, s, e in d_segs
+                if lbl not in (_DRIVER_SETUP_LABEL, _DRIVER_COMPUTE_LABEL)
+                and e - s >= 0.1
+            ]
+        )
+        if steps:
+            _p(f"  driver steps (s)           : {steps}")
+    # The two absolute parallel efficiencies of the paper's Performance
+    # Measures section, in the t_0..t_3 / Δτ_i notation of add_time_labels:
+    # T_ideal = W / p over the map-reduce window (t_1 = first task start = 0
+    # .. t_3 = end of reduce) resp. the end-to-end window (t_0 = application
+    # start .. t_3). W includes the reduce tasks.
+    if t3_rel is not None:
+        _p(
+            f"  E map-reduce               : "
+            f"{100 * ideal / t3_rel:8.1f} %   [= (W / p) / (t_3 - t_1)]"
+        )
+        if driver is not None:
+            _p(
+                f"  E end-to-end               : "
+                f"{100 * ideal / (t3_rel - app_start_rel):8.1f} % "
+                f"  [= (W / p) / (t_3 - t_0)]"
+            )
+    # Ramp and tail: time to reach 95% of workers / time the last 5% of tasks
+    # spend after the 95th-percentile end. (argmax = first True; searchsorted
+    # is invalid here -- the running count is not monotonic.)
+    reach = running >= 0.95 * n_workers
+    ramp = float(ev_t[int(np.argmax(reach))]) if reach.any() else np.nan
+    tail = makespan - np.quantile(tm["end"], 0.95)
+    _p(f"  ramp to 95% busy           : {ramp:8.1f} s")
+    _p(f"  straggler tail (p95->last) : {tail:8.1f} s")
+    if len(tr):
+        busy_r = tr["T_image_cube_task"].sum()
+        inside = np.clip(np.minimum(tr["end"], makespan) - tr["start"], 0, None)
+        overlap = float(inside.sum() / busy_r) if busy_r else 0.0
+        _p(
+            f"  reduce nodes (measured)    : {len(tr)} calls, {busy_r:8.1f} s "
+            f"busy, window {tr['start'].min():.1f}-{tr['end'].max():.1f} s, "
+            f"{100 * overlap:.0f}% of reduce busy inside the map window"
+        )
+
+    # ---------------- figure ---------------------------------------------- #
+    if driver is not None:
+        fig, (ax_d, ax_u, ax) = plt.subplots(
+            3,
+            1,
+            figsize=(15, 13.8),
+            sharex=True,
+            gridspec_kw={"height_ratios": [0.45, 1, 5], "hspace": 0.05},
+        )
+        for lbl, s, e in d_segs:
+            ax_d.add_patch(plt.Rectangle((s, 0), e - s, 1, color=d_colors[lbl], lw=0))
+        d_dur = {}
+        for lbl, s, e in d_segs:
+            d_dur[lbl] = d_dur.get(lbl, 0.0) + (e - s)
+        ax_d.legend(
+            handles=[
+                Patch(color=d_colors[lbl], label=f"{lbl} ({dur:.1f} s)")
+                for lbl, dur in d_dur.items()
+            ],
+            loc="upper left",
+            bbox_to_anchor=(1.005, 1.15),
+            fontsize=12,
+            frameon=False,
+            labelspacing=0.3,
+            handlelength=1.4,
+        )
+        ax_d.set_ylim(0, 1)
+        ax_d.set_yticks([])
+        ax_d.set_ylabel("driver", fontsize=16)
+    else:
+        fig, (ax_u, ax) = plt.subplots(
+            2,
+            1,
+            figsize=(15, 13),
+            sharex=True,
+            gridspec_kw={"height_ratios": [1, 5], "hspace": 0.04},
+        )
+
+    ax_u.fill_between(ev_t, running, step="post", color=_LOAD_COLOR, alpha=0.35, lw=0)
+    ax_u.plot(
+        ev_t,
+        running,
+        drawstyle="steps-post",
+        color=_LOAD_COLOR,
+        lw=1,
+        label="running map tasks",
+    )
+    if len(tr):
+        rev = np.concatenate([tr["start"].values, tr["end"].values])
+        rdl = np.concatenate([np.ones(len(tr)), -np.ones(len(tr))])
+        ro = np.argsort(rev, kind="stable")
+        ax_u.plot(
+            rev[ro],
+            np.cumsum(rdl[ro]),
+            drawstyle="steps-post",
+            color=_POST_COLOR,
+            lw=1.2,
+            label="running reduce nodes",
+        )
+    ax_u.axhline(
+        n_workers, color="#666666", ls="--", lw=1, label=f"p = {n_workers} workers"
+    )
+    ax_u.legend(
+        loc="upper left", bbox_to_anchor=(1.005, 1.0), fontsize=14, frameon=False
+    )
+    if pre_rel is not None:
+        ax_u.axvspan(pre_rel, 0, color=_PRE_COLOR, alpha=0.20)
+        ax_u.axvspan(makespan, post_end_rel, color=_POST_COLOR, alpha=0.25)
+    elif T_compute:
+        ax_u.axvspan(makespan, T_compute, color=_POST_COLOR, alpha=0.25)
+        ax_u.text(
+            0.5 * (makespan + T_compute),
+            0.5 * n_workers,
+            f"{post_label}\n{post:.0f} s",
+            ha="center",
+            fontsize=16,
+            color="#8a4a6d",
+        )
+    ax_u.set_ylabel("running tasks", fontsize=20)
+    ax_u.tick_params(labelsize=20)
+    ax_u.grid(True, alpha=0.25)
+
+    seg_h = 0.9
+    for _, r in t.iterrows():
+        y = r["row"] - seg_h / 2
+        if r["kind"] == "reduce":
+            ax.add_patch(
+                plt.Rectangle(
+                    (r["start"], y),
+                    r["end"] - r["start"],
+                    seg_h,
+                    color=_POST_COLOR,
+                    lw=0,
+                )
+            )
+            continue
+        load_end = r["start"] + r["T_make_empty_image"] + r["T_load"]
+        write_start = r["end"] - r["T_write"]
+        ax.add_patch(
+            plt.Rectangle(
+                (r["start"], y),
+                load_end - r["start"],
+                seg_h,
+                color=_LOAD_COLOR,
+                lw=0,
+            )
+        )
+        ax.add_patch(
+            plt.Rectangle(
+                (load_end, y),
+                max(write_start - load_end, 0),
+                seg_h,
+                color=_SCIENCE_COLOR,
+                lw=0,
+            )
+        )
+        ax.add_patch(
+            plt.Rectangle(
+                (write_start, y), r["T_write"], seg_h, color=_WRITE_COLOR, lw=0
+            )
+        )
+    if pre_rel is not None:
+        ax.axvspan(pre_rel, 0, color=_PRE_COLOR, alpha=0.20)
+        ax.axvspan(makespan, post_end_rel, color=_POST_COLOR, alpha=0.25)
+    elif T_compute:
+        ax.axvspan(makespan, T_compute, color=_POST_COLOR, alpha=0.25)
+    # Host separators + sparse host-name ticks (real yticks, so matplotlib
+    # keeps the axis label clear of them however long the hostnames are).
+    bounds = t.groupby("host_idx")["row"].max().sort_index()
+    for b in bounds.values[:-1]:
+        ax.axhline(b + 0.5, color="#dddddd", lw=0.4)
+    step = max(1, len(hosts) // 24)
+    shown = range(0, len(hosts), step)
+    ax.set_yticks(
+        [t.loc[t["host_idx"] == hi, "row"].mean() for hi in shown],
+        [hosts[hi].split(".")[0] for hi in shown],
+        fontsize=12,
+    )
+    ax.tick_params(axis="y", length=0)
+    ax.tick_params(axis="x", labelsize=20)
+    ax.set_ylim(-1, n_lanes)
+    left = pre_rel if pre_rel is not None else 0.0
+    right = (
+        post_end_rel
+        if post_end_rel is not None
+        else max(T_compute or 0, makespan, t["end"].max())
+    )
+    if driver is not None:
+        left = min(left, app_start_rel)
+        right = max(right, app_end_rel)
+    ax.set_xlim(left * 1.02 if left < 0 else left, right * 1.005)
+    if driver is not None:
+        # Name the wide driver segments in place; every step is identified in
+        # the legend below the figure (with its duration) regardless of width.
+        span = right - left
+        for lbl, s, e in d_segs:
+            if e - s > 0.04 * span:
+                ax_d.text(
+                    (s + e) / 2,
+                    0.5,
+                    lbl,
+                    ha="center",
+                    va="center",
+                    fontsize=14,
+                    color="#333333",
+                )
+    ax.set_ylabel(f"worker processes ({n_lanes} lanes, grouped by host)", fontsize=20)
+    ax.set_xlabel("time since first task start (s)", fontsize=20)
+    if add_time_labels:
+        # Bold efficiency-derivation marks: t_0..t_3 under the x-axis and each
+        # map task's duration Δτ_i on its bar (i = task number).
+        import matplotlib.transforms as mtransforms
+
+        marks = [(0.0, r"$\mathbf{t_1}$"), (makespan, r"$\mathbf{t_2}$")]
+        if driver is not None:
+            marks.append((app_start_rel, r"$\mathbf{t_0}$"))
+        if t3_rel is not None:
+            marks.append((t3_rel, r"$\mathbf{t_3}$"))
+        trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+        marks.sort(key=lambda m: m[0])
+        last_x = None  # nearly coincident marks (e.g. t_2/t_3) dodge to a 2nd row
+        for x, lbl in marks:
+            dodged = last_x is not None and (x - last_x) < 0.055 * (right - left)
+            ax.text(
+                x,
+                -0.095 if dodged else -0.048,
+                lbl,
+                transform=trans,
+                ha="center",
+                va="top",
+                fontsize=26,
+            )
+            last_x = None if dodged else x
+        ax.xaxis.labelpad = 96  # keep the axis caption clear of the t marks
+        # Δτ_i on every task, map AND reduce (W = Σ Δτ_i over all). The white
+        # text gets a thin dark stroke so it stays readable where it spills
+        # past a narrow bar, and neighboring labels within a lane closer than
+        # the approximate label width dodge up/down within the lane band.
+        import matplotlib.patheffects as path_effects
+
+        stroke = [path_effects.withStroke(linewidth=2.5, foreground="#555555")]
+        w_est = 0.045 * (right - left)  # ~label width in data units
+        t["tau_level"] = 0  # shared with the HTML twin
+        last_in_lane = {}  # row -> (center_x, level) of the previous label
+        for i, r in t.sort_values(["row", "start"]).iterrows():
+            cx = (r["start"] + r["end"]) / 2
+            prev = last_in_lane.get(r["row"])
+            level = 0
+            if prev is not None and cx - prev[0] < w_est:
+                level = 1 if prev[1] != 1 else -1
+            last_in_lane[r["row"]] = (cx, level)
+            t.at[i, "tau_level"] = level
+            ax.text(
+                cx,
+                r["row"] + 0.30 * level,
+                rf"$\mathbf{{\Delta\tau_{{{int(r['tau_index'])}}}}}$",
+                ha="center",
+                va="center",
+                fontsize=18,
+                color="white",
+                path_effects=stroke,
+            )
+    handles = [
+        Patch(color=_LOAD_COLOR, label="load"),
+        Patch(color=_SCIENCE_COLOR, label="science"),
+        Patch(color=_WRITE_COLOR, label="write"),
+        Patch(color=_PRE_COLOR, alpha=0.35, label=pre_label),
+        Patch(color=_POST_COLOR, alpha=0.4, label=post_label),
+    ]
+    if len(tr):
+        handles.insert(3, Patch(color=_POST_COLOR, label="reduce node (measured)"))
+    ax.legend(
+        handles=handles,
+        loc="upper left",
+        bbox_to_anchor=(1.005, 1.0),
+        fontsize=16,
+        frameon=False,
+    )
+    fig.suptitle(
+        f"{title or 'task stream'}\n"
+        f"ideal {ideal:.0f} s | task window {makespan:.0f} s | "
+        + (f"T_compute {T_compute:.0f} s" if T_compute else "")
+        + (f" | application {app_total:.0f} s" if driver is not None else ""),
+        fontsize=24,
+    )
+    # Efficiency decomposition block above the title; it sits outside the
+    # figure edge, so it relies on the tight bounding box used when saving.
+    # Long lines (e.g. the driver-step breakdown) are wrapped so the block
+    # stays no wider than the figure at this font size.
+    import textwrap
+
+    wrapped = [
+        w
+        for line in summary
+        for w in textwrap.wrap(
+            line, width=88, subsequent_indent=" " * 31, drop_whitespace=False
+        )
+    ]
+    fig.text(
+        0.02,
+        1.002,
+        "\n".join(wrapped),
+        va="bottom",
+        ha="left",
+        fontsize=18,
+        family="monospace",
+    )
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print("wrote", save_path)
+    if html_path is not None:
+        _write_task_stream_html(
+            t,
+            hosts,
+            n_lanes,
+            n_workers,
+            ev_t,
+            running,
+            pre_rel,
+            post_end_rel,
+            makespan,
+            ideal,
+            T_compute,
+            pre_label,
+            post_label,
+            title,
+            html_path,
+            driver=driver,
+            add_time_labels=add_time_labels,
+        )
+    return fig
