@@ -311,22 +311,31 @@ def check_model_update(config, *, mode, require_complete=False):
 
     # --- CLEAN rectangle ---
     # None and the all-minus-one sentinel explicitly select the whole image.
+    # A plane has (l, m) = (y, x) axes. Bounds describe half-open slices:
+    # xmax/ymax may equal the corresponding axis length, but the rectangle must
+    # be nonempty. Reject invalid bounds instead of relying on native clipping.
     if "clean_box" in controls and controls["clean_box"] is not None:
         box = controls["clean_box"]
         if not isinstance(box, tuple) or len(box) != 4:
             raise ValueError(
                 "clean_box must be a 4-tuple (xmin, xmax, ymin, ymax) or None."
             )
+        for value in box:
+            require_integer("clean_box coordinate", value, allow_minus_one=True)
         if box != (-1, -1, -1, -1):
-            for value in box:
-                require_integer("clean_box coordinate", value)
-            if box[0] > box[1] or box[2] > box[3]:
-                raise ValueError("clean_box lower bounds must not exceed upper bounds.")
-            if "image_size" in image_params and (
-                box[1] >= image_params["image_size"][0]
-                or box[3] >= image_params["image_size"][1]
-            ):
-                raise ValueError("clean_box must fit the image geometry.")
+            if any(value < 0 for value in box):
+                raise ValueError(
+                    "clean_box coordinates must be non-negative or use the whole-image tuple (-1, -1, -1, -1)."
+                )
+            xmin, xmax, ymin, ymax = box
+            if xmin >= xmax or ymin >= ymax:
+                raise ValueError("clean_box requires xmin < xmax and ymin < ymax.")
+            if "image_size" in image_params:
+                n_l, n_m = image_params["image_size"]
+                if xmax > n_m or ymax > n_l:
+                    raise ValueError(
+                        "clean_box must fit the image geometry: xmax <= size of m, ymax <= size of l."
+                    )
 
     # --- Requested scales ---
     # Validate the exact list before the kernel can sort or discard any scale.

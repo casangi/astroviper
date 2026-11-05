@@ -131,7 +131,9 @@ def _validate_deconvolve_params(deconvolve_params, *, input_checked=False):
           cutoff as a fraction of the peak primary beam (used to build the
           deconvolution mask, *not* the deconvolver stopping threshold).
           Default 0.0.
-        - ``clean_box`` : 4-tuple ``(xmin, xmax, ymin, ymax)``. Default
+        - ``clean_box`` : 4-tuple ``(xmin, xmax, ymin, ymax)`` with exclusive
+          upper bounds. The x axis follows ``m`` and y follows ``l``; the
+          nonempty rectangle must fit the image. Default
           ``(-1, -1, -1, -1)`` meaning the full image.
         - ``max_iter_divergence`` : int, number of consecutive iterations the
           RMS of a plane's residual may be above ``(1 + gain / 10)`` times

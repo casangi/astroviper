@@ -104,6 +104,12 @@ when the supplied scope is `global`; it does not rewrite the caller's mapping.
 Supplied scope values still undergo enum validation. No global weight-density
 or Briggs-factor graph is constructed for natural weighting.
 
+`clean_box=(xmin, xmax, ymin, ymax)` uses half-open pixel bounds, with x along
+`m` and y along `l`. For `image_size=[n_l, n_m]`, require
+`0 <= xmin < xmax <= n_m` and `0 <= ymin < ymax <= n_l`. Bounds must be integers;
+invalid rectangles are rejected rather than clipped. `None` or the integer
+tuple `(-1, -1, -1, -1)` selects the whole image.
+
 ## Coordinate-only spectral preflight
 
 Polarization coordinates must be a nonempty one-dimensional vector of supported

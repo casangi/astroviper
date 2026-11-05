@@ -286,3 +286,58 @@ def test_accepted_polarization_containers_produce_identical_images(
             np.testing.assert_array_equal(coordinates, original)
     xr.testing.assert_equal(images[0], images[1])
     xr.testing.assert_equal(images[0], images[2])
+
+
+@pytest.mark.parametrize("workflow", ["cube", "mfs", "mvc"])
+@pytest.mark.parametrize(
+    "box",
+    [
+        (0, 97, 0, 48),
+        (0, 96, 0, 49),
+        (2, 2, 0, 1),
+        (0, 1, 2, 2),
+        (10, 9, 0, 1),
+        (-1, 96, 0, 48),
+    ],
+)
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_invalid_clean_boxes_fail_before_io(
+    monkeypatch, tmp_path, workflow, box, existing_output
+):
+    from astroviper.distributed_applications.imaging import (
+        image_continuum_single_field,
+        image_cube_single_field,
+    )
+    from tests.unit.processing_functions.imaging.config_check.test_full_validation import (
+        configuration,
+    )
+
+    config = configuration()
+    config["image_params"].update(image_size=[48, 96], n_taylor_terms=1)
+    config["deconvolver"] = "hogbom"
+    config["cycle_control_params"]["clean_box"] = box
+    if workflow == "cube":
+        driver = image_cube_single_field
+    else:
+        driver = image_continuum_single_field
+        config["continuum_mode"] = workflow
+    output = tmp_path / "rejected.img.zarr"
+    if existing_output:
+        output.mkdir()
+        (output / "sentinel").write_bytes(b"existing image")
+
+    def forbidden_io(*args, **kwargs):
+        raise AssertionError("Invalid clean_box must fail before I/O")
+
+    monkeypatch.setattr("xradio.measurement_set.open_processing_set", forbidden_io)
+    monkeypatch.setattr("astroviper.utils.io.write_zarr_image_store", forbidden_io)
+    monkeypatch.setattr(
+        "astroviper.utils.io.create_empty_data_variables_on_disk", forbidden_io
+    )
+    with pytest.raises(ValueError, match="clean_box"):
+        driver(str(tmp_path / "never-opened.ps.zarr"), str(output), **config)
+    if existing_output:
+        assert (output / "sentinel").read_bytes() == b"existing image"
+        assert list(output.iterdir()) == [output / "sentinel"]
+    else:
+        assert not output.exists()

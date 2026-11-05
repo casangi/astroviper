@@ -1589,3 +1589,54 @@ class TestExactPsfSubtraction:
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("clean", [hogbom_clean, hogbom_clean_many_threads])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "image_size,box",
+    [
+        ([64, 64], (60, 64, 0, 64)),
+        ([48, 96], (10, 90, 5, 40)),
+        ([96, 48], (5, 40, 10, 90)),
+    ],
+)
+def test_clean_box_matches_native_half_open_axes(clean, dtype, image_size, box):
+    from astroviper.processing_functions.imaging.config_check import (
+        CUBE_SINGLE_FIELD,
+        check_model_update,
+    )
+
+    check_model_update(
+        {
+            "image_params": {"image_size": image_size},
+            "cycle_control_params": {"clean_box": box},
+        },
+        mode=CUBE_SINGLE_FIELD,
+    )
+    n_l, n_m = image_size
+    xmin, xmax, ymin, ymax = box
+    residual = np.zeros((1, 1, 1, n_l, n_m), dtype=dtype)
+    expected_model = np.zeros_like(residual)
+    for row, column, flux in ((ymin, xmin, 2.0), (ymax - 1, xmax - 1, 3.0)):
+        residual[0, 0, 0, row, column] = flux
+        expected_model[0, 0, 0, row, column] = flux
+    # Stronger sources outside the rectangle must not enter the peak search.
+    # For interior boxes these lie exactly on the excluded upper endpoints.
+    if xmax < n_m:
+        residual[0, 0, 0, ymin, xmax] = 100.0
+    else:
+        residual[0, 0, 0, ymin, xmin - 1] = 100.0
+    if ymax < n_l:
+        residual[0, 0, 0, ymax, xmin] = 50.0
+    expected_residual = residual - expected_model
+    model = np.zeros_like(residual)
+    clean(
+        residual,
+        _delta_psf_cube(1, 1, 1, n_l, n_m, dtype),
+        model,
+        {"clean_box": box, "gain": 1.0, "max_iter": 4, "threshold": 0.1},
+        processing_function_threads=1,
+    )
+    np.testing.assert_array_equal(model, expected_model)
+    np.testing.assert_array_equal(residual, expected_residual)
