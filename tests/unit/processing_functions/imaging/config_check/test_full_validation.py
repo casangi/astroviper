@@ -152,10 +152,8 @@ def test_scales_are_rejected_instead_of_sorted_or_dropped(scales):
 @pytest.mark.parametrize(
     "options",
     [
-        {"field_name": "field-0"},
         {"vizualize_graph": True},
         {"compute_backend": "mpi"},
-        {"mpi_cluster_setup": {}},
         {"write_visibility_model_to_ps": True},
         {"weight_memory_mode": "cache"},
         {"visibility_memory_mode": "cache"},
@@ -605,3 +603,41 @@ def test_cube_partitions_use_nearest_cells_and_preserve_coverage_guards(reverse,
     else:
         check_channel_partitions(mapping, processing_set, **arguments)
     np.testing.assert_array_equal(processing_set["ms"].frequency.values, frequencies)
+
+
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+@pytest.mark.parametrize("field_name", [None, "field-0"])
+def test_workflow_retains_field_name(mode, field_name):
+    configuration = {"field_name": field_name}
+    original = deepcopy(configuration)
+    check_driver_workflow(configuration, mode=mode)
+    assert configuration == original
+
+
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+@pytest.mark.parametrize("field_name", [False, 1, ["field-0"]])
+def test_workflow_rejects_malformed_field_name(mode, field_name):
+    with pytest.raises(TypeError, match="field_name must be a string or None"):
+        check_driver_workflow({"field_name": field_name}, mode=mode)
+
+
+@pytest.mark.parametrize(
+    "mode,backend",
+    [
+        (CUBE_SINGLE_FIELD, "dask"),
+        (CUBE_SINGLE_FIELD, "mpi"),
+        (CONTINUUM_SINGLE_FIELD, "dask"),
+    ],
+)
+@pytest.mark.parametrize("setup", [None, {}, {"max_workers": 2}])
+def test_workflow_retains_mpi_cluster_setup(mode, backend, setup):
+    configuration = {"compute_backend": backend, "mpi_cluster_setup": setup}
+    original = deepcopy(configuration)
+    check_driver_workflow(configuration, mode=mode)
+    assert configuration == original
+
+
+@pytest.mark.parametrize("setup", [False, 2, "mpi", []])
+def test_workflow_rejects_malformed_mpi_cluster_setup(setup):
+    with pytest.raises(TypeError, match="mpi_cluster_setup"):
+        check_driver_workflow({"mpi_cluster_setup": setup}, mode=CONTINUUM_SINGLE_FIELD)

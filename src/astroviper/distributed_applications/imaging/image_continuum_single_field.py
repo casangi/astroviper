@@ -2675,8 +2675,8 @@ def image_continuum_single_field(
         :func:`xradio.measurement_set.open_processing_set` when opening the
         input Processing Set.
     field_name : str or None, optional
-        Reserved field-selection interface. It is currently ignored; select a
-        field when preparing the input Processing Set.
+        Reserved field-selection argument, retained for future support. It does
+        not currently filter fields; prepare a single-field input Processing Set.
     memory_mode : str, optional
         General processing-set memory policy. Continuum imaging currently
         supports only ``"in_memory"``; the weight, visibility-grid, and
@@ -2723,6 +2723,10 @@ def image_continuum_single_field(
         correlations (see ``instrument_polarization_basis``). The labels must be a
         nonempty one-dimensional vector. An xarray DataArray must have exactly
         the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``

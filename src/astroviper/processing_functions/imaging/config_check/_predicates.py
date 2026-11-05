@@ -15,10 +15,10 @@ from astroviper.processing_functions.imaging.config_check._common import (
 
 
 def check_primary_beam_limit(value):
-    """Require a finite scalar cutoff in [0, 1) to retain beam support."""
+    """Require a finite scalar cutoff in the inclusive interval [0, 1]."""
     limit = require_finite_real("primary_beam_limit", value, scalar=True)
-    if not 0 <= limit < 1:
-        raise ValueError("primary_beam_limit must lie in [0, 1).")
+    if not 0 <= limit <= 1:
+        raise ValueError("primary_beam_limit must lie in [0, 1].")
 
 
 def check_briggs_robust(value):

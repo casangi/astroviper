@@ -66,9 +66,11 @@ def _run(
     read_output=None,
     *,
     weighting="briggs",
+    mpi_cluster_setup=None,
 ):
     with dask.config.set(scheduler="synchronous"):
         result = image_continuum_single_field(
+            mpi_cluster_setup=mpi_cluster_setup,
             ps_store=str(store),
             image_store=str(output),
             image_params=params,
@@ -157,6 +159,7 @@ def test_natural_scopes_preserve_cleaned_and_restored_images(
             "in_memory",
             "tree",
             weighting="natural",
+            mpi_cluster_setup={"max_workers": 2} if scope is not None else None,
         )
         assert result["n_cycles"] > 0
         assert np.isfinite(images[scope].SKY_MODEL).all()

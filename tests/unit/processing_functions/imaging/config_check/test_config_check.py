@@ -251,7 +251,7 @@ def test_model_thresholds(name, value, error):
     "options,message",
     [
         ({"primary_beam_correction": True, "restore": False}, "restoration_output"),
-        ({"primary_beam_limit": 1.0}, "primary_beam_limit"),
+        ({"primary_beam_limit": 1.01}, "primary_beam_limit"),
         ({"primary_beam_limit": -0.1}, "primary_beam_limit"),
         ({"primary_beam_limit": np.nan}, "primary_beam_limit"),
         ({"memory_mode": "cache"}, "memory_mode"),

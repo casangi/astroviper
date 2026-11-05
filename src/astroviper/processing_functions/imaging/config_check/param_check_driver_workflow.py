@@ -97,7 +97,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
             )
 
     # --- Primary-beam cutoff ---
-    # The fractional cutoff must be one finite value in the interval [0, 1).
+    # The fractional cutoff must be one finite value in the interval [0, 1].
     if "primary_beam_limit" in config:
         from astroviper.processing_functions.imaging.config_check._predicates import (
             check_primary_beam_limit,
@@ -139,11 +139,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # Cube supports Dask and MPI; continuum is restricted to its Dask path above.
     if "compute_backend" in config and config["compute_backend"] not in ("dask", "mpi"):
         raise ValueError("compute_backend must be 'dask' or 'mpi'.")
-    if config.get("mpi_cluster_setup") is not None and (
-        mode.imaging_kind == "continuum"
-        or config.get("compute_backend", "dask") != "mpi"
-    ):
-        raise ValueError("mpi_cluster_setup requires the implemented cube MPI backend.")
+    # --- MPI cluster options ---
+    # Retain options on every backend; only the cube MPI path consumes them.
+    if config.get("mpi_cluster_setup") is not None:
+        require_mapping("mpi_cluster_setup", config["mpi_cluster_setup"])
 
     # ========================================================================
     # 3. Acceleration and execution capabilities
@@ -191,12 +190,15 @@ def check_driver_workflow(config, *, mode, require_complete=False):
                     f"DFT does not produce the requested uv grids: {sorted(kept_grids)}."
                 )
 
+    # --- Field-name interface ---
+    # Delphi uses the name for its phase centre. Other drivers retain the
+    # argument for field selection; their input must already contain one field.
+    field_name = config.get("field_name")
+    if field_name is not None and not isinstance(field_name, str):
+        raise TypeError("field_name must be a string or None.")
+
     # --- Unsupported interface options ---
-    # Reject accepted-but-unused options until their implementation is available.
-    if config.get("field_name") is not None:
-        raise ValueError(
-            "field_name selection is not implemented; select a field when preparing the input Processing Set."
-        )
+    # Reject requested execution paths without an implementation.
     if config.get("vizualize_graph", False) and (
         mode.imaging_kind == "continuum" or config.get("compute_backend") == "mpi"
     ):

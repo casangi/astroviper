@@ -84,7 +84,7 @@ def test_direct_restoration_rejects_cutoff_before_accessing_products():
     )
 
     with pytest.raises(ValueError, match="primary_beam_limit"):
-        restore_continuum_image(None, primary_beam_limit=1)
+        restore_continuum_image(None, primary_beam_limit=1.01)
 
 
 def test_direct_prediction_rejects_order_before_accessing_products():

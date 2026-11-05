@@ -18,22 +18,25 @@ from astroviper.processing_functions.imaging.config_check.param_check_residual_u
 @pytest.mark.parametrize(
     "checker", [check_residual_update, check_model_update, check_driver_workflow]
 )
-@pytest.mark.parametrize("value", [0.0, np.float64(0.5), np.nextafter(1.0, 0.0)])
-def test_beam_limit_boundaries_are_shared(checker, value):
+@pytest.mark.parametrize("value", [0.0, np.float64(0.5), np.nextafter(1.0, 0.0), 1.0])
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+def test_beam_limit_boundaries_are_shared(checker, value, mode):
     controls = {"primary_beam_limit": value}
     config = (
         {"cycle_control_params": controls}
         if checker is check_model_update
         else controls
     )
-    checker(config, mode=CUBE_SINGLE_FIELD)
+    checker(config, mode=mode)
     assert controls["primary_beam_limit"] is value
 
 
 @pytest.mark.parametrize(
     "checker", [check_residual_update, check_model_update, check_driver_workflow]
 )
-@pytest.mark.parametrize("value", [-0.1, 1.0, np.nan, np.inf, True, "0.5", [0.5]])
+@pytest.mark.parametrize(
+    "value", [-0.1, np.nextafter(1.0, np.inf), np.nan, np.inf, True, "0.5", [0.5]]
+)
 def test_beam_limits_reject_malformed_original_values(checker, value):
     controls = {"primary_beam_limit": value}
     config = (

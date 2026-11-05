@@ -237,9 +237,15 @@ def check_residual_update(config, *, mode, require_complete=False):
             raise ValueError("fft_padding must be between 1 and 10.")
 
     # --- Image time coordinates ---
-    # Empty or non-finite coordinates cannot define output image planes.
+    # Use the image factory's parser so numeric MJD, calendar times, and
+    # Astropy Time follow exactly XRADIO's contract. Parse a temporary value;
+    # the original configuration passes unchanged to the image constructor.
     if "time_coords" in image_params:
-        time_coords = require_finite_real("time_coords", image_params["time_coords"])
+        from xradio.image._util.image_factory import _time_coords_to_mjd
+
+        time_coords = require_finite_real(
+            "time_coords", _time_coords_to_mjd(image_params["time_coords"])
+        )
         if time_coords.ndim != 1:
             raise ValueError("time_coords must be one-dimensional.")
         # The current MVC gridder accumulates all integrations into one plane.

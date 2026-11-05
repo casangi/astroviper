@@ -59,8 +59,13 @@ node/processing calls. The three validators cover geometry, frequencies,
 weighting, algorithm compatibility, scales, gain, stopping controls, memory
 policies, backend capabilities, restoration, and output compatibility.
 Unsupported requested features raise, including multifield execution,
-`field_name`, continuum MPI, continuum graph visualization, and cube global
+continuum MPI, continuum graph visualization, and cube global
 weighting. The cube Dask graph visualization and cube MPI setup remain supported.
+`field_name` is retained as a string or `None` in all driver interfaces. Delphi
+uses it to determine the phase centre; the standard cube and continuum drivers
+reserve it for future field selection. Input must already be single-field.
+`mpi_cluster_setup` is retained on all drivers and ignored outside the cube MPI
+backend. `primary_beam_limit` accepts the inclusive interval `[0.0, 1.0]`.
 
 Continuum restoration uses `restoration_output` as its sole product selector:
 `apparent` writes `SKY_RESTORED_FLAT_NOISE`, `primary_beam_corrected` writes

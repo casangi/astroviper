@@ -689,3 +689,10 @@ def test_delphi_gives_the_teardown_to_the_last_compute_only(
     )
     assert psf_calls[-1]["mpi_cluster_setup"] == mpi_cluster_setup
     assert mpi_cluster_setup == {"max_workers": 2, "teardown_force_exit_seconds": 30}
+
+
+def test_metadata_uses_explicit_field_name():
+    metadata = delphi_module._processing_set_metadata(
+        _metadata_processing_set(field_names=("target",)), "target"
+    )
+    np.testing.assert_array_equal(metadata["phase_direction"], PC)

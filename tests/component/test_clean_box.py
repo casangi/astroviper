@@ -79,3 +79,19 @@ def test_image_edge_box_matches_whole_image(
     assert np.isfinite(actual.SKY_MODEL).all()
     assert np.max(np.abs(actual.SKY_MODEL.values)) > 0
     xr.testing.assert_equal(actual, expected)
+
+
+@pytest.mark.parametrize("workflow", ["cube", "mfs", "mvc"])
+def test_iso_time_matches_mjd_image(imaging_input, tmp_path, workflow):
+    store, params = imaging_input
+    params = {
+        **params,
+        "image_size": [48, 48],
+        "n_taylor_terms": 1,
+        "time_coords": [58849.5],
+    }
+    expected = _run(store, tmp_path / "mjd.img.zarr", params, workflow, None)
+    params = {**params, "time_coords": "2020-01-01T12:00:00"}
+    actual = _run(store, tmp_path / "iso.img.zarr", params, workflow, None)
+    xr.testing.assert_equal(actual, expected)
+    assert params["time_coords"] == "2020-01-01T12:00:00"

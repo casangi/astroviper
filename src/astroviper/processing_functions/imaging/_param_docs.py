@@ -25,7 +25,11 @@ _IMAGE_PARAMS_DOC = (
     'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
     "correlations (see ``instrument_polarization_basis``). The labels must be a\n"
     "nonempty one-dimensional vector. An xarray DataArray must have exactly\n"
-    "the dimension ``polarization``; other dimension names are rejected."
+    "the dimension ``polarization``; other dimension names are rejected.\n"
+    "``time_coords`` accepts XRADIO image-factory time formats: numeric MJD\n"
+    "(UTC) days, numeric strings, ISO time strings, datetime64 values, Python\n"
+    "datetime objects, or Astropy Time, as scalars or one-dimensional sequences.\n"
+    "Times must be finite and nonempty; validation preserves the supplied values."
 )
 
 _CONTINUUM_IMAGE_PARAMS_DOC = (
@@ -142,7 +146,15 @@ _CONTINUUM_MODE_DOC = (
     'parallel hands only; ``["I", "Q", "U", "V"]`` is refused.'
 )
 
+_FIELD_NAME_DOC = (
+    "Reserved field-selection argument, retained for future support. It does\n"
+    "not currently filter fields; prepare a single-field input Processing Set."
+)
+
 IMAGING_PARAM_DOCS = {
+    "image_cube_single_field.field_name": _FIELD_NAME_DOC,
+    "image_continuum_single_field.field_name": _FIELD_NAME_DOC,
+    "point_spread_function_cube_single_field.field_name": _FIELD_NAME_DOC,
     "feather.selection": """``xarray`` ``isel`` selection applied to both input images (e.g. a
 frequency channel range or an ``l``/``m`` sub-window). Chunking is determined
 from the selected images.""",
