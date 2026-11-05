@@ -44,8 +44,8 @@ Distributed drivers use `require_complete=True` to require image coordinates
 and cycle controls before I/O, output creation, or graph construction. Lower
 entry points validate the subset of settings their interfaces receive. Validation
 does not insert defaults, rewrite aliases, clamp values, sort scales, or select
-a different algorithm. Optional omitted settings use the implementation's
-existing defaults without modifying the caller's dictionary. Explicit invalid
+a different algorithm. Only settings declared optional use their documented
+defaults without modifying the caller's dictionary. Explicit invalid
 values, including `None` thresholds, raise.
 
 `reference_frequency`, in Hz, is used consistently in configuration and continuum
@@ -94,8 +94,11 @@ frequency units, when supplied, must be Hz.
 Fixed gain must satisfy `0 < gain <= 1`. Adaptive gain is available only through
 the separately documented native MT-MFS API, whose safety checks are preserved.
 Scales must start at zero, increase strictly at native float32 scale precision,
-and fit within half the smallest image axis. No scale is dropped. Briggs robust
-is in `[-2, 2]`; absolute-Briggs noise must be positive. `uniform` remains an
+and fit within half the smallest image axis. No scale is dropped. Both `briggs`
+and `briggs_abs` require `imaging_weights_params["robust"]` explicitly, as a finite
+real number in `[-2, 2]`. An omitted value raises `KeyError`; no robustness value
+is inferred or inserted into the caller's mapping. Absolute-Briggs noise must
+be positive. `uniform` remains an
 unchanged public weighting value and uses its production kernel recipe.
 
 Natural weighting is independent of density scope and always uses the local

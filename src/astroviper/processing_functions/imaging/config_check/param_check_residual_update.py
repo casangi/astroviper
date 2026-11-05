@@ -386,7 +386,8 @@ def check_residual_update(config, *, mode, require_complete=False):
         raise ValueError("briggs_abs requires weighting_scope='local'.")
 
     # --- Briggs robustness ---
-    # A requested Briggs scheme must provide its finite, supported robustness.
+    # Both Briggs variants require an explicit weighting trade-off. Validate
+    # that finite value in [-2, 2] without inferring or inserting a default.
     if weighting in ("briggs", "briggs_abs"):
         if "robust" not in weights:
             raise KeyError(

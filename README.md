@@ -53,6 +53,12 @@ output representations before execution, without modifying caller parameters.
 FITS output requires uniformly spaced channel centres; use Zarr for irregular
 frequency axes.
 
+Both Briggs weighting variants (`"briggs"` and `"briggs_abs"`) require an
+explicit finite `robust` value in `[-2, 2]`; no robustness default is inferred.
+For example, use `{"weighting": "briggs", "robust": 0.5}` when 0.5 is the
+intended weighting choice. Missing or invalid values fail validation before
+input reads, output creation, or graph execution.
+
 Input metadata and generated task boundaries are checked before output writes
 or graph execution when they become available. Continuum beam inference needs
 only antenna metadata and runs before the first output write. Spectral preflight

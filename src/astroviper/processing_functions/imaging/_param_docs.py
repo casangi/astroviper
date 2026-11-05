@@ -226,8 +226,9 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
     "residual_cycle_continuum_single_field.image_params": (_CONTINUUM_IMAGE_PARAMS_DOC),
     "imaging_weights_params": (
         'Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,\n'
-        '``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs\n'
-        'trade-off. ``weighting_scope`` is ``"local"`` for a density per\n'
+        '``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an\n'
+        "explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.\n"
+        '``weighting_scope`` is ``"local"`` for a density per\n'
         'frequency channel or ``"global"`` for one density across all selected\n'
         "channels in distributed continuum imaging. Natural weighting is\n"
         "independent of this scope."

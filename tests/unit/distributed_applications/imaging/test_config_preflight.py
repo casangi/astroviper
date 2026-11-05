@@ -341,3 +341,51 @@ def test_invalid_clean_boxes_fail_before_io(
         assert list(output.iterdir()) == [output / "sentinel"]
     else:
         assert not output.exists()
+
+
+@pytest.mark.parametrize("workflow", ["cube", "mfs", "mvc"])
+@pytest.mark.parametrize("weighting", ["briggs", "briggs_abs"])
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_missing_briggs_robust_fails_before_io(
+    monkeypatch, tmp_path, workflow, weighting, existing_output
+):
+    from astroviper.distributed_applications.imaging import (
+        image_continuum_single_field,
+        image_cube_single_field,
+    )
+    from tests.unit.processing_functions.imaging.config_check.test_full_validation import (
+        configuration,
+    )
+
+    config = configuration()
+    config["imaging_weights_params"] = {"weighting": weighting}
+    if weighting == "briggs_abs":
+        config["imaging_weights_params"]["briggs_abs_noise"] = 1.0
+    if workflow == "cube":
+        config["image_params"]["n_taylor_terms"] = 1
+        config["deconvolver"] = "hogbom"
+        driver = image_cube_single_field
+    else:
+        config["continuum_mode"] = workflow
+        driver = image_continuum_single_field
+    output = tmp_path / "missing-robust.img.zarr"
+    if existing_output:
+        output.mkdir()
+        (output / "sentinel").write_bytes(b"existing output")
+
+    def forbidden_io(*args, **kwargs):
+        raise AssertionError("Missing robust must fail before input reads or writes")
+
+    monkeypatch.setattr("xradio.measurement_set.open_processing_set", forbidden_io)
+    monkeypatch.setattr("astroviper.utils.io.write_zarr_image_store", forbidden_io)
+    monkeypatch.setattr(
+        "astroviper.utils.io.create_empty_data_variables_on_disk", forbidden_io
+    )
+    with pytest.raises(KeyError, match="robust"):
+        driver(str(tmp_path / "never-opened.ps.zarr"), str(output), **config)
+    assert "robust" not in config["imaging_weights_params"]
+    if existing_output:
+        assert (output / "sentinel").read_bytes() == b"existing output"
+        assert list(output.iterdir()) == [output / "sentinel"]
+    else:
+        assert not output.exists()
