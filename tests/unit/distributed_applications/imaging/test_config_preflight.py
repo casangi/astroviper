@@ -98,6 +98,94 @@ def test_generated_cube_records_channel_preflight(tmp_path, generated_store):
     image.close()
 
 
+def test_cube_graph_omits_driver_only_arrays_without_changing_images(
+    tmp_path, generated_store, monkeypatch
+):
+    """Compare execution and serialized graphs with the former full payload."""
+    from copy import deepcopy
+
+    import cloudpickle
+    import graphviper.graph_tools as graph_tools
+    import xarray as xr
+
+    processing_set = open_processing_set(str(generated_store))
+    image_params = continuum_tests._tw_hydra_image_params(processing_set)
+    image_params["n_taylor_terms"] = 1
+    original = deepcopy(image_params)
+    real_map = graph_tools.map
+    use_full_payload = False
+
+    def compare_payloads(**kwargs):
+        params = kwargs["input_params"]
+        assert "frequency_coords" not in params["image_params"]
+        assert "spectral_diagnostics" not in params
+        assert params["input_checked"] is True
+        assert params["image_params"] is not image_params
+        compact = real_map(**kwargs)
+        for task in compact["map"]["input_params"]:
+            assert "frequency_coords" not in task["image_params"]
+            assert "spectral_diagnostics" not in task
+            assert task["task_coords"]["frequency"]["data"].size > 0
+
+        with xr.open_zarr(params["image_store"]) as image:
+            diagnostics = image.attrs["input_validation"]
+        full_params = {
+            **params,
+            "image_params": image_params,
+            "spectral_diagnostics": diagnostics,
+        }
+        full = real_map(**{**kwargs, "input_params": full_params})
+        # Measure real GraphVIPER task structures at both review task counts.
+        # Each task owns a copy, as in GraphVIPER's map implementation.
+        for count in (16, 118):
+            lengths = []
+            for graph in (compact, full):
+                tasks = graph["map"]["input_params"]
+                measured = deepcopy(graph)
+                measured["map"]["input_params"] = [
+                    {**deepcopy(tasks[index % len(tasks)]), "task_id": index}
+                    for index in range(count)
+                ]
+                lengths.append(len(cloudpickle.dumps(measured)))
+            assert lengths[0] < lengths[1]
+        return full if use_full_payload else compact
+
+    monkeypatch.setattr(graph_tools, "map", compare_payloads)
+    compact_result, compact_image = _run_cube(
+        generated_store,
+        tmp_path / "compact.img.zarr",
+        image_params,
+        single_precision_image=False,
+    )
+    use_full_payload = True
+    full_result, full_image = _run_cube(
+        generated_store,
+        tmp_path / "full.img.zarr",
+        image_params,
+        single_precision_image=False,
+    )
+    try:
+        # Independent runs have different data-group provenance timestamps.
+        xr.testing.assert_equal(compact_image, full_image)
+        assert (
+            compact_image.attrs["input_validation"]
+            == full_image.attrs["input_validation"]
+        )
+        compact_attrs = deepcopy(compact_image.attrs)
+        full_attrs = deepcopy(full_image.attrs)
+        for attrs in (compact_attrs, full_attrs):
+            for group in attrs["data_groups"].values():
+                group.pop("date", None)
+        assert compact_attrs == full_attrs
+        assert compact_result["input_validation"] == full_result["input_validation"]
+        xr.testing.assert_identical(
+            xr.Dataset(attrs=image_params), xr.Dataset(attrs=original)
+        )
+    finally:
+        compact_image.close()
+        full_image.close()
+
+
 def test_spectral_failure_leaves_no_output_or_graph(
     monkeypatch, tmp_path, generated_store
 ):

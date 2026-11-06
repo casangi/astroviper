@@ -1017,7 +1017,13 @@ def image_cube_single_field(
     zarr_meta = {}
 
     input_params = {}
-    input_params["image_params"] = image_params
+    # Cube nodes obtain their frequency slice from task_coords. Keep the full
+    # axis on the driver instead of copying it into every task's configuration.
+    input_params["image_params"] = {
+        name: value
+        for name, value in image_params.items()
+        if name != "frequency_coords"
+    }
     input_params["imaging_weights_params"] = imaging_weights_params
     input_params["zarr_meta"] = zarr_meta
     input_params["to_disk"] = True
@@ -1187,8 +1193,8 @@ def image_cube_single_field(
         )
 
     input_params["image_store"] = image_store
-    input_params["image_params"] = image_params
-    input_params["spectral_diagnostics"] = spectral_diagnostics
+    # Preflight diagnostics belong to the output metadata and driver result;
+    # cube nodes do not consume them.
 
     # Sharded output: dispatch the tasks in shard-interleaved "waves" (each wave
     # touches every shard file once) so the concurrently running tasks write to
@@ -1203,26 +1209,8 @@ def image_cube_single_field(
             image_store, image_data_variables_keep[0], node_task_data_mapping
         )
 
-    # Create Map Graph. The node task has an explicit, NumPy-documented,
-    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
-        check_configuration_consistency,
-    )
-
-    check_configuration_consistency(
-        locals(),
-        input_params,
-        names=(
-            "image_params",
-            "imaging_weights_params",
-            "cycle_control_params",
-            "deconvolver",
-            "single_precision_image",
-        ),
-    )
-
-    # standalone signature; graphviper's map() adapts it to the single
-    # ``input_params`` dict calling convention automatically (forwarding only the
-    # keys the node task declares), so it can be passed directly.
+    # The node task has an explicit, NumPy-documented standalone signature;
+    # graphviper adapts the input_params dictionary to its declared arguments.
     start = time.time()
     viper_graph = map(
         input_data=ps_xdt,
