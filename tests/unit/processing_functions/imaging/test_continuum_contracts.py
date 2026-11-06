@@ -254,7 +254,7 @@ def test_model_accumulation_rejects_incompatible_state(continuum_mode, fault):
         "missing_beam",
         "missing_model",
         "negative_limit",
-        "unit_limit",
+        "above_unit_limit",
     ],
 )
 def test_pb_correction_rejects_invalid_final_products(fault):
@@ -271,8 +271,8 @@ def test_pb_correction_rejects_invalid_final_products(fault):
         image = image.drop_vars("SKY_MODEL")
     elif fault == "negative_limit":
         primary_beam_limit = -0.1
-    elif fault == "unit_limit":
-        primary_beam_limit = 1.0
+    elif fault == "above_unit_limit":
+        primary_beam_limit = np.nextafter(1.0, np.inf)
     with pytest.raises(KeyError if fault.startswith("missing") else ValueError):
         restore_continuum_image(
             image,
@@ -280,3 +280,11 @@ def test_pb_correction_rejects_invalid_final_products(fault):
             primary_beam_limit=primary_beam_limit,
             continuum_mode="mvc",
         )
+
+
+def test_restoration_accepts_inclusive_primary_beam_limit():
+    image = make_continuum_image(continuum_mode="mvc")
+    restore_continuum_image(
+        image, restoration_output="both", primary_beam_limit=1.0, continuum_mode="mvc"
+    )
+    assert image.SKY_RESTORED_FLAT_SKY.dims == image.SKY_MODEL.dims

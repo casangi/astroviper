@@ -764,6 +764,7 @@ def check_taylor_hessian_approximation(
 
 
 @shares_param_docs
+@shares_param_docs
 def check_model_products(
     img_xds,
     config,
@@ -771,6 +772,7 @@ def check_model_products(
     mode,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
+    hessian_cache=None,
 ):
     """Validate model-update products and all MT-MFS Hessians before compute.
 
@@ -784,6 +786,12 @@ def check_model_products(
         Imaging kind and field layout.
     image_data_group_in_name, image_data_group_out_name : str
         Data groups naming the residual/PSF/mask and any existing model.
+
+    hessian_cache : mutable mapping or None, optional
+        Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.
+        Reuse requires matching PSF contents, coordinates, precision, Taylor basis,
+        geometry, scales, scale bias, and cell sampling. Changing-product checks
+        always run. None disables reuse; input_checked does not control this cache.
 
     Returns
     -------
@@ -1079,6 +1087,35 @@ def check_model_products(
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
 
     psf_values = psf.transpose(*psf_dims).values
+    hessian_fields = (
+        "taylor_hessian_condition_number",
+        "taylor_hessian_order_zero_noise_amplification",
+        "taylor_hessian_spatial_blocks",
+    )
+    cache_key = None
+    if hessian_cache is not None:
+        from collections.abc import MutableMapping
+        from copy import deepcopy
+
+        from astroviper.processing_functions.imaging.config_check._hessian_cache import (
+            model_hessian_cache_key,
+        )
+
+        if not isinstance(hessian_cache, MutableMapping):
+            raise TypeError("hessian_cache must be a mutable mapping or None.")
+        cache_key = model_hessian_cache_key(
+            psf,
+            psf_values,
+            diagnostics,
+            small_scale_bias=controls.get("small_scale_bias", 0.0),
+            cell_size=config.get("image_params", {}).get("cell_size"),
+        )
+        if hessian_cache.get("key") == cache_key:
+            # Only static diagnostics are reused. All changing-product checks
+            # above have run on the actual arrays of this invocation.
+            diagnostics.update(deepcopy(hessian_cache["diagnostics"]))
+            return diagnostics
+
     epsilon = np.finfo(residual.dtype).eps
     for time_index in range(residual.sizes["time"]):
         for polarization_index in range(residual.sizes["polarization"]):
@@ -1219,6 +1256,14 @@ def check_model_products(
                     **spatial_diagnostics,
                 }
             )
+    if hessian_cache is not None:
+        # Publish only after every plane has passed. Failed checks never create
+        # a reusable success record, and image metadata is not used as a cache.
+        hessian_cache.clear()
+        hessian_cache.update(
+            key=cache_key,
+            diagnostics={name: deepcopy(diagnostics[name]) for name in hessian_fields},
+        )
     return diagnostics
 
 

@@ -4004,6 +4004,9 @@ def image_continuum_single_field(
             # Static products from the first cycle are required in later cycles.
             # This holds static quantities such as PSF and PB
             if not is_first_cycle:
+                append_input_params["hessian_cache"] = last_cycle_return_dict.get(
+                    "hessian_cache"
+                )
                 append_input_params["static_xds"] = static_xds
                 append_input_params["model_xds"] = model_xds
                 append_input_params["model_uv_xds"] = model_uv_xds

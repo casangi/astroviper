@@ -571,3 +571,78 @@ def test_hogbom_multi_term_rejection_precedes_every_write(
     assert snapshot(store) == input_before
     assert snapshot(output) == output_before
     assert output.exists() is existing_output
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_hessian_reuse_matches_fresh_checks_across_cycles(
+    tmp_path, continuum_input, monkeypatch, continuum_mode
+):
+    from importlib import import_module
+
+    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+
+    checks = import_module(
+        "astroviper.processing_functions.imaging.config_check.param_check_model_update"
+    )
+    original_hessian = mtmfs.hessian
+    hessian_calls = []
+
+    def count_hessians(*args, **kwargs):
+        hessian_calls.append(1)
+        return original_hessian(*args, **kwargs)
+
+    monkeypatch.setattr(mtmfs, "hessian", count_hessians)
+    original_check = checks.check_model_products
+    diagnostic_hessian_calls = []
+
+    def record_checks(*args, **kwargs):
+        before = len(hessian_calls)
+        result = original_check(*args, **kwargs)
+        diagnostic_hessian_calls.append(len(hessian_calls) - before)
+        return result
+
+    monkeypatch.setattr(checks, "check_model_products", record_checks)
+    store, params, mask_path, _ = continuum_input
+    cached_result, cached_image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "cached.img.zarr",
+        continuum_mode,
+        "local",
+        False,
+        "in_memory",
+        "tree",
+    )
+    assert cached_result["n_cycles"] >= 2
+    planes = cached_image.sizes["time"] * cached_image.sizes["polarization"]
+    assert sum(diagnostic_hessian_calls) == planes
+    assert len(diagnostic_hessian_calls) == cached_result["n_cycles"] + 1
+    assert "hessian_cache" not in cached_image.attrs
+
+    # Recompute every diagnostic on the reference run while keeping the same
+    # processing path and all numerical inputs.
+    def without_reuse(*args, **kwargs):
+        kwargs["hessian_cache"] = None
+        return record_checks(*args, **kwargs)
+
+    monkeypatch.setattr(checks, "check_model_products", without_reuse)
+    hessian_calls.clear()
+    diagnostic_hessian_calls.clear()
+    fresh_result, fresh_image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "fresh.img.zarr",
+        continuum_mode,
+        "local",
+        False,
+        "in_memory",
+        "tree",
+    )
+    assert sum(diagnostic_hessian_calls) >= fresh_result["n_cycles"] * planes
+    assert cached_result["n_cycles"] == fresh_result["n_cycles"]
+    xr.testing.assert_equal(cached_image, fresh_image)
+    assert (
+        cached_image.attrs["input_validation"] == fresh_image.attrs["input_validation"]
+    )

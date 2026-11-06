@@ -152,6 +152,12 @@ _FIELD_NAME_DOC = (
 )
 
 IMAGING_PARAM_DOCS = {
+    "hessian_cache": (
+        "Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.\n"
+        "Reuse requires matching PSF contents, coordinates, precision, Taylor basis,\n"
+        "geometry, scales, scale bias, and cell sampling. Changing-product checks\n"
+        "always run. None disables reuse; input_checked does not control this cache."
+    ),
     "image_cube_single_field.field_name": _FIELD_NAME_DOC,
     "image_continuum_single_field.field_name": _FIELD_NAME_DOC,
     "point_spread_function_cube_single_field.field_name": _FIELD_NAME_DOC,

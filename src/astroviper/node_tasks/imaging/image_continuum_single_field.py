@@ -3855,27 +3855,12 @@ def model_update_continuum_single_field(
         "model",
     )
 
-    from astroviper.processing_functions.imaging.config_check._common import (
-        CONTINUUM_SINGLE_FIELD,
-    )
-    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
-        check_model_products,
-    )
-
-    product_diagnostics = check_model_products(
-        img_xds,
-        input_params,
-        mode=CONTINUUM_SINGLE_FIELD,
-        image_data_group_in_name=image_data_group_in_name,
-        image_data_group_out_name=image_data_group_out_name,
-    )
-    img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
-        product_diagnostics
-    )
+    # This state is separate from input_checked and from persisted diagnostics.
+    hessian_cache = dict(input_params.get("hessian_cache") or {})
     if "spectral_diagnostics" in input_params:
-        img_xds.attrs["input_validation"]["spectral_design"] = input_params[
-            "spectral_diagnostics"
-        ]
+        img_xds.attrs.setdefault("input_validation", {})["spectral_design"] = (
+            input_params["spectral_diagnostics"]
+        )
 
     # -------------------------------------------------------------
     # Obtain the cycle controller.
@@ -3939,6 +3924,25 @@ def model_update_continuum_single_field(
             )
     stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
     if stopcode.imaging != 0:
+        # No processing-function update follows convergence. Validate the
+        # actual final products here, with the same content-verified cache.
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+        )
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_model_products,
+        )
+
+        img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
+            check_model_products(
+                img_xds,
+                input_params,
+                mode=CONTINUUM_SINGLE_FIELD,
+                image_data_group_in_name=image_data_group_in_name,
+                image_data_group_out_name=image_data_group_out_name,
+                hessian_cache=hessian_cache,
+            )
+        )
         import xarray as xr
 
         from astroviper.utils.data_group_tools import modify_data_groups_xds
@@ -3966,6 +3970,7 @@ def model_update_continuum_single_field(
                 "residual_statistics": residual_imaging_dict,
                 "residual_converged": True,
                 "is_first_cycle": False,
+                "hessian_cache": hessian_cache,
             }
         )
 
@@ -4015,6 +4020,8 @@ def model_update_continuum_single_field(
             input_params.get("cycle_acceleration", "none") == "conjugate_gradient"
         ),
         input_checked=True,
+        product_config=input_params,
+        hessian_cache=hessian_cache,
     )
     copy_residual_statistics(deconvolve_dict, residual_imaging_dict)
 
@@ -4072,5 +4079,6 @@ def model_update_continuum_single_field(
             "stopcode": stopcode,
             "stopdesc": stopdesc,
             "is_first_cycle": False,
+            "hessian_cache": hessian_cache,
         }
     )

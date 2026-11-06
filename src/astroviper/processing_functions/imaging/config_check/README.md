@@ -399,3 +399,21 @@ constructed image dimensions and task boundaries when these become available.
 Both stages use the same layout validator. Continuum beam metadata validation
 returns a resolved copy for reuse across tasks and cycles; resolving a beam on
 a direct helper call still applies its own applicable checks.
+
+## Runtime Taylor-Hessian reuse
+
+The model-update processing function checks current products once per update.
+The append node checks products itself when convergence skips that update.
+Dimension/basis/precision, model, mask and derived-control checks always run;
+`input_checked` never skips these runtime checks.
+
+Expensive PSF/Hessian diagnostics may reuse an explicit workflow-owned
+`hessian_cache`. A content digest and coordinate labels identify the actual PSF;
+Taylor count, precision, image geometry, reference frequency, scales, scale bias
+and cell sampling also participate in the key. Changed inputs force fresh
+checks, including in-place PSF edits and replacement products after worker
+transfer. A linear PSF read avoids repeating scale convolutions and spatial
+Fourier diagnostics. Only successful checks populate the cache. Cached
+statistics are copied into output diagnostics; the cache remains separate from
+image metadata, and native cleaner safety checks remain active on every update.
+Direct calls without a cache recompute all diagnostics.

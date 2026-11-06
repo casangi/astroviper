@@ -3500,6 +3500,8 @@ def model_update_mtmfs_single_field(
     write_back_deconvolver_residual=False,
     *,
     input_checked: bool = False,
+    product_config=None,
+    hessian_cache=None,
 ):
     """Perform one continuum model update.
 
@@ -3619,6 +3621,15 @@ def model_update_mtmfs_single_field(
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
 
+    product_config : mapping or None, optional
+        Full validated workflow configuration for runtime product/basis checks.
+        The supplied deconvolver and current deconvolution controls take precedence.
+    hessian_cache : mutable mapping or None, optional
+        Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.
+        Reuse requires matching PSF contents, coordinates, precision, Taylor basis,
+        geometry, scales, scale bias, and cell sampling. Changing-product checks
+        always run. None disables reuse; input_checked does not control this cache.
+
     Returns
     -------
     deconvolve_dict : ImagingDict
@@ -3673,10 +3684,15 @@ def model_update_mtmfs_single_field(
 
     product_diagnostics = check_model_products(
         img_xds,
-        {"deconvolver": deconvolver, "deconvolve_params": deconvolve_params},
+        {
+            **({} if product_config is None else product_config),
+            "deconvolver": deconvolver,
+            "cycle_control_params": deconvolve_params,
+        },
         mode=CONTINUUM_SINGLE_FIELD,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
+        hessian_cache=hessian_cache,
     )
     img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
         product_diagnostics
