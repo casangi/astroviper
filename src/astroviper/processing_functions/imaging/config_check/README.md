@@ -55,7 +55,10 @@ requires two to four. Cube planes are independent single-term images.
 
 JSON schemas check basic structure, dtypes, and allowed strings. Python owns
 numerical bounds and conditional relationships, including checks on direct
-node/processing calls. The three validators cover geometry, frequencies,
+node/processing calls. Shared allowed-value rules intentionally also protect
+Python entry points that have no schema decorator. These non-mutating checks
+use `require_*` predicates; the legacy `check_params` helper inserts defaults
+and is not interchangeable with them. The three validators cover geometry, frequencies,
 weighting, algorithm compatibility, scales, gain, stopping controls, memory
 policies, backend capabilities, restoration, and output compatibility.
 Unsupported requested features raise, including multifield execution,
@@ -390,3 +393,9 @@ Feather has a separate validation entry point, without a cube/continuum mode.
 `check_feather_inputs` checks the shapes and dtypes of opened `SKY` products
 without loading pixels. The driver retains file access, existence checks, and
 chunking. A missing overwrite key is read as `False` without changing `outim`.
+
+Output layout is checked from supplied coordinates at entry and again with the
+constructed image dimensions and task boundaries when these become available.
+Both stages use the same layout validator. Continuum beam metadata validation
+returns a resolved copy for reuse across tasks and cycles; resolving a beam on
+a direct helper call still applies its own applicable checks.

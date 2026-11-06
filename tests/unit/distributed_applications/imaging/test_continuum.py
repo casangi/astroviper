@@ -841,8 +841,10 @@ def _run_tw_hydra_continuum(
     return result, xr.open_zarr(output_store)
 
 
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("existing_output", [False, True])
 def test_beam_metadata_rejection_precedes_weight_scan_and_output(
-    tmp_path, tw_hydra_store, monkeypatch
+    tmp_path, tw_hydra_store, monkeypatch, continuum_mode, existing_output
 ):
     """An unsupported inferred aperture must fail before expensive preflight."""
     processing_set = open_processing_set(str(tw_hydra_store))
@@ -864,11 +866,23 @@ def test_beam_metadata_rejection_precedes_weight_scan_and_output(
         unexpected_weight_scan,
     )
     output = tmp_path / "unsupported_beam.img.zarr"
+    if existing_output:
+        output.mkdir()
+        (output / "marker").write_text("keep existing output")
     with pytest.raises(ValueError, match="12-m or 7-m"):
         _run_tw_hydra_continuum(
-            tw_hydra_store, output, processing_set, 1, "mfs", {"weighting": "natural"}
+            tw_hydra_store,
+            output,
+            processing_set,
+            1,
+            continuum_mode,
+            {"weighting": "natural"},
         )
-    assert not output.exists()
+    if existing_output:
+        assert list(output.iterdir()) == [output / "marker"]
+        assert (output / "marker").read_text() == "keep existing output"
+    else:
+        assert not output.exists()
 
 
 def test_tw_hydra_mvc_local_beam_moments_are_frequency_partition_invariant(

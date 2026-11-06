@@ -23,8 +23,29 @@ def generated_store(tmp_path_factory):
     ],
 )
 def test_generated_continuum_image_records_coordinate_and_actual_product_checks(
-    tmp_path, generated_store, continuum_mode, weighting
+    tmp_path, generated_store, continuum_mode, weighting, monkeypatch
 ):
+    from copy import deepcopy
+    from importlib import import_module
+
+    import xarray as xr
+
+    beams = import_module(
+        "astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam"
+    )
+    resolver = beams.resolve_continuum_primary_beam
+    resolved_parameters = []
+
+    def record_resolution(image_params, antenna_xds, **kwargs):
+        original = deepcopy(image_params)
+        resolved = resolver(image_params, antenna_xds, **kwargs)
+        xr.testing.assert_identical(
+            xr.Dataset(attrs=image_params), xr.Dataset(attrs=original)
+        )
+        resolved_parameters.append(resolved)
+        return resolved
+
+    monkeypatch.setattr(beams, "resolve_continuum_primary_beam", record_resolution)
     processing_set = open_processing_set(str(generated_store))
     result, image = continuum_tests._run_tw_hydra_continuum(
         generated_store,
@@ -35,6 +56,9 @@ def test_generated_continuum_image_records_coordinate_and_actual_product_checks(
         weighting,
         deconvolver="mtmfs",
     )
+    assert len(resolved_parameters) == 1
+    assert resolved_parameters[0]["primary_beam_model"] != "auto"
+    assert resolved_parameters[0]["list_dish_diameters"]
     validation = image.attrs["input_validation"]
     assert validation["spectral_design"]["spectral_design_rank"] == 2
     spectral = validation["spectral_design"]

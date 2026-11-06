@@ -11,6 +11,7 @@ from xradio.image._util.image_factory import _time_coords_to_mjd
 from astroviper.processing_functions.imaging.config_check import (
     CONTINUUM_SINGLE_FIELD,
     CUBE_SINGLE_FIELD,
+    check_driver_workflow,
     check_residual_update,
 )
 
@@ -46,6 +47,7 @@ def test_xradio_time_formats_are_accepted_without_mutation(value, mode, continuu
     before = deepcopy(value)
     config = {"image_params": {"time_coords": value}, "continuum_mode": continuum_mode}
     check_residual_update(config, mode=mode)
+    check_driver_workflow(config, mode=mode)
     assert config["image_params"]["time_coords"] is value
     np.testing.assert_array_equal(
         _time_coords_to_mjd(value), _time_coords_to_mjd(before)
@@ -81,4 +83,15 @@ def test_mvc_time_plane_count_is_checked_after_parsing():
                 "image_params": {"time_coords": Time(["2020-01-01", "2020-01-02"])},
             },
             mode=CONTINUUM_SINGLE_FIELD,
+        )
+
+
+@pytest.mark.parametrize(
+    "time", [58849.5, "2020-01-01T12:00:00", Time("2020-01-01T12:00:00")]
+)
+def test_scalar_time_cannot_hide_oversized_disk_chunks(time):
+    with pytest.raises(ValueError, match="exceeds the time extent"):
+        check_driver_workflow(
+            {"image_params": {"time_coords": time}, "image_chunking": {"time": 2}},
+            mode=CUBE_SINGLE_FIELD,
         )

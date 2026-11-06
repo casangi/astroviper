@@ -599,7 +599,7 @@ def check_selected_samples(samples):
 
 
 def check_continuum_beam_metadata(image_params, antenna_xds, *, continuum_mode):
-    """Check inferred continuum apertures before output creation.
+    """Check and return inferred continuum apertures before output creation.
 
     Parameters
     ----------
@@ -609,6 +609,13 @@ def check_continuum_beam_metadata(image_params, antenna_xds, *, continuum_mode):
         Small combined antenna metadata dataset.
     continuum_mode : {"mfs", "mvc"}
         Beam-selection context, shared by all frequency tasks.
+
+    Returns
+    -------
+    dict
+        Validated copy with the resolved beam prescription. Reuse it throughout
+        the workflow so all tasks share the same metadata-derived apertures.
+        The caller's configuration and antenna metadata are unchanged.
     """
     from astroviper.processing_functions.imaging.config_check._primary_beam import (
         check_continuum_primary_beam,
@@ -630,12 +637,13 @@ def check_continuum_beam_metadata(image_params, antenna_xds, *, continuum_mode):
         )
 
     # --- Inferred prescription ---
-    # The existing resolver checks common diameters and ALMA aperture support.
+    # The resolver checks common diameters and ALMA aperture support.
     # It returns a copy; validate that copy without changing the caller config.
     resolved = resolve_continuum_primary_beam(
         image_params, antenna_xds, continuum_mode=continuum_mode
     )
     check_continuum_primary_beam(resolved)
+    return resolved
 
 
 # ========================================================================

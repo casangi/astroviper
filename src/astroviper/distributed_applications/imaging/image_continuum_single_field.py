@@ -3467,13 +3467,13 @@ def image_continuum_single_field(
         for ms_name, ms_xdt in ps_xdt.items()
     }
 
-    # Beam inference needs only antenna metadata and must fail before the first
-    # output write or weight scan. Keep the original later resolver and guards.
+    # Infer and validate the beam once from the full metadata before output
+    # creation. Reuse the resolved copy for every frequency task and cycle.
     from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
         check_continuum_beam_metadata,
     )
 
-    check_continuum_beam_metadata(
+    resolved_image_params = check_continuum_beam_metadata(
         image_params,
         ps_xdt.xr_ps.get_combined_antenna_xds(),
         continuum_mode=continuum_mode,
@@ -3619,17 +3619,7 @@ def image_continuum_single_field(
 
     controller = _make_continuum_cycle_controller(cycle_control_params)
 
-    from astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam import (
-        resolve_continuum_primary_beam,
-    )
-
-    # Resolve telescope/band once before task partitioning. Every MVC chunk
-    # must use the prescription selected from the full image frequency axis.
-    image_params = resolve_continuum_primary_beam(
-        image_params,
-        ps_xdt.xr_ps.get_combined_antenna_xds(),
-        continuum_mode=continuum_mode,
-    )
+    image_params = resolved_image_params
     input_params["image_params"] = image_params
 
     import copy

@@ -210,7 +210,7 @@ def check_kept_variables(config, *, mode=None, fits=False, require_image=True):
         )
 
 
-def check_output_layout(config, *, parallel_coords=None):
+def check_output_layout(config, *, parallel_coords=None, image_shape=None):
     """Check disk layout using parameters and, when available, task boundaries.
 
     Parameters
@@ -219,6 +219,9 @@ def check_output_layout(config, *, parallel_coords=None):
         Image coordinates and optional image_chunking/image_sharding mappings.
     parallel_coords : mapping or None
         Generated task coordinates. Absent during the first parameter check.
+    image_shape : mapping or None
+        Actual image dimension sizes when available. Otherwise infer sizes from
+        supplied coordinates; scalar time formats represent one image plane.
     """
     # --- Layout schema ---
     # A positive count and a known dimension are decidable before partitioning.
@@ -226,20 +229,25 @@ def check_output_layout(config, *, parallel_coords=None):
 
     # Before mapping, only image extents and explicit disk chunks are known.
     # Once task coordinates exist, the same validator checks write alignment.
-    image = config.get("image_params", {})
-    shape = {
-        dim: len(image[f"{dim}_coords"])
-        for dim in ("time", "frequency", "polarization")
-        if f"{dim}_coords" in image
-    }
-    if "image_size" in image:
-        shape.update(zip(("l", "m"), image["image_size"], strict=True))
+    if image_shape is None:
+        image = config.get("image_params", {})
+        shape = {
+            dim: np.size(image[f"{dim}_coords"])
+            for dim in ("time", "frequency", "polarization")
+            if f"{dim}_coords" in image
+        }
+        if "image_size" in image:
+            shape.update(zip(("l", "m"), image["image_size"], strict=True))
+        extra_dims = ("time", "frequency", "polarization", "l", "m", "u", "v")
+    else:
+        shape = dict(image_shape)
+        extra_dims = ("u", "v")
     validate_image_chunking_and_sharding(
         config.get("image_chunking"),
         config.get("image_sharding"),
         shape,
         parallel_coords,
-        extra_dims=("time", "frequency", "polarization", "l", "m", "u", "v"),
+        extra_dims=extra_dims,
         parallelism_pending=parallel_coords is None,
     )
 

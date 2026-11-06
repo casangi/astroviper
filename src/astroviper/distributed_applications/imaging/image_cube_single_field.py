@@ -864,7 +864,6 @@ def image_cube_single_field(
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
-        validate_image_chunking_and_sharding,
         write_zarr_image_store,
     )
     from astroviper.utils.measurement_set_v2 import is_measurement_set_v2
@@ -998,15 +997,13 @@ def image_cube_single_field(
         + str(len(parallel_coords["frequency"]["data_chunks"]))
     )
 
-    # Recheck the shared layout rules now that automatic task sizes are known.
-    # Retain the original driver/writer validation while the checks coexist.
+    # Check write alignment against the constructed image and automatic tasks.
     from astroviper.processing_functions.imaging.config_check._output import (
         check_output_layout,
     )
 
-    check_output_layout(locals(), parallel_coords=parallel_coords)
-    validate_image_chunking_and_sharding(
-        image_chunking, image_sharding, dict(img_xds.sizes), parallel_coords
+    check_output_layout(
+        locals(), parallel_coords=parallel_coords, image_shape=dict(img_xds.sizes)
     )
     timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
         time.time() - start

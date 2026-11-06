@@ -164,7 +164,10 @@ def test_inferred_alma_aperture_and_explicit_override():
     with pytest.raises(ValueError, match="12-m or 7-m"):
         check_continuum_beam_metadata({}, antenna, continuum_mode="mvc")
     params = {"list_dish_diameters": [10.7]}
-    check_continuum_beam_metadata(params, antenna, continuum_mode="mvc")
+    resolved = check_continuum_beam_metadata(params, antenna, continuum_mode="mvc")
+    assert resolved["list_dish_diameters"] == [10.7]
+    assert resolved["list_blockage_diameters"] == [0.75]
+    assert resolved["primary_beam_model"] == "casa_airy"
     assert params == {"list_dish_diameters": [10.7]}
 
 
