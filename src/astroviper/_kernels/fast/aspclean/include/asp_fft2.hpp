@@ -26,6 +26,8 @@
 // SSE2): the module has no AVX2 build, whose lanes give some NaNs another
 // sign bit than the reference's.
 
+#include <sys/mman.h>  // the large buffers (POSIX: the fast modules build on Linux and macOS)
+
 #include <algorithm>
 #include <complex>
 #include <cstddef>
@@ -39,13 +41,6 @@
 #include <vector>
 
 #include "asp_fft.hpp"
-
-// Transparent huge pages for the large buffers are off: madvise(MADV_HUGEPAGE)
-// is compiled in only with -DASTROVIPER_ASP_FAST_HUGEPAGES=1 on a platform
-// that has it (the runs of this work keep NumPy's NUMPY_MADVISE_HUGEPAGE=0).
-#if defined(ASTROVIPER_ASP_FAST_HUGEPAGES) && ASTROVIPER_ASP_FAST_HUGEPAGES
-#include <sys/mman.h>
-#endif
 
 #ifdef POCKETFFT_NO_VECTORS
 #error "the fast Asp transforms need pocketfft's SIMD lanes (GCC or Clang 5 or later)"
@@ -63,23 +58,43 @@ static_assert(sizeof(cd) == sizeof(cx) && alignof(cd) == alignof(cx),
               "std::complex<double> and pocketfft's cmplx<double> share a layout");
 
 // ---------------------------------------------------------------------------
-// Memory: uninitialised, 64-byte aligned buffers (2 MB aligned and advised
-// for huge pages from 4 MB on, when built with ASTROVIPER_ASP_FAST_HUGEPAGES).
+// Memory: uninitialised buffers. One of 4 MB or more is mapped from the system
+// and unmapped when it is freed, so that a call leaves no memory behind:
+// glibc's malloc serves such a block from the arena of the thread that asks
+// once its mmap threshold has risen (up to 32 MB), and keeps it after it is
+// freed (a model update frees tens of them, M: 0.6 GiB kept after three
+// 2048^2 cube calls). Smaller buffers come from malloc, 64-byte aligned. With
+// AddressSanitizer every buffer comes from malloc, which its redzones cover.
+// A mapping of 4 MB or more is advised for huge pages only when built with
+// ASTROVIPER_ASP_FAST_HUGEPAGES=1 (it gave no speed in this work's runs, M).
 // ---------------------------------------------------------------------------
+#if defined(__SANITIZE_ADDRESS__)
+constexpr std::size_t kMappedBytes = SIZE_MAX;
+#else
+constexpr std::size_t kMappedBytes = std::size_t(4) << 20;
+#endif
+
 inline void* alloc_bytes(std::size_t bytes) {
-    std::size_t align = 64;
+    if (bytes >= kMappedBytes) {
+        void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) throw std::bad_alloc();
 #if defined(ASTROVIPER_ASP_FAST_HUGEPAGES) && ASTROVIPER_ASP_FAST_HUGEPAGES && defined(MADV_HUGEPAGE)
-    constexpr std::size_t kHuge = std::size_t(2) << 20;
-    const bool big = bytes >= 2 * kHuge;
-    if (big) align = kHuge;
+        madvise(p, bytes, MADV_HUGEPAGE);
 #endif
-    const std::size_t rounded = (std::max<std::size_t>(bytes, 1) + align - 1) / align * align;
-    void* p = std::aligned_alloc(align, rounded);
+        return p;
+    }
+    void* p = std::aligned_alloc(64, (std::max<std::size_t>(bytes, 1) + 63) / 64 * 64);
     if (p == nullptr) throw std::bad_alloc();
-#if defined(ASTROVIPER_ASP_FAST_HUGEPAGES) && ASTROVIPER_ASP_FAST_HUGEPAGES && defined(MADV_HUGEPAGE)
-    if (big) madvise(p, rounded, MADV_HUGEPAGE);
-#endif
     return p;
+}
+
+// Frees what alloc_bytes(bytes) returned (bytes: the same size).
+inline void free_bytes(void* p, std::size_t bytes) noexcept {
+    if (p == nullptr) return;
+    if (bytes >= kMappedBytes)
+        munmap(p, bytes);
+    else
+        std::free(p);
 }
 
 template <typename T>
@@ -92,16 +107,16 @@ public:
     Buf(Buf&& o) noexcept : p_(o.p_), n_(o.n_), cap_(o.cap_) { o.p_ = nullptr; o.n_ = o.cap_ = 0; }
     Buf& operator=(Buf&& o) noexcept {
         if (this != &o) {
-            std::free(p_);
+            free_bytes(p_, cap_ * sizeof(T));
             p_ = o.p_; n_ = o.n_; cap_ = o.cap_;
             o.p_ = nullptr; o.n_ = o.cap_ = 0;
         }
         return *this;
     }
-    ~Buf() { std::free(p_); }
+    ~Buf() { free_bytes(p_, cap_ * sizeof(T)); }
     void resize(std::size_t n) {
         if (n > cap_) {
-            std::free(p_);
+            free_bytes(p_, cap_ * sizeof(T));
             p_ = nullptr;
             n_ = cap_ = 0;  // still empty if the allocation throws
             p_ = static_cast<T*>(alloc_bytes(n * sizeof(T)));
