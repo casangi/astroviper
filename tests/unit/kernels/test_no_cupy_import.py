@@ -113,9 +113,16 @@ FAST_DFT = pytest.param(
         reason="fast DFT module not built",
     ),
 )
+FAST_ASP = pytest.param(
+    "asp=fast",
+    marks=pytest.mark.skipif(
+        not _installed("_kernels/fast/aspclean/_aspclean_fast_ext"),
+        reason="fast Asp module not built",
+    ),
+)
 
 
-@pytest.mark.parametrize("selection", ["ref", ALL_REF, FAST_DFT])
+@pytest.mark.parametrize("selection", ["ref", ALL_REF, FAST_DFT, FAST_ASP])
 def test_hooked_process_never_imports_cupy(run_python, selection):
     out = run_python("-c", BLOCKED, ASTROVIPER_KERNELS=selection)
     result = json.loads(out.rpartition("RESULT ")[2])

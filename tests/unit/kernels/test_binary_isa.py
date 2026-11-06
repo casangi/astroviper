@@ -14,6 +14,9 @@ the installed extensions outside ``_kernels``, so a new reference extension
 cannot escape the rules. Skipped off x86-64 and when ``objdump`` (binutils) is
 not installed.
 
+A fast module built for the baseline instruction set only
+(``BASELINE_FAST_MODULES``) follows the rules of the reference modules.
+
 The fast modules (``FAST_MODULES``) have no fused multiply-add either. Their
 AVX2 code lives in ``*_avx2.cpp`` units built without LTO, which must define
 no weak or unique symbol (``nm`` types W, V, u): the linker may otherwise keep
@@ -54,6 +57,8 @@ REFERENCE_MODULES = [
 
 #: The fast-kernel modules, relative to the ``astroviper`` package.
 FAST_MODULES = ["_kernels/fast/dft/_dft_fast_ext"]
+#: The fast-kernel modules with no AVX2 unit (no AVX2 code at all).
+BASELINE_FAST_MODULES = ["_kernels/fast/aspclean/_aspclean_fast_ext"]
 
 #: FMA3 (vfmadd231pd, vfnmsub132ss, vfmaddsub213ps, ...) and FMA4 mnemonics.
 FMA = re.compile(r"\bvfn?m(?:add|sub|addsub|subadd)\w*")
@@ -139,6 +144,13 @@ def test_reference_module_has_no_fma_and_no_wide_registers(relative):
     assert XMM_REGISTER.search(text), "the register pattern matches nothing"
     assert sorted(set(FMA.findall(text))) == []
     assert sorted(set(WIDE_REGISTER.findall(text))) == []
+
+
+@pytest.mark.parametrize(
+    "relative", BASELINE_FAST_MODULES, ids=lambda r: r.split("/")[-1]
+)
+def test_baseline_fast_module_has_no_fma_and_no_wide_registers(relative):
+    test_reference_module_has_no_fma_and_no_wide_registers(relative)
 
 
 @pytest.mark.parametrize("relative", FAST_MODULES, ids=lambda r: r.split("/")[-1])
