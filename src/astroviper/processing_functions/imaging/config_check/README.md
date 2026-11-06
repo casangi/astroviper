@@ -417,3 +417,10 @@ Fourier diagnostics. Only successful checks populate the cache. Cached
 statistics are copied into output diagnostics; the cache remains separate from
 image metadata, and native cleaner safety checks remain active on every update.
 Direct calls without a cache recompute all diagnostics.
+
+After configuration validation, cube and continuum drivers check destination
+existence before opening the input or running metadata preflight. This read-only
+filesystem check lives in `utils.io`, follows XRADIO's actual Zarr naming policy,
+and checks the cube FITS output directory as supplied. It leaves existing files
+untouched, including when overwrite is enabled. Writers retain their final
+existence checks to catch destinations created after preflight.

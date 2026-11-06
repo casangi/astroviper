@@ -95,3 +95,38 @@ def test_iso_time_matches_mjd_image(imaging_input, tmp_path, workflow):
     actual = _run(store, tmp_path / "iso.img.zarr", params, workflow, None)
     xr.testing.assert_equal(actual, expected)
     assert params["time_coords"] == "2020-01-01T12:00:00"
+
+
+@pytest.mark.parametrize("workflow", ["cube", "mfs", "mvc"])
+@pytest.mark.parametrize("requested_name", ["existing.zarr", "existing.img.zarr"])
+def test_existing_image_is_rejected_before_input_reopens(
+    imaging_input, tmp_path, monkeypatch, workflow, requested_name
+):
+    from xradio.image import image as image_module
+
+    if requested_name == "existing.zarr" and not hasattr(
+        image_module, "zarr_store_name"
+    ):
+        pytest.skip("XRADIO keeps the requested name, so these are distinct outputs")
+    store, params = imaging_input
+    params = {**params, "image_size": [48, 48], "n_taylor_terms": 1}
+    output = tmp_path / "existing.img.zarr"
+    _run(store, output, params, workflow, None)
+    before = {
+        str(path.relative_to(output)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+
+    def forbidden_input(*args, **kwargs):
+        raise AssertionError("An existing output must be rejected before input I/O")
+
+    monkeypatch.setattr("xradio.measurement_set.open_processing_set", forbidden_input)
+    with pytest.raises(FileExistsError, match="overwrite=True"):
+        _run(store, tmp_path / requested_name, params, workflow, None)
+    after = {
+        str(path.relative_to(output)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+    assert after == before

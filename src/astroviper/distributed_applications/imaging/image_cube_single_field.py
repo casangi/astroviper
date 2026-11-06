@@ -842,6 +842,12 @@ def image_cube_single_field(
 
         check_config(locals(), mode=CUBE_SINGLE_FIELD, require_complete=True)
 
+    from astroviper.utils.io import check_image_output_destination
+
+    check_image_output_destination(
+        image_store, overwrite=overwrite, output_image_format=output_image_format
+    )
+
     import time
 
     import dask

@@ -514,6 +514,53 @@ def image_chunk_and_shard_shapes(
     return chunks, shards
 
 
+def check_image_output_destination(
+    image_store, *, overwrite=False, output_image_format="zarr"
+):
+    """Reject an existing destination before opening imaging input data.
+
+    Parameters
+    ----------
+    image_store : str or path-like
+        Requested output name. Zarr follows the installed XRADIO writer's
+        naming policy. Cube FITS output uses this directory unchanged and
+        creates its per-variable FITS files inside it.
+    overwrite : bool, optional
+        Permit replacement. This check never creates, deletes, or changes files.
+    output_image_format : {"zarr", "fits"}, optional
+        Output representation, default "zarr".
+
+    Raises
+    ------
+    FileExistsError
+        If the actual output destination exists and overwrite is False.
+
+    Notes
+    -----
+    The writer must still check at write time: a destination can appear after
+    this early check. Older XRADIO writers without a Zarr naming resolver keep
+    the requested name; newer writers supply the resolver used here.
+    """
+    import os
+
+    if overwrite:
+        return
+    destination = os.fsdecode(os.fspath(image_store))
+    if output_image_format == "zarr":
+        from xradio.image import image as image_module
+
+        resolve_name = getattr(image_module, "zarr_store_name", None)
+        if resolve_name is not None:
+            destination = os.path.expanduser(destination)
+            if len(destination) > 1:
+                destination = destination.rstrip(os.sep)
+            destination = resolve_name(destination)
+    if os.path.lexists(destination):
+        raise FileExistsError(
+            f"{destination} already exists. Set overwrite=True to replace it."
+        )
+
+
 def write_zarr_image_store(img_xds, image_store, overwrite=False):
     """Write an image dataset to a Zarr store and return the path of the store.
 

@@ -3352,6 +3352,10 @@ def image_continuum_single_field(
 
         check_config(locals(), mode=CONTINUUM_SINGLE_FIELD, require_complete=True)
 
+    from astroviper.utils.io import check_image_output_destination
+
+    check_image_output_destination(image_store, overwrite=overwrite)
+
     import time
 
     import toolviper.utils.logger as logger
