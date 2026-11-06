@@ -220,6 +220,13 @@ matrix at each spatial frequency is `H_kl(u) = Fourier(P_(k+l))(u)`.
   obtaining it is outside coordinate-only preflight. Convert FWHM to `sigma_i`, and form
   the Taylor Fourier PSFs from
   `sum_i q_i * x_i**order * sigma_i**2 * exp(-2*pi**2*sigma_i**2*|u|**2)`.
+  Each channel contributes only where `|u| <= Bmax_i * frequency_i / c`,
+  including the boundary. Gaussian tails beyond that channel's longest
+  baseline cannot represent measured information and are excluded before
+  forming the Taylor moments. Modes outside all channel envelopes are
+  unsupported, not conditioning failures. Within the combined envelope, a
+  mode supported by too few channels can still have deficient Taylor rank.
+  This circular outer envelope does not model UV holes or directional coverage.
   The Gaussian area factor is retained; only a common normalization cancels.
   No Gaussian cleaning components are introduced. Evaluate at most 33 by 33
   coordinates sampled from the image's half-Fourier grid. This is a coarse

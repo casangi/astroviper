@@ -6,7 +6,10 @@ import warnings
 import numpy as np
 import pytest
 
-from astroviper.processing_functions.imaging.config_check import CONTINUUM_SINGLE_FIELD
+from astroviper.processing_functions.imaging.config_check import (
+    CONTINUUM_SINGLE_FIELD,
+    _spatial_hessian,
+)
 from astroviper.processing_functions.imaging.config_check._spatial_hessian import (
     check_gaussian_spatial_hessian,
     check_psf_spatial_hessian,
@@ -275,8 +278,100 @@ def test_frequency_dependent_gaussian_width_changes_spatial_coupling():
             frequencies, np.ones(3), np.full(3, 5000), **kwargs
         )
     assert constant_width["max_order_zero_noise_amplification"] == pytest.approx(1)
-    assert natural_resolution["max_order_zero_noise_amplification"] > 3
+    assert natural_resolution["max_order_zero_noise_amplification"] > 1
+    assert natural_resolution["excess_noise_mode_count"] == 0
+    assert natural_resolution["rank_deficient_mode_count"] > 0
     assert natural_resolution["sampling"] == "at_most_33_by_33_half_fourier_grid"
+
+
+@pytest.mark.parametrize("channel_count", [3, 1025])
+@pytest.mark.parametrize("scalar_baseline", [False, True])
+def test_gaussian_channel_support_matches_explicit_moments(
+    monkeypatch, channel_count, scalar_baseline
+):
+    frequencies = 299792458.0 * np.resize([1.0, 2.0, 3.0], channel_count)
+    weights = np.resize([1.0, 2.0, 0.5], channel_count)
+    baselines = 1.0 if scalar_baseline else np.resize([1.0, 0.5, 1.0], channel_count)
+    original = (frequencies.copy(), weights.copy(), np.copy(baselines))
+    captured = {}
+
+    def inspect(transfer, first, second, **kwargs):
+        captured.update(transfer=transfer.copy(), first=first, second=second)
+        return check_spatial_hessian_blocks(transfer, first, second, **kwargs)
+
+    monkeypatch.setattr(_spatial_hessian, "check_spatial_hessian_blocks", inspect)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        result = check_gaussian_spatial_hessian(
+            frequencies,
+            weights,
+            baselines,
+            n_taylor_terms=2,
+            reference_frequency=2 * 299792458.0,
+            image_size=[8, 8],
+            cell_size=[-0.125, 0.125],
+            precision="float64",
+        )
+    # Independent scalar moment sums, including the per-channel hard cutoff.
+    # The grid contains radius 1 and 3 exactly, testing inclusive boundaries.
+    cutoff = np.broadcast_to(baselines, frequencies.shape) * frequencies / 299792458.0
+    sigma = (1 / cutoff) / np.sqrt(8 * np.log(2))
+    x = frequencies / (2 * 299792458.0) - 1
+    expected = np.zeros_like(captured["transfer"])
+    for i, u in enumerate(captured["first"]):
+        for j, v in enumerate(captured["second"]):
+            radius_squared = u**2 + v**2
+            for channel in range(channel_count):
+                if radius_squared <= cutoff[channel] ** 2:
+                    response = (
+                        weights[channel]
+                        / weights.max()
+                        * (sigma[channel] / sigma.max()) ** 2
+                        * np.exp(-2 * np.pi**2 * sigma[channel] ** 2 * radius_squared)
+                    )
+                    for order in range(3):
+                        expected[order, i, j] += response * x[channel] ** order
+    np.testing.assert_allclose(captured["transfer"], expected, rtol=1e-12, atol=1e-15)
+    radius_squared = captured["first"][:, None] ** 2 + captured["second"][None, :] ** 2
+    outside = radius_squared > cutoff.max() ** 2
+    assert result["outside_baseline_support_mode_count"] == int(outside.sum())
+    assert result["unsupported_mode_count"] == int(outside.sum())
+    assert (
+        result["rank_deficient_mode_count"] > 0
+    )  # Only the high-frequency channel remains.
+    assert result["maximum_spatial_frequency_cycles_per_radian"] == [
+        float(cutoff.min()),
+        float(cutoff.max()),
+    ]
+    for examples in result["examples"].values():
+        for mode in examples:
+            assert np.hypot(mode["frequency_l"], mode["frequency_m"]) <= cutoff.max()
+    np.testing.assert_array_equal(frequencies, original[0])
+    np.testing.assert_array_equal(weights, original[1])
+    np.testing.assert_array_equal(baselines, original[2])
+
+
+@pytest.mark.parametrize("precision", ["float32", "float64"])
+def test_gaussian_tails_outside_all_baselines_do_not_warn(precision):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = check_gaussian_spatial_hessian(
+            299792458.0 * np.array([1.0, 2.0, 3.0]),
+            np.ones(3),
+            0.1,
+            n_taylor_terms=2,
+            reference_frequency=2 * 299792458.0,
+            image_size=[8, 8],
+            cell_size=[-0.125, 0.125],
+            precision=precision,
+        )
+    assert result["supported_mode_count"] == result["assessed_mode_count"] == 1
+    assert result["unsupported_mode_count"] == result["mode_count"] - 1
+    assert (
+        result["outside_baseline_support_mode_count"]
+        == result["unsupported_mode_count"]
+    )
+    assert not caught
 
 
 def test_actual_gaussian_psfs_agree_with_analytic_blocks_at_resolved_modes():

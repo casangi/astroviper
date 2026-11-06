@@ -277,6 +277,12 @@ def check_gaussian_spatial_hessian(
     -------
     dict
         Shared spatial-block diagnostics and Gaussian approximation metadata.
+
+    Notes
+    -----
+    Each channel contributes only for ``|u| <= Bmax * frequency / c``.
+    This circular support envelope excludes Gaussian tails where no baseline
+    can supply data; it does not approximate actual UV coverage inside it.
     """
     frequencies, weights = np.asarray(frequencies), np.asarray(weights)
     if (
@@ -316,6 +322,7 @@ def check_gaussian_spatial_hessian(
     # independently normalizing each Fourier Gaussian would alter Taylor
     # coupling. Only a common area and weight scale may cancel here.
     fwhm = (299792458.0 / frequencies) / baselines
+    maximum_spatial_frequency = 1.0 / fwhm
     sigma = fwhm / np.sqrt(8 * np.log(2))
     areas = (sigma / sigma.max()) ** 2
     q = weights / weights.max()
@@ -348,6 +355,18 @@ def check_gaussian_spatial_hessian(
         gaussian = np.exp(
             -2 * np.pi**2 * sigma[selection, None] ** 2 * radii_squared[None, :]
         )
+        # --- Per-channel baseline support ---
+        # Gaussian Fourier tails extend to infinity, whereas a channel's data
+        # cannot constrain |u| > Bmax_i / lambda_i. Exclude those tails before
+        # adding Taylor moments: otherwise their unequal decay can mimic poor
+        # conditioning at spatial frequencies absent from the observation.
+        # A channel's cutoff is inclusive. Modes outside every channel become
+        # zero/unsupported; modes supported by only part of the band retain
+        # their genuine loss of Taylor information. The circular envelope says
+        # nothing about holes or anisotropy within the measured UV coverage.
+        gaussian[
+            radii_squared[None, :] > maximum_spatial_frequency[selection, None] ** 2
+        ] = 0.0
         gaussian *= (q[selection] * areas[selection])[:, None]
         taylor = np.vander(x[selection], N=2 * n_taylor_terms - 1, increasing=True)
         transfer += taylor.T @ gaussian
@@ -364,6 +383,14 @@ def check_gaussian_spatial_hessian(
         sampling="at_most_33_by_33_half_fourier_grid",
         gaussian_fwhm_radians=[float(fwhm.min()), float(fwhm.max())],
         resolution_recipe="wavelength_over_longest_usable_projected_baseline",
+        support_recipe="per_channel_circular_longest_projected_baseline_envelope",
+        maximum_spatial_frequency_cycles_per_radian=[
+            float(maximum_spatial_frequency.min()),
+            float(maximum_spatial_frequency.max()),
+        ],
+        outside_baseline_support_mode_count=int(
+            np.count_nonzero(radii_squared > maximum_spatial_frequency.max() ** 2)
+        ),
     )
     return result
 
