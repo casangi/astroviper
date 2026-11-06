@@ -113,9 +113,16 @@ FAST_DFT = pytest.param(
         reason="fast DFT module not built",
     ),
 )
+FAST_HOGBOM = pytest.param(
+    "hogbom=fast",
+    marks=pytest.mark.skipif(
+        not _installed("_kernels/fast/hogbom/_hogbom_fast_ext"),
+        reason="fast Hogbom module not built",
+    ),
+)
 
 
-@pytest.mark.parametrize("selection", ["ref", ALL_REF, FAST_DFT])
+@pytest.mark.parametrize("selection", ["ref", ALL_REF, FAST_DFT, FAST_HOGBOM])
 def test_hooked_process_never_imports_cupy(run_python, selection):
     out = run_python("-c", BLOCKED, ASTROVIPER_KERNELS=selection)
     result = json.loads(out.rpartition("RESULT ")[2])

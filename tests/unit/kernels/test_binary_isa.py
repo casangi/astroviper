@@ -53,7 +53,10 @@ REFERENCE_MODULES = [
 ]
 
 #: The fast-kernel modules, relative to the ``astroviper`` package.
-FAST_MODULES = ["_kernels/fast/dft/_dft_fast_ext"]
+FAST_MODULES = [
+    "_kernels/fast/dft/_dft_fast_ext",
+    "_kernels/fast/hogbom/_hogbom_fast_ext",
+]
 
 #: FMA3 (vfmadd231pd, vfnmsub132ss, vfmaddsub213ps, ...) and FMA4 mnemonics.
 FMA = re.compile(r"\bvfn?m(?:add|sub|addsub|subadd)\w*")
