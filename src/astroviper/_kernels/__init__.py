@@ -19,20 +19,25 @@ imported and nothing can switch later in that process.
 
 Hooked kernels and entries (implementations registered so far):
 
-=========  ================================  ===============
-kernel     entries                           implementations
-=========  ================================  ===============
-``dft``    ``dft_predict``                   ``ref``
-``hogbom`` ``clean_cube``,                   ``ref``
-           ``clean_cube_many_threads``
-``asp``    ``clean``, ``clean_cube``         ``ref``
-=========  ================================  ===============
+==========  ================================  ===============
+kernel      entries                           implementations
+==========  ================================  ===============
+``dft``     ``dft_predict``                   ``ref``
+``hogbom``  ``clean_cube``,                   ``ref``
+            ``clean_cube_many_threads``
+``asp``     ``clean``, ``clean_cube``         ``ref``
+==========  ================================  ===============
 
 ``ASTROVIPER_KERNELS_TRACE=<dir>``
     Each wrapped call appends one JSON line to
-    ``<dir>/kernels-<host>-<pid>.jsonl``: kernel, entry, impl, path, t_start,
-    t_end (epoch seconds), wall_s, rusage_cpu_s (process-wide), first_call,
-    and the shapes and dtypes of the array arguments.
+    ``<dir>/kernels-<host>-<pid>.jsonl``: kernel, entry, impl, path, error
+    (the exception type name, or null), t_start and t_end (epoch seconds,
+    ``t_end = t_start + wall_s``), wall_s, rusage_cpu_s with
+    ``cpu_scope="process"`` (the process-wide CPU time of the call),
+    first_call, host, pid, thread, and the shapes and dtypes of the array
+    arguments. A line that cannot be written is logged once and dropped; it
+    never changes the call's result. Only hooked shims trace: setting the
+    trace without ``ASTROVIPER_KERNELS`` traces nothing.
 
 Processes inherit the selection only through their environment: set the
 variable before a Dask cluster starts. A worker that imported a shim with it

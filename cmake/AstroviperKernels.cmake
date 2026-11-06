@@ -56,10 +56,18 @@ endif()
 #                 the module is skipped with a message, so a toolchain gap can
 #                 never break the reference wheel.
 #   SOURCES       generic .cpp files (baseline ISA)
-#   AVX2_SOURCES  *_avx2.cpp files, compiled with -mavx2 and without LTO (so no
-#                 AVX2 code can be merged into a generic inline function); the
-#                 module is compiled with AV_HAVE_AVX2=1 when they are added.
-#                 Ignored on non-x86_64 targets.
+#   AVX2_SOURCES  *_avx2.cpp files, compiled with -mavx2 and without LTO (so
+#                 the link-time optimiser cannot inline their AVX2 code into
+#                 generic functions); the module is compiled with
+#                 AV_HAVE_AVX2=1 when they are added. Ignored on non-x86_64
+#                 targets. -fno-lto does not stop the linker from picking an
+#                 AVX2 copy of a weak (COMDAT) symbol: an inline function or
+#                 template instantiation emitted by such a unit can replace a
+#                 generic caller's copy. So an AVX2 unit keeps all its code in
+#                 an anonymous namespace, uses no std containers or other
+#                 header templates, and must define no weak symbol (nm: no
+#                 W/V/u), which test_binary_isa.py checks on the -fno-lto
+#                 objects of each fast module (a WP3 acceptance item).
 #   INCLUDE_DIRS  as for astroviper_add_pybind_module()
 # ---------------------------------------------------------------------------
 function(astroviper_add_fast_kernel_module)
@@ -70,15 +78,28 @@ function(astroviper_add_fast_kernel_module)
     endif()
 
     # The probe is built with the package's C++ standard (CMAKE_CXX_STANDARD),
-    # standard library and threads, like the module.
+    # standard library, threads and the module's include directories.
     set(CMAKE_REQUIRED_LIBRARIES Threads::Threads)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         set(CMAKE_REQUIRED_FLAGS "-stdlib=libc++")
         set(CMAKE_REQUIRED_LINK_OPTIONS "-stdlib=libc++")
     endif()
-    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/${FK_PROBE}" _probe)
-    check_cxx_source_compiles("${_probe}" AV_FAST_PROBE_${FK_NAME})
-    if(NOT AV_FAST_PROBE_${FK_NAME})
+    set(CMAKE_REQUIRED_INCLUDES)
+    foreach(_dir IN LISTS FK_INCLUDE_DIRS)
+        get_filename_component(_dir "${_dir}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        list(APPEND CMAKE_REQUIRED_INCLUDES "${_dir}")
+    endforeach()
+    # The cached result is keyed on the probe's content and include
+    # directories, and editing the probe re-runs configure, so an incremental
+    # build directory never keeps a stale verdict.
+    set(_probe_file "${CMAKE_CURRENT_SOURCE_DIR}/${FK_PROBE}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_probe_file}")
+    file(READ "${_probe_file}" _probe)
+    string(SHA256 _probe_key "${_probe}|${CMAKE_REQUIRED_INCLUDES}")
+    string(SUBSTRING "${_probe_key}" 0 16 _probe_key)
+    set(_probe_result AV_FAST_PROBE_${FK_NAME}_${_probe_key})
+    check_cxx_source_compiles("${_probe}" ${_probe_result})
+    if(NOT ${_probe_result})
         message(STATUS
             "AstroVIPER: skipping fast kernel ${FK_NAME}: its compile probe "
             "failed with ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}; "

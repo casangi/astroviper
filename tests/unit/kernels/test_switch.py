@@ -7,15 +7,22 @@ themselves. A fake ``hogbom=fast`` implementation (this module's
 implementation. Import-time behaviour runs in subprocesses.
 """
 
+import importlib
 import json
+import logging
+import os
 import re
 import socket
+import sys
+import textwrap
+import threading
 from importlib import import_module
 
 import numpy as np
 import pytest
 
 from astroviper._kernels import _switch
+from astroviper._kernels.__main__ import main as check_main
 from astroviper._kernels._switch import ENV, RESERVED, TRACE_ENV, dispatch, impl, parse
 from astroviper.processing_functions.imaging.deconvolvers.hogbom import _hogbom_ext
 from tests.unit.kernels.conftest import ALL_REF, SHIMS
@@ -35,6 +42,30 @@ def fake_fast(monkeypatch):
     monkeypatch.setattr(_switch, "_resolved", {})
     parse.cache_clear()
     yield
+    parse.cache_clear()
+
+
+@pytest.fixture
+def fake_module(monkeypatch, tmp_path):
+    """``fake_module(name, source=None)`` registers module ``name`` as
+    ``hogbom=fast``, written from ``source`` (``None``: no such module)."""
+    names = []
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(_switch, "_resolved", {})
+    monkeypatch.setattr(_switch, "_logged", set())
+
+    def register(name, source=None):
+        if source is not None:
+            (tmp_path / f"{name}.py").write_text(textwrap.dedent(source))
+            importlib.invalidate_caches()
+        monkeypatch.setitem(_switch._REGISTRY["hogbom"], "fast", name)
+        parse.cache_clear()
+        names.append(name)
+        return name
+
+    yield register
+    for name in names:
+        sys.modules.pop(name, None)
     parse.cache_clear()
 
 
@@ -197,19 +228,138 @@ def test_trace_lines(monkeypatch, tmp_path):
         rf"kernels-{re.escape(socket.gethostname())}-\d+\.jsonl", path.name
     )
     first, second = map(json.loads, path.read_text().splitlines())
-    assert {k: first[k] for k in ("kernel", "entry", "impl", "path")} == {
+    assert {k: first[k] for k in ("kernel", "entry", "impl", "path", "error")} == {
         "kernel": "hogbom",
         "entry": "clean_cube",
         "impl": "ref",
         "path": "ref",
+        "error": None,
     }
     assert (first["first_call"], second["first_call"]) == (True, False)
     assert first["t_start"] <= first["t_end"] <= second["t_start"]
+    assert first["t_end"] == first["t_start"] + first["wall_s"]
     assert first["wall_s"] >= 0 and first["rusage_cpu_s"] >= 0
+    assert first["cpu_scope"] == "process"
+    assert (first["host"], first["pid"]) == (socket.gethostname(), os.getpid())
+    assert first["thread"] == threading.get_ident()
     assert first["shapes"]["0"] == second["shapes"]["residual_cube"] == [1, 1, 1, 8, 8]
     assert first["shapes"]["max_iter_per_cycle_updated"] == [1, 1, 1]
     assert first["dtypes"]["max_iter_per_cycle_updated"] == "int32"
     assert "gain" not in first["shapes"]
+
+
+def test_trace_records_a_raising_call(monkeypatch, tmp_path):
+    monkeypatch.setenv(ENV, "hogbom=ref")
+    monkeypatch.setenv(TRACE_ENV, str(tmp_path))
+    wrapper = dispatch("hogbom", _hogbom_ext.clean_cube)
+    with pytest.raises(TypeError):
+        wrapper(residual_cube=np.zeros((2, 2)))
+    (path,) = tmp_path.iterdir()
+    (record,) = map(json.loads, path.read_text().splitlines())
+    assert (record["impl"], record["path"], record["error"]) == (
+        "ref",
+        "ref",
+        "TypeError",
+    )
+
+
+def test_unwritable_trace_never_changes_the_outcome(monkeypatch, tmp_path, caplog):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+    monkeypatch.setenv(ENV, "hogbom=ref")
+    monkeypatch.setenv(TRACE_ENV, str(blocker))
+    monkeypatch.setattr(_switch, "_trace_failed", set())
+    wrapper = dispatch("hogbom", _hogbom_ext.clean_cube)
+    direct, switched = _hogbom_inputs(), _hogbom_inputs()
+    expected = _hogbom_ext.clean_cube(**direct)
+    with caplog.at_level(logging.WARNING, logger="astroviper.kernels"):
+        result = wrapper(**switched)
+        with pytest.raises(TypeError):  # the call's own exception, not OSError
+            wrapper(residual_cube=np.zeros((2, 2)))
+    assert result.keys() == expected.keys()
+    for key, value in expected.items():
+        assert np.asarray(result[key]).tobytes() == np.asarray(value).tobytes()
+    for key in ("residual_cube", "model_cube"):
+        assert direct[key].tobytes() == switched[key].tobytes()
+    (warning,) = caplog.records
+    assert "cannot write trace lines" in warning.getMessage()
+
+
+def test_impl_imports_without_holding_the_lock(fake_module):
+    """An implementation module may resolve the reference while it imports."""
+    fake_module(
+        "_kernels_fake_reentrant",
+        """
+        from astroviper._kernels._switch import impl
+
+        reference = impl("hogbom", "clean_cube", "ref")
+        clean_cube = clean_cube_many_threads = reference
+        """,
+    )
+    found = []
+    worker = threading.Thread(
+        target=lambda: found.append(impl("hogbom", "clean_cube", "fast")), daemon=True
+    )
+    worker.start()
+    worker.join(timeout=30)
+    assert not worker.is_alive(), "impl() deadlocked on a re-entrant import"
+    assert found == [_hogbom_ext.clean_cube]
+
+
+def test_missing_module_raises_import_error(fake_module, monkeypatch, capsys):
+    module = fake_module("_kernels_fake_not_built")
+    message = f"hogbom=fast: module {module} is not available"
+    with pytest.raises(ImportError, match=re.escape(message)):
+        impl("hogbom", "clean_cube", "fast")
+    monkeypatch.setenv(ENV, "hogbom=fast")
+    wrapper = dispatch("hogbom", _hogbom_ext.clean_cube)
+    with pytest.raises(ImportError, match=re.escape(message)):
+        wrapper(**_hogbom_inputs())
+    assert check_main(["--check"]) == 1
+    assert f"ASTROVIPER_KERNELS check failed: {message}" in capsys.readouterr().err
+
+
+def test_import_error_inside_a_module_is_not_relabelled(fake_module):
+    fake_module("_kernels_fake_broken", "import _kernels_fake_missing_dependency\n")
+    with pytest.raises(ModuleNotFoundError) as caught:
+        impl("hogbom", "clean_cube", "fast")
+    assert caught.value.name == "_kernels_fake_missing_dependency"
+    assert "is not available" not in str(caught.value)
+
+
+def test_info_logged_once_per_kernel_and_impl_with_isa(fake_module, caplog):
+    module = fake_module(
+        "_kernels_fake_isa",
+        """
+        ISA = "avx2"
+
+        def clean_cube(*args, **kwargs):
+            return "fast"
+
+        clean_cube_many_threads = clean_cube
+        """,
+    )
+    with caplog.at_level(logging.INFO, logger="astroviper.kernels"):
+        for entry in ("clean_cube", "clean_cube_many_threads", "clean_cube"):
+            impl("hogbom", entry, "fast")
+    assert [r.getMessage() for r in caplog.records] == [
+        f"kernel hogbom=fast from {module} (ISA avx2)"
+    ]
+
+
+def test_check_command_checks_the_trace_dir(monkeypatch, tmp_path, capsys):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+    monkeypatch.setenv(ENV, "hogbom=ref")
+    monkeypatch.setenv(TRACE_ENV, str(blocker))
+    assert check_main(["--check"]) == 1
+    assert "ASTROVIPER_KERNELS check failed: " in capsys.readouterr().err
+    monkeypatch.setenv(TRACE_ENV, str(tmp_path / "trace"))
+    assert check_main(["--check"]) == 0
+    assert list((tmp_path / "trace").iterdir()) == []
+    monkeypatch.delenv(ENV)
+    assert check_main(["--check"]) == 0
+    assert "is set but ASTROVIPER_KERNELS is not" in capsys.readouterr().err
 
 
 def test_typo_fails_at_shim_import(run_python):

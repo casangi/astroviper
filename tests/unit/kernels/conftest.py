@@ -59,6 +59,18 @@ def tiny_hogbom():
 """
 
 
+@pytest.fixture(autouse=True)
+def _private_trace(monkeypatch):
+    """Keep the switch's own calls out of a switched session's trace.
+
+    Under the kernels plugin ``ASTROVIPER_KERNELS_TRACE`` names the session's
+    trace directory; the in-process tests here make calls through fake
+    implementations, so each test sees the variable unset (a test that traces
+    sets its own directory).
+    """
+    monkeypatch.delenv("ASTROVIPER_KERNELS_TRACE", raising=False)
+
+
 @pytest.fixture
 def run_python():
     """Run a fresh interpreter: ``run_python(*args, check=True, timeout=300, **env)``.

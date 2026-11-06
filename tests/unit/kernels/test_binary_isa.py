@@ -8,7 +8,11 @@ apply to whole modules, read from the disassembly of the installed files:
 * no 256- or 512-bit vector register in a reference module: the reference
   extensions are built for the baseline x86-64 instruction set.
 
-Each fast-kernel module adds its own rules when it lands. Skipped off x86-64
+The patterns are checked on canned lines of both objdump syntaxes, each module
+must disassemble to real code, and the list of reference modules must equal
+the installed extensions outside ``_kernels``, so a new reference extension
+cannot escape the rules. Each fast-kernel module adds its own rules when it
+lands. Skipped off x86-64
 and when ``objdump`` (binutils) is not installed.
 """
 
@@ -38,8 +42,12 @@ REFERENCE_MODULES = [
 
 #: FMA3 (vfmadd231pd, vfnmsub132ss, vfmaddsub213ps, ...) and FMA4 mnemonics.
 FMA = re.compile(r"\bvfn?m(?:add|sub|addsub|subadd)\w*")
-#: AT&T register names wider than xmm.
-WIDE_REGISTER = re.compile(r"%[yz]mm\d+")
+#: Register names wider than xmm, in AT&T (``%ymm0``) or Intel (``ymm0``) syntax.
+WIDE_REGISTER = re.compile(r"(?<![\w%])%?[yz]mm\d+\b")
+#: SSE register names, which every x86-64 module with floating point uses.
+XMM_REGISTER = re.compile(r"(?<![\w%])%?xmm\d+\b")
+#: One disassembled instruction: ``  <address>:<tab><instruction>``.
+INSTRUCTION = re.compile(r"^\s*[0-9a-f]+:\t", re.MULTILINE)
 
 OBJDUMP = shutil.which("objdump")
 
@@ -52,9 +60,13 @@ pytestmark = [
 ]
 
 
+def _package():
+    return Path(importlib.util.find_spec("astroviper").origin).parent
+
+
 def _module_file(relative):
     """Installed file of an extension module, found without importing it."""
-    package = Path(importlib.util.find_spec("astroviper").origin).parent
+    package = _package()
     for suffix in importlib.machinery.EXTENSION_SUFFIXES:
         path = package / (relative + suffix)
         if path.is_file():
@@ -72,8 +84,42 @@ def _instructions(path):
     ).stdout
 
 
+@pytest.mark.parametrize(
+    "line, fma, wide",
+    [
+        ("  1a2b:\tvfmadd231pd %ymm2,%ymm1,%ymm0", True, True),
+        ("  1a2b:\tvfmadd231pd ymm0,ymm1,ymm2", True, True),
+        ("  1a2b:\tvfnmsub132ss %xmm2,%xmm1,%xmm0", True, False),
+        ("  1a2b:\tvaddpd zmm0,zmm1,zmm2", False, True),
+        ("  1a2b:\tmovq   xmm0,rax", False, False),
+        ("  1a2b:\tmovapd %xmm1,%xmm0", False, False),
+        ("  1a2b:\tcall   1c0 <mymm1@plt>", False, False),
+    ],
+)
+def test_patterns(line, fma, wide):
+    """The rules match in both objdump syntaxes, and only register names."""
+    assert bool(FMA.search(line)) is fma
+    assert bool(WIDE_REGISTER.search(line)) is wide
+    assert INSTRUCTION.search(line)
+
+
+def test_reference_module_list_is_complete():
+    """Every installed extension outside ``_kernels`` is a listed reference module."""
+    package = _package()
+    suffixes = sorted(importlib.machinery.EXTENSION_SUFFIXES, key=len, reverse=True)
+    found = set()
+    for path in package.rglob("*"):
+        relative = path.relative_to(package).as_posix()
+        suffix = next((s for s in suffixes if relative.endswith(s)), None)
+        if suffix and path.is_file() and not relative.startswith("_kernels/"):
+            found.add(relative.removesuffix(suffix))
+    assert sorted(found) == sorted(REFERENCE_MODULES)
+
+
 @pytest.mark.parametrize("relative", REFERENCE_MODULES, ids=lambda r: r.split("/")[-1])
 def test_reference_module_has_no_fma_and_no_wide_registers(relative):
     text = _instructions(_module_file(relative))
+    assert len(INSTRUCTION.findall(text)) > 1000, "no code was disassembled"
+    assert XMM_REGISTER.search(text), "the register pattern matches nothing"
     assert sorted(set(FMA.findall(text))) == []
     assert sorted(set(WIDE_REGISTER.findall(text))) == []

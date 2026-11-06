@@ -8,21 +8,26 @@ A switched session passes only if the selected implementations really ran,
 not just the reference behind them. The plugin:
 
 * requires explicit ``<kernel>=<impl>`` tokens (a bare ``<impl>`` default is
-  refused, so the session states exactly which kernels it is about);
+  refused, so the session states exactly which kernels it is about) and
+  validates them with the switch's own grammar after collection (so that the
+  session imports its modules in the same order as an unswitched one);
 * sets ``ASTROVIPER_KERNELS_TRACE`` to a fresh directory unless it is set, so
   that every hooked call, including those in Dask workers started by the
   tests, writes a trace line;
-* at the end counts, over every trace file, the calls that executed the
-  selected implementation, prints them per kernel, entry and path, and fails
-  the session when a selected kernel that the collected test modules name
-  (see ``USES``) has none;
+* attributes each trace record, by its start time, to the test file that was
+  running (setup, call or teardown), and prints the calls per file, kernel,
+  entry, impl, path and error;
+* fails the session when a collected file of ``MANIFEST`` made no call that
+  executed the selected implementation of an entry it lists for a selected
+  kernel, or when any record ran an implementation other than the session's
+  selection (another selection leaked into the trace);
 * provides the ``kernel_trace`` fixture for tests that assert the path taken
   by their own calls.
 """
 
+import bisect
 import json
 import os
-import re
 import tempfile
 import time
 from collections import Counter
@@ -33,11 +38,49 @@ import pytest
 ENV = "ASTROVIPER_KERNELS"
 TRACE_ENV = "ASTROVIPER_KERNELS_TRACE"
 
-#: A collected test module uses a kernel when its source matches the pattern.
-USES = {
-    "dft": re.compile(r"\bdft_predict\b"),
-    "hogbom": re.compile(r"\bhogbom\b"),
-    "asp": re.compile(r"\baspclean\b"),
+_DA = "tests/unit/distributed_applications"
+_NT = "tests/unit/node_tasks"
+_PF = "tests/unit/processing_functions"
+_DFT = {"dft": ("dft_predict",)}
+_ASP_CUBE = {"asp": ("clean_cube",)}
+_HOGBOM_CUBE = {"hogbom": ("clean_cube",)}
+_HOGBOM_BOTH = {"hogbom": ("clean_cube", "clean_cube_many_threads")}
+
+#: ``{test file: {kernel: entries}}``: the files whose calls (in process or in
+#: Dask workers) execute these hooked entries, measured on the sharded
+#: ``tests/unit`` run with every kernel switched to ``ref``. A switched session
+#: fails when a collected file listed here executes none of the selected
+#: implementation of one of its entries for an explicitly selected kernel.
+#: Other files are counted and printed, not required. An implementation that
+#: declines some calls by design (path other than its impl) adjusts its
+#: entries here when it lands.
+MANIFEST = {
+    f"{_DA}/imaging/test_continuum.py": _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_continuum_cube_agreement.py": _ASP_CUBE | _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_continuum_dft.py": _DFT | _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_continuum_gridding_kernel.py": _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_continuum_polarization.py": _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_image_cube_cycle_control_record.py": _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_image_cube_single_field.py": _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_image_cube_single_field_delphi.py": _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_image_cube_single_field_dft.py": _DFT | _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_image_cube_single_field_report.py": _HOGBOM_CUBE,
+    f"{_DA}/simulation/test_simulate_processing_set.py": _DFT,
+    f"{_NT}/imaging/test_continuum.py": _ASP_CUBE,
+    f"{_NT}/imaging/test_node_task_science.py": _HOGBOM_CUBE,
+    f"{_PF}/imaging/gridders/test_direct_fourier_transform_cpp.py": _DFT,
+    f"{_PF}/imaging/test_aspclean.py": {"asp": ("clean", "clean_cube")},
+    f"{_PF}/imaging/test_continuum_dft.py": _DFT,
+    f"{_PF}/imaging/test_continuum_variants.py": _ASP_CUBE | _HOGBOM_CUBE,
+    f"{_PF}/imaging/test_deconvolution.py": _ASP_CUBE | _HOGBOM_BOTH,
+    f"{_PF}/imaging/test_direct_fourier_transform.py": _DFT,
+    f"{_PF}/imaging/test_exact_psf_subtraction.py": _HOGBOM_BOTH,
+    f"{_PF}/imaging/test_hogbom_clean.py": _HOGBOM_BOTH,
+    f"{_PF}/imaging/test_hogbom_many_threads.py": _HOGBOM_BOTH,
+    f"{_PF}/imaging/test_hogbom_stop_tests.py": _HOGBOM_BOTH,
+    f"{_PF}/imaging/test_iteration_history.py": _ASP_CUBE | _HOGBOM_BOTH,
+    f"{_PF}/imaging/test_max_cycles_auto.py": _ASP_CUBE | _HOGBOM_CUBE,
+    f"{_PF}/simulation/test_sky_image_visibilities.py": _DFT,
 }
 
 
@@ -56,59 +99,169 @@ def _explicit_selection(value):
 
 
 def _records(trace_dir, since):
-    """Trace records of every process written at or after ``since``."""
-    records = []
+    """``(records, undecodable)``: the trace records of every process that
+    started at or after ``since``, and the number of lines that are not a
+    record (such as a line cut short by a killed process)."""
+    records, undecodable = [], 0
     for path in sorted(Path(trace_dir).glob("kernels-*.jsonl")):
         with open(path, encoding="utf-8") as f:
-            records += [r for r in map(json.loads, f) if r["t_start"] >= since]
-    return records
+            for line in f:
+                try:
+                    record = json.loads(line)
+                    recent = record["t_start"] >= since
+                except (ValueError, KeyError, TypeError):
+                    undecodable += 1
+                    continue
+                if recent:
+                    records.append(record)
+    return records, undecodable
 
 
-def _executed(record):
-    """Whether a traced call ran its selected implementation."""
-    return record["path"] == record["impl"]
+def _executed(record, selection):
+    """Whether a traced call ran, without raising, the implementation that
+    ``selection`` (``{kernel: impl}``) selects for its kernel."""
+    name = selection.get(record["kernel"])
+    return (
+        record.get("error") is None
+        and record["impl"] == name
+        and record["path"] == name
+    )
+
+
+def _attribute(records, intervals):
+    """Test file running at the start of each record (``None`` between tests).
+
+    ``intervals`` are the ``(start, end, file)`` of the tests in run order.
+    """
+    starts = [start for start, _, _ in intervals]
+    files = []
+    for record in records:
+        i = bisect.bisect_right(starts, record["t_start"]) - 1
+        inside = i >= 0 and record["t_start"] <= intervals[i][1]
+        files.append(intervals[i][2] if inside else None)
+    return files
+
+
+def summarize(records, explicit, effective, intervals, collected):
+    """The session's verdict on its trace records.
+
+    Parameters
+    ----------
+    records : list of dict
+        Trace records of the session.
+    explicit, effective : dict
+        ``{kernel: impl}`` the session names, and the full selection it makes.
+    intervals : list of tuple
+        ``(start, end, file)`` of each test run, in run order.
+    collected : set of str
+        Collected test files, relative to the root directory.
+
+    Returns
+    -------
+    counts : Counter
+        Calls per ``(file, kernel, entry, impl, path, error)``.
+    missing : list of str
+        ``"<file>: <kernel>.<entry>=<impl>"`` for each manifest entry of a
+        collected file, for an explicitly selected kernel, that no call
+        executed.
+    foreign : Counter
+        Calls per ``(kernel, impl)`` of an implementation the session does
+        not select.
+    """
+    files = _attribute(records, intervals)
+    counts = Counter(
+        (f, r["kernel"], r["entry"], r["impl"], r["path"], r.get("error"))
+        for f, r in zip(files, records, strict=True)
+    )
+    executed = Counter(
+        (f, r["kernel"], r["entry"])
+        for f, r in zip(files, records, strict=True)
+        if _executed(r, effective)
+    )
+    missing = [
+        f"{path}: {kernel}.{entry}={explicit[kernel]}"
+        for path in sorted(collected & MANIFEST.keys())
+        for kernel, entries in MANIFEST[path].items()
+        if kernel in explicit
+        for entry in entries
+        if executed[path, kernel, entry] == 0
+    ]
+    foreign = Counter(
+        (r["kernel"], r["impl"])
+        for r in records
+        if r["impl"] != effective.get(r["kernel"])
+    )
+    return counts, missing, foreign
 
 
 class KernelsPlugin:
     def __init__(self, selection, trace_dir):
         self.selection = selection
+        self.effective = None
         self.trace_dir = trace_dir
         self.started = time.time()
-        self.used = set()
+        self.root = None
+        self.collected = set()
+        self.intervals = []
         self.counts = Counter()
         self.missing = []
+        self.foreign = Counter()
+        self.undecodable = 0
+
+    def _relative(self, path):
+        try:
+            return Path(path).relative_to(self.root).as_posix()
+        except ValueError:
+            return str(path)
 
     def pytest_collection_finish(self, session):
-        for path in {item.path for item in session.items}:
-            source = Path(path).read_text(encoding="utf-8")
-            self.used |= {k for k, p in USES.items() if p.search(source)}
+        from astroviper._kernels._switch import parse
+
+        try:
+            self.effective = dict(parse(os.environ[ENV]))
+        except ValueError as e:
+            raise pytest.UsageError(f"kernels plugin: {e}") from None
+        self.root = session.config.rootpath
+        self.collected = {self._relative(item.path) for item in session.items}
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_protocol(self, item, nextitem):
+        start = time.time()
+        yield
+        self.intervals.append((start, time.time(), self._relative(item.path)))
 
     def pytest_sessionfinish(self, session):
-        records = _records(self.trace_dir, self.started)
-        self.counts = Counter(
-            (r["kernel"], r["entry"], r["impl"], r["path"]) for r in records
+        if self.effective is None:  # the selection is invalid
+            return
+        records, self.undecodable = _records(self.trace_dir, self.started)
+        self.counts, self.missing, self.foreign = summarize(
+            records, self.selection, self.effective, self.intervals, self.collected
         )
-        executed = Counter(r["kernel"] for r in records if _executed(r))
-        self.missing = [
-            f"{kernel}={name}"
-            for kernel, name in self.selection.items()
-            if kernel in self.used and executed[kernel] == 0
-        ]
-        if self.missing and session.exitstatus == pytest.ExitCode.OK:
+        failed = self.missing or self.foreign
+        if failed and session.exitstatus == pytest.ExitCode.OK:
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
     def pytest_terminal_summary(self, terminalreporter):
         write = terminalreporter.write_line
         terminalreporter.section("ASTROVIPER_KERNELS")
         write(f"{ENV}={os.environ[ENV]!r}, traces in {self.trace_dir}")
-        for (kernel, entry, name, path), n in sorted(self.counts.items()):
-            write(f"  {kernel}.{entry} impl={name} path={path}: {n} calls")
-        for pair in self.missing:
+        for key, n in sorted(self.counts.items(), key=lambda kv: str(kv[0])):
+            path, kernel, entry, name, taken, error = key
+            raised = f" error={error}" if error else ""
             write(
-                f"FAILED: {pair} is selected and used by the collected tests, "
-                "but no call executed it",
+                f"  {path or '(between tests)'}: {kernel}.{entry} "
+                f"impl={name} path={taken}{raised}: {n} calls"
+            )
+        if self.undecodable:
+            write(f"  {self.undecodable} undecodable trace lines skipped", yellow=True)
+        for (kernel, name), n in sorted(self.foreign.items()):
+            write(
+                f"FAILED: {n} calls ran {kernel}={name}, which this session "
+                "does not select",
                 red=True,
             )
+        for item in self.missing:
+            write(f"FAILED: no call executed {item}", red=True)
 
 
 def pytest_configure(config):
@@ -127,4 +280,4 @@ def pytest_configure(config):
 def kernel_trace():
     """``kernel_trace()`` returns the trace records written since the test began."""
     since = time.time()
-    return lambda: _records(os.environ[TRACE_ENV], since)
+    return lambda: _records(os.environ[TRACE_ENV], since)[0]

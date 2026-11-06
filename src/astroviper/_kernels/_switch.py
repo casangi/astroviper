@@ -2,7 +2,8 @@
 The ``ASTROVIPER_KERNELS`` switch: grammar, registry, dispatch and trace.
 
 Only the standard library is imported here, so that a hooked shim costs no
-third-party import and CuPy is never imported unless a ``gpu`` kernel runs.
+third-party import, and no AstroVIPER code imports CuPy unless a ``gpu``
+kernel runs (third-party packages, zarr among them, may import it themselves).
 """
 
 import functools
@@ -48,10 +49,12 @@ _REGISTRY = {
 }
 
 _logger = logging.getLogger("astroviper.kernels")
+# Guards the bookkeeping below; never held across an import or a kernel call.
 _lock = threading.Lock()
 _resolved = {}  # (kernel, entry, impl) -> callable
 _logged = set()  # (kernel, impl) announced on the logger
 _traced = set()  # (kernel, entry, impl) that wrote a trace line
+_trace_failed = set()  # trace directories whose write failure was logged
 
 
 def _names(names):
@@ -146,18 +149,31 @@ def impl(kernel, entry, name):
     module_name = _REGISTRY[kernel].get(name)
     if module_name is None:
         raise ValueError(f"{kernel!r} has no implementation {name!r}")
+    # Outside _lock: the import system serialises the import of each module,
+    # and an implementation module may itself call impl() while it imports.
+    try:
+        module = import_module(module_name)
+    except ImportError as e:
+        if e.name != module_name:
+            raise
+        raise ImportError(
+            f"{kernel}={name}: module {module_name} is not available "
+            "(not built, or skipped by its compile probe)",
+            name=module_name,
+        ) from e
     with _lock:
-        try:
-            module = import_module(module_name)
-        except ImportError as e:
-            raise ImportError(
-                f"{kernel}={name}: module {module_name} is not available "
-                "(not built, or skipped by its compile probe)"
-            ) from e
-        function = _resolved[key] = getattr(module, entry)
-        if (kernel, name) not in _logged:
-            _logged.add((kernel, name))
-            _logger.info("kernel %s=%s from %s", kernel, name, module_name)
+        function = _resolved.setdefault(key, getattr(module, entry))
+        announce = (kernel, name) not in _logged
+        _logged.add((kernel, name))
+    if announce:
+        isa = getattr(module, "ISA", None)
+        _logger.info(
+            "kernel %s=%s from %s%s",
+            kernel,
+            name,
+            module_name,
+            f" (ISA {isa})" if isa else "",
+        )
     return function
 
 
@@ -220,34 +236,62 @@ def _cpu_seconds():
 def _call_traced(trace_dir, kernel, entry, name, target, args, kwargs):
     """Run ``target`` and append its trace line to ``<trace_dir>``.
 
-    ``rusage_cpu_s`` is the process-wide CPU time of the call (it includes the
-    C++ worker threads, and any other thread running meanwhile).
+    The call's result or exception is returned or raised unchanged: a trace
+    line that cannot be written is logged once per directory and dropped.
+    ``error`` is the type name of the exception the call raised, or ``None``.
+    ``rusage_cpu_s`` is the process-wide CPU time of the call
+    (``cpu_scope="process"``: it includes the C++ worker threads, and any
+    other thread running meanwhile). ``t_end`` is ``t_start + wall_s``: one
+    monotonic interval, anchored at the epoch time of the call's start.
     """
+    error = None
     cpu0, t0, p0 = _cpu_seconds(), time.time(), time.perf_counter()
     try:
         return target(*args, **kwargs)
+    except BaseException as e:
+        error = type(e).__name__
+        raise
     finally:
-        wall, t1, cpu = time.perf_counter() - p0, time.time(), _cpu_seconds() - cpu0
-        arrays = _arrays(args, kwargs)
-        with _lock:
-            first = (kernel, entry, name) not in _traced
-            _traced.add((kernel, entry, name))
+        wall, cpu = time.perf_counter() - p0, _cpu_seconds() - cpu0
+        try:
+            arrays = _arrays(args, kwargs)
+            with _lock:
+                first = (kernel, entry, name) not in _traced
+                _traced.add((kernel, entry, name))
+            host, pid = socket.gethostname(), os.getpid()
             record = {
                 "kernel": kernel,
                 "entry": entry,
                 "impl": name,
                 "path": name,
+                "error": error,
                 "t_start": t0,
-                "t_end": t1,
+                "t_end": t0 + wall,
                 "wall_s": wall,
                 "rusage_cpu_s": cpu,
+                "cpu_scope": "process",
                 "first_call": first,
+                "host": host,
+                "pid": pid,
+                "thread": threading.get_ident(),
                 "shapes": {k: list(a.shape) for k, a in arrays.items()},
                 "dtypes": {k: str(a.dtype) for k, a in arrays.items()},
             }
+            line = json.dumps(record) + "\n"
             os.makedirs(trace_dir, exist_ok=True)
-            path = os.path.join(
-                trace_dir, f"kernels-{socket.gethostname()}-{os.getpid()}.jsonl"
-            )
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
+            path = os.path.join(trace_dir, f"kernels-{host}-{pid}.jsonl")
+            with _lock, open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception as e:  # never let the trace change the call's outcome
+            with _lock:
+                report = trace_dir not in _trace_failed
+                _trace_failed.add(trace_dir)
+            if report:
+                _logger.warning(
+                    "%s=%s: cannot write trace lines (%s: %s); "
+                    "the kernel calls are not traced",
+                    TRACE_ENV,
+                    trace_dir,
+                    type(e).__name__,
+                    e,
+                )
