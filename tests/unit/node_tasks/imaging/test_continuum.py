@@ -93,6 +93,26 @@ def test_install_clean_mask_broadcasts_and_registers_data_group():
     )
 
 
+def test_install_clean_mask_takes_one_mask_per_plane():
+    """A mask with a plane per polarization reaches every Taylor term."""
+    residual = xr.DataArray(
+        np.zeros((1, 2, 2, 2, 3)),
+        dims=("time", "taylor_term", "polarization", "l", "m"),
+    )
+    image = xr.Dataset(
+        {"SKY_RESIDUAL": residual},
+        attrs={"data_groups": {"residual": {"sky": "SKY_RESIDUAL"}}},
+    )
+    mask = np.zeros((1, 1, 2, 2, 3), dtype=bool)
+    mask[0, 0, 1, 1, 2] = True
+
+    install_clean_mask(image, mask, description="Automatic deconvolution mask")
+
+    for taylor_term in range(2):
+        np.testing.assert_array_equal(image["MASK"].values[0, taylor_term], mask[0, 0])
+    assert image["MASK"].attrs["description"] == "Automatic deconvolution mask."
+
+
 def test_install_clean_mask_rejects_wrong_shape():
     """Node-level validation protects direct callers from mismatched masks."""
     image = xr.Dataset(
@@ -571,6 +591,96 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
     )
 
     assert captured["history"] is previous_history
+
+
+@pytest.mark.parametrize(
+    "threshold, expected",
+    [(0.1, [True, False]), ([0.1, 0.5], [True, True]), (0.0, [False, False])],
+)
+def test_append_takes_threshold_reached_from_the_record(
+    monkeypatch, threshold, expected
+):
+    """From the latest threshold_per_cycle of every plane in the forwarded record."""
+    record = ImagingDict()
+    for stokes_i, stokes_q in ((1.0, 1.0), (0.1, 0.5)):
+        record.add({"threshold_per_cycle": stokes_i}, time=0, pol=0, chan=0)
+        record.add({"threshold_per_cycle": stokes_q}, time=0, pol=1, chan=0)
+    captured = {}
+
+    def fake_auto_mask(image, params, **kwargs):
+        captured.update(kwargs)
+        return kwargs["auto_mask_state"]
+
+    monkeypatch.setattr(
+        continuum_processing, "make_auto_mask_continuum", fake_auto_mask
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_continuum_image",
+        lambda image, input_params, **kwargs: (image, xr.Dataset(), None),
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "model_update_continuum_single_field",
+        lambda input_data, input_params: {"image": input_data["image"]},
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_post_update_continuum_model_state",
+        lambda image, input_params, previous_model_xds: (xr.Dataset(), None),
+    )
+
+    continuum_node.continuum_cycle_append_node(
+        {"image": xr.Dataset()},
+        {
+            "is_first_cycle": False,
+            "deconvolution": record,
+            "auto_mask_params": {},
+            "auto_mask_state": {"planes_stopped": np.zeros((1, 1, 2), dtype=bool)},
+            "cycle_control_params": {"threshold": threshold},
+        },
+    )
+
+    np.testing.assert_array_equal(captured["threshold_reached"][0, 0], expected)
+
+
+def test_append_has_no_threshold_reached_for_the_first_mask(monkeypatch):
+    captured = {}
+
+    def fake_auto_mask(image, params, **kwargs):
+        captured.update(kwargs)
+        return {"planes_stopped": np.zeros((1, 1, 2), dtype=bool)}
+
+    monkeypatch.setattr(
+        continuum_processing, "make_auto_mask_continuum", fake_auto_mask
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_continuum_image",
+        lambda image, input_params, **kwargs: (image, xr.Dataset(), None),
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "model_update_continuum_single_field",
+        lambda input_data, input_params: {"image": input_data["image"]},
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_post_update_continuum_model_state",
+        lambda image, input_params, previous_model_xds: (xr.Dataset(), None),
+    )
+
+    continuum_node.continuum_cycle_append_node(
+        {"image": xr.Dataset()},
+        {
+            "is_first_cycle": True,
+            "auto_mask_params": {},
+            "cycle_control_params": {"threshold": 0.1},
+        },
+    )
+
+    assert captured["threshold_reached"] is None
+    assert captured["auto_mask_state"] is None
 
 
 def _empty_weight_image(**kwargs):

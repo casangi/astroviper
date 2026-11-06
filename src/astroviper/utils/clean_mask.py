@@ -44,8 +44,13 @@ def load_clean_mask(clean_mask, image_size):
     return clean_mask_array
 
 
-def install_clean_mask(img_xds, clean_mask, image_data_group_name="residual"):
-    """Install a 2-D CLEAN mask on every residual plane of an image.
+def install_clean_mask(
+    img_xds,
+    clean_mask,
+    image_data_group_name="residual",
+    description="User-supplied deconvolution mask",
+):
+    """Install a CLEAN mask on the residual planes of an image.
 
     The mask is written to ``MASK`` with the dimensions of ``SKY_RESIDUAL`` and
     registered as the ``mask`` of ``image_data_group_name``, where cube imaging
@@ -56,9 +61,13 @@ def install_clean_mask(img_xds, clean_mask, image_data_group_name="residual"):
     img_xds : xarray.Dataset
         Image with ``SKY_RESIDUAL`` ending in ``(l, m)``. Modified in place.
     clean_mask : numpy.ndarray or None
-        Bool ``(l, m)`` plane (see :func:`load_clean_mask`); ``None`` is a no-op.
+        Bool mask ending in ``(l, m)`` that broadcasts to ``SKY_RESIDUAL``: one
+        plane for all of them (see :func:`load_clean_mask`) or one per plane;
+        ``None`` is a no-op.
     image_data_group_name : str, optional
         Data group that gets the mask. Default ``"residual"``.
+    description : str, optional
+        Description of the mask.
 
     Raises
     ------
@@ -83,20 +92,18 @@ def install_clean_mask(img_xds, clean_mask, image_data_group_name="residual"):
     if residual.dims[-2:] != ("l", "m"):
         raise ValueError("SKY_RESIDUAL must end in the ('l', 'm') dimensions.")
 
-    mask_plane = np.asarray(clean_mask, dtype=bool)
+    mask_values = np.asarray(clean_mask, dtype=bool)
     expected_shape = (residual.sizes["l"], residual.sizes["m"])
-    if mask_plane.shape != expected_shape:
+    if mask_values.shape[-2:] != expected_shape:
         raise ValueError(
-            f"The clean mask has shape {mask_plane.shape}; expected {expected_shape}."
+            f"The clean mask has shape {mask_values.shape}; expected {expected_shape}."
         )
 
-    expanded = mask_plane.reshape((1,) * (residual.ndim - 2) + mask_plane.shape)
-    mask_values = np.broadcast_to(expanded, residual.shape).copy()
     img_xds["MASK"] = xr.DataArray(
-        mask_values,
+        np.broadcast_to(mask_values, residual.shape).copy(),
         dims=residual.dims,
         coords={dimension: residual.coords[dimension] for dimension in residual.dims},
-        attrs={"description": "User-supplied deconvolution mask.", "type": "mask"},
+        attrs={"description": f"{description}.", "type": "mask"},
     )
 
     data_groups = img_xds.attrs.get("data_groups", {})
@@ -110,5 +117,5 @@ def install_clean_mask(img_xds, clean_mask, image_data_group_name="residual"):
         img_xds,
         data_group_out_name=image_data_group_name,
         data_group_out=residual_group,
-        description="User-supplied deconvolution mask installed.",
+        description=f"{description} installed.",
     )

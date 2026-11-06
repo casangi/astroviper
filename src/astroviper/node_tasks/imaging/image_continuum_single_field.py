@@ -3303,8 +3303,9 @@ def continuum_cycle_append_node(
        Stokes basis;
     4. installs the static continuum products (for example, the primary beam and
        fitted restoring beam parameters);
-    5. checks convergence on the refreshed residual without consuming budgets;
-    6. either updates the model and prepares its state for the next graph, or
+    5. updates the automatic mask with ``input_params["auto_mask_params"]``;
+    6. checks convergence on the refreshed residual without consuming budgets;
+    7. either updates the model and prepares its state for the next graph, or
        finalizes the accumulated model using this same prepared residual.
 
     The graph topology stays fixed: the append chooses the branch at runtime.
@@ -3388,6 +3389,44 @@ def continuum_cycle_append_node(
         input_params.get("image_data_group_in_name", "residual"),
     )
 
+    auto_mask_state = None
+    T_auto_mask = 0.0
+    if input_params.get("auto_mask_params") is not None:
+        import numpy as np
+
+        from astroviper.processing_functions.imaging.image_continuum_single_field import (
+            make_auto_mask_continuum,
+        )
+
+        start = time.time()
+        cycle_control_params = input_params["cycle_control_params"]
+        image_data_group_name = input_params.get("image_data_group_in_name", "residual")
+        previous_state = input_params.get("auto_mask_state")
+        threshold_reached = None
+        if previous_state is not None:
+            threshold = np.asarray(cycle_control_params["threshold"], dtype=float)
+            threshold_per_cycle = np.full(
+                previous_state["planes_stopped"].shape, np.inf
+            )
+            for key, fields in input_params["deconvolution"].data.items():
+                threshold_per_cycle[key.time, key.chan, key.pol] = fields[
+                    "threshold_per_cycle"
+                ][-1]
+            threshold_reached = (threshold > 0) & (threshold_per_cycle <= threshold)
+        auto_mask_state = make_auto_mask_continuum(
+            img_xds,
+            input_params["auto_mask_params"],
+            auto_mask_state=previous_state,
+            primary_beam_limit=cycle_control_params.get("primary_beam_limit", 0.0),
+            threshold_reached=threshold_reached,
+            processing_function_threads=input_params.get(
+                "processing_function_threads", 1
+            ),
+            image_data_group_in_name=image_data_group_name,
+            image_data_group_out_name=image_data_group_name,
+        )
+        T_auto_mask = time.time() - start
+
     model_update_input_params = dict(input_params)
     model_update_input_params.pop("static_xds", None)
 
@@ -3469,10 +3508,13 @@ def continuum_cycle_append_node(
 
     return_dict["model_xds"] = model_xds
     return_dict["model_uv_xds"] = model_uv_xds
+    return_dict["auto_mask_state"] = auto_mask_state
 
     timing_model_update = return_dict.get("timing_model_update")
     if timing_model_update is not None:
         timing_model_update["T_prepare_model_state"] = T_prepare_model_state
+        if auto_mask_state is not None:
+            timing_model_update["T_auto_mask"] = T_auto_mask
         if cycle_acceleration != "none":
             timing_model_update["T_cycle_acceleration"] = T_cycle_acceleration
 

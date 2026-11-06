@@ -151,6 +151,7 @@ def image_cube_single_field(
     gridding_kernel_params: dict[str, Any] | None = None,
     primary_beam_params: dict[str, Any] | None = None,
     clean_mask: str | None = None,
+    auto_mask_params: dict[str, Any] | None = None,
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -640,8 +641,56 @@ def image_cube_single_field(
         residual plane that the model update cleans: in cube imaging in place
         of the primary-beam mask of ``primary_beam_limit``, in continuum
         imaging within it. Asp measures the noise of its significance test
-        (``asp_scale_significance``) outside the pixels it cleans. ``None``
-        keeps the primary-beam mask.
+        (``asp_scale_significance``) outside the pixels it cleans. Without
+        ``auto_mask_params``, ``None`` keeps the primary-beam mask.
+    auto_mask_params : dict or None, optional
+        Automatic CLEAN mask (CASA ``usemask='auto-multithresh'``, Kepley et
+        al. 2020, PASP 132, 024505). ``None`` makes no automatic mask; a dict,
+        empty for the defaults, updates the mask of every plane from its
+        residual after every residual update, before the stop test. It is
+        refused together with ``clean_mask``. A mask never loses pixels and
+        holds none outside ``primary_beam_limit``; a plane with an empty mask
+        stops with stop code 7 until a later update gives it pixels. Continuum
+        imaging masks Taylor term zero. *Differs from CASA*: the clean beam and
+        the largest PSF sidelobe are those of each plane, not of the whole
+        cube; a plane stops updating on its own, from its own
+        ``threshold_per_cycle``, not with its channel or the peak of the cube;
+        and the mask written includes the update after the last model update.
+        Keys, with the default and the CASA name in brackets:
+
+        - ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts
+          from the pixels above this times the largest PSF sidelobe times the
+          peak residual or, when larger, ``noise_threshold`` times the noise.
+        - ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is
+          1.4826 times the median absolute deviation; every threshold is
+          relative to the median of the noise sample.
+        - ``low_noise_threshold`` (1.5) [``lownoisethreshold``] : The mask grows
+          through the pixels above this times the noise or, when larger, the
+          sidelobe level.
+        - ``negative_threshold`` (0.0) [``negativethreshold``] : Above 0, the
+          mask takes the pixels below minus this times the noise or, when
+          lower, minus the sidelobe level.
+        - ``smooth_factor`` (1.0) [``smoothfactor``] : Every part of the mask is
+          smoothed with the clean beam scaled by this.
+        - ``min_beam_fraction`` (0.3) [``minbeamfrac``] : Positive regions
+          smaller than this fraction of the clean beam area are removed before
+          smoothing; 0 keeps them.
+        - ``cut_threshold`` (0.01) [``cutthreshold``] : A smoothed mask is cut
+          at this fraction of its peak, in (0, 1).
+        - ``grow_iterations`` (75) [``growiterations``] : Largest number of
+          binary dilation steps in one update, before smoothing; 0 does not
+          grow it.
+        - ``grow_prune`` (``True``) [``dogrowprune``] : Remove small regions
+          from the grown mask too.
+        - ``min_percent_change`` (-1.0) [``minpercentchange``] : At or above 0,
+          a plane whose threshold is set by the noise stops updating its mask
+          once the ``threshold_per_cycle`` of its model update is the absolute
+          ``threshold`` and the mask then did not change or changed by less
+          than this percentage. Whatever the value, such a plane stops updating
+          when its mask is empty.
+        - ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every
+          pixel inside ``primary_beam_limit``. ``False`` measures it outside the
+          mask or, without a mask, on the pixels Chauvenet's criterion leaves.
     skunk_works : bool
         If ``True`` use the experimental performance I/O path in each node task:
         load only the data group's data variables straight from the Zarr chunk
@@ -835,6 +884,9 @@ def image_cube_single_field(
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
     from xradio.measurement_set import open_processing_set
 
+    from astroviper.processing_functions.image_analysis.make_auto_mask import (
+        validate_auto_mask_params,
+    )
     from astroviper.processing_functions.imaging.deconvolution import (
         validate_exact_psf_subtraction,
         validate_record_iteration_history,
@@ -927,6 +979,7 @@ def image_cube_single_field(
         _validate_n_mapping_parallelism(n_mapping_parallelism)
 
     clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
+    auto_mask_params = validate_auto_mask_params(auto_mask_params, clean_mask)
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
@@ -1150,6 +1203,7 @@ def image_cube_single_field(
     input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["primary_beam_params"] = primary_beam_params
     input_params["clean_mask"] = clean_mask_array
+    input_params["auto_mask_params"] = auto_mask_params
     input_params["skunk_works"] = skunk_works
     input_params["image_chunking"] = image_chunking
     input_params["image_sharding"] = image_sharding

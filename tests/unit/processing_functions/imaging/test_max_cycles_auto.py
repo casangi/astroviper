@@ -16,6 +16,7 @@ made after every residual update on the residual it has just made.
 """
 
 import copy
+import importlib
 
 import numpy as np
 import pytest
@@ -544,6 +545,7 @@ def _image(
     deconvolver="hogbom",
     restore=False,
     gridding_kernel_params=None,
+    auto_mask_params=None,
     **visibilities,
 ):
     from xradio.image import make_empty_sky_image
@@ -586,10 +588,54 @@ def _image(
         image_data_variables_keep=["sky_residual", "sky_model"],
         restore=restore,
         gridding_kernel_params=gridding_kernel_params,
+        auto_mask_params=auto_mask_params,
     )
 
 
 STOKES_I, STOKES_Q = Key(time=0, pol=0, chan=0), Key(time=0, pol=1, chan=0)
+
+
+class TestAutoMaskFlag:
+    """The loop works threshold_reached out from its own threshold_per_cycle."""
+
+    @staticmethod
+    def flags(monkeypatch, threshold):
+        module = importlib.import_module(
+            "astroviper.processing_functions.image_analysis.make_auto_mask"
+        )
+        make_auto_mask = module.make_auto_mask
+        flags = []
+
+        def spy(*args, **kwargs):
+            flags.append(kwargs["threshold_reached"])
+            return make_auto_mask(*args, **kwargs)
+
+        monkeypatch.setattr(module, "make_auto_mask", spy)
+        _image({"max_cycles": 6, "threshold": threshold}, auto_mask_params={})
+        return flags
+
+    def test_a_threshold_for_every_plane(self, monkeypatch):
+        """The empty Stokes Q plane sits on the threshold from the start."""
+        first, *flags = self.flags(monkeypatch, 0.01)
+        assert first is None
+        assert [flag[0, 0].tolist() for flag in flags] == [
+            [False, True],
+            [False, True],
+            [True, True],
+        ]
+
+    def test_a_threshold_per_polarization(self, monkeypatch):
+        _, *flags = self.flags(monkeypatch, [0.05, 0.0])
+        assert [flag[0, 0].tolist() for flag in flags] == [
+            [False, False],
+            [False, False],
+            [True, False],
+        ]
+
+    def test_a_threshold_of_zero(self, monkeypatch):
+        _, *flags = self.flags(monkeypatch, 0.0)
+        assert flags
+        assert not any(flag.any() for flag in flags)
 
 
 class TestImagingCycleLoop:

@@ -136,6 +136,20 @@ def test_mvc_asp_significance_without_a_clean_mask_warns(
         assert "Give a clean_mask" in messages[0]
 
 
+def test_mvc_asp_significance_with_an_auto_mask_does_not_warn(monkeypatch):
+    """No warning: an automatic mask does not exist yet when this is tested."""
+    import toolviper.utils.logger
+
+    messages = []
+    monkeypatch.setattr(
+        toolviper.utils.logger,
+        "warning",
+        lambda message, *args, **kwargs: messages.append(message),
+    )
+    _warn_on_mvc_asp_significance_without_clean_mask("mvc", "asp", {}, None, {})
+    assert messages == []
+
+
 def test_public_api_refuses_multi_term_asp_before_writing(tmp_path):
     """The graph layer refuses Asp with two Taylor terms before it opens the
     input or creates the image store."""
@@ -174,6 +188,35 @@ def _assert_refused_before_writing(tmp_path, match, **kwargs):
         image_continuum_single_field(**arguments)
     assert not image_store.exists()
     assert list(ps_store.iterdir()) == []
+
+
+def test_a_clean_mask_with_auto_mask_params_is_refused_before_writing(tmp_path):
+    mask_file = tmp_path / "mask.npy"
+    np.save(mask_file, np.ones((8, 8), dtype=bool))
+    _assert_refused_before_writing(
+        tmp_path,
+        "exclude each other",
+        image_params={
+            "n_taylor_terms": 1,
+            "image_size": [8, 8],
+            "reference_frequency": 1.0e9,
+        },
+        clean_mask=str(mask_file),
+        auto_mask_params={},
+    )
+
+
+def test_an_unknown_auto_mask_parameter_is_refused_before_writing(tmp_path):
+    _assert_refused_before_writing(
+        tmp_path,
+        "Unknown auto_mask_params keys",
+        image_params={
+            "n_taylor_terms": 1,
+            "image_size": [8, 8],
+            "reference_frequency": 1.0e9,
+        },
+        auto_mask_params={"noise": 5.0},
+    )
 
 
 @pytest.mark.parametrize("deconvolver", ["hogbom", "asp", "mtmfs"])
