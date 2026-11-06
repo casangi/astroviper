@@ -67,6 +67,8 @@ def _run(
     *,
     weighting="briggs",
     mpi_cluster_setup=None,
+    cycle_overrides=None,
+    extra_outputs=(),
 ):
     with dask.config.set(scheduler="synchronous"):
         result = image_continuum_single_field(
@@ -89,7 +91,8 @@ def _run(
                 psf_sidelobe_factor=1.5,
                 min_psf_fraction=0.05,
                 max_psf_fraction=0.8,
-            ),
+            )
+            | (cycle_overrides or {}),
             gridder="anti_alias",
             deconvolver="mtmfs",
             continuum_mode=continuum_mode,
@@ -104,7 +107,8 @@ def _run(
                 "point_spread_function",
                 "primary_beam",
                 "beam_fit_params_point_spread_function",
-            ],
+            ]
+            + list(extra_outputs),
             single_precision_image=False,
             processing_function_threads=1,
             n_mapping_parallelism={"frequency": 3},
@@ -646,3 +650,93 @@ def test_hessian_reuse_matches_fresh_checks_across_cycles(
     assert (
         cached_image.attrs["input_validation"] == fresh_image.attrs["input_validation"]
     )
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("threshold", [0.0, 1e-3])
+@pytest.mark.parametrize("scope", ["local", "global"])
+def test_automatic_cycles_match_the_resolved_explicit_limit(
+    tmp_path, continuum_input, continuum_mode, threshold, scope
+):
+    store, params, mask_path, _ = continuum_input
+    automatic, auto_image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "auto.img.zarr",
+        continuum_mode,
+        scope,
+        False,
+        "in_memory",
+        "tree",
+        cycle_overrides={"max_cycles": "auto", "threshold": threshold},
+    )
+    # max_cycles counts down during execution; compare against the original
+    # prediction, recorded separately for every dirty-image plane.
+    limit = max(
+        (
+            value
+            for value in automatic["controller"].max_cycles_auto.values()
+            if value is not None
+        ),
+        default=1,
+    )
+    assert isinstance(limit, int) and limit > 0
+    assert any(
+        value is not None for value in automatic["controller"].max_cycles_auto.values()
+    )
+    explicit, explicit_image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "explicit.img.zarr",
+        continuum_mode,
+        scope,
+        False,
+        "in_memory",
+        "tree",
+        cycle_overrides={"max_cycles": limit, "threshold": threshold},
+    )
+    assert automatic["n_cycles"] == explicit["n_cycles"]
+    xr.testing.assert_equal(auto_image, explicit_image)
+
+
+@pytest.mark.parametrize("key", ["visibility", "uv_sampling"])
+def test_mfs_retains_requested_uv_products_after_cleaning(
+    tmp_path, continuum_input, key
+):
+    store, params, mask_path, _ = continuum_input
+    result, image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "uv.img.zarr",
+        "mfs",
+        "global",
+        False,
+        "in_memory",
+        "tree",
+        extra_outputs=[key],
+    )
+    assert result["n_cycles"] >= 2
+    assert {"u", "v"} <= set(image[key.upper()].dims)
+    assert np.isfinite(image[key.upper()]).all()
+    assert np.any(image[key.upper()].values != 0)
+    _, reference = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "reference.img.zarr",
+        "mfs",
+        "global",
+        False,
+        "in_memory",
+        "tree",
+    )
+    for name in (
+        "SKY_RESIDUAL",
+        "SKY_MODEL",
+        "POINT_SPREAD_FUNCTION",
+        "SKY_RESTORED_FLAT_SKY",
+    ):
+        xr.testing.assert_equal(image[name], reference[name])

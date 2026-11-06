@@ -67,6 +67,9 @@ def point_spread_function_cube_single_field(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
         ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an

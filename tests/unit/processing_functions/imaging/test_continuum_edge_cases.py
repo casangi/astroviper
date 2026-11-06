@@ -304,7 +304,7 @@ def test_model_fft_rejects_incompatible_models_before_transform(fault, message):
         {"SKY_MODEL": ("taylor_term", [1.0, 2.0])},
         attrs={"data_groups": {"model": {"sky": "SKY_MODEL"}}},
     )
-    params = {"n_taylor_terms": 2}
+    params = {"n_taylor_terms": 2, "fft_padding": 1.2}
     basis = "linear"
     error = ValueError
     if fault == "type":

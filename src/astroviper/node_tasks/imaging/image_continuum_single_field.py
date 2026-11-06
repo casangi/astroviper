@@ -688,6 +688,16 @@ def _install_static_continuum_products(
     if "PRIMARY_BEAM_TAYLOR" in static_xds:
         static_variable_names.append("PRIMARY_BEAM_TAYLOR")
 
+    # Requested MFS sampling grids are static PSF products too. Ordinary
+    # runs omit them, avoiding additional persistent grid-sized buffers.
+    sampling_products = ("UV_SAMPLING", "UV_SAMPLING_NORMALIZATION")
+    present_sampling = [name for name in sampling_products if name in static_xds]
+    if present_sampling and len(present_sampling) != len(sampling_products):
+        raise KeyError(
+            "Static MFS sampling grid and normalization must be supplied together."
+        )
+    static_variable_names.extend(present_sampling)
+
     for name in static_variable_names:
         if name not in static_xds:
             raise KeyError(f"static_xds does not contain {name!r}.")
@@ -742,6 +752,20 @@ def _install_static_continuum_products(
     )
     if "PRIMARY_BEAM_TAYLOR" in static_xds:
         residual_group["primary_beam_taylor"] = "PRIMARY_BEAM_TAYLOR"
+
+    if "UV_SAMPLING" in static_xds:
+        from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+        modify_data_groups_xds(
+            img_xds,
+            data_group_out_name=image_data_group_name,
+            data_group_out={
+                **residual_group,
+                "uv_sampling": "UV_SAMPLING",
+                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
+            },
+            description="Reinstalled requested static MFS sampling grid.",
+        )
 
     return img_xds
 
@@ -1022,6 +1046,7 @@ def residual_update_continuum_single_field(
     gridding_kernel_params=None,
     *,
     input_checked: bool = False,
+    calculate_auto_sensitivity: bool = False,
 ):
     """Compute one frequency chunk's continuum products in memory.
 
@@ -1110,6 +1135,9 @@ def residual_update_continuum_single_field(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``
@@ -1175,6 +1203,8 @@ def residual_update_continuum_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
 
     memory_mode : str, optional
         Currently only ``"in_memory"`` is supported.
@@ -1308,6 +1338,11 @@ def residual_update_continuum_single_field(
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    calculate_auto_sensitivity : bool, optional
+        On the first cycle, return additive weight statistics for automatic
+        cycle limits with zero threshold. Uses loaded weights, not visibility
+        or UVW data; no driver preflight scan is performed.
 
     Returns
     -------
@@ -1596,6 +1631,16 @@ def residual_update_continuum_single_field(
         input_checked=True,
     )
 
+    auto_weight_sums = None
+    if is_first_cycle and calculate_auto_sensitivity:
+        from astroviper.processing_functions.imaging.weight_statistics import (
+            continuum_correlation_weight_sums,
+        )
+
+        auto_weight_sums = continuum_correlation_weight_sums(
+            ps_xdt, processing_set_data_group_name
+        )
+
     # Retain the task-local frequency-dependent PB for MVC
     pb_xds = None
     mvc_observed_visibility_grid_xds = None
@@ -1743,6 +1788,9 @@ def residual_update_continuum_single_field(
         "timing_node_tasks": timing_df,
     }
 
+    if auto_weight_sums is not None:
+        return_dict["auto_weight_sums"] = auto_weight_sums
+
     # Return weights computed locally in the first imaging cycle to the driver.
     if return_weight_datasets:
         return_dict["task_id"] = int(task_id)
@@ -1805,6 +1853,9 @@ def grid_imaging_weight_density_continuum_node(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``
@@ -2116,6 +2167,9 @@ def degrid_imaging_weights_continuum_node(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``
@@ -2843,6 +2897,10 @@ def _prepare_continuum_image(
             "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
             "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         )
+        if continuum_mode == "mfs" and "uv_sampling" in input_params.get(
+            "image_data_variables_keep", ()
+        ):
+            static_image_variable_names += ("UV_SAMPLING", "UV_SAMPLING_NORMALIZATION")
         static_variable_names = static_image_variable_names
         if (
             continuum_mode == "mvc"
@@ -3922,6 +3980,30 @@ def model_update_continuum_single_field(
                 "converged solution; the resulting image is not scientifically "
                 "usable."
             )
+    if controller.max_cycles == "auto":
+        import numpy as np
+
+        from astroviper.processing_functions.imaging.weight_statistics import (
+            continuum_sensitivity,
+        )
+
+        sensitivity = None
+        if any(
+            controller._plane_threshold(pol) <= 0
+            for pol in range(img_xds.sizes["polarization"])
+        ):
+            if "auto_weight_sums" not in input_data:
+                raise KeyError(
+                    "Automatic continuum cycle limits with zero threshold require reduced auto_weight_sums."
+                )
+            sensitivity = np.broadcast_to(
+                continuum_sensitivity(
+                    input_data["auto_weight_sums"], img_xds.polarization.values
+                ),
+                (img_xds.sizes["time"], 1, img_xds.sizes["polarization"]),
+            )
+        controller.resolve_max_cycles(residual_imaging_dict, sensitivity=sensitivity)
+
     stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
     if stopcode.imaging != 0:
         # No processing-function update follows convergence. Validate the

@@ -424,3 +424,22 @@ filesystem check lives in `utils.io`, follows XRADIO's actual Zarr naming policy
 and checks the cube FITS output directory as supplied. It leaves existing files
 untouched, including when overwrite is enabled. Writers retain their final
 existence checks to catch destinations created after preflight.
+
+Distributed single-field drivers require explicit FFT padding and exactly one
+image time coordinate. The default designed kernel needs padding >= 1.05;
+CASA's fixed kernel also permits 1.0. These checks precede input I/O. Standalone
+processing functions retain their supported multi-time array contracts.
+MFS can publish its Taylor UV grids; an explicitly requested sampling grid
+remains in the static cache for final publication after cleaning. Ordinary runs
+retain no extra grid buffers. Cube and MVC reject UV-grid disk requests before
+creating output. MVC does not silently omit requested channel grids.
+
+Continuum automatic cycle limits are resolved from the first dirty Taylor-zero
+image before convergence is checked. Positive thresholds require no extra
+weight-statistic work. For zero thresholds, first-cycle map tasks accumulate
+small additive correlation-weight sums from their loaded weights and flags.
+After global reduction, the existing sensitivity formula supplies the reference
+noise: correlation variance is sum(W**2/w)/sum(W)**2 and Stokes variances follow
+the instrument-to-Stokes transform. Combining sums before the ratio makes the
+result independent of frequency partitioning. No visibility/UVW reads or driver
+sample scan are added; later cycles reuse the resolved controller limit.

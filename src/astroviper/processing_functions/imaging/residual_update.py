@@ -64,6 +64,9 @@ def imaging_setup_single_field(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
         ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
@@ -88,6 +91,8 @@ def imaging_setup_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     image_data_group_out_name : str, optional
         Image data group that the PSF, primary beam and residual image are
         registered under.  Default ``"residual"``.
@@ -380,6 +385,9 @@ def residual_update_cube_single_field(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     model_exists : bool
         ``False`` for the first residual update (the dirty image: there is no
         sky model to degrid yet); ``True`` once a model update has run, in
@@ -409,6 +417,8 @@ def residual_update_cube_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     image_data_group_in_name : str, optional
         Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
         ``"mask"``) roles name the input data variables.  Datasets without

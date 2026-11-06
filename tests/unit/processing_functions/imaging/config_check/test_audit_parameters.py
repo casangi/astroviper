@@ -482,7 +482,9 @@ def test_direct_cube_setup_checks_fitter_before_input_access():
     )
 
     with pytest.raises(ValueError, match="psf_fitting_method"):
-        imaging_setup_single_field(None, None, {}, {}, psf_fitting_method="bad")
+        imaging_setup_single_field(
+            None, None, {"fft_padding": 1.2}, {}, psf_fitting_method="bad"
+        )
 
 
 def test_frequency_matching_public_spelling_rejected_early():

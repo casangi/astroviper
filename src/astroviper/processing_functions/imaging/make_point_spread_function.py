@@ -453,6 +453,9 @@ def make_point_spread_function_single_field(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     ms_data_group_in_name : str, optional
         Measurement-set data group that supplies the weights/uvw used for the
         UV-sampling grid.  Default ``"base"``.
@@ -466,6 +469,8 @@ def make_point_spread_function_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -688,6 +693,9 @@ def make_subtraction_point_spread_function_single_field(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     correlation_coords : sequence of str
         The correlations of the imaging weights, in their order: the PSF
         planes, as the image-sized PSF has them before the transform to the

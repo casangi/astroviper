@@ -114,6 +114,7 @@ def check_residual_update(config, *, mode, require_complete=False):
             "frequency_coords",
             "time_coords",
             "polarization_coords",
+            "fft_padding",
         ):
             if name not in image_params:
                 raise KeyError(f"image_params must contain {name!r}.")
@@ -248,7 +249,12 @@ def check_residual_update(config, *, mode, require_complete=False):
         )
         if time_coords.ndim != 1:
             raise ValueError("time_coords must be one-dimensional.")
-        # The current MVC gridder accumulates all integrations into one plane.
+        # The distributed imagers integrate their selected times into one
+        # image plane; they do not partition input integrations by image time.
+        if require_complete and time_coords.size != 1:
+            raise ValueError(
+                "Single-field imaging requires exactly one image time plane."
+            )
         if (
             mode.imaging_kind == "continuum"
             and continuum_mode == "mvc"

@@ -387,6 +387,26 @@ def _mfs_map_result(task_id, value=1.0):
     }
 
 
+def test_automatic_sensitivity_reduction_is_associative_and_requires_every_partition():
+    leaves = [_mfs_map_result(index) for index in range(3)]
+    for index, leaf in enumerate(leaves):
+        leaf["auto_weight_sums"] = xr.Dataset(
+            {"sum_weight_imaging": ("correlation", [1.0 + index, 2.0 + index])},
+            coords={"correlation": ["XX", "YY"]},
+        )
+    params = {"continuum_mode": "mfs", "additive_variables": ()}
+    flat = combine_continuum_chunks(leaves, params)
+    partial = combine_continuum_chunks(leaves[:2], params)
+    tree = combine_continuum_chunks([partial, leaves[2]], params)
+    xr.testing.assert_identical(flat["auto_weight_sums"], tree["auto_weight_sums"])
+    np.testing.assert_array_equal(
+        flat["auto_weight_sums"].sum_weight_imaging, [6.0, 9.0]
+    )
+    leaves[2].pop("auto_weight_sums")
+    with pytest.raises(ValueError, match="weight sums are missing"):
+        combine_continuum_chunks(leaves, params)
+
+
 def test_mfs_reducer_retains_one_identical_static_primary_beam():
     """MFS keeps a static PB once and validates duplicate copies."""
     result = combine_continuum_chunks(

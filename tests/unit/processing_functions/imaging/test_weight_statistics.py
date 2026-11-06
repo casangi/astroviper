@@ -316,3 +316,58 @@ def test_unknown_correlation_raises(bad):
     weight = np.ones((1, 1, 1, 2))
     with pytest.raises(ValueError):
         _statistics(weight, weight, np.zeros(weight.shape, bool), ["XX", bad], ["I"])
+
+
+@pytest.mark.parametrize("block", [1, 10**6])
+def test_continuum_sensitivity_uses_global_sums_and_no_visibility_or_uvw(
+    block, monkeypatch
+):
+    """Global variance uses sum(W**2/w)/sum(W)**2 before the Stokes transform."""
+    import dask.array as da
+    from dask import delayed
+
+    monkeypatch.setattr(weight_statistics, "BLOCK_SAMPLES", block)
+    rng = np.random.default_rng(7)
+    weight = rng.uniform(0.5, 5.0, (3, 3, 4, 2))
+    imaging = weight * rng.uniform(0.2, 1.0, weight.shape)
+    flag = np.zeros(weight.shape, dtype=bool)
+    flag[0, 0, 1] = True
+    ms = _measurement_set(
+        weight,
+        flag,
+        np.zeros((3, 3, 3)),
+        ["a", "a", "b"],
+        ["b", "a", "c"],
+        np.arange(4) + 1e9,
+        ["XX", "YY"],
+        imaging,
+    )
+
+    def forbidden():
+        raise AssertionError("Sensitivity read visibility or UVW samples")
+
+    ms["UVW"] = xr.DataArray(
+        da.from_delayed(delayed(forbidden)(), shape=(3, 3, 3), dtype=float),
+        dims=("time", "baseline_id", "uvw_label"),
+    )
+    parts = [
+        weight_statistics.continuum_correlation_weight_sums(
+            {"ms": ms.isel(frequency=slice(0, 2))}, "base"
+        ),
+        weight_statistics.continuum_correlation_weight_sums(
+            {"ms": ms.isel(frequency=slice(2, 4), polarization=[1, 0])}, "base"
+        ),
+    ]
+    sums = parts[0] + parts[1]
+    actual = weight_statistics.continuum_sensitivity(sums, ["I", "Q"])
+    cross = [0, 2]
+    valid = ~flag[:, cross]
+    w = np.where(valid, imaging[:, cross], 0)
+    variance = (
+        np.sum(w * w / weight[:, cross], axis=(0, 1, 2))
+        / np.sum(w, axis=(0, 1, 2)) ** 2
+    )
+    expected = np.sqrt(variance.sum() / 4)
+    np.testing.assert_allclose(actual, [[expected, expected]], rtol=1e-14)
+    full = weight_statistics.continuum_correlation_weight_sums({"ms": ms}, "base")
+    xr.testing.assert_allclose(sums, full)

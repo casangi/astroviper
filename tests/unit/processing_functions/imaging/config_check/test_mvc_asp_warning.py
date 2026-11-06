@@ -97,6 +97,7 @@ def test_public_driver_warns_once_before_opening_input(monkeypatch, tmp_path):
         "frequency_coords": [1e9],
         "time_coords": [0.0],
         "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
     }
     controls = {
         "max_iter": 1,

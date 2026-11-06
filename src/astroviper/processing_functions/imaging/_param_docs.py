@@ -29,7 +29,10 @@ _IMAGE_PARAMS_DOC = (
     "``time_coords`` accepts XRADIO image-factory time formats: numeric MJD\n"
     "(UTC) days, numeric strings, ISO time strings, datetime64 values, Python\n"
     "datetime objects, or Astropy Time, as scalars or one-dimensional sequences.\n"
-    "Times must be finite and nonempty; validation preserves the supplied values."
+    "Times must be finite and nonempty; validation preserves the supplied values.\n"
+    "Distributed single-field imagers require exactly one image time plane and\n"
+    "an explicit ``fft_padding``. Designed kernels, including the default,\n"
+    "require padding at least 1.05; CASA's fixed kernel permits 1.0."
 )
 
 _CONTINUUM_IMAGE_PARAMS_DOC = (
@@ -666,7 +669,9 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
     ),
     "image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
-        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).'
+        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
+        "The distributed cube writer does not publish UV grids; standalone\n"
+        "processing functions may retain their working grids in memory."
     ),
     "primary_beam_correction": (
         "If ``True`` write the primary-beam-corrected restored cube to\n"
@@ -714,7 +719,9 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.\n'
         "Restored and spectral products require ``restore=True``. Alpha products\n"
         "require at least two Taylor terms; beta requires at least three.\n"
-        "Unavailable products are rejected before input reads or graph construction."
+        "MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;\n"
+        "MVC cannot publish channel UV grids. Unavailable products are rejected\n"
+        "before input reads or graph construction."
     ),
     "image_continuum_single_field.restore": (
         "If ``True`` restore every Taylor coefficient after deconvolution and\n"

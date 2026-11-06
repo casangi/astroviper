@@ -39,6 +39,9 @@ def make_undeconvolved_image_mvc_single_field(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``

@@ -82,7 +82,9 @@ def check_fits_coordinates(image_params):
             raise ValueError("FITS direction_reference must be FK5 or ICRS.")
 
 
-def check_kept_variables(config, *, mode=None, fits=False, require_image=True):
+def check_kept_variables(
+    config, *, mode=None, fits=False, require_image=True, distributed=False
+):
     """Check the requested variable registry and the FITS representation.
 
     Parameters
@@ -92,6 +94,9 @@ def check_kept_variables(config, *, mode=None, fits=False, require_image=True):
     mode : ImagingMode or None
         Workflow whose output capabilities must be checked. None checks only
         registry membership and storage representation for direct writer calls.
+    distributed : bool, optional
+        Enforce the distributed driver's disk-publication capabilities. Working
+        UV grids may still be retained by standalone processing functions.
     fits : bool
         Whether to require the fixed FITS writer's image/beam dimensions.
     """
@@ -138,6 +143,22 @@ def check_kept_variables(config, *, mode=None, fits=False, require_image=True):
             raise ValueError(
                 "Legacy continuum output keys are not produced; use "
                 "'sky_restored_flat_noise' or 'sky_restored_flat_sky' instead."
+            )
+
+        # --- Published UV grids ---
+        # MFS retains Taylor grids. MVC discards channel grids after forming
+        # its Taylor images; the cube writer has no UV-grid output schema.
+        grids = requested & {"visibility", "uv_sampling", "aperture"}
+        if (
+            distributed
+            and grids
+            and (
+                mode.imaging_kind == "cube"
+                or config.get("continuum_mode", "mfs") == "mvc"
+            )
+        ):
+            raise ValueError(
+                f"UV-grid outputs {sorted(grids)} are not supported by this imaging workflow."
             )
 
         # --- Restoration-dependent products ---

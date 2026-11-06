@@ -86,10 +86,9 @@ def check_gridding_kernel(params, *, fft_padding=None):
         make_gridding_kernel,
     )
 
-    if params is not None:
-        # The builder delegates its recipe and padding checks to this module.
-        # Its numerical correction guard is also used by direct builder calls.
-        make_gridding_kernel(params, fft_padding=fft_padding)
+    # None selects the production default, which has the same design/padding
+    # requirements as an explicit recipe. The cached builder owns those rules.
+    make_gridding_kernel(params, fft_padding=fft_padding)
 
 
 def check_kernel_options(kernel_type, interpolation):

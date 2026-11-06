@@ -48,6 +48,7 @@ def test_public_hogbom_rejection_directs_to_mtmfs_before_opening_or_writing(
         "frequency_coords": [1e9, 1.2e9],
         "time_coords": [0.0],
         "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
     }
     before = deepcopy(image_params)
     output = tmp_path / "image.zarr"

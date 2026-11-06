@@ -34,6 +34,7 @@ def configuration():
         "image_params": {
             "image_size": [32, 32],
             "cell_size": [-1e-5, 1e-5],
+            "fft_padding": 1.2,
             "phase_direction": [0.0, 0.0],
             "time_coords": [0.0],
             "polarization_coords": ["I", "Q"],

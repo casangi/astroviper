@@ -487,6 +487,29 @@ def test_install_static_products_does_not_alias_the_cache():
     )
 
 
+@pytest.mark.parametrize("missing", [None, "UV_SAMPLING", "UV_SAMPLING_NORMALIZATION"])
+def test_requested_static_sampling_grid_is_complete_and_independent(missing):
+    static = _static_products()
+    static["UV_SAMPLING"] = xr.DataArray(
+        np.ones((1, 3, 1, 2, 2), dtype=complex),
+        dims=("time", "psf_taylor_order", "polarization", "u", "v"),
+    )
+    static["UV_SAMPLING_NORMALIZATION"] = xr.DataArray(
+        np.ones((1, 3, 1)), dims=("time", "psf_taylor_order", "polarization")
+    )
+    if missing:
+        static = static.drop_vars(missing)
+        image = xr.Dataset()
+        with pytest.raises(KeyError, match="supplied together"):
+            continuum_node._install_static_continuum_products(image, static)
+        assert not image.data_vars
+    else:
+        result = continuum_node._install_static_continuum_products(xr.Dataset(), static)
+        assert result.attrs["data_groups"]["residual"]["uv_sampling"] == "UV_SAMPLING"
+        result.UV_SAMPLING.values[:] = 0
+        np.testing.assert_array_equal(static.UV_SAMPLING, 1)
+
+
 def test_install_static_products_rejects_frequency_still_in_use():
     """A live channel cube prevents replacement of its frequency coordinate."""
     image = xr.Dataset(
@@ -599,6 +622,7 @@ def _weight_node_params():
     return {
         "image_params": {
             "phase_direction": [0.0, 0.0],
+            "fft_padding": 1.2,
             "image_size": [2, 2],
             "cell_size": [1.0, 1.0],
             "time_coords": [0.0],

@@ -121,6 +121,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # False-like strings and integers must not silently enable a different path.
     for name in (
         "input_checked",
+        "calculate_auto_sensitivity",
         "single_precision_image",
         "restore",
         "primary_beam_correction",
@@ -289,7 +290,9 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     image_params = require_mapping("image_params", config.get("image_params", {}))
     if output_format == "fits":
         check_fits_coordinates(image_params)
-    check_kept_variables(config, mode=mode, fits=output_format == "fits")
+    check_kept_variables(
+        config, mode=mode, fits=output_format == "fits", distributed=require_complete
+    )
     check_output_layout(config)
     check_output_codec(config)
 

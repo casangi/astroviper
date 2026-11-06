@@ -1785,6 +1785,18 @@ def combine_continuum_chunks(input_data, input_params):
         "deconvolution": combined_deconvolution,
     }
 
+    summaries = [result.get("auto_weight_sums") for result in input_data]
+    if any(summary is not None for summary in summaries):
+        if any(summary is None for summary in summaries):
+            raise ValueError(
+                "Automatic sensitivity weight sums are missing from a continuum partition."
+            )
+        combined = summaries[0].copy(deep=True)
+        for summary in summaries[1:]:
+            first, second = xr.align(combined, summary, join="exact")
+            combined = first + second
+        return_dict["auto_weight_sums"] = combined
+
     if weight_cache_mapping:
         return_dict["weight_cache_mapping"] = weight_cache_mapping
 
@@ -2727,6 +2739,9 @@ def image_continuum_single_field(
         (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
         datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
         Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``
@@ -2812,7 +2827,9 @@ def image_continuum_single_field(
         products and the derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.
         Restored and spectral products require ``restore=True``. Alpha products
         require at least two Taylor terms; beta requires at least three.
-        Unavailable products are rejected before input reads or graph construction.
+        MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;
+        MVC cannot publish channel UV grids. Unavailable products are rejected
+        before input reads or graph construction.
     compressor : object, optional
         Output Zarr compressor.
     processing_set_data_group_name : str
@@ -3358,6 +3375,7 @@ def image_continuum_single_field(
 
     import time
 
+    import numpy as np
     import toolviper.utils.logger as logger
     from graphviper.graph_tools.coordinate_utils import (
         get_disk_chunk_sizes,
@@ -3620,6 +3638,10 @@ def image_continuum_single_field(
     input_params["skunk_works"] = skunk_works
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
     input_params["spectral_diagnostics"] = spectral_diagnostics
+
+    input_params["calculate_auto_sensitivity"] = cycle_control_params.get(
+        "max_cycles"
+    ) == "auto" and np.any(np.asarray(cycle_control_params.get("threshold", 0.0)) <= 0)
 
     controller = _make_continuum_cycle_controller(cycle_control_params)
 

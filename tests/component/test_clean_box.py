@@ -130,3 +130,72 @@ def test_existing_image_is_rejected_before_input_reopens(
         if path.is_file()
     }
     assert after == before
+
+
+@pytest.mark.parametrize(
+    "workflow,case",
+    [
+        (workflow, case)
+        for workflow in ("cube", "mfs", "mvc")
+        for case in ("padding", "times")
+    ]
+    + [(workflow, "grid") for workflow in ("cube", "mvc")],
+)
+def test_invalid_capabilities_preserve_existing_science_output(
+    imaging_input, tmp_path, monkeypatch, workflow, case
+):
+    store, params = imaging_input
+    params = {**params, "image_size": [48, 48], "n_taylor_terms": 1}
+    output = tmp_path / "preserved.img.zarr"
+    _run(store, output, params, workflow, None)
+    before = {
+        str(path.relative_to(output)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+    from astroviper.distributed_applications.imaging import (
+        image_continuum_single_field,
+        image_cube_single_field,
+    )
+
+    if case == "padding":
+        params["fft_padding"] = 1.0
+    if case == "times":
+        params["time_coords"] = [0.0, 1.0]
+    config = dict(
+        image_params=params,
+        imaging_weights_params={"weighting": "natural"},
+        cycle_control_params={
+            "max_iter": 0,
+            "max_cycles": 0,
+            "gain": 0.1,
+            "threshold": 0.0,
+            "psf_sidelobe_factor": 1.0,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+            "max_iter_per_cycle": 1,
+        },
+        deconvolver="hogbom",
+        overwrite=True,
+        image_data_variables_keep=["sky_residual"]
+        + (["visibility"] if case == "grid" else []),
+    )
+    if workflow != "cube":
+        config["continuum_mode"] = workflow
+
+    def forbidden_input(*args, **kwargs):
+        raise AssertionError("Invalid configuration reached input I/O")
+
+    monkeypatch.setattr("xradio.measurement_set.open_processing_set", forbidden_input)
+    with pytest.raises(ValueError, match="fft_padding|time plane|UV-grid"):
+        (
+            image_cube_single_field
+            if workflow == "cube"
+            else image_continuum_single_field
+        )(str(store), str(output), **config)
+    after = {
+        str(path.relative_to(output)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+    assert after == before

@@ -27,6 +27,7 @@ def _image_params(n_taylor_terms=1):
         "frequency_coords": [1e9],
         "time_coords": [0.0],
         "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
     }
 
 
@@ -89,6 +90,7 @@ def test_public_api_rejects_msv2_before_creating_output(monkeypatch, tmp_path):
                 "frequency_coords": [1.0e9],
                 "time_coords": [0.0],
                 "polarization_coords": ["I", "Q"],
+                "fft_padding": 1.2,
             },
             {"weighting": "natural"},
             dict(

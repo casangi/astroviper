@@ -30,6 +30,7 @@ def test_public_driver_rejects_numerics_before_opening_or_writing(
         "phase_direction": [0.0, 0.0],
         "time_coords": [0.0],
         "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
     }
     output = tmp_path / "image.zarr"
     with pytest.raises(ValueError, match="frequency_coords"):

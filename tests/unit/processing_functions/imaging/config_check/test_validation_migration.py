@@ -133,6 +133,7 @@ def test_psf_driver_checks_nested_configuration_before_io(tmp_path):
         "frequency_coords": [1e9],
         "time_coords": [0],
         "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
     }
     output = tmp_path / "never-created.zarr"
     with pytest.raises(ValueError, match="image_size"):
