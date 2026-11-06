@@ -363,7 +363,7 @@ def image_cube_single_field_delphi(
         n_mapping_parallelism=n_mapping_parallelism,
         overwrite=overwrite,
         restore=True,
-        primary_beam_correction=True,
+        restoration_output="both",
         psf_fitting_method=PSF_FITTING_METHOD,
         gridding_kernel_params=GRIDDING_KERNEL_PARAMS,
         primary_beam_params=primary_beam_params,

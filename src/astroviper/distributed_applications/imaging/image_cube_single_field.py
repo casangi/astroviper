@@ -147,7 +147,7 @@ def image_cube_single_field(
     vizualize_graph: bool = False,
     fft_backend="pyfftw",
     restore: bool = False,
-    primary_beam_correction: bool = False,
+    restoration_output: str = "apparent",
     psf_fitting_method: str = "astroviper",
     gridding_kernel_params: dict[str, Any] | None = None,
     primary_beam_params: dict[str, Any] | None = None,
@@ -555,12 +555,16 @@ def image_cube_single_field(
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
-    primary_beam_correction : bool, optional
-        If ``True`` write the primary-beam-corrected restored cube to
-        ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``). Divide the model and residual
-        by the channel power primary beam before clean-beam convolution. Pixels
-        below ``primary_beam_limit`` are blanked with NaN. Requires ``restore``.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
+        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
+        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
+        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
+        Cube corrects the model and residual by the channel power primary beam
+        before convolution. MFS divides their Taylor polynomials; MVC divides
+        by its common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
+        selector only when ``restore=True``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -898,9 +902,13 @@ def image_cube_single_field(
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
-    if restore and "sky_restored" not in image_data_variables_keep:
+    if (
+        restore
+        and restoration_output in ("apparent", "both")
+        and "sky_restored" not in image_data_variables_keep
+    ):
         image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
-    if primary_beam_correction:
+    if restore and restoration_output in ("primary_beam_corrected", "both"):
         if "sky_restored_primary_beam_corrected" not in image_data_variables_keep:
             image_data_variables_keep = list(image_data_variables_keep) + [
                 "sky_restored_primary_beam_corrected"
@@ -1054,7 +1062,7 @@ def image_cube_single_field(
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
-    input_params["primary_beam_correction"] = primary_beam_correction
+    input_params["restoration_output"] = restoration_output
     input_params["psf_fitting_method"] = psf_fitting_method
     input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["primary_beam_params"] = primary_beam_params

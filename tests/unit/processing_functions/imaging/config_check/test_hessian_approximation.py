@@ -1,7 +1,6 @@
 """PSF-free Taylor-Hessian estimates use only selected spectral metadata."""
 
 import json
-import warnings
 
 import numpy as np
 import pytest
@@ -57,10 +56,9 @@ def test_frequency_moment_estimate_matches_direct_small_system(nterms):
 @pytest.mark.parametrize("precision", ["float32", "float64"])
 @pytest.mark.parametrize("factor", [1e-200, 1.0, 1e200])
 def test_narrow_band_and_common_weight_units_do_not_imply_dependent_moments(
-    precision, factor
+    diagnostic_warnings, precision, factor
 ):
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with diagnostic_warnings() as caught:
         result = _approximation(
             [1e9 - 1e3, 1e9, 1e9 + 1e3],
             np.full(3, factor),
@@ -73,9 +71,10 @@ def test_narrow_band_and_common_weight_units_do_not_imply_dependent_moments(
     assert not caught
 
 
-def test_approximate_order_zero_coupling_warns_without_rejecting():
-    with pytest.warns(
-        RuntimeWarning,
+def test_approximate_order_zero_coupling_warns_without_rejecting(
+    diagnostic_warnings,
+):
+    with diagnostic_warnings(
         match="Approximate Taylor-Hessian order-zero noise amplification exceeds 3.0",
     ):
         result = _approximation(
@@ -88,13 +87,15 @@ def test_approximate_order_zero_coupling_warns_without_rejecting():
     assert min(result["equilibrated_eigenvalues"]) > result["eigenvalue_tolerance"]
 
 
-def test_approximate_native_pivot_guard_uses_working_precision():
+def test_approximate_native_pivot_guard_uses_working_precision(
+    diagnostic_warnings,
+):
     args = dict(n_taylor_terms=2, reference_frequency=1e9)
     with pytest.raises(
         ValueError, match="Approximate Taylor-Hessian.*unsafe relative Cholesky pivots"
     ):
         _approximation([1.1e9, 1.10001e9], [1, 1], precision="float32", **args)
-    with pytest.warns(RuntimeWarning, match="Approximate Taylor-Hessian order-zero"):
+    with diagnostic_warnings(match="Approximate Taylor-Hessian order-zero"):
         _approximation([1.1e9, 1.10001e9], [1, 1], precision="float64", **args)
 
 

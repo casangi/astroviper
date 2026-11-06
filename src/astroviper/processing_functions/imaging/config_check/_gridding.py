@@ -14,6 +14,7 @@ def check_gridding_kernel_parameters(params):
     ----------
     params : mapping or None
         Explicit kernel settings. Missing keys retain the builder's defaults.
+
     Notes
     -----
     The production builder caches kernels by their recipe, so this preflight
@@ -62,7 +63,13 @@ def check_gridding_kernel_parameters(params):
 
 
 def check_kernel_padding(fft_padding):
-    """Require a padding that leaves a design region below the alias boundary."""
+    """Require a padding that leaves a design region below the alias boundary.
+
+    Parameters
+    ----------
+    fft_padding : float
+        Finite scalar padding factor of at least 1.05.
+    """
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         MIN_DESIGN_PADDING,
     )
@@ -75,7 +82,15 @@ def check_kernel_padding(fft_padding):
 
 
 def check_gridding_kernel(params, *, fft_padding=None):
-    """Check the recipe and cached numerical image-edge correction."""
+    """Check the recipe and cached numerical image-edge correction.
+
+    Parameters
+    ----------
+    params : mapping or None
+        Kernel recipe; None selects the production default.
+    fft_padding : float or None, optional
+        Padding factor supplied to the cached numerical kernel builder.
+    """
     if params is not None:
         require_mapping("gridding_kernel_params", params)
         if params.get("type") == "dft":
@@ -92,7 +107,15 @@ def check_gridding_kernel(params, *, fft_padding=None):
 
 
 def check_kernel_options(kernel_type, interpolation):
-    """Check options shared by recipe builders and explicitly supplied tables."""
+    """Check options shared by recipe builders and explicitly supplied tables.
+
+    Parameters
+    ----------
+    kernel_type : str
+        Kernel type registered by the production builder.
+    interpolation : {'nearest', 'linear'}
+        Lookup interpolation used for the kernel table.
+    """
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         KERNEL_TYPES,
     )
@@ -106,6 +129,12 @@ def check_kernel_options(kernel_type, interpolation):
 
 
 def check_casa_support(support):
-    """Schwab's tabulated approximation is defined for exactly seven grid points."""
+    """Schwab's tabulated approximation is defined for exactly seven grid points.
+
+    Parameters
+    ----------
+    support : int
+        Stencil width, which must equal seven for the CASA kernel.
+    """
     if support != 7:
         raise ValueError("prolate_spheroidal_casa requires kernel support=7.")

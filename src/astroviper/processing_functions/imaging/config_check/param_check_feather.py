@@ -17,7 +17,15 @@ from astroviper.processing_functions.imaging.config_check._common import (
 
 
 def check_feather_config(outim, highres, lowres):
-    """Validate image paths and the output policy without modifying mappings."""
+    """Validate image paths and the output policy without modifying mappings.
+
+    Parameters
+    ----------
+    outim : mapping
+        Required nonempty output name and optional Boolean overwrite policy.
+    highres, lowres : str
+        Nonempty paths to the high- and low-resolution input images.
+    """
     # --- Input locations ---
     # Each graph node reopens these paths; in-memory images are not supported.
     for name, path in (("highres", highres), ("lowres", lowres)):
@@ -49,6 +57,21 @@ def check_feather_config(outim, highres, lowres):
 def check_feather_inputs(highres, lowres):
     """Require compatible SKY shapes and supported real floating-point storage.
 
+    Parameters
+    ----------
+    highres, lowres : xarray.Dataset
+        Opened images whose SKY variables must have identical shapes and float32
+        or float64 storage.
+
+    Raises
+    ------
+    ValueError
+        A SKY product is missing or has unsupported storage precision.
+    RuntimeError
+        The input SKY shapes differ.
+
+    Notes
+    -----
     Only metadata is inspected: no image pixels are loaded or converted. Mixed
     float32/float64 inputs remain supported with the existing precision policy.
     """

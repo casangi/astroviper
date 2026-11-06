@@ -97,6 +97,8 @@ def check_kept_variables(
     distributed : bool, optional
         Enforce the distributed driver's disk-publication capabilities. Working
         UV grids may still be retained by standalone processing functions.
+    require_image : bool, optional
+        Require at least one image-domain variable when checking FITS output.
     fits : bool
         Whether to require the fixed FITS writer's image/beam dimensions.
     """
@@ -168,15 +170,19 @@ def check_kept_variables(
             raise ValueError(
                 f"Requested variables {sorted(restored_products)} require restore=True."
             )
-        if (
-            mode.imaging_kind == "cube"
-            and "sky_restored_primary_beam_corrected" in requested
-            and "primary_beam_correction" in config
-            and not config["primary_beam_correction"]
-        ):
-            raise ValueError(
-                "sky_restored_primary_beam_corrected requires primary_beam_correction=True."
-            )
+        # --- Selected cube restoration products ---
+        if mode.imaging_kind == "cube" and "restoration_output" in config:
+            for key, allowed in (
+                ("sky_restored", ("apparent", "both")),
+                (
+                    "sky_restored_primary_beam_corrected",
+                    ("primary_beam_corrected", "both"),
+                ),
+            ):
+                if key in requested and config["restoration_output"] not in allowed:
+                    raise ValueError(
+                        f"{key} is unavailable with restoration_output={config['restoration_output']!r}."
+                    )
 
         # --- Selected continuum restoration products ---
         # A keep request must agree with the single restoration selector; never
@@ -209,9 +215,11 @@ def check_kept_variables(
     # Restoration adds mandatory outputs locally; never append to the caller list.
     effective = set(kept)
     if config.get("restore", False):
-        effective.add("sky_restored")
-    if config.get("primary_beam_correction", False):
-        effective.add("sky_restored_primary_beam_corrected")
+        output = config.get("restoration_output", "apparent")
+        if output in ("apparent", "both"):
+            effective.add("sky_restored")
+        if output in ("primary_beam_corrected", "both"):
+            effective.add("sky_restored_primary_beam_corrected")
     image_dims = ("time", "frequency", "polarization", "l", "m")
     beam_dims = ("time", "frequency", "polarization", "beam_params_label")
     unsupported = [

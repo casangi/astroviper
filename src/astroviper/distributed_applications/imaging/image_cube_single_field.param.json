@@ -37,7 +37,7 @@
         "vizualize_graph": { "type": "boolean" },
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
-        "primary_beam_correction": { "type": "boolean" },
+        "restoration_output": { "type": "string", "allowed": ["apparent", "primary_beam_corrected", "both"] },
         "psf_fitting_method": { "type": "string", "allowed": ["astroviper", "casa"] },
         "gridding_kernel_params": { "type": ["dict"], "nullable": true },
         "primary_beam_params": { "type": ["dict"], "nullable": true },

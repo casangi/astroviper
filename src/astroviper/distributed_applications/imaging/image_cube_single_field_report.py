@@ -212,7 +212,7 @@ def _add_moment_maximum(
             document.note(
                 f"No {description}: {key} was not written"
                 + (
-                    " (it needs restore=True and primary_beam_correction=True)."
+                    " (it needs restore=True and restoration_output='primary_beam_corrected' or 'both')."
                     if key == "sky_restored_primary_beam_corrected"
                     else "."
                 )

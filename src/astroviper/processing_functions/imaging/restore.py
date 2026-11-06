@@ -6,6 +6,7 @@ from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
+from astroviper.utils.param_docs import shares_param_docs
 
 # FWHM = 2 * sqrt(2 * ln 2) * sigma. Matches the factor used by the PSF Gaussian
 # fit (astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit)
@@ -584,6 +585,7 @@ def _restore_image_arrays(
     }
 
 
+@shares_param_docs
 def restore_image(
     img_xds: xr.Dataset,
     image_data_group_in_residual_name: str = "residual",
@@ -594,10 +596,12 @@ def restore_image(
     beam_polarization_index: int = 0,
     processing_function_threads: int = 1,
     consume_model: bool = False,
-    primary_beam_correction: bool = False,
+    restoration_output: str = "apparent",
     primary_beam_limit: float = 0.2,
     primary_beam_key: str = "primary_beam",
     overwrite: bool = True,
+    *,
+    input_checked: bool = False,
 ):
     """Restore an image: model convolved with the clean beam plus the residual.
 
@@ -616,8 +620,9 @@ def restore_image(
     The clean beam is normalised to unit peak, so a model point source of flux
     ``F`` (Jy) becomes a Gaussian of peak ``F`` Jy/beam.
 
-    With ``primary_beam_correction`` the primary beam corrected restored image
-    is made in the same pass and stored as
+    With ``restoration_output="primary_beam_corrected"`` only the corrected
+    image is made; ``"both"`` also retains the apparent image. The corrected
+    image is stored as
     ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED`` (role ``sky_primary_beam_corrected``
     of the restored group): the model and the residual are divided by the
     primary beam before the convolution, ``(SKY_MODEL / P) * B + SKY_RESIDUAL
@@ -625,10 +630,13 @@ def restore_image(
     :func:`primary_beam_corrected_plane`; CASA's ``pbcor`` divides the
     restored image instead).
 
+    Corrected-only output does not allocate an apparent restored cube and
+    leaves the input model intact even when ``consume_model=True``.
+
     Efficiency
     ----------
     The work is done plane by plane so no full-cube temporaries are allocated
-    beyond the single restored cube.  The convolution is a real FFT
+    beyond the requested restored cubes.  The convolution is a real FFT
     (``scipy.fft.rfft2`` / ``irfft2``, the inverse done in two in-place steps
     that give the same result without scipy's hidden copy of the spectrum,
     see ``_inverse_rfft2``) at the image dtype (single-precision
@@ -639,7 +647,7 @@ def restore_image(
     and the inverse-transform output, with the residual added into the restored
     cube without a further temporary.  Planes whose model is entirely zero skip
     the convolution (the restored plane is just the residual).  With
-    ``consume_model=True`` even the restored cube allocation is avoided: the
+    ``consume_model=True`` and apparent output, its cube allocation is avoided: the
     model cube's buffer is reused and the model variable dropped.
 
     Parameters
@@ -673,10 +681,11 @@ def restore_image(
         beam (the same beam is applied to every polarization).  Default ``0``
         (Stokes I).
     processing_function_threads : int, optional
-        Number of worker threads handed to ``scipy.fft`` for the per-plane
-        FFTs.  Values ``<= 0`` use all available cores.  Default ``1``.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     consume_model : bool, optional
-        If ``True`` the restored cube is written into the **model** variable's
+        If ``True`` and apparent output is requested, that cube is written
+        into the **model** variable's
         buffer instead of a freshly allocated cube (each model plane is fully
         read into its forward FFT before its slot is overwritten), and the
         model data variable is removed from ``img_xds`` afterwards — the model
@@ -685,10 +694,16 @@ def restore_image(
         image cube of peak memory.  Requires the model and residual dtypes to
         match; otherwise a fresh cube is allocated as for ``False``.  Default
         ``False`` (model preserved).
-    primary_beam_correction : bool, optional
-        If ``True`` also make the primary beam corrected restored image
-        (needs the ``primary_beam_key`` role in the residual data group).
-        Default ``False``.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
+        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
+        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
+        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
+        Cube corrects the model and residual by the channel power primary beam
+        before convolution. MFS divides their Taylor polynomials; MVC divides
+        by its common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
+        selector only when ``restore=True``.
     primary_beam_limit : float, optional
         Primary beam (power) cutoff below which the corrected image is blanked
         with NaN, as a fraction of the beam peak.  Default ``0.2`` (the CASA
@@ -696,6 +711,11 @@ def restore_image(
     primary_beam_key : str, optional
         Role key of the primary beam in the residual data group.  Default
         ``"primary_beam"``.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
     overwrite : bool, optional
         If ``True`` an existing restored data group / output variable is
         overwritten.  Default ``True``.
@@ -720,8 +740,23 @@ def restore_image(
     """
     import pandas as pd
 
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check._predicates import (
+            check_primary_beam_limit,
+            check_restoration_output,
+        )
+
+        check_restoration_output(restoration_output)
+        check_primary_beam_limit(primary_beam_limit)
+
+    make_apparent = restoration_output in ("apparent", "both")
+    correct = restoration_output in ("primary_beam_corrected", "both")
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = {"sky": "SKY_RESTORED"}
+        image_data_group_out_modified = {
+            "sky": "SKY_RESTORED"
+            if make_apparent
+            else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        }
 
     # Resolve every required runtime product before building output metadata.
     # A cube consumes the fitted beam directly and does not require a PSF.
@@ -734,7 +769,6 @@ def restore_image(
     beam_name = resolve_restoration_product(
         img_xds, image_data_group_in_residual_name, beam_fit_params_key
     )
-    correct = bool(primary_beam_correction)
     if correct:
         primary_beam_name = resolve_restoration_product(
             img_xds, image_data_group_in_residual_name, primary_beam_key
@@ -751,7 +785,11 @@ def restore_image(
     restored_sky_name = restored_group["sky"]
     if correct:
         primary_beam = img_xds[primary_beam_name].values
-        corrected_sky_name = "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        corrected_sky_name = (
+            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            if make_apparent
+            else restored_sky_name
+        )
         restored_group["sky_primary_beam_corrected"] = corrected_sky_name
 
     residual_da = img_xds[residual_sky_name]
@@ -776,17 +814,17 @@ def restore_image(
         processing_function_threads=processing_function_threads,
         primary_beam=primary_beam if correct else None,
         primary_beam_limit=primary_beam_limit,
-        output="both" if correct else "apparent",
+        output=restoration_output,
         consume_model=(consume_model and model_sky_name != residual_sky_name),
     )
-    restored = products["apparent"]
     consume = bool(array_timing["consumed_model"])
     if correct:
         corrected = products["primary_beam_corrected"]
         T_correct = float(array_timing["primary_beam_corrected"])
 
     # Store the restored sky, preserving the residual's dims, coords and attrs.
-    img_xds[restored_sky_name] = residual_da.copy(data=restored)
+    if make_apparent:
+        img_xds[restored_sky_name] = residual_da.copy(data=products["apparent"])
     if correct:
         img_xds[corrected_sky_name] = residual_da.copy(data=corrected)
         img_xds[corrected_sky_name].attrs["type"] = "sky"

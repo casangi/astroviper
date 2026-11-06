@@ -508,7 +508,7 @@ def image_cube_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     restore=False,
-    primary_beam_correction=False,
+    restoration_output="apparent",
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
@@ -843,12 +843,16 @@ def image_cube_single_field(
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
-    primary_beam_correction : bool, optional
-        If ``True`` write the primary-beam-corrected restored cube to
-        ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``). Divide the model and residual
-        by the channel power primary beam before clean-beam convolution. Pixels
-        below ``primary_beam_limit`` are blanked with NaN. Requires ``restore``.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
+        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
+        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
+        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
+        Cube corrects the model and residual by the channel power primary beam
+        before convolution. MFS divides their Taylor polynomials; MVC divides
+        by its common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
+        selector only when ``restore=True``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -1294,7 +1298,6 @@ def image_cube_single_field(
     # restore may overwrite it. The deconvolver's primary_beam_limit is the
     # blanking cutoff when set, else the CASA pblimit default of 0.2.
     timing["T_correct_sky_by_primary_beam"] = 0.0
-    correct = primary_beam_correction and restore
     if restore:
         from astroviper.processing_functions.imaging.restore import restore_image
 
@@ -1308,7 +1311,8 @@ def image_cube_single_field(
             # written to the output store; let the restore reuse its buffer
             # instead of allocating a fresh restored cube.
             consume_model="sky_model" not in image_data_variables_keep,
-            primary_beam_correction=correct,
+            restoration_output=restoration_output,
+            input_checked=True,
             primary_beam_limit=(
                 cycle_control_params.get("primary_beam_limit", 0.0) or 0.2
             ),

@@ -10,7 +10,17 @@ from astroviper.processing_functions.imaging.config_check._common import (
 
 
 def _check_aperture(dish, blockage, *, name):
-    """Require physical aperture dimensions, preserving the supplied values."""
+    """Require physical aperture dimensions, preserving the supplied values.
+
+    Parameters
+    ----------
+    dish : array-like
+        Finite effective dish diameters in metres.
+    blockage : array-like
+        Finite blockage diameters in metres, nonnegative and smaller than dish.
+    name : str
+        Aperture label included in errors.
+    """
     dish = require_finite_real(f"{name} dish diameter", dish, positive=True)
     blockage = require_finite_real(f"{name} blockage diameter", blockage)
     if dish.shape != blockage.shape or np.any(blockage < 0) or np.any(blockage >= dish):
@@ -124,7 +134,14 @@ def check_cube_primary_beam(params):
 
 
 def _check_explicit_beam_model(model):
-    """Check small analytic/polynomial model metadata without evaluating pixels."""
+    """Check small analytic/polynomial model metadata without evaluating pixels.
+
+    Parameters
+    ----------
+    model : mapping or xarray.Dataset
+        Analytic aperture prescription or frequency-dependent beam-polynomial
+        metadata.
+    """
     from collections.abc import Mapping
 
     import xarray as xr

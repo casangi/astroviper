@@ -673,13 +673,6 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "The distributed cube writer does not publish UV grids; standalone\n"
         "processing functions may retain their working grids in memory."
     ),
-    "primary_beam_correction": (
-        "If ``True`` write the primary-beam-corrected restored cube to\n"
-        "``sky_restored_primary_beam_corrected``\n"
-        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``). Divide the model and residual\n"
-        "by the channel power primary beam before clean-beam convolution. Pixels\n"
-        "below ``primary_beam_limit`` are blanked with NaN. Requires ``restore``."
-    ),
     "restore_continuum_image.continuum_mode": (
         "Continuum construction convention. When omitted, infer it from the\n"
         "residual or image metadata. An explicit value must agree with any\n"
@@ -693,13 +686,15 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "Taylor term before restoration. The stored residual remains unchanged."
     ),
     "restoration_output": (
-        'Restored continuum products to compute: ``"apparent"`` writes\n'
-        '``SKY_RESTORED_FLAT_NOISE``, ``"primary_beam_corrected"`` writes\n'
-        '``SKY_RESTORED_FLAT_SKY``, and ``"both"`` writes both Taylor stacks.\n'
-        "This selector is the sole continuum correction/output control. MFS\n"
-        "corrects the model and residual Taylor polynomials before convolution;\n"
-        "MVC divides by the common power primary beam. Corrected pixels below\n"
-        "``primary_beam_limit`` are blanked with NaN."
+        'Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,\n'
+        'or ``"both"``. Cube outputs are ``SKY_RESTORED`` and\n'
+        "``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are\n"
+        "``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.\n"
+        "Cube corrects the model and residual by the channel power primary beam\n"
+        "before convolution. MFS divides their Taylor polynomials; MVC divides\n"
+        "by its common power primary beam. Corrected pixels below\n"
+        "``primary_beam_limit`` are blanked with NaN. Imaging workflows use this\n"
+        "selector only when ``restore=True``."
     ),
     "psf_fitting_method": (
         'Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or\n'

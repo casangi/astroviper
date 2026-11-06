@@ -70,13 +70,23 @@ reserve it for future field selection. Input must already be single-field.
 `mpi_cluster_setup` is retained on all drivers and ignored outside the cube MPI
 backend. `primary_beam_limit` accepts the inclusive interval `[0.0, 1.0]`.
 
-Continuum restoration uses `restoration_output` as its sole product selector:
-`apparent` writes `SKY_RESTORED_FLAT_NOISE`, `primary_beam_corrected` writes
-`SKY_RESTORED_FLAT_SKY`, and `both` writes both Taylor stacks. The distributed
-driver defaults to corrected output when `restore=True`; direct restoration
-calls default to apparent output. Continuum no longer accepts
-`primary_beam_correction` in function arguments or node configuration. Cube
-imaging retains that Boolean switch.
+Cube and continuum restoration use the same `restoration_output` selector:
+
+| Selector | Cube product | Continuum product |
+| --- | --- | --- |
+| `apparent` | `SKY_RESTORED` | `SKY_RESTORED_FLAT_NOISE` |
+| `primary_beam_corrected` | `SKY_RESTORED_PRIMARY_BEAM_CORRECTED` | `SKY_RESTORED_FLAT_SKY` |
+| `both` | Both cube products | Both Taylor stacks |
+
+Cube workflows and direct restoration default to apparent output; the
+continuum distributed driver defaults to corrected output. Imaging workflows
+compute restoration products only when `restore=True`; the selector is still
+validated when restoration is disabled. Neither workflow accepts the retired
+`primary_beam_correction` Boolean. Cube correction divides model and residual
+by the channel primary beam before convolution. MFS divides their Taylor
+polynomials, while MVC uses its common beam. Corrected-only output does not
+allocate an apparent restored cube. The selector controls intensity products;
+the separate spectral-product convention is described by the restoration API.
 
 Output requests must match the selected workflow and restoration products.
 Restored images and spectral products require `restore=True`; alpha products
@@ -84,6 +94,9 @@ need at least two Taylor terms and beta at least three. Continuum-only keys are
 refused by cube imaging, and a continuum keep list cannot override
 `restoration_output`. All these relationships are checked before graph or output
 creation without changing the supplied configuration.
+
+Numerical spectral and Hessian diagnostics use warning-level ToolVIPER log
+messages, so worker diagnostics follow the software stack's logging controls.
 
 The workflow checker also logs the MVC/Asp significance warning when significance
 is enabled without an explicit clean mask. The diagnostic runs at the unchecked

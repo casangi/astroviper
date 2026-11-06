@@ -64,19 +64,51 @@ def test_conflicting_keep_requests_fail_before_opening_input(
     assert not image_store.exists()
 
 
-def test_cube_keeps_its_separate_correction_api():
+def test_cube_uses_the_same_restoration_selector():
     from astroviper.processing_functions.imaging.config_check import (
         CUBE_SINGLE_FIELD,
         check_driver_workflow,
     )
 
     check_driver_workflow(
-        {"restore": True, "primary_beam_correction": True}, mode=CUBE_SINGLE_FIELD
+        {"restore": True, "restoration_output": "both"}, mode=CUBE_SINGLE_FIELD
     )
-    with pytest.raises(ValueError, match="continuum-only"):
-        check_driver_workflow({"restoration_output": "both"}, mode=CUBE_SINGLE_FIELD)
+    with pytest.raises(ValueError, match="restoration_output"):
+        check_driver_workflow({"primary_beam_correction": True}, mode=CUBE_SINGLE_FIELD)
 
 
 def test_removed_processing_keyword_has_no_alias():
     with pytest.raises(TypeError, match="primary_beam_correction"):
         restore_continuum_image(None, primary_beam_correction=True)
+
+
+@pytest.mark.parametrize(
+    "output,key",
+    [
+        ("apparent", "sky_restored_primary_beam_corrected"),
+        ("primary_beam_corrected", "sky_restored"),
+    ],
+)
+def test_cube_rejects_conflicting_products_before_input_or_output(
+    monkeypatch, tmp_path, output, key
+):
+    from astroviper.distributed_applications.imaging import image_cube_single_field
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Input opened before restoration selection was checked")
+
+    monkeypatch.setattr("xradio.measurement_set.open_processing_set", forbidden)
+    config = configuration()
+    config["deconvolver"] = "hogbom"
+    config["image_params"]["n_taylor_terms"] = 1
+    output_path = tmp_path / "refused.img.zarr"
+    with pytest.raises(ValueError, match="unavailable with restoration_output"):
+        image_cube_single_field(
+            ps_store="unopened.ps.zarr",
+            image_store=str(output_path),
+            restore=True,
+            restoration_output=output,
+            image_data_variables_keep=[key],
+            **config,
+        )
+    assert not output_path.exists()

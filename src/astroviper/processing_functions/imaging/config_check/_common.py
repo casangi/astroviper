@@ -37,7 +37,32 @@ CONTINUUM_SINGLE_FIELD = ImagingMode("continuum", "single_field")
 
 
 def require_finite_real(name, value, *, positive=False, scalar=False):
-    """Check real numerical values without coercing configuration values."""
+    """Check real numerical values without coercing configuration values.
+
+    Parameters
+    ----------
+    name : str
+        Parameter label included in errors.
+    value : array-like
+        Nonempty finite real values; unit-bearing quantities are rejected.
+    positive : bool, optional
+        Require every value to be strictly positive.
+    scalar : bool, optional
+        Require a zero-dimensional value.
+
+    Returns
+    -------
+    numpy.ndarray
+        Validated NumPy view/conversion of the value, without coercing its dtype
+        or changing the caller input.
+
+    Raises
+    ------
+    TypeError
+        The input is non-real, unit-bearing, or nonscalar when a scalar is required.
+    ValueError
+        The input is empty, non-finite, or fails the requested positivity condition.
+    """
     import numpy as np
 
     if hasattr(value, "unit"):
@@ -57,7 +82,25 @@ def require_finite_real(name, value, *, positive=False, scalar=False):
 
 
 def require_mapping(name, value):
-    """Require a mapping without copying or filling it."""
+    """Require a mapping without copying or filling it.
+
+    Parameters
+    ----------
+    name : str
+        Parameter label included in errors.
+    value : object
+        Original object, which must implement the mapping interface.
+
+    Returns
+    -------
+    mapping
+        The original validated mapping, without copying or inserting keys.
+
+    Raises
+    ------
+    TypeError
+        The supplied object does not implement the mapping interface.
+    """
     from collections.abc import Mapping
 
     if not isinstance(value, Mapping):
@@ -66,7 +109,26 @@ def require_mapping(name, value):
 
 
 def require_integer(name, value, *, minimum=0, allow_minus_one=False):
-    """Require an integer count, optionally allowing the documented -1 sentinel."""
+    """Require an integer count, optionally allowing the documented -1 sentinel.
+
+    Parameters
+    ----------
+    name : str
+        Parameter label included in errors.
+    value : int
+        Integral count; Boolean values are rejected.
+    minimum : int, optional
+        Inclusive lower bound, default zero.
+    allow_minus_one : bool, optional
+        Also accept the sentinel -1 independently of the lower bound.
+
+    Raises
+    ------
+    TypeError
+        The supplied value is Boolean or not integral.
+    ValueError
+        The count is below the permitted minimum and is not an allowed sentinel.
+    """
     from numbers import Integral
 
     if isinstance(value, bool) or not isinstance(value, Integral):
@@ -79,7 +141,20 @@ def require_integer(name, value, *, minimum=0, allow_minus_one=False):
 
 
 def require_boolean(name, value):
-    """Require a Boolean rather than a truthy string or number."""
+    """Require a Boolean rather than a truthy string or number.
+
+    Parameters
+    ----------
+    name : str
+        Parameter label included in errors.
+    value : bool
+        Python or NumPy Boolean; numbers and truthy strings are rejected.
+
+    Raises
+    ------
+    TypeError
+        The supplied value is not a Python or NumPy Boolean.
+    """
     import numpy as np
 
     if not isinstance(value, bool | np.bool_):
@@ -121,6 +196,22 @@ def imaging_weighting_scope(params, *, mode):
 def selected_frequency_mask(frequencies, requested_frequencies, *, mode):
     """Select source channels with the policy of the requested imaging mode.
 
+    Parameters
+    ----------
+    frequencies : array-like
+        One-dimensional source channel coordinates in Hz.
+    requested_frequencies : array-like
+        Requested image or execution-block frequencies in Hz.
+    mode : ImagingMode
+        Cube nearest-channel selection or continuum matching within rtol=1e-12.
+
+    Returns
+    -------
+    numpy.ndarray of bool
+        Mask with the source frequency shape identifying selected channels.
+
+    Notes
+    -----
     Cube imaging includes the nearest-channel half cells, allowing shifted
     execution blocks and channel averaging. Continuum retains its exact
     frequency selection. Neither policy changes the supplied coordinates.
@@ -148,13 +239,37 @@ def selected_frequency_mask(frequencies, requested_frequencies, *, mode):
 
 
 def check_continuum_mode(value):
-    """Require one of the implemented continuum image representations."""
+    """Require one of the implemented continuum image representations.
+
+    Parameters
+    ----------
+    value : {'mfs', 'mvc'}
+        Requested continuum representation.
+    """
     if value not in ("mfs", "mvc"):
         raise ValueError("continuum_mode must be 'mfs' or 'mvc'.")
 
 
 def check_fft_backend(backend):
-    """Require a supported and locally importable FFT implementation."""
+    """Require a supported and locally importable FFT implementation.
+
+    Parameters
+    ----------
+    backend : {'scipy', 'pyfftw'}
+        FFT implementation to validate and import.
+
+    Returns
+    -------
+    module
+        Imported SciPy-compatible FFT implementation.
+
+    Raises
+    ------
+    ValueError
+        The backend name is unsupported.
+    ImportError
+        The selected FFT implementation is not installed.
+    """
     from importlib import import_module
 
     if backend not in ("scipy", "pyfftw"):

@@ -395,7 +395,7 @@ def test_delphi_calculate_parameters_only(ps_store, tmp_path, psf_calls):
     assert controls["exact_psf_subtraction"] is False
     assert not {"psf_fraction", "predicted_imaging_cycles"} & set(derived)
     assert arguments["gridding_kernel_params"] == LEAST_MISFIT_9
-    assert arguments["restore"] is True and arguments["primary_beam_correction"]
+    assert arguments["restore"] is True and arguments["restoration_output"] == "both"
     np.testing.assert_allclose(
         derived["sensitivity_natural"], 0.8 * np.array([[1e-3, 2e-3], [3e-3, 4e-3]])
     )

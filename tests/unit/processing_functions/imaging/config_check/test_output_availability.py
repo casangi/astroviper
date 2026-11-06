@@ -81,12 +81,12 @@ def test_spectral_products_require_their_taylor_coefficients(key, nterms):
 
 
 def test_cube_corrected_output_requires_correction():
-    with pytest.raises(ValueError, match="requires primary_beam_correction"):
+    with pytest.raises(ValueError, match="unavailable with restoration_output"):
         check_driver_workflow(
             {
                 "image_data_variables_keep": ["sky_restored_primary_beam_corrected"],
                 "restore": True,
-                "primary_beam_correction": False,
+                "restoration_output": "apparent",
             },
             mode=CUBE_SINGLE_FIELD,
         )
@@ -114,7 +114,7 @@ def test_available_products_preserve_configuration(mode, kept, nterms, correct):
         "image_params": {"n_taylor_terms": nterms},
         "restore": True,
         **(
-            {"primary_beam_correction": correct}
+            {"restoration_output": "both" if correct else "apparent"}
             if mode.imaging_kind == "cube"
             else {"restoration_output": "both"}
         ),

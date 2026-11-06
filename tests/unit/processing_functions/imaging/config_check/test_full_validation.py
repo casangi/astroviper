@@ -1,6 +1,5 @@
 """Numerical, product, partition, and full-configuration preflight checks."""
 
-import warnings
 from copy import deepcopy
 
 import numpy as np
@@ -229,9 +228,10 @@ def test_spectral_condition_is_invariant_to_common_weight_scale():
     )
 
 
-def test_weak_slope_does_not_warn_when_order_zero_noise_is_small():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+def test_weak_slope_does_not_warn_when_order_zero_noise_is_small(
+    diagnostic_warnings,
+):
+    with diagnostic_warnings() as caught:
         diagnostics = check_spectral_sampling(
             [1e9, 1e9 + 1e4],
             [1, 1],
@@ -247,8 +247,10 @@ def test_weak_slope_does_not_warn_when_order_zero_noise_is_small():
     assert not caught
 
 
-def test_reference_frequency_extrapolation_still_warns():
-    with pytest.warns(RuntimeWarning, match="outside the usable frequency range"):
+def test_reference_frequency_extrapolation_still_warns(
+    diagnostic_warnings,
+):
+    with diagnostic_warnings(match="outside the usable frequency range"):
         check_spectral_sampling(
             [1e9, 1.2e9], [1, 1], n_taylor_terms=2, reference_frequency=1.3e9
         )
@@ -294,10 +296,10 @@ def test_centered_constant_and_slope_do_not_amplify_order_zero_noise(nterms):
     assert diagnostics["taylor_zero_noise_amplification"] == pytest.approx(1.0)
 
 
-def test_curvature_coupling_warns_about_order_zero_noise_without_rejecting():
-    with pytest.warns(
-        RuntimeWarning, match="Taylor order-zero noise amplification exceeds 3.0"
-    ):
+def test_curvature_coupling_warns_about_order_zero_noise_without_rejecting(
+    diagnostic_warnings,
+):
+    with diagnostic_warnings(match="Taylor order-zero noise amplification exceeds 3.0"):
         diagnostics = check_spectral_sampling(
             [1e9, 1.001e9, 1.2e9],
             [1, 1, 1],
@@ -422,11 +424,12 @@ def test_frequency_lookup_matches_dense_comparison_without_changing_coordinates(
     ).any()
 
 
-def test_small_uncoupled_taylor_moment_does_not_warn_about_order_zero():
+def test_small_uncoupled_taylor_moment_does_not_warn_about_order_zero(
+    diagnostic_warnings,
+):
     image = make_runaway_taylor_image()
     image.POINT_SPREAD_FUNCTION.values[:, 2] *= 4e-12
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with diagnostic_warnings() as caught:
         diagnostics = check_model_products(
             image, {"deconvolver": "mtmfs"}, mode=CONTINUUM_SINGLE_FIELD
         )
@@ -447,7 +450,9 @@ def test_small_uncoupled_taylor_moment_does_not_warn_about_order_zero():
 
 @pytest.mark.parametrize("rho", [0.0, 0.9, 0.95, 0.99])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_hessian_order_zero_warning_tracks_coupling_on_every_scale(rho, dtype):
+def test_hessian_order_zero_warning_tracks_coupling_on_every_scale(
+    diagnostic_warnings, rho, dtype
+):
     # H = a * [[1, rho], [rho, 1]] has G_H0 = 1 / sqrt(1 - rho**2),
     # independently of the common scale-filter amplitude a.
     image = make_runaway_taylor_image(dtype=dtype)
@@ -457,8 +462,7 @@ def test_hessian_order_zero_warning_tracks_coupling_on_every_scale(rho, dtype):
     image = xr.concat([image, later], dim="time")
     snapshot = image.copy(deep=True)
     expected = 1 / np.sqrt(1 - rho**2)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with diagnostic_warnings() as caught:
         diagnostics = check_model_products(
             image,
             {"deconvolver": "mtmfs", "cycle_control_params": {"scales": [0.0, 2.0]}},
@@ -522,7 +526,9 @@ def test_model_product_metadata_uses_serializable_scalars(reference):
 
 @pytest.mark.parametrize("nterms", [2, 3])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_narrow_band_hessian_is_checked_independently_of_taylor_units(nterms, dtype):
+def test_narrow_band_hessian_is_checked_independently_of_taylor_units(
+    diagnostic_warnings, nterms, dtype
+):
     # Narrow-band moments are small even when their constraints are independent.
     # The three-term Hessian has equilibrated eigenvalues 1 and 1 +/- 1/sqrt(3).
     moments = [1.0, 0.0, 1e-12] if nterms == 2 else [1.0, 0.0, 1e-12, 0.0, 3e-24]
@@ -548,8 +554,7 @@ def test_narrow_band_hessian_is_checked_independently_of_taylor_units(nterms, dt
             }
         },
     )
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with diagnostic_warnings() as caught:
         diagnostics = check_model_products(
             image, {"deconvolver": "mtmfs"}, mode=CONTINUUM_SINGLE_FIELD
         )

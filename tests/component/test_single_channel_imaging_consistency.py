@@ -565,7 +565,7 @@ def image(
             imaging_weights_params=dict(IMAGING_WEIGHTS_PARAMS),
             cycle_control_params={**controls, "primary_beam_limit": PRIMARY_BEAM_LIMIT},
             primary_beam_params={"telescope": TELESCOPE},
-            primary_beam_correction=deconvolve,
+            restoration_output=("both" if deconvolve else "apparent"),
             image_data_variables_keep=(KEEP + ["sky_restored"] if deconvolve else KEEP),
         )
     else:

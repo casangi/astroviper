@@ -1,7 +1,6 @@
 """Full PSF convolution blocks retain interactions between delta components."""
 
 import json
-import warnings
 
 import numpy as np
 import pytest
@@ -30,11 +29,13 @@ def coupled_psfs(size=8, coupling=0.98):
     return psfs
 
 
-def test_spatial_diagnostic_detects_coupling_invisible_to_central_pixels():
+def test_spatial_diagnostic_detects_coupling_invisible_to_central_pixels(
+    diagnostic_warnings,
+):
     psfs = coupled_psfs()
     original = psfs.copy()
     assert np.array_equal(psfs[:, 4, 4], [1, 0, 1])
-    with pytest.warns(RuntimeWarning, match="Spatial Taylor-Hessian diagnostic"):
+    with diagnostic_warnings(match="Spatial Taylor-Hessian diagnostic"):
         result = check_psf_spatial_hessian(psfs, precision="float64")
     assert result["max_order_zero_noise_amplification"] == pytest.approx(
         1 / np.sqrt(1 - 0.98**2)
@@ -74,11 +75,13 @@ def test_fourier_blocks_match_explicit_spatial_delta_component_matrix():
     assert result["max_order_zero_noise_amplification"] == pytest.approx(expected_max)
 
 
-def test_model_product_checker_retains_spatial_diagnostics_and_local_guards():
+def test_model_product_checker_retains_spatial_diagnostics_and_local_guards(
+    diagnostic_warnings,
+):
     image = make_runaway_taylor_image()
     image.POINT_SPREAD_FUNCTION.values[0, :, 0] = coupled_psfs(size=32)
     original = image.copy(deep=True)
-    with pytest.warns(RuntimeWarning, match="Spatial Taylor-Hessian diagnostic"):
+    with diagnostic_warnings(match="Spatial Taylor-Hessian diagnostic"):
         result = check_model_products(
             image, {"deconvolver": "mtmfs"}, mode=CONTINUUM_SINGLE_FIELD
         )
@@ -95,11 +98,12 @@ def test_model_product_checker_retains_spatial_diagnostics_and_local_guards():
     xr.testing.assert_identical(image, original)
 
 
-def test_missing_spatial_modes_do_not_require_a_global_pixel_inverse():
+def test_missing_spatial_modes_do_not_require_a_global_pixel_inverse(
+    diagnostic_warnings,
+):
     transfer = np.zeros((3, 4, 3))
     transfer[0, 0, 0] = transfer[2, 0, 0] = 1
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with diagnostic_warnings() as caught:
         result = check_spatial_hessian_blocks(
             transfer,
             np.arange(4),
@@ -113,9 +117,11 @@ def test_missing_spatial_modes_do_not_require_a_global_pixel_inverse():
     assert not caught
 
 
-def test_supported_but_taylor_deficient_mode_is_reported_separately():
+def test_supported_but_taylor_deficient_mode_is_reported_separately(
+    diagnostic_warnings,
+):
     transfer = np.array([[[1, 1]], [[0, 1]], [[1, 1]]], dtype=float)
-    with pytest.warns(RuntimeWarning, match="Spatial Taylor-Hessian diagnostic"):
+    with diagnostic_warnings(match="Spatial Taylor-Hessian diagnostic"):
         result = check_spatial_hessian_blocks(
             transfer,
             [0],
@@ -128,8 +134,10 @@ def test_supported_but_taylor_deficient_mode_is_reported_separately():
     assert result["assessed_mode_count"] == 1
 
 
-def test_no_support_reports_no_amplification_instead_of_a_fictitious_pass():
-    with pytest.warns(RuntimeWarning, match="Spatial Taylor-Hessian diagnostic"):
+def test_no_support_reports_no_amplification_instead_of_a_fictitious_pass(
+    diagnostic_warnings,
+):
+    with diagnostic_warnings(match="Spatial Taylor-Hessian diagnostic"):
         result = check_spatial_hessian_blocks(
             np.zeros((3, 2, 2)),
             [0, 1],
@@ -142,10 +150,12 @@ def test_no_support_reports_no_amplification_instead_of_a_fictitious_pass():
     assert result["worst_mode"] is None
 
 
-def test_asymmetric_psf_is_not_silently_symmetrized():
+def test_asymmetric_psf_is_not_silently_symmetrized(
+    diagnostic_warnings,
+):
     psfs = coupled_psfs(coupling=0)
     psfs[1, 3, 4] = 0.2
-    with pytest.warns(RuntimeWarning, match="Spatial Taylor-Hessian diagnostic"):
+    with diagnostic_warnings(match="Spatial Taylor-Hessian diagnostic"):
         result = check_psf_spatial_hessian(psfs, precision="float64")
     assert result["non_hermitian_mode_count"] > 0
 
@@ -154,7 +164,9 @@ def test_asymmetric_psf_is_not_silently_symmetrized():
     "shape", [(64, 64), (192, 192), (192, 128), (64, 65), (65, 64), (65, 65)]
 )
 @pytest.mark.parametrize("precision", ["float32", "float64"])
-def test_self_adjoint_psf_retains_only_paired_lags(shape, precision):
+def test_self_adjoint_psf_retains_only_paired_lags(
+    diagnostic_warnings, shape, precision
+):
     # A tilted cosine is physically even under simultaneous lag inversion,
     # but its unmatched negative-edge lines need not be even individually.
     l = np.arange(shape[0]) - shape[0] // 2
@@ -162,8 +174,7 @@ def test_self_adjoint_psf_retains_only_paired_lags(shape, precision):
     plane = np.cos(0.17 * l[:, None] + 0.31 * m[None, :]).astype(precision)
     psfs = np.stack([plane, np.zeros_like(plane), 0.25 * plane])
     before = psfs.copy()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)  # Curvature is independent.
+    with diagnostic_warnings():
         result = check_psf_spatial_hessian(psfs, precision=precision)
     retained = [n - int(n % 2 == 0) for n in shape]
     assert result["input_image_shape"] == list(shape)
@@ -177,14 +188,13 @@ def test_self_adjoint_psf_retains_only_paired_lags(shape, precision):
 @pytest.mark.parametrize("precision", ["float32", "float64"])
 @pytest.mark.parametrize("error_factor", [0.25, 4.0])
 def test_fft_stage_tolerance_accepts_roundoff_but_reports_asymmetry(
-    size, precision, error_factor
+    diagnostic_warnings, size, precision, error_factor
 ):
     psfs = coupled_psfs(size=size, coupling=0).astype(precision)
     epsilon = np.finfo(precision).eps
     relative = epsilon * np.ceil(np.log2((size - 1) ** 2))
     psfs[0, size // 2 + 1, size // 2] = error_factor * relative
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
+    with diagnostic_warnings():
         result = check_psf_spatial_hessian(psfs, precision=precision)
     assert result["fft_relative_roundoff_tolerance"] == relative
     assert result["hermitian_absolute_tolerance"][0] == pytest.approx(
@@ -207,7 +217,9 @@ def test_invalid_hermitian_allowance_is_rejected(tolerance):
 
 
 @pytest.mark.parametrize("single_precision", [False, True])
-def test_gridded_even_psf_passes_self_adjointness(single_precision):
+def test_gridded_even_psf_passes_self_adjointness(
+    diagnostic_warnings, single_precision
+):
     from astroviper.processing_functions.imaging.residual_update import (
         imaging_setup_single_field,
     )
@@ -231,8 +243,7 @@ def test_gridded_even_psf_passes_self_adjointness(single_precision):
     )
     psf = image.POINT_SPREAD_FUNCTION.values[0, 0, :1]
     before = psf.copy()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
+    with diagnostic_warnings():
         result = check_psf_spatial_hessian(
             psf, precision="float32" if single_precision else "float64"
         )
@@ -241,11 +252,13 @@ def test_gridded_even_psf_passes_self_adjointness(single_precision):
     np.testing.assert_array_equal(psf, before)
 
 
-def test_spatial_block_batches_keep_correct_mode_locations():
+def test_spatial_block_batches_keep_correct_mode_locations(
+    diagnostic_warnings,
+):
     transfer = np.zeros((3, 65, 65))
     transfer[0] = transfer[2] = 1
     transfer[1, -1, -1] = 0.98
-    with pytest.warns(RuntimeWarning, match="Spatial Taylor-Hessian diagnostic"):
+    with diagnostic_warnings(match="Spatial Taylor-Hessian diagnostic"):
         result = check_spatial_hessian_blocks(
             transfer,
             np.arange(65),
@@ -259,7 +272,9 @@ def test_spatial_block_batches_keep_correct_mode_locations():
     assert result["worst_mode"]["frequency_m"] == 64
 
 
-def test_frequency_dependent_gaussian_width_changes_spatial_coupling():
+def test_frequency_dependent_gaussian_width_changes_spatial_coupling(
+    diagnostic_warnings,
+):
     frequencies = np.array([1e9, 2e9, 3e9])
     kwargs = dict(
         n_taylor_terms=2,
@@ -273,7 +288,7 @@ def test_frequency_dependent_gaussian_width_changes_spatial_coupling():
     constant_width = check_gaussian_spatial_hessian(
         frequencies, np.ones(3), 5000 * 1e9 / frequencies, **kwargs
     )
-    with pytest.warns(RuntimeWarning, match="Spatial Taylor-Hessian diagnostic"):
+    with diagnostic_warnings(match="Spatial Taylor-Hessian diagnostic"):
         natural_resolution = check_gaussian_spatial_hessian(
             frequencies, np.ones(3), np.full(3, 5000), **kwargs
         )
@@ -287,7 +302,7 @@ def test_frequency_dependent_gaussian_width_changes_spatial_coupling():
 @pytest.mark.parametrize("channel_count", [3, 1025])
 @pytest.mark.parametrize("scalar_baseline", [False, True])
 def test_gaussian_channel_support_matches_explicit_moments(
-    monkeypatch, channel_count, scalar_baseline
+    diagnostic_warnings, monkeypatch, channel_count, scalar_baseline
 ):
     frequencies = 299792458.0 * np.resize([1.0, 2.0, 3.0], channel_count)
     weights = np.resize([1.0, 2.0, 0.5], channel_count)
@@ -300,8 +315,7 @@ def test_gaussian_channel_support_matches_explicit_moments(
         return check_spatial_hessian_blocks(transfer, first, second, **kwargs)
 
     monkeypatch.setattr(_spatial_hessian, "check_spatial_hessian_blocks", inspect)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
+    with diagnostic_warnings():
         result = check_gaussian_spatial_hessian(
             frequencies,
             weights,
@@ -352,9 +366,10 @@ def test_gaussian_channel_support_matches_explicit_moments(
 
 
 @pytest.mark.parametrize("precision", ["float32", "float64"])
-def test_gaussian_tails_outside_all_baselines_do_not_warn(precision):
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+def test_gaussian_tails_outside_all_baselines_do_not_warn(
+    diagnostic_warnings, precision
+):
+    with diagnostic_warnings() as caught:
         result = check_gaussian_spatial_hessian(
             299792458.0 * np.array([1.0, 2.0, 3.0]),
             np.ones(3),

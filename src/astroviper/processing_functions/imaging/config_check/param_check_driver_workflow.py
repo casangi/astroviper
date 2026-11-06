@@ -64,37 +64,19 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     ):
         raise ValueError("Continuum imaging supports only compute_backend='dask'.")
 
-    # --- Cube restoration and primary-beam correction ---
-    # Cube keeps its correction switch. Continuum has one product selector,
-    # so a second switch must not silently contradict or override that choice.
-    if mode.imaging_kind == "continuum" and "primary_beam_correction" in config:
+    # --- Shared restoration product selector ---
+    # Cube and continuum use the same three explicit output choices. Reject
+    # the retired Boolean rather than silently changing the requested products.
+    if "primary_beam_correction" in config:
         raise ValueError(
-            "Continuum uses restoration_output; primary_beam_correction is not accepted."
+            "Use restoration_output; primary_beam_correction is not accepted."
         )
-    if (
-        mode.imaging_kind == "cube"
-        and config.get("primary_beam_correction", False)
-        and not config.get("restore", False)
-    ):
-        raise ValueError("primary_beam_correction requires restore=True.")
-
-    # --- Continuum restoration products ---
-    # The selector alone determines whether to compute apparent, corrected, or
-    # both Taylor stacks. No independent correction flag is needed.
     if "restoration_output" in config:
-        if mode.imaging_kind != "continuum":
-            raise ValueError(
-                "restoration_output is continuum-only; cube uses primary_beam_correction."
-            )
-        output = config["restoration_output"]
-        if not isinstance(output, str) or output not in (
-            "apparent",
-            "primary_beam_corrected",
-            "both",
-        ):
-            raise ValueError(
-                "restoration_output must be 'apparent', 'primary_beam_corrected', or 'both'."
-            )
+        from astroviper.processing_functions.imaging.config_check._predicates import (
+            check_restoration_output,
+        )
+
+        check_restoration_output(config["restoration_output"])
 
     # --- Primary-beam cutoff ---
     # The fractional cutoff must be one finite value in the interval [0, 1].
@@ -125,7 +107,6 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         "prepared_continuum_image",
         "single_precision_image",
         "restore",
-        "primary_beam_correction",
         "skunk_works",
         "calculate_parameters_only",
         "overwrite",
@@ -510,6 +491,13 @@ def check_configuration_consistency(reference, candidate, *, names=None):
 def check_momentum_coefficient(value):
     """Require finite scalar momentum in [0, 1), including for direct calls.
 
+    Parameters
+    ----------
+    value : float
+        Finite scalar momentum coefficient in [0, 1).
+
+    Notes
+    -----
     Zero selects a plain step. The supported momentum recurrence requires a
     coefficient below one; refuse malformed inputs before creating state.
     """
@@ -526,6 +514,16 @@ def check_momentum_coefficient(value):
 def check_continuum_graph_arguments(append_node, append_input_params):
     """Require an append task and its parameters together before building a graph.
 
+    Parameters
+    ----------
+    append_node : callable or None
+        Optional task appended to the reduction graph.
+    append_input_params : mapping or None
+        Parameters for that task; must be supplied exactly when the task is
+        supplied.
+
+    Notes
+    -----
     These are arguments of each new graph construction, so an earlier check of
     imaging parameters does not cover them.
     """
@@ -538,6 +536,17 @@ def check_continuum_graph_arguments(append_node, append_input_params):
 def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
     """Check storage capabilities using the format detected by the I/O layer.
 
+    Parameters
+    ----------
+    config : mapping
+        Input path, execution-engine switch, and requested writes to input data.
+    input_is_msv2 : bool
+        Format classification already determined by the caller.
+    allow_msv2 : bool, optional
+        Whether this workflow supports read-only MSv2 input.
+
+    Notes
+    -----
     MSv2 is read through the skunk-works engine and is never written by an
     imaging run. Keep format detection and optional-engine imports at the
     calling layer; this validator performs no I/O.
@@ -569,6 +578,13 @@ def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
 def check_imaging_merge_strategy(merge_strategy):
     """Require a merge policy before inspecting convergence-record contents.
 
+    Parameters
+    ----------
+    merge_strategy : {'update', 'latest', 'error'}
+        Requested strategy for combining overlapping convergence records.
+
+    Notes
+    -----
     Invalid policies are configuration errors even when records are empty or
     disjoint. Actual duplicate keys remain a runtime check of the merge.
     """

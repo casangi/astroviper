@@ -61,7 +61,7 @@ def test_validators_accept_read_only_config_and_preserve_values(check, mode):
             **(
                 {"restoration_output": "both"}
                 if mode.imaging_kind == "continuum"
-                else {"primary_beam_correction": True}
+                else {"restoration_output": "both"}
             ),
             "primary_beam_limit": 0.2,
             "memory_mode": "in_memory",

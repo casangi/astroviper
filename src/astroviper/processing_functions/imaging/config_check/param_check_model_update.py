@@ -461,7 +461,18 @@ def check_model_update(config, *, mode, require_complete=False):
 
 
 def _check_control_shapes(controls, image_params, *, mode):
-    """Check caller control arrays against the geometry known at this boundary."""
+    """Check caller control arrays against the geometry known at this boundary.
+
+    Parameters
+    ----------
+    controls : mapping
+        Supplied scalar or per-plane cycle and iteration controls.
+    image_params : mapping
+        Known image dimensions and coordinates; unavailable extents are not
+        inferred.
+    mode : ImagingMode
+        Cube or continuum layout used to interpret control-array axes.
+    """
     if "threshold" in controls:
         shape = np.shape(controls["threshold"])
         allowed_ranks = (0, 1, 2) if mode.imaging_kind == "cube" else (0, 1)
@@ -605,7 +616,7 @@ def check_taylor_hessian_approximation(
     gridding effects, and per-plane differences hidden by aggregated weights
     are absent; this cannot certify the later actual-PSF checks.
     """
-    import warnings
+    import toolviper.utils.logger as logger
 
     from astroviper.processing_functions.imaging.config_check._spectral import (
         make_weighted_taylor_design,
@@ -725,10 +736,8 @@ def check_taylor_hessian_approximation(
     diagnostics["order_zero_noise_amplification"] = amplification
     diagnostics["order_zero_noise_amplification_limit"] = 3.0
     if amplification > 3.0:
-        warnings.warn(
+        logger.warning(
             f"Approximate Taylor-Hessian order-zero noise amplification exceeds 3.0: {diagnostics}",
-            RuntimeWarning,
-            stacklevel=2,
         )
 
     # ========================================================================
@@ -798,7 +807,7 @@ def check_model_products(
     dict
         Validated effective inputs and separately named Taylor-Hessian diagnostics.
     """
-    import warnings
+    import toolviper.utils.logger as logger
 
     mode.require_supported()
     controls = config.get("cycle_control_params", config.get("deconvolve_params", {}))
@@ -1219,10 +1228,8 @@ def check_model_products(
             # residual noise. Warn, rather than reject, under this assumption.
             noise_amplification_limit = 3.0
             if np.any(noise_amplification > noise_amplification_limit):
-                warnings.warn(
+                logger.warning(
                     f"Taylor-Hessian order-zero noise amplification exceeds {noise_amplification_limit} ({context}); covariance_assumption=proportional_to_hessian; per_scale={noise_amplification.tolist()}.",
-                    RuntimeWarning,
-                    stacklevel=2,
                 )
             diagnostics["taylor_hessian_order_zero_noise_amplification"].append(
                 {
@@ -1274,7 +1281,18 @@ def check_model_products(
 
 
 def check_max_cycles(value, max_psf_fraction=None, *, allow_integral_float=False):
-    """Check cycle limits, retaining the standalone controller's legacy float API."""
+    """Check cycle limits, retaining the standalone controller's legacy float API.
+
+    Parameters
+    ----------
+    value : int or {'auto'}
+        Cycle limit, including the -1 sentinel and zero; 'auto' requests a
+        derived budget.
+    max_psf_fraction : float or None, optional
+        Upper cycle fraction; if supplied for auto, it must be below one.
+    allow_integral_float : bool, optional
+        Permit integral floating-point values for the standalone controller API.
+    """
     if isinstance(value, str) and value == "auto":
         if max_psf_fraction is not None and max_psf_fraction >= 1:
             raise ValueError("max_cycles='auto' requires max_psf_fraction below 1.")
@@ -1296,7 +1314,20 @@ def check_max_cycles(value, max_psf_fraction=None, *, allow_integral_float=False
 
 
 def check_hogbom_option(deconvolver, name, value, *, mode=None):
-    """Check history/subtraction capabilities, retaining the existing helper API."""
+    """Check history/subtraction capabilities, retaining the existing helper API.
+
+    Parameters
+    ----------
+    deconvolver : str or None
+        Selected algorithm, or None when the helper has no algorithm context.
+    name : str
+        Capability switch: record_iteration_history or exact_psf_subtraction.
+    value : bool
+        Whether the capability is enabled.
+    mode : ImagingMode or None, optional
+        Workflow context; continuum does not provide a double-sized subtraction
+        PSF.
+    """
     require_boolean(name, value)
     # Continuum graphs never provide the double-sized subtraction PSF.
     if (
@@ -1325,7 +1356,14 @@ def check_hogbom_option(deconvolver, name, value, *, mode=None):
 
 
 def check_entropy_controls(controls):
-    """Check the small entropy histogram controls before allocating state."""
+    """Check the small entropy histogram controls before allocating state.
+
+    Parameters
+    ----------
+    controls : mapping
+        Optional entropy stopping switch, histogram bin counts, and positive SNR
+        limit.
+    """
     if "entropy_stop" in controls:
         require_boolean("entropy_stop", controls["entropy_stop"])
     for name in ("entropy_spatial_bins", "entropy_flux_bins"):
@@ -1338,7 +1376,17 @@ def check_entropy_controls(controls):
 
 
 def check_nonnegative(name, value, *, scalar=False):
-    """Require a finite non-negative threshold or multiplier."""
+    """Require a finite non-negative threshold or multiplier.
+
+    Parameters
+    ----------
+    name : str
+        Parameter label included in errors.
+    value : array-like
+        Finite real thresholds or multipliers, all nonnegative.
+    scalar : bool, optional
+        Require a zero-dimensional value.
+    """
     values = require_finite_real(name, value, scalar=scalar)
     if np.any(values < 0):
         raise ValueError(f"{name} must be non-negative.")
@@ -1347,6 +1395,15 @@ def check_nonnegative(name, value, *, scalar=False):
 def check_deconvolver(deconvolver, *, mode):
     """Require an implemented algorithm for this imaging mode.
 
+    Parameters
+    ----------
+    deconvolver : str
+        Algorithm name supported by the selected workflow.
+    mode : ImagingMode
+        Spectral imaging kind and supported field layout.
+
+    Notes
+    -----
     Restoration needs the algorithm name without the iteration controls and
     Taylor configuration required when actually updating a model.
     """
@@ -1368,7 +1425,14 @@ def check_deconvolver(deconvolver, *, mode):
 
 
 def check_cycle_heuristic_parameters(config):
-    """Validate supplied heuristic policy without checking measured residuals."""
+    """Validate supplied heuristic policy without checking measured residuals.
+
+    Parameters
+    ----------
+    config : mapping
+        Supplied gain, iteration, beam-cutoff, noise, and PSF-fraction controls.
+        Measured residual values are checked by their owning heuristics.
+    """
     require_mapping("heuristic controls", config)
 
     # --- Shared iteration policy ---
@@ -1415,6 +1479,16 @@ def check_cycle_heuristic_parameters(config):
 def check_psf_fit_counts(name, value):
     """Require a usable two-axis fitting grid before interpolation.
 
+    Parameters
+    ----------
+    name : {'sampling', 'npix_window'}
+        Fitting control whose bounds are checked.
+    value : array-like of int
+        Two counts: sampling requires at least two per axis; windows require
+        positive odd counts.
+
+    Notes
+    -----
     Sampling needs two points per axis to define a spacing. Fitting windows
     need positive odd counts to retain a central pixel. Refuse fractional
     counts before NumPy grid construction can interpret or truncate them.

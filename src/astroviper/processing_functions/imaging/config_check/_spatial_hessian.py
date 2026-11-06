@@ -1,8 +1,7 @@
 """Diagnose spatially coupled Taylor Hessians without a pixel-space matrix."""
 
-import warnings
-
 import numpy as np
+import toolviper.utils.logger as logger
 
 
 def check_spatial_hessian_blocks(
@@ -235,10 +234,8 @@ def check_spatial_hessian_blocks(
         counts = {
             key: value for key, value in result.items() if key.endswith("mode_count")
         }
-        warnings.warn(
+        logger.warning(
             f"Spatial Taylor-Hessian diagnostic ({context or {}}): {counts}; max_order_zero_noise_amplification={result['max_order_zero_noise_amplification']}; covariance_assumption={result['covariance_assumption']}; examples={result['examples']}.",
-            RuntimeWarning,
-            stacklevel=2,
         )
     return result
 

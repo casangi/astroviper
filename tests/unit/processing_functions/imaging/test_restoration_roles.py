@@ -89,7 +89,7 @@ def test_bad_registered_products_fail_before_restoration_writes(kind, group, rol
     snapshot = image.copy(deep=True)
     with pytest.raises(KeyError, match="MISSING_PRODUCT"):
         if kind == "cube":
-            restore_image(image, primary_beam_correction=True, consume_model=True)
+            restore_image(image, restoration_output="both", consume_model=True)
         else:
             restore_continuum_image(
                 image, restoration_output="both", input_checked=True
@@ -112,7 +112,7 @@ def test_primary_beam_role_is_required_only_for_correction(kind):
             "MISSING_UNUSED_BEAM"
         )
     restored, _ = (
-        restore(image, primary_beam_correction=False)
+        restore(image, restoration_output="apparent")
         if kind == "cube"
         else restore(image, restoration_output="apparent")
     )

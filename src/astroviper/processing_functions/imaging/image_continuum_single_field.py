@@ -4400,13 +4400,15 @@ def restore_continuum_image(
         Taylor term before restoration. The stored residual remains unchanged.
 
     restoration_output : {"apparent", "primary_beam_corrected", "both"}, default "apparent"
-        Restored continuum products to compute: ``"apparent"`` writes
-        ``SKY_RESTORED_FLAT_NOISE``, ``"primary_beam_corrected"`` writes
-        ``SKY_RESTORED_FLAT_SKY``, and ``"both"`` writes both Taylor stacks.
-        This selector is the sole continuum correction/output control. MFS
-        corrects the model and residual Taylor polynomials before convolution;
-        MVC divides by the common power primary beam. Corrected pixels below
-        ``primary_beam_limit`` are blanked with NaN.
+        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
+        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
+        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
+        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
+        Cube corrects the model and residual by the channel power primary beam
+        before convolution. MFS divides their Taylor polynomials; MVC divides
+        by its common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
+        selector only when ``restore=True``.
 
     continuum_mode : {"mfs", "mvc"} or None, optional
         Continuum construction convention. When omitted, infer it from the

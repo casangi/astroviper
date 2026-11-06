@@ -544,7 +544,15 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
 
 
 def check_selected_fields(fields, *, mode):
-    """Reject a multi-field selection before reading sample arrays."""
+    """Reject a multi-field selection before reading sample arrays.
+
+    Parameters
+    ----------
+    fields : sequence of str
+        Distinct selected field identifiers from source metadata.
+    mode : ImagingMode
+        Workflow whose single-field restriction applies.
+    """
     mode.require_supported()
     if mode.field_layout == "single_field" and len(fields) > 1:
         raise ValueError(
@@ -555,6 +563,22 @@ def check_selected_fields(fields, *, mode):
 def absent_visibility_rows(weights, uvw, *, time_centroid=None):
     """Identify padding without modifying the supplied arrays.
 
+    Parameters
+    ----------
+    weights : numpy.ndarray
+        Statistical weights with axes (time, baseline, frequency, polarization).
+    uvw : numpy.ndarray
+        UVW coordinates with axes (time, baseline, uvw_label).
+    time_centroid : numpy.ndarray or None, optional
+        Per-row time markers. Without them, no rows are classified as padding.
+
+    Returns
+    -------
+    numpy.ndarray of bool
+        Padding mask with shape (time, baseline).
+
+    Notes
+    -----
     Missing time and UVW markers must agree with non-contributing weights.
     XRADIO padding weights may be zero or NaN after sigma-to-weight conversion;
     positive, negative, or infinite weights must not hide corrupt observations.
@@ -569,7 +593,17 @@ def absent_visibility_rows(weights, uvw, *, time_centroid=None):
 
 
 def check_statistical_weights(weights, active, *, context):
-    """Require finite, non-negative statistical weights for active samples."""
+    """Require finite, non-negative statistical weights for active samples.
+
+    Parameters
+    ----------
+    weights : numpy.ndarray
+        Statistical sample weights.
+    active : numpy.ndarray of bool
+        Broadcast-compatible mask selecting non-absent, unflagged samples.
+    context : mapping
+        Selection identifiers included in failures.
+    """
     if np.any((~np.isfinite(weights) | (weights < 0)) & active):
         details = "; ".join(f"{name}={value!r}" for name, value in context.items())
         raise ValueError(
@@ -579,7 +613,15 @@ def check_statistical_weights(weights, active, *, context):
 
 
 def check_visibility_uvw(uvw, *, measurement_set):
-    """Reject invalid UVW after known absent rows have been excluded."""
+    """Reject invalid UVW after known absent rows have been excluded.
+
+    Parameters
+    ----------
+    uvw : numpy.ndarray
+        Selected UVW coordinates after removing known absent rows.
+    measurement_set : str
+        Source identifier included in failures.
+    """
     if not np.all(np.isfinite(uvw)):
         raise ValueError(
             f"Spectral-design preflight: non-finite UVW coordinates in {measurement_set!r}."
@@ -587,7 +629,18 @@ def check_visibility_uvw(uvw, *, measurement_set):
 
 
 def check_effective_weights(weights, active, *, context):
-    """Check computed imaging weights before accumulating spectral constraints."""
+    """Check computed imaging weights before accumulating spectral constraints.
+
+    Parameters
+    ----------
+    weights : numpy.ndarray
+        Computed effective imaging weights.
+    active : numpy.ndarray of bool
+        Broadcast-compatible mask selecting samples to validate.
+    context : mapping
+        Measurement Set, channel_selection, and polarization identifiers for
+        failures.
+    """
     if np.any((~np.isfinite(weights) | (weights < 0)) & active):
         raise ValueError(
             "Spectral-design preflight: negative or non-finite effective imaging weights "
@@ -597,7 +650,13 @@ def check_effective_weights(weights, active, *, context):
 
 
 def check_selected_samples(samples):
-    """Require selected samples before constructing spectral diagnostics."""
+    """Require selected samples before constructing spectral diagnostics.
+
+    Parameters
+    ----------
+    samples : sequence
+        Selected channel/sample records; an empty selection is rejected.
+    """
     if not samples:
         raise ValueError(
             "Spectral-design preflight: no source channels match the requested frequency selection."
@@ -701,7 +760,7 @@ def check_spectral_sampling(
     ValueError
         If metadata, weights, or the weighted design are invalid.
     """
-    import warnings
+    import toolviper.utils.logger as logger
 
     from astroviper.processing_functions.imaging.config_check._spectral import (
         make_weighted_taylor_design,
@@ -895,10 +954,8 @@ def check_spectral_sampling(
         taylor_zero_noise_amplification_limit=noise_amplification_limit,
     )
     if noise_amplification > noise_amplification_limit:
-        warnings.warn(
+        logger.warning(
             f"Taylor order-zero noise amplification exceeds {noise_amplification_limit}: {diagnostics}",
-            RuntimeWarning,
-            stacklevel=2,
         )
 
     # --- Reference-frequency placement ---
@@ -907,10 +964,8 @@ def check_spectral_sampling(
         reference_value < usable_frequencies.min()
         or reference_value > usable_frequencies.max()
     ):
-        warnings.warn(
+        logger.warning(
             f"Reference frequency is outside the usable frequency range: {diagnostics}",
-            RuntimeWarning,
-            stacklevel=2,
         )
 
     return diagnostics
@@ -922,7 +977,21 @@ def check_spectral_sampling(
 
 
 def check_continuum_basis(image_params):
-    """Require the common Taylor order and reference frequency for map helpers."""
+    """Require the common Taylor order and reference frequency for map helpers.
+
+    Parameters
+    ----------
+    image_params : mapping
+        Continuum geometry with required n_taylor_terms and reference_frequency
+        in Hz.
+
+    Raises
+    ------
+    KeyError
+        A required Taylor count or reference frequency is absent.
+    TypeError, ValueError
+        The supplied configuration violates the continuum basis rules.
+    """
     from astroviper.processing_functions.imaging.config_check._common import (
         CONTINUUM_SINGLE_FIELD,
     )
@@ -935,7 +1004,16 @@ def check_continuum_basis(image_params):
 
 
 def check_reference_frequency(value, *, allow_one_element=False):
-    """Check a shared reference, allowing legacy one-element helper inputs."""
+    """Check a shared reference, allowing legacy one-element helper inputs.
+
+    Parameters
+    ----------
+    value : float or array-like
+        Finite positive scalar reference frequency in Hz.
+    allow_one_element : bool, optional
+        Also accept a one-element array at legacy helper boundaries without
+        modifying it.
+    """
     values = value
     if allow_one_element:
         values = np.asarray(value)
@@ -954,6 +1032,13 @@ def check_reference_frequency(value, *, allow_one_element=False):
 def check_weight_density_method(params):
     """Require a density-based method for density gridding and degridding.
 
+    Parameters
+    ----------
+    params : mapping
+        Imaging weights configuration selecting Briggs or uniform weighting.
+
+    Notes
+    -----
     Natural weighting has no density grid. Absolute Briggs weighting uses a
     different recipe; these continuum helpers implement Briggs and uniform only.
     General weighting validation remains in ``check_residual_update``.
@@ -972,12 +1057,26 @@ def check_weight_density_method(params):
 
 
 def check_pixels_per_beam(value):
-    """Require finite, positive sampling across the fitted minor beam axis."""
+    """Require finite, positive sampling across the fitted minor beam axis.
+
+    Parameters
+    ----------
+    value : float
+        Finite positive number of image pixels across the minor beam axis.
+    """
     require_finite_real("pixels_per_beam", value, positive=True, scalar=True)
 
 
 def check_beam_level(value, *, name="level"):
-    """A beam boundary must lie strictly between zero and peak power."""
+    """A beam boundary must lie strictly between zero and peak power.
+
+    Parameters
+    ----------
+    value : float
+        Finite scalar fractional beam power strictly between zero and one.
+    name : str, optional
+        Parameter label included in errors.
+    """
     level = require_finite_real(name, value, scalar=True)
     if not 0 < level < 1:
         raise ValueError(f"{name} must lie in (0, 1).")
@@ -986,6 +1085,17 @@ def check_beam_level(value, *, name="level"):
 def check_telescope_prescription(telescope, *, default_robust=False):
     """Require a supported prescription after observatory metadata is interpreted.
 
+    Parameters
+    ----------
+    telescope : str
+        Interpreted telescope identifier: ALMA/ACA/VLA/EVLA/NGVLA for beams, or
+        alma/aca/vla for default robustness.
+    default_robust : bool, optional
+        Check availability of a default robustness prescription instead of a
+        beam model.
+
+    Notes
+    -----
     ngVLA has a beam model but no pipeline robustness prescription. Do not
     silently substitute another telescope's robustness.
     """
@@ -1004,6 +1114,14 @@ def check_telescope_prescription(telescope, *, default_robust=False):
 def check_delphi_parameters(config):
     """Check supplied Delphi controls before metadata access or its PSF pass.
 
+    Parameters
+    ----------
+    config : mapping
+        Supplied pixels_per_beam, n_sigma, image-edge beam limit, weighting, and
+        optional robustness. Derived geometry is validated later.
+
+    Notes
+    -----
     Image geometry and cycle thresholds are derived later and must be checked
     as a new imaging configuration. This check never resolves defaults.
     """
@@ -1035,6 +1153,15 @@ def check_delphi_parameters(config):
 def check_frequency_matching(value, *, name="matching"):
     """Require the shared cube/continuum frequency-assignment policy.
 
+    Parameters
+    ----------
+    value : {'nearest', 'exact'}
+        Requested frequency-assignment strategy.
+    name : str, optional
+        Parameter label included in errors.
+
+    Notes
+    -----
     Checking this enum does not certify the coordinates: mapping still checks
     dimensions, finiteness, coverage, and uniqueness against the actual data.
     """
