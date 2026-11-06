@@ -22,7 +22,7 @@ from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _accumulate_graph_timings,
-    _apply_exact_frequency_selection_to_continuum_mapping,
+    _check_continuum_frequency_assignment,
     _combine_graph_timing_frames,
     _continuum_image_for_disk,
     _create_continuum_weight_cache_store,
@@ -132,55 +132,22 @@ def test_load_clean_mask_rejects_invalid_input(
         load_clean_mask(mask_path, image_size)
 
 
-def test_exact_frequency_selection_reorders_a_nonmonotonic_child():
-    """Irregular integer indexers put a non-monotonic child in task order."""
-    mapping, processing_set = _frequency_mapping(
-        [[10.0, 11.0, 20.0], [21.0, 30.0, 31.0]],
-        [30.0, 31.0, 20.0, 21.0, 10.0, 11.0],
-    )
-
-    result = _apply_exact_frequency_selection_to_continuum_mapping(
-        mapping,
-        processing_set,
-    )
-
-    for task_id in result:
-        selector = result[task_id]["data_selection"]["child"]["frequency"]
-        assert isinstance(selector, np.ndarray)
-        selected = processing_set["child"].isel(frequency=selector).frequency.values
-        np.testing.assert_array_equal(
-            selected,
-            result[task_id]["task_coords"]["frequency"]["data"],
-        )
-
-
-def test_exact_frequency_selection_retains_lazy_contiguous_slices():
-    """Contiguous child indices remain slice indexers instead of arrays."""
-    mapping, processing_set = _frequency_mapping(
-        [[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]],
-        [30.0, 31.0, 20.0, 21.0, 10.0, 11.0],
-    )
-
-    result = _apply_exact_frequency_selection_to_continuum_mapping(
-        mapping,
-        processing_set,
-    )
-
-    selectors = [
-        result[task_id]["data_selection"]["child"]["frequency"] for task_id in result
-    ]
-    assert selectors == [slice(4, 6), slice(2, 4), slice(0, 2)]
-
-
-def test_exact_frequency_selection_rejects_unassigned_child_channels():
-    """The helper never silently drops a Processing Set frequency channel."""
+def test_frequency_assignment_rejects_unassigned_child_channels():
+    """The check never silently drops a Processing Set frequency channel."""
     mapping, processing_set = _frequency_mapping([[10.0]], [10.0, 20.0])
 
     with pytest.raises(ValueError, match="not assigned exactly once"):
-        _apply_exact_frequency_selection_to_continuum_mapping(
-            mapping,
-            processing_set,
-        )
+        _check_continuum_frequency_assignment(mapping, processing_set)
+
+
+def test_frequency_assignment_rejects_a_repeat_on_a_chunk_edge():
+    """A channel in two tasks would be counted twice in the continuum image."""
+    mapping, processing_set = _frequency_mapping(
+        [[10.0, 20.0], [20.0, 30.0]], [10.0, 20.0, 30.0]
+    )
+
+    with pytest.raises(ValueError, match="not assigned exactly once"):
+        _check_continuum_frequency_assignment(mapping, processing_set)
 
 
 @pytest.fixture(scope="module")
@@ -1342,6 +1309,55 @@ def test_tw_hydra_refused_image_params_write_nothing(
         )
     assert _store_snapshot(store) == files
     assert not output_store.exists()
+
+
+def _tw_hydra_store_with_channel_order(tw_hydra_store, store, order):
+    """Copy the TW Hydra store with its channels stored in the given order."""
+    open_processing_set(str(tw_hydra_store)).isel(
+        frequency=order, missing_dims="ignore"
+    ).to_zarr(store, zarr_format=2)
+
+
+def test_tw_hydra_non_monotonic_child_writes_nothing(tmp_path, tw_hydra_store):
+    """GraphVIPER refuses a non-monotonic child before anything is written."""
+    store = tmp_path / "input.ps.zarr"
+    _tw_hydra_store_with_channel_order(tw_hydra_store, store, [3, 4, 1, 2, 0])
+    files = _store_snapshot(store)
+    output_store = tmp_path / "refused.img.zarr"
+    with pytest.raises(ValueError, match="is not monotonic"):
+        _run_tw_hydra_continuum(
+            store,
+            output_store,
+            open_processing_set(str(store)),
+            2,
+            "mfs",
+            {"weighting": "natural", "weighting_scope": "local"},
+            weight_memory_mode="in_place",
+        )
+    assert _store_snapshot(store) == files
+    assert not output_store.exists()
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_tw_hydra_decreasing_child_gives_the_same_image(
+    tmp_path, tw_hydra_store, continuum_mode
+):
+    """A decreasing child loads in stored order and images as an increasing one."""
+    store = tmp_path / "decreasing.ps.zarr"
+    _tw_hydra_store_with_channel_order(tw_hydra_store, store, [4, 3, 2, 1, 0])
+    images = [
+        _run_tw_hydra_continuum(
+            input_store,
+            tmp_path / f"{index}.img.zarr",
+            open_processing_set(str(input_store)),
+            2,
+            continuum_mode,
+            {"weighting": "natural", "weighting_scope": "local"},
+        )[1]
+        for index, input_store in enumerate((tw_hydra_store, store))
+    ]
+    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "SKY_MODEL"):
+        xr.testing.assert_allclose(images[0][variable], images[1][variable])
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
