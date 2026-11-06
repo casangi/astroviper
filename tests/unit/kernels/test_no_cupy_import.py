@@ -11,6 +11,7 @@ production modules that call them, and makes a hooked call. A positive
 control, an AstroVIPER-path ``import cupy`` made after zarr's, must be caught.
 """
 
+import importlib
 import importlib.util
 import json
 
@@ -94,7 +95,23 @@ print("RESULT", json.dumps({{"blocked": found, "cached": cached, "caught": caugh
 """
 
 
-@pytest.mark.parametrize("selection", ["ref", ALL_REF])
+def _built(module):
+    try:
+        importlib.import_module(module)
+    except ImportError:
+        return False
+    return True
+
+
+FAST_DFT = pytest.param(
+    "dft=fast",
+    marks=pytest.mark.skipif(
+        not _built("astroviper._kernels.fast.dft"), reason="fast DFT module not built"
+    ),
+)
+
+
+@pytest.mark.parametrize("selection", ["ref", ALL_REF, FAST_DFT])
 def test_hooked_process_never_imports_cupy(run_python, selection):
     out = run_python("-c", BLOCKED, ASTROVIPER_KERNELS=selection)
     result = json.loads(out.rpartition("RESULT ")[2])

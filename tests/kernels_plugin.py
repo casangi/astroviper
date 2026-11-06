@@ -19,8 +19,10 @@ not just the reference behind them. The plugin:
   entry, impl, path and error;
 * fails the session when a collected file of ``MANIFEST`` made no call that
   executed the selected implementation of an entry it lists for a selected
-  kernel, or when any record ran an implementation other than the session's
-  selection (another selection leaked into the trace);
+  kernel (a call executes it on the paths of ``EXECUTED_PATHS``, unless the
+  file declines it by design, ``DECLINED_BY_DESIGN``), or when any record ran
+  an implementation other than the session's selection (another selection
+  leaked into the trace);
 * provides the ``kernel_trace`` fixture for tests that assert the path taken
   by their own calls.
 """
@@ -48,12 +50,12 @@ _HOGBOM_BOTH = {"hogbom": ("clean_cube", "clean_cube_many_threads")}
 
 #: ``{test file: {kernel: entries}}``: the files whose calls (in process or in
 #: Dask workers) execute these hooked entries, measured on the sharded
-#: ``tests/unit`` run with every kernel switched to ``ref``. A switched session
+#: ``tests/unit`` run with every kernel switched to ``ref`` (and the component
+#: file that the DFT's verification switches). A switched session
 #: fails when a collected file listed here executes none of the selected
 #: implementation of one of its entries for an explicitly selected kernel.
-#: Other files are counted and printed, not required. An implementation that
-#: declines some calls by design (path other than its impl) adjusts its
-#: entries here when it lands.
+#: Other files are counted and printed, not required; so are the files of
+#: ``DECLINED_BY_DESIGN`` for its implementations.
 MANIFEST = {
     f"{_DA}/imaging/test_continuum.py": _HOGBOM_CUBE,
     f"{_DA}/imaging/test_continuum_cube_agreement.py": _ASP_CUBE | _HOGBOM_CUBE,
@@ -81,6 +83,25 @@ MANIFEST = {
     f"{_PF}/imaging/test_iteration_history.py": _ASP_CUBE | _HOGBOM_BOTH,
     f"{_PF}/imaging/test_max_cycles_auto.py": _ASP_CUBE | _HOGBOM_CUBE,
     f"{_PF}/simulation/test_sky_image_visibilities.py": _DFT,
+    "tests/component/test_single_channel_imaging_consistency.py": _DFT | _HOGBOM_CUBE,
+}
+
+_W_TERM = "its calls have w != 0, declined until path B (WP6)"
+
+#: ``{(kernel, impl): {test file: reason}}``: files of ``MANIFEST`` whose calls
+#: all decline that implementation by design (measured under ``dft=fast``):
+#: their calls are counted, and are parity evidence, but no executed call is
+#: required of them. The others must execute it.
+DECLINED_BY_DESIGN = {
+    ("dft", "fast"): {
+        f"{_DA}/imaging/test_continuum_dft.py": _W_TERM + " (simulated with w)",
+        f"{_DA}/imaging/test_image_cube_single_field_dft.py": _W_TERM
+        + " (simulated with w)",
+        f"{_DA}/simulation/test_simulate_processing_set.py": _W_TERM
+        + " (the simulator's default w_term=True)",
+        f"{_PF}/imaging/gridders/test_direct_fourier_transform_cpp.py": _W_TERM
+        + " (w_term='large')",
+    },
 }
 
 
@@ -117,14 +138,23 @@ def _records(trace_dir, since):
     return records, undecodable
 
 
+#: The paths that execute an implementation which reports its path per call
+#: (``astroviper._kernels._switch.report_path``); any other implementation
+#: executes on the path named after it. A ``dft=fast`` call that ``declined``
+#: ran the reference behind the fast entry's checks: parity evidence, not an
+#: execution of the fast kernel (path B joins ``"S"`` here when it lands).
+EXECUTED_PATHS = {("dft", "fast"): ("S",)}
+
+
 def _executed(record, selection):
     """Whether a traced call ran, without raising, the implementation that
     ``selection`` (``{kernel: impl}``) selects for its kernel."""
     name = selection.get(record["kernel"])
+    paths = EXECUTED_PATHS.get((record["kernel"], name), (name,))
     return (
         record.get("error") is None
         and record["impl"] == name
-        and record["path"] == name
+        and record["path"] in paths
     )
 
 
@@ -183,6 +213,7 @@ def summarize(records, explicit, effective, intervals, collected):
         for path in sorted(collected & MANIFEST.keys())
         for kernel, entries in MANIFEST[path].items()
         if kernel in explicit
+        and path not in DECLINED_BY_DESIGN.get((kernel, explicit[kernel]), ())
         for entry in entries
         if executed[path, kernel, entry] == 0
     ]

@@ -7,7 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from tests import kernels_plugin
-from tests.kernels_plugin import MANIFEST, KernelsPlugin, _records, summarize
+from tests.kernels_plugin import (
+    DECLINED_BY_DESIGN,
+    EXECUTED_PATHS,
+    MANIFEST,
+    KernelsPlugin,
+    _records,
+    summarize,
+)
 
 LISTED = "tests/unit/node_tasks/imaging/test_node_task_science.py"  # hogbom.clean_cube
 OTHER = "tests/unit/processing_functions/imaging/test_other.py"
@@ -35,12 +42,45 @@ def _verdict(*records, collected=(LISTED, OTHER)):
 
 
 def test_the_manifest_lists_existing_files_and_hooked_entries():
-    from astroviper._kernels._switch import _ENTRIES
+    from astroviper._kernels._switch import _ENTRIES, _REGISTRY
 
     for path, kernels in MANIFEST.items():
         assert (Path(__file__).parents[3] / path).is_file(), path
         for kernel, entries in kernels.items():
             assert set(entries) <= set(_ENTRIES[kernel]), (path, kernel)
+    for kernel, name in DECLINED_BY_DESIGN.keys() | EXECUTED_PATHS.keys():
+        assert name in _REGISTRY[kernel]
+    for (kernel, _), files in DECLINED_BY_DESIGN.items():
+        assert all(kernel in MANIFEST[path] for path in files)
+
+
+DFT_FILE = "tests/unit/processing_functions/imaging/test_direct_fourier_transform.py"
+BY_DESIGN = (
+    "tests/unit/processing_functions/imaging/gridders/"
+    "test_direct_fourier_transform_cpp.py"
+)
+
+
+@pytest.mark.parametrize(
+    "path, executed", [("S", True), ("declined", False), ("fast", False)]
+)
+def test_dft_fast_executes_on_path_s_only(path, executed):
+    record = {"kernel": "dft", "entry": "dft_predict", "impl": "fast", "path": path}
+    record |= {"error": None, "t_start": 15.0}
+    selection = {"dft": "fast"}
+    assert kernels_plugin._executed(record, selection) is executed
+    _, missing, foreign = summarize(
+        [record], selection, selection, [(10.0, 20.0, DFT_FILE)], {DFT_FILE}
+    )
+    assert (missing == [], foreign) == (executed, {})
+
+
+def test_files_declined_by_design_are_not_required():
+    assert BY_DESIGN in DECLINED_BY_DESIGN["dft", "fast"]
+    for name, required in (("fast", [DFT_FILE]), ("ref", [BY_DESIGN, DFT_FILE])):
+        selection = {"dft": name}
+        missing = summarize([], selection, selection, [], {BY_DESIGN, DFT_FILE})[1]
+        assert missing == [f"{path}: dft.dft_predict={name}" for path in required]
 
 
 def test_an_executed_call_in_the_listed_file_passes():

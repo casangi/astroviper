@@ -11,13 +11,21 @@ apply to whole modules, read from the disassembly of the installed files:
 The patterns are checked on canned lines of both objdump syntaxes, each module
 must disassemble to real code, and the list of reference modules must equal
 the installed extensions outside ``_kernels``, so a new reference extension
-cannot escape the rules. Each fast-kernel module adds its own rules when it
-lands. Skipped off x86-64
-and when ``objdump`` (binutils) is not installed.
+cannot escape the rules. Skipped off x86-64 and when ``objdump`` (binutils) is
+not installed.
+
+The fast modules (``FAST_MODULES``) have no fused multiply-add either. Their
+AVX2 code lives in ``*_avx2.cpp`` units built without LTO, which must define
+no weak or unique symbol (``nm`` types W, V, u): the linker may otherwise keep
+an AVX2 unit's copy of an inline or template function for every caller,
+generic code included. Their object files are read from the build directory,
+``ASTROVIPER_BUILD_DIR`` or else ``build/*`` of the repository (the package's
+default); the test is skipped when there is none.
 """
 
 import importlib.machinery
 import importlib.util
+import os
 import platform
 import re
 import shutil
@@ -40,6 +48,9 @@ REFERENCE_MODULES = [
     "processing_functions/simulation/visibility_kernel_cpp/_visibility_kernel_ext",
 ]
 
+#: The fast-kernel modules, relative to the ``astroviper`` package.
+FAST_MODULES = ["_kernels/fast/dft/_dft_fast_ext"]
+
 #: FMA3 (vfmadd231pd, vfnmsub132ss, vfmaddsub213ps, ...) and FMA4 mnemonics.
 FMA = re.compile(r"\bvfn?m(?:add|sub|addsub|subadd)\w*")
 #: Register names wider than xmm, in AT&T (``%ymm0``) or Intel (``ymm0``) syntax.
@@ -50,6 +61,7 @@ XMM_REGISTER = re.compile(r"(?<![\w%])%?xmm\d+\b")
 INSTRUCTION = re.compile(r"^\s*[0-9a-f]+:\t", re.MULTILINE)
 
 OBJDUMP = shutil.which("objdump")
+NM = shutil.which("nm")
 
 pytestmark = [
     pytest.mark.skipif(
@@ -123,3 +135,43 @@ def test_reference_module_has_no_fma_and_no_wide_registers(relative):
     assert XMM_REGISTER.search(text), "the register pattern matches nothing"
     assert sorted(set(FMA.findall(text))) == []
     assert sorted(set(WIDE_REGISTER.findall(text))) == []
+
+
+@pytest.mark.parametrize("relative", FAST_MODULES, ids=lambda r: r.split("/")[-1])
+def test_fast_module_has_no_fma(relative):
+    text = _instructions(_module_file(relative))
+    assert len(INSTRUCTION.findall(text)) > 1000, "no code was disassembled"
+    assert XMM_REGISTER.search(text), "the register pattern matches nothing"
+    assert sorted(set(FMA.findall(text))) == []
+
+
+def _avx2_objects(relative):
+    """The ``*_avx2.cpp`` object files of a fast module in the build directories."""
+    configured = os.environ.get("ASTROVIPER_BUILD_DIR")
+    roots = (
+        [Path(configured)] if configured else Path(__file__).parents[3].glob("build/*")
+    )
+    target = relative.rpartition("/")[2]
+    return sorted(
+        o for root in roots for o in root.glob(f"**/{target}.dir/**/*_avx2.cpp.o")
+    )
+
+
+@pytest.mark.skipif(NM is None, reason="nm (binutils) is not installed")
+@pytest.mark.parametrize("relative", FAST_MODULES, ids=lambda r: r.split("/")[-1])
+def test_avx2_units_define_no_weak_symbols(relative):
+    objects = _avx2_objects(relative)
+    if not objects:
+        pytest.skip(
+            "no build directory with the module's objects (ASTROVIPER_BUILD_DIR)"
+        )
+    for path in objects:
+        listing = subprocess.run(
+            [NM, str(path)], check=True, capture_output=True, text=True
+        )
+        symbols = [
+            line.split()[-2:] for line in listing.stdout.splitlines() if line.strip()
+        ]
+        assert [s for s in symbols if s[0] in ("W", "V", "u")] == [], path.name
+        assert any(kind == "T" for kind, _ in symbols), f"{path.name} exports nothing"
+        assert WIDE_REGISTER.search(_instructions(path)), f"{path.name} has no AVX code"
