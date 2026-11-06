@@ -1651,9 +1651,8 @@ def test_mfs_primary_beam_taylor_inputs_reuse_channel_imaging_weights(monkeypatc
 
     def evaluate_primary_beam(frequencies, polarizations, *args, **kwargs):
         frequencies = np.asarray(frequencies)
-        if frequencies.size == frequency.size:
-            return channel_beam[None, ...]
-        return np.ones((1, 1, len(polarizations), 1, 1))
+        indices = [np.flatnonzero(frequency == value)[0] for value in frequencies]
+        return channel_beam[None, indices, ...]
 
     monkeypatch.setattr(continuum_beam, "evaluate_primary_beam", evaluate_primary_beam)
     image = xr.Dataset(

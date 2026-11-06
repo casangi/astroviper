@@ -227,6 +227,48 @@ def _mfs_channel_imaging_weight_sums(
     )
 
 
+def _mfs_primary_beam_weight_summary(ps_xdt, img_xds, processing_set_data_group_name):
+    """Retain only the channel/correlation weights needed by final MFS restoration.
+
+    The lookup bound records the original task's Airy sampling grid, so deferred
+    evaluation preserves the same beam samples across frequency partitions.
+    Neither variable has a spatial axis or needs the visibility data again.
+    """
+    weights = _mfs_channel_imaging_weight_sums(
+        ps_xdt, img_xds, processing_set_data_group_name
+    )
+    summary = weights.to_dataset()
+    summary["MFS_BEAM_LOOKUP_FREQUENCY_MAX"] = weights.frequency.copy(
+        data=np.full(weights.sizes["frequency"], weights.frequency.values.max())
+    )
+    return summary
+
+
+def _combine_mfs_primary_beam_weight_summaries(summaries):
+    """Concatenate exclusively owned frequency summaries at any reduce level."""
+    import xarray as xr
+
+    required = {"MFS_CHANNEL_IMAGING_WEIGHT_SUM", "MFS_BEAM_LOOKUP_FREQUENCY_MAX"}
+    for summary in summaries:
+        if not isinstance(summary, xr.Dataset) or not required <= set(summary):
+            raise ValueError(
+                "An MFS beam summary must contain channel weights and lookup bounds."
+            )
+        if summary.MFS_CHANNEL_IMAGING_WEIGHT_SUM.dims != ("frequency", "polarization"):
+            raise ValueError(
+                "MFS beam weights must have frequency/polarization dimensions."
+            )
+        if summary.MFS_BEAM_LOOKUP_FREQUENCY_MAX.dims != ("frequency",):
+            raise ValueError("MFS beam lookup bounds must have a frequency dimension.")
+    result = xr.concat(
+        summaries, dim="frequency", data_vars="all", coords="minimal", join="exact"
+    ).sortby("frequency")
+    frequencies = result.frequency.values
+    if np.unique(frequencies).size != frequencies.size:
+        raise ValueError("MFS beam summaries contain duplicate frequency ownership.")
+    return result
+
+
 def _convert_primary_beam_to_reference_frequency(
     img_xds,
     *,
@@ -236,6 +278,7 @@ def _convert_primary_beam_to_reference_frequency(
     image_data_group_in_name="residual",
     make_primary_beam_taylor=True,
     channel_imaging_weight_sums=None,
+    channel_lookup_frequency_max=None,
 ):
     """Build the static and polynomial primary-beam products needed by MFS.
 
@@ -249,10 +292,14 @@ def _convert_primary_beam_to_reference_frequency(
     post-flagging imaging-weight sums ``s_nu`` as the apparent sky. This is the
     CASA ``widebandpbcor`` weighted polynomial fit, with AstroViper deriving its
     ``weightlist`` directly from ``WEIGHT_IMAGING``. This task-local function
-    stores only additive polynomial-fit numerators and spectral moments; the
-    global append node solves the fit after all frequency partitions have been
-    reduced. No channel-sized beam cube is carried through the distributed
-    reduction. Runs without restoration skip that projection.
+    stores additive polynomial-fit numerators and spectral moments. Distributed
+    MFS calls this projection only at final restoration, using the compact
+    globally collected channel weights. Channel beams are evaluated and
+    accumulated one at a time;
+    peak spatial working memory therefore depends on Taylor order, not channel
+    count. The Airy lookup frequency bound is kept fixed across the task to
+    preserve the beam samples of the previous batched evaluation. Runs without
+    restoration skip that projection.
     """
     import numpy as np
     import xarray as xr
@@ -343,33 +390,66 @@ def _convert_primary_beam_to_reference_frequency(
                 "MFS channel imaging-weight sums must be finite and non-negative."
             )
 
-        channel_data = evaluate_primary_beam(
-            channel_frequencies,
-            img_xds.polarization.values,
-            pb_params,
-            pb_image_params,
-            dtype=float_dtype,
-        )[0]
-        channel_data = np.broadcast_to(
-            channel_data,
-            (img_xds.sizes["time"], *channel_data.shape),
-        )
         x_frequency = (channel_frequencies - reference_frequency_hz) / (
             reference_frequency_hz
         )
         n_moments = 2 * n_taylor_terms - 1
-        numerator = np.stack(
-            [
-                np.sum(
-                    channel_data
-                    * spectral_weights[None, :, :, None, None]
-                    * x_frequency[None, :, None, None, None] ** order,
-                    axis=1,
-                )
-                for order in range(n_taylor_terms)
-            ],
-            axis=1,
+
+        # Accumulate directly into Taylor images. Stream each channel's
+        # beam and reuse one float64 weighted plane across terms/polarizations,
+        # rather than allocating channel x polarization x l x m products.
+        numerator = np.zeros(
+            (
+                img_xds.sizes["time"],
+                n_taylor_terms,
+                img_xds.sizes["polarization"],
+                *pb_image_params["image_size"],
+            ),
+            dtype=np.float64,
         )
+        weighted_beam = np.empty(pb_image_params["image_size"], dtype=np.float64)
+        if channel_lookup_frequency_max is None:
+            channel_lookup_frequency_max = np.full(
+                channel_frequencies.shape, channel_frequencies.max()
+            )
+        else:
+            channel_lookup_frequency_max = np.asarray(
+                channel_lookup_frequency_max, dtype=np.float64
+            )
+            if (
+                channel_lookup_frequency_max.shape != channel_frequencies.shape
+                or not np.all(np.isfinite(channel_lookup_frequency_max))
+                or np.any(channel_lookup_frequency_max < channel_frequencies)
+            ):
+                raise ValueError(
+                    "MFS beam lookup bounds must cover their channel frequencies."
+                )
+        for channel, frequency in enumerate(channel_frequencies):
+            channel_data = evaluate_primary_beam(
+                np.asarray([frequency]),
+                img_xds.polarization.values,
+                pb_params,
+                pb_image_params,
+                dtype=float_dtype,
+                lookup_frequency_max=channel_lookup_frequency_max[channel],
+            )[0, 0]
+            for polarization in range(img_xds.sizes["polarization"]):
+                np.multiply(
+                    channel_data[polarization],
+                    spectral_weights[channel, polarization],
+                    out=weighted_beam,
+                    dtype=np.float64,
+                )
+                for order in range(n_taylor_terms):
+                    numerator[:, order, polarization] += weighted_beam
+                    if order + 1 < n_taylor_terms:
+                        weighted_beam *= x_frequency[channel]
+            # Release this view before evaluating the next channel's beam.
+            del channel_data
+        del weighted_beam
+
+        # These spectral moments have no spatial axes and remain small even
+        # for many channels. Keep their existing reduction and normalization.
         moments = np.stack(
             [
                 np.sum(
@@ -544,8 +624,10 @@ def imaging_setup_continuum_single_field(
     image_data_group_out_name : str, optional
         Name of the continuum image data group. Defaults to ``"residual"``.
     make_primary_beam_taylor : bool, optional
-        Whether MFS should evaluate the channel-dependent primary beam and form
-        the additive Taylor-fit contributions used by restoration. Default true.
+        Collect the first-cycle inputs needed for primary-beam Taylor products.
+        Distributed MFS retains compact channel/correlation weight sums and fits
+        the beam only at final restoration. MVC keeps its final diagnostic
+        outside the iterative image and static cache.
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -775,21 +857,21 @@ def imaging_setup_continuum_single_field(
     #
     if continuum_mode == "mfs":
         start = time.time()
-        channel_imaging_weight_sums = None
         if make_primary_beam_taylor:
-            channel_imaging_weight_sums = _mfs_channel_imaging_weight_sums(
-                ps_xdt,
-                img_xds,
-                processing_set_data_group_name,
+            # Preserve the actual first-cycle weights before residual processing,
+            # but defer every spatial Taylor-beam allocation to finalization.
+            summary = _mfs_primary_beam_weight_summary(
+                ps_xdt, img_xds, processing_set_data_group_name
             )
+            for name in summary:
+                img_xds[name] = summary[name]
         img_xds = _convert_primary_beam_to_reference_frequency(
             img_xds,
             image_params=image_params,
             reference_frequency_hz=reference_frequency_hz,
             float_dtype=float_dtype,
             image_data_group_in_name=image_data_group_out_name,
-            make_primary_beam_taylor=make_primary_beam_taylor,
-            channel_imaging_weight_sums=channel_imaging_weight_sums,
+            make_primary_beam_taylor=False,
         )
         primary_beam_return_df = pd.DataFrame({"T_primary_beam": [time.time() - start]})
     else:

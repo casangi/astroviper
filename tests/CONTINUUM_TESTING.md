@@ -21,6 +21,10 @@ Paths below are relative to `tests/`.
 
 ## New test modules
 
+- `unit/processing_functions/imaging/test_mfs_beam_streaming.py`: dense-sum
+  equivalence for both Airy prescriptions, float32/64 beams, 1–4 Taylor terms,
+  multiple times/polarizations, and zero-weight channels. It checks exact beam
+  samples and that each channel allocation is released before the next one.
 - `unit/processing_functions/imaging/test_continuum_contracts.py`: numerical
   oracles and model/cache/PB input contracts.
 - `unit/node_tasks/imaging/test_continuum_cache_contracts.py`: real Zarr cache
@@ -215,3 +219,48 @@ remain subject to pytest's normal temporary-directory retention.
 Primary-beam tests embed small tables of independent CASA output values;
 no PB data downloads are required.
 Large-data image-level comparisons are outside the repository test suite.
+
+## MFS primary-beam working memory
+
+MFS now accumulates primary-beam Taylor numerators channel by channel, reusing
+one float64 weighted spatial plane. Spatial working memory scales with the
+number of Taylor terms rather than the number of channels in a task. Physical
+Airy calls retain the task-wide interpolation-table frequency bound; changing
+that bound per channel would change beam samples and perturb spectral fits.
+The small frequency/polarization moment arrays retain their existing reduction.
+
+A local comparison against `e4858391`, at 1024 × 1024 pixels, two correlations,
+two Taylor terms, and physical Airy float32 beams, gave the following results.
+Peak allocations are measured with `tracemalloc` inside the contribution helper,
+including its outputs, and are not the whole worker's resident memory. Runtime
+is the median of three warm runs; peak memory is the maximum of those runs.
+
+| Channels per task | Batched peak | Streamed peak | Batched time | Streamed time |
+| --- | --- | --- | --- | --- |
+| 4 | 160.0 MiB | 64.3 MiB | 0.186 s | 0.181 s |
+| 16 | 592.0 MiB | 64.3 MiB | 0.612 s | 0.600 s |
+
+Taylor numerators, spectral moments, and the reference beam matched the previous
+calculation within floating-point rounding. These are local helper measurements,
+not deployment-cluster performance guarantees.
+
+## Final-only continuum state
+
+First-cycle MFS map tasks retain only channel/correlation imaging-weight sums
+and their original Airy interpolation bounds. The reducer concatenates these
+small summaries; finalization computes the streamed beam projection and Taylor
+fit once. Visibility data and channel beams are not read again. MVC's beam
+polynomial remains a final diagnostic and stays outside the iterative cache.
+
+The driver holds restoration-only state outside the imaging-cycle graphs.
+`static_xds` returns from the first append only. A separate finalization graph
+runs after residual verification and records its own task timing, without an
+extra residual update or model update. Tests cover a stop in the first cycle
+and after multiple model updates, with restoration enabled and disabled.
+
+MVC channel counts stay integer and additive through all reduce levels. The
+global append then stores `MVC_RESIDUAL_BEAM_SUPPORTED = count >= n_taylor_terms`
+as a Boolean array. Later cycles retain the exact same support, scalar fallback,
+and primary-beam exclusions while using one byte per pixel instead of eight.
+Dense/deferred beam-fit comparisons cover 2–4 Taylor terms, both Airy models,
+both precisions, multiple times/polarizations, and different frequency partitions.

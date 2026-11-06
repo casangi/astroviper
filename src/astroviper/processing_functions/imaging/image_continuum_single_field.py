@@ -137,8 +137,10 @@ def imaging_preparation_continuum_single_field(
         Identifier of the parallel chunk being processed.
 
     make_primary_beam_taylor : bool, optional
-        Whether MFS should form the additive primary-beam Taylor-fit
-        contributions needed by restoration. Default true.
+        Collect the first-cycle inputs needed for primary-beam Taylor products.
+        Distributed MFS retains compact channel/correlation weight sums and fits
+        the beam only at final restoration. MVC keeps its final diagnostic
+        outside the iterative image and static cache.
 
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
@@ -1639,6 +1641,9 @@ def finalize_mvc_taylor_normal_equations(
     ----------
     contributions : xarray.Dataset
         Globally accumulated MVC residual, PSF, beam, and weight sums.
+        Channel support may be supplied as additive integer counts or as the
+        Boolean ``MVC_RESIDUAL_BEAM_SUPPORTED`` cache formed after global
+        reduction for this fixed Taylor order.
     effective_primary_beam : xarray.DataArray or None, optional
         Previously calculated common primary beam. When omitted, calculate it
         from the supplied PSF-weighted beam sums.
@@ -1694,12 +1699,24 @@ def finalize_mvc_taylor_normal_equations(
             .values
         )
         supported = valid_effective_pb.transpose(*pixel_dims).values
-        determined = supported & (
-            contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"]
-            .transpose(*pixel_dims)
-            .values
-            >= n_taylor_terms
-        )
+        if "MVC_RESIDUAL_BEAM_SUPPORTED" in contributions:
+            channel_support = contributions["MVC_RESIDUAL_BEAM_SUPPORTED"]
+            if channel_support.dtype != np.bool_:
+                raise TypeError("Cached MVC channel support must be Boolean.")
+            if (
+                channel_support.attrs.get("n_taylor_terms", n_taylor_terms)
+                != n_taylor_terms
+            ):
+                raise ValueError(
+                    "Cached MVC channel support uses a different Taylor order."
+                )
+        else:
+            # Raw map/reduce contributions still carry additive integer counts.
+            # Only the global append may replace them with this fixed-order mask.
+            channel_support = (
+                contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"] >= n_taylor_terms
+            )
+        determined = supported & channel_support.transpose(*pixel_dims).values
         gram = beam_squared[..., hankel]
         gram[~determined] = np.eye(n_taylor_terms)
         coefficients = np.linalg.solve(
@@ -2036,6 +2053,63 @@ def fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2):
         continuum_mode="mfs",
         primary_beam_limit=float(primary_beam_limit),
         usage="wideband_primary_beam_correction",
+    )
+
+
+def _fit_mfs_primary_beam_for_restoration(
+    img_xds, summary, image_params, primary_beam_limit
+):
+    """Build the MFS beam polynomial once from compact first-cycle weights.
+
+    Preserve each task's interpolation bound and correlation weights, then apply
+    the same polarization relabeling used by the original first-cycle fit.
+    """
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
+        _convert_primary_beam_to_reference_frequency,
+    )
+
+    fit_inputs = xr.Dataset(
+        coords={
+            "time": img_xds.time,
+            "frequency": summary.frequency,
+            "polarization": summary.polarization,
+            "l": img_xds.l,
+            "m": img_xds.m,
+        },
+        attrs={"data_groups": {"residual": {}}},
+    )
+    fit_inputs = _convert_primary_beam_to_reference_frequency(
+        fit_inputs,
+        image_params=image_params,
+        reference_frequency_hz=float(image_params["reference_frequency"]),
+        float_dtype=img_xds.PRIMARY_BEAM.dtype,
+        channel_imaging_weight_sums=summary.MFS_CHANNEL_IMAGING_WEIGHT_SUM,
+        channel_lookup_frequency_max=summary.MFS_BEAM_LOOKUP_FREQUENCY_MAX.values,
+    )
+    fitted = fit_mfs_primary_beam_taylor(
+        fit_inputs, primary_beam_limit=primary_beam_limit
+    )
+    beam_image = xr.Dataset(
+        {
+            "PRIMARY_BEAM_TAYLOR": fitted,
+            "PRIMARY_BEAM": fit_inputs.PRIMARY_BEAM_REFERENCE,
+        }
+    )
+    beam_image = transform_polarization_basis(
+        beam_image, new_polarization_basis="stokes", overwrite=True
+    )
+    if not np.array_equal(beam_image.polarization, img_xds.polarization):
+        raise ValueError(
+            "The deferred MFS beam fit does not match the restored polarizations."
+        )
+    return beam_image.PRIMARY_BEAM_TAYLOR.transpose(
+        "time", "taylor_term", "polarization", "l", "m"
     )
 
 
@@ -2415,8 +2489,10 @@ def residual_update_continuum_single_field(
         Indicates whether this is the first imaging cycle.
 
     make_primary_beam_taylor : bool, optional
-        Whether MFS should form the additive primary-beam Taylor-fit
-        contributions needed by restoration. Default true.
+        Collect the first-cycle inputs needed for primary-beam Taylor products.
+        Distributed MFS retains compact channel/correlation weight sums and fits
+        the beam only at final restoration. MVC keeps its final diagnostic
+        outside the iterative image and static cache.
 
     model_uv_xds : xarray.Dataset, optional
         Globally prepared Fourier-domain Taylor model used for degridding during

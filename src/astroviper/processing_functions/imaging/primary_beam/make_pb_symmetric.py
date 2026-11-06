@@ -14,6 +14,8 @@ of https://en.wikipedia.org/wiki/Airy_disk.  When ``ipower == 1`` the voltage
 pattern is returned; when ``ipower == 2`` the (power) primary beam is returned.
 """
 
+from astroviper.utils.param_docs import shares_param_docs
+
 
 # Formula for obscured airy pattern found in https://en.wikipedia.org/wiki/Airy_disk (see Obscured Airy pattern section)
 # If ipower is 1 the voltage pattern is returned if ipower is 2 the primary beam is returned.
@@ -244,7 +246,10 @@ def airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
 # (chan x N0 x N1) array, then linearly interpolated back onto the 2D image.
 # The interpolation query is fully vectorised across channels via broadcasting.
 # @profile(precision=1)
-def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
+@shares_param_docs
+def airy_disk_rorder_v2(
+    freq_chan, pol, pb_params, grid_params, dtype=None, *, lookup_frequency_max=None
+):
     """Fast obscured-Airy primary beam in ``(dish, chan, pol, l, m)`` order.
 
     Equivalent to :func:`airy_disk_rorder` but evaluates the Bessel term on a
@@ -271,6 +276,13 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
         ``numpy.float64``.  Pass ``numpy.float32`` to halve memory usage at the
         cost of ~7 decimal digits of precision (sufficient for primary-beam
         applications).
+
+    lookup_frequency_max : float or None, optional
+        Upper frequency in Hz used to build the physical Airy interpolation
+        table. Supply the maximum frequency of the complete task when evaluating
+        its channels separately, preserving the same beam samples as a batched
+        evaluation. None uses the maximum of freq_chan. The CASA Airy model
+        uses its own per-channel tables and does not need this bound.
 
     Returns
     -------
@@ -300,6 +312,13 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
 
     c = scipy.constants.c  # 299792458
     k = ((2 * np.pi * freq_chan) / c).astype(dtype)
+    # A streamed caller supplies the full task's upper frequency so every
+    # channel uses exactly the lookup grid of a batched evaluation.
+    k_max = (
+        k.max()
+        if lookup_frequency_max is None
+        else ((2 * np.pi * np.asarray([lookup_frequency_max])) / c).astype(dtype).max()
+    )
 
     x = (np.arange(-image_center[0], image_size[0] - image_center[0]) * cell[0]).astype(
         dtype
@@ -326,7 +345,7 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
         aperture = dish_diameter / 2
 
         # u = r * k * aperture.  Build a 1D lookup table over the full u range.
-        u_max = float(r_2d.max() * k.max() * aperture)
+        u_max = float(r_2d.max() * k_max * aperture)
         # ~10 samples per π gives <0.1 % linear-interpolation error for J1(u)/u.
         n_samples = max(int(u_max * 10.0 / np.pi) + 1, 10000)
         u_1d = np.linspace(0.0, u_max * 1.001, n_samples)
