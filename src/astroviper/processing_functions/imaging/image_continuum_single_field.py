@@ -3316,7 +3316,8 @@ def model_update_mtmfs_single_field(
         ``max_iter_divergence`` are checked as in the cube deconvolver.
         Every deconvolver places its component centres on pixels where the
         primary beam is at least ``primary_beam_limit`` (default 0) times its
-        peak and not 0 (Asp components reach past them). When a clean mask is
+        peak and not 0 (Asp components reach past them, Gaussians with
+        ``asp_min_mask_coverage`` of their flux on them). When a clean mask is
         present, its intersection with that PB support is used; the stop
         test measures the same pixels. With ``"asp"`` the keys of
         :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`

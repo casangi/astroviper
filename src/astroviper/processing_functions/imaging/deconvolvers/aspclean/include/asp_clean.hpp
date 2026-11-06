@@ -31,7 +31,12 @@
 //    limit with the factor (1 + gain) and no peak limit;
 //  * an asp_largest_scale below the PSF width gives the initial scales 0,
 //    asp_largest_scale and the PSF width, as in LibRA, not the point scale
-//    only.
+//    only;
+//  * a Gaussian component is centred on the mask and keeps
+//    asp_min_mask_coverage of its flux on it, in the search and after the
+//    fit. CASA thresholds mask (*) scale, as MatrixCleaner does with scales
+//    that sum to 1; Asp's sum to sqrt(2 pi) sigma, so there the test lets a
+//    Gaussian go outside the mask.
 // A residual pixel outside the search region (mask not above 0.99) that is
 // not finite is zero during the model update and gets its value back
 // afterwards.
@@ -115,8 +120,9 @@ struct AspResult {
 };
 
 // Options of Asp beyond CASA's and LibRA's AspMatrixCleaner, all off by default
-// in the kernel; deconvolution.asp_clean() turns asp_scale_significance,
-// asp_residual_components and asp_residual_component_positive_only on: the
+// in the kernel but asp_min_mask_coverage; deconvolution.asp_clean() turns
+// asp_scale_significance, asp_residual_components and
+// asp_residual_component_positive_only on: the
 // first two together clean the ring residuals Asp leaves on resolved
 // emission, with far fewer iterations.
 //   asp_scale_significance: measure the noise of the residual smoothed with
@@ -152,6 +158,11 @@ struct AspResult {
 //     (two switch to a Hogbom run); 0 keeps CASA's and LibRA's absolute 1e-4,
 //     in the units of the image, which counts every iteration once the peak
 //     residual is below about a mJy.
+//   asp_min_mask_coverage: the least share of the flux of a Gaussian component
+//     on the mask, in [0, 1). The search takes an initial scale only on the
+//     mask pixels where it has this share; a fit that falls short of it is
+//     cut back to the widest Gaussian that has it, or to a point, with its
+//     amplitude fitted again. With 0 only the centre must be on the mask.
 struct AspOptions {
     bool asp_scale_significance = false;
     double asp_significance = 0.0;
@@ -169,6 +180,7 @@ struct AspOptions {
     int asp_residual_component_fit_iterations = 10;
     double asp_no_change_tolerance = 0.0;
     bool record_iteration_history = false;
+    double asp_min_mask_coverage = 0.995;
 };
 
 // Estimate the PSF Gaussian width (mean FWHM in pixels) that seeds the Asp
