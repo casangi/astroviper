@@ -18,11 +18,12 @@
 // * a vis_data that shares memory with an input (the reference would read
 //   inputs that it has already overwritten).
 //
-// A misaligned array, which the reference reads in place (Dask hands its
+// A misaligned input, which the reference reads in place (Dask hands its
 // workers arrays at arbitrary offsets of the frames it received), is read
-// through an aligned copy of its bytes (vis_data by path S's own copy). The
-// path is then decided in C++ from the inputs (dft_separable.cpp), without the
-// GIL, before anything is written.
+// through an aligned copy of its bytes; path S reads and writes the values of
+// vis_data in place, as bytes, at any alignment. The path is then decided in
+// C++ from the inputs (dft_separable.cpp), without the GIL, before anything
+// is written.
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -273,9 +274,10 @@ PYBIND11_MODULE(_dft_fast_ext, module) {
                "visibilities and returns 'S', or writes nothing and returns 'declined' (the "
                "caller then runs the reference).");
     module.def("cos_sin_turns", &cos_sin_turns,
-               "cos(2 pi t) and sin(2 pi t) of angles t in turns, as path S evaluates them "
-               "(the reference's cos_sin_of_turns, with the selected instruction set): bitwise "
-               "the reference's cos_sin_turns for finite turns (for NaN or infinite turns both "
-               "give NaN, not always with the same sign bit or payload).",
+               "cos(2 pi t) and sin(2 pi t) of angles t in turns, by the function of path S's "
+               "phasors (the reference's cos_sin_of_turns, with the selected instruction set, "
+               "which path S evaluates at its exact reduced phases): bitwise the reference's "
+               "cos_sin_turns for finite turns (for NaN or infinite turns both give NaN, not "
+               "always with the same sign bit or payload).",
                py::arg("turns"));
 }

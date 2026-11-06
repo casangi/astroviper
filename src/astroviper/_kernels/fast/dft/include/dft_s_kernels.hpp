@@ -1,7 +1,8 @@
 #pragma once
 
 // The routines of path S that are built once per instruction set: the
-// phasors (the reference's cos_sin_of_turns), the micro-kernel of the GEMM and
+// phasors (the reference's cos_sin_of_turns, of the exact phases u l and v m
+// reduced by whole turns and rounded once), the micro-kernel of the GEMM and
 // the sums over the model rows. src/dft_s_kernels.inc holds the code they
 // share; src/dft_s_generic.cpp (baseline ISA) and src/dft_s_avx2.cpp (AVX2,
 // x86-64 only) each compile it once, with their own micro-kernel.
@@ -26,7 +27,8 @@ constexpr int kTileSamples = 8;
 struct Kernels {
     const char* isa;  // "generic" or "avx2"
 
-    // cos(2 pi t) and sin(2 pi t) of count angles t in turns.
+    // cos(2 pi t) and sin(2 pi t) of count angles t in turns (the reference's
+    // cos_sin_of_turns, which the phasors below evaluate).
     void (*cos_sin_turns)(const double* turns, i64 count, double* cos_values,
                           double* sin_values);
 

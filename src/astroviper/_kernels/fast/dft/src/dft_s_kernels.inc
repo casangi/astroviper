@@ -6,12 +6,14 @@
 using dft_fast::i64;
 using dft_fast::kTileSamples;
 
-// The phasors are those of the reference prediction: the constants,
-// round_to_integer and cos_sin_of_turns below are verbatim copies of the
-// reference's (processing_functions/imaging/gridders/direct_fourier_transform_cpp
-// /src/direct_fourier_transform.cpp, where they are internal to that unit),
-// built with the same -ffp-contract=off. The tests compare the text with the
-// reference source and the values bit for bit with its cos_sin_turns.
+// The phasors are those of the reference prediction, of exact phases: the
+// constants, round_to_integer and cos_sin_of_turns below are verbatim copies
+// of the reference's (processing_functions/imaging/gridders/
+// direct_fourier_transform_cpp/src/direct_fourier_transform.cpp, where they are
+// internal to that unit), built with the same -ffp-contract=off, and the turns
+// they are given are formed without the reference's roundings of u l and v m
+// (reduced_turns). The tests compare the text with the reference source and
+// the values bit for bit with its cos_sin_turns.
 
 constexpr double kTwoPi = 6.28318530717958647692528676655900577;
 
@@ -71,25 +73,60 @@ void cos_sin_turns(const double* turns, i64 count, double* cos_values, double* s
     }
 }
 
-// Lane s of a panel: cos_sin_of_turns(v m) is bitwise even in its argument for
-// the cosine and odd for the sine (the reduction rounds half to even, which is
-// symmetric), which the folding of the m axis relies on.
+// The phases are exact before their one rounding: a b = p + e exactly, with
+// p = fl(a b) and e from Dekker's two-product (no FMA; exact unless |a b| is
+// below about 2^-969 turns, where e is off by a few 2^-1074 turns), and
+// p - round(p) is exact for |p| < 2^51 (path S's range guard), so
+// (p - round(p)) + e is the angle a b in turns reduced by a whole number of
+// turns, rounded once, by at most 2^-54 turns whatever |a b| is. (The
+// reference rounds a b to p, an error of up to 2^-53 |a b| turns, and then
+// rounds the sum of its phases.) cos_sin_of_turns then reduces that angle
+// exactly again.
+
+constexpr double kSplitter = 134217729.0;  // 2^27 + 1
+
+// x = hi + lo exactly, each part with at most 26 significant bits (Veltkamp's
+// splitting, for |x| below 2^996).
+inline void split(double x, double& hi, double& lo) {
+    const double t = kSplitter * x;
+    hi = t - (t - x);
+    lo = x - hi;
+}
+
+// The turns a b reduced as above, from a, b and their splits. Odd in b bit
+// for bit, up to the sign of a zero (every step rounds to nearest, which is
+// symmetric, and round_to_integer rounds half to even), so that
+// cos_sin_of_turns of it is bitwise even in b for the cosine and odd for the
+// sine (the sine of a zero turn is +0 either way), which the folding of the m
+// axis relies on.
+inline double reduced_turns(double a, double a_hi, double a_lo, double b, double b_hi,
+                            double b_lo) {
+    const double p = a * b;
+    const double e = ((a_hi * b_hi - p) + a_hi * b_lo + a_lo * b_hi) + a_lo * b_lo;
+    return (p - round_to_integer(p)) + e;
+}
+
+// Lane s of a panel holds sample p * kTileSamples + s.
 void column_phasors(const double* v, i64 count, const double* m, i64 columns,
                     double* cos_panels, double* sin_panels) {
     const i64 panels = (count + kTileSamples - 1) / kTileSamples;
     for (i64 p = 0; p < panels; ++p) {
-        double lane_v[kTileSamples];
+        double lane_v[kTileSamples], lane_hi[kTileSamples], lane_lo[kTileSamples];
         for (int s = 0; s < kTileSamples; ++s) {
             const i64 k = p * kTileSamples + s;
             lane_v[s] = k < count ? v[k] : 0.0;
+            split(lane_v[s], lane_hi[s], lane_lo[s]);
         }
         double* panel_cos = cos_panels + p * columns * kTileSamples;
         double* panel_sin = sin_panels + p * columns * kTileSamples;
         for (i64 f = 0; f < columns; ++f) {
             const double m_f = m[f];
+            double m_hi, m_lo;
+            split(m_f, m_hi, m_lo);
             for (int s = 0; s < kTileSamples; ++s) {
                 double c, sn;
-                cos_sin_of_turns(lane_v[s] * m_f, c, sn);
+                cos_sin_of_turns(
+                    reduced_turns(lane_v[s], lane_hi[s], lane_lo[s], m_f, m_hi, m_lo), c, sn);
                 panel_cos[f * kTileSamples + s] = c;
                 panel_sin[f * kTileSamples + s] = sn;
             }
@@ -99,9 +136,12 @@ void column_phasors(const double* v, i64 count, const double* m, i64 columns,
 
 void row_phasors(const double* u, i64 count, double l, double* cos_values,
                  double* sin_values) {
+    double l_hi, l_lo;
+    split(l, l_hi, l_lo);
     for (i64 k = 0; k < count; ++k) {
-        double c, s;
-        cos_sin_of_turns(u[k] * l, c, s);
+        double u_hi, u_lo, c, s;
+        split(u[k], u_hi, u_lo);
+        cos_sin_of_turns(reduced_turns(u[k], u_hi, u_lo, l, l_hi, l_lo), c, s);
         cos_values[k] = c;
         sin_values[k] = s;
     }

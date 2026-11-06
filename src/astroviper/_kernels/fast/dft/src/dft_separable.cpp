@@ -27,11 +27,16 @@
 // and computed one at a time, so the packed weights take 16 bytes x components
 // x kept rows x folded columns of one plane at most.
 //
-// The visibilities are computed into a private copy of vis_data, which one
-// copy commits once every plane is done: a call that fails to allocate or to
-// start a thread declines with vis_data untouched, and vis_data may be
-// misaligned. The inputs are read without the GIL, so they must not change
-// during the call (as for the reference).
+// The phases u l and v m are exact before one rounding of the reduced angle
+// (dft_s_kernels.inc), so path S's error does not grow with the phase, unlike
+// the reference's (which rounds u l, v m and their sum).
+//
+// Path S writes the samples that the reference writes (the used rows' values
+// that are not NaN), and nothing else, directly: every buffer is allocated and
+// every thread started before the first write, so a call that cannot have
+// them declines with vis_data untouched, and after it nothing can fail.
+// vis_data may be misaligned. The inputs are read without the GIL, so they
+// must not change during the call (as for the reference).
 
 #include <cmath>
 #include <complex>
@@ -122,20 +127,66 @@ struct Plane {
     PlaneLayout layout;
 };
 
+// The sizes of a block of count samples of a plane: the block in whole
+// micro-panels (width), its components and folded columns, and the rows of a
+// band of the GEMM (whole micro-panels and whole kept rows, all of their
+// components).
+struct BlockShape {
+    i64 count, width, n_components, n_columns, band_rows;
+};
+
+BlockShape block_shape(const PlaneLayout& layout, i64 count) {
+    const auto n_components = static_cast<i64>(layout.components.size());
+    i64 band_rows = 0;
+    if (n_components > 0) {
+        const i64 step =
+            kTileRows / greatest_common_divisor(kTileRows, n_components) * n_components;
+        band_rows = std::max(step, kBandRows / step * step);
+    }
+    return {count, round_up(count, kTileSamples), n_components,
+            static_cast<i64>(layout.column_a.size()), band_rows};
+}
+
+// Room in scratch for the blocks of up to count samples of a plane
+// (compute_block) and for its packing (pack_plane: n of the folded columns),
+// so that neither allocates.
+void reserve(Scratch& scratch, const PlaneLayout& layout, i64 count) {
+    const BlockShape shape = block_shape(layout, count);
+    scratch.n_a.get(shape.n_columns);
+    scratch.n_b.get(shape.n_columns);
+    scratch.u.get(shape.count);
+    scratch.v.get(shape.count);
+    scratch.column_cos.get(shape.n_columns * shape.width);
+    scratch.column_sin.get(shape.n_columns * shape.width);
+    scratch.t_re.get(shape.band_rows * shape.width);
+    scratch.t_im.get(shape.band_rows * shape.width);
+    scratch.row_cos.get(shape.count);
+    scratch.row_sin.get(shape.count);
+    scratch.x_re.get(shape.n_components * shape.width);
+    scratch.x_im.get(shape.n_components * shape.width);
+}
+
+// The packed weights of a plane (pack_plane), in doubles.
+i64 packed_size(const PlaneLayout& layout) {
+    const auto n_packed = static_cast<i64>(layout.rows.size() * layout.components.size());
+    return round_up(n_packed, kTileRows) * static_cast<i64>(layout.column_a.size());
+}
+
 // One block of a plane's samples: its phasors, the GEMM bands with the sums
-// over their rows, then its visibilities in vis (laid out as vis_data).
+// over their rows, then its samples of vis_data.
 template <typename VisT>
 void compute_block(const Call& call, const Samples& samples, const Plane& plane,
                    const double* scale, const double* p, const double* q, i64 block,
-                   const Kernels& routines, Scratch& scratch, VisT* vis) {
+                   const Kernels& routines, Scratch& scratch) {
     const PlaneLayout& layout = plane.layout;
     const i64* rows = samples.rows.data() + samples.row_start[plane.a_time];
     const i64* channels = samples.channels.data() + samples.channel_start[plane.a_chan];
     const i64 n_channels = samples.n_channels(plane.a_chan);
     const i64 first = block * kBlockSamples;
     const i64 count = std::min(kBlockSamples, plane.n_samples - first);
-    const i64 width = round_up(count, kTileSamples);  // the block in whole micro-panels
-    const auto n_components = static_cast<i64>(layout.components.size());
+    const BlockShape shape = block_shape(layout, count);
+    const i64 width = shape.width;
+    const i64 n_components = shape.n_components;
 
     double* x_re = scratch.x_re.get(n_components * width);
     double* x_im = scratch.x_im.get(n_components * width);
@@ -148,13 +199,10 @@ void compute_block(const Call& call, const Samples& samples, const Plane& plane,
             u[k] = uvw[0] * factor;
             v[k] = uvw[1] * factor;
         }
-        const auto n_columns = static_cast<i64>(layout.column_a.size());
+        const i64 n_columns = shape.n_columns;
         const i64 n_packed = static_cast<i64>(layout.rows.size()) * n_components;
         const i64 padded_rows = round_up(n_packed, kTileRows);
-        // A band holds whole micro-panels and whole rows (all their components).
-        const i64 step =
-            kTileRows / greatest_common_divisor(kTileRows, n_components) * n_components;
-        const i64 band_rows = std::max(step, kBandRows / step * step);
+        const i64 band_rows = shape.band_rows;
         double* column_cos = scratch.column_cos.get(n_columns * width);
         double* column_sin = scratch.column_sin.get(n_columns * width);
         double* t_re = scratch.t_re.get(band_rows * width);
@@ -199,14 +247,19 @@ void compute_block(const Call& call, const Samples& samples, const Plane& plane,
         }
     }
 
-    // The visibilities, overwritten as the reference writes them: NaN values
-    // are kept, the others narrowed from the double sums.
+    // The visibilities, written where the reference writes them: the NaN
+    // values are kept, the others overwritten by the double sums narrowed.
+    // vis_data may be misaligned, so its values are read and written as bytes.
     using VisElement = typename VisT::value_type;
+    constexpr auto kBytes = static_cast<i64>(sizeof(VisT));
+    auto* const vis = static_cast<unsigned char*>(call.vis);
     for (i64 k = 0; k < count; ++k) {
         const i64 row = rows[(first + k) / n_channels];
-        VisT* out = vis + (row * call.n_vis_chan + channels[(first + k) % n_channels]) * call.n_pol;
+        const i64 sample = row * call.n_vis_chan + channels[(first + k) % n_channels];
         for (i64 pol = 0; pol < call.n_pol; ++pol) {
-            const VisT current = out[pol];
+            unsigned char* out = vis + (sample * call.n_pol + pol) * kBytes;
+            VisT current;
+            std::memcpy(&current, out, sizeof(VisT));
             if (std::isnan(static_cast<double>(current.real())) ||
                 std::isnan(static_cast<double>(current.imag())))
                 continue;
@@ -222,7 +275,8 @@ void compute_block(const Call& call, const Samples& samples, const Plane& plane,
                     im = im + correlation.im_sign * x_re[correlation.im * width + k];
                 }
             }
-            out[pol] = VisT(static_cast<VisElement>(re), static_cast<VisElement>(im));
+            const VisT value(static_cast<VisElement>(re), static_cast<VisElement>(im));
+            std::memcpy(out, &value, sizeof(VisT));
         }
     }
 }
@@ -277,11 +331,11 @@ Path predict_typed(const Call& call) {
     const i64 n_values = n_rows * call.n_vis_chan * call.n_pol;
     if (n_values == 0) return Path::separable;  // nothing to write
 
-    // Path S into the private copy of vis_data (its NaN values are kept), one
-    // plane at a time: pack its weights (one item per kept row), then compute
-    // its blocks of samples.
-    std::vector<VisT> staged(static_cast<std::size_t>(n_values));
-    std::memcpy(staged.data(), call.vis, staged.size() * sizeof(VisT));
+    // Path S, one plane at a time: pack its weights (one item per kept row),
+    // then compute its blocks of samples, each writing its samples of
+    // vis_data. Every buffer is allocated and every thread started first, so
+    // that what can fail (std::bad_alloc, std::system_error) fails before the
+    // first write, and nothing after it allocates.
     const Kernels& routines = kernels();
     auto n_blocks = [](const Plane& plane) {
         return round_up(plane.n_samples, kBlockSamples) / kBlockSamples;
@@ -294,25 +348,27 @@ Path predict_typed(const Call& call) {
     }
     std::vector<Scratch> scratch(static_cast<std::size_t>(workers));
     Buffer p_buffer, q_buffer;
+    for (const Plane& plane : planes) {  // the first block of a plane is its largest
+        for (Scratch& room : scratch)
+            reserve(room, plane.layout, std::min(kBlockSamples, plane.n_samples));
+        p_buffer.get(packed_size(plane.layout));
+        q_buffer.get(packed_size(plane.layout));
+    }
+    Team team(workers);
     for (const Plane& plane : planes) {
         const PlaneLayout& layout = plane.layout;
-        const auto n_packed = static_cast<i64>(layout.rows.size() * layout.components.size());
-        const auto n_columns = static_cast<i64>(layout.column_a.size());
-        const i64 packed_size = round_up(n_packed, kTileRows) * n_columns;
-        double* p = p_buffer.get(packed_size);
-        double* q = q_buffer.get(packed_size);
-        if (n_packed > 0) {
+        const i64 size = packed_size(layout);
+        double* p = p_buffer.get(size);
+        double* q = q_buffer.get(size);
+        if (size > 0) {
             pack_plane(model + (plane.a_time * call.m_chan + plane.a_chan) * plane_size, call.n_l,
-                       call.n_m, layout, call.l, call.m, call.threads, scratch, p, q);
+                       call.n_m, layout, call.l, call.m, team, scratch, p, q);
         }
-        parallel_for(resolve_threads(call.threads, n_blocks(plane)), n_blocks(plane),
-                     [&](int worker, i64 block) {
-                         compute_block<VisT>(call, samples, plane, scale.data(), p, q, block,
-                                             routines, scratch[worker], staged.data());
-                     });
+        team.run(n_blocks(plane), [&](int worker, i64 block) {
+            compute_block<VisT>(call, samples, plane, scale.data(), p, q, block, routines,
+                                scratch[worker]);
+        });
     }
-    // The only write to vis_data, after everything that can fail.
-    std::memcpy(call.vis, staged.data(), staged.size() * sizeof(VisT));
     return Path::separable;
 }
 
@@ -326,9 +382,12 @@ Path predict_model(const Call& call) {
 
 Path predict(const Call& call) {
     // A call that cannot allocate its buffers (std::bad_alloc) or start a
-    // thread (std::system_error) declines: vis_data is written only by the
-    // last copy of path S, so it is untouched, and the reference then runs and
-    // succeeds or fails on its own terms.
+    // thread (std::system_error) declines: both can happen only before path
+    // S's first write, so vis_data is untouched, and the reference then runs
+    // and succeeds or fails on its own terms. Nothing else is expected to
+    // throw (every size comes from an existing array); anything else would be
+    // a bug, and it propagates (the switch's trace records it) instead of
+    // being hidden by a decline.
     try {
         switch (call.model_type) {
             case Element::float32:

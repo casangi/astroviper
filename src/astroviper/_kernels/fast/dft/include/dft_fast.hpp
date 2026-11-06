@@ -26,11 +26,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "dft_s_kernels.hpp"
@@ -39,13 +44,15 @@ namespace dft_fast {
 
 enum class Path { separable, declined };
 
+class Team;  // the workers of a call's parallel loops, below
+
 enum class Element { float32, float64, complex64, complex128 };
 
 // One call, as the reference binding sees it after its checks: C-contiguous
 // arrays with the reference's shapes, maps within their image axes and
 // direction cosines in front of the horizon (python/bindings.cpp). The inputs
-// are aligned; vis may be at any address (path S copies it in and out), and
-// none of them may change during the call.
+// are aligned; vis may be at any address (path S reads and writes its values
+// as bytes), and none of them may change during the call.
 struct Call {
     const void* model;  // (m_time, m_chan, m_pol, n_l, n_m) of model_type
     void* vis;          // (n_time, n_baseline, n_vis_chan, n_pol) of vis_type
@@ -62,9 +69,11 @@ struct Call {
     int threads;  // processing_function_threads
 };
 
-// Decides the path of a call and, for path S, writes its visibilities.
-// Called without the GIL. Raises nothing for a resource failure: a call that
-// cannot allocate or start its threads declines with vis untouched.
+// Decides the path of a call and, for path S, writes its visibilities: the
+// samples that the reference writes (those of the used rows whose value is
+// not NaN), and no other byte of vis. Called without the GIL. Raises nothing
+// for a resource failure: a call that cannot allocate or start its threads
+// declines with vis untouched.
 Path predict(const Call& call);
 
 // The routines of the instruction set chosen for this process
@@ -152,9 +161,10 @@ struct Scratch {
 // component, row r = kept row * components + component, as micro-panels of
 // kTileRows rows: element (r, f) at ((r / kTileRows) * columns + f) * kTileRows
 // + r % kTileRows. The rows past the last (up to a multiple of kTileRows) are 0.
+// One item of the team's loop per kept row, with the scratch of its worker.
 template <typename ModelT>
 void pack_plane(const ModelT* plane, i64 n_l, i64 n_m, const PlaneLayout& layout,
-                const double* l, const double* m, int threads, std::vector<Scratch>& scratch,
+                const double* l, const double* m, Team& team, std::vector<Scratch>& scratch,
                 double* p, double* q);
 
 // Workers of a call: processing_function_threads as the reference resolves it
@@ -169,38 +179,117 @@ inline int resolve_threads(int processing_function_threads, i64 n_work) {
     return threads;
 }
 
-// Runs body(worker, item) for every item < n_items on `threads` workers (the
-// calling thread is worker 0), each taking the next item from a shared counter.
-// Which worker computes an item depends on timing, but an item's result does
-// not: items write disjoint outputs with the same operations whoever runs them.
-// The first exception of any worker (or of starting one) stops the others at
-// their next item and is rethrown once all have stopped.
-template <typename Body>
-void parallel_for(int threads, i64 n_items, Body&& body) {
-    std::atomic<i64> next{0};
-    std::atomic<bool> failed{false};
-    std::exception_ptr error;
-    auto work = [&](int worker) {
+// The workers of a call's parallel loops: `workers` threads, the calling
+// thread as worker 0, started together when the team is made and kept for all
+// of its loops, so that a failure to start one (std::system_error or
+// std::bad_alloc, thrown by the constructor once the started ones have
+// stopped) comes before the loops. run(n_items, body) calls body(worker, item)
+// for every item < n_items, each worker taking the next item from a shared
+// counter, and returns when every worker is done; the first exception of a
+// worker stops the others at their next item and is rethrown. Which worker
+// computes an item depends on timing, but an item's result does not: items
+// write disjoint outputs with the same operations whoever runs them.
+class Team {
+public:
+    explicit Team(int workers) {
         try {
-            for (i64 item = next.fetch_add(1, std::memory_order_relaxed);
-                 item < n_items && !failed.load(std::memory_order_relaxed);
-                 item = next.fetch_add(1, std::memory_order_relaxed)) {
-                body(worker, item);
+            threads_.reserve(static_cast<std::size_t>(std::max(workers - 1, 0)));
+            for (int worker = 1; worker < workers; ++worker)
+                threads_.emplace_back(&Team::serve, this, worker);
+        } catch (...) {
+            stop();
+            throw;
+        }
+    }
+    Team(const Team&) = delete;
+    Team& operator=(const Team&) = delete;
+    ~Team() { stop(); }
+
+    template <typename Body>
+    void run(i64 n_items, Body&& body) {
+        using Function = std::remove_reference_t<Body>;
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            loop_ = {n_items, std::addressof(body), [](void* function, int worker, i64 item) {
+                         (*static_cast<Function*>(function))(worker, item);
+                     }};
+            next_.store(0, std::memory_order_relaxed);
+            failed_.store(false, std::memory_order_relaxed);
+            busy_ = threads_.size();
+            ++generation_;
+        }
+        wake_.notify_all();
+        work(0);
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_.wait(lock, [this] { return busy_ == 0; });
+        if (error_) std::rethrow_exception(std::exchange(error_, nullptr));
+    }
+
+private:
+    struct Loop {
+        i64 n_items = 0;
+        void* body = nullptr;
+        void (*call)(void*, int, i64) = nullptr;
+    };
+
+    // The loop's items, from the counter; loop_ is read without the lock,
+    // after the lock that published it (the workers wait for a new
+    // generation under it).
+    void work(int worker) {
+        try {
+            for (i64 item = next_.fetch_add(1, std::memory_order_relaxed);
+                 item < loop_.n_items && !failed_.load(std::memory_order_relaxed);
+                 item = next_.fetch_add(1, std::memory_order_relaxed)) {
+                loop_.call(loop_.body, worker, item);
             }
         } catch (...) {
-            if (!failed.exchange(true)) error = std::current_exception();
+            const std::lock_guard<std::mutex> lock(mutex_);
+            if (!error_) error_ = std::current_exception();
+            failed_.store(true, std::memory_order_relaxed);
         }
-    };
-    std::vector<std::thread> pool;
-    try {
-        pool.reserve(static_cast<std::size_t>(std::max(threads - 1, 0)));
-        for (int t = 1; t < threads; ++t) pool.emplace_back(work, t);
-    } catch (...) {
-        if (!failed.exchange(true)) error = std::current_exception();
     }
-    work(0);
-    for (std::thread& thread : pool) thread.join();
-    if (error) std::rethrow_exception(error);
+
+    void serve(int worker) {
+        std::uint64_t seen = 0;
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (;;) {
+            wake_.wait(lock, [&] { return stopping_ || generation_ != seen; });
+            if (stopping_) return;
+            seen = generation_;
+            lock.unlock();
+            work(worker);
+            lock.lock();
+            if (--busy_ == 0) done_.notify_one();
+        }
+    }
+
+    void stop() noexcept {
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        wake_.notify_all();
+        for (std::thread& thread : threads_) thread.join();
+    }
+
+    std::mutex mutex_;
+    std::condition_variable wake_, done_;
+    std::vector<std::thread> threads_;
+    Loop loop_;
+    std::atomic<i64> next_{0};
+    std::atomic<bool> failed_{false};
+    std::exception_ptr error_;
+    std::size_t busy_ = 0;  // workers other than 0 that have not finished the loop
+    std::uint64_t generation_ = 0;
+    bool stopping_ = false;
+};
+
+// One loop on a team of its own (Team): body(worker, item) for every item <
+// n_items on `threads` workers.
+template <typename Body>
+void parallel_for(int threads, i64 n_items, Body&& body) {
+    Team team(threads);
+    team.run(n_items, body);
 }
 
 }  // namespace dft_fast

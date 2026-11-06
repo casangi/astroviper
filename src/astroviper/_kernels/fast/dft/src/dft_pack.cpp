@@ -273,7 +273,7 @@ bool analyse_plane(const ModelT* plane, i64 n_l, i64 n_m, const i64* pol_map, i6
 
 template <typename ModelT>
 void pack_plane(const ModelT* plane, i64 n_l, i64 n_m, const PlaneLayout& layout,
-                const double* l, const double* m, int threads, std::vector<Scratch>& scratch,
+                const double* l, const double* m, Team& team, std::vector<Scratch>& scratch,
                 double* p, double* q) {
     const i64 n_pixels = n_l * n_m;
     const auto n_components = static_cast<i64>(layout.components.size());
@@ -283,7 +283,7 @@ void pack_plane(const ModelT* plane, i64 n_l, i64 n_m, const PlaneLayout& layout
     const i64* column_b = layout.column_b.data();
 
     // One item per kept row: its n are computed once for all its components.
-    parallel_for(resolve_threads(threads, n_rows), n_rows, [&](int worker, i64 kept_row) {
+    team.run(n_rows, [&](int worker, i64 kept_row) {
         const i64 i = layout.rows[kept_row];
         double* n_a = scratch[worker].n_a.get(n_columns);
         double* n_b = scratch[worker].n_b.get(n_columns);
@@ -329,7 +329,7 @@ void pack_plane(const ModelT* plane, i64 n_l, i64 n_m, const PlaneLayout& layout
     template bool analyse_plane<MODELT>(const MODELT*, i64, i64, const i64*, i64, const double*, \
                                         int, PlaneLayout&);                                      \
     template void pack_plane<MODELT>(const MODELT*, i64, i64, const PlaneLayout&, const double*, \
-                                     const double*, int, std::vector<Scratch>&, double*, double*);
+                                     const double*, Team&, std::vector<Scratch>&, double*, double*);
 
 DFT_FAST_INSTANTIATE(float)
 DFT_FAST_INSTANTIATE(double)

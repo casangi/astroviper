@@ -12,7 +12,10 @@ w) before anything is written:
 
 ``"S"``
     Every used row (all three uvw finite) has ``w == 0``: the separable sum,
-    a GEMM over the folded model per model plane. A sample's bits do not
+    a GEMM over the folded model per model plane, with the phases ``u l`` and
+    ``v m`` exact before one rounding of the reduced angle, so that its error
+    does not grow with the phase (the reference's does). It writes the
+    samples that the reference writes and no other. A sample's bits do not
     depend on the threads or the instruction set, nor on how the rows and
     channels are split into calls that take S (a split can change the path of
     a part, as the path is decided per call).
@@ -22,8 +25,9 @@ w) before anything is written:
     threads: the reference binding runs with the same arguments, so the
     result is the reference's, bit for bit, and so is any exception.
 
-Misaligned arrays (such as Dask's deserialised ones) are read through aligned
-copies. The path is reported to the kernel switch, so that each trace line
+Misaligned inputs (such as Dask's deserialised arrays) are read through
+aligned copies, and a misaligned ``vis_data`` is written in place. The path
+is reported to the kernel switch, so that each trace line
 names it. ``ISA`` is the instruction set of path S in this process:
 ``"avx2"`` when the CPU has it, or ``"generic"`` (set
 ``ASTROVIPER_KERNELS_ISA=generic`` before the import to force it, for tests).

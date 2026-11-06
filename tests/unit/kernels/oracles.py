@@ -13,11 +13,11 @@ as the kernels round it), far more accurately than double precision allows:
 * n, M / n, the cosines and sines and the sums are long double, the sums by
   Neumaier's compensated summation.
 
-With ``rounded=True`` it evaluates instead the sum of the roundings that path
-S shares with the reference, bit for bit: the phases of the float64 products
-fl(u l) and fl(v m) (reduced exactly) and the weights W = fl(M / fl(n)), n
-formed as the kernels form it. Path S differs from that sum only by its own
-arithmetic, whatever the phases (w = 0, the case of path S).
+With ``kernel_weights=True`` it evaluates instead the exact sum of the
+weights that path S shares with the reference, bit for bit: W = fl(M / fl(n)),
+n formed as the kernels form it (the phases stay exact). Path S differs from
+that sum only by its own arithmetic, whatever the phases (w = 0, the case of
+path S).
 
 NumPy's long double is the x87 80-bit format on x86-64 (64-bit significand)
 and IEEE binary128 on aarch64 Linux, so the oracle's error is about 1e-18 of
@@ -52,12 +52,10 @@ def two_prod(a, b):
     return p, e
 
 
-def reduced_turns(a, b, rounded=False):
-    """The fractional turns of the exact product ``a * b``, in long double, or
-    (``rounded``) of its float64 rounding, as the kernels form it."""
+def reduced_turns(a, b):
+    """The fractional turns of the exact product ``a * b``, in long double."""
     p, e = two_prod(a, b)
-    turns = (p - np.rint(p)).astype(LONG)
-    return turns if rounded else turns + e.astype(LONG)
+    return (p - np.rint(p)).astype(LONG) + e.astype(LONG)
 
 
 def neumaier_sum(terms):
@@ -75,12 +73,20 @@ def neumaier_sum(terms):
 
 
 def predict(
-    model, uvw, frequency_coord, frequency_map, time_map, pol_map, l, m, rounded=False
+    model,
+    uvw,
+    frequency_coord,
+    frequency_map,
+    time_map,
+    pol_map,
+    l,
+    m,
+    kernel_weights=False,
 ):
     """The exact visibilities of ``dft_predict``'s sum, with its error scales.
 
     Parameters are those of ``dft_predict`` without ``vis_data``, and
-    ``rounded`` (see the module docstring).
+    ``kernel_weights`` (see the module docstring).
 
     Returns
     -------
@@ -106,7 +112,7 @@ def predict(
     r2 = l.astype(LONG)[:, None] ** 2 + m.astype(LONG)[None, :] ** 2
     n = np.sqrt(1 - r2)
     n_minus_one = -r2 / (1 + n)
-    if rounded:  # n = sqrt(1 - (l l + m m)) in float64, as the kernels form it
+    if kernel_weights:  # n = sqrt(1 - (l l + m m)) in float64, as the kernels do
         n = np.sqrt(1.0 - (l[:, None] * l[:, None] + m[None, :] * m[None, :]))
     scale = frequency / C
     weights = {}
@@ -119,7 +125,7 @@ def predict(
                 if key not in weights:
                     plane = model[key].astype(np.complex128)
                     i, j = np.nonzero(plane)
-                    if rounded:  # W = fl(M / n) in float64
+                    if kernel_weights:  # W = fl(M / n) in float64
                         weight = (plane[i, j].real / n[i, j]).astype(LONG)
                         weight_im = (plane[i, j].imag / n[i, j]).astype(LONG)
                     else:
@@ -133,8 +139,8 @@ def predict(
                     uk, vk, wk = u[ks, None], v[ks, None], w[ks, None]
                     w_turns = wk.astype(LONG) * n_minus_one[i, j][None, :]
                     phase = (
-                        reduced_turns(uk, l[None, i], rounded)
-                        + reduced_turns(vk, m[None, j], rounded)
+                        reduced_turns(uk, l[None, i])
+                        + reduced_turns(vk, m[None, j])
                         + (w_turns - np.rint(w_turns))
                     )
                     cos, sin = np.cos(TWO_PI * phase), np.sin(TWO_PI * phase)

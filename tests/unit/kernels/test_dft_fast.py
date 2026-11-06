@@ -7,16 +7,19 @@ entry, which returns it. Small inputs only.
 * The phasors are the reference's: the copied source text, and the bits (for
   finite turns).
 * Path S is accurate: the oracle bounds (``oracles.py``) in the output dtype,
-  on random and adversarial coherent inputs, against the exact sum and
-  against the sum of the roundings path S shares with the reference (at any
-  phase); in aggregate it is closer to the exact sum than the reference; a
-  slightly perturbed result fails the bounds.
+  per sample, on random and adversarial coherent inputs, against the exact
+  sum, against the reference's error there (the plan's bound (2)) and against
+  the exact sum of the weights path S shares with the reference (at any
+  phase, its phases being exact); a slightly perturbed result fails the
+  bounds.
 * Path S is invariant: bitwise across thread counts, splits of the rows into
   calls, concurrent calls, and the generic and AVX2 routines (two
   subprocesses), also through the depth-blocked GEMM of wide images.
 * Coverage: every dtype pair, 1 to 4 polarizations, permuted and duplicated
   pol_map, several model planes, complex models, NaN outputs, skipped rows,
-  misaligned arrays (read through aligned copies), the GIL released.
+  misaligned arrays (read through aligned copies), the GIL released, and
+  concurrent calls on disjoint rows of one vis_data (only the samples that
+  the reference writes are written).
 * Declined calls are the reference's, bit for bit and exception for exception.
   (No test hands the reference a misaligned array: its binding reads one in
   place, which is undefined behaviour that UBSan reports.)
@@ -30,6 +33,7 @@ import re
 import socket
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -184,28 +188,32 @@ def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
         inputs by two terms that vanish elsewhere (``_plane_terms``): kappa
         for n near the horizon, and the underflow allowance U = (products and
         quotients) x 2^-1074 for subnormal values;
-    (1t) |V_fast - V_rp| <= (L + 8) eps sum|W| + U + 1/2 ulp_out against
-        V_rp, the sum of the roundings that path S shares with the reference
-        (``oracles.predict(rounded=True)``): path S's own arithmetic, with no
-        2 pi T term, so that a non-exact path S shows at any phase (its own
-        error is a few eps sum|W|);
+    (2) |V_fast - V_or| <= |V_ref - V_or| + (16 + kappa) eps sum|M/n| + U
+        + 1 ulp_out: the plan's bound (2), path S at least as close to the
+        exact sum as the reference at every sample, with the same two terms
+        (the weights' error, which both kernels share bit for bit, can exceed
+        16 eps sum|M/n| only through kappa or U, and the reference's other
+        errors can cancel part of it at a sample);
+    (1t) |V_fast - V_kw| <= (L + 8) eps sum|W| + U + 1/2 ulp_out against
+        V_kw, the exact sum of the weights W that path S shares with the
+        reference (``oracles.predict(kernel_weights=True)``): path S's own
+        arithmetic, with no 2 pi T term, so that a non-exact path S shows at
+        any phase (its own error is a few eps sum|W|);
     (c64) complex64 outputs: |V_fast - V_ref| <= 1 ulp32 + the bound (1) + the
         error of the reference's complex128 result ``v_ref128``.
 
-    The plan's bound (2), |V_fast - V_or| <= |V_ref - V_or| + 16 eps
-    sum|M/n| + 1 ulp_out, does not hold per sample for an exact path S: both
-    kernels round the products u l and v m bit for bit (an error of up to
-    2 pi T eps sum|M/n|), and the reference's extra rounding of the phase
-    sum, independent of that error, cancels it at some samples. Its errors are
-    therefore about sqrt(2) times path S's in rms, with as large maxima, and
-    the bound is checked in aggregate instead, by the rms test below.
+    Path S's phases are exact (``dft_s_kernels.inc``), so its error does not
+    grow with T, while the reference's does (it rounds u l, v m and their sum,
+    up to about 2 pi T eps sum|M/n|): bound (2) holds because path S's own
+    error and the shared one are each a few eps sum|M/n| at most.
 
-    ulp_out is that of the larger of |V_oracle| and |V_fast| in the output
-    dtype. Only the predicted samples count (``keep`` excludes others, such
-    as NaN outputs). Returns ``{criterion: number of failing components}``.
+    ulp_out is that of the largest of |V_oracle| and |V_fast| (and |V_ref| for
+    bound (2)) in the output dtype. Only the predicted samples count (``keep``
+    excludes others, such as NaN outputs). Returns ``{criterion: number of
+    failing components}``.
     """
     exact, norm, turns = oracles.predict(**call)
-    rounded, norm_rounded, _ = oracles.predict(**call, rounded=True)
+    weighted, norm_weighted, _ = oracles.predict(**call, kernel_weights=True)
     used = np.isfinite(norm) & keep
     terms = _plane_terms(call)[
         call["time_map"][:, None, None, None],
@@ -216,23 +224,28 @@ def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
     )
     underflow = products * 2.0**-1074
     phase = 2 * np.pi * turns[used]
-    budget = (chain + phase + 8 + kappa) * EPS * norm[used] + underflow
-    budget_rounded = (chain + 8) * EPS * norm_rounded[used] + underflow
-    budget, budget_rounded = (
-        budget.astype(oracles.LONG),
-        budget_rounded.astype(oracles.LONG),
+    budgets = (
+        (chain + phase + 8 + kappa) * EPS * norm[used] + underflow,
+        (16 + kappa) * EPS * norm[used] + underflow,
+        (chain + 8) * EPS * norm_weighted[used] + underflow,
     )
-    failed = {"bound1": 0, "bound1t": 0, "complex64": 0}
+    budget, budget2, budget_weighted = (b.astype(oracles.LONG) for b in budgets)
+    failed = {"bound1": 0, "bound2": 0, "bound1t": 0, "complex64": 0}
     for part in (np.real, np.imag):
-        x_or, x_rp = part(exact[used]), part(rounded[used])
+        x_or, x_kw = part(exact[used]), part(weighted[used])
         x_fast = part(v_fast[used]).astype(oracles.LONG)
         x_ref = part(v_ref[used]).astype(oracles.LONG)
         dtype = v_fast.real.dtype
         ulp = _ulp(np.maximum(np.abs(x_or), np.abs(x_fast)), dtype)
-        ulp_rounded = _ulp(np.maximum(np.abs(x_rp), np.abs(x_fast)), dtype)
-        failed["bound1"] += int(np.sum(np.abs(x_fast - x_or) > budget + ulp / 2))
+        ulp2 = _ulp(
+            np.maximum(np.maximum(np.abs(x_or), np.abs(x_fast)), np.abs(x_ref)), dtype
+        )
+        ulp_weighted = _ulp(np.maximum(np.abs(x_kw), np.abs(x_fast)), dtype)
+        error = np.abs(x_fast - x_or)
+        failed["bound1"] += int(np.sum(error > budget + ulp / 2))
+        failed["bound2"] += int(np.sum(error > np.abs(x_ref - x_or) + budget2 + ulp2))
         failed["bound1t"] += int(
-            np.sum(np.abs(x_fast - x_rp) > budget_rounded + ulp_rounded / 2)
+            np.sum(np.abs(x_fast - x_kw) > budget_weighted + ulp_weighted / 2)
         )
         if v_fast.dtype == np.complex64:
             ref128 = np.abs(part(v_ref128[used]).astype(oracles.LONG) - x_or)
@@ -243,7 +256,7 @@ def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
     return failed
 
 
-ACCURATE = {"bound1": 0, "bound1t": 0, "complex64": 0}
+ACCURATE = {"bound1": 0, "bound2": 0, "bound1t": 0, "complex64": 0}
 
 
 def _assert_accurate(call, dtype=np.complex128, threads=4):
@@ -339,6 +352,8 @@ def _depth_blocked_call():
         "near_horizon",
         "subnormal_model",
         "depth_blocked",
+        "cancelling_phase_roundings",
+        "huge_phases",
     ],
 )
 def test_path_s_is_within_the_oracle_bounds(case):
@@ -371,50 +386,43 @@ def test_path_s_is_within_the_oracle_bounds(case):
         call["m"] = np.array([-edge, -0.48, -0.16, 0.16, 0.48, edge])
     elif case == "subnormal_model":  # every weight and sum below 2^-1022
         call = _call(_stokes_i(18) * 1e-310)
+    elif case == "cancelling_phase_roundings":
+        # One pixel, u and v of 2e4 to 9e4 turns (f = c): at about 5 % of these
+        # samples the reference's rounding of u l + v m cancels much of its
+        # roundings of u l and v m, so that a path S with those two roundings
+        # alone fails bound (2) (the first sample is the WP3 verification's
+        # worst: 2.4e4 eps sum|M/n| off, the reference 1.2e3).
+        call = _call(
+            np.ones((1, 1, 1, 1, 1)), n_time=1, n_baseline=2000, frequency=(C,)
+        )
+        call["l"], call["m"] = np.array([0.0371]), np.array([-0.0613])
+        uv = np.random.default_rng(2026).uniform(2e4, 9e4, (2000, 2))
+        uv[0] = 22579.416710392346, 84623.62315537463
+        call["uvw"][0, :, :2] = uv
+    elif case == "huge_phases":  # |u l| + |v m| up to about 7e9 turns
+        call = _call(_stokes_i(24, 8, 8), cell=1e-3, uv_m=3e9)
     else:
         call = _depth_blocked_call()
     _assert_accurate(call)
 
 
 @needs_oracle
-@pytest.mark.parametrize("uv_m", [1.5e3, 3e4], ids=["T~400", "T~8000"])
-def test_path_s_is_closer_to_the_exact_sum_than_the_reference_in_rms(uv_m):
-    """The plan's bound (2) in aggregate (see ``_violations``): over 4800
-    components path S's rms error against the exact sum is at most the
-    reference's, which adds the rounding of its phase sums to the rounding of
-    u l and v m that both share."""
-    call = _call(
-        _stokes_i(21), n_time=3, n_baseline=200, frequency=(1e11, 1.2e11), uv_m=uv_m
-    )
-    path, v_fast = _path(call)
-    v_ref = _run(reference, call)
-    exact, norm, _ = oracles.predict(**call)
-    used = np.isfinite(norm)
-
-    def rms(v):
-        error = (v[used].astype(np.clongdouble) - exact[used]) / norm[used]
-        return float(np.sqrt(np.mean(np.concatenate([error.real, error.imag]) ** 2)))
-
-    assert path == "S" and 2 * used.sum() >= 2000
-    assert rms(v_fast) <= rms(v_ref)
-
-
-@needs_oracle
 def test_the_bounds_detect_a_perturbed_result():
     """At the sample of the largest phase (T about 6000 turns), bound (1t)
-    detects an error of (L + 16) eps sum|W| beyond path S's own, which bound
-    (1) cannot see there; an error of 1e-11 sum|W| fails both."""
+    detects an error of (L + 16) eps sum|W| beyond path S's own, which bounds
+    (1) and (2) cannot see there (the reference is farther off); an error of
+    1e-11 sum|W| fails all three."""
     call = _call(_stokes_i(7), uv_m=3e4)
     path, v_fast = _path(call)
     v_ref = _run(reference, call)
     assert path == "S" and _violations(call, v_fast, v_ref) == ACCURATE
-    rounded, norm, turns = oracles.predict(**call, rounded=True)
+    weighted, norm, turns = oracles.predict(**call, kernel_weights=True)
     k = np.unravel_index(np.nanargmax(turns), turns.shape)
     chain = _plane_terms(call)[0, 0, 0]
-    sign = 1.0 if v_fast[k].real >= rounded[k].real else -1.0
+    sign = 1.0 if v_fast[k].real >= weighted[k].real else -1.0
     for error, failed in (
-        ((chain + 16) * EPS * norm[k], {"bound1": 0, "bound1t": 1}),
-        (1e-11 * norm[k], {"bound1": 1, "bound1t": 1}),
+        ((chain + 16) * EPS * norm[k], {"bound1t": 1}),
+        (1e-11 * norm[k], {"bound1": 1, "bound2": 1, "bound1t": 1}),
     ):
         perturbed = v_fast.copy()
         perturbed[k] += sign * error
@@ -549,6 +557,40 @@ def test_concurrent_calls_give_the_bits_of_serial_calls():
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         assert all(pool.map(bits, range(24)))
+
+
+def test_concurrent_calls_on_disjoint_rows_keep_each_others_samples():
+    """Two calls at once on one vis_data, each predicting the rows that the
+    other skips (a NaN u): path S writes only the samples that the reference
+    writes, so the slow call cannot undo the quick one's (as a copy of
+    vis_data taken before and written back after would)."""
+    frequency = np.linspace(1e11, 1.1e11, 8)
+    slow = _call(
+        _stokes_i(26, 512, 512), n_time=1, n_baseline=2000, frequency=frequency
+    )
+    quick = dict(slow, model=_stokes_i(27, 4, 4), uvw=slow["uvw"].copy())
+    quick |= {"l": slow["l"][254:258].copy(), "m": slow["m"][254:258].copy()}
+    slow["uvw"][0, 1000:, 0] = np.nan
+    quick["uvw"][0, :1000, 0] = np.nan
+    expected = {
+        "slow": _run(fast, slow, threads=1)[0, :1000].tobytes(),
+        "quick": _run(fast, quick, threads=1)[0, 1000:].tobytes(),
+    }
+    vis = np.full(_vis(slow).shape, 7.0 + 7.0j)
+    started = threading.Event()
+
+    def predict_slow():  # about 0.1 s
+        started.set()
+        _run(fast, slow, threads=1, vis=vis)
+
+    worker = threading.Thread(target=predict_slow)
+    worker.start()
+    started.wait()
+    time.sleep(0.01)
+    _run(fast, quick, threads=1, vis=vis)
+    worker.join()
+    assert vis[0, :1000].tobytes() == expected["slow"]
+    assert vis[0, 1000:].tobytes() == expected["quick"]
 
 
 def test_the_gil_is_released_during_path_s():
