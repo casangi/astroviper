@@ -21,6 +21,10 @@ done:
 * elementwise passes run on all threads, and sums stay serial, in the
   reference's order.
 
+An array at an address that is not a multiple of its item size (Dask may hand
+a worker one) is read through an aligned copy of its bytes, and a residual or
+model written back in place.
+
 The module is built for the baseline instruction set only (``ISA`` is
 ``"generic"``): pocketfft's AVX2 lanes give some NaNs another sign bit than
 the reference's.

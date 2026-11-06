@@ -978,17 +978,20 @@ def _misaligned(array):
     return view
 
 
-def test_misaligned_arrays():
-    """Both read and write them in place (on x86-64 an unaligned load is
-    legal; UBSan reports both): the same bits."""
-    inputs = _scene("holes")
-    expected = _call(REFERENCE["clean"], inputs, 2, CORAL | RECORD)
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_misaligned_arrays(entry):
+    """Every array at an address that is not a multiple of its item size (as
+    Dask may ship them): read through aligned copies, the residual and the
+    model written back in place, the reference's bits. (The reference reads
+    such arrays in place, which is undefined behaviour: it gets aligned ones.)"""
+    inputs = _scene("holes") if entry == "clean" else _cube()
+    options = CORAL | {"record_iteration_history": True}
+    expected = _call(REFERENCE[entry], inputs, 2, options)
     shifted = {
         k: _misaligned(v) if isinstance(v, np.ndarray) else v for k, v in inputs.items()
     }
-    residual, model = shifted["residual"], shifted["model"]
-    result = FAST["clean"](**shifted, processing_function_threads=5, **CORAL, **RECORD)
-    _assert_same((residual, model, result), expected, "misaligned")
+    result = FAST[entry](**shifted, processing_function_threads=5, **options)
+    _assert_same((shifted["residual"], shifted["model"], result), expected, entry)
 
 
 def test_concurrent_calls():

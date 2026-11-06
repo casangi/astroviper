@@ -3,14 +3,18 @@
 // with its names, parameters, defaults, docstrings, checks, exceptions and
 // results, calling aspclean_fast:: instead of aspclean::. The reference's test
 // helpers (psf_gaussian_width, convolve_centered, lbfgs_minimize) are not
-// hooked and not repeated here. One change: the components are copied only
-// when there is one (memcpy from the null data() of an empty vector is
-// undefined, even of 0 bytes).
+// hooked and not repeated here. Two changes, which change no value: a
+// misaligned array is read (and the residual and the model written back)
+// through an aligned copy (Aligned), and the components are copied only when
+// there is one (memcpy from the null data() of an empty vector is undefined,
+// even of 0 bytes).
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -66,6 +70,41 @@ static py::array_t<double> history_array(const std::vector<double>& values) {
     return py::array_t<double>(static_cast<py::ssize_t>(values.size()), values.data());
 }
 
+// The data of a checked array, or an aligned copy of it when its address is
+// not a multiple of alignof(T): Dask can hand a worker an array at any byte
+// offset of a frame it received, and reading a T at such an address is
+// undefined (the reference reads it in place, which x86-64 tolerates). The
+// copy has the same bytes, so the results are the same; with `write_back` it
+// goes back to the caller's buffer at the end of the call (the residual and
+// the model are updated in place).
+template <typename T>
+class Aligned {
+public:
+    Aligned(const py::buffer_info& info, bool write_back)
+        : caller_(info.ptr), count_(static_cast<std::size_t>(info.size)), write_back_(write_back) {
+        if (count_ == 0 || reinterpret_cast<std::uintptr_t>(caller_) % alignof(T) == 0) {
+            data_ = static_cast<T*>(caller_);
+            return;
+        }
+        copy_.resize(count_);
+        std::memcpy(copy_.data(), caller_, count_ * sizeof(T));
+        data_ = copy_.data();
+    }
+    Aligned(const Aligned&) = delete;
+    Aligned& operator=(const Aligned&) = delete;
+    ~Aligned() {
+        if (write_back_ && !copy_.empty()) std::memcpy(caller_, copy_.data(), count_ * sizeof(T));
+    }
+    T* get() const { return data_; }
+
+private:
+    void* caller_;
+    std::size_t count_;
+    bool write_back_;
+    std::vector<T> copy_;
+    T* data_ = nullptr;
+};
+
 template <typename T>
 static py::dict plane_impl(py::array residual, py::array psf, py::array model,
                            py::array mask, double gain, double threshold_per_cycle,
@@ -84,12 +123,10 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     py::buffer_info mi = check_array<T>(model, "model", 2, shp, true);
     py::buffer_info pi = check_array<T>(psf, "psf", 2, shp, false);
 
-    const T* mask_ptr = nullptr;
     py::buffer_info ki;
-    if (mask.size() > 0) {
-        ki = check_array<T>(mask, "mask", 2, shp, false);
-        mask_ptr = static_cast<const T*>(ki.ptr);
-    }
+    if (mask.size() > 0) ki = check_array<T>(mask, "mask", 2, shp, false);
+    // No mask: a null pointer (ki holds none).
+    const Aligned<T> r(ri, true), m(mi, true), p(pi, false), k(ki, false);
 
     deconvolvers::DivergenceControl<double> divergence;
     divergence.max_iter_divergence = max_iter_divergence;
@@ -99,8 +136,7 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     {
         py::gil_scoped_release release;  // C++ touches no Python objects
         res = aspclean_fast::aspclean_plane<T>(
-            static_cast<T*>(ri.ptr), static_cast<T*>(mi.ptr),
-            static_cast<const T*>(pi.ptr), mask_ptr, nx, ny, gain, threshold_per_cycle,
+            r.get(), m.get(), p.get(), k.get(), nx, ny, gain, threshold_per_cycle,
             max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width, asp_largest_scale,
             asp_stop_point_mode, asp_scale_normalization_method, asp_stop_after_hogbom_run,
             verbose, divergence, processing_function_threads, options);
@@ -240,12 +276,8 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     const std::vector<py::ssize_t> pshp = {nt, nf, np_psf, ny, nx};
     py::buffer_info pi = check_array<T>(psf, "psf", 5, pshp, false);
 
-    const T* mask_ptr = nullptr;
     py::buffer_info ki;
-    if (mask.size() > 0) {
-        ki = check_array<T>(mask, "mask", 5, shp, false);
-        mask_ptr = static_cast<const T*>(ki.ptr);
-    }
+    if (mask.size() > 0) ki = check_array<T>(mask, "mask", 5, shp, false);
 
     // Per-plane iteration control: threshold_per_cycle (float64) and
     // max_iter_per_cycle_updated (int32) are (nt, nf, np_img) arrays so every
@@ -256,8 +288,10 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
         check_array<double>(threshold_per_cycle, "threshold_per_cycle", 3, cshp, false);
     py::buffer_info nit_info =
         check_array<int>(max_iter_per_cycle_updated, "max_iter_per_cycle_updated", 3, cshp, false);
-    const double* thr_ptr = static_cast<const double*>(thr_info.ptr);
-    const int* nit_ptr = static_cast<const int*>(nit_info.ptr);
+    // No mask: a null pointer (ki holds none).
+    const Aligned<T> r(ri, true), m(mi, true), p(pi, false), k(ki, false);
+    const Aligned<double> thr(thr_info, false);
+    const Aligned<int> nit(nit_info, false);
 
     const int nplanes = nt * nf * np_img;
     std::vector<aspclean::AspResult> results(nplanes);
@@ -268,9 +302,8 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     {
         py::gil_scoped_release release;
         aspclean_fast::aspclean_cube<T>(
-            static_cast<T*>(ri.ptr), static_cast<T*>(mi.ptr),
-            static_cast<const T*>(pi.ptr), mask_ptr, nt, nf, np_img, np_psf, nx,
-            ny, gain, thr_ptr, nit_ptr, asp_fused_threshold, asp_psf_width, asp_largest_scale,
+            r.get(), m.get(), p.get(), k.get(), nt, nf, np_img, np_psf, nx,
+            ny, gain, thr.get(), nit.get(), asp_fused_threshold, asp_psf_width, asp_largest_scale,
             asp_stop_point_mode, asp_scale_normalization_method, asp_stop_after_hogbom_run,
             processing_function_threads, divergence, results.data(), options);
     }
