@@ -102,7 +102,8 @@ def test_reference_selections(value):
     ],
 )
 def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom):
-    assert parse(value) == {**ALL_REFERENCE, "dft": dft, "hogbom": hogbom}
+    # asp has fast as well, and no token names it: it follows the default, as dft
+    assert parse(value) == {**ALL_REFERENCE, "dft": dft, "hogbom": hogbom, "asp": dft}
 
 
 @pytest.mark.parametrize(
@@ -113,7 +114,10 @@ def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom):
             "dft=fsat",
             "unknown implementation 'fsat'; implementations: fast, gpu, ref, ref1",
         ),
-        ("asp=gpu", "'asp' has no implementation 'gpu'; its implementations: ref"),
+        (
+            "asp=gpu",
+            "'asp' has no implementation 'gpu'; its implementations: fast, ref",
+        ),
         ("hogbom=fast", "'hogbom' has no implementation 'fast'"),
         ("gpu", "no kernel implements 'gpu' yet"),
         ("dft=ref:avx2", "variants (':...') are not supported"),
@@ -150,7 +154,7 @@ def test_registry_holds_the_reference_pairs():
     assert {k: set(v) for k, v in _switch._REGISTRY.items()} == {
         "dft": {"ref", "fast"},
         "hogbom": {"ref"},
-        "asp": {"ref"},
+        "asp": {"ref", "fast"},
     }
     for kernel, (shim, ext, entries) in SHIMS.items():
         assert _switch._ENTRIES[kernel] == entries

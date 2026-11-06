@@ -46,7 +46,10 @@ _REGISTRY = {
         "fast": "astroviper._kernels.fast.dft",
     },
     "hogbom": {"ref": f"{_IMAGING}.deconvolvers.hogbom._hogbom_ext"},
-    "asp": {"ref": f"{_IMAGING}.deconvolvers.aspclean._aspclean_ext"},
+    "asp": {
+        "ref": f"{_IMAGING}.deconvolvers.aspclean._aspclean_ext",
+        "fast": "astroviper._kernels.fast.aspclean",
+    },
 }
 
 _logger = logging.getLogger("astroviper.kernels")
