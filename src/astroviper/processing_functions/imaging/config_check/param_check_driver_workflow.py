@@ -122,6 +122,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     for name in (
         "input_checked",
         "calculate_auto_sensitivity",
+        "prepared_continuum_image",
         "single_precision_image",
         "restore",
         "primary_beam_correction",

@@ -3594,7 +3594,9 @@ def continuum_cycle_append_node(
         finalize_params.update(
             prepared_continuum_image=True, static_xds=static_xds, model_xds=model_xds
         )
-        return_dict = continuum_finalize_node(return_dict, finalize_params)
+        return_dict = continuum_finalize_node(
+            return_dict, finalize_params, input_checked=True
+        )
 
     return_dict["static_xds"] = static_xds
     return_dict["timing_psf_fit"] = (
@@ -3608,6 +3610,8 @@ def continuum_cycle_append_node(
 def continuum_finalize_node(
     input_data,
     input_params,
+    *,
+    input_checked: bool = False,
 ):
     """Finalize continuum products and optionally restore the model.
 
@@ -3624,12 +3628,29 @@ def continuum_finalize_node(
         Static products, accumulated model, restoration options, cache state,
         and output-product policy supplied by the distributed driver.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
         Final in-memory image, model and static state, convergence metadata,
         caches, and restoration/PSF timing records.
     """
+
+    checked = input_checked or input_params.get("input_checked", False)
+    if not checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_model_update,
+        )
+
+        check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
+        check_driver_workflow(input_params, mode=CONTINUUM_SINGLE_FIELD)
 
     from astroviper.utils.data_group_tools import modify_data_groups_xds
 
@@ -3655,6 +3676,7 @@ def continuum_finalize_node(
             input_data["image"],
             input_params,
             initialize_static_products=False,
+            input_checked=checked,
         )
 
     model_xds = input_params["model_xds"]

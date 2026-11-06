@@ -443,3 +443,11 @@ noise: correlation variance is sum(W**2/w)/sum(W)**2 and Stokes variances follow
 the instrument-to-Stokes transform. Combining sums before the ratio makes the
 result independent of frequency partitioning. No visibility/UVW reads or driver
 sample scan are added; later cycles reuse the resolved controller limit.
+
+`continuum_finalize_node` validates supplied model and workflow settings on
+direct calls, including the deconvolver, restoration selector and preparation
+switch. Unprepared images receive residual-configuration checks during actual
+preparation. A checked caller may supply the keyword or dictionary trust flag;
+finalization forwards it without changing the caller's mapping. Accumulated
+model/static-state checks and restoration's actual-product checks always run,
+including when the configuration was already validated.
