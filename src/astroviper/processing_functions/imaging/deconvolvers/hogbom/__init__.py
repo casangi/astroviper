@@ -27,3 +27,8 @@ __all__ = [
     "is_float32",
     "is_float64",
 ]
+if __import__("os").environ.get("ASTROVIPER_KERNELS"):
+    from astroviper._kernels import dispatch as _dispatch
+
+    clean_cube = _dispatch("hogbom", clean_cube)
+    clean_cube_many_threads = _dispatch("hogbom", clean_cube_many_threads)

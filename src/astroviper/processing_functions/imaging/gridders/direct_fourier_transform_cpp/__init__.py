@@ -21,3 +21,7 @@ __all__ = [
     "dft_predict",
     "cos_sin_turns",
 ]
+if __import__("os").environ.get("ASTROVIPER_KERNELS"):
+    from astroviper._kernels import dispatch as _dispatch
+
+    dft_predict = _dispatch("dft", dft_predict)
