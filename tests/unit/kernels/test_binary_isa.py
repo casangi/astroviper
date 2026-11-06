@@ -20,7 +20,11 @@ no weak or unique symbol (``nm`` types W, V, u): the linker may otherwise keep
 an AVX2 unit's copy of an inline or template function for every caller,
 generic code included. Their object files are read from the build directory,
 ``ASTROVIPER_BUILD_DIR`` or else ``build/*`` of the repository (the package's
-default); the test is skipped when there is none.
+default), only where the module linked there is the installed one, byte for
+byte; the test is skipped when there is none. Where a C++ compiler is on the
+path, each AVX2 unit is also compiled at every optimisation level a build
+type gives it (Debug: -Og, see cmake/AstroviperKernels.cmake) and checked the
+same way.
 """
 
 import importlib.machinery
@@ -146,15 +150,37 @@ def test_fast_module_has_no_fma(relative):
 
 
 def _avx2_objects(relative):
-    """The ``*_avx2.cpp`` object files of a fast module in the build directories."""
+    """The ``*_avx2.cpp`` object files of a fast module, from the build
+    directories whose linked module is the installed one (not a stale tree or
+    another wheel tag's)."""
     configured = os.environ.get("ASTROVIPER_BUILD_DIR")
     roots = (
         [Path(configured)] if configured else Path(__file__).parents[3].glob("build/*")
     )
     target = relative.rpartition("/")[2]
-    return sorted(
-        o for root in roots for o in root.glob(f"**/{target}.dir/**/*_avx2.cpp.o")
+    installed = _module_file(relative).read_bytes()
+    objects = []
+    for root in roots:
+        linked = [
+            path
+            for suffix in importlib.machinery.EXTENSION_SUFFIXES
+            for path in root.glob(f"**/{target}{suffix}")
+        ]
+        if any(path.read_bytes() == installed for path in linked):
+            objects += root.glob(f"**/{target}.dir/**/*_avx2.cpp.o")
+    return sorted(objects)
+
+
+def _check_avx2_object(path):
+    listing = subprocess.run(
+        [NM, str(path)], check=True, capture_output=True, text=True
     )
+    symbols = [
+        line.split()[-2:] for line in listing.stdout.splitlines() if line.strip()
+    ]
+    assert [s for s in symbols if s[0] in ("W", "V", "u")] == [], path.name
+    assert any(kind == "T" for kind, _ in symbols), f"{path.name} exports nothing"
+    assert WIDE_REGISTER.search(_instructions(path)), f"{path.name} has no AVX code"
 
 
 @pytest.mark.skipif(NM is None, reason="nm (binutils) is not installed")
@@ -163,15 +189,34 @@ def test_avx2_units_define_no_weak_symbols(relative):
     objects = _avx2_objects(relative)
     if not objects:
         pytest.skip(
-            "no build directory with the module's objects (ASTROVIPER_BUILD_DIR)"
+            "no build directory with the installed module's objects "
+            "(ASTROVIPER_BUILD_DIR)"
         )
     for path in objects:
-        listing = subprocess.run(
-            [NM, str(path)], check=True, capture_output=True, text=True
+        _check_avx2_object(path)
+
+
+#: The C++ compiler for fresh compiles of the AVX2 units, if any.
+CXX = os.environ.get("CXX") or shutil.which("c++") or shutil.which("g++")
+
+
+@pytest.mark.skipif(NM is None or CXX is None, reason="no nm or no C++ compiler")
+@pytest.mark.parametrize("level", ["-O3", "-O2", "-Os", "-Og", "-O1"])
+@pytest.mark.parametrize("relative", FAST_MODULES, ids=lambda r: r.split("/")[-1])
+def test_avx2_units_define_no_weak_symbols_at_every_level(relative, level, tmp_path):
+    """The rule above on fresh compiles of the AVX2 units with the module's
+    flags, at the optimisation levels of the build types (Release -O3,
+    RelWithDebInfo -O2, MinSizeRel -Os, Debug -Og for these units) and -O1."""
+    module = Path(__file__).parents[3] / "src/astroviper" / relative.rpartition("/")[0]
+    units = sorted(module.glob("src/*_avx2.cpp"))
+    assert units, f"no AVX2 unit in {module}"
+    flags = ["-std=c++23", "-fPIC", "-ffp-contract=off", "-mavx2", "-fno-lto", level]
+    flags += ["-DAV_HAVE_AVX2=1", f"-I{module / 'include'}"]
+    for unit in units:
+        target = tmp_path / f"{unit.stem}.o"
+        subprocess.run(
+            [CXX, *flags, "-c", str(unit), "-o", str(target)],
+            check=True,
+            capture_output=True,
         )
-        symbols = [
-            line.split()[-2:] for line in listing.stdout.splitlines() if line.strip()
-        ]
-        assert [s for s in symbols if s[0] in ("W", "V", "u")] == [], path.name
-        assert any(kind == "T" for kind, _ in symbols), f"{path.name} exports nothing"
-        assert WIDE_REGISTER.search(_instructions(path)), f"{path.name} has no AVX code"
+        _check_avx2_object(target)

@@ -13,6 +13,12 @@ as the kernels round it), far more accurately than double precision allows:
 * n, M / n, the cosines and sines and the sums are long double, the sums by
   Neumaier's compensated summation.
 
+With ``rounded=True`` it evaluates instead the sum of the roundings that path
+S shares with the reference, bit for bit: the phases of the float64 products
+fl(u l) and fl(v m) (reduced exactly) and the weights W = fl(M / fl(n)), n
+formed as the kernels form it. Path S differs from that sum only by its own
+arithmetic, whatever the phases (w = 0, the case of path S).
+
 NumPy's long double is the x87 80-bit format on x86-64 (64-bit significand)
 and IEEE binary128 on aarch64 Linux, so the oracle's error is about 1e-18 of
 sum |M / n| or less; on macOS arm64 it is double precision and ``AVAILABLE``
@@ -46,10 +52,12 @@ def two_prod(a, b):
     return p, e
 
 
-def reduced_turns(a, b):
-    """The fractional turns of the exact product ``a * b``, in long double."""
+def reduced_turns(a, b, rounded=False):
+    """The fractional turns of the exact product ``a * b``, in long double, or
+    (``rounded``) of its float64 rounding, as the kernels form it."""
     p, e = two_prod(a, b)
-    return (p - np.rint(p)).astype(LONG) + e.astype(LONG)
+    turns = (p - np.rint(p)).astype(LONG)
+    return turns if rounded else turns + e.astype(LONG)
 
 
 def neumaier_sum(terms):
@@ -66,10 +74,13 @@ def neumaier_sum(terms):
     return total + compensation
 
 
-def predict(model, uvw, frequency_coord, frequency_map, time_map, pol_map, l, m):
+def predict(
+    model, uvw, frequency_coord, frequency_map, time_map, pol_map, l, m, rounded=False
+):
     """The exact visibilities of ``dft_predict``'s sum, with its error scales.
 
-    Parameters are those of ``dft_predict`` without ``vis_data``.
+    Parameters are those of ``dft_predict`` without ``vis_data``, and
+    ``rounded`` (see the module docstring).
 
     Returns
     -------
@@ -95,6 +106,8 @@ def predict(model, uvw, frequency_coord, frequency_map, time_map, pol_map, l, m)
     r2 = l.astype(LONG)[:, None] ** 2 + m.astype(LONG)[None, :] ** 2
     n = np.sqrt(1 - r2)
     n_minus_one = -r2 / (1 + n)
+    if rounded:  # n = sqrt(1 - (l l + m m)) in float64, as the kernels form it
+        n = np.sqrt(1.0 - (l[:, None] * l[:, None] + m[None, :] * m[None, :]))
     scale = frequency / C
     weights = {}
     for t in range(n_time):
@@ -106,8 +119,12 @@ def predict(model, uvw, frequency_coord, frequency_map, time_map, pol_map, l, m)
                 if key not in weights:
                     plane = model[key].astype(np.complex128)
                     i, j = np.nonzero(plane)
-                    weight = plane[i, j].real.astype(LONG) / n[i, j]
-                    weight_im = plane[i, j].imag.astype(LONG) / n[i, j]
+                    if rounded:  # W = fl(M / n) in float64
+                        weight = (plane[i, j].real / n[i, j]).astype(LONG)
+                        weight_im = (plane[i, j].imag / n[i, j]).astype(LONG)
+                    else:
+                        weight = plane[i, j].real.astype(LONG) / n[i, j]
+                        weight_im = plane[i, j].imag.astype(LONG) / n[i, j]
                     flux = float(np.sum(np.hypot(weight, weight_im)))
                     weights[key] = (i, j, weight, weight_im, flux)
                 i, j, weight, weight_im, flux = weights[key]
@@ -116,8 +133,8 @@ def predict(model, uvw, frequency_coord, frequency_map, time_map, pol_map, l, m)
                     uk, vk, wk = u[ks, None], v[ks, None], w[ks, None]
                     w_turns = wk.astype(LONG) * n_minus_one[i, j][None, :]
                     phase = (
-                        reduced_turns(uk, l[None, i])
-                        + reduced_turns(vk, m[None, j])
+                        reduced_turns(uk, l[None, i], rounded)
+                        + reduced_turns(vk, m[None, j], rounded)
                         + (w_turns - np.rint(w_turns))
                     )
                     cos, sin = np.cos(TWO_PI * phase), np.sin(TWO_PI * phase)

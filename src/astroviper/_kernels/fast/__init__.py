@@ -13,6 +13,8 @@ Layout, one subdirectory per kernel::
     fast/<kernel>/src/             generic sources, plus *_avx2.cpp units
     fast/<kernel>/python/bindings.cpp
     fast/<kernel>/__init__.py      re-exports the entries of the extension
+    fast/common/                   headers every module may include (isa.hpp:
+                                   the instruction set chosen per process)
 
 The modules are built only with ``ASTROVIPER_BUILD_FAST_KERNELS=ON`` (the
 default on Linux x86_64 with GCC >= 14 or Clang >= 17), and each one only if

@@ -16,21 +16,31 @@
 // Every T element is one sequential sum over the folded columns in their fixed
 // order (the micro-kernel's depth steps continue it through memory), and every
 // X element one over the kept rows in order; a sample's values depend only on
-// its u, v and model plane, and a block of samples is computed by one thread.
-// The bits therefore do not depend on the threads, the blocking, the order of
-// the work or on how the rows are split between calls, and the generic and
-// AVX2 routines perform the same rounded operations (dft_s_kernels.hpp). The
-// planes are packed and computed one at a time, so the packed weights take
-// 16 bytes x components x kept rows x folded columns of one plane at most.
+// its u, v and model plane (one time and channel of the model, with all of its
+// referenced polarizations), and a block of samples is computed by one thread.
+// The bits therefore do not depend on the threads, the blocking or the order
+// of the work, nor on how the rows and channels are split between calls that
+// take path S, and the generic and AVX2 routines perform the same rounded
+// operations (dft_s_kernels.hpp). The path itself is decided per call, from all
+// of its planes, rows and w: a split can move some samples between path S and
+// the reference, whose results differ at rounding level. The planes are packed
+// and computed one at a time, so the packed weights take 16 bytes x components
+// x kept rows x folded columns of one plane at most.
+//
+// The visibilities are computed into a private copy of vis_data, which one
+// copy commits once every plane is done: a call that fails to allocate or to
+// start a thread declines with vis_data untouched, and vis_data may be
+// misaligned. The inputs are read without the GIL, so they must not change
+// during the call (as for the reference).
 
 #include <cmath>
 #include <complex>
-#include <cstdlib>
-#include <stdexcept>
-#include <string>
-#include <string_view>
+#include <cstring>
+#include <new>
+#include <system_error>
 
 #include "dft_fast.hpp"
+#include "isa.hpp"
 
 namespace dft_fast {
 
@@ -113,11 +123,11 @@ struct Plane {
 };
 
 // One block of a plane's samples: its phasors, the GEMM bands with the sums
-// over their rows, then its visibilities.
+// over their rows, then its visibilities in vis (laid out as vis_data).
 template <typename VisT>
 void compute_block(const Call& call, const Samples& samples, const Plane& plane,
                    const double* scale, const double* p, const double* q, i64 block,
-                   const Kernels& routines, Scratch& scratch) {
+                   const Kernels& routines, Scratch& scratch, VisT* vis) {
     const PlaneLayout& layout = plane.layout;
     const i64* rows = samples.rows.data() + samples.row_start[plane.a_time];
     const i64* channels = samples.channels.data() + samples.channel_start[plane.a_chan];
@@ -192,7 +202,6 @@ void compute_block(const Call& call, const Samples& samples, const Plane& plane,
     // The visibilities, overwritten as the reference writes them: NaN values
     // are kept, the others narrowed from the double sums.
     using VisElement = typename VisT::value_type;
-    VisT* vis = static_cast<VisT*>(call.vis);
     for (i64 k = 0; k < count; ++k) {
         const i64 row = rows[(first + k) / n_channels];
         VisT* out = vis + (row * call.n_vis_chan + channels[(first + k) % n_channels]) * call.n_pol;
@@ -254,7 +263,7 @@ Path predict_typed(const Call& call) {
             Plane plane{a_time, a_chan, n_samples, {}};
             const ModelT* values = model + (a_time * call.m_chan + a_chan) * plane_size;
             if (!analyse_plane(values, call.n_l, call.n_m, call.pol_map, call.n_pol, call.m,
-                               plane.layout))
+                               call.threads, plane.layout))
                 return Path::declined;
             const PlaneLayout& layout = plane.layout;
             const auto samples_of_plane = static_cast<double>(n_samples);
@@ -265,10 +274,14 @@ Path predict_typed(const Call& call) {
         }
     }
     if (!(cost <= kAlpha * reference_cost)) return Path::declined;
-    if (call.n_pol == 0) return Path::separable;  // nothing to write
+    const i64 n_values = n_rows * call.n_vis_chan * call.n_pol;
+    if (n_values == 0) return Path::separable;  // nothing to write
 
-    // Path S, one plane at a time: pack its weights (one item per kept row),
-    // then compute its blocks of samples.
+    // Path S into the private copy of vis_data (its NaN values are kept), one
+    // plane at a time: pack its weights (one item per kept row), then compute
+    // its blocks of samples.
+    std::vector<VisT> staged(static_cast<std::size_t>(n_values));
+    std::memcpy(staged.data(), call.vis, staged.size() * sizeof(VisT));
     const Kernels& routines = kernels();
     auto n_blocks = [](const Plane& plane) {
         return round_up(plane.n_samples, kBlockSamples) / kBlockSamples;
@@ -295,9 +308,11 @@ Path predict_typed(const Call& call) {
         parallel_for(resolve_threads(call.threads, n_blocks(plane)), n_blocks(plane),
                      [&](int worker, i64 block) {
                          compute_block<VisT>(call, samples, plane, scale.data(), p, q, block,
-                                             routines, scratch[worker]);
+                                             routines, scratch[worker], staged.data());
                      });
     }
+    // The only write to vis_data, after everything that can fail.
+    std::memcpy(call.vis, staged.data(), staged.size() * sizeof(VisT));
     return Path::separable;
 }
 
@@ -310,31 +325,36 @@ Path predict_model(const Call& call) {
 }  // namespace
 
 Path predict(const Call& call) {
-    switch (call.model_type) {
-        case Element::float32:
-            return predict_model<float>(call);
-        case Element::float64:
-            return predict_model<double>(call);
-        case Element::complex64:
-            return predict_model<std::complex<float>>(call);
-        case Element::complex128:
-            return predict_model<std::complex<double>>(call);
+    // A call that cannot allocate its buffers (std::bad_alloc) or start a
+    // thread (std::system_error) declines: vis_data is written only by the
+    // last copy of path S, so it is untouched, and the reference then runs and
+    // succeeds or fails on its own terms.
+    try {
+        switch (call.model_type) {
+            case Element::float32:
+                return predict_model<float>(call);
+            case Element::float64:
+                return predict_model<double>(call);
+            case Element::complex64:
+                return predict_model<std::complex<float>>(call);
+            case Element::complex128:
+                return predict_model<std::complex<double>>(call);
+        }
+    } catch (const std::bad_alloc&) {
+        return Path::declined;
+    } catch (const std::system_error&) {
+        return Path::declined;
     }
     return Path::declined;
 }
 
 const Kernels& kernels() {
     static const Kernels selected = [] {
-        const char* value = std::getenv("ASTROVIPER_KERNELS_ISA");
-        const std::string_view isa = value != nullptr ? value : "";
-        if (!isa.empty() && isa != "generic") {
-            throw std::invalid_argument("ASTROVIPER_KERNELS_ISA=" + std::string(isa) +
-                                        ": expected 'generic' (the baseline instruction set) "
-                                        "or unset (the best one of the CPU)");
-        }
+        const bool avx2 = astroviper::fast::select_isa() == astroviper::fast::Isa::avx2;
 #if defined(AV_HAVE_AVX2)
-        if (isa.empty() && __builtin_cpu_supports("avx2")) return avx2_kernels();
+        if (avx2) return avx2_kernels();
 #endif
+        static_cast<void>(avx2);  // no AVX2 routines in this build
         return generic_kernels();
     }();
     return selected;

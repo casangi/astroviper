@@ -249,15 +249,16 @@ def test_trace_lines(monkeypatch, tmp_path):
 
 
 def test_trace_records_the_reported_path(fake_module, monkeypatch, tmp_path):
-    """A path an implementation reports names its own traced call only."""
+    """A path an implementation reports names its own traced call only, not a
+    call of another thread, an enclosing call or a call of another kernel."""
     fake_module(
         "_kernels_fake_paths",
         """
         from astroviper._kernels._switch import report_path
 
-        def clean_cube(path=None, inner=None, fail=False):
+        def clean_cube(path=None, inner=None, fail=False, kernel="hogbom"):
             if path:
-                report_path(path)
+                report_path(kernel, path)
             if inner:
                 inner(path="inner")
             if fail:
@@ -271,13 +272,14 @@ def test_trace_records_the_reported_path(fake_module, monkeypatch, tmp_path):
     wrapper = dispatch("hogbom", _hogbom_ext.clean_cube)
     wrapper(path="S")
     impl("hogbom", "clean_cube", "fast")(path="untraced")
-    worker = threading.Thread(target=lambda: _switch.report_path("other thread"))
+    worker = threading.Thread(target=lambda: _switch.report_path("hogbom", "thread"))
     worker.start()
     worker.join()
     wrapper()
     with pytest.raises(RuntimeError):
         wrapper(path="declined", fail=True)
     wrapper(path="outer", inner=wrapper)
+    wrapper(path="S", kernel="dft")  # an untraced dft call's report inside it
     (path,) = (tmp_path / "trace").iterdir()
     records = [json.loads(line) for line in path.read_text().splitlines()]
     assert [(r["path"], r["error"]) for r in records] == [
@@ -286,6 +288,7 @@ def test_trace_records_the_reported_path(fake_module, monkeypatch, tmp_path):
         ("declined", "RuntimeError"),
         ("inner", None),
         ("outer", None),
+        ("fast", None),
     ]
 
 

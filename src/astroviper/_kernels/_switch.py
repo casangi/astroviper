@@ -56,7 +56,7 @@ _resolved = {}  # (kernel, entry, impl) -> callable
 _logged = set()  # (kernel, impl) announced on the logger
 _traced = set()  # (kernel, entry, impl) that wrote a trace line
 _trace_failed = set()  # trace directories whose write failure was logged
-_reported = threading.local()  # .path: see report_path()
+_reported = threading.local()  # .value = (kernel, path): see report_path()
 
 
 def _names(names):
@@ -222,18 +222,22 @@ def dispatch(kernel, function):
     return wrapper
 
 
-def report_path(path):
-    """Report the path that the running call of a hooked entry takes.
+def report_path(kernel, path):
+    """Report the path that the running call of a hooked entry of ``kernel`` takes.
 
     For implementations with more than one path, such as ``dft=fast`` (``"S"``
-    or ``"declined"``): called once per call, before anything that can raise,
-    so that the call's trace line has this ``path`` instead of the
-    implementation's name. The report is kept per thread and belongs to the
-    innermost traced call: the trace clears it before each call and restores
-    the enclosing call's afterwards, so a report never reaches another call
-    or thread. Outside a traced call it has no effect.
+    or ``"declined"``): called once per call, once the path is known and before
+    the part that may raise for the call's arguments (the reference's run of a
+    declined call), so that the call's trace line has this ``path`` instead of
+    the implementation's name. A call that raises before it reports is traced
+    with the implementation's name and the error. The report is kept per
+    thread and belongs to the innermost traced call, if that call is of
+    ``kernel``: the trace clears it before each call and restores the
+    enclosing call's afterwards, so a report never reaches another call, a
+    call of another kernel or another thread. Outside a traced call it has no
+    effect.
     """
-    _reported.path = path
+    _reported.value = (kernel, path)
 
 
 def _arrays(args, kwargs):
@@ -262,8 +266,8 @@ def _call_traced(trace_dir, kernel, entry, name, target, args, kwargs):
     monotonic interval, anchored at the epoch time of the call's start.
     """
     error = None
-    enclosing = getattr(_reported, "path", None)
-    _reported.path = None
+    enclosing = getattr(_reported, "value", None)
+    _reported.value = None
     cpu0, t0, p0 = _cpu_seconds(), time.time(), time.perf_counter()
     try:
         return target(*args, **kwargs)
@@ -272,7 +276,8 @@ def _call_traced(trace_dir, kernel, entry, name, target, args, kwargs):
         raise
     finally:
         wall, cpu = time.perf_counter() - p0, _cpu_seconds() - cpu0
-        path, _reported.path = _reported.path or name, enclosing
+        reported, _reported.value = _reported.value, enclosing
+        path = reported[1] if reported and reported[0] == kernel else name
         try:
             arrays = _arrays(args, kwargs)
             with _lock:

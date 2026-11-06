@@ -4,14 +4,22 @@ The implementation is called directly (``astroviper._kernels.impl``), so these
 tests run in any session; the path of a call is read from the extension's
 entry, which returns it. Small inputs only.
 
-* The phasors are the reference's: the copied source text, and the bits.
+* The phasors are the reference's: the copied source text, and the bits (for
+  finite turns).
 * Path S is accurate: the oracle bounds (``oracles.py``) in the output dtype,
-  on random and adversarial coherent inputs; a perturbed result fails them.
+  on random and adversarial coherent inputs, against the exact sum and
+  against the sum of the roundings path S shares with the reference (at any
+  phase); in aggregate it is closer to the exact sum than the reference; a
+  slightly perturbed result fails the bounds.
 * Path S is invariant: bitwise across thread counts, splits of the rows into
-  calls, and the generic and AVX2 routines (two subprocesses).
+  calls, concurrent calls, and the generic and AVX2 routines (two
+  subprocesses), also through the depth-blocked GEMM of wide images.
 * Coverage: every dtype pair, 1 to 4 polarizations, permuted and duplicated
-  pol_map, several model planes, complex models, NaN outputs, skipped rows.
+  pol_map, several model planes, complex models, NaN outputs, skipped rows,
+  misaligned arrays (read through aligned copies), the GIL released.
 * Declined calls are the reference's, bit for bit and exception for exception.
+  (No test hands the reference a misaligned array: its binding reads one in
+  place, which is undefined behaviour that UBSan reports.)
 * Pickled arrays and keyword calls take path S, a sparse model declines, and
   the trace of the hooked shim names each call's path.
 """
@@ -20,6 +28,9 @@ import json
 import pickle
 import re
 import socket
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -126,19 +137,36 @@ def _path(call, dtype=np.complex128, threads=4, vis=None):
 
 
 # ---------------------------------------------------------------- the oracle bounds
-def _chain_lengths(call):
-    """Path S's longest summation chain per model plane: kept rows + folded columns."""
+def _plane_terms(call):
+    """``(..., 3)``: per model plane (time, channel) of the call, path S's
+    terms of the bounds:
+
+    * L, its longest summation chain: kept rows + folded columns, a kept
+      column of m > 0 folded with a kept one of -m (bitwise), once per value,
+      as dft_pack.cpp folds them;
+    * kappa, the largest r^2 / (1 - r^2) over its non-zero pixels, the
+      condition of n = sqrt(1 - l^2 - m^2) (a relative error of n, shared by
+      both kernels, up to about (kappa + 1) eps);
+    * its products and quotients per sample and pass (the weights M / n of the
+      kept pixels, kept rows x folded columns in the GEMM, kept rows in the
+      row sums), each of which rounds by up to 2^-1075 absolute when its
+      result is subnormal (a sum of subnormal values is exact): with the two
+      passes (cos and sin), an underflow allowance of their number x 2^-1074.
+    """
     model = np.asarray(call["model"])
     referenced = sorted(set(call["pol_map"].tolist()))
-    chains = np.zeros(model.shape[:2])
+    l, m = call["l"], call["m"]
+    r2 = l[:, None] ** 2 + m[None, :] ** 2
+    terms = np.zeros(model.shape[:2] + (3,))
     for plane in np.ndindex(model.shape[:2]):
         nonzero = (model[plane][referenced] != 0).any(axis=0)
         rows = int(nonzero.any(axis=1).sum())
-        kept = call["m"][nonzero.any(axis=0)]
-        negative = set(kept[kept < 0].tolist())
-        pairs = sum(1 for x in kept[kept > 0].tolist() if -x in negative)
-        chains[plane] = rows + kept.size - pairs
-    return chains
+        kept = m[nonzero.any(axis=0)]
+        pairs = len(set(kept[kept > 0].tolist()) & set((-kept[kept < 0]).tolist()))
+        columns = kept.size - pairs
+        kappa = (r2[nonzero] / (1 - r2[nonzero])).max(initial=0.0)
+        terms[plane] = rows + columns, kappa, nonzero.sum() + rows * columns + rows
+    return terms
 
 
 def _ulp(x, dtype):
@@ -147,46 +175,65 @@ def _ulp(x, dtype):
 
 
 def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
-    """Where the bounds of plan_v2 (dft_design) fail, per real component:
+    """Where the per-sample bounds fail, per real component:
 
-    (1) |V_fast - V_or| <= (L + 2 pi T + 8) eps sum|M/n| + 1/2 ulp_out, with
-        L the chain length of the sample's plane and T the sample's largest
-        |u l| + |v m| + |w (n - 1)|;
-    (2) |V_fast - V_or| <= |V_ref - V_or| + (2 pi T + 16) eps sum|M/n|
-        + 1 ulp_out. The plan's margin is 16 eps sum|M/n|; the 2 pi T term is
-        added because both kernels round the same products u l and v m, an
-        error of up to 2 pi T eps sum|M/n| that they share bit for bit, and
-        the reference's extra rounding of the phase sum can cancel it at a
-        sample: without the term the bound fails by chance whenever T eps is
-        not small, with it it holds at every sample whose other errors stay
-        within 16 eps sum|M/n| (fast's are about 1 eps sum|M/n|);
-    (3) complex64 outputs: |V_fast - V_ref| <= 1 ulp32 + the bound (1) + the
+    (1) |V_fast - V_or| <= (L + 2 pi T + 8 + kappa) eps sum|M/n| + U
+        + 1/2 ulp_out: the bound of plan_v2 (dft_design) against the exact
+        sum V_or, with L the chain length of the sample's plane and T the
+        sample's largest |u l| + |v m| + |w (n - 1)|, made valid for all
+        inputs by two terms that vanish elsewhere (``_plane_terms``): kappa
+        for n near the horizon, and the underflow allowance U = (products and
+        quotients) x 2^-1074 for subnormal values;
+    (1t) |V_fast - V_rp| <= (L + 8) eps sum|W| + U + 1/2 ulp_out against
+        V_rp, the sum of the roundings that path S shares with the reference
+        (``oracles.predict(rounded=True)``): path S's own arithmetic, with no
+        2 pi T term, so that a non-exact path S shows at any phase (its own
+        error is a few eps sum|W|);
+    (c64) complex64 outputs: |V_fast - V_ref| <= 1 ulp32 + the bound (1) + the
         error of the reference's complex128 result ``v_ref128``.
 
-    Every bound holds per sample. ulp_out is that of the larger of |V_or|
-    and |V_fast| in the output dtype. Only the predicted samples count
-    (``keep`` excludes others, such as NaN outputs). Returns ``{criterion:
-    number of failing components}``.
+    The plan's bound (2), |V_fast - V_or| <= |V_ref - V_or| + 16 eps
+    sum|M/n| + 1 ulp_out, does not hold per sample for an exact path S: both
+    kernels round the products u l and v m bit for bit (an error of up to
+    2 pi T eps sum|M/n|), and the reference's extra rounding of the phase
+    sum, independent of that error, cancels it at some samples. Its errors are
+    therefore about sqrt(2) times path S's in rms, with as large maxima, and
+    the bound is checked in aggregate instead, by the rms test below.
+
+    ulp_out is that of the larger of |V_oracle| and |V_fast| in the output
+    dtype. Only the predicted samples count (``keep`` excludes others, such
+    as NaN outputs). Returns ``{criterion: number of failing components}``.
     """
     exact, norm, turns = oracles.predict(**call)
+    rounded, norm_rounded, _ = oracles.predict(**call, rounded=True)
     used = np.isfinite(norm) & keep
-    chains = _chain_lengths(call)[
+    terms = _plane_terms(call)[
         call["time_map"][:, None, None, None],
         call["frequency_map"][None, None, :, None],
     ]
-    chains = np.broadcast_to(chains, norm.shape)
-    phase = 2 * np.pi * turns
-    budget = ((chains + phase + 8) * EPS * norm)[used].astype(oracles.LONG)
-    margin = ((phase + 16) * EPS * norm)[used].astype(oracles.LONG)
-    failed = {"bound1": 0, "bound2": 0, "complex64": 0}
+    chain, kappa, products = (
+        np.broadcast_to(terms[..., k], norm.shape)[used] for k in range(3)
+    )
+    underflow = products * 2.0**-1074
+    phase = 2 * np.pi * turns[used]
+    budget = (chain + phase + 8 + kappa) * EPS * norm[used] + underflow
+    budget_rounded = (chain + 8) * EPS * norm_rounded[used] + underflow
+    budget, budget_rounded = (
+        budget.astype(oracles.LONG),
+        budget_rounded.astype(oracles.LONG),
+    )
+    failed = {"bound1": 0, "bound1t": 0, "complex64": 0}
     for part in (np.real, np.imag):
-        x_or = part(exact[used])
+        x_or, x_rp = part(exact[used]), part(rounded[used])
         x_fast = part(v_fast[used]).astype(oracles.LONG)
         x_ref = part(v_ref[used]).astype(oracles.LONG)
-        ulp = _ulp(np.maximum(np.abs(x_or), np.abs(x_fast)), v_fast.real.dtype)
-        error = np.abs(x_fast - x_or)
-        failed["bound1"] += int(np.sum(error > budget + ulp / 2))
-        failed["bound2"] += int(np.sum(error > np.abs(x_ref - x_or) + margin + ulp))
+        dtype = v_fast.real.dtype
+        ulp = _ulp(np.maximum(np.abs(x_or), np.abs(x_fast)), dtype)
+        ulp_rounded = _ulp(np.maximum(np.abs(x_rp), np.abs(x_fast)), dtype)
+        failed["bound1"] += int(np.sum(np.abs(x_fast - x_or) > budget + ulp / 2))
+        failed["bound1t"] += int(
+            np.sum(np.abs(x_fast - x_rp) > budget_rounded + ulp_rounded / 2)
+        )
         if v_fast.dtype == np.complex64:
             ref128 = np.abs(part(v_ref128[used]).astype(oracles.LONG) - x_or)
             ulp32 = _ulp(np.maximum(np.abs(x_fast), np.abs(x_ref)), np.float32)
@@ -194,6 +241,9 @@ def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
                 np.sum(np.abs(x_fast - x_ref) > ulp32 + budget + ref128)
             )
     return failed
+
+
+ACCURATE = {"bound1": 0, "bound1t": 0, "complex64": 0}
 
 
 def _assert_accurate(call, dtype=np.complex128, threads=4):
@@ -204,11 +254,7 @@ def _assert_accurate(call, dtype=np.complex128, threads=4):
     v_ref128 = (
         _run(reference, call, np.complex128, threads) if dtype == np.complex64 else None
     )
-    assert _violations(call, v_fast, v_ref, v_ref128) == {
-        "bound1": 0,
-        "bound2": 0,
-        "complex64": 0,
-    }
+    assert _violations(call, v_fast, v_ref, v_ref128) == ACCURATE
 
 
 # ---------------------------------------------------------------- the phasors
@@ -238,6 +284,8 @@ def test_phasors_are_a_verbatim_copy_of_the_reference():
 
 
 def test_phasors_are_bitwise_the_reference():
+    """For finite turns (path S's range guard keeps |u l|, |v m| < 2^51; for a
+    NaN or infinite turn both give NaN, with another sign bit or payload)."""
     rng = np.random.default_rng(1)
     edges = [
         0.0,
@@ -270,6 +318,12 @@ def test_phasors_are_bitwise_the_reference():
 
 
 # ---------------------------------------------------------------- accuracy
+def _depth_blocked_call():
+    """3 x 2048 pixels: 1025 folded columns, three depth steps of the GEMM's
+    micro-kernel (kDepth = 344), the last one partial, as for HL Tau."""
+    return _call(_sky(19, (1, 1, 2, 3, 2048)), n_time=1, n_baseline=20, cell=3e-6)
+
+
 @needs_oracle
 @pytest.mark.parametrize(
     "case",
@@ -281,6 +335,10 @@ def test_phasors_are_bitwise_the_reference():
         "opposite_large_phases",
         "wide_field",
         "m_without_mirrors",
+        "near_mirrors_large_phases",
+        "near_horizon",
+        "subnormal_model",
+        "depth_blocked",
     ],
 )
 def test_path_s_is_within_the_oracle_bounds(case):
@@ -300,26 +358,67 @@ def test_path_s_is_within_the_oracle_bounds(case):
         call = _call(model, cell=1e-3, uv_m=3e4, n_baseline=60)
     elif case == "wide_field":  # |l|, |m| up to 0.3: n down to 0.9
         call = _call(_stokes_i(5, 21, 21), cell=0.03, uv_m=1e3, frequency=(1.4e9,))
-    else:  # a 0.3-pixel shift: no column pairs, unfolded and still exact
+    elif case == "m_without_mirrors":  # a 0.3-pixel shift: no pairs, unfolded
         call = _call(_stokes_i(6), m_offset=0.3)
+    elif case == "near_mirrors_large_phases":  # m_b = -m_a + 1 ulp: not folded
+        call = _call(_stokes_i(16), uv_m=8e4)  # T up to about 2e4 turns
+        half = np.flatnonzero(call["m"] > 0)[::2]
+        call["m"][half] = np.nextafter(call["m"][half], 1.0)
+    elif case == "near_horizon":  # n down to 4.5e-6 at the corners: kappa 5e10
+        call = _call(_stokes_i(17, 6, 6), uv_m=1.0)
+        call["l"] = np.array([-0.6, -0.36, -0.12, 0.12, 0.36, 0.6])
+        edge = 0.8 - 1.25e-11
+        call["m"] = np.array([-edge, -0.48, -0.16, 0.16, 0.48, edge])
+    elif case == "subnormal_model":  # every weight and sum below 2^-1022
+        call = _call(_stokes_i(18) * 1e-310)
+    else:
+        call = _depth_blocked_call()
     _assert_accurate(call)
 
 
 @needs_oracle
-def test_the_bounds_detect_a_perturbed_result():
-    call = _call(_stokes_i(7))
+@pytest.mark.parametrize("uv_m", [1.5e3, 3e4], ids=["T~400", "T~8000"])
+def test_path_s_is_closer_to_the_exact_sum_than_the_reference_in_rms(uv_m):
+    """The plan's bound (2) in aggregate (see ``_violations``): over 4800
+    components path S's rms error against the exact sum is at most the
+    reference's, which adds the rounding of its phase sums to the rounding of
+    u l and v m that both share."""
+    call = _call(
+        _stokes_i(21), n_time=3, n_baseline=200, frequency=(1e11, 1.2e11), uv_m=uv_m
+    )
     path, v_fast = _path(call)
     v_ref = _run(reference, call)
-    assert path == "S" and not any(_violations(call, v_fast, v_ref).values())
-    norm = float(
-        np.sum(
-            np.abs(call["model"][0, 0, 0])
-            / np.sqrt(1 - call["l"][:, None] ** 2 - call["m"] ** 2)
-        )
-    )
-    v_fast[1, 5, 0, 1] += 1e-11 * norm
-    failed = _violations(call, v_fast, v_ref)
-    assert failed["bound1"] == 1 and failed["bound2"] == 1
+    exact, norm, _ = oracles.predict(**call)
+    used = np.isfinite(norm)
+
+    def rms(v):
+        error = (v[used].astype(np.clongdouble) - exact[used]) / norm[used]
+        return float(np.sqrt(np.mean(np.concatenate([error.real, error.imag]) ** 2)))
+
+    assert path == "S" and 2 * used.sum() >= 2000
+    assert rms(v_fast) <= rms(v_ref)
+
+
+@needs_oracle
+def test_the_bounds_detect_a_perturbed_result():
+    """At the sample of the largest phase (T about 6000 turns), bound (1t)
+    detects an error of (L + 16) eps sum|W| beyond path S's own, which bound
+    (1) cannot see there; an error of 1e-11 sum|W| fails both."""
+    call = _call(_stokes_i(7), uv_m=3e4)
+    path, v_fast = _path(call)
+    v_ref = _run(reference, call)
+    assert path == "S" and _violations(call, v_fast, v_ref) == ACCURATE
+    rounded, norm, turns = oracles.predict(**call, rounded=True)
+    k = np.unravel_index(np.nanargmax(turns), turns.shape)
+    chain = _plane_terms(call)[0, 0, 0]
+    sign = 1.0 if v_fast[k].real >= rounded[k].real else -1.0
+    for error, failed in (
+        ((chain + 16) * EPS * norm[k], {"bound1": 0, "bound1t": 1}),
+        (1e-11 * norm[k], {"bound1": 1, "bound1t": 1}),
+    ):
+        perturbed = v_fast.copy()
+        perturbed[k] += sign * error
+        assert _violations(call, perturbed, v_ref) == ACCURATE | failed
 
 
 @needs_oracle
@@ -440,40 +539,81 @@ def test_bitwise_across_splits_of_the_rows():
         assert _run(fast, part).tobytes() == expected[times, baselines].tobytes()
 
 
+def test_concurrent_calls_give_the_bits_of_serial_calls():
+    """Python threads calling path S at once, on shared inputs."""
+    calls = [_invariance_call(), _call(_stokes_i(23), n_baseline=50)]
+    expected = [_run(fast, call, threads=2).tobytes() for call in calls]
+
+    def bits(i):
+        return _run(fast, calls[i % 2], threads=2).tobytes() == expected[i % 2]
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        assert all(pool.map(bits, range(24)))
+
+
+def test_the_gil_is_released_during_path_s():
+    """Another Python thread runs while a call computes: with a switch
+    interval longer than the call, it could not if the call held the GIL."""
+    call = _call(_stokes_i(22, 512, 512), n_time=4, n_baseline=2000)
+    started, done = threading.Event(), threading.Event()
+
+    def predict():
+        started.set()
+        _run(fast, call, threads=1)  # about 0.07 s
+        done.set()
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(30.0)
+    try:
+        worker = threading.Thread(target=predict)
+        worker.start()
+        started.wait()
+        during = not done.is_set()
+        worker.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert during and done.is_set()
+
+
 ISA_RUN = """
 import sys
 import numpy as np
 from astroviper._kernels import impl
 from astroviper._kernels.fast.dft import ISA
-arrays = np.load(sys.argv[1])
 names = ("model", "vis_data", "uvw", "frequency_coord", "frequency_map", "time_map", "pol_map", "l", "m")
-arguments = [arrays[k] for k in names]
-impl("dft", "dft_predict", "fast")(*arguments, processing_function_threads=3)
-np.save(sys.argv[2], arguments[1])
+for source, target in zip(sys.argv[1::2], sys.argv[2::2]):
+    arrays = np.load(source)
+    arguments = [arrays[k] for k in names]
+    impl("dft", "dft_predict", "fast")(*arguments, processing_function_threads=3)
+    np.save(target, arguments[1])
 print(ISA)
 """
 
 
 def test_generic_and_avx2_routines_give_the_same_bits(run_python, tmp_path):
-    call = _invariance_call()
-    np.savez(tmp_path / "call.npz", vis_data=_vis(call), **call)
+    """Also through the GEMM's depth steps of a wide image."""
+    calls = {"invariance": _invariance_call(), "depth_blocked": _depth_blocked_call()}
+    for name, call in calls.items():
+        np.savez(tmp_path / f"{name}.npz", vis_data=_vis(call), **call)
     results = {}
-    for name, env in (
+    for isa, env in (
         ("default", {}),
         ("generic", {"ASTROVIPER_KERNELS_ISA": "generic"}),
     ):
-        out = run_python(
-            "-c",
-            ISA_RUN,
-            str(tmp_path / "call.npz"),
-            str(tmp_path / f"{name}.npy"),
-            **env,
-        )
-        results[out.strip().splitlines()[-1]] = np.load(tmp_path / f"{name}.npy")
+        files = []
+        for name in calls:
+            files += [
+                str(tmp_path / f"{name}.npz"),
+                str(tmp_path / f"{name}-{isa}.npy"),
+            ]
+        out = run_python("-c", ISA_RUN, *files, **env)
+        results[out.strip().splitlines()[-1]] = [
+            np.load(tmp_path / f"{name}-{isa}.npy").tobytes() for name in calls
+        ]
     if "avx2" not in results:
         pytest.skip("no AVX2 routines on this machine or build")
     assert set(results) == {"avx2", "generic"}
-    assert results["avx2"].tobytes() == results["generic"].tobytes()
+    assert results["avx2"] == results["generic"]
 
 
 def test_an_unknown_isa_override_fails_the_import(run_python):
@@ -535,13 +675,6 @@ def _late_nan(call):
     }
 
 
-def _unaligned_l(call):
-    size = call["l"].size
-    l = np.frombuffer(bytearray(8 * size + 1), np.float64, size, offset=1)
-    l[:] = call["l"]
-    return {"l": l}
-
-
 def _read_only(call):
     vis = _vis(call)
     vis.setflags(write=False)
@@ -574,7 +707,6 @@ DECLINED = {
     ),
     "list_maps": _declined(lambda c: {"pol_map": [0, 1], "frequency_map": [0]}),
     "float32_l": _declined(lambda c: {"l": c["l"].astype(np.float32)}),
-    "unaligned_l": _declined(_unaligned_l),
     "big_endian_model": _declined(lambda c: {"model": c["model"].astype(">f8")}),
     "int_model": _declined(lambda c: {"model": c["model"].astype(np.int32)}),
     "fortran_model": _declined(lambda c: {"model": np.asfortranarray(c["model"])}),
@@ -647,6 +779,39 @@ def test_pickled_arrays_and_keyword_calls_take_path_s():
         == "S"
     )
     assert vis.tobytes() == expected.tobytes()
+
+
+def _misaligned(array):
+    """A copy of ``array`` one byte off the alignment that NumPy requires, as
+    Dask hands its workers arrays at arbitrary offsets of the frames it
+    received."""
+    buffer = np.zeros(array.nbytes + 1, np.uint8)
+    copy = buffer[1:].view(array.dtype).reshape(array.shape)
+    copy[...] = array
+    assert not copy.flags.aligned
+    return copy
+
+
+def test_misaligned_arrays_take_path_s_through_aligned_copies():
+    """Every array of the call misaligned: path S reads aligned copies and
+    writes vis_data in place, with the bits of the aligned call (NaN values
+    kept); with a w != 0 it declines and writes nothing. (The reference reads
+    a misaligned array in place, which is undefined behaviour: not called.)"""
+    call = _invariance_call()
+    initial = _vis(call) + (3.0 - 2.0j)
+    initial[0, 9, 1, 2] = np.nan
+    path, expected = _path(call, vis=initial.copy())
+    assert path == "S"
+    misaligned = {k: _misaligned(v) for k, v in call.items()}
+    vis = _misaligned(initial)
+    assert (
+        ext.dft_predict(*_args(misaligned, vis), processing_function_threads=3) == "S"
+    )
+    assert vis.tobytes() == expected.tobytes()
+    misaligned["uvw"][0, 3, 2] = 0.5
+    vis = _misaligned(initial)
+    assert ext.dft_predict(*_args(misaligned, vis)) == "declined"
+    assert vis.tobytes() == initial.tobytes()
 
 
 def test_w_minus_zero_counts_as_zero():

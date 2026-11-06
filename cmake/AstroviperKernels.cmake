@@ -67,8 +67,14 @@ endif()
 #                 an anonymous namespace, uses no std containers or other
 #                 header templates, and must define no weak symbol (nm: no
 #                 W/V/u), which test_binary_isa.py checks on the -fno-lto
-#                 objects of each fast module (a WP3 acceptance item).
-#   INCLUDE_DIRS  as for astroviper_add_pybind_module()
+#                 objects of each fast module (a WP3 acceptance item). The
+#                 inline functions of the standard headers it still uses
+#                 (std::abs of <cmath>) are inlined at -O1 and above but
+#                 emitted as weak symbols at -O0, so in a Debug build these
+#                 units are compiled with -Og.
+#   INCLUDE_DIRS  further include directories (also the probe's); the
+#                 module's include/ and fast/common/, the headers shared by
+#                 the fast modules, are always on the module's include path
 # ---------------------------------------------------------------------------
 function(astroviper_add_fast_kernel_module)
     cmake_parse_arguments(FK "" "NAME;PROBE" "SOURCES;AVX2_SOURCES;INCLUDE_DIRS" ${ARGN})
@@ -107,16 +113,14 @@ function(astroviper_add_fast_kernel_module)
         return()
     endif()
 
-    set(_include_dirs)
-    if(FK_INCLUDE_DIRS)
-        set(_include_dirs INCLUDE_DIRS ${FK_INCLUDE_DIRS})
-    endif()
-    astroviper_add_pybind_module(NAME ${FK_NAME} SOURCES ${FK_SOURCES} ${_include_dirs})
+    astroviper_add_pybind_module(NAME ${FK_NAME} SOURCES ${FK_SOURCES}
+        INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include" ${FK_INCLUDE_DIRS}
+                     "${PROJECT_SOURCE_DIR}/src/astroviper/_kernels/fast/common")
 
     if(FK_AVX2_SOURCES AND _av_x86_64)
         target_sources(${FK_NAME} PRIVATE ${FK_AVX2_SOURCES})
-        set_source_files_properties(${FK_AVX2_SOURCES}
-            PROPERTIES COMPILE_OPTIONS "-mavx2;-fno-lto")
+        set_property(SOURCE ${FK_AVX2_SOURCES} APPEND PROPERTY COMPILE_OPTIONS
+            -mavx2 -fno-lto $<$<CONFIG:Debug>:-Og>)
         target_compile_definitions(${FK_NAME} PRIVATE AV_HAVE_AVX2=1)
     endif()
 endfunction()

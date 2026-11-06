@@ -9,13 +9,18 @@
 //
 // by exact algebraic refactorings only, whose results differ from the exact
 // value by rounding (no approximation of any term). A call takes one path,
-// decided from its inputs alone before anything is written (dft_separable.cpp):
+// decided from its inputs alone (all of its model planes, rows and w) before
+// anything is written (dft_separable.cpp):
 //
 //   separable (path S)  every used row has w = 0: the sum separates into the
-//                       GEMM of dft_separable.cpp, whose bits do not depend on
-//                       the threads, the blocking, the ISA or the rows' chunking;
-//   declined            anything else; nothing is written and the caller runs
-//                       the reference binding (its bits, its exceptions).
+//                       GEMM of dft_separable.cpp. A sample's bits depend only
+//                       on its u, v and model plane, not on the threads, the
+//                       blocking or the ISA, so they are the same however the
+//                       rows and channels are split into calls that take S;
+//   declined            anything else, including a call that cannot allocate
+//                       its buffers or start its threads; nothing is written
+//                       and the caller runs the reference binding (its bits,
+//                       its exceptions).
 //
 // Path B (the exact w term, WP6) becomes a third path for calls with w != 0.
 
@@ -38,7 +43,9 @@ enum class Element { float32, float64, complex64, complex128 };
 
 // One call, as the reference binding sees it after its checks: C-contiguous
 // arrays with the reference's shapes, maps within their image axes and
-// direction cosines in front of the horizon (python/bindings.cpp).
+// direction cosines in front of the horizon (python/bindings.cpp). The inputs
+// are aligned; vis may be at any address (path S copies it in and out), and
+// none of them may change during the call.
 struct Call {
     const void* model;  // (m_time, m_chan, m_pol, n_l, n_m) of model_type
     void* vis;          // (n_time, n_baseline, n_vis_chan, n_pol) of vis_type
@@ -56,17 +63,20 @@ struct Call {
 };
 
 // Decides the path of a call and, for path S, writes its visibilities.
-// Called without the GIL.
+// Called without the GIL. Raises nothing for a resource failure: a call that
+// cannot allocate or start its threads declines with vis untouched.
 Path predict(const Call& call);
 
-// The routines of the instruction set chosen for this process: AVX2 when the
-// CPU has it and the module was built with it, unless ASTROVIPER_KERNELS_ISA is
-// "generic"; read once, at the first call (the module's import). Throws
-// std::invalid_argument for another value of ASTROVIPER_KERNELS_ISA.
+// The routines of the instruction set chosen for this process
+// (astroviper::fast::select_isa of fast/common/isa.hpp), read once, at the
+// first call (the module's import). Throws std::invalid_argument for an
+// invalid ASTROVIPER_KERNELS_ISA.
 const Kernels& kernels();
 
-// Path S's view of one model plane (one time and channel of the model): the
-// real planes it sums and where they are non-zero (dft_pack.cpp).
+// Path S's view of one model plane: one time and channel of the model, with
+// all of its referenced polarizations (so a polarization's bits may depend on
+// which others the call references, at rounding level): the real planes it
+// sums and where they are non-zero (dft_pack.cpp).
 struct PlaneLayout {
     // A real component plane: the real (part 0) or imaginary (part 1) part of
     // the model polarization pol.
@@ -99,10 +109,11 @@ struct PlaneLayout {
 
 // The layout of plane (the plane's m_pol polarizations of n_l x n_m pixels),
 // or false if a referenced value is not finite or so large that a sum of path
-// S could overflow.
+// S could overflow. One pass over the plane on up to `threads` workers; the
+// result does not depend on their number.
 template <typename ModelT>
 bool analyse_plane(const ModelT* plane, i64 n_l, i64 n_m, const i64* pol_map, i64 n_pol,
-                   const double* m, PlaneLayout& layout);
+                   const double* m, int threads, PlaneLayout& layout);
 
 // 64-byte aligned doubles, uninitialised, kept between uses: get(n) returns
 // room for n values (reallocated only when it grows).

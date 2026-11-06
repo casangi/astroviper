@@ -12,8 +12,10 @@ control, an AstroVIPER-path ``import cupy`` made after zarr's, must be caught.
 """
 
 import importlib
+import importlib.machinery
 import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
@@ -95,18 +97,20 @@ print("RESULT", json.dumps({{"blocked": found, "cached": cached, "caught": caugh
 """
 
 
-def _built(module):
-    try:
-        importlib.import_module(module)
-    except ImportError:
-        return False
-    return True
+def _installed(relative):
+    """Whether the extension module ``astroviper/<relative>`` is installed: its
+    file, found without importing it (an import would import the reference
+    shims, and fix the process ISA, at collection)."""
+    package = Path(importlib.util.find_spec("astroviper").origin).parent
+    suffixes = importlib.machinery.EXTENSION_SUFFIXES
+    return any((package / (relative + suffix)).is_file() for suffix in suffixes)
 
 
 FAST_DFT = pytest.param(
     "dft=fast",
     marks=pytest.mark.skipif(
-        not _built("astroviper._kernels.fast.dft"), reason="fast DFT module not built"
+        not _installed("_kernels/fast/dft/_dft_fast_ext"),
+        reason="fast DFT module not built",
     ),
 )
 

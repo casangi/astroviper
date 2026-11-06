@@ -75,12 +75,34 @@ def test_dft_fast_executes_on_path_s_only(path, executed):
     assert (missing == [], foreign) == (executed, {})
 
 
-def test_files_declined_by_design_are_not_required():
+def _dft(path, error=None):
+    """A ``dft=fast`` record of the file running at t = 15."""
+    record = {"kernel": "dft", "entry": "dft_predict", "impl": "fast", "path": path}
+    return record | {"error": error, "t_start": 15.0}
+
+
+@pytest.mark.parametrize(
+    "records, missing",
+    [
+        ([], [BY_DESIGN, DFT_FILE]),
+        ([_dft("declined", "RuntimeError")], [BY_DESIGN, DFT_FILE]),
+        ([_dft("declined")], [DFT_FILE]),
+        ([_dft("S")], [DFT_FILE]),
+    ],
+    ids=["no-call", "raised", "declined", "S"],
+)
+def test_files_declined_by_design_need_a_call_that_reached_fast(records, missing):
+    """Such a file needs no executed call but one ``dft=fast`` call that did not
+    raise, on any path (its calls go through the hook); under ``dft=ref`` it
+    needs an executed call, like every listed file."""
     assert BY_DESIGN in DECLINED_BY_DESIGN["dft", "fast"]
-    for name, required in (("fast", [DFT_FILE]), ("ref", [BY_DESIGN, DFT_FILE])):
-        selection = {"dft": name}
-        missing = summarize([], selection, selection, [], {BY_DESIGN, DFT_FILE})[1]
-        assert missing == [f"{path}: dft.dft_predict={name}" for path in required]
+    intervals = [(10.0, 20.0, BY_DESIGN), (30.0, 40.0, DFT_FILE)]
+    collected = {BY_DESIGN, DFT_FILE}
+    fast, ref = {"dft": "fast"}, {"dft": "ref"}
+    verdict = summarize(records, fast, fast, intervals, collected)[1]
+    assert verdict == [f"{p}: dft.dft_predict=fast" for p in missing]
+    verdict = summarize([], ref, ref, intervals, collected)[1]
+    assert verdict == [f"{p}: dft.dft_predict=ref" for p in (BY_DESIGN, DFT_FILE)]
 
 
 def test_an_executed_call_in_the_listed_file_passes():

@@ -7,21 +7,26 @@ It computes the reference's exact direct sum (``direct_fourier_transform_cpp``)
 
 by exact algebraic refactorings only, with results within rounding of the
 exact value; it is not bitwise equal to the reference. Each call takes one
-path, chosen in C++ from its inputs alone before anything is written:
+path, chosen in C++ from its inputs alone (all of its model planes, rows and
+w) before anything is written:
 
 ``"S"``
     Every used row (all three uvw finite) has ``w == 0``: the separable sum,
-    a GEMM over the folded model per model plane. Its bits do not depend on
-    the threads, the instruction set or on how the rows are split into calls.
+    a GEMM over the folded model per model plane. A sample's bits do not
+    depend on the threads or the instruction set, nor on how the rows and
+    channels are split into calls that take S (a split can change the path of
+    a part, as the path is decided per call).
 ``"declined"``
     Anything else, including every call the reference binding would convert
-    or reject: the reference binding runs with the same arguments, so the
+    or reject and a call that cannot allocate its buffers or start its
+    threads: the reference binding runs with the same arguments, so the
     result is the reference's, bit for bit, and so is any exception.
 
-The path is reported to the kernel switch, so that each trace line names it.
-``ISA`` is the instruction set of path S in this process: ``"avx2"`` when the
-CPU has it, or ``"generic"`` (set ``ASTROVIPER_KERNELS_ISA=generic`` before
-the import to force it, for tests).
+Misaligned arrays (such as Dask's deserialised ones) are read through aligned
+copies. The path is reported to the kernel switch, so that each trace line
+names it. ``ISA`` is the instruction set of path S in this process:
+``"avx2"`` when the CPU has it, or ``"generic"`` (set
+``ASTROVIPER_KERNELS_ISA=generic`` before the import to force it, for tests).
 """
 
 from astroviper._kernels._switch import report_path
@@ -42,6 +47,6 @@ def dft_predict(*args, **kwargs):
     raises the reference's exceptions).
     """
     path = _fast_predict(*args, **kwargs)
-    report_path(path)
+    report_path("dft", path)
     if path == DECLINED:
         _reference_predict(*args, **kwargs)

@@ -19,10 +19,11 @@ not just the reference behind them. The plugin:
   entry, impl, path and error;
 * fails the session when a collected file of ``MANIFEST`` made no call that
   executed the selected implementation of an entry it lists for a selected
-  kernel (a call executes it on the paths of ``EXECUTED_PATHS``, unless the
-  file declines it by design, ``DECLINED_BY_DESIGN``), or when any record ran
-  an implementation other than the session's selection (another selection
-  leaked into the trace);
+  kernel (a call executes it on the paths of ``EXECUTED_PATHS``; a file that
+  declines it by design, ``DECLINED_BY_DESIGN``, needs one call that reached
+  it without raising, on any path), or when any record ran an implementation
+  other than the session's selection (another selection leaked into the
+  trace);
 * provides the ``kernel_trace`` fixture for tests that assert the path taken
   by their own calls.
 """
@@ -53,9 +54,9 @@ _HOGBOM_BOTH = {"hogbom": ("clean_cube", "clean_cube_many_threads")}
 #: ``tests/unit`` run with every kernel switched to ``ref`` (and the component
 #: file that the DFT's verification switches). A switched session
 #: fails when a collected file listed here executes none of the selected
-#: implementation of one of its entries for an explicitly selected kernel.
-#: Other files are counted and printed, not required; so are the files of
-#: ``DECLINED_BY_DESIGN`` for its implementations.
+#: implementation of one of its entries for an explicitly selected kernel (or,
+#: for the files of ``DECLINED_BY_DESIGN``, reaches none). Other files are
+#: counted and printed, not required.
 MANIFEST = {
     f"{_DA}/imaging/test_continuum.py": _HOGBOM_CUBE,
     f"{_DA}/imaging/test_continuum_cube_agreement.py": _ASP_CUBE | _HOGBOM_CUBE,
@@ -90,8 +91,10 @@ _W_TERM = "its calls have w != 0, declined until path B (WP6)"
 
 #: ``{(kernel, impl): {test file: reason}}``: files of ``MANIFEST`` whose calls
 #: all decline that implementation by design (measured under ``dft=fast``):
-#: their calls are counted, and are parity evidence, but no executed call is
-#: required of them. The others must execute it.
+#: their calls are parity evidence, so instead of an executed call they need
+#: one call of the implementation that did not raise (on any path, declined
+#: included), which shows that their calls go through the hook. The others
+#: must execute it.
 DECLINED_BY_DESIGN = {
     ("dft", "fast"): {
         f"{_DA}/imaging/test_continuum_dft.py": _W_TERM + " (simulated with w)",
@@ -146,16 +149,21 @@ def _records(trace_dir, since):
 EXECUTED_PATHS = {("dft", "fast"): ("S",)}
 
 
+def _reached(record, selection):
+    """Whether a traced call of the implementation that ``selection``
+    (``{kernel: impl}``) selects for its kernel returned without raising, on
+    any of its paths."""
+    return record.get("error") is None and record["impl"] == selection.get(
+        record["kernel"]
+    )
+
+
 def _executed(record, selection):
     """Whether a traced call ran, without raising, the implementation that
     ``selection`` (``{kernel: impl}``) selects for its kernel."""
     name = selection.get(record["kernel"])
     paths = EXECUTED_PATHS.get((record["kernel"], name), (name,))
-    return (
-        record.get("error") is None
-        and record["impl"] == name
-        and record["path"] in paths
-    )
+    return _reached(record, selection) and record["path"] in paths
 
 
 def _attribute(records, intervals):
@@ -193,7 +201,8 @@ def summarize(records, explicit, effective, intervals, collected):
     missing : list of str
         ``"<file>: <kernel>.<entry>=<impl>"`` for each manifest entry of a
         collected file, for an explicitly selected kernel, that no call
-        executed.
+        executed (that no call reached, for a file of
+        ``DECLINED_BY_DESIGN``).
     foreign : Counter
         Calls per ``(kernel, impl)`` of an implementation the session does
         not select.
@@ -203,19 +212,22 @@ def summarize(records, explicit, effective, intervals, collected):
         (f, r["kernel"], r["entry"], r["impl"], r["path"], r.get("error"))
         for f, r in zip(files, records, strict=True)
     )
-    executed = Counter(
-        (f, r["kernel"], r["entry"])
-        for f, r in zip(files, records, strict=True)
-        if _executed(r, effective)
-    )
+    executed, reached = Counter(), Counter()
+    for f, r in zip(files, records, strict=True):
+        executed[f, r["kernel"], r["entry"]] += _executed(r, effective)
+        reached[f, r["kernel"], r["entry"]] += _reached(r, effective)
+
+    def satisfied(path, kernel, entry):
+        by_design = path in DECLINED_BY_DESIGN.get((kernel, explicit[kernel]), ())
+        return (reached if by_design else executed)[path, kernel, entry] > 0
+
     missing = [
         f"{path}: {kernel}.{entry}={explicit[kernel]}"
         for path in sorted(collected & MANIFEST.keys())
         for kernel, entries in MANIFEST[path].items()
         if kernel in explicit
-        and path not in DECLINED_BY_DESIGN.get((kernel, explicit[kernel]), ())
         for entry in entries
-        if executed[path, kernel, entry] == 0
+        if not satisfied(path, kernel, entry)
     ]
     foreign = Counter(
         (r["kernel"], r["impl"])
