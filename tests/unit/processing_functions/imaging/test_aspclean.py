@@ -1181,7 +1181,7 @@ class TestRingCleaning:
         assert out["timing"]["n_residual_components"] > 10
         assert out["stop_code"] == 2  # the threshold
         assert out["peak_residual"] <= threshold
-        assert out["iterations_performed"] < 0.7 * asp["iterations_performed"]
+        assert out["iterations_performed"] < 0.8 * asp["iterations_performed"]
         np.testing.assert_allclose(model.sum(), sky[mask > 0].sum(), rtol=0.05)
         # the residual update stays the exact linear convolution
         assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
@@ -1659,7 +1659,7 @@ class TestMaskCoverage:
     @pytest.mark.parametrize(
         "kwargs,least",
         [
-            ({}, 0.99),
+            ({}, 0.995),
             ({"asp_min_mask_coverage": 0.5}, 0.5),
             ({"asp_min_mask_coverage": 0.9}, 0.9),
             ({"asp_min_mask_coverage": 0.99}, 0.99),
@@ -1716,8 +1716,8 @@ class TestMaskCoverage:
         mask[44:85, 44:85] = 1.0
         out, *_ = self._clean(psf, dirty, mask, 1)
         ((i, j, sigma, amplitude),) = out["components"]
-        assert _mask_coverage(mask, i, j, sigma) >= 0.99
-        assert _mask_coverage(mask, i, j, 1.01 * sigma) < 0.99
+        assert _mask_coverage(mask, i, j, sigma) >= 0.995
+        assert _mask_coverage(mask, i, j, 1.01 * sigma) < 0.995
 
         i0, i1, j0, j1 = (int(c + s * 2.5 * sigma) for c in (i, j) for s in (-1, 1))
         box = (slice(j0, j1 + 1), slice(i0, i1 + 1))
@@ -1740,7 +1740,7 @@ class TestMaskCoverage:
         out, *_ = self._clean(psf, dirty, mask, 1)
         ((i, j, sigma, _),) = out["components"]
         assert sigma >= aspclean.psf_gaussian_width(psf)
-        assert _mask_coverage(mask, i, j, sigma) >= 0.99
+        assert _mask_coverage(mask, i, j, sigma) >= 0.995
 
     def test_soft_mask_counts_the_same_in_the_search_and_after_the_fit(self):
         """A fit at the scale tested is not cut for pixels the search counted."""
@@ -1759,8 +1759,8 @@ class TestMaskCoverage:
         psf = _centered_psf(n, n, 2.0)
         dirty = _linear_convolution(_gauss(n, n, 64, 64, 1.2, 5.0), psf)
         mask = np.ones_like(dirty)
-        out, *_ = self._clean(psf, dirty, mask, 1)
+        out, *_ = self._clean(psf, dirty, mask, 1, asp_min_mask_coverage=0.99)
         assert out["components"][0, 2] > 0
         mask[64, 65] = 0.0
-        out, *_ = self._clean(psf, dirty, mask, 1)
+        out, *_ = self._clean(psf, dirty, mask, 1, asp_min_mask_coverage=0.99)
         np.testing.assert_array_equal(out["components"][0, :3], [64, 64, 0])

@@ -510,7 +510,7 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("asp_residual_component_positive_only") = false,
           py::arg("asp_significance_gain") = 0.0, py::arg("asp_no_change_tolerance") = 0.0,
           py::arg("record_iteration_history") = false,
-          py::arg("asp_min_mask_coverage") = 0.99);
+          py::arg("asp_min_mask_coverage") = 0.995);
 
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp model update independently on every (time, frequency, "
@@ -542,7 +542,7 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("asp_residual_component_positive_only") = false,
           py::arg("asp_significance_gain") = 0.0, py::arg("asp_no_change_tolerance") = 0.0,
           py::arg("record_iteration_history") = false,
-          py::arg("asp_min_mask_coverage") = 0.99);
+          py::arg("asp_min_mask_coverage") = 0.995);
 
     m.def("psf_gaussian_width", &psf_width_helper,
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "

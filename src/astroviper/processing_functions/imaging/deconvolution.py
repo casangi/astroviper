@@ -1566,10 +1566,10 @@ def asp_clean(
           initial scale is searched only on the mask pixels where it has this
           share, so a scale too wide for the mask is not searched; a fit that
           falls short of it is cut back to the widest Gaussian that has it. A
-          share of 0.99 takes about 3 scale sizes of mask around the centre; a
-          source that fills its mask loses its wide scales, which can nearly
-          double the iterations. With 0 only the centre must be on the mask.
-          Default 0.99.
+          share of 0.995 takes about 3.3 scale sizes of mask around the centre;
+          a source that fills its mask loses its wide scales, which can take
+          two to four times the iterations. With 0 only the centre must be on
+          the mask. Default 0.995.
 
         Note: ``clean_box`` is ignored by the Asp algorithm (use a mask
         instead).
@@ -1710,7 +1710,7 @@ def asp_clean(
             deconvolve_params.get("asp_stop_after_hogbom_run", False)
         ),
         asp_min_mask_coverage=float(
-            deconvolve_params.get("asp_min_mask_coverage", 0.99)
+            deconvolve_params.get("asp_min_mask_coverage", 0.995)
         ),
         # Options beyond CASA and LibRA (off by default in the kernel).
         asp_scale_significance=bool(

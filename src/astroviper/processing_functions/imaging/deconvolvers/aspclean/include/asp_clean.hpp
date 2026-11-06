@@ -180,7 +180,7 @@ struct AspOptions {
     int asp_residual_component_fit_iterations = 10;
     double asp_no_change_tolerance = 0.0;
     bool record_iteration_history = false;
-    double asp_min_mask_coverage = 0.99;
+    double asp_min_mask_coverage = 0.995;
 };
 
 // Estimate the PSF Gaussian width (mean FWHM in pixels) that seeds the Asp
