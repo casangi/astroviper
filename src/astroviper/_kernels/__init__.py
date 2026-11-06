@@ -22,7 +22,7 @@ Hooked kernels and entries (implementations registered so far):
 ==========  ================================  ===============
 kernel      entries                           implementations
 ==========  ================================  ===============
-``dft``     ``dft_predict``                   ``ref``
+``dft``     ``dft_predict``                   ``ref``, ``fast``
 ``hogbom``  ``clean_cube``,                   ``ref``
             ``clean_cube_many_threads``
 ``asp``     ``clean``, ``clean_cube``         ``ref``
@@ -30,7 +30,9 @@ kernel      entries                           implementations
 
 ``ASTROVIPER_KERNELS_TRACE=<dir>``
     Each wrapped call appends one JSON line to
-    ``<dir>/kernels-<host>-<pid>.jsonl``: kernel, entry, impl, path, error
+    ``<dir>/kernels-<host>-<pid>.jsonl``: kernel, entry, impl, path (the
+    path the implementation reported for the call, such as ``"S"`` or
+    ``"declined"`` for ``dft=fast``, else the impl), error
     (the exception type name, or null), t_start and t_end (epoch seconds,
     ``t_end = t_start + wall_s``), wall_s, rusage_cpu_s with
     ``cpu_scope="process"`` (the process-wide CPU time of the call),
@@ -38,6 +40,11 @@ kernel      entries                           implementations
     arguments. A line that cannot be written is logged once and dropped; it
     never changes the call's result. Only hooked shims trace: setting the
     trace without ``ASTROVIPER_KERNELS`` traces nothing.
+
+``ASTROVIPER_KERNELS_ISA=generic``
+    A test override read once per process, at the import of a fast module:
+    its baseline instruction-set routines instead of the best ones the CPU
+    supports (they give the same bits). Any other value is an error.
 
 Processes inherit the selection only through their environment: set the
 variable before a Dask cluster starts. A worker that imported a shim with it

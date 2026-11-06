@@ -91,18 +91,18 @@ def test_reference_selections(value):
 
 
 @pytest.mark.parametrize(
-    "value, hogbom",
+    "value, dft, hogbom",
     [
-        ("fast", "fast"),
-        ("*=FAST", "fast"),
-        ("hogbom=fast", "fast"),
-        ("fast,hogbom=ref", "ref"),
-        ("hogbom=ref,fast", "fast"),
-        ("ref,hogbom=fast,dft=ref", "fast"),
+        ("fast", "fast", "fast"),
+        ("*=FAST", "fast", "fast"),
+        ("hogbom=fast", "ref", "fast"),
+        ("fast,hogbom=ref", "fast", "ref"),
+        ("hogbom=ref,fast", "fast", "fast"),
+        ("ref,hogbom=fast,dft=ref", "ref", "fast"),
     ],
 )
-def test_defaults_overrides_and_later_tokens_win(fake_fast, value, hogbom):
-    assert parse(value) == {**ALL_REFERENCE, "hogbom": hogbom}
+def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom):
+    assert parse(value) == {**ALL_REFERENCE, "dft": dft, "hogbom": hogbom}
 
 
 @pytest.mark.parametrize(
@@ -115,7 +115,7 @@ def test_defaults_overrides_and_later_tokens_win(fake_fast, value, hogbom):
         ),
         ("asp=gpu", "'asp' has no implementation 'gpu'; its implementations: ref"),
         ("hogbom=fast", "'hogbom' has no implementation 'fast'"),
-        ("fast", "no kernel implements 'fast' yet"),
+        ("gpu", "no kernel implements 'gpu' yet"),
         ("dft=ref:avx2", "variants (':...') are not supported"),
         ("ref:x", "variants (':...') are not supported"),
         *[(f"{k}=ref", f"kernel {k!r} is reserved") for k in RESERVED],
@@ -148,7 +148,7 @@ def test_selection_is_read_only_and_cached():
 
 def test_registry_holds_the_reference_pairs():
     assert {k: set(v) for k, v in _switch._REGISTRY.items()} == {
-        "dft": {"ref"},
+        "dft": {"ref", "fast"},
         "hogbom": {"ref"},
         "asp": {"ref"},
     }
@@ -246,6 +246,47 @@ def test_trace_lines(monkeypatch, tmp_path):
     assert first["shapes"]["max_iter_per_cycle_updated"] == [1, 1, 1]
     assert first["dtypes"]["max_iter_per_cycle_updated"] == "int32"
     assert "gain" not in first["shapes"]
+
+
+def test_trace_records_the_reported_path(fake_module, monkeypatch, tmp_path):
+    """A path an implementation reports names its own traced call only."""
+    fake_module(
+        "_kernels_fake_paths",
+        """
+        from astroviper._kernels._switch import report_path
+
+        def clean_cube(path=None, inner=None, fail=False):
+            if path:
+                report_path(path)
+            if inner:
+                inner(path="inner")
+            if fail:
+                raise RuntimeError(path)
+
+        clean_cube_many_threads = clean_cube
+        """,
+    )
+    monkeypatch.setenv(ENV, "hogbom=fast")
+    monkeypatch.setenv(TRACE_ENV, str(tmp_path / "trace"))
+    wrapper = dispatch("hogbom", _hogbom_ext.clean_cube)
+    wrapper(path="S")
+    impl("hogbom", "clean_cube", "fast")(path="untraced")
+    worker = threading.Thread(target=lambda: _switch.report_path("other thread"))
+    worker.start()
+    worker.join()
+    wrapper()
+    with pytest.raises(RuntimeError):
+        wrapper(path="declined", fail=True)
+    wrapper(path="outer", inner=wrapper)
+    (path,) = (tmp_path / "trace").iterdir()
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(r["path"], r["error"]) for r in records] == [
+        ("S", None),
+        ("fast", None),
+        ("declined", "RuntimeError"),
+        ("inner", None),
+        ("outer", None),
+    ]
 
 
 def test_trace_records_a_raising_call(monkeypatch, tmp_path):
