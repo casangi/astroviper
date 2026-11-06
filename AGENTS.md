@@ -213,8 +213,10 @@ Aspen fit (CASA's circular ones wrap the response of a component near an edge
 around to the opposite edge), separable spectra with real (half spectrum)
 transforms, no transform for point components, no end of the model
 update after a Hogbom run (CASA's, kept as
-`cycle_control_params["asp_stop_after_hogbom_run"]`), and no "diverging" guard
-(`AspMatrixCleaner` "5. Diverging" of CASA and LibRA). Beyond CASA, the
+`cycle_control_params["asp_stop_after_hogbom_run"]`), no "diverging" guard
+(`AspMatrixCleaner` "5. Diverging" of CASA and LibRA), and Gaussian components
+held on the mask by their share of flux (`asp_min_mask_coverage`), where CASA
+tests `mask (*) scale` with scales that do not sum to 1. Beyond CASA, the
 imager's Asp starts each model update with components shaped by the residual
 (Ma, Zhang & Zhang 2026) and cleans smoothed residual that is significant at
 its scale below the threshold (`asp_residual_components`,
