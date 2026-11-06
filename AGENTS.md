@@ -628,11 +628,39 @@ per-variable nodes.
   validates** (not in a central `config/` directory), and the decorator points
   the validator at the module's own directory, e.g.
   `validate(config_dir=os.path.dirname(os.path.abspath(__file__)))`. The schema
-  key is the function name. Validate **once, at the graph layer** — node tasks
-  and processing functions trust the already-checked `input_params`. For
-  internal/leaf-level checks reuse
-  `astroviper.utils.check_params.check_params` (type/range/allowed-value checks
-  with defaults) rather than ad-hoc validation.
+  key is the function name. JSON schemas check basic structure, types, and
+  allowed strings; numerical bounds and conditional relationships belong in
+  Python.
+  - **Validate at every callable layer:** distributed applications, node tasks,
+    and processing functions validate direct calls by default. Imaging entry
+    points use keyword-only `input_checked=False`. Import and call the applicable
+    configuration validators inside `if not input_checked`.
+  - **Skip repeated configuration validation:** after successful validation, an
+    upper layer passes `input_checked=True` down the stack; graph nodes also
+    carry it through `input_params`. This applies to distributed entry points
+    called from another validated workflow as well. Reuse the flag only for
+    unchanged configuration in the same imaging mode. Newly derived or changed
+    settings require their applicable checks before being marked checked.
+  - **Keep validation centralized and non-mutating:** imaging configuration
+    rules live in `processing_functions/imaging/config_check/`. The independent
+    residual-update, model-update, and driver-workflow validators share utility
+    predicates; they do not call one another. `check_config` orchestrates all
+    three. Drivers require complete configuration before I/O, output creation,
+    or graph construction; lower entry points check the settings they receive.
+    Raise on malformed configuration without inserting defaults, coercing
+    values, or substituting another configuration. Documented optional defaults
+    must not modify the caller's mapping. Do not add duplicate inline rules or
+    use the legacy default-inserting `check_params` helper for these checks.
+  - **Keep runtime validation active:** `input_checked` skips configuration
+    checks only. Checks on newly loaded data, derived products, numerical
+    results, and native array contracts remain active in their owning modules.
+    Metadata preflight must stay cheap: inspect coordinates, attributes, shapes,
+    and dtypes without reading bulk sample arrays or doing imaging work.
+  - **Design for all imaging modes:** each imaging validator distinguishes cube
+    and continuum, and single-field and multifield layouts. Multifield execution
+    is currently unsupported, but its rules belong in the same validation
+    architecture. Keep checks in clear logical blocks, with a description of
+    each check and motivation for numerical acceptance criteria.
 
 ---
 
