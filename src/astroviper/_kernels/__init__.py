@@ -23,7 +23,7 @@ Hooked kernels and entries (implementations registered so far):
 kernel      entries                           implementations
 ==========  ================================  ===============
 ``dft``     ``dft_predict``                   ``ref``, ``fast``
-``hogbom``  ``clean_cube``,                   ``ref``
+``hogbom``  ``clean_cube``,                   ``ref``, ``fast``
             ``clean_cube_many_threads``
 ``asp``     ``clean``, ``clean_cube``         ``ref``
 ==========  ================================  ===============
