@@ -12,7 +12,8 @@ the same exception type and message. Small inputs only (at most 256^2).
 * The entries are the reference's: the docstrings (so the names, types and
   defaults of the parameters, ``asp_min_mask_coverage = 0.995`` last), the
   refused control values (``ValueError``), the binding's checks, any thread
-  count, pickled and misaligned arrays, concurrent calls.
+  count, pickled arrays, misaligned arrays (read through aligned copies),
+  concurrent calls.
 * The scenes of #410's tests and more (``asp_min_mask_coverage``): two mask
   boxes, a tight mask with holes, soft masks, a full mask and no mask, a mask
   too small for every scale, fits cut back (to the widest Gaussian on the
@@ -22,8 +23,9 @@ the same exception type and message. Small inputs only (at most 256^2).
   tie of the cut-back's first test, mask values exactly at the search
   threshold 0.99 and the bounding-box threshold 1e-6 (and one double away, in
   float32 too), NaN, infinite and negative mask values, masks at the image
-  edges and single pixels, odd sizes and float32 inputs; with the kernel's
-  defaults and with the options ``deconvolution.asp_clean`` passes.
+  edges and single pixels, odd sizes and float32 inputs; with the binding's
+  defaults (gain 0.1), the kernel's as #410's tests run it (gain 0.3) and the
+  options ``deconvolution.asp_clean`` passes.
 * Cubes of such planes with their own thresholds, iteration limits and PSFs
   (or one broadcast PSF), float64 and float32, at 1 to 12 threads.
 * Through the switch: ``deconvolution.asp_clean`` with ``asp=fast`` passes
