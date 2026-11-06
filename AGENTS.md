@@ -133,8 +133,9 @@ the future.
 1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
    over data chunks via `graphviper...map`, reduces results
    (`graphviper...reduce`), then `generate_dask_workflow` + `dask.compute`. This
-   is the *only* layer that knows about Dask, chunking, and clusters. It also
-   creates the (empty) on-disk output structures that node tasks write into.
+   owns Dask execution, chunking, and clusters. The centralized imaging
+   validation module is the explicit exception described below. This layer
+   also creates the (empty) on-disk output structures that node tasks write into.
 2. **`node_tasks/`** — The functions that get delayed in `distributed_applications/`.
    They may load chunks of input data, write chunks of output data, and call
    `processing_functions`. The structures they write into are created by
@@ -160,6 +161,16 @@ the future.
    `utils/data_group_tools.py` (data-group bookkeeping — read it before touching
    data groups) and `utils/io.py` (Zarr variable definitions + chunk writers).
    The io.py will eventually move to XRADIO.
+
+**Configuration-validation exception:**
+`processing_functions/imaging/config_check/` deliberately serves all layers.
+It may validate backend and MPI options, append-node arguments, task mappings,
+and channel-partition coverage, and import GraphVIPER helpers needed to apply
+the workflow's coordinate-selection rules. These checks stay centralized here
+even though they understand graph configuration and structure. This exception
+permits validation only: graph construction, scheduling, and execution remain
+in `distributed_applications/`; input/output data I/O remains outside the
+validation module. Other processing functions retain the normal layer rules.
 
 ### Public API surface
 Each layer/subdomain re-exports its entry points via `__init__.py`. The imaging
