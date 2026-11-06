@@ -242,3 +242,83 @@ def test_multiple_selected_fields_are_rejected():
     processing_set["ms"].attrs["partition_info"]["field_name"] = ["one", "two"]
     with pytest.raises(ValueError, match="multiple fields"):
         preflight_imaging_inputs(processing_set, config, mode=CONTINUUM_SINGLE_FIELD)
+
+
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+@pytest.mark.parametrize("layout", ["one_partition", "separate_partitions"])
+def test_three_selected_fields_fail_without_loading_samples(mode, layout):
+    import dask.array as da
+    from dask import delayed
+
+    processing_set, config = inputs()
+    if mode == CUBE_SINGLE_FIELD:
+        config["image_params"]["n_taylor_terms"] = 1
+        config["deconvolver"] = "hogbom"
+
+    def forbidden_read():
+        pytest.fail("A multi-field selection loaded bulk samples before rejection")
+
+    source = processing_set["ms"]
+    for name in ("VISIBILITY", "WEIGHT", "FLAG", "UVW"):
+        variable = source[name]
+        source[name] = xr.DataArray(
+            da.from_delayed(
+                delayed(forbidden_read)(), shape=variable.shape, dtype=variable.dtype
+            ),
+            dims=variable.dims,
+        )
+    fields = [
+        "NGC4038 - Antennae North_0",
+        "NGC4038 - Antennae North_1",
+        "NGC4038 - Antennae North_2",
+    ]
+    if layout == "one_partition":
+        source.attrs["partition_info"]["field_name"] = fields
+    else:
+        processing_set = {}
+        for index, field in enumerate(fields):
+            child = source.copy(deep=True)
+            child.attrs["partition_info"] = {
+                **source.attrs["partition_info"],
+                "field_name": [field],
+            }
+            processing_set[f"ms{index}"] = child
+    snapshots = {
+        name: dataset.copy(deep=True) for name, dataset in processing_set.items()
+    }
+    with pytest.raises(
+        ValueError, match="Single-field imaging selected multiple fields"
+    ) as failure:
+        preflight_imaging_inputs(processing_set, config, mode=mode)
+    for field in fields:
+        assert field in str(failure.value)
+    for name, dataset in processing_set.items():
+        assert dataset.identical(snapshots[name])
+
+
+@pytest.mark.parametrize("role", ["correlated_data", "weight", "flag", "uvw"])
+def test_invalid_sample_storage_types_rejected_from_metadata(role):
+    processing_set, config = inputs()
+    source = processing_set["ms"]
+    name = source.attrs["data_groups"]["base"][role]
+    source[name] = source[name].astype(str)
+    with pytest.raises(TypeError, match=f"unsupported {role} dtype"):
+        check_input_metadata(source, config, mode=CUBE_SINGLE_FIELD)
+
+
+def test_missing_data_group_is_rejected_before_sample_reads():
+    processing_set, config = inputs()
+    source = processing_set["ms"]
+    source.attrs["data_groups"] = {}
+    with pytest.raises(KeyError, match="data group.*missing"):
+        check_input_metadata(source, config, mode=CUBE_SINGLE_FIELD)
+
+
+@pytest.mark.parametrize("dimension", ["frequency", "polarization"])
+def test_coordinate_metadata_must_be_one_dimensional(dimension):
+    processing_set, config = inputs()
+    source = processing_set["ms"]
+    values = source[dimension].values[:, None]
+    source = source.assign_coords({dimension: ((dimension, "extra"), values)})
+    with pytest.raises(ValueError, match="one-dimensional coordinate"):
+        check_input_metadata(source, config, mode=CUBE_SINGLE_FIELD)

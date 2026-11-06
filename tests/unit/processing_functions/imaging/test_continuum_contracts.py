@@ -288,3 +288,13 @@ def test_restoration_accepts_inclusive_primary_beam_limit():
         image, restoration_output="both", primary_beam_limit=1.0, continuum_mode="mvc"
     )
     assert image.SKY_RESTORED_FLAT_SKY.dims == image.SKY_MODEL.dims
+
+
+@pytest.mark.parametrize("deconvolver", ["MTMFS", "unknown", None])
+def test_restoration_rejects_algorithm_before_accessing_products(deconvolver):
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        restore_continuum_image,
+    )
+
+    with pytest.raises(ValueError, match="deconvolver"):
+        restore_continuum_image(None, deconvolver=deconvolver)

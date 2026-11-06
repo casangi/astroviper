@@ -24,7 +24,7 @@ def _weights(weighting):
 def test_briggs_requires_robust_without_inserting_a_default(mode, weighting):
     params = _weights(weighting)
     original = dict(params)
-    with pytest.raises(KeyError, match="robust"):
+    with pytest.raises(KeyError, match="Briggs weighting requires.*robust"):
         check_residual_update(
             {"imaging_weights_params": MappingProxyType(params)}, mode=mode
         )

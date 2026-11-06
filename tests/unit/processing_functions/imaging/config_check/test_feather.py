@@ -80,3 +80,17 @@ def test_opened_images_checked_without_mutating_output(
         driver.feather(outim, "hi", "lo", input_checked=input_checked)
     assert outim == {"name": str(tmp_path / "out")}
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("missing", ["highres", "lowres"])
+def test_feather_requires_sky_in_each_opened_image(missing):
+    from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+        check_feather_inputs,
+    )
+
+    good = xr.Dataset({"SKY": ("pixel", np.ones(2, dtype=np.float32))})
+    bad = xr.Dataset()
+    with pytest.raises(ValueError, match=f"{missing} must contain a SKY"):
+        check_feather_inputs(
+            bad if missing == "highres" else good, bad if missing == "lowres" else good
+        )

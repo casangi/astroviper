@@ -316,3 +316,57 @@ def test_msv2_fits_output(msv2_image, antennae_msv2, image_params, tmp_path):
         # dataset (time, frequency, polarization, l, m).
         expected = reference[name].values[0].transpose(0, 1, 3, 2)
         assert np.array_equal(data, expected, equal_nan=True), name
+
+
+@pytest.fixture(scope="module")
+def antennae_all_fields_ps(antennae_msv2, tmp_path_factory):
+    """Convert all three original fields for the single-field refusal tests."""
+    from xradio.measurement_set import convert_msv2_to_processing_set
+
+    directory = tmp_path_factory.mktemp("antennae_all_fields")
+    ms_copy = str(directory / MS_NAME)
+    shutil.copytree(antennae_msv2, ms_copy)
+    store = str(directory / "all-fields.ps.zarr")
+    convert_msv2_to_processing_set(ms_copy, store, partition_scheme=["FIELD_ID"])
+    return store
+
+
+@pytest.mark.parametrize("input_format", ["msv2", "processing_set"])
+@pytest.mark.parametrize("output_format", ["zarr", "fits"])
+def test_three_field_observation_is_refused_before_output(
+    monkeypatch,
+    tmp_path,
+    antennae_msv2,
+    antennae_all_fields_ps,
+    image_params,
+    input_format,
+    output_format,
+):
+    """Keep the original multi-field observation as an explicit negative case."""
+
+    def forbidden(*args, **kwargs):
+        pytest.fail(
+            "The multi-field configuration reached output or graph construction"
+        )
+
+    monkeypatch.setattr("xradio.image.write_image", forbidden)
+    monkeypatch.setattr("graphviper.graph_tools.generate_dask_workflow", forbidden)
+    source = antennae_msv2 if input_format == "msv2" else antennae_all_fields_ps
+    snapshot = _file_state(source)
+    output = tmp_path / "refused.img.zarr"
+    with pytest.raises(
+        ValueError, match="Single-field imaging selected multiple fields"
+    ) as failure:
+        _image_cube(
+            source,
+            str(output),
+            image_params,
+            msv2_open_options={"partition_scheme": ["FIELD_ID"]},
+            skunk_works=input_format == "msv2" or output_format == "fits",
+            output_image_format=output_format,
+        )
+    for field in ("North_0", "North_1", "North_2"):
+        assert field in str(failure.value)
+    assert not output.exists()
+    assert list(tmp_path.iterdir()) == []
+    assert _file_state(source) == snapshot

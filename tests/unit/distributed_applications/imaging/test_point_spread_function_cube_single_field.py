@@ -157,3 +157,28 @@ def test_the_direct_fourier_transform_point_spread_function(ps_store):
         rtol=1e-2,
     )
     xr.testing.assert_identical(dft.SENSITIVITY, gridder.SENSITIVITY)
+
+
+def test_psf_driver_checks_nested_configuration_before_io(tmp_path):
+    from astroviper.distributed_applications.imaging.point_spread_function_cube_single_field import (
+        point_spread_function_cube_single_field,
+    )
+
+    image_params = {
+        "image_size": [0, 16],
+        "cell_size": [-1e-5, 1e-5],
+        "phase_direction": [0, 0],
+        "frequency_coords": [1e9],
+        "time_coords": [0],
+        "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
+    }
+    output = tmp_path / "never-created.zarr"
+    with pytest.raises(ValueError, match="image_size"):
+        point_spread_function_cube_single_field(
+            "missing.ps.zarr",
+            image_params,
+            {"weighting": "natural"},
+            image_store=str(output),
+        )
+    assert not output.exists()

@@ -308,3 +308,26 @@ def test_coordinator_passes_same_inputs_to_each_independent_check(monkeypatch):
     module.check_config(config, mode=CONTINUUM_SINGLE_FIELD)
     assert calls == ["residual_update", "model_update", "driver_workflow"]
     assert config == {}
+
+
+def test_coordinator_rejects_invalid_component_configuration():
+    for mode, config in [
+        (CONTINUUM_SINGLE_FIELD, {"fft_backend": "bad"}),
+        (
+            CONTINUUM_SINGLE_FIELD,
+            {"continuum_mode": "mvc", "image_params": {"time_coords": [1.0, 2.0]}},
+        ),
+        (CONTINUUM_SINGLE_FIELD, {"image_params": {"primary_beam_model": "bad"}}),
+        (CUBE_SINGLE_FIELD, {"psf_fitting_method": "bad"}),
+        (CUBE_SINGLE_FIELD, {"gridding_kernel_params": {"support": 2}}),
+        (CUBE_SINGLE_FIELD, {"primary_beam_params": {"effective_dish_diameter": -1}}),
+        (
+            CONTINUUM_SINGLE_FIELD,
+            {
+                "image_params": {"polarization_coords": ["I"]},
+                "cycle_control_params": {"threshold": [1.0, 2.0]},
+            },
+        ),
+    ]:
+        with pytest.raises((ValueError, TypeError)):
+            check_config(config, mode=mode)

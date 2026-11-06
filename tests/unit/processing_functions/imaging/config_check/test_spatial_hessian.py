@@ -453,3 +453,82 @@ def test_invalid_spatial_transfers_fail(fault):
             precision="float64",
             frequency_units="cycles_per_pixel",
         )
+
+
+@pytest.mark.parametrize(
+    "fault", ["dimensions", "even_orders", "empty", "complex", "nonfinite"]
+)
+def test_actual_psf_layout_rejected_before_fourier_transform(fault):
+    psf = coupled_psfs()
+    if fault == "dimensions":
+        psf = psf[0]
+    elif fault == "even_orders":
+        psf = psf[:2]
+    elif fault == "empty":
+        psf = psf[:, :0]
+    elif fault == "complex":
+        psf = psf.astype(complex)
+    else:
+        psf[0, 0, 0] = np.nan
+    with pytest.raises(ValueError, match="finite real stack"):
+        check_psf_spatial_hessian(psf, precision="float64")
+
+
+@pytest.mark.parametrize("cells", [[0, 1], [1], [np.inf, 1]])
+def test_actual_psf_requires_finite_nonzero_two_axis_cells(cells):
+    with pytest.raises(ValueError, match="cell sizes"):
+        check_psf_spatial_hessian(coupled_psfs(), precision="float64", cell_size=cells)
+
+
+def test_spatial_blocks_reject_an_unsupported_working_precision():
+    with pytest.raises(ValueError, match="precision must"):
+        check_spatial_hessian_blocks(
+            np.ones((1, 1, 1)),
+            [0],
+            [0],
+            precision="float16",
+            frequency_units="cycles_per_pixel",
+        )
+
+
+@pytest.mark.parametrize(
+    "frequencies,weights",
+    [([[1e9]], [1]), ([1e9], [1, 1]), ([np.nan], [1]), ([1e9], [-1]), ([0], [1])],
+)
+def test_gaussian_requires_matching_positive_finite_spectral_samples(
+    frequencies, weights
+):
+    with pytest.raises(ValueError, match="matching positive finite"):
+        check_gaussian_spatial_hessian(
+            frequencies,
+            weights,
+            1000,
+            n_taylor_terms=1,
+            reference_frequency=1e9,
+            image_size=[8, 8],
+            cell_size=[1e-5, 1e-5],
+            precision="float64",
+        )
+
+
+@pytest.mark.parametrize(
+    "size,cells",
+    [
+        ([1, 8], [1e-5, 1e-5]),
+        ([8.0, 8.0], [1e-5, 1e-5]),
+        ([8, 8], [0, 1e-5]),
+        ([8, 8], [np.nan, 1e-5]),
+    ],
+)
+def test_gaussian_requires_valid_integer_extents_and_angular_cells(size, cells):
+    with pytest.raises(ValueError, match="two image sizes"):
+        check_gaussian_spatial_hessian(
+            np.array([1e9]),
+            np.ones(1),
+            1000,
+            n_taylor_terms=1,
+            reference_frequency=1e9,
+            image_size=size,
+            cell_size=cells,
+            precision="float64",
+        )
