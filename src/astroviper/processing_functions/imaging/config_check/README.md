@@ -224,11 +224,14 @@ matrix at each spatial frequency is `H_kl(u) = Fourier(P_(k+l))(u)`.
   No Gaussian cleaning components are introduced. Evaluate at most 33 by 33
   coordinates sampled from the image's half-Fourier grid. This is a coarse
   spatial approximation and may miss problems between sampled modes.
-- **Actual PSFs:** center-to-origin shift and transform every Taylor PSF, then
+- **Actual PSFs:** remove index zero along each even spatial axis, leaving
+  paired negative/positive lags about the peak at `size // 2`. Odd axes are
+  retained unchanged. Center-to-origin shift and transform every Taylor PSF, then
   examine every stored half-Fourier mode for each time/polarization plane.
-  This uses the full PSF structure, including interactions between different
+  This uses the retained PSF structure, including interactions between different
   delta-component positions. It assumes periodic convolution and does not model
   a restricted CLEAN mask or the exact finite-boundary subtraction operator.
+  The imaging PSF is unchanged; only the diagnostic uses the paired-lag patch.
 
 The common checks are:
 
@@ -239,8 +242,15 @@ The common checks are:
    invertible. Negative order-zero transfers above this floor remain visible
    to the curvature checks rather than being hidden as missing support.
 2. **Self-adjointness.** Supported modes whose Taylor transfers have significant
-   imaginary parts are reported as non-Hermitian. The tolerance is
-   `nterms * eps * max(abs(transfer_order))` for each order. PSFs are not silently
+   imaginary parts are reported as non-Hermitian. For actual PSFs, the absolute
+   allowance per order is `eps * max(1, ceil(log2(N_pixels))) * sum(abs(PSF_order))`
+   on the retained patch. The FFT has logarithmically many stages, and the
+   unnormalized transform obeys `abs(FFT(E)) <= sum(abs(E))`. This gives an
+   absolute scale even at Fourier cancellations; it is a roundoff estimate,
+   not a rigorous bound on upstream gridding errors. Use the larger epsilon
+   of the input and working precisions. Analytic transfers retain
+   `nterms * eps * max(abs(transfer_order))`. Support and Taylor-rank thresholds
+   remain independent. PSFs are not silently
    symmetrized; these modes are excluded from the symmetric-eigenvalue analysis.
 3. **Taylor curvature/rank within supported modes.** Equilibrate each real block
    by its diagonal, then distinguish negative curvature from eigenvalues

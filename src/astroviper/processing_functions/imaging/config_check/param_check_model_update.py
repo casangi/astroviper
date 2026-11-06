@@ -1237,9 +1237,10 @@ def check_model_products(
             # --- Full spatial PSF blocks for delta components ---
             # Local inverses above protect the actual component update, but do
             # not retain interactions between different component positions.
-            # Fourier blocks of the full PSFs do. Diagnose all supported modes
-            # before any plane can change, using the same rules as Gaussian
-            # preflight; missing spatial modes are not required to be invertible.
+            # Fourier blocks retain those interactions on a periodic patch of
+            # paired PSF lags. Diagnose its supported modes before any plane
+            # can change; missing spatial modes need not be invertible. The
+            # actual-PSF helper handles unmatched edges and FFT roundoff.
             spatial_diagnostics = check_psf_spatial_hessian(
                 psf_values[time_index, :, polarization_index],
                 precision=residual.dtype,

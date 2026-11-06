@@ -13,6 +13,7 @@ def check_spatial_hessian_blocks(
     precision,
     frequency_units,
     context=None,
+    hermitian_absolute_tolerance=None,
 ):
     """Inspect Fourier blocks of a periodic, shift-invariant Taylor operator.
 
@@ -29,6 +30,10 @@ def check_spatial_hessian_blocks(
         Units of the supplied spatial coordinates, e.g. cycles_per_radian.
     context : mapping, optional
         Stage, field, time, and polarization identifiers for warnings.
+    hermitian_absolute_tolerance : array-like, optional
+        Nonnegative absolute imaginary-part allowance per Taylor PSF order.
+        Actual PSF transforms supply their spatial FFT roundoff estimate.
+        Analytic transfers use the working-precision relative allowance.
 
     Returns
     -------
@@ -77,6 +82,18 @@ def check_spatial_hessian_blocks(
     support_scale = float(np.max(np.abs(values[0])))
     support_tolerance = relative_tolerance * support_scale
     order_scales = np.max(np.abs(values), axis=1)
+    if hermitian_absolute_tolerance is None:
+        hermitian_tolerance = relative_tolerance * order_scales
+    else:
+        hermitian_tolerance = np.asarray(hermitian_absolute_tolerance)
+        if (
+            hermitian_tolerance.shape != (transfer.shape[0],)
+            or not np.all(np.isfinite(hermitian_tolerance))
+            or np.any(hermitian_tolerance < 0)
+        ):
+            raise ValueError(
+                "Hermitian tolerances must be finite nonnegative values per PSF order."
+            )
     result = {
         "representation": "periodic_spatial_fourier_blocks",
         "frequency_units": frequency_units,
@@ -89,6 +106,7 @@ def check_spatial_hessian_blocks(
         "mode_count": values.shape[1],
         "support_relative_tolerance": float(relative_tolerance),
         "support_absolute_tolerance": float(support_tolerance),
+        "hermitian_absolute_tolerance": hermitian_tolerance.tolist(),
         "unsupported_mode_count": 0,
         "supported_mode_count": 0,
         "non_hermitian_mode_count": 0,
@@ -135,7 +153,7 @@ def check_spatial_hessian_blocks(
         # indicates an asymmetric PSF after centering. Report it rather than
         # silently discarding the imaginary part and asserting positive rank.
         hermitian = np.all(
-            np.abs(block_values.imag) <= relative_tolerance * order_scales[:, None],
+            np.abs(block_values.imag) <= hermitian_tolerance[:, None],
             axis=0,
         )
         record("non_hermitian", indices[supported & ~hermitian])
@@ -357,6 +375,8 @@ def check_psf_spatial_hessian(psf, *, precision, cell_size=None, context=None):
     ----------
     psf : ndarray
         Real, centered Taylor PSFs of one plane, shape ``(2*nterms-1, l, m)``.
+        The peak/zero lag is at ``(n_l//2, n_m//2)``. Index zero is excluded
+        on each even spatial axis to retain only paired positive/negative lags.
     precision : {"float32", "float64"}
         Working image precision used for support/rank thresholds.
     cell_size : array-like, optional
@@ -383,13 +403,45 @@ def check_psf_spatial_hessian(psf, *, precision, cell_size=None, context=None):
     cells = np.ones(2) if cell_size is None else np.asarray(cell_size)
     if cells.shape != (2,) or not np.all(np.isfinite(cells)) or np.any(cells == 0):
         raise ValueError("Spatial-Hessian cell sizes must be finite and nonzero.")
-    # Center-to-origin shifting removes the common Fourier phase of a centered
-    # convolution kernel. No even-symmetry assumption or PSF symmetrization is
-    # applied: imaginary transfer components are diagnosed by the shared check.
+    # --- Paired spatial lags ---
+    # An even axis of length 2m samples lags -m,...,m-1 about peak index m.
+    # Its -m sample has no +m partner. Periodically wrapping that edge would
+    # compare different physical lags and create spurious imaginary transfer.
+    # Exclude only that leading sample, leaving -(m-1),...,+m-1. Odd axes
+    # already have paired lags. This view changes neither the imaging PSF nor
+    # its interior asymmetry; the diagnostic uses the retained periodic patch,
+    # not the exact finite-image normal operator.
+    input_shape = psf.shape[1:]
+    start_l = 1 if input_shape[0] % 2 == 0 else 0
+    start_m = 1 if input_shape[1] % 2 == 0 else 0
+    psf = psf[:, start_l:, start_m:]
+
+    # --- FFT roundoff allowance ---
+    # A spatial FFT has O(log2(N_pixels)) stages. With the unnormalized forward
+    # transform, a perturbation E obeys |FFT(E)(u)| <= sum_x |E(x)|. Use the
+    # per-order L1 norm as an absolute amplitude scale, avoiding cancellation
+    # or tiny individual Fourier modes in a relative denominator. The stage
+    # count times epsilon is a numerical error estimate, not a strict bound on
+    # every FFT implementation or on upstream gridding errors. Include the
+    # supplied working precision and the input precision. This allowance is
+    # for self-adjointness only; support and Taylor-rank thresholds are separate.
+    epsilon = np.finfo(precision).eps
+    if psf.dtype.kind == "f":
+        epsilon = max(epsilon, np.finfo(psf.dtype).eps)
+    n_pixels = psf.shape[1] * psf.shape[2]
+    fft_stages = max(1, int(np.ceil(np.log2(n_pixels))))
+    fft_relative_tolerance = epsilon * fft_stages
+    hermitian_tolerance = np.empty(psf.shape[0], dtype=np.float64)
+
+    # Center-to-origin shifting removes the common Fourier phase. No PSF
+    # symmetrization or projection onto real transfer values is performed.
     transfer = np.empty(
         (psf.shape[0], psf.shape[1], psf.shape[2] // 2 + 1), dtype=np.complex128
     )
     for order in range(psf.shape[0]):
+        # Reduce one plane at a time, avoiding another full Taylor stack.
+        absolute_scale = np.sum(np.abs(psf[order]), dtype=np.float64)
+        hermitian_tolerance[order] = fft_relative_tolerance * absolute_scale
         transfer[order] = np.fft.rfft2(np.fft.ifftshift(psf[order]))
     result = check_spatial_hessian_blocks(
         transfer,
@@ -400,6 +452,10 @@ def check_psf_spatial_hessian(psf, *, precision, cell_size=None, context=None):
         if cell_size is None
         else "cycles_per_radian",
         context={**(context or {}), "stage": "actual_psf"},
+        hermitian_absolute_tolerance=hermitian_tolerance,
     )
     result["sampling"] = "all_half_fourier_modes"
+    result["input_image_shape"] = list(input_shape)
+    result["diagnostic_image_shape"] = list(psf.shape[1:])
+    result["fft_relative_roundoff_tolerance"] = float(fft_relative_tolerance)
     return result

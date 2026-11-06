@@ -47,17 +47,19 @@ def test_fourier_blocks_match_explicit_spatial_delta_component_matrix():
     psfs = coupled_psfs(size=4, coupling=0.5)
     # Construct the full 2*n_pixels square convolution Hessian as an oracle.
     # Only tests construct this matrix; production inspects small Fourier blocks.
-    kernels = np.fft.ifftshift(psfs, axes=(1, 2))
-    pixels = list(np.ndindex(4, 4))
-    dense = np.empty((32, 32))
+    # The diagnostic removes the unpaired leading lag on even axes. Build
+    # the independent oracle for exactly that retained periodic domain.
+    kernels = np.fft.ifftshift(psfs[:, 1:, 1:], axes=(1, 2))
+    pixels = list(np.ndindex(3, 3))
+    dense = np.empty((18, 18))
     for k in range(2):
         for l in range(2):
             for a, first in enumerate(pixels):
                 for b, second in enumerate(pixels):
                     separation = tuple(
-                        (first[axis] - second[axis]) % 4 for axis in range(2)
+                        (first[axis] - second[axis]) % 3 for axis in range(2)
                     )
-                    dense[k * 16 + a, l * 16 + b] = kernels[k + l][separation]
+                    dense[k * 9 + a, l * 9 + b] = kernels[k + l][separation]
     eigenvalues = np.linalg.eigvalsh(dense)
     result = check_psf_spatial_hessian(psfs, precision="float64")
     assert result["minimum_relative_eigenvalue"] == pytest.approx(
@@ -143,6 +145,97 @@ def test_asymmetric_psf_is_not_silently_symmetrized():
     with pytest.warns(RuntimeWarning, match="Spatial Taylor-Hessian diagnostic"):
         result = check_psf_spatial_hessian(psfs, precision="float64")
     assert result["non_hermitian_mode_count"] > 0
+
+
+@pytest.mark.parametrize(
+    "shape", [(64, 64), (192, 192), (192, 128), (64, 65), (65, 64), (65, 65)]
+)
+@pytest.mark.parametrize("precision", ["float32", "float64"])
+def test_self_adjoint_psf_retains_only_paired_lags(shape, precision):
+    # A tilted cosine is physically even under simultaneous lag inversion,
+    # but its unmatched negative-edge lines need not be even individually.
+    l = np.arange(shape[0]) - shape[0] // 2
+    m = np.arange(shape[1]) - shape[1] // 2
+    plane = np.cos(0.17 * l[:, None] + 0.31 * m[None, :]).astype(precision)
+    psfs = np.stack([plane, np.zeros_like(plane), 0.25 * plane])
+    before = psfs.copy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # Curvature is independent.
+        result = check_psf_spatial_hessian(psfs, precision=precision)
+    retained = [n - int(n % 2 == 0) for n in shape]
+    assert result["input_image_shape"] == list(shape)
+    assert result["diagnostic_image_shape"] == retained
+    assert result["mode_count"] == retained[0] * (retained[1] // 2 + 1)
+    assert result["non_hermitian_mode_count"] == 0
+    np.testing.assert_array_equal(psfs, before)
+
+
+@pytest.mark.parametrize("size", [32, 192])
+@pytest.mark.parametrize("precision", ["float32", "float64"])
+@pytest.mark.parametrize("error_factor", [0.25, 4.0])
+def test_fft_stage_tolerance_accepts_roundoff_but_reports_asymmetry(
+    size, precision, error_factor
+):
+    psfs = coupled_psfs(size=size, coupling=0).astype(precision)
+    epsilon = np.finfo(precision).eps
+    relative = epsilon * np.ceil(np.log2((size - 1) ** 2))
+    psfs[0, size // 2 + 1, size // 2] = error_factor * relative
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        result = check_psf_spatial_hessian(psfs, precision=precision)
+    assert result["fft_relative_roundoff_tolerance"] == relative
+    assert result["hermitian_absolute_tolerance"][0] == pytest.approx(
+        relative * np.abs(psfs[0]).sum(dtype=np.float64), rel=1e-12, abs=0
+    )
+    assert (result["non_hermitian_mode_count"] > 0) == (error_factor > 1)
+
+
+@pytest.mark.parametrize("tolerance", [[-1, 0, 0], [np.nan, 0, 0], [0, 0]])
+def test_invalid_hermitian_allowance_is_rejected(tolerance):
+    with pytest.raises(ValueError, match="Hermitian tolerances"):
+        check_spatial_hessian_blocks(
+            np.ones((3, 1, 1)),
+            [0],
+            [0],
+            precision="float64",
+            frequency_units="cycles_per_pixel",
+            hermitian_absolute_tolerance=tolerance,
+        )
+
+
+@pytest.mark.parametrize("single_precision", [False, True])
+def test_gridded_even_psf_passes_self_adjointness(single_precision):
+    from astroviper.processing_functions.imaging.residual_update import (
+        imaging_setup_single_field,
+    )
+    from tests.unit.processing_functions.imaging.test_exact_psf_subtraction import (
+        _empty_image,
+    )
+    from tests.unit.processing_functions.imaging.test_max_cycles_auto import (
+        IMAGE_PARAMS,
+        _processing_set,
+    )
+
+    params = {**IMAGE_PARAMS, "image_size": [192, 192]}
+    image, _ = imaging_setup_single_field(
+        _processing_set(),
+        _empty_image(192),
+        params,
+        {"weighting": "natural"},
+        processing_set_data_group_name="base",
+        single_precision_image=single_precision,
+        fft_backend="scipy",
+    )
+    psf = image.POINT_SPREAD_FUNCTION.values[0, 0, :1]
+    before = psf.copy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        result = check_psf_spatial_hessian(
+            psf, precision="float32" if single_precision else "float64"
+        )
+    assert result["non_hermitian_mode_count"] == 0
+    assert result["assessed_mode_count"] > 0
+    np.testing.assert_array_equal(psf, before)
 
 
 def test_spatial_block_batches_keep_correct_mode_locations():
