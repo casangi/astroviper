@@ -5,7 +5,7 @@ import pytest
 import xarray as xr
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
-    _apply_exact_frequency_selection_to_continuum_mapping,
+    _check_continuum_frequency_assignment,
     _validate_continuum_output_keys,
     combine_continuum_chunks,
 )
@@ -131,4 +131,4 @@ def test_partition_selection_rejects_ambiguous_or_incomplete_frequency_metadata(
         mapping[0]["task_coords"]["frequency"]["data"] = [90.0, 100.0, 110.0]
     ps = xr.DataTree.from_dict({"child": child})
     with pytest.raises(ValueError, match=message):
-        _apply_exact_frequency_selection_to_continuum_mapping(mapping, ps)
+        _check_continuum_frequency_assignment(mapping, ps)
