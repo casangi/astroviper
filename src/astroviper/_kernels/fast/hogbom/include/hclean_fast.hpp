@@ -43,20 +43,21 @@
 // reference clean_cube runs them: each thread cleans whole planes from its
 // start and waits for none (small planes on up to about sqrt(work / the cost
 // of a thread) threads, which start one after another while planes are left
-// that none has taken). A small clean box on a plane of at least 65,536
-// pixels, whose final passes subtract the deferred components from the rest
-// of the plane, has them shared by a team. Other planes run in crews: whole
-// planes per thread when at least twice as many planes as threads iterate,
-// else one crew for large planes
-// (or a lone iterating one), which runs them one after another, or several
-// smaller crews side by side. A plane that stops at its first search (Stokes
-// V beside I) counts for no crew. A crew synchronises at every iteration; its
-// threads wait for the next step by polling for a bounded time that adapts to
-// how their recent waits ended, and then sleep. Every thread of a call has
-// ended when it returns. Unlike the reference clean_cube, which runs one
-// thread per plane, the fast one puts several threads on one plane when that
-// is faster: the same results, from more cores at once. The results never
-// depend on the number of threads or on the instruction set.
+// that none has taken; when their boxes are small, a plane that stops at its
+// first search counts for none). A small clean box on a plane of at least
+// 65,536 pixels, whose final passes subtract the deferred components from the
+// rest of the plane, has them shared by a team. Other planes run in crews:
+// whole planes per thread when at least twice as many planes as threads
+// iterate, else one crew for large planes (or a lone iterating one), which
+// runs them one after another, or several smaller crews side by side. A plane
+// that stops at its first search (Stokes V beside I) counts for no crew. A
+// crew synchronises at every iteration; its threads wait for the next step by
+// polling for a bounded time that adapts to how their recent waits ended, and
+// then sleep. Every thread of a call has ended when it returns. Unlike the
+// reference clean_cube, which runs one thread per plane, the fast one puts
+// several threads on one plane when that is faster: the same results, from
+// more cores at once. The results never depend on the number of threads or on
+// the instruction set.
 //
 // Memory: besides its inputs and the iteration history, a call keeps the
 // plans of its split planes with a budget (a few bytes per row and per

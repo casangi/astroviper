@@ -22,8 +22,9 @@ set or on these choices.
 Threads: a call uses up to ``processing_function_threads`` (< 1 counts as 1,
 as in the reference), and no more than the CPUs it may run on and its work
 justify: many small planes get up to about the square root of their work in
-units of the cost of starting a thread, often fewer than the reference starts,
-and a thread starts only while planes are left that no thread has taken.
+units of the cost of starting a thread (tiny planes that stop at their first
+search count for none), often fewer than the reference starts, and a thread
+starts only while planes are left that no thread has taken.
 Unlike the reference ``clean_cube``, which runs one thread per plane, the
 fast one may put several threads on one plane: the same results, from more
 cores at once. Its threads poll for a bounded time between the steps of an
@@ -36,12 +37,13 @@ small planes column by column has a copy of one plane, its mask and its PSF.
 
 Speed, measured on one machine (12 cores, 24 threads; the WP4 reports): calls
 of several small planes at 12 and 24 threads, and calls of larger planes, were
-faster than the reference, with three exceptions. A call that does almost
-nothing (a plane or two that stop within a few iterations: tens of
-microseconds) took up to about 10 microseconds longer, the fixed cost of a
-call. Planes of 8 x 8 pixels on one thread ran at 0.88 to 1.2 times the
-reference's speed (it varied from process to process). And narrow planes just
-over 65,536 pixels (1,400 x 48) ran at 0.88 to 1.1 times its speed.
+faster than the reference (or about as fast, on small planes whose masks keep
+few pixels), with three exceptions. A call that does almost nothing (small
+planes that stop within a few iterations: tens of microseconds in all) took
+up to about 15 microseconds longer, the fixed cost of a call. Planes of 8 x 8
+pixels on one thread ran at 0.83 to 1.2 times the reference's speed (it
+varied from process to process). And narrow planes just over 65,536 pixels
+(1,400 x 48) ran at 0.88 to 1.1 times its speed.
 
 Each call takes one path, reported to the kernel switch for its trace line:
 

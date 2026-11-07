@@ -27,7 +27,7 @@ compares NaN bits too.
   direct pass, row by row or column by column, larger ones split into
   searched and deferred pixels. The random cubes and the edge cases run at
   the sizes of each; planes and boxes either side of the limits, narrow
-  planes and rows of several chunks run too.
+  planes, sparse masks and rows of several chunks run too.
 * Multi-plane cubes: per-plane budgets, thresholds and masks, a broadcast PSF,
   Stokes I active with V idle, many small planes at 1 to 24 threads, and the
   production paths: crews of several threads on a plane, side by side or one
@@ -40,13 +40,14 @@ compares NaN bits too.
   exception; arrays the call writes that share memory with another argument
   decline; misaligned arrays take the fast path through aligned copies.
 * Resources: no thread outlives a call, small planes start no more threads
-  than planes with a budget while a small box on a large plane gets the team
-  for its final passes, idle threads sleep (side by side and in a team), the
-  GIL is released during a call, threads that cannot be started leave a
-  smaller team with the same bits, memory does not grow with the iterations,
-  and an error after the first write leaves a misaligned cube as cleaned as
-  an aligned one. Without the extension the package raises
-  ModuleNotFoundError, so that this module skips.
+  than planes with a budget (none when they stop at their first search)
+  while a small box on a large plane gets the team for its final passes,
+  idle threads sleep (side by side and in a team), the GIL is released
+  during a call, threads that cannot be started leave a smaller team with
+  the same bits, memory does not grow with the iterations, and an error
+  after the first write leaves a misaligned cube as cleaned as an aligned
+  one. Without the extension the package raises ModuleNotFoundError, so that
+  this module skips.
 * The trace of the hooked shim names each call's path.
 """
 
@@ -1120,6 +1121,40 @@ def test_narrow_planes_are_the_reference(entry, shape):
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
+def test_small_planes_with_sparse_masks_are_the_reference(entry):
+    """Small planes whose masks keep little of the boxes that the direct pass
+    scans: masks keeping about 5, 20, 30 and 95 % of the plane, a single
+    pixel, an empty mask whose zero peaks a negative threshold keeps running,
+    and calls whose planes keep everything or nothing (a quarter and a half of
+    them kept), at 1, 6 and 24 threads."""
+    kept = np.zeros((1, 2, 2, 24, 30), bool)
+    kept[0, 0, 0] = True
+    for i, (shape, mask, threshold) in enumerate(
+        (
+            ((3, 48), "random5", 0.0),
+            ((64, 64), "random20", 0.0),
+            ((64, 64), "random30", 0.0),
+            ((40, 100), "random95", 0.0),
+            ((48, 52), "single", 0.0),
+            ((100, 71), "empty", -1.0),
+            ((24, 30), kept, 0.0),
+            ((24, 30), kept | kept[:, :, ::-1], 0.0),
+        )
+    ):
+        case = _case(
+            *shape,
+            (np.float64, np.float32)[i % 2],
+            planes=(1, 2, 2),
+            mask=mask,
+            niter=300,
+            threshold=threshold,
+            divergence=threshold >= 0,
+            seed=200 + i,
+        )
+        _check(entry, case, threads=(1, 6, 24))
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
 @pytest.mark.parametrize("dtype", [np.float64, np.float32])
 @pytest.mark.parametrize("shape", [(8, 600), (3, 2000), (13, 513)])
 def test_rows_of_several_chunks_in_the_direct_pass_are_the_reference(
@@ -1501,6 +1536,30 @@ def test_small_planes_start_no_more_threads_than_planes_with_a_budget(n):
     case["kwargs"]["max_iter_per_cycle_updated"].flat[4:] = 0
     before, most = _threads_seen(lambda: _run(FAST["clean_cube"], case, 24))
     assert before + 1 < most <= before + 1 + 3, (before, most)
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/task"), reason="needs /proc")
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_small_planes_that_stop_at_their_first_search_start_no_thread(entry):
+    """12 planes of 16 x 16 with budgets of 1000 and thresholds above their
+    peaks, at 24 threads: their first searches, made before the threads are
+    chosen, stop them all, so the call runs on the calling thread alone (the
+    reference starts a thread per plane), with the reference's bits."""
+    case = _case(
+        16,
+        16,
+        np.float64,
+        planes=(1, 3, 4),
+        niter=1000,
+        threshold=1e9,
+        divergence=False,
+        seed=78,
+    )
+    expected = _run(REFERENCE[entry], case)
+    actual = []
+    before, most = _threads_seen(lambda: actual.append(_run(FAST[entry], case, 24)))
+    _assert_same(expected, actual[0])
+    assert most == before + 1, (before, most)
 
 
 @pytest.mark.skipif(not os.path.isdir("/proc/self/task"), reason="needs /proc")

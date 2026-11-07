@@ -80,6 +80,14 @@ constexpr long kDirectPixels = 8192;
 constexpr int kDirectWidth = 64;
 constexpr long kDirectNarrowPixels = 65536;
 
+// When the boxes of a call's planes for the direct pass add up to at most
+// kHintPixels pixels, each plane's first search is made before the threads
+// are chosen (E): a plane that stops at it needs no thread, and the threads
+// that its budget would justify cost more than the work of such a call (M: 2
+// planes of 12 x 260 that stop at once, 12 threads: 59 us before, 18 us with
+// the hint, 77 us in the reference).
+constexpr long kHintPixels = 16384;
+
 // A small clean box on a plane of at least kSharedFinalPixels pixels leaves
 // final passes (the deferred subtractions from the rest of the plane) that
 // the call's threads share in a team (E): on smaller planes they are too
@@ -1366,7 +1374,19 @@ bool clean_cube(const Cube<T>& c) {
         }
         side_by_side = unsplit || (box < 2 * kPixelsPerThread && unshared);
         if (unsplit) {
-            threads = side_by_side_threads(c.threads, active, pass_updates + final_updates);
+            // Planes that stop at their first search need no thread (a hint:
+            // each model update makes that search again), when looking is cheap.
+            int iterating = active;
+            double updates = pass_updates + final_updates;
+            if (box * static_cast<long>(nplanes) <= kHintPixels) {
+                for (const Plane<T>& p : planes) {
+                    if (p.max_iter > 0 && stops_at_once(c, p, kernels)) {
+                        --iterating;
+                        updates -= iteration * p.max_iter;
+                    }
+                }
+            }
+            threads = side_by_side_threads(c.threads, iterating, updates);
         } else {
             const long usable = std::max(active * crew_threads, final_threads(final_updates));
             threads = team_size(c.threads, usable, pass_updates + final_updates);
