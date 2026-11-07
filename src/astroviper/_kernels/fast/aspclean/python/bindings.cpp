@@ -126,7 +126,7 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     py::buffer_info ki;
     if (mask.size() > 0) ki = check_array<T>(mask, "mask", 2, shp, false);
     // No mask: a null pointer (ki holds none).
-    const Aligned<T> r(ri, true), m(mi, true), p(pi, false), k(ki, false);
+    const Aligned<T> rd(ri, true), md(mi, true), pd(pi, false), kd(ki, false);
 
     deconvolvers::DivergenceControl<double> divergence;
     divergence.max_iter_divergence = max_iter_divergence;
@@ -136,7 +136,7 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     {
         py::gil_scoped_release release;  // C++ touches no Python objects
         res = aspclean_fast::aspclean_plane<T>(
-            r.get(), m.get(), p.get(), k.get(), nx, ny, gain, threshold_per_cycle,
+            rd.get(), md.get(), pd.get(), kd.get(), nx, ny, gain, threshold_per_cycle,
             max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width, asp_largest_scale,
             asp_stop_point_mode, asp_scale_normalization_method, asp_stop_after_hogbom_run,
             verbose, divergence, processing_function_threads, options);
@@ -289,7 +289,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     py::buffer_info nit_info =
         check_array<int>(max_iter_per_cycle_updated, "max_iter_per_cycle_updated", 3, cshp, false);
     // No mask: a null pointer (ki holds none).
-    const Aligned<T> r(ri, true), m(mi, true), p(pi, false), k(ki, false);
+    const Aligned<T> rd(ri, true), md(mi, true), pd(pi, false), kd(ki, false);
     const Aligned<double> thr(thr_info, false);
     const Aligned<int> nit(nit_info, false);
 
@@ -302,7 +302,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     {
         py::gil_scoped_release release;
         aspclean_fast::aspclean_cube<T>(
-            r.get(), m.get(), p.get(), k.get(), nt, nf, np_img, np_psf, nx,
+            rd.get(), md.get(), pd.get(), kd.get(), nt, nf, np_img, np_psf, nx,
             ny, gain, thr.get(), nit.get(), asp_fused_threshold, asp_psf_width, asp_largest_scale,
             asp_stop_point_mode, asp_scale_normalization_method, asp_stop_after_hogbom_run,
             processing_function_threads, divergence, results.data(), options);
