@@ -185,7 +185,12 @@ NO_UPDATE_THRESHOLD = 100.0
 
 
 def _image_restored(
-    ps_store, image_store, n_tasks, clean_mask=None, **cycle_control_params
+    ps_store,
+    image_store,
+    n_tasks,
+    clean_mask=None,
+    restoration_output="both",
+    **cycle_control_params,
 ):
     """The driver on the point source in ``n_tasks`` node tasks, restored and
     primary beam corrected, keeping the model, the mask and the primary
@@ -222,7 +227,7 @@ def _image_restored(
         single_precision_image=False,
         n_mapping_parallelism={"frequency": n_tasks},
         restore=True,
-        primary_beam_correction=True,
+        restoration_output=restoration_output,
         clean_mask=clean_mask,
     )
 
@@ -527,7 +532,9 @@ def test_msv2_without_the_engine(tmp_path, monkeypatch):
 )
 def test_msv2_refuses_writing_into_the_input(tmp_path, flag):
     ms_path = _measurement_set_like(tmp_path)
-    with pytest.raises(ValueError, match="never writes into its input"):
+    with pytest.raises(
+        ValueError, match="not implemented for the in-memory cube workflow"
+    ):
         _image_cube(ms_path, str(tmp_path / "cube.img.zarr"), [1e11], **{flag: True})
     _assert_nothing_written(tmp_path)
 
@@ -781,3 +788,23 @@ def test_msv2_run_does_not_write_the_measurement_set(
     _assert_imaged(result)
     assert _file_state(ms_path) == before
     assert not os.path.exists(os.path.join(ms_path, "XRADIO_PARTITIONS"))
+
+
+@pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both"])
+def test_cube_publishes_only_selected_restoration_products(
+    tmp_path, synchronous_dask, output
+):
+    ps_store = _simulate_point_source(tmp_path)
+    store = str(tmp_path / "selected.img.zarr")
+    _image_restored(ps_store, store, 1, restoration_output=output, max_iter=0)
+    image = load_image(store)
+    assert ("SKY_RESTORED" in image) == (output in ("apparent", "both"))
+    assert ("SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in image) == (
+        output in ("primary_beam_corrected", "both")
+    )
+    selected = (
+        "SKY_RESTORED"
+        if output == "apparent"
+        else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+    )
+    assert np.isfinite(image[selected]).any()

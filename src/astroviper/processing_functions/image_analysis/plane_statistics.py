@@ -34,7 +34,7 @@ PLANE_STATISTIC_NAMES = (
 DEFAULT_STATISTICS_VARIABLES = (
     "sky_residual",
     "sky_restored",
-    # Written by correct_sky_by_primary_beam (primary_beam_correction=True;
+    # Written by correct_sky_by_primary_beam (restoration_output="primary_beam_corrected" or "both";
     # branch 265-port-sirius) -- resolved by upper-casing the key when the
     # io table of this branch does not list it yet.
     "sky_restored_primary_beam_corrected",

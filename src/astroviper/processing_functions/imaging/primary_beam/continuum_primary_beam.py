@@ -160,8 +160,15 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode=
     """
     params = dict(image_params)
     model = params.get("primary_beam_model", "auto")
-    if model not in ("auto", "airy", "casa_airy"):
-        raise ValueError("primary_beam_model must be 'auto', 'airy', or 'casa_airy'.")
+    from astroviper.processing_functions.imaging.config_check._common import (
+        check_continuum_mode,
+    )
+    from astroviper.processing_functions.imaging.config_check._primary_beam import (
+        check_continuum_primary_beam,
+    )
+
+    check_continuum_primary_beam(image_params)
+    check_continuum_mode(continuum_mode)
     if "telescope_name" in antenna_xds:
         names = {
             str(name).strip().upper()
@@ -178,8 +185,6 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode=
     # which instead uses a 24.5-m unobstructed aperture with the same support.
     reference_frequency = params.get("reference_frequency")
     frequencies = np.asarray(params.get("frequency_coords", []), dtype=float)
-    if continuum_mode not in ("mfs", "mvc"):
-        raise ValueError("continuum_mode must be 'mfs' or 'mvc'.")
     if reference_frequency is None:
         reference_frequency = np.mean(frequencies) if frequencies.size else np.nan
     frequency_ghz = float(reference_frequency) / 1e9

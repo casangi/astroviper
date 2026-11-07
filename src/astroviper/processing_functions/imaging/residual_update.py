@@ -25,6 +25,8 @@ def imaging_setup_single_field(
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
+    *,
+    input_checked: bool = False,
 ):
     """Perform the once-per-chunk imaging setup before the imaging cycle loop.
 
@@ -55,11 +57,21 @@ def imaging_setup_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -79,6 +91,8 @@ def imaging_setup_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     image_data_group_out_name : str, optional
         Image data group that the PSF, primary beam and residual image are
         registered under.  Default ``"residual"``.
@@ -159,6 +173,12 @@ def imaging_setup_single_field(
         Zernike aperture models and Jones images are not supported: they are
         not azimuthally symmetric and depend on the parallactic angle.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -166,6 +186,17 @@ def imaging_setup_single_field(
     return_df : pandas.DataFrame
         One-row timing frame for the setup step.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CUBE_SINGLE_FIELD)
+        # Setup also selects the Gaussian fitter used by model restoration.
+        check_model_update(locals(), mode=CUBE_SINGLE_FIELD)
 
     import numpy as np
     import toolviper.utils.logger as logger
@@ -222,6 +253,7 @@ def imaging_setup_single_field(
         ms_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
         processing_function_threads=processing_function_threads,
         frequency_matching="nearest",
+        input_checked=True,
     )
     T_weights = time.time() - T_start_weight
 
@@ -274,6 +306,7 @@ def imaging_setup_single_field(
         overwrite=True,
         processing_function_threads=processing_function_threads,
         fitting_method=psf_fitting_method,
+        input_checked=True,
     )
     T_psf_fit = time.time() - start
 
@@ -313,6 +346,8 @@ def residual_update_cube_single_field(
     image_data_group_out_name="residual",
     last_residual_update=False,
     gridding_kernel_params=None,
+    *,
+    input_checked: bool = False,
 ):
     """Run one residual update.
 
@@ -343,7 +378,16 @@ def residual_update_cube_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     model_exists : bool
         ``False`` for the first residual update (the dirty image: there is no
         sky model to degrid yet); ``True`` once a model update has run, in
@@ -373,6 +417,8 @@ def residual_update_cube_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     image_data_group_in_name : str, optional
         Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
         ``"mask"``) roles name the input data variables.  Datasets without
@@ -432,6 +478,12 @@ def residual_update_cube_single_field(
         ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
         gridders' that sum times the kernel's stencil sums.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -443,6 +495,14 @@ def residual_update_cube_single_field(
         ``T_degrid`` and ``T_grid`` time the two transforms and the FFT
         timings are zero.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CUBE_SINGLE_FIELD)
 
     import numpy as np
     import toolviper.utils.logger as logger

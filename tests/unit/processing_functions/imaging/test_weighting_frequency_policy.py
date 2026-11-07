@@ -228,7 +228,7 @@ def test_one_channel_continuum_weights_equal_cube_weights(monkeypatch, weighting
             setup(
                 ps,
                 image,
-                {"n_taylor_terms": 1, "reference_frequency": 1.0e9},
+                {"n_taylor_terms": 1, "reference_frequency": 1.0e9, "fft_padding": 1.2},
                 local,
                 processing_set_data_group_name="base",
             )

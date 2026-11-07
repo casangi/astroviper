@@ -487,6 +487,29 @@ def test_install_static_products_does_not_alias_the_cache():
     )
 
 
+@pytest.mark.parametrize("missing", [None, "UV_SAMPLING", "UV_SAMPLING_NORMALIZATION"])
+def test_requested_static_sampling_grid_is_complete_and_independent(missing):
+    static = _static_products()
+    static["UV_SAMPLING"] = xr.DataArray(
+        np.ones((1, 3, 1, 2, 2), dtype=complex),
+        dims=("time", "psf_taylor_order", "polarization", "u", "v"),
+    )
+    static["UV_SAMPLING_NORMALIZATION"] = xr.DataArray(
+        np.ones((1, 3, 1)), dims=("time", "psf_taylor_order", "polarization")
+    )
+    if missing:
+        static = static.drop_vars(missing)
+        image = xr.Dataset()
+        with pytest.raises(KeyError, match="supplied together"):
+            continuum_node._install_static_continuum_products(image, static)
+        assert not image.data_vars
+    else:
+        result = continuum_node._install_static_continuum_products(xr.Dataset(), static)
+        assert result.attrs["data_groups"]["residual"]["uv_sampling"] == "UV_SAMPLING"
+        result.UV_SAMPLING.values[:] = 0
+        np.testing.assert_array_equal(static.UV_SAMPLING, 1)
+
+
 def test_install_static_products_rejects_frequency_still_in_use():
     """A live channel cube prevents replacement of its frequency coordinate."""
     image = xr.Dataset(
@@ -510,12 +533,15 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
     monkeypatch.setattr(
         continuum_node,
         "model_update_continuum_single_field",
-        lambda input_data, input_params: {"image": input_data["image"]},
+        lambda input_data, input_params, **kwargs: {"image": input_data["image"]},
     )
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda image, input_params, previous_model_xds: (xr.Dataset(), None),
+        lambda image, input_params, previous_model_xds=None, *, input_checked: (
+            xr.Dataset(),
+            None,
+        ),
     )
     result = continuum_node.continuum_cycle_append_node(
         {
@@ -550,7 +576,8 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
         lambda image, input_params, **kwargs: (image, xr.Dataset(), None),
     )
 
-    def fake_model_update(input_data, input_params):
+    def fake_model_update(input_data, input_params, *, input_checked=False):
+        assert input_checked is True
         captured["history"] = input_data["deconvolution"]
         return {"image": input_data["image"]}
 
@@ -562,7 +589,10 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda image, input_params, previous_model_xds: (xr.Dataset(), None),
+        lambda image, input_params, previous_model_xds=None, *, input_checked: (
+            xr.Dataset(),
+            None,
+        ),
     )
 
     continuum_node.continuum_cycle_append_node(
@@ -592,6 +622,7 @@ def _weight_node_params():
     return {
         "image_params": {
             "phase_direction": [0.0, 0.0],
+            "fft_padding": 1.2,
             "image_size": [2, 2],
             "cell_size": [1.0, 1.0],
             "time_coords": [0.0],
@@ -685,6 +716,7 @@ def test_residual_update_node_passes_the_gridding_kernel_on(
         fake_residual_update,
     )
     params = _weight_node_params()
+    params["image_params"]["fft_padding"] = 1.2
     params.update(
         image_store="image.zarr",
         weight_memory_mode="in_place",
@@ -858,11 +890,11 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
     dims = ("time", "taylor_term", "polarization", "l", "m")
     image = xr.Dataset(
         {
-            "SKY_RESIDUAL": (dims, np.ones((1, 2, 1, 3, 3))),
-            "SKY_MODEL": (dims, np.zeros((1, 2, 1, 3, 3))),
+            "SKY_RESIDUAL": (dims, np.ones((1, 1, 1, 3, 3))),
+            "SKY_MODEL": (dims, np.zeros((1, 1, 1, 3, 3))),
             "POINT_SPREAD_FUNCTION": (
                 ("time", "psf_taylor_order", "polarization", "l", "m"),
-                np.ones((1, 3, 1, 3, 3)),
+                np.ones((1, 1, 1, 3, 3)),
             ),
             "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
                 ("time", "polarization"),
@@ -984,6 +1016,12 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
             }
         },
     )
+    # Each backend gets products for its supported Taylor order. The MT-MFS
+    # PSF moments have a positive definite Taylor Hessian.
+    image.POINT_SPREAD_FUNCTION.loc[{"psf_taylor_order": 1}] = 0.0
+    image.POINT_SPREAD_FUNCTION.loc[{"psf_taylor_order": 2}] = 0.25
+    if deconvolver == "hogbom":
+        image = image.isel(taylor_term=slice(1), psf_taylor_order=slice(1))
     params = {
         "max_iter": 10,
         "max_cycles": 3,
@@ -1011,7 +1049,8 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         assert not np.shares_memory(model, previous_model.SKY_MODEL.values)
         start_flux = model[0, 0].sum(axis=(-2, -1))
         model[0, 0] += 1.0
-        model[0, 1] -= 0.25
+        if deconvolver == "mtmfs":
+            model[0, 1] -= 0.25
         result = ImagingDict()
         for pol, iterations in enumerate((1, 2)):
             result.add(
@@ -1084,7 +1123,8 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         assert fields["t_model_update"][0] > 0
     increment = (result["image"].SKY_MODEL - previous_model.SKY_MODEL).values
     np.testing.assert_array_equal(increment[0, 0], 1.0)
-    np.testing.assert_array_equal(increment[0, 1], -0.25)
+    if deconvolver == "mtmfs":
+        np.testing.assert_array_equal(increment[0, 1], -0.25)
 
 
 @pytest.mark.parametrize(
@@ -1530,6 +1570,19 @@ def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch)
     assert model_uv is predicted
 
 
+def _with_single_term_psf(image):
+    """Supply the valid single-term products required even when CLEAN stops."""
+    image = image.isel(taylor_term=slice(1))
+    image["POINT_SPREAD_FUNCTION"] = image.SKY_RESIDUAL.rename(
+        {"taylor_term": "psf_taylor_order"}
+    ).copy(deep=True)
+    image["POINT_SPREAD_FUNCTION"].data[...] = 1.0
+    image.attrs["data_groups"]["residual"]["point_spread_function"] = (
+        "POINT_SPREAD_FUNCTION"
+    )
+    return image
+
+
 def test_zero_max_iter_uses_current_controller_fields():
     from astroviper.processing_functions.imaging.utils import CycleController
 
@@ -1537,6 +1590,7 @@ def test_zero_max_iter_uses_current_controller_fields():
     image.attrs["data_groups"]["residual"] = {"sky": "SKY_RESIDUAL"}
     image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (("time", "polarization"), [[0.1]])
     controller = CycleController(max_iter=0)
+    image = _with_single_term_psf(image)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {"cycle_control_params": {"max_iter": 0}, "controller": controller},
@@ -1588,6 +1642,7 @@ def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
     monkeypatch.setattr(
         continuum_processing, "model_update_mtmfs_single_field", unexpected_update
     )
+    image = _with_single_term_psf(image)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {
@@ -1697,6 +1752,7 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
     monkeypatch.setattr(
         continuum_processing, "model_update_mtmfs_single_field", unexpected_update
     )
+    image = _with_single_term_psf(image)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {
@@ -1758,6 +1814,7 @@ def test_model_update_constructs_controller_when_omitted():
         "max_iter_per_cycle": 1,
     }
 
+    image = _with_single_term_psf(image)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {"cycle_control_params": params},
@@ -1851,7 +1908,8 @@ def _run_accelerated_append(
     controller = CycleController(max_iter=100)
     controller.ensure_planes(1, 1, 2)
 
-    def fake_model_update(input_data, input_params):
+    def fake_model_update(input_data, input_params, *, input_checked=False):
+        assert input_checked is True
         image = input_data["image"]
         increment = (0.0 if converged else 0.25) * image.SKY_RESIDUAL
         previous = input_params.get("model_xds")
@@ -1903,14 +1961,17 @@ def test_default_append_does_not_enter_cycle_acceleration(monkeypatch, params):
     monkeypatch.setattr(
         continuum_node,
         "model_update_continuum_single_field",
-        lambda input_data, input_params: {
+        lambda input_data, input_params, *, input_checked: {
             "image": input_data["image"],
             "timing_model_update": pd.DataFrame({"T_model_update": [0.0]}),
         },
     )
     captured = {}
 
-    def prepare(model_update_xds, input_params, previous_model_xds):
+    def prepare(
+        model_update_xds, input_params, previous_model_xds=None, *, input_checked
+    ):
+        assert input_checked is True
         captured["model"] = model_update_xds
         captured["previous"] = previous_model_xds
         return xr.Dataset(), None
@@ -2041,10 +2102,10 @@ def test_only_conjugate_gradient_writes_back_the_hogbom_residual(
 ):
     from astroviper.processing_functions.imaging.utils import CycleController
 
-    image = _acceleration_image(0)
+    image = _acceleration_image(0).isel(taylor_term=slice(0, 1))
     image["POINT_SPREAD_FUNCTION"] = (
         ("time", "psf_taylor_order", "polarization", "l", "m"),
-        np.ones((1, 3, 2, 4, 4)),
+        np.ones((1, 1, 2, 4, 4)),
     )
     image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
         ("time", "polarization"),
@@ -2171,6 +2232,8 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
         ("time", "psf_taylor_order", "polarization", "l", "m"),
         np.ones((1, 3, 2, 4, 4)),
     )
+    # The central Taylor Hessian is the identity, not a singular all-ones matrix.
+    image["POINT_SPREAD_FUNCTION"].values[:, 1] = 0.0
     image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
         ("time", "polarization"),
         [[0.1, 0.1]],
@@ -2229,7 +2292,7 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
     monkeypatch.setattr(
         continuum_node,
         "_prepare_post_update_continuum_model_state",
-        lambda model_update_xds, input_params, previous_model_xds: (
+        lambda model_update_xds, input_params, previous_model_xds=None, *, input_checked: (
             xr.Dataset(),
             None,
         ),
@@ -2286,6 +2349,8 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
             ("time", "psf_taylor_order", "polarization", "l", "m"),
             np.ones((1, 3, 2, 4, 4)),
         )
+        # The central Taylor Hessian is the identity, not a singular all-ones matrix.
+        image["POINT_SPREAD_FUNCTION"].values[:, 1] = 0.0
         image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
             ("time", "polarization"),
             [[0.1, 0.1]],
@@ -2401,3 +2466,104 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
             assert fields["model_flux_negative"][cycle] == pytest.approx(
                 plane[plane < 0].sum(), rel=1e-12
             )
+
+
+@pytest.mark.parametrize(
+    "top_level_limit,control_limit,expected_limit,expected_peak",
+    [
+        (0.2, None, 0.2, 0.05),
+        (0.2, 0.2, 0.2, 0.05),
+        (None, 0.2, 0.2, 0.05),
+        (None, None, 0.0, 5.0),
+        (0.0, None, 0.0, 5.0),
+    ],
+)
+def test_continuum_stopping_and_model_update_share_effective_beam_limit(
+    monkeypatch, top_level_limit, control_limit, expected_limit, expected_peak
+):
+    """An outer residual must affect cycle thresholds only if it can be cleaned."""
+    image, _, _ = make_single_term_continuum_image()
+    image.SKY_RESIDUAL.values.fill(0.05)
+    image.SKY_RESIDUAL.values[..., 0, 0] = 5.0
+    image.PRIMARY_BEAM.values[..., 0, 0] = 0.1
+    image.MAX_SIDELOBE_POINT_SPREAD_FUNCTION.values.fill(0.5)
+    controls = {
+        "max_iter": 10,
+        "max_cycles": 3,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "max_iter_per_cycle": 5,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    if control_limit is not None:
+        controls["primary_beam_limit"] = control_limit
+    original_controls = controls.copy()
+    input_params = {"cycle_control_params": controls}
+    if top_level_limit is not None:
+        input_params["primary_beam_limit"] = top_level_limit
+
+    class BackendReached(Exception):
+        pass
+
+    def inspect_model_update(image_arg, deconvolver, effective_controls, **kwargs):
+        assert effective_controls["primary_beam_limit"] == expected_limit
+        # The real residual statistics and cycle controller must use the same
+        # support as the model update: half of the largest cleanable residual.
+        np.testing.assert_allclose(
+            effective_controls["threshold_per_cycle"], 0.5 * expected_peak
+        )
+        raise BackendReached
+
+    monkeypatch.setattr(
+        continuum_processing, "model_update_mtmfs_single_field", inspect_model_update
+    )
+    with pytest.raises(BackendReached):
+        continuum_node.model_update_continuum_single_field(
+            {"image": image}, input_params
+        )
+    assert input_params["cycle_control_params"] is controls
+    assert controls == original_controls
+
+
+@pytest.mark.parametrize("input_checked", [False, True])
+def test_preparation_checks_actual_taylor_layout_with_shared_predicate(
+    monkeypatch, input_checked
+):
+    image = make_runaway_taylor_image()
+    config = {
+        "image_params": {},
+        "n_taylor_terms": 2,
+        "n_psf_taylor_terms": 3,
+        "reference_frequency": 1e9,
+        "image_data_group_in_name": "residual",
+        "gridding_kernel_params": {"type": "dft"},
+    }
+    monkeypatch.setattr(
+        continuum_node,
+        "_resolve_continuum_append_configuration",
+        lambda *args, **kwargs: config,
+    )
+    dft = importlib.import_module(
+        "astroviper.processing_functions.imaging.direct_fourier_transform"
+    )
+    monkeypatch.setattr(dft, "normalize_dft_image", lambda *args, **kwargs: None)
+
+    class LayoutChecked(Exception):
+        pass
+
+    def check(product, **kwargs):
+        assert product.identical(image.SKY_RESIDUAL)
+        assert kwargs == {
+            "name": "SKY_RESIDUAL",
+            "term_dimension": "taylor_term",
+            "expected_count": 2,
+        }
+        raise LayoutChecked
+
+    monkeypatch.setattr(continuum_processing, "check_continuum_taylor_layout", check)
+    with pytest.raises(LayoutChecked):
+        continuum_node._prepare_continuum_image(
+            image, {}, initialize_static_products=True, input_checked=input_checked
+        )

@@ -27,6 +27,8 @@ def point_spread_function_cube_single_field(
     load_data_variables=None,
     task_id=0,
     input_data=None,
+    *,
+    input_checked=False,
 ):
     """Make the point spread function of one frequency chunk of a single-field
     cube, with its beam fit and the weight statistics of every channel.
@@ -50,11 +52,21 @@ def point_spread_function_cube_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -181,6 +193,12 @@ def point_spread_function_cube_single_field(
         Pre-loaded ``{ms_name: node}`` visibilities; when given, nothing is
         loaded.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
@@ -195,6 +213,14 @@ def point_spread_function_cube_single_field(
           ``MAX_SIDELOBE_POINT_SPREAD_FUNCTION`` and the variables of
           :func:`~astroviper.processing_functions.imaging.weight_statistics.calculate_weight_statistics_single_field`.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import pandas as pd
@@ -282,6 +308,7 @@ def point_spread_function_cube_single_field(
             psf_fitting_method=psf_fitting_method,
             gridding_kernel_params=gridding_kernel_params,
             primary_beam_params=primary_beam_params,
+            input_checked=True,
         )
         timing_frames.append(timing_chan)
 

@@ -74,3 +74,59 @@ def test_missing_disk_cache_fails_explicitly(tmp_path, kind):
 def test_cache_coordinate_indexer_rejects_ambiguous_stored_channels():
     with pytest.raises(ValueError, match="duplicate"):
         _stored_coordinate_indexer([1.0, 1.0, 2.0], [1.0], "frequency")
+
+
+@pytest.fixture(params=["primary_beam", "weights", "observed_grid"])
+def cache_attachment(request):
+    from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+        _mapping_with_task_observed_grids,
+        _mapping_with_task_primary_beams,
+        _mapping_with_task_weights,
+    )
+
+    return {
+        "primary_beam": (
+            _mapping_with_task_primary_beams,
+            "primary_beam_xds",
+            "MVC primary-beam",
+        ),
+        "weights": (_mapping_with_task_weights, "weight_datasets", "imaging-weight"),
+        "observed_grid": (
+            _mapping_with_task_observed_grids,
+            "observed_visibility_grid_xds",
+            "MVC visibility-grid",
+        ),
+    }[request.param]
+
+
+@pytest.mark.parametrize("task_ids", [[], [0], [0, 2]])
+def test_task_caches_attach_by_identity_without_changing_inputs(
+    cache_attachment, task_ids
+):
+    attach, product_key, _ = cache_attachment
+    tasks = {task_id: {"task_id": task_id} for task_id in task_ids}
+    # Reversed insertion order must not associate a product with another task.
+    cache = {task_id: object() for task_id in reversed(task_ids)}
+    original_tasks = {task_id: dict(task) for task_id, task in tasks.items()}
+    result = attach(tasks, cache)
+    for task_id in task_ids:
+        assert result[task_id][product_key] is cache[task_id]
+        assert result[task_id]["task_id"] == task_id
+        assert result[task_id] is not tasks[task_id]
+    assert tasks == original_tasks
+    assert set(result) == set(tasks) == set(cache)
+
+
+@pytest.mark.parametrize("cache_ids", [[], [0], [0, 2, 3], [0, 3]])
+def test_task_caches_reject_missing_and_foreign_ids(cache_attachment, cache_ids):
+    attach, _, cache_name = cache_attachment
+    tasks = {0: {"task_id": 0}, 2: {"task_id": 2}}
+    cache = {task_id: object() for task_id in cache_ids}
+    with pytest.raises(
+        ValueError, match=f"{cache_name} cache does not match"
+    ) as caught:
+        attach(tasks, cache)
+    assert "expected=[0, 2]" in str(caught.value)
+    assert f"received={sorted(cache_ids)}" in str(caught.value)
+    assert tasks == {0: {"task_id": 0}, 2: {"task_id": 2}}
+    assert set(cache) == set(cache_ids)

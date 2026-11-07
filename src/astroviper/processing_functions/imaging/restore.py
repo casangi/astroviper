@@ -6,11 +6,80 @@ from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
+from astroviper.utils.param_docs import shares_param_docs
 
 # FWHM = 2 * sqrt(2 * ln 2) * sigma. Matches the factor used by the PSF Gaussian
 # fit (astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit)
 # so a beam built here round-trips back to the same [major, minor, pa].
 FWHM_factor = 2.0 * np.sqrt(2.0 * np.log(2.0))
+
+
+# -----------------------------------------------------------------------------
+# Runtime restoration product roles
+# -----------------------------------------------------------------------------
+
+
+def resolve_restoration_product(img_xds, data_group_name, role, *, fallback=None):
+    """Resolve a required restoration role without reading or modifying pixels.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image products and their data-group registrations.
+    data_group_name : str
+        Group containing the requested role.
+    role : str
+        Logical role, such as sky, restoring-beam parameters, or primary beam.
+    fallback : str, optional
+        Explicit compatibility variable used only when the role is unregistered.
+        Continuum permits legacy PSF and restoring-beam registrations; cube
+        restoration requires its registered roles. A missing registered variable
+        never falls back to another product.
+
+    Returns
+    -------
+    str
+        Existing variable name. No data-group entries or defaults are inserted.
+
+    Raises
+    ------
+    KeyError
+        If the data group, required role, or referenced variable is missing.
+    """
+    # --- Required data group ---
+    groups = img_xds.attrs.get("data_groups", {})
+    if data_group_name not in groups:
+        raise KeyError(
+            f"Restoration data group {data_group_name!r} is missing. "
+            f"Available groups are {list(groups)}."
+        )
+
+    # --- Registered role or explicitly supported legacy product ---
+    variable_name = groups[data_group_name].get(role)
+    if variable_name is None:
+        if fallback is None:
+            raise KeyError(
+                f"Restoration data group {data_group_name!r} does not define {role!r}."
+            )
+        if fallback not in img_xds:
+            raise KeyError(
+                f"Restoration data group {data_group_name!r} does not define {role!r}, "
+                f"and {fallback!r} is absent."
+            )
+        variable_name = fallback
+
+    # --- Actual product availability ---
+    if variable_name not in img_xds:
+        raise KeyError(
+            f"Restoration variable {variable_name!r} for role {role!r} "
+            f"in data group {data_group_name!r} is missing."
+        )
+    return variable_name
+
+
+# -----------------------------------------------------------------------------
+# Clean-beam kernels and plane restoration
+# -----------------------------------------------------------------------------
 
 
 def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtype):
@@ -516,6 +585,7 @@ def _restore_image_arrays(
     }
 
 
+@shares_param_docs
 def restore_image(
     img_xds: xr.Dataset,
     image_data_group_in_residual_name: str = "residual",
@@ -526,10 +596,12 @@ def restore_image(
     beam_polarization_index: int = 0,
     processing_function_threads: int = 1,
     consume_model: bool = False,
-    primary_beam_correction: bool = False,
+    restoration_output: str = "apparent",
     primary_beam_limit: float = 0.2,
     primary_beam_key: str = "primary_beam",
     overwrite: bool = True,
+    *,
+    input_checked: bool = False,
 ):
     """Restore an image: model convolved with the clean beam plus the residual.
 
@@ -548,8 +620,9 @@ def restore_image(
     The clean beam is normalised to unit peak, so a model point source of flux
     ``F`` (Jy) becomes a Gaussian of peak ``F`` Jy/beam.
 
-    With ``primary_beam_correction`` the primary beam corrected restored image
-    is made in the same pass and stored as
+    With ``restoration_output="primary_beam_corrected"`` only the corrected
+    image is made; ``"both"`` also retains the apparent image. The corrected
+    image is stored as
     ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED`` (role ``sky_primary_beam_corrected``
     of the restored group): the model and the residual are divided by the
     primary beam before the convolution, ``(SKY_MODEL / P) * B + SKY_RESIDUAL
@@ -557,10 +630,13 @@ def restore_image(
     :func:`primary_beam_corrected_plane`; CASA's ``pbcor`` divides the
     restored image instead).
 
+    Corrected-only output does not allocate an apparent restored cube and
+    leaves the input model intact even when ``consume_model=True``.
+
     Efficiency
     ----------
     The work is done plane by plane so no full-cube temporaries are allocated
-    beyond the single restored cube.  The convolution is a real FFT
+    beyond the requested restored cubes.  The convolution is a real FFT
     (``scipy.fft.rfft2`` / ``irfft2``, the inverse done in two in-place steps
     that give the same result without scipy's hidden copy of the spectrum,
     see ``_inverse_rfft2``) at the image dtype (single-precision
@@ -571,7 +647,7 @@ def restore_image(
     and the inverse-transform output, with the residual added into the restored
     cube without a further temporary.  Planes whose model is entirely zero skip
     the convolution (the restored plane is just the residual).  With
-    ``consume_model=True`` even the restored cube allocation is avoided: the
+    ``consume_model=True`` and apparent output, its cube allocation is avoided: the
     model cube's buffer is reused and the model variable dropped.
 
     Parameters
@@ -605,10 +681,11 @@ def restore_image(
         beam (the same beam is applied to every polarization).  Default ``0``
         (Stokes I).
     processing_function_threads : int, optional
-        Number of worker threads handed to ``scipy.fft`` for the per-plane
-        FFTs.  Values ``<= 0`` use all available cores.  Default ``1``.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     consume_model : bool, optional
-        If ``True`` the restored cube is written into the **model** variable's
+        If ``True`` and apparent output is requested, that cube is written
+        into the **model** variable's
         buffer instead of a freshly allocated cube (each model plane is fully
         read into its forward FFT before its slot is overwritten), and the
         model data variable is removed from ``img_xds`` afterwards — the model
@@ -617,10 +694,16 @@ def restore_image(
         image cube of peak memory.  Requires the model and residual dtypes to
         match; otherwise a fresh cube is allocated as for ``False``.  Default
         ``False`` (model preserved).
-    primary_beam_correction : bool, optional
-        If ``True`` also make the primary beam corrected restored image
-        (needs the ``primary_beam_key`` role in the residual data group).
-        Default ``False``.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
+        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
+        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
+        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
+        Cube corrects the model and residual by the channel power primary beam
+        before convolution. MFS divides their Taylor polynomials; MVC divides
+        by its common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
+        selector only when ``restore=True``.
     primary_beam_limit : float, optional
         Primary beam (power) cutoff below which the corrected image is blanked
         with NaN, as a fraction of the beam peak.  Default ``0.2`` (the CASA
@@ -628,6 +711,11 @@ def restore_image(
     primary_beam_key : str, optional
         Role key of the primary beam in the residual data group.  Default
         ``"primary_beam"``.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
     overwrite : bool, optional
         If ``True`` an existing restored data group / output variable is
         overwritten.  Default ``True``.
@@ -652,53 +740,56 @@ def restore_image(
     """
     import pandas as pd
 
-    if image_data_group_out_modified is None:
-        image_data_group_out_modified = {"sky": "SKY_RESTORED"}
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check._predicates import (
+            check_primary_beam_limit,
+            check_restoration_output,
+        )
 
-    # Resolve the residual group as the "input" and build the restored output
-    # group from it (so the restored group inherits the residual roles and just
-    # overrides the sky variable).
-    residual_group, restored_group = create_data_groups_in_and_out(
+        check_restoration_output(restoration_output)
+        check_primary_beam_limit(primary_beam_limit)
+
+    make_apparent = restoration_output in ("apparent", "both")
+    correct = restoration_output in ("primary_beam_corrected", "both")
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "sky": "SKY_RESTORED"
+            if make_apparent
+            else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        }
+
+    # Resolve every required runtime product before building output metadata.
+    # A cube consumes the fitted beam directly and does not require a PSF.
+    residual_sky_name = resolve_restoration_product(
+        img_xds, image_data_group_in_residual_name, "sky"
+    )
+    model_sky_name = resolve_restoration_product(
+        img_xds, image_data_group_in_model_name, "sky"
+    )
+    beam_name = resolve_restoration_product(
+        img_xds, image_data_group_in_residual_name, beam_fit_params_key
+    )
+    if correct:
+        primary_beam_name = resolve_restoration_product(
+            img_xds, image_data_group_in_residual_name, primary_beam_key
+        )
+
+    # The restored output inherits the residual roles and replaces only sky.
+    _, restored_group = create_data_groups_in_and_out(
         img_xds,
         data_group_in_name=image_data_group_in_residual_name,
         data_group_out_name=image_data_group_out_restore_name,
         data_group_out_modified=image_data_group_out_modified,
         overwrite=overwrite,
     )
-
-    # The model is the second input group; resolve it directly.
-    assert image_data_group_in_model_name in img_xds.attrs["data_groups"], (
-        "Model data group "
-        + image_data_group_in_model_name
-        + " not found in img_xds data_groups: "
-        + str(list(img_xds.attrs["data_groups"].keys()))
-    )
-    model_group = img_xds.attrs["data_groups"][image_data_group_in_model_name]
-
-    assert beam_fit_params_key in residual_group, (
-        "Beam-fit parameters '"
-        + beam_fit_params_key
-        + "' not found in the residual data group '"
-        + image_data_group_in_residual_name
-        + "'. Run point_spread_function_gaussian_fit first."
-    )
-
-    residual_sky_name = residual_group["sky"]
-    model_sky_name = model_group["sky"]
-    beam_name = residual_group[beam_fit_params_key]
     restored_sky_name = restored_group["sky"]
-
-    correct = bool(primary_beam_correction)
     if correct:
-        assert primary_beam_key in residual_group, (
-            "Data group '"
-            + image_data_group_in_residual_name
-            + "' has no "
-            + primary_beam_key
-            + " entry; run make_primary_beam_single_field first."
+        primary_beam = img_xds[primary_beam_name].values
+        corrected_sky_name = (
+            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            if make_apparent
+            else restored_sky_name
         )
-        primary_beam = img_xds[residual_group[primary_beam_key]].values
-        corrected_sky_name = "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
         restored_group["sky_primary_beam_corrected"] = corrected_sky_name
 
     residual_da = img_xds[residual_sky_name]
@@ -723,17 +814,17 @@ def restore_image(
         processing_function_threads=processing_function_threads,
         primary_beam=primary_beam if correct else None,
         primary_beam_limit=primary_beam_limit,
-        output="both" if correct else "apparent",
+        output=restoration_output,
         consume_model=(consume_model and model_sky_name != residual_sky_name),
     )
-    restored = products["apparent"]
     consume = bool(array_timing["consumed_model"])
     if correct:
         corrected = products["primary_beam_corrected"]
         T_correct = float(array_timing["primary_beam_corrected"])
 
     # Store the restored sky, preserving the residual's dims, coords and attrs.
-    img_xds[restored_sky_name] = residual_da.copy(data=restored)
+    if make_apparent:
+        img_xds[restored_sky_name] = residual_da.copy(data=products["apparent"])
     if correct:
         img_xds[corrected_sky_name] = residual_da.copy(data=corrected)
         img_xds[corrected_sky_name].attrs["type"] = "sky"

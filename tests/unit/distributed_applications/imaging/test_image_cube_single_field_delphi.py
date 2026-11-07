@@ -176,7 +176,9 @@ def test_image_cube_single_field_signature_keeps_required_arguments():
     parameters = inspect.signature(image_cube_single_field).parameters
     assert parameters["parameters_file"].default is None
     assert parameters["ps_store"].default is inspect.Parameter.empty
-    assert list(parameters)[-1] == "parameters_file"
+    assert parameters["input_checked"].default is False
+    assert parameters["input_checked"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert list(parameters)[-2:] == ["parameters_file", "input_checked"]
 
 
 def test_read_parameters_file_json_round_trip(tmp_path):
@@ -393,7 +395,7 @@ def test_delphi_calculate_parameters_only(ps_store, tmp_path, psf_calls):
     assert controls["exact_psf_subtraction"] is False
     assert not {"psf_fraction", "predicted_imaging_cycles"} & set(derived)
     assert arguments["gridding_kernel_params"] == LEAST_MISFIT_9
-    assert arguments["restore"] is True and arguments["primary_beam_correction"]
+    assert arguments["restore"] is True and arguments["restoration_output"] == "both"
     np.testing.assert_allclose(
         derived["sensitivity_natural"], 0.8 * np.array([[1e-3, 2e-3], [3e-3, 4e-3]])
     )
@@ -614,7 +616,7 @@ def test_metadata_refuses_several_fields():
 
 @pytest.mark.parametrize("name", ["pixels_per_beam", "n_sigma"])
 def test_delphi_refuses_a_non_positive_input(tmp_path, name):
-    with pytest.raises(ValueError, match=f"{name} must be positive"):
+    with pytest.raises(ValueError, match=f"{name} must be.*positive"):
         delphi_module.image_cube_single_field_delphi(
             "unused.ps.zarr", str(tmp_path / "cube.img.zarr"), **{name: 0}
         )
@@ -687,3 +689,35 @@ def test_delphi_gives_the_teardown_to_the_last_compute_only(
     )
     assert psf_calls[-1]["mpi_cluster_setup"] == mpi_cluster_setup
     assert mpi_cluster_setup == {"max_workers": 2, "teardown_force_exit_seconds": 30}
+
+
+def test_metadata_uses_explicit_field_name():
+    metadata = delphi_module._processing_set_metadata(
+        _metadata_processing_set(field_names=("target",)), "target"
+    )
+    np.testing.assert_array_equal(metadata["phase_direction"], PC)
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("pixels_per_beam", 0),
+        ("pixels_per_beam", float("inf")),
+        ("n_sigma", 0),
+        ("n_sigma", float("nan")),
+        ("image_edge_primary_beam_limit", 0),
+        ("image_edge_primary_beam_limit", 1),
+        ("robust", float("nan")),
+        ("robust", 3),
+    ],
+)
+def test_delphi_rejects_controls_before_metadata_io(tmp_path, name, value):
+    from astroviper.distributed_applications.imaging.image_cube_single_field_delphi import (
+        image_cube_single_field_delphi,
+    )
+
+    output = tmp_path / "never-created.zarr"
+    with pytest.raises(ValueError, match=name):
+        image_cube_single_field_delphi("missing.ps.zarr", str(output), **{name: value})
+    assert not output.exists()
+    assert not (tmp_path / "never-created.zarr.parameters.json").exists()

@@ -1,9 +1,10 @@
 """Component tests: imaging a Measurement Set v2 directly (skunk_works).
 
-The real ALMA Measurement Set v2 ``Antennae_North.cal.lsrk.split.ms`` (4 MSv4s,
-8 channels of a spectral window with decreasing frequencies, XX and YY) is
-imaged by ``image_cube_single_field`` with ``ps_store`` set to the Measurement
-Set itself and ``skunk_works=True``: the driver opens it with XRADIO's
+One field of the real ALMA Measurement Set v2
+``Antennae_North.cal.lsrk.split.ms`` (8 channels of a spectral window with
+decreasing frequencies, XX and YY) is imaged by ``image_cube_single_field``
+with ``ps_store`` set to the Measurement Set itself and ``skunk_works=True``:
+the driver opens it with XRADIO's
 ``xradio_msv2`` engine and every node task reads its own selection through
 the engine. The tests check that
 
@@ -55,6 +56,11 @@ IMAGE_DATA_VARIABLES_KEEP = [
 N_FREQUENCY_CHUNKS = 4
 
 
+def _single_field_partition(partition):
+    """Image one actual pointing from the three-field Antennae observation."""
+    return partition["FIELD_ID"] == [0]
+
+
 def _file_state(path):
     """Every file under ``path``: its relative path, size and mtime."""
     state = {}
@@ -89,15 +95,20 @@ def antennae_ps(antennae_msv2, tmp_path_factory):
     ms_copy = str(directory / "copy" / MS_NAME)
     shutil.copytree(antennae_msv2, ms_copy)
     ps_store = str(directory / "Antennae_North.ps.zarr")
-    convert_msv2_to_processing_set(ms_copy, ps_store, partition_scheme=[])
+    convert_msv2_to_processing_set(
+        ms_copy,
+        ps_store,
+        partition_scheme=["FIELD_ID"],
+        partition_filter=_single_field_partition,
+    )
     shutil.rmtree(os.path.dirname(ms_copy))
     return ps_store
 
 
 @pytest.fixture(scope="module")
 def image_params(antennae_ps):
-    """A small image (64 x 64 pixels of 0.13 arcsec) of every channel, centred
-    on the central field (read from the converted processing set)."""
+    """A small image (64 x 64 pixels of 0.13 arcsec) of every channel,
+    centred on the selected field of the converted processing set."""
     from xradio.measurement_set import open_processing_set
 
     ps_xdt = open_processing_set(antennae_ps)
@@ -145,6 +156,10 @@ def _image_cube(ps_store, image_store, image_params, **overrides):
 
     arguments = dict(
         ps_store=ps_store,
+        msv2_open_options={
+            "partition_scheme": ["FIELD_ID"],
+            "partition_filter": _single_field_partition,
+        },
         image_store=image_store,
         image_params=image_params,
         imaging_weights_params={
@@ -301,3 +316,57 @@ def test_msv2_fits_output(msv2_image, antennae_msv2, image_params, tmp_path):
         # dataset (time, frequency, polarization, l, m).
         expected = reference[name].values[0].transpose(0, 1, 3, 2)
         assert np.array_equal(data, expected, equal_nan=True), name
+
+
+@pytest.fixture(scope="module")
+def antennae_all_fields_ps(antennae_msv2, tmp_path_factory):
+    """Convert all three original fields for the single-field refusal tests."""
+    from xradio.measurement_set import convert_msv2_to_processing_set
+
+    directory = tmp_path_factory.mktemp("antennae_all_fields")
+    ms_copy = str(directory / MS_NAME)
+    shutil.copytree(antennae_msv2, ms_copy)
+    store = str(directory / "all-fields.ps.zarr")
+    convert_msv2_to_processing_set(ms_copy, store, partition_scheme=["FIELD_ID"])
+    return store
+
+
+@pytest.mark.parametrize("input_format", ["msv2", "processing_set"])
+@pytest.mark.parametrize("output_format", ["zarr", "fits"])
+def test_three_field_observation_is_refused_before_output(
+    monkeypatch,
+    tmp_path,
+    antennae_msv2,
+    antennae_all_fields_ps,
+    image_params,
+    input_format,
+    output_format,
+):
+    """Keep the original multi-field observation as an explicit negative case."""
+
+    def forbidden(*args, **kwargs):
+        pytest.fail(
+            "The multi-field configuration reached output or graph construction"
+        )
+
+    monkeypatch.setattr("xradio.image.write_image", forbidden)
+    monkeypatch.setattr("graphviper.graph_tools.generate_dask_workflow", forbidden)
+    source = antennae_msv2 if input_format == "msv2" else antennae_all_fields_ps
+    snapshot = _file_state(source)
+    output = tmp_path / "refused.img.zarr"
+    with pytest.raises(
+        ValueError, match="Single-field imaging selected multiple fields"
+    ) as failure:
+        _image_cube(
+            source,
+            str(output),
+            image_params,
+            msv2_open_options={"partition_scheme": ["FIELD_ID"]},
+            skunk_works=input_format == "msv2" or output_format == "fits",
+            output_image_format=output_format,
+        )
+    for field in ("North_0", "North_1", "North_2"):
+        assert field in str(failure.value)
+    assert not output.exists()
+    assert list(tmp_path.iterdir()) == []
+    assert _file_state(source) == snapshot

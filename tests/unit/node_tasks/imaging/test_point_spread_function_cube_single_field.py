@@ -4,6 +4,7 @@ written, and an image channel no visibility channel maps onto, made from the
 whole chunk."""
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from astroviper.node_tasks.imaging.point_spread_function_cube_single_field import (
@@ -99,3 +100,18 @@ def test_channel_properties_and_whole_chunk_fallback():
     assert timing["task_id"].iloc[0] == 5
     assert timing["n_channels"].iloc[0] == 2
     assert timing["T_write"].iloc[0] >= 0.0
+
+
+def test_psf_node_checks_configuration_before_loading():
+    from astroviper.node_tasks.imaging.point_spread_function_cube_single_field import (
+        point_spread_function_cube_single_field,
+    )
+
+    with pytest.raises(ValueError, match="image_size"):
+        point_spread_function_cube_single_field(
+            {"image_size": [0, 16]},
+            {"weighting": "natural"},
+            None,
+            None,
+            "missing.ps.zarr",
+        )

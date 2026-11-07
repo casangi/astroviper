@@ -31,6 +31,8 @@ def point_spread_function_cube_single_field(
     overwrite: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
+    *,
+    input_checked=False,
 ):
     """
     Make the point spread function of a spectral cube, with its beam fit and
@@ -58,11 +60,21 @@ def point_spread_function_cube_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -82,7 +94,8 @@ def point_spread_function_cube_single_field(
         Measurement Set v2 from CASA often lacks the default
         ``"OBSERVE_TARGET#ON_SOURCE"``).
     field_name : str, optional
-        Not used yet (as in the imager); kept for the interface.
+        Reserved field-selection argument, retained for future support. It does
+        not currently filter fields; prepare a single-field input Processing Set.
     processing_set_data_group_name : str
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool
@@ -202,6 +215,12 @@ def point_spread_function_cube_single_field(
         when ``compute_backend="mpi"`` (e.g. ``max_workers``, ``chunksize``,
         ``reduce_in_pool``, ``progress_every``). Ignored for the Dask backend.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     xarray.Dataset
@@ -244,6 +263,19 @@ def point_spread_function_cube_single_field(
         ``imaging_weights_params``, ``gridding_kernel_params`` (defaults filled
         in) and ``psf_fitting_method``.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_driver_workflow,
+            check_model_update,
+            check_residual_update,
+        )
+
+        # PSF-only work needs complete geometry, but no deconvolution controls.
+        check_residual_update(locals(), mode=CUBE_SINGLE_FIELD, require_complete=True)
+        check_model_update(locals(), mode=CUBE_SINGLE_FIELD)
+        check_driver_workflow(locals(), mode=CUBE_SINGLE_FIELD)
 
     import time
 
@@ -296,12 +328,13 @@ def point_spread_function_cube_single_field(
     # The node tasks load through XRADIO's processing set loader, which can
     # leave VISIBILITY out; a Measurement Set v2 is read only by the imager's
     # skunk works path.
-    if is_measurement_set_v2(ps_store):
-        raise ValueError(
-            f"{ps_store} is a Measurement Set v2; convert it with "
-            "xradio.measurement_set.convert_msv2_to_processing_set and use the "
-            "processing set."
-        )
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_input_storage,
+    )
+
+    check_input_storage(
+        locals(), input_is_msv2=is_measurement_set_v2(ps_store), allow_msv2=False
+    )
     if n_mapping_parallelism is not None:
         _validate_n_mapping_parallelism(n_mapping_parallelism)
     # The requested Stokes planes fix the correlations that are loaded and
@@ -409,6 +442,7 @@ def point_spread_function_cube_single_field(
     input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["primary_beam_params"] = primary_beam_params
     input_params["load_data_variables"] = load_data_variables
+    input_params["input_checked"] = True
 
     viper_graph = map(
         input_data=ps_xdt,

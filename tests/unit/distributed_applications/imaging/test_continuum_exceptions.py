@@ -6,31 +6,12 @@ import xarray as xr
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _apply_exact_frequency_selection_to_continuum_mapping,
-    _validate_continuum_output_keys,
     combine_continuum_chunks,
 )
 
 
 def _leaf():
     return {"image": xr.Dataset(), "timing_node_tasks": pd.DataFrame({"task_id": [0]})}
-
-
-@pytest.mark.parametrize(
-    ("legacy_key", "replacement"),
-    [
-        ("sky_restored", "sky_restored_flat_sky"),
-        ("sky_restored_primary_beam_corrected", "sky_restored_flat_sky"),
-    ],
-)
-def test_continuum_rejects_legacy_restored_output_keys(legacy_key, replacement):
-    """Removed continuum restore names fail with their explicit migration target."""
-    with pytest.raises(ValueError, match=replacement):
-        _validate_continuum_output_keys(["sky_residual", legacy_key])
-
-
-def test_continuum_accepts_current_restored_output_key():
-    """The flat-sky continuum restore key passes output validation."""
-    _validate_continuum_output_keys(["sky_residual", "sky_restored_flat_sky"])
 
 
 @pytest.mark.parametrize(

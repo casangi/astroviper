@@ -368,7 +368,13 @@ def _task_chunk_lengths(dim, parallel_coords):
 
 
 def validate_image_chunking_and_sharding(
-    image_chunking, image_sharding, shape_dict, parallel_coords, extra_dims=("u", "v")
+    image_chunking,
+    image_sharding,
+    shape_dict,
+    parallel_coords,
+    extra_dims=("u", "v"),
+    *,
+    parallelism_pending=False,
 ):
     """Validate the on-disk image chunking and sharding against the image and
     the mapping parallelism.
@@ -405,6 +411,10 @@ def validate_image_chunking_and_sharding(
         ``frequency``), providing the per-task chunk lengths.
     extra_dims : tuple of str, optional
         Dimension names accepted as keys although absent from ``shape_dict``.
+    parallelism_pending : bool, optional
+        Before mapping, defer the implicit frequency chunk's shard divisibility
+        check until task extents are known. Explicit chunks and known image
+        extents are still checked. Default False.
 
     Raises
     ------
@@ -413,8 +423,21 @@ def validate_image_chunking_and_sharding(
         larger than the task extent or not dividing the task chunks, or a shard
         that is not a multiple of its chunk.
     """
+    from collections.abc import Mapping
+
+    for label, value in (
+        ("image_chunking", image_chunking),
+        ("image_sharding", image_sharding),
+    ):
+        if value is not None and not isinstance(value, Mapping):
+            raise TypeError(f"{label} must be a mapping.")
     chunking = dict(image_chunking or {})
     sharding = dict(image_sharding or {})
+    if sharding:
+        import zarr
+
+        if int(zarr.__version__.split(".")[0]) < 3:
+            raise ValueError("image_sharding requires Zarr v3.")
     valid_dims = set(shape_dict) | set(extra_dims)
     for label, mapping in (("image_chunking", chunking), ("image_sharding", sharding)):
         for dim, size in mapping.items():
@@ -448,6 +471,8 @@ def validate_image_chunking_and_sharding(
                     )
     for dim, size in sharding.items():
         if dim not in shape_dict:
+            continue
+        if parallelism_pending and dim == "frequency" and dim not in chunking:
             continue
         chunk = chunking.get(dim, _task_extent(dim, shape_dict, parallel_coords))
         if size < int(shape_dict[dim]) and size % chunk:
@@ -487,6 +512,53 @@ def image_chunk_and_shard_shapes(
         chunks.append(chunk)
         shards.append(max(chunk, -(-want // chunk) * chunk))
     return chunks, shards
+
+
+def check_image_output_destination(
+    image_store, *, overwrite=False, output_image_format="zarr"
+):
+    """Reject an existing destination before opening imaging input data.
+
+    Parameters
+    ----------
+    image_store : str or path-like
+        Requested output name. Zarr follows the installed XRADIO writer's
+        naming policy. Cube FITS output uses this directory unchanged and
+        creates its per-variable FITS files inside it.
+    overwrite : bool, optional
+        Permit replacement. This check never creates, deletes, or changes files.
+    output_image_format : {"zarr", "fits"}, optional
+        Output representation, default "zarr".
+
+    Raises
+    ------
+    FileExistsError
+        If the actual output destination exists and overwrite is False.
+
+    Notes
+    -----
+    The writer must still check at write time: a destination can appear after
+    this early check. Older XRADIO writers without a Zarr naming resolver keep
+    the requested name; newer writers supply the resolver used here.
+    """
+    import os
+
+    if overwrite:
+        return
+    destination = os.fsdecode(os.fspath(image_store))
+    if output_image_format == "zarr":
+        from xradio.image import image as image_module
+
+        resolve_name = getattr(image_module, "zarr_store_name", None)
+        if resolve_name is not None:
+            destination = os.path.expanduser(destination)
+            if len(destination) > 1:
+                destination = destination.rstrip(os.sep)
+            destination = resolve_name(destination)
+    if os.path.lexists(destination):
+        raise FileExistsError(
+            f"{destination} already exists. Set overwrite=True to replace it."
+        )
 
 
 def write_zarr_image_store(img_xds, image_store, overwrite=False):
@@ -607,11 +679,6 @@ def create_empty_data_variables_on_disk(
     validate_image_chunking_and_sharding(
         image_chunking, image_sharding, shape_dict, parallel_coords
     )
-    if image_sharding and not _ZARR_V3:
-        raise ValueError(
-            "image_sharding (output sharding) requires Zarr v3; the installed "
-            "zarr is v2."
-        )
     sharded = bool(image_sharding) and _ZARR_V3
 
     if _ZARR_V3 and compressor is not None:

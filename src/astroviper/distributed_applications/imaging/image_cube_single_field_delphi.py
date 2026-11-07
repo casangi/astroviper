@@ -75,6 +75,8 @@ def image_cube_single_field_delphi(
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     processing_function_threads: int = 1,
+    *,
+    input_checked=False,
 ) -> dict:
     """
     Image a single field cube with parameters derived from the data.
@@ -181,6 +183,12 @@ def image_cube_single_field_delphi(
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
@@ -202,6 +210,18 @@ def image_cube_single_field_delphi(
         robust when ``robust`` is ``None``), or correlations the imager cannot
         image.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_driver_workflow,
+        )
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_delphi_parameters,
+        )
+
+        check_delphi_parameters(locals())
+        check_driver_workflow(locals(), mode=CUBE_SINGLE_FIELD)
+
     import numpy as np
     import toolviper.utils.logger as logger
     from xradio.measurement_set import open_processing_set
@@ -229,9 +249,6 @@ def image_cube_single_field_delphi(
         name: call_locals[name]
         for name in inspect.signature(image_cube_single_field_delphi).parameters
     }
-    for name in ("pixels_per_beam", "n_sigma"):
-        if not delphi_inputs[name] > 0:
-            raise ValueError(f"{name} must be positive, got {delphi_inputs[name]!r}")
     if parameters_file is None:
         parameters_file = f"{image_store}.parameters.json"
     if os.path.exists(parameters_file) and not overwrite:
@@ -260,6 +277,7 @@ def image_cube_single_field_delphi(
         float(frequency_coords.min()),
         image_edge_primary_beam_limit,
         primary_beam_params,
+        input_checked=True,
     )
     max_antenna_separation = longest_antenna_separation(metadata["antenna_positions"])
     cell_guess = cell_size_guess(max_antenna_separation, float(frequency_coords.max()))
@@ -302,6 +320,7 @@ def image_cube_single_field_delphi(
     cell = cell_size_from_beam_fit(
         point_spread_function_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"],
         pixels_per_beam,
+        input_checked=True,
     )
     max_cell = max_cell_size_for_uv_coverage(cell_guess)
     if cell > max_cell:
@@ -344,7 +363,7 @@ def image_cube_single_field_delphi(
         n_mapping_parallelism=n_mapping_parallelism,
         overwrite=overwrite,
         restore=True,
-        primary_beam_correction=True,
+        restoration_output="both",
         psf_fitting_method=PSF_FITTING_METHOD,
         gridding_kernel_params=GRIDDING_KERNEL_PARAMS,
         primary_beam_params=primary_beam_params,
