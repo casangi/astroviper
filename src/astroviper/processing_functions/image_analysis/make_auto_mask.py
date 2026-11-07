@@ -132,6 +132,17 @@ def _chauvenet_sample(values):
     return values
 
 
+def _bounding_box(mask, margin=0):
+    """Slices around the pixels of ``mask``, ``margin`` wider, inside the plane."""
+    box = []
+    for axis, size in enumerate(mask.shape):
+        pixels = np.flatnonzero(mask.any(axis=1 - axis))
+        box.append(
+            slice(max(pixels[0] - margin, 0), min(pixels[-1] + margin + 1, size))
+        )
+    return tuple(box)
+
+
 def _location_and_noise(plane, support, previous_mask, fast_noise):
     """Median and MAD based noise of a residual plane.
 
@@ -147,8 +158,10 @@ def _location_and_noise(plane, support, previous_mask, fast_noise):
             sample = plane[outside]
         else:
             sample = _chauvenet_sample(plane[support])
-    location = float(np.median(sample))
-    noise = MAD_TO_SIGMA * float(np.median(np.abs(sample - location)))
+    location = float(np.median(sample, overwrite_input=True))
+    sample -= location
+    np.abs(sample, out=sample)
+    noise = MAD_TO_SIGMA * float(np.median(sample, overwrite_input=True))
     return location, noise
 
 
@@ -173,12 +186,15 @@ def _plane_thresholds(peak, sidelobe, location, noise, params):
 
 def _prune(mask, min_pixels):
     """``mask`` without its 4-connected regions of fewer than ``min_pixels``."""
-    labels, n_regions = scipy.ndimage.label(mask)
-    if n_regions == 0:
+    if not mask.any():
         return mask
+    box = _bounding_box(mask)
+    labels, _ = scipy.ndimage.label(mask[box])
     keep = np.bincount(labels.ravel()) >= min_pixels
     keep[0] = False
-    return keep[labels]
+    pruned = np.zeros_like(mask)
+    pruned[box] = keep[labels]
+    return pruned
 
 
 def _smooth_and_cut(mask, kernel, cut_threshold):
@@ -187,8 +203,35 @@ def _smooth_and_cut(mask, kernel, cut_threshold):
 
     if not mask.any():
         return mask
-    smoothed = scipy.signal.fftconvolve(mask.astype(np.float64), kernel, mode="same")
-    return smoothed > cut_threshold * smoothed.max()
+    # Beyond the reach of the kernel the smoothed mask is 0, so only the box of
+    # the mask is transformed.
+    half_width = kernel.shape[0] // 2
+    box = _bounding_box(mask)
+    reach = _bounding_box(mask, half_width)
+    smoothed = scipy.signal.fftconvolve(mask[box].astype(np.float64), kernel)[
+        tuple(
+            slice(
+                wide.start - narrow.start + half_width,
+                wide.stop - narrow.start + half_width,
+            )
+            for wide, narrow in zip(reach, box, strict=True)
+        )
+    ]
+    cut = np.zeros_like(mask)
+    cut[reach] = smoothed > cut_threshold * smoothed.max()
+    return cut
+
+
+def _grow(mask, constraint, iterations):
+    """``mask`` inside ``constraint``, dilated through ``constraint``, 4-connected."""
+    grown = mask & constraint
+    if grown.any():
+        # A dilation stays within ``iterations`` pixels of where it starts.
+        box = _bounding_box(grown, iterations)
+        grown[box] = scipy.ndimage.binary_dilation(
+            grown[box], iterations=iterations, mask=constraint[box]
+        )
+    return grown
 
 
 def _update_plane_mask(
@@ -240,7 +283,14 @@ def _update_plane_mask(
     )
     mask_threshold, grow_threshold, negative_threshold, noise_sets_threshold = (
         _plane_thresholds(
-            float(np.abs(plane[support]).max()), sidelobe, location, noise, params
+            max(
+                float(plane.max(where=support, initial=-np.inf)),
+                -float(plane.min(where=support, initial=np.inf)),
+            ),
+            sidelobe,
+            location,
+            noise,
+            params,
         )
     )
 
@@ -262,18 +312,14 @@ def _update_plane_mask(
         / (4.0 * math.log(2.0) * delta**2)
     )
 
-    new_mask = plane > mask_threshold
+    mask = plane > mask_threshold
     if params["min_beam_fraction"] > 0:
-        new_mask = _prune(new_mask & support, prune_pixels)
-    mask = previous_mask | _smooth_and_cut(new_mask, kernel, params["cut_threshold"])
+        mask = _prune(mask & support, prune_pixels)
+    mask = _smooth_and_cut(mask, kernel, params["cut_threshold"])
+    mask |= previous_mask
 
     if params["grow_iterations"] > 0 and previous_mask.any():
-        constraint = plane > grow_threshold
-        grown = scipy.ndimage.binary_dilation(
-            previous_mask & constraint,
-            iterations=params["grow_iterations"],
-            mask=constraint,
-        )
+        grown = _grow(previous_mask, plane > grow_threshold, params["grow_iterations"])
         if params["min_beam_fraction"] > 0 and params["grow_prune"]:
             grown = _prune(grown, prune_pixels)
         mask |= _smooth_and_cut(grown, kernel, params["cut_threshold"])
@@ -379,18 +425,21 @@ def make_auto_mask(
     residual = sky.values
     planes_shape = residual.shape[:3]
 
-    support = np.isfinite(residual)
+    primary_beam = None
     primary_beam_name = group.get("primary_beam")
     if primary_beam_name is not None and primary_beam_name in img_xds:
         primary_beam = img_xds[primary_beam_name].values
-        support &= primary_beam >= primary_beam_limit * np.nanmax(primary_beam)
-        support &= primary_beam != 0
+        primary_beam_floor = primary_beam_limit * np.nanmax(primary_beam)
 
     mask_name = group.get("mask")
     if mask_name is None or mask_name not in img_xds:
         mask = np.zeros(residual.shape, dtype=bool)
     else:
-        mask = img_xds[mask_name].values.astype(bool)
+        previous = img_xds[mask_name].values
+        in_place = (
+            mask_name == image_data_group_out["mask"] and previous.flags.writeable
+        )
+        mask = previous.astype(bool, copy=not in_place)
 
     beam = img_xds[group["beam_fit_params_point_spread_function"]]
     beam = beam.transpose(*plane_dims, ...).values
@@ -409,9 +458,13 @@ def make_auto_mask(
         for index in np.ndindex(planes_shape):
             if planes_stopped[index]:
                 continue
+            support = np.isfinite(residual[index])
+            if primary_beam is not None:
+                support &= primary_beam[index] >= primary_beam_floor
+                support &= primary_beam[index] != 0
             mask[index], planes_stopped[index] = _update_plane_mask(
                 residual[index],
-                support[index],
+                support,
                 mask[index],
                 float(sidelobe[index]),
                 beam[index],

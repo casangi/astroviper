@@ -2441,6 +2441,7 @@ def test_auto_mask_keeps_the_primary_beam_limit():
 def test_auto_mask_state_carries_the_mask_to_the_next_update():
     first = _continuum_image_with_two_sources()
     state = make_auto_mask_continuum(first, {}, primary_beam_limit=0.2)
+    first_mask = state["mask"].copy()
 
     second = _continuum_image_with_two_sources()
     second.SKY_RESIDUAL.values[...] = np.random.default_rng(5).normal(
@@ -2452,9 +2453,9 @@ def test_auto_mask_state_carries_the_mask_to_the_next_update():
         second, {}, auto_mask_state=state, primary_beam_limit=0.2
     )
 
-    assert updated["mask"][state["mask"]].all()
+    assert updated["mask"][first_mask].all()
     assert second.MASK.values[0, 1, 0, 20, 40]
-    assert not state["mask"][0, 0, 0, 45, 40]
+    assert not first_mask[0, 0, 0, 45, 40]
     assert updated["mask"][0, 0, 0, 45, 40]
     # Stokes V stopped at the first update, the mask stays empty
     assert updated["planes_stopped"][0, 0, 1]

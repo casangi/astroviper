@@ -4,13 +4,17 @@ import math
 
 import numpy as np
 import pytest
+import scipy.signal
 import xarray as xr
 
 from astroviper.processing_functions.image_analysis.make_auto_mask import (
+    _bounding_box,
     _chauvenet_sample,
+    _grow,
     _location_and_noise,
     _plane_thresholds,
     _prune,
+    _smooth_and_cut,
     make_auto_mask,
     validate_auto_mask_params,
 )
@@ -219,6 +223,45 @@ def test_prune_counts_four_connected_pixels():
     np.testing.assert_array_equal(_prune(mask, 4), expected)
     np.testing.assert_array_equal(_prune(mask, 5), np.zeros_like(mask))
     np.testing.assert_array_equal(_prune(mask, 1), mask)
+
+
+def test_bounding_box():
+    mask = np.zeros((10, 12), dtype=bool)
+    mask[2:4, 5] = True
+    assert _bounding_box(mask) == (slice(2, 4), slice(5, 6))
+    assert _bounding_box(mask, 3) == (slice(0, 7), slice(2, 9))
+    assert _bounding_box(mask, 20) == (slice(0, 10), slice(0, 12))
+
+
+@pytest.mark.parametrize(
+    "rows, columns",
+    [
+        (slice(40, 44), slice(50, 60)),
+        (slice(0, 5), slice(0, 5)),
+        (slice(N - 3, N), slice(10, N)),
+        (slice(0, N), slice(0, N)),
+    ],
+)
+def test_smoothing_the_box_of_the_mask_is_smoothing_the_plane(rows, columns):
+    mask = np.zeros((N, N), dtype=bool)
+    mask[rows, columns] = True
+    mask[(rows.start + rows.stop) // 2, columns.start] = False
+    kernel = _elliptical_gaussian_kernel(37, 37, 6.0, 3.0, 0.5, np.float64)
+    plane = scipy.signal.fftconvolve(mask.astype(np.float64), kernel, mode="same")
+    np.testing.assert_array_equal(
+        _smooth_and_cut(mask, kernel, 0.2), plane > 0.2 * plane.max()
+    )
+
+
+def test_growth_goes_as_far_as_the_iterations():
+    constraint = np.zeros((N, N), dtype=bool)
+    constraint[40, 10:80] = True
+    mask = np.zeros_like(constraint)
+    mask[40, 30:32] = True
+    mask[60, 60] = True  # outside the constraint, no seed
+    expected = np.zeros_like(mask)
+    expected[40, 25:37] = True
+    np.testing.assert_array_equal(_grow(mask, constraint, 5), expected)
 
 
 def test_prune_removes_only_the_pixels_of_a_region():
@@ -533,6 +576,25 @@ class TestStops:
         xds = image(noise_plane())
         stopped = make_auto_mask(xds, {"noise_threshold": 50.0}, planes_stopped=given)
         assert stopped[0, 0, 0] and not given[0, 0, 0]
+
+
+def test_the_mask_is_updated_in_place_when_it_can_be():
+    previous = np.zeros((1, 1, 1, N, N), dtype=bool)
+    previous[0, 0, 0, 70:75, 20:25] = True
+    xds = image(noise_plane() + gaussian((40, 60), 50.0), mask=previous)
+    xds["MASK"] = (xds.MASK.dims, previous)
+    make_auto_mask(xds, {})
+    assert np.shares_memory(xds.MASK.values, previous)
+    assert previous[0, 0, 0, 40, 60]
+
+
+def test_another_output_variable_leaves_the_mask_given():
+    previous = np.zeros((1, 1, 1, N, N), dtype=bool)
+    xds = image(noise_plane() + gaussian((40, 60), 50.0), mask=previous)
+    xds["MASK"] = (xds.MASK.dims, previous)
+    make_auto_mask(xds, {}, image_data_group_out_modified={"mask": "MASK_AUTOMATIC"})
+    assert xds.MASK_AUTOMATIC.values[0, 0, 0, 40, 60]
+    assert not xds.MASK.values.any()
 
 
 def test_the_data_groups_name_the_variables():
