@@ -1875,15 +1875,14 @@ void check_controls(double asp_psf_width, int asp_largest_scale, int asp_stop_po
         throw std::invalid_argument("asp_min_mask_coverage must be at least 0 and below 1");
 }
 
+namespace {
+
+// Whether the residual holds a wild value (any_wild) that the model update
+// reads: a value that is not finite outside the search region is zero during
+// the model update (clean_plane), as in the reference.
 template <typename T>
-bool needs_reference(Unaligned<T> residual, Unaligned<T> model, Unaligned<T> psf, Unaligned<T> mask,
-                     std::size_t n, std::size_t npsf, int threads) {
-    const std::size_t nt = static_cast<std::size_t>(std::max(1, threads));
-    if (any_wild(psf, npsf, nt) || any_wild(model, n, nt)) return true;
-    if (!any_wild(residual, n, nt)) return false;
-    // The residual has a wild value: is it one the model update reads? A value
-    // that is not finite outside the search region is zero during the model
-    // update (clean_plane), as in the reference.
+bool residual_needs_reference(Unaligned<T> residual, Unaligned<T> mask, std::size_t n, std::size_t threads) {
+    if (!any_wild(residual, n, threads)) return false;
     for (std::size_t k = 0; k < n; ++k) {
         const double r = static_cast<double>(residual[k]);
         if (std::isfinite(r) ? !(std::fabs(r) < 0x1p64)
@@ -1891,6 +1890,34 @@ bool needs_reference(Unaligned<T> residual, Unaligned<T> model, Unaligned<T> psf
             return true;
     }
     return false;
+}
+
+}  // namespace
+
+template <typename T>
+bool needs_reference(Unaligned<T> residual, Unaligned<T> model, Unaligned<T> psf, Unaligned<T> mask,
+                     std::size_t n, std::size_t npsf, int threads) {
+    const std::size_t nt = static_cast<std::size_t>(std::max(1, threads));
+    return any_wild(psf, npsf, nt) || any_wild(model, n, nt) || residual_needs_reference(residual, mask, n, nt);
+}
+
+template <typename T>
+int planes_needing_reference(Unaligned<T> residual, Unaligned<T> model, Unaligned<T> psf, Unaligned<T> mask, int nt,
+                             int nf, int np_img, int np_psf, std::size_t plane, int threads,
+                             unsigned char* declined) {
+    const std::size_t nth = static_cast<std::size_t>(std::max(1, threads));
+    const int npsf = std::max(0, nt * nf * np_psf), nplanes = std::max(0, nt * nf * np_img);
+    std::vector<unsigned char> psfWild(static_cast<std::size_t>(npsf));
+    for (int q = 0; q < npsf; ++q) psfWild[q] = any_wild(psf.at(static_cast<std::size_t>(q) * plane), plane, nth);
+    int count = 0;
+    for (int p = 0; p < nplanes; ++p) {
+        const int q = p / np_img * np_psf + (np_psf == 1 ? 0 : p % np_img);  // its PSF plane
+        const std::size_t off = static_cast<std::size_t>(p) * plane;
+        declined[p] = psfWild[q] || any_wild(model.at(off), plane, nth) ||
+                      residual_needs_reference(residual.at(off), mask.at(off), plane, nth);
+        count += declined[p];
+    }
+    return count;
 }
 
 template <typename T>
@@ -1915,7 +1942,7 @@ void aspclean_cube(T* residual, T* model, Unaligned<T> psf, Unaligned<T> mask, i
                    int asp_largest_scale, int asp_stop_point_mode, int asp_scale_normalization_method,
                    bool asp_stop_after_hogbom_run, int processing_function_threads,
                    const deconvolvers::DivergenceControl<double>& divergence, AspResult* results,
-                   const AspOptions& options) {
+                   const AspOptions& options, const ReferencePlanes& reference) {
     check_controls(asp_psf_width, asp_largest_scale, asp_stop_point_mode, asp_scale_normalization_method,
                    options.asp_min_mask_coverage);
     const int nplanes = nt * nf * np_img;
@@ -1928,6 +1955,12 @@ void aspclean_cube(T* residual, T* model, Unaligned<T> psf, Unaligned<T> mask, i
     auto worker = [&]() {
         int p;
         while ((p = next.fetch_add(1)) < nplanes) {
+            // A plane that needs the reference, with the threads that the
+            // reference's driver gives the transforms of a plane at its start.
+            if (reference.declined && reference.declined[p]) {
+                results[p] = reference.run(p, static_cast<int>(fft_threads.get()));
+                continue;
+            }
             const int tt = p / (nf * np_img);
             const int nn = (p / np_img) % nf;
             const int pp = p % np_img;
@@ -1957,6 +1990,10 @@ template bool needs_reference<float>(Unaligned<float>, Unaligned<float>, Unalign
                                       std::size_t, std::size_t, int);
 template bool needs_reference<double>(Unaligned<double>, Unaligned<double>, Unaligned<double>, Unaligned<double>,
                                        std::size_t, std::size_t, int);
+template int planes_needing_reference<float>(Unaligned<float>, Unaligned<float>, Unaligned<float>, Unaligned<float>,
+                                              int, int, int, int, std::size_t, int, unsigned char*);
+template int planes_needing_reference<double>(Unaligned<double>, Unaligned<double>, Unaligned<double>,
+                                               Unaligned<double>, int, int, int, int, std::size_t, int, unsigned char*);
 template AspResult aspclean_plane<float>(float*, float*, Unaligned<float>, Unaligned<float>, int, int, double, double,
                                          int, double, double, int, int, int, bool, bool,
                                          const deconvolvers::DivergenceControl<double>&, int, const AspOptions&);
@@ -1965,9 +2002,11 @@ template AspResult aspclean_plane<double>(double*, double*, Unaligned<double>, U
                                           const deconvolvers::DivergenceControl<double>&, int, const AspOptions&);
 template void aspclean_cube<float>(float*, float*, Unaligned<float>, Unaligned<float>, int, int, int, int, int, int,
                                    double, const double*, const int*, double, double, int, int, int, bool, int,
-                                   const deconvolvers::DivergenceControl<double>&, AspResult*, const AspOptions&);
+                                   const deconvolvers::DivergenceControl<double>&, AspResult*, const AspOptions&,
+                                   const ReferencePlanes&);
 template void aspclean_cube<double>(double*, double*, Unaligned<double>, Unaligned<double>, int, int, int, int, int,
                                     int, double, const double*, const int*, double, double, int, int, int, bool, int,
-                                    const deconvolvers::DivergenceControl<double>&, AspResult*, const AspOptions&);
+                                    const deconvolvers::DivergenceControl<double>&, AspResult*, const AspOptions&,
+                                    const ReferencePlanes&);
 
 }  // namespace aspclean_fast

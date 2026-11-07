@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <functional>
 
 #include "asp_clean.hpp"
 
@@ -56,6 +57,25 @@ template <typename T>
 bool needs_reference(Unaligned<T> residual, Unaligned<T> model, Unaligned<T> psf, Unaligned<T> mask,
                      std::size_t n, std::size_t npsf, int threads);
 
+// needs_reference of each plane of a cube (nt x nf x np_img planes of `plane`
+// items, with nt x nf x np_psf PSF planes): declined[p] is 1 for a plane that
+// needs the reference, else 0; returns their number. Each PSF plane is
+// scanned once.
+template <typename T>
+int planes_needing_reference(Unaligned<T> residual, Unaligned<T> model, Unaligned<T> psf, Unaligned<T> mask, int nt,
+                             int nf, int np_img, int np_psf, std::size_t plane, int threads, unsigned char* declined);
+
+// The planes of a cube that the reference cleans. The cube's workers, as many
+// as the reference's driver starts, take the planes in its order; a declined
+// plane p goes to run(p, threads): the reference on that plane alone, its
+// transforms on `threads` threads (the share the reference's driver gives a
+// plane at that point), which returns the plane's result. The other planes
+// keep their bits, which depend on no other plane and no thread count.
+struct ReferencePlanes {
+    const unsigned char* declined = nullptr;  // a flag per plane; null: none
+    std::function<AspResult(int plane, int threads)> run;
+};
+
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, Unaligned<T> psf, Unaligned<T> mask, int nx, int ny, double gain,
                          double threshold_per_cycle, int max_iter_per_cycle_updated, double asp_fused_threshold,
@@ -71,6 +91,6 @@ void aspclean_cube(T* residual, T* model, Unaligned<T> psf, Unaligned<T> mask, i
                    int asp_largest_scale, int asp_stop_point_mode, int asp_scale_normalization_method,
                    bool asp_stop_after_hogbom_run, int processing_function_threads,
                    const deconvolvers::DivergenceControl<double>& divergence, AspResult* results,
-                   const AspOptions& options = AspOptions{});
+                   const AspOptions& options = AspOptions{}, const ReferencePlanes& reference = {});
 
 }  // namespace aspclean_fast

@@ -28,7 +28,13 @@ same arguments, so its bits are the reference's, NaNs included, at the call's
 thread count, and the kernel switch traces it with path ``"declined"``. On
 such values pocketfft's SIMD lanes and its scalar path (the reference's on
 some lines) can give a NaN another sign bit or payload, as can two compilations
-of one sum.
+of one sum. So is a call whose model overlaps its residual without being the
+same array (the reference updates the two in one order). In a cube only the
+planes that need the reference run it, each alone, with the share of the
+threads that the reference's cube driver gives a plane; the other planes run
+here, and the call is traced with path ``"fast"``. The reference runs the
+whole cube when every plane needs it, or when some do and the PSF or the mask
+overlaps the residual or the model.
 
 The PSF and the mask are read in place at any address; a residual or model at
 an address that is not a multiple of its item size (Dask may hand a worker

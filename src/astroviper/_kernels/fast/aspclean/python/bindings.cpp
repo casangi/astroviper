@@ -6,9 +6,12 @@
 // hooked and not repeated here. The changes, none of which changes a value:
 //  * after the checks, a call that needs the reference (its PSF, model or
 //    searched residual holds a value that is not finite, or one of magnitude
-//    2^64 or more: aspclean_fast::needs_reference) is declined: the reference
-//    binding runs it with the same arguments, and the kernel switch traces it
-//    with path "declined";
+//    2^64 or more: aspclean_fast::needs_reference), or whose model overlaps
+//    its residual without being it, is declined: the reference binding runs
+//    it with the same arguments, and the kernel switch traces it with path
+//    "declined". In a cube only the planes that need the reference run it,
+//    each alone (ReferencePlanes), unless all do or the cube's arrays overlap;
+//    the call's path is then "fast";
 //  * the PSF and the mask are read in place at any alignment (Unaligned); a
 //    misaligned residual or model is updated through an aligned copy
 //    (Aligned) that goes back to the caller's buffer at the end; an argument
@@ -22,6 +25,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -79,6 +83,48 @@ static py::array_t<double> history_array(const std::vector<double>& values) {
     return py::array_t<double>(static_cast<py::ssize_t>(values.size()), values.data());
 }
 
+// Components of each kind the model update of every plane of a cube
+// subtracted (clean_cube's count arrays).
+static const std::pair<const char*, int aspclean::AspResult::*> kCubeCounts[] = {
+    {"n_residual_components", &aspclean::AspResult::n_residual_components},
+    {"n_scale_components", &aspclean::AspResult::n_scale_components},
+    {"n_point_components", &aspclean::AspResult::n_point_components},
+    {"n_significance_components", &aspclean::AspResult::n_significance_components},
+    {"n_hogbom_runs", &aspclean::AspResult::n_hogbom_runs},
+    {"n_switch_no_change", &aspclean::AspResult::n_switch_no_change},
+    {"n_switch_point_scales", &aspclean::AspResult::n_switch_point_scales},
+    {"n_switch_fused", &aspclean::AspResult::n_switch_fused},
+};
+
+// The first item of the array `name` of a result dict.
+template <typename V>
+static V first_item(const py::dict& r, const char* name) {
+    const py::array a = r[name].cast<py::array>();
+    V v;
+    std::memcpy(&v, a.data(), sizeof(V));
+    return v;
+}
+
+// The plane of a 1 x 1 x 1 cube from the reference's clean_cube, as the
+// arrays of clean_cube report a plane (the GIL is held).
+static aspclean::AspResult reference_plane(const py::dict& r, bool history) {
+    aspclean::AspResult res;
+    res.iterations = first_item<int>(r, "iterations_performed");
+    res.retval = first_item<int>(r, "retval");
+    res.stop_code = first_item<int>(r, "stop_code");
+    res.peak_residual = first_item<double>(r, "peak_residual");
+    res.model_flux = first_item<double>(r, "model_flux");
+    for (const auto& [name, member] : kCubeCounts) res.*member = first_item<int>(r, name);
+    if (history)
+        for (const auto& [name, record] : kIterationHistoryRecords) {
+            const py::list per_time = r[name].cast<py::list>();
+            const py::array a = per_time[0].cast<py::list>()[0].cast<py::list>()[0].cast<py::array>();
+            const double* values = static_cast<const double*>(a.data());
+            (res.*record).assign(values, values + a.size());
+        }
+    return res;
+}
+
 // The data of a checked array, or an aligned copy of it when its address is
 // not a multiple of alignof(T): Dask can hand a worker an array at any byte
 // offset of a frame it received, and reading a T at such an address is
@@ -133,25 +179,40 @@ static aspclean_fast::Unaligned<T> read_only(const void* p, const void* residual
     return items<T>(p);
 }
 
+// Whether two checked arrays share a byte (an absent mask shares none).
+static bool overlap(const py::buffer_info& a, const py::buffer_info& b) {
+    if (a.ptr == nullptr || b.ptr == nullptr || a.size == 0 || b.size == 0) return false;
+    const auto a0 = reinterpret_cast<std::uintptr_t>(a.ptr), b0 = reinterpret_cast<std::uintptr_t>(b.ptr);
+    return a0 < b0 + static_cast<std::uintptr_t>(b.size * b.itemsize) &&
+           b0 < a0 + static_cast<std::uintptr_t>(a.size * a.itemsize);
+}
+
+// A model that overlaps the residual without being it: the reference updates
+// the two in one order at any thread count; this kernel's threads would race.
+static bool entangled(const py::buffer_info& residual, const py::buffer_info& model) {
+    return model.ptr != residual.ptr && overlap(residual, model);
+}
+
 // Whether the call must run the reference (aspclean_fast::needs_reference),
 // from the caller's buffers before anything is written; the GIL is released.
 template <typename T>
 static bool declines(const py::buffer_info& residual, const py::buffer_info& model, const py::buffer_info& psf,
                      const py::buffer_info& mask, int threads) {
+    if (entangled(residual, model)) return true;
     py::gil_scoped_release release;
     return aspclean_fast::needs_reference<T>(items<T>(residual.ptr), items<T>(model.ptr), items<T>(psf.ptr),
                                              items<T>(mask.ptr), static_cast<std::size_t>(residual.size),
                                              static_cast<std::size_t>(psf.size), threads);
 }
 
+static constexpr const char* kReference = "astroviper.processing_functions.imaging.deconvolvers.aspclean._aspclean_ext";
+
 // Runs a declined call: the reference's entry with the call's arguments (so
 // its result, exception and bits are the reference's), after telling the
 // kernel switch, whose trace line of the call then has path "declined".
 static py::dict run_reference(const char* entry, const py::dict& arguments) {
     py::module_::import("astroviper._kernels._switch").attr("report_path")("asp", "declined");
-    return py::module_::import("astroviper.processing_functions.imaging.deconvolvers.aspclean._aspclean_ext")
-        .attr(entry)(**arguments)
-        .cast<py::dict>();
+    return py::module_::import(kReference).attr(entry)(**arguments).cast<py::dict>();
 }
 
 // The keyword arguments of the options that clean and clean_cube share.
@@ -394,8 +455,23 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     // No mask: a null pointer (ki holds none).
     aspclean_fast::check_controls(asp_psf_width, asp_largest_scale, asp_stop_point_mode,
                                   asp_scale_normalization_method, options.asp_min_mask_coverage);
-    if (declines<T>(ri, mi, pi, ki, processing_function_threads))
-        return run_reference("clean_cube", arguments());
+    if (entangled(ri, mi)) return run_reference("clean_cube", arguments());
+    // The planes that need the reference (needs_reference of each plane).
+    const int nplanes = nt * nf * np_img;
+    const std::size_t plane = static_cast<std::size_t>(ny) * nx;
+    std::vector<unsigned char> declined(static_cast<std::size_t>(std::max(nplanes, 0)), 0);
+    int ndeclined = 0;
+    {
+        py::gil_scoped_release release;
+        ndeclined = aspclean_fast::planes_needing_reference<T>(items<T>(ri.ptr), items<T>(mi.ptr), items<T>(pi.ptr),
+                                                                items<T>(ki.ptr), nt, nf, np_img, np_psf, plane,
+                                                                processing_function_threads, declined.data());
+    }
+    // The reference runs the whole cube when all its planes need it, or when
+    // some do and the PSF or the mask overlaps the residual or the model (the
+    // planes of the two kernels would then read each other's updates).
+    const bool apart = !overlap(pi, ri) && !overlap(pi, mi) && !overlap(ki, ri) && !overlap(ki, mi);
+    if (ndeclined > 0 && (ndeclined == nplanes || !apart)) return run_reference("clean_cube", arguments());
     // A model that is the residual itself shares its working buffer.
     const bool shared = mi.ptr == ri.ptr;
     const Aligned<T> rd(ri, true);
@@ -404,7 +480,40 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     const Aligned<double> thr(thr_info, false);
     const Aligned<int> nit(nit_info, false);
 
-    const int nplanes = nt * nf * np_img;
+    // A plane that needs the reference: the reference's clean_cube on that
+    // plane alone, a 1 x 1 x 1 cube of views of the working buffers (and of
+    // the caller's PSF and mask), with the call's options and its own
+    // threshold and iteration limit; called by the cube's workers.
+    const py::object reference_cube =
+        ndeclined > 0 ? py::module_::import(kReference).attr("clean_cube") : py::object();
+    aspclean_fast::ReferencePlanes reference;
+    if (ndeclined > 0) {
+        reference.declined = declined.data();
+        reference.run = [&](int p, int threads) {
+            py::gil_scoped_acquire gil;
+            const int tt = p / (nf * np_img), nn = (p / np_img) % nf, pp = p % np_img;
+            const std::size_t off = static_cast<std::size_t>(p) * plane * sizeof(T);
+            const std::size_t psf_off =
+                ((static_cast<std::size_t>(tt) * nf + nn) * np_psf + (np_psf == 1 ? 0 : pp)) * plane * sizeof(T);
+            const std::vector<py::ssize_t> one = {1, 1, 1, ny, nx};
+            py::dict a = arguments();
+            a["residual"] = py::array(residual.dtype(), one, reinterpret_cast<unsigned char*>(rd.get()) + off,
+                                      residual);
+            a["model"] = py::array(model.dtype(), one, reinterpret_cast<unsigned char*>(modelp) + off, model);
+            a["psf"] = py::array(psf.dtype(), one, static_cast<const unsigned char*>(pi.ptr) + psf_off, psf);
+            if (ki.ptr != nullptr)
+                a["mask"] = py::array(mask.dtype(), one, static_cast<const unsigned char*>(ki.ptr) + off, mask);
+            py::array_t<double> threshold(std::vector<py::ssize_t>{1, 1, 1});
+            py::array_t<int> limit(std::vector<py::ssize_t>{1, 1, 1});
+            *threshold.mutable_data() = thr.get()[p];
+            *limit.mutable_data() = nit.get()[p];
+            a["threshold_per_cycle"] = threshold;
+            a["max_iter_per_cycle_updated"] = limit;
+            a["processing_function_threads"] = threads;
+            return reference_plane(reference_cube(**a).cast<py::dict>(), options.record_iteration_history);
+        };
+    }
+
     std::vector<aspclean::AspResult> results(nplanes);
     deconvolvers::DivergenceControl<double> divergence;
     divergence.max_iter_divergence = max_iter_divergence;
@@ -417,7 +526,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
             read_only<T>(ki.ptr, ri.ptr, rd.get(), mi.ptr, modelp), nt, nf, np_img, np_psf, nx,
             ny, gain, thr.get(), nit.get(), asp_fused_threshold, asp_psf_width, asp_largest_scale,
             asp_stop_point_mode, asp_scale_normalization_method, asp_stop_after_hogbom_run,
-            processing_function_threads, divergence, results.data(), options);
+            processing_function_threads, divergence, results.data(), options, reference);
     }
 
     py::array_t<int> iters({nt, nf, np_img});
@@ -452,18 +561,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     out["diverged"] = diverged;
     out["peak_residual"] = peak;
     out["model_flux"] = flux;
-    // Components of each kind the model update of every plane subtracted.
-    const std::pair<const char*, int aspclean::AspResult::*> counts[] = {
-        {"n_residual_components", &aspclean::AspResult::n_residual_components},
-        {"n_scale_components", &aspclean::AspResult::n_scale_components},
-        {"n_point_components", &aspclean::AspResult::n_point_components},
-        {"n_significance_components", &aspclean::AspResult::n_significance_components},
-        {"n_hogbom_runs", &aspclean::AspResult::n_hogbom_runs},
-        {"n_switch_no_change", &aspclean::AspResult::n_switch_no_change},
-        {"n_switch_point_scales", &aspclean::AspResult::n_switch_point_scales},
-        {"n_switch_fused", &aspclean::AspResult::n_switch_fused},
-    };
-    for (const auto& [name, member] : counts) {
+    for (const auto& [name, member] : kCubeCounts) {
         py::array_t<int> a({nt, nf, np_img});
         int* ap = a.mutable_data();
         for (int i = 0; i < nplanes; ++i) ap[i] = results[i].*member;
