@@ -72,6 +72,10 @@ def check_auto_mask_params(value):
             require_boolean(key, value[key])
     if "grow_iterations" in value:
         require_integer("grow_iterations", value["grow_iterations"])
+
+    # --- Numerical ranges ---
+    # smooth_factor scales the smoothing kernel, which needs a width. cut_threshold is a
+    # fraction of the smoothed peak: 0 keeps the whole reach of the kernel, 1 nothing.
     if "min_percent_change" in value:
         require_finite_real(
             "min_percent_change", value["min_percent_change"], scalar=True

@@ -7,7 +7,8 @@ both sources in Stokes I by themselves, and nothing in Stokes V, where the mask
 stays empty and the plane stops with a zero mask. The mask must hold the peak
 of each source and stay below 8 percent of the image (measured: at most 5.8),
 and the model of each source must hold its apparent flux within 5 percent
-(measured: within 2.9 percent). Hogbom may not put a component outside the mask.
+(measured: within 2.9 percent). Hogbom may not put a component outside the mask,
+and the mask holds no pixel outside ``primary_beam_limit``.
 The arguments that exclude each other are refused before anything is written.
 """
 
@@ -113,6 +114,7 @@ def run_continuum(
     deconvolver,
     n_taylor_terms=1,
     cycle_control_params=CONTINUUM_CYCLE_CONTROL,
+    primary_beam_limit=0.2,
 ):
     source_store, _ = simulated
     ps_store = str(directory / "input.ps.zarr")
@@ -140,7 +142,7 @@ def run_continuum(
             continuum_mode=continuum_mode,
             instrument_polarization_basis="circular",
             restore=True,
-            primary_beam_limit=0.2,
+            primary_beam_limit=primary_beam_limit,
             scan_intents=["OBSERVE_TARGET#ON_SOURCE"],
             processing_set_data_group_name="base",
             image_data_variables_keep=[
@@ -217,6 +219,16 @@ def test_continuum_masks_the_sources_by_itself(
     assert not image.MASK.values[0, :, 1].any()
     assert result["controller"].stop_code_imaging[0, 0, 1] == IMAGING_ZERO_MASK
     assert result["controller"].cycles_done >= 2
+
+
+def test_continuum_mask_stays_inside_primary_beam_limit(tmp_path, simulated):
+    limit = 0.7
+    _, image = run_continuum(
+        simulated, tmp_path, "mfs", "hogbom", primary_beam_limit=limit
+    )
+    mask = image.MASK.values[0, 0, 0].astype(bool)
+    assert mask.any()
+    assert image.PRIMARY_BEAM.isel(frequency=0).values[0, 0][mask].min() >= limit
 
 
 def test_a_dirty_image_gets_its_mask(tmp_path, simulated):

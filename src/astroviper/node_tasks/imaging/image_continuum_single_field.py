@@ -3511,7 +3511,10 @@ def continuum_cycle_append_node(
             img_xds,
             input_params["auto_mask_params"],
             auto_mask_state=previous_state,
-            primary_beam_limit=cycle_control_params.get("primary_beam_limit", 0.0),
+            primary_beam_limit=input_params.get(
+                "primary_beam_limit",
+                cycle_control_params.get("primary_beam_limit", 0.0),
+            ),
             threshold_reached=threshold_reached,
             processing_function_threads=input_params.get(
                 "processing_function_threads", 1

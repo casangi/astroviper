@@ -603,74 +603,9 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
     assert captured["history"] is previous_history
 
 
-@pytest.mark.parametrize(
-    "threshold, stokes_q, expected",
-    [
-        (0.1, 0.5, [True, False]),
-        ([0.1, 0.5], 0.5, [True, True]),
-        ([0.1, 0.0], 0.0, [True, False]),
-        (0.0, 0.0, [False, False]),
-        (0.1, None, [True, False]),
-    ],
-)
-def test_append_takes_threshold_reached_from_the_record(
-    monkeypatch, threshold, stokes_q, expected
-):
-    """From the latest threshold_per_cycle of every plane in the forwarded record."""
-    record = ImagingDict()
-    record.add({"threshold_per_cycle": 1.0}, time=0, pol=0, chan=0)
-    record.add({"threshold_per_cycle": 0.1}, time=0, pol=0, chan=0)
-    if stokes_q is not None:
-        record.add({"threshold_per_cycle": 1.0}, time=0, pol=1, chan=0)
-        record.add({"threshold_per_cycle": stokes_q}, time=0, pol=1, chan=0)
-    captured = {}
-
-    def fake_auto_mask(image, params, **kwargs):
-        captured.update(kwargs)
-        return kwargs["auto_mask_state"]
-
-    monkeypatch.setattr(
-        continuum_processing, "make_auto_mask_continuum", fake_auto_mask
-    )
-    monkeypatch.setattr(
-        continuum_node,
-        "_prepare_continuum_image",
-        lambda image, input_params, **kwargs: (image, xr.Dataset(), None),
-    )
-    monkeypatch.setattr(
-        continuum_node,
-        "model_update_continuum_single_field",
-        lambda input_data, input_params, **kwargs: {"image": input_data["image"]},
-    )
-    monkeypatch.setattr(
-        continuum_node,
-        "_prepare_post_update_continuum_model_state",
-        lambda image, input_params, previous_model_xds=None, *, input_checked: (
-            xr.Dataset(),
-            None,
-        ),
-    )
-
-    continuum_node.continuum_cycle_append_node(
-        {"image": xr.Dataset()},
-        {
-            "is_first_cycle": False,
-            "deconvolution": record,
-            "auto_mask_params": {},
-            "auto_mask_state": {"planes_stopped": np.zeros((1, 1, 2), dtype=bool)},
-            "cycle_control_params": {
-                "threshold": threshold,
-                "primary_beam_limit": 0.2,
-            },
-        },
-    )
-
-    np.testing.assert_array_equal(captured["threshold_reached"][0, 0], expected)
-    assert captured["primary_beam_limit"] == 0.2
-    assert captured["input_checked"] is True
-
-
-def test_append_has_no_threshold_reached_for_the_first_mask(monkeypatch):
+@pytest.fixture
+def auto_mask_call(monkeypatch):
+    """What the append node gives the mask, with its other steps faked."""
     captured = {}
 
     def fake_auto_mask(image, params, **kwargs):
@@ -698,7 +633,46 @@ def test_append_has_no_threshold_reached_for_the_first_mask(monkeypatch):
             None,
         ),
     )
+    return captured
 
+
+@pytest.mark.parametrize(
+    "threshold, stokes_q, expected",
+    [
+        (0.1, 0.5, [True, False]),
+        ([0.1, 0.5], 0.5, [True, True]),
+        ([0.1, 0.0], 0.0, [True, False]),
+        (0.0, 0.0, [False, False]),
+        (0.1, None, [True, False]),
+    ],
+)
+def test_append_takes_threshold_reached_from_the_record(
+    auto_mask_call, threshold, stokes_q, expected
+):
+    """From the latest threshold_per_cycle of every plane in the forwarded record."""
+    record = ImagingDict()
+    record.add({"threshold_per_cycle": 1.0}, time=0, pol=0, chan=0)
+    record.add({"threshold_per_cycle": 0.1}, time=0, pol=0, chan=0)
+    if stokes_q is not None:
+        record.add({"threshold_per_cycle": 1.0}, time=0, pol=1, chan=0)
+        record.add({"threshold_per_cycle": stokes_q}, time=0, pol=1, chan=0)
+
+    continuum_node.continuum_cycle_append_node(
+        {"image": xr.Dataset()},
+        {
+            "is_first_cycle": False,
+            "deconvolution": record,
+            "auto_mask_params": {},
+            "auto_mask_state": {"planes_stopped": np.zeros((1, 1, 2), dtype=bool)},
+            "cycle_control_params": {"threshold": threshold},
+        },
+    )
+
+    np.testing.assert_array_equal(auto_mask_call["threshold_reached"][0, 0], expected)
+    assert auto_mask_call["input_checked"] is True
+
+
+def test_append_has_no_threshold_reached_for_the_first_mask(auto_mask_call):
     continuum_node.continuum_cycle_append_node(
         {"image": xr.Dataset()},
         {
@@ -708,8 +682,38 @@ def test_append_has_no_threshold_reached_for_the_first_mask(monkeypatch):
         },
     )
 
-    assert captured["threshold_reached"] is None
-    assert captured["auto_mask_state"] is None
+    assert auto_mask_call["threshold_reached"] is None
+    assert auto_mask_call["auto_mask_state"] is None
+
+
+@pytest.mark.parametrize(
+    "top_level_limit, control_limit, expected_limit",
+    [
+        (0.2, None, 0.2),
+        (0.2, 0.2, 0.2),
+        (None, 0.2, 0.2),
+        (None, None, 0.0),
+        (0.0, None, 0.0),
+    ],
+)
+def test_append_gives_the_mask_the_limit_of_the_model_update(
+    auto_mask_call, top_level_limit, control_limit, expected_limit
+):
+    """The driver sends the limit at the top level, beside the cycle controls."""
+    controls = {"threshold": 0.1}
+    if control_limit is not None:
+        controls["primary_beam_limit"] = control_limit
+    input_params = {
+        "is_first_cycle": True,
+        "auto_mask_params": {},
+        "cycle_control_params": controls,
+    }
+    if top_level_limit is not None:
+        input_params["primary_beam_limit"] = top_level_limit
+
+    continuum_node.continuum_cycle_append_node({"image": xr.Dataset()}, input_params)
+
+    assert auto_mask_call["primary_beam_limit"] == expected_limit
 
 
 def _empty_weight_image(**kwargs):
