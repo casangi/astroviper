@@ -3439,7 +3439,9 @@ def image_continuum_single_field(
           smoothed with the clean beam scaled by this.
         - ``min_beam_fraction`` (0.3) [``minbeamfrac``] : Positive regions
           smaller than this fraction of the clean beam area are removed before
-          smoothing; 0 keeps them.
+          smoothing; 0 keeps them. An unresolved source is removed whatever its
+          signal to noise when ``sidelobe_threshold`` times the largest PSF
+          sidelobe is above exp(-``min_beam_fraction``), and a warning is logged.
         - ``cut_threshold`` (0.01) [``cutthreshold``] : A smoothed mask is cut
           at this fraction of its peak, in (0, 1).
         - ``grow_iterations`` (75) [``growiterations``] : Largest number of

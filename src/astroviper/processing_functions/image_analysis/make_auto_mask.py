@@ -11,6 +11,7 @@ import numpy as np
 import scipy.fft
 import scipy.ndimage
 import scipy.special
+import toolviper.utils.logger as logger
 
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
@@ -130,6 +131,35 @@ def _chauvenet_sample(values):
             break
         values = kept
     return values
+
+
+def _warn_when_unresolved_sources_are_pruned(sidelobe, params):
+    """Warn when the sidelobe level alone prunes every unresolved source.
+
+    A Gaussian holds ln(1 / f) beam areas above the fraction f of its peak, so
+    an unresolved source passes pruning only for f below
+    exp(-``min_beam_fraction``), whatever its signal to noise. Left out of the
+    mask it stays the peak, and the sidelobe level stays above everything else.
+
+    Parameters
+    ----------
+    sidelobe : numpy.ndarray
+        Largest PSF sidelobe of every plane.
+    params : dict
+        Complete ``auto_mask_params``.
+    """
+    limit = math.exp(-params["min_beam_fraction"])
+    fraction = params["sidelobe_threshold"] * sidelobe
+    n_planes = np.count_nonzero(fraction > limit)
+    if params["min_beam_fraction"] > 0 and n_planes:
+        logger.warning(
+            f"auto_mask_params: sidelobe_threshold times the largest PSF sidelobe "
+            f"is up to {np.nanmax(fraction):.2f} in {n_planes} of {fraction.size} "
+            f"planes, above exp(-min_beam_fraction) = {limit:.2f}. Pruning then "
+            "removes every unresolved source, whatever its signal to noise. Lower "
+            f"sidelobe_threshold below {limit / np.nanmax(sidelobe):.2f} or "
+            f"min_beam_fraction below {-math.log(np.nanmax(fraction)):.2f}."
+        )
 
 
 def _bounding_box(mask, margin=0):
@@ -448,6 +478,7 @@ def make_auto_mask(
     delta = abs(float(img_xds.l[1] - img_xds.l[0]))
 
     if planes_stopped is None:
+        _warn_when_unresolved_sources_are_pruned(sidelobe, params)
         planes_stopped = np.zeros(planes_shape, dtype=bool)
     else:
         planes_stopped = np.array(planes_stopped, dtype=bool)

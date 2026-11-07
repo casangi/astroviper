@@ -578,6 +578,47 @@ class TestStops:
         assert stopped[0, 0, 0] and not given[0, 0, 0]
 
 
+class TestPruningWarning:
+    @pytest.fixture
+    def warnings(self, monkeypatch):
+        messages = []
+        monkeypatch.setattr("toolviper.utils.logger.warning", messages.append)
+        return messages
+
+    def test_the_sidelobe_level_decides_for_an_unresolved_source(self, warnings):
+        plane = noise_plane(1, 0.01) + gaussian((40, 60), 50.0)
+        kept = image(plane, sidelobe=0.70 / 3.0)
+        make_auto_mask(kept, {})
+        assert plane_mask(kept)[40, 60]
+        assert not warnings
+        pruned = image(plane, sidelobe=0.80 / 3.0)
+        make_auto_mask(pruned, {})
+        assert not plane_mask(pruned).any()
+        assert len(warnings) == 1
+
+    def test_the_message_gives_the_way_out(self, warnings):
+        make_auto_mask(image(noise_plane(), sidelobe=0.27), {})
+        assert "up to 0.81 in 1 of 1 planes" in warnings[0]
+        assert "exp(-min_beam_fraction) = 0.74" in warnings[0]
+        assert "sidelobe_threshold below 2.74" in warnings[0]
+        assert "min_beam_fraction below 0.21" in warnings[0]
+
+    def test_it_counts_the_planes(self, warnings):
+        xds = image(np.stack([noise_plane()] * 3)[None, :, None])
+        xds["SIDELOBE"].values[0, :, 0] = [0.1, 0.3, np.nan]
+        make_auto_mask(xds, {})
+        assert "in 1 of 3 planes" in warnings[0]
+
+    def test_only_at_the_first_update(self, warnings):
+        xds = image(noise_plane(), sidelobe=0.3)
+        make_auto_mask(xds, {}, planes_stopped=np.zeros((1, 1, 1), dtype=bool))
+        assert not warnings
+
+    def test_without_pruning_there_is_nothing_to_warn_about(self, warnings):
+        make_auto_mask(image(noise_plane(), sidelobe=0.9), {"min_beam_fraction": 0.0})
+        assert not warnings
+
+
 def test_the_mask_is_updated_in_place_when_it_can_be():
     previous = np.zeros((1, 1, 1, N, N), dtype=bool)
     previous[0, 0, 0, 70:75, 20:25] = True
