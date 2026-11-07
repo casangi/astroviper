@@ -82,6 +82,30 @@ struct Box {
     int i0 = 0, j0 = 0, i1 = -1, j1 = -1;
 };
 
+// static_cast<int>(v) as the reference's compiled code computes it, where v
+// can lie outside the range of int: the scale sizes of asp_psf_width or of
+// the width of a PSF much wider than the image (2^31 / 3 px and more), and a
+// fitted scale that runs away (1e36 for PSFs near 2^64). The reference's cast
+// is undefined there; compiled, it is the target's conversion instruction,
+// whose result this returns in defined C++: INT_MIN on x86 (cvttsd2si's
+// integer indefinite, NaN too), the saturated value on AArch64 (fcvtzs, NaN
+// 0). Elsewhere it is the reference's cast itself.
+inline int compiled_int(double v) {
+    if (v > -2147483649.0 && v < 2147483648.0) return static_cast<int>(v);
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    return std::numeric_limits<int>::min();
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    if (std::isnan(v)) return 0;
+    return v < 0.0 ? std::numeric_limits<int>::min() : std::numeric_limits<int>::max();
+#else
+    return static_cast<int>(v);
+#endif
+}
+
+// v modulo 2^32 as an int: the reference's int arithmetic on the values of
+// compiled_int, which overflows there (undefined; compiled, it wraps).
+inline int wrapped(long long v) { return static_cast<int>(static_cast<unsigned int>(v)); }
+
 void verify_box(int& blc0, int& blc1, int& trc0, int& trc1, int nx, int ny) {
     blc0 = std::max(0, std::min(blc0, nx - 1));
     blc1 = std::max(0, std::min(blc1, ny - 1));
@@ -364,12 +388,16 @@ struct FastObjective {
         if (!std::isfinite(amp) || asc < 1e-3) asc = 1e-3;
 
         const double sigma5 = 5.0 * asc / 2.0;
-        const int minI = std::max(0, static_cast<int>(cx - sigma5));
-        const int maxI = std::min(nx - 1, static_cast<int>(cx + sigma5));
-        const int minJ = std::max(0, static_cast<int>(cy - sigma5));
-        const int maxJ = std::min(ny - 1, static_cast<int>(cy + sigma5));
-        const int bx = maxI - minI + 1, by = maxJ - minJ + 1;
-        int lx = good_fft_size(2 * bx - 1), ly = good_fft_size(2 * by - 1);
+        // The reference's box, also for a scale beyond the range of int
+        // (compiled_int, wrapped): then maxI (maxJ) is INT_MIN on x86, and the
+        // box is empty.
+        const int minI = std::max(0, compiled_int(cx - sigma5));
+        const int maxI = std::min(nx - 1, compiled_int(cx + sigma5));
+        const int minJ = std::max(0, compiled_int(cy - sigma5));
+        const int maxJ = std::min(ny - 1, compiled_int(cy + sigma5));
+        const int bx = wrapped(static_cast<long long>(maxI) - minI + 1);
+        const int by = wrapped(static_cast<long long>(maxJ) - minJ + 1);
+        int lx = good_fft_size(wrapped(2LL * bx - 1)), ly = good_fft_size(wrapped(2LL * by - 1));
         const bool padded = static_cast<double>(lx) * ly >= static_cast<double>(padNx) * padNy;
         int ox = -minI, oy = -minJ, px = 0, py = 0;
         if (padded) {
@@ -401,9 +429,9 @@ struct FastObjective {
         const double norm = 1.0 / (kSqrtTwoPi * asc);
         const double dnorm = norm / asc;
         // The sum reads grid rows j + oy, j in [minJ, maxJ), and columns
-        // i + ox, i in [minI, maxI).
-        const int r0 = minJ + oy, nr = maxJ - minJ;
-        const int c0 = minI + ox, nc = maxI - minI;
+        // i + ox, i in [minI, maxI) (none for an empty box).
+        const int r0 = minJ + oy, nr = maxJ > minJ ? maxJ - minJ : 0;
+        const int c0 = minI + ox, nc = maxI > minI ? maxI - minI : 0;
         const std::size_t nthreads = threads.get();
         if (nr > 0 && nc > 0) {
             ws.UA.resize(static_cast<std::size_t>(nr) * hx);
@@ -853,12 +881,16 @@ private:
             noiseIdx_.assign(ns, {});
             noiseRowStart_.assign(ns, std::vector<std::size_t>(static_cast<std::size_t>(ny_) + 1, 0));
             for (int s = 0; s < ns; ++s) {
-                const int border = static_cast<int>(3.0 * initScaleSizes_[s]) + 1;
+                // The reference's border, also for a scale beyond the range
+                // of int (then every pixel is skipped).
+                const int border = wrapped(static_cast<long long>(compiled_int(3.0 * initScaleSizes_[s])) + 1);
+                const int xEnd = wrapped(static_cast<long long>(nx_) - border);
+                const int yEnd = wrapped(static_cast<long long>(ny_) - border);
                 std::vector<std::size_t>& idx = noiseIdx_[s];
                 std::vector<std::size_t>& rs = noiseRowStart_[s];
                 for (std::size_t k = 0; k < n_all; k += stride) {
                     const int i = static_cast<int>(k % nx_), j = static_cast<int>(k / nx_);
-                    if (i < border || j < border || i >= nx_ - border || j >= ny_ - border) continue;
+                    if (i < border || j < border || i >= xEnd || j >= yEnd) continue;
                     if (maskMat_(i, j) > 1e-6) continue;
                     idx.push_back(k);
                     rs[static_cast<std::size_t>(j) + 1] += 1;
@@ -1306,7 +1338,9 @@ private:
         }
 
         for (int s = 0; s < nInitScales_; ++s) {
-            const int border = static_cast<int>(initScaleSizes_[s] * 1.5);
+            // The reference's border, also for a scale beyond the range of
+            // int (then INT_MIN on x86: no border is zeroed).
+            const int border = compiled_int(initScaleSizes_[s] * 1.5);
             Mat& m = initScaleMasks_[s];
             auto zeroBox = [&](int b0, int b1, int t0, int t1) {
                 verify_box(b0, b1, t0, t1, nx_, ny_);
