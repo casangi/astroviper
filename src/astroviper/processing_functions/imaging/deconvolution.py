@@ -820,9 +820,9 @@ def deconvolve(
             mode=CUBE_SINGLE_FIELD,
         )
 
-    exact_psf_subtraction = (deconvolve_params or {}).get(
-        "exact_psf_subtraction", False
-    )
+    exact_psf_subtraction = algorithm == "least_squares" or (
+        deconvolve_params or {}
+    ).get("exact_psf_subtraction", False)
 
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {"sky": "SKY_MODEL"}
@@ -988,6 +988,20 @@ def deconvolve(
             mask_cube=mask_arr,
             input_checked=True,
         )
+    elif algorithm == "least_squares":
+        from astroviper.processing_functions.imaging.deconvolvers.least_squares import (
+            least_squares_solve,
+        )
+
+        results = least_squares_solve(
+            residual_cube=residual_arr,
+            psf_cube=psf_arr,
+            model_cube=model_arr,
+            deconvolve_params=deconvolve_params,
+            processing_function_threads=processing_function_threads,
+            mask_cube=mask_arr,
+            input_checked=True,
+        )
     else:  # asp
         results = asp_clean(
             residual_cube=residual_arr,
@@ -1034,6 +1048,12 @@ def deconvolve(
             },
         },
     )
+    if "least_squares_rms_outside_mask" in results:
+        rms_outside = results["least_squares_rms_outside_mask"]
+        for key, fields in imaging_dict.data.items():
+            fields["least_squares_rms_outside_mask"] = rms_outside.get(
+                (key.time, key.chan, key.pol), []
+            )
     return imaging_dict
 
 

@@ -153,6 +153,7 @@ def image_cube_single_field(
     primary_beam_params: dict[str, Any] | None = None,
     clean_mask: str | None = None,
     auto_mask_params: dict[str, Any] | None = None,
+    least_squares_params: dict[str, Any] | None = None,
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -1124,6 +1125,7 @@ def image_cube_single_field(
     input_params["primary_beam_params"] = primary_beam_params
     input_params["clean_mask"] = clean_mask_array
     input_params["auto_mask_params"] = auto_mask_params
+    input_params["least_squares_params"] = least_squares_params
     input_params["skunk_works"] = skunk_works
     input_params["image_chunking"] = image_chunking
     input_params["image_sharding"] = image_sharding

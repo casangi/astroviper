@@ -748,6 +748,22 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "(``asp_scale_significance``) outside the pixels it cleans. Without\n"
         "``auto_mask_params``, ``None`` keeps the primary-beam mask."
     ),
+    "least_squares_params": (
+        "Least-squares solve of the sky model inside the clean mask, a\n"
+        "prototype. ``None`` makes no solve. A dict adds one last imaging cycle\n"
+        "once the stop test has ended the others: its model update solves\n"
+        "``M P M d = M R`` by conjugate residual, with ``M`` the clean mask of\n"
+        "the plane, ``P`` the PSF of twice the image size and ``R`` the\n"
+        "residual, and adds ``d`` to the model. ``max_cycles`` sets how many\n"
+        "CLEAN model updates come first, and they must have finished the mask.\n"
+        "Needs ``clean_mask`` or ``auto_mask_params``. The model keeps no sign\n"
+        "and nothing limits what is fitted inside the mask, noise included.\n"
+        "\n"
+        "- ``max_steps`` : Most steps per plane, each one FFT pair on the\n"
+        "  bounding box of the mask. A plane stops earlier when the RMS of its\n"
+        "  residual outside the mask has fallen by less than 5 percent over 200\n"
+        "  steps."
+    ),
     "auto_mask_params": (
         "Automatic CLEAN mask (CASA ``usemask='auto-multithresh'``, Kepley et\n"
         "al. 2020, PASP 132, 024505). ``None`` makes no automatic mask; a dict,\n"

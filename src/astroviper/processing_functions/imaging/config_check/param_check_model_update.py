@@ -10,6 +10,7 @@ from astroviper.processing_functions.imaging.config_check._common import (
 )
 from astroviper.processing_functions.imaging.config_check._predicates import (
     check_auto_mask_params,
+    check_least_squares_params,
     check_primary_beam_limit,
     check_taylor_count,
 )
@@ -67,6 +68,19 @@ def check_model_update(config, *, mode, require_complete=False):
         check_auto_mask_params(config["auto_mask_params"])
         if config.get("clean_mask") is not None:
             raise ValueError("clean_mask and auto_mask_params exclude each other.")
+
+    # --- Least-squares solve ---
+    # The solve fits everything inside its mask, so it needs one that holds the
+    # emission and is tight, which the primary-beam mask is not. Its operator is
+    # the gridded PSF.
+    if config.get("least_squares_params") is not None:
+        check_least_squares_params(config["least_squares_params"])
+        if config.get("clean_mask") is None and config.get("auto_mask_params") is None:
+            raise ValueError(
+                "least_squares_params needs a clean_mask or auto_mask_params."
+            )
+        if (config.get("gridding_kernel_params") or {}).get("type") == "dft":
+            raise ValueError("least_squares_params needs a gridded image.")
 
     # ========================================================================
     # 2. PSF fitting and helper inputs

@@ -531,6 +531,7 @@ def image_cube_single_field(
     primary_beam_params=None,
     clean_mask=None,
     auto_mask_params=None,
+    least_squares_params=None,
     memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
@@ -1386,6 +1387,7 @@ def image_cube_single_field(
             primary_beam_params=primary_beam_params,
             clean_mask=clean_mask,
             auto_mask_params=auto_mask_params,
+            least_squares_params=least_squares_params,
             task_id=task_id,
             input_checked=True,
         )

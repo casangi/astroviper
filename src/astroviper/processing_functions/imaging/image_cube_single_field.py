@@ -514,6 +514,7 @@ def image_cube_single_field(
     primary_beam_params=None,
     clean_mask=None,
     auto_mask_params=None,
+    least_squares_params=None,
     task_id=0,
     *,
     input_checked: bool = False,
@@ -1126,7 +1127,9 @@ def image_cube_single_field(
     # exact_psf_subtraction: the PSF of twice the image size, made once and
     # used by the model updates only for the subtraction.
     subtraction_psf_cube = None
-    if exact_psf_subtraction and cycle_control_params["max_iter"] > 0:
+    if (exact_psf_subtraction or least_squares_params is not None) and (
+        cycle_control_params["max_iter"] > 0
+    ):
         start = time.time()
         subtraction_psf_cube, _ = make_subtraction_point_spread_function_single_field(
             ps_xdt,
@@ -1155,6 +1158,7 @@ def image_cube_single_field(
     auto_mask_planes_stopped = None
     threshold_per_cycle = None
     model_exists = False
+    least_squares_done = False
     n_cycles = 0
     while True:
         # ---- Residual-update phase ----
@@ -1178,7 +1182,7 @@ def image_cube_single_field(
         accumulate_timing(timing, residual_return_df)
         if not model_exists:
             install_clean_mask(img_xds, clean_mask)
-        if auto_mask_params is not None:
+        if auto_mask_params is not None and not least_squares_done:
             start = time.time()
             threshold_reached = None
             if threshold_per_cycle is not None:
@@ -1242,9 +1246,18 @@ def image_cube_single_field(
         stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
         timing["T_stop_test"] += time.time() - start
 
+        # The least-squares solve is the model update of one last imaging
+        # cycle, whose residual update makes the residual written.
+        least_squares_now = (
+            least_squares_params is not None
+            and stopcode.imaging != 0
+            and model_exists
+            and not least_squares_done
+        )
+
         # ---- Model-update phase (cycle control + deconvolve + convergence) ----
         model_phase_start = time.time()
-        if stopcode.imaging == 0:
+        if least_squares_now or (stopcode.imaging == 0 and not least_squares_done):
             logger.debug("Doing model update")
             # Size the controller's per-plane state to this cube so cycle
             # control (max_iter and threshold) is tracked independently for every
@@ -1277,6 +1290,8 @@ def image_cube_single_field(
             }
             if subtraction_psf_cube is not None:
                 deconvolve_params["subtraction_psf_cube"] = subtraction_psf_cube
+            if least_squares_now:
+                deconvolve_params["least_squares_params"] = least_squares_params
 
             start = time.time()
             (
@@ -1284,7 +1299,7 @@ def image_cube_single_field(
                 model_update_return_df,
             ) = model_update_cube_single_field(
                 img_xds,
-                deconvolver,
+                "least_squares" if least_squares_now else deconvolver,
                 deconvolve_params,
                 model_exists=model_exists,
                 processing_function_threads=processing_function_threads,
@@ -1318,7 +1333,8 @@ def image_cube_single_field(
         # convergence (everything done after each stop test).
         timing["T_model_update"] += time.time() - model_phase_start
 
-        if stopcode.imaging != 0:
+        least_squares_done = least_squares_done or least_squares_now
+        if imaging_dict is residual_imaging_dict:
             logger.debug(f"  *** CONVERGED: {stopdesc} ***")
             break
 

@@ -43,6 +43,28 @@ def check_briggs_robust(value):
 
 
 # -----------------------------------------------------------------------------
+# Least-squares solve
+# -----------------------------------------------------------------------------
+
+
+def check_least_squares_params(value):
+    """Require ``least_squares_params`` with a ``max_steps`` of at least 1.
+
+    Parameters
+    ----------
+    value : mapping
+        The parameters of the least-squares solve.
+    """
+    require_mapping("least_squares_params", value)
+    unknown = sorted(set(value) - {"max_steps"})
+    if unknown:
+        raise ValueError(f"Unknown least_squares_params keys: {unknown}.")
+    if "max_steps" not in value:
+        raise ValueError("least_squares_params needs max_steps.")
+    require_integer("max_steps", value["max_steps"], minimum=1)
+
+
+# -----------------------------------------------------------------------------
 # Automatic mask
 # -----------------------------------------------------------------------------
 
