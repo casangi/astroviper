@@ -26,6 +26,14 @@ Memory: besides its inputs and the iteration history, a call keeps the plans
 of its planes and at most 16,384 deferred subtractions of 32 bytes per plane
 in flight; it does not grow with the iterations.
 
+Speed: on planes smaller or narrower than about 64 x 64 pixels,
+``clean_cube`` can be slower than the reference (one 8 x 8 plane on one
+thread took 1.1 to 1.7 times as long, measured on one machine), and a call of
+either entry that does almost nothing takes a few microseconds longer: there
+the fast path's fixed costs per call, plane and row are as large as the
+reference's whole work. On larger planes it is faster, and so is
+``clean_cube_many_threads`` from 2 threads.
+
 Each call takes one path, reported to the kernel switch for its trace line:
 
 ``"fast"``
