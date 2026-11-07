@@ -605,13 +605,20 @@ class TestAutoMaskFlag:
         )
         make_auto_mask = module.make_auto_mask
         flags = []
+        stopped = [None]
 
         def spy(*args, **kwargs):
             flags.append(kwargs["threshold_reached"])
-            return make_auto_mask(*args, **kwargs)
+            assert kwargs["primary_beam_limit"] == 0.2
+            assert kwargs["planes_stopped"] is stopped[0]
+            stopped[0] = make_auto_mask(*args, **kwargs)
+            return stopped[0]
 
         monkeypatch.setattr(module, "make_auto_mask", spy)
-        _image({"max_cycles": 6, "threshold": threshold}, auto_mask_params={})
+        _, timing, _ = _image(
+            {"max_cycles": 6, "threshold": threshold}, auto_mask_params={}
+        )
+        assert timing["T_auto_mask"].iloc[0] > 0
         return flags
 
     def test_a_threshold_for_every_plane(self, monkeypatch):

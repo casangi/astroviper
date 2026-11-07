@@ -103,6 +103,9 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
     "Floating-point precision for the primary beam. Defaults to\n``numpy.float64``."
 )
 
+_AUTO_MASK_DATA_GROUP_IN_DOC = 'Data group of the residual. Default ``"residual"``.'
+_AUTO_MASK_DATA_GROUP_OUT_DOC = 'Data group that gets the mask. Default ``"residual"``.'
+
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
     'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
@@ -147,6 +150,14 @@ IMAGING_PARAM_DOCS = {
     "resolve_continuum_primary_beam.image_params": (
         _CONTINUUM_PRIMARY_BEAM_RESOLUTION_PARAMS_DOC
     ),
+    "make_auto_mask.auto_mask_params": (
+        "Keys of :data:`AUTO_MASK_DEFAULTS`\n(:func:`validate_auto_mask_params`)."
+    ),
+    "make_auto_mask_continuum.auto_mask_params": "The automatic mask parameters.",
+    "make_auto_mask.image_data_group_in_name": _AUTO_MASK_DATA_GROUP_IN_DOC,
+    "make_auto_mask_continuum.image_data_group_in_name": _AUTO_MASK_DATA_GROUP_IN_DOC,
+    "make_auto_mask.image_data_group_out_name": _AUTO_MASK_DATA_GROUP_OUT_DOC,
+    "make_auto_mask_continuum.image_data_group_out_name": _AUTO_MASK_DATA_GROUP_OUT_DOC,
     "make_primary_beam_single_field.img_xds": _PRIMARY_BEAM_IMAGE_DATASET_DOC,
     "make_continuum_primary_beam_single_field.img_xds": (
         _PRIMARY_BEAM_IMAGE_DATASET_DOC
@@ -692,17 +703,22 @@ IMAGING_PARAM_DOCS = {
         "residual after every residual update, before the stop test. It is\n"
         "refused together with ``clean_mask``. A mask never loses pixels and\n"
         "holds none outside ``primary_beam_limit``; a plane with an empty mask\n"
-        "stops with stop code 7 until a later update gives it pixels. Continuum\n"
-        "imaging masks Taylor term zero. *Differs from CASA*: the clean beam and\n"
+        "stops with stop code 7. A plane whose last two model updates did no\n"
+        "iteration gets stop code 4 when its mask grows onto pixels above the\n"
+        "threshold, and is cleaned again only if another plane keeps the imaging\n"
+        "cycles going. Continuum imaging makes the mask from Taylor term zero\n"
+        "and applies it to every term. *Differs from CASA*: the clean beam and\n"
         "the largest PSF sidelobe are those of each plane, not of the whole\n"
         "cube; a plane stops updating on its own, from its own\n"
         "``threshold_per_cycle``, not with its channel or the peak of the cube;\n"
-        "and the mask written includes the update after the last model update.\n"
+        "``max_iter = 0`` makes a mask, ``niter=0`` none; and the mask written\n"
+        "includes the update after the last model update.\n"
         "Keys, with the default and the CASA name in brackets:\n"
         "\n"
         "- ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts\n"
         "  from the pixels above this times the largest PSF sidelobe times the\n"
-        "  peak residual or, when larger, ``noise_threshold`` times the noise.\n"
+        "  peak residual (the sidelobe level) or, when larger,\n"
+        "  ``noise_threshold`` times the noise.\n"
         "- ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is\n"
         "  1.4826 times the median absolute deviation; every threshold is\n"
         "  relative to the median of the noise sample.\n"

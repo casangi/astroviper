@@ -650,17 +650,22 @@ def image_cube_single_field(
         residual after every residual update, before the stop test. It is
         refused together with ``clean_mask``. A mask never loses pixels and
         holds none outside ``primary_beam_limit``; a plane with an empty mask
-        stops with stop code 7 until a later update gives it pixels. Continuum
-        imaging masks Taylor term zero. *Differs from CASA*: the clean beam and
+        stops with stop code 7. A plane whose last two model updates did no
+        iteration gets stop code 4 when its mask grows onto pixels above the
+        threshold, and is cleaned again only if another plane keeps the imaging
+        cycles going. Continuum imaging makes the mask from Taylor term zero
+        and applies it to every term. *Differs from CASA*: the clean beam and
         the largest PSF sidelobe are those of each plane, not of the whole
         cube; a plane stops updating on its own, from its own
         ``threshold_per_cycle``, not with its channel or the peak of the cube;
-        and the mask written includes the update after the last model update.
+        ``max_iter = 0`` makes a mask, ``niter=0`` none; and the mask written
+        includes the update after the last model update.
         Keys, with the default and the CASA name in brackets:
 
         - ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts
           from the pixels above this times the largest PSF sidelobe times the
-          peak residual or, when larger, ``noise_threshold`` times the noise.
+          peak residual (the sidelobe level) or, when larger,
+          ``noise_threshold`` times the noise.
         - ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is
           1.4826 times the median absolute deviation; every threshold is
           relative to the median of the noise sample.

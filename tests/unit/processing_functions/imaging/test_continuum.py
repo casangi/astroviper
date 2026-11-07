@@ -2419,6 +2419,17 @@ def test_auto_mask_comes_from_taylor_term_zero_and_reaches_every_term():
     assert image.attrs["data_groups"]["residual"]["mask"] == "MASK"
 
 
+def test_auto_mask_follows_the_data_groups():
+    image = _continuum_image_with_two_sources().rename({"SKY_RESIDUAL": "SKY"})
+    image.attrs["data_groups"]["residual"]["sky"] = "SKY"
+    make_auto_mask_continuum(
+        image, {}, primary_beam_limit=0.2, image_data_group_out_name="masked"
+    )
+    assert image.MASK.dims == image.SKY.dims
+    assert image.MASK.values[0, 1, 0, 20, 40]
+    assert image.attrs["data_groups"]["masked"]["mask"] == "MASK"
+
+
 def test_auto_mask_keeps_the_primary_beam_limit():
     image = _continuum_image_with_two_sources()
     image.SKY_RESIDUAL.values[0, 0, 0, 15:25, 58:62] = 500.0

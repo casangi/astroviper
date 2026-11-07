@@ -44,6 +44,7 @@ CYCLE_CONTROL = {
     "min_psf_fraction": 0.05,
     "max_psf_fraction": 0.8,
 }
+CONTINUUM_CYCLE_CONTROL = {**CYCLE_CONTROL, "max_cycles": 8}
 MAX_MASK_FRACTION = 0.08
 FLUX_TOLERANCE = 0.05
 
@@ -105,7 +106,14 @@ def run_cube(simulated, directory, deconvolver, **kwargs):
         return stored.load()
 
 
-def run_continuum(simulated, directory, continuum_mode, deconvolver, n_taylor_terms=1):
+def run_continuum(
+    simulated,
+    directory,
+    continuum_mode,
+    deconvolver,
+    n_taylor_terms=1,
+    cycle_control_params=CONTINUUM_CYCLE_CONTROL,
+):
     source_store, _ = simulated
     ps_store = str(directory / "input.ps.zarr")
     shutil.copytree(source_store, ps_store)
@@ -125,7 +133,7 @@ def run_continuum(simulated, directory, continuum_mode, deconvolver, n_taylor_te
                 "weighting": "natural",
                 "casa_weighting_implementation": True,
             },
-            cycle_control_params={**CYCLE_CONTROL, "max_cycles": 8},
+            cycle_control_params=cycle_control_params,
             gridder="anti_alias",
             deconvolver=deconvolver,
             auto_mask_params={},
@@ -220,6 +228,19 @@ def test_a_dirty_image_gets_its_mask(tmp_path, simulated):
     )
     assert image.MASK.values[0, :, 0].any()
     assert not image.MASK.values[0, :, 1].any()
+    assert not image.SKY_MODEL.values.any()
+
+
+def test_a_dirty_continuum_image_gets_its_mask(tmp_path, simulated):
+    _, image = run_continuum(
+        simulated,
+        tmp_path,
+        "mfs",
+        "hogbom",
+        cycle_control_params={**CYCLE_CONTROL, "max_iter": 0},
+    )
+    assert image.MASK.values[0, 0, 0].any()
+    assert not image.MASK.values[0, 0, 1].any()
     assert not image.SKY_MODEL.values.any()
 
 

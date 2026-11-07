@@ -2818,6 +2818,7 @@ def _continuum_clean_support(
     )
 
 
+@shares_param_docs
 def make_auto_mask_continuum(
     img_xds,
     auto_mask_params,
@@ -2851,7 +2852,8 @@ def make_auto_mask_continuum(
         ``(time, 1, polarization)`` bool, the planes whose preceding
         ``threshold_per_cycle`` was the absolute ``threshold``.
     processing_function_threads : int, optional
-        Threads of the smoothing FFTs.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     image_data_group_in_name : str, optional
         Data group of the residual. Default ``"residual"``.
     image_data_group_out_name : str, optional
@@ -2863,14 +2865,24 @@ def make_auto_mask_continuum(
         ``"mask"``, ``(time, 1, polarization, l, m)`` bool, and
         ``"planes_stopped"``, ``(time, 1, polarization)`` bool.
     """
+    import numpy as np
     import xarray as xr
 
     from astroviper.processing_functions.image_analysis.make_auto_mask import (
         make_auto_mask,
     )
-    from astroviper.utils.clean_mask import install_clean_mask
+    from astroviper.utils.data_group_tools import (
+        create_data_groups_in_and_out,
+        modify_data_groups_xds,
+    )
 
-    group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    group, image_data_group_out = create_data_groups_in_and_out(
+        img_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified={"mask": "MASK"},
+        overwrite=True,
+    )
     frequency = _continuum_frequency_coord(img_xds)
     beam_role = "beam_fit_params_point_spread_function"
     sidelobe_role = "max_sidelobe_point_spread_function"
@@ -2916,11 +2928,17 @@ def make_auto_mask_continuum(
         image_data_group_out_name=image_data_group_in_name,
     )
     mask = cube_xds["MASK"].values
-    install_clean_mask(
+    sky = img_xds[group["sky"]]
+    img_xds[image_data_group_out["mask"]] = (
+        sky.dims,
+        np.broadcast_to(mask, sky.shape).copy(),
+        {"description": "Automatic deconvolution mask.", "type": "mask"},
+    )
+    modify_data_groups_xds(
         img_xds,
-        mask,
         image_data_group_out_name,
-        description="Automatic deconvolution mask",
+        image_data_group_out,
+        description="Automatic deconvolution mask updated.",
     )
     return {"mask": mask, "planes_stopped": planes_stopped}
 

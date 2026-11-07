@@ -16,6 +16,7 @@ from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
+from astroviper.utils.param_docs import shares_param_docs
 
 AUTO_MASK_DEFAULTS = {
     "sidelobe_threshold": 3.0,
@@ -210,8 +211,8 @@ def _update_plane_mask(
     delta : float
         Pixel size, radians.
     threshold_reached : bool
-        Stop updating the mask of this plane when it changes less than
-        ``min_percent_change``.
+        The preceding ``threshold_per_cycle`` of this plane was the absolute
+        ``threshold``; only then does ``min_percent_change`` stop its mask.
     params : dict
         Complete ``auto_mask_params``.
 
@@ -298,6 +299,7 @@ def _update_plane_mask(
     return mask, stop
 
 
+@shares_param_docs
 def make_auto_mask(
     img_xds,
     auto_mask_params,
@@ -312,14 +314,14 @@ def make_auto_mask(
     """Update the automatic CLEAN mask from the residual of every plane.
 
     Every plane gets the pixels above the larger of ``sidelobe_threshold`` times
-    the largest PSF sidelobe times the peak residual and ``noise_threshold``
-    times the noise, without the regions smaller than ``min_beam_fraction``
-    clean beams, smoothed with ``smooth_factor`` clean beams and cut at
-    ``cut_threshold`` of the peak of the smoothed mask. A mask of the preceding
-    residual update also grows through the pixels above the larger of the
-    sidelobe level and ``low_noise_threshold`` times the noise, and with
-    ``negative_threshold`` above 0 the mask takes the negative features too. A
-    mask never loses pixels.
+    the largest PSF sidelobe times the peak residual (the sidelobe level) and
+    ``noise_threshold`` times the noise, without the regions smaller than
+    ``min_beam_fraction`` clean beams, smoothed with ``smooth_factor`` clean
+    beams and cut at ``cut_threshold`` of the peak of the smoothed mask. A mask
+    of the preceding residual update also grows through the pixels above the
+    larger of the sidelobe level and ``low_noise_threshold`` times the noise,
+    and with ``negative_threshold`` above 0 the mask takes the negative features
+    too. A mask never loses pixels.
 
     Parameters
     ----------
@@ -344,7 +346,8 @@ def make_auto_mask(
         ``threshold_per_cycle`` was the absolute ``threshold``. Only then does
         ``min_percent_change`` stop a mask.
     processing_function_threads : int, optional
-        Threads of the smoothing FFTs.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     image_data_group_in_name : str, optional
         Data group of the residual. Default ``"residual"``.
     image_data_group_out_name : str, optional
@@ -357,8 +360,9 @@ def make_auto_mask(
     -------
     numpy.ndarray
         ``(time, frequency, polarization)`` bool ``planes_stopped``, updated: a
-        plane stops when the noise sets its threshold and its mask is empty,
-        did not change or changed by less than ``min_percent_change`` percent.
+        plane stops when the noise sets its threshold and its mask is empty or,
+        with ``min_percent_change`` at or above 0 and ``threshold_reached``,
+        did not change or changed by less than that percentage.
     """
     params = {**AUTO_MASK_DEFAULTS, **auto_mask_params}
     if image_data_group_out_modified is None:

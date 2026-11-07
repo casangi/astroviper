@@ -192,7 +192,7 @@ def test_two_hands_leave_every_mask_on_its_plane():
 
 
 def test_two_hands_are_transformed_in_place_and_stay_real():
-    """The two-hand conversion is real: same buffer, same data type, masks included."""
+    """The two-hand conversion is real: same buffer, same data type."""
     xds = _make_linear_image(xx=12.0, yy=8.0)
     xds["SKY"] = xds["SKY"].astype(np.float32)
     buffer = xds["SKY"].values

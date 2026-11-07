@@ -93,26 +93,6 @@ def test_install_clean_mask_broadcasts_and_registers_data_group():
     )
 
 
-def test_install_clean_mask_takes_one_mask_per_plane():
-    """A mask with a plane per polarization reaches every Taylor term."""
-    residual = xr.DataArray(
-        np.zeros((1, 2, 2, 2, 3)),
-        dims=("time", "taylor_term", "polarization", "l", "m"),
-    )
-    image = xr.Dataset(
-        {"SKY_RESIDUAL": residual},
-        attrs={"data_groups": {"residual": {"sky": "SKY_RESIDUAL"}}},
-    )
-    mask = np.zeros((1, 1, 2, 2, 3), dtype=bool)
-    mask[0, 0, 1, 1, 2] = True
-
-    install_clean_mask(image, mask, description="Automatic deconvolution mask")
-
-    for taylor_term in range(2):
-        np.testing.assert_array_equal(image["MASK"].values[0, taylor_term], mask[0, 0])
-    assert image["MASK"].attrs["description"] == "Automatic deconvolution mask."
-
-
 def test_install_clean_mask_rejects_wrong_shape():
     """Node-level validation protects direct callers from mismatched masks."""
     image = xr.Dataset(
@@ -594,16 +574,24 @@ def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "threshold, expected",
-    [(0.1, [True, False]), ([0.1, 0.5], [True, True]), (0.0, [False, False])],
+    "threshold, stokes_q, expected",
+    [
+        (0.1, 0.5, [True, False]),
+        ([0.1, 0.5], 0.5, [True, True]),
+        ([0.1, 0.0], 0.0, [True, False]),
+        (0.0, 0.0, [False, False]),
+        (0.1, None, [True, False]),
+    ],
 )
 def test_append_takes_threshold_reached_from_the_record(
-    monkeypatch, threshold, expected
+    monkeypatch, threshold, stokes_q, expected
 ):
     """From the latest threshold_per_cycle of every plane in the forwarded record."""
     record = ImagingDict()
-    for stokes_i, stokes_q in ((1.0, 1.0), (0.1, 0.5)):
-        record.add({"threshold_per_cycle": stokes_i}, time=0, pol=0, chan=0)
+    record.add({"threshold_per_cycle": 1.0}, time=0, pol=0, chan=0)
+    record.add({"threshold_per_cycle": 0.1}, time=0, pol=0, chan=0)
+    if stokes_q is not None:
+        record.add({"threshold_per_cycle": 1.0}, time=0, pol=1, chan=0)
         record.add({"threshold_per_cycle": stokes_q}, time=0, pol=1, chan=0)
     captured = {}
 
@@ -637,11 +625,15 @@ def test_append_takes_threshold_reached_from_the_record(
             "deconvolution": record,
             "auto_mask_params": {},
             "auto_mask_state": {"planes_stopped": np.zeros((1, 1, 2), dtype=bool)},
-            "cycle_control_params": {"threshold": threshold},
+            "cycle_control_params": {
+                "threshold": threshold,
+                "primary_beam_limit": 0.2,
+            },
         },
     )
 
     np.testing.assert_array_equal(captured["threshold_reached"][0, 0], expected)
+    assert captured["primary_beam_limit"] == 0.2
 
 
 def test_append_has_no_threshold_reached_for_the_first_mask(monkeypatch):

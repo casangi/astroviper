@@ -2626,9 +2626,9 @@ def _warn_on_mvc_asp_significance_without_clean_mask(
             "residual to 0 outside the primary-beam support, where Asp then "
             "measures the noise of its significance test, so that test measures "
             "no noise, or after the residual-shaped components only their "
-            "sidelobes. Give a clean_mask that leaves more pixels of the "
-            "primary-beam support outside it than the image has outside that "
-            "support."
+            "sidelobes. Give a clean_mask or auto_mask_params that leaves more "
+            "pixels of the primary-beam support outside it than the image has "
+            "outside that support."
         )
 
 
@@ -2866,8 +2866,9 @@ def image_continuum_single_field(
     Högbom does and requires ``image_params["n_taylor_terms"] = 1``; with
     more Taylor terms it raises ``ValueError`` before anything is written.
     In MVC the significance test of Asp (``asp_scale_significance``) needs a
-    suitable ``clean_mask`` (see ``deconvolver``). All verify refreshed
-    residuals before finalization. MT-MFS needs two to four Taylor terms.
+    suitable ``clean_mask`` or automatic mask (see ``deconvolver``). All verify
+    refreshed residuals before finalization. MT-MFS needs two to four Taylor
+    terms.
     Restoration is optional. ``cycle_acceleration`` optionally replaces each
     model increment by a conjugate gradient or Nesterov momentum step.
 
@@ -3409,17 +3410,22 @@ def image_continuum_single_field(
         residual after every residual update, before the stop test. It is
         refused together with ``clean_mask``. A mask never loses pixels and
         holds none outside ``primary_beam_limit``; a plane with an empty mask
-        stops with stop code 7 until a later update gives it pixels. Continuum
-        imaging masks Taylor term zero. *Differs from CASA*: the clean beam and
+        stops with stop code 7. A plane whose last two model updates did no
+        iteration gets stop code 4 when its mask grows onto pixels above the
+        threshold, and is cleaned again only if another plane keeps the imaging
+        cycles going. Continuum imaging makes the mask from Taylor term zero
+        and applies it to every term. *Differs from CASA*: the clean beam and
         the largest PSF sidelobe are those of each plane, not of the whole
         cube; a plane stops updating on its own, from its own
         ``threshold_per_cycle``, not with its channel or the peak of the cube;
-        and the mask written includes the update after the last model update.
+        ``max_iter = 0`` makes a mask, ``niter=0`` none; and the mask written
+        includes the update after the last model update.
         Keys, with the default and the CASA name in brackets:
 
         - ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts
           from the pixels above this times the largest PSF sidelobe times the
-          peak residual or, when larger, ``noise_threshold`` times the noise.
+          peak residual (the sidelobe level) or, when larger,
+          ``noise_threshold`` times the noise.
         - ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is
           1.4826 times the median absolute deviation; every threshold is
           relative to the median of the noise sample.

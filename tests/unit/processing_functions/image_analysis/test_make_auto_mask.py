@@ -7,7 +7,6 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.image_analysis.make_auto_mask import (
-    AUTO_MASK_DEFAULTS,
     _chauvenet_sample,
     _location_and_noise,
     _plane_thresholds,
@@ -86,7 +85,19 @@ class TestValidate:
         assert validate_auto_mask_params(None) is None
 
     def test_empty_dict_gives_the_defaults(self):
-        assert validate_auto_mask_params({}) == AUTO_MASK_DEFAULTS
+        assert validate_auto_mask_params({}) == {
+            "sidelobe_threshold": 3.0,
+            "noise_threshold": 5.0,
+            "low_noise_threshold": 1.5,
+            "negative_threshold": 0.0,
+            "smooth_factor": 1.0,
+            "min_beam_fraction": 0.3,
+            "cut_threshold": 0.01,
+            "grow_iterations": 75,
+            "grow_prune": True,
+            "min_percent_change": -1.0,
+            "fast_noise": True,
+        }
 
     def test_given_values_are_kept(self):
         params = validate_auto_mask_params({"noise_threshold": 4.25})
@@ -126,6 +137,18 @@ class TestValidate:
     def test_refuses_a_bad_value(self, key, value, message):
         with pytest.raises(ValueError, match=message):
             validate_auto_mask_params({key: value})
+
+
+def test_the_noise_stays_inside_the_primary_beam():
+    plane = noise_plane()
+    plane[:, 48:] *= 20.0
+    support = np.zeros_like(plane, dtype=bool)
+    support[:, :48] = True
+    previous = np.zeros_like(support)
+    previous[:8, :8] = True
+    for fast_noise in (True, False):
+        _, noise = _location_and_noise(plane, support, previous, fast_noise)
+        assert abs(noise - 1.0) < 0.1
 
 
 class TestStatistics:
@@ -196,6 +219,15 @@ def test_prune_counts_four_connected_pixels():
     np.testing.assert_array_equal(_prune(mask, 4), expected)
     np.testing.assert_array_equal(_prune(mask, 5), np.zeros_like(mask))
     np.testing.assert_array_equal(_prune(mask, 1), mask)
+
+
+def test_prune_removes_only_the_pixels_of_a_region():
+    mask = np.zeros((12, 12), dtype=bool)
+    mask[1, 1:4] = mask[1:4, 3] = True  # 5 pixels in rows 1-3, columns 1-3
+    mask[3:12, 1] = True  # 9 pixels, the tip (3, 1) inside that box
+    expected = np.zeros_like(mask)
+    expected[3:12, 1] = True
+    np.testing.assert_array_equal(_prune(mask, 6), expected)
 
 
 class TestMaskOfOnePlane:
@@ -308,6 +340,26 @@ class TestMaskOfOnePlane:
         np.testing.assert_array_equal(plane_mask(xds), previous)
         assert not stopped[0, 0, 0]
 
+    def test_a_negative_peak_sets_the_sidelobe_level(self):
+        plane = noise_plane() + gaussian((40, 60), 30.0) - gaussian((70, 20), 300.0)
+        xds = image(plane, sidelobe=0.05)
+        make_auto_mask(xds, {})
+        assert not plane_mask(xds)[40, 60]
+
+    def test_a_plane_without_finite_pixels_stays_empty(self):
+        xds = image(np.full((N, N), np.nan))
+        stopped = make_auto_mask(xds, {})
+        assert not plane_mask(xds).any()
+        assert not stopped[0, 0, 0]
+
+    def test_negative_features_are_smoothed(self):
+        plane = np.zeros((N, N))
+        plane[48, 48] = -100.0
+        xds = image(plane, beam=(12 * PIXEL, 4 * PIXEL, 0.6), sidelobe=0.0)
+        make_auto_mask(xds, {"negative_threshold": 4.0, "cut_threshold": 0.2})
+        kernel = _elliptical_gaussian_kernel(N, N, 12.0, 4.0, 0.6, np.float64)
+        np.testing.assert_array_equal(plane_mask(xds), kernel > 0.2)
+
     def test_negative_features(self):
         plane = noise_plane() + gaussian((40, 60), 50.0) - gaussian((70, 20), 30.0)
         xds = image(plane)
@@ -372,6 +424,27 @@ class TestUpdates:
         kept = image(faint, mask=previous)
         make_auto_mask(kept, {"grow_prune": False})
         assert np.count_nonzero(plane_mask(kept)) > 4
+
+    def test_new_emission_and_growth_in_one_update(self):
+        first, _ = self.first_and_faint()
+        xds = image(first)
+        make_auto_mask(xds, {})
+        second = noise_plane(2, 0.1) + gaussian((75, 75), 5.0)
+        second[42:62, 36:44] = 0.3
+        xds = image(second, mask=plane_mask(xds).copy(), sidelobe=0.01)
+        make_auto_mask(xds, {})
+        assert plane_mask(xds)[75, 75]
+        assert plane_mask(xds)[57, 40]
+
+    def test_growth_starts_inside_the_constraint(self):
+        previous = np.zeros((N, N), dtype=bool)
+        previous[40:48, 40:48] = True
+        plane = noise_plane(2, 0.1)
+        plane[40:48, 40:48] = 0.0
+        plane[48:60, 40:48] = 0.3
+        xds = image(plane, mask=previous)
+        make_auto_mask(xds, {})
+        assert not plane_mask(xds)[55, 44]
 
     def test_a_masked_source_is_not_masked_again(self):
         plane = noise_plane() + gaussian((40, 60), 50.0)
@@ -445,6 +518,16 @@ class TestStops:
         assert stopped[0, 0, 0]
         np.testing.assert_array_equal(plane_mask(xds), previous)
 
+    def test_a_stopped_plane_does_not_stop_the_others(self):
+        channels = np.stack([noise_plane(1) + gaussian((40, 60), 50.0)] * 2)
+        stopped = np.zeros((1, 2, 1), dtype=bool)
+        stopped[0, 0, 0] = True
+        xds = image(channels[None, :, None])
+        result = make_auto_mask(xds, {}, planes_stopped=stopped)
+        assert not xds.MASK.values[0, 0, 0].any()
+        assert xds.MASK.values[0, 1, 0, 40, 60]
+        assert result[0, 0, 0] and not result[0, 1, 0]
+
     def test_the_stopped_planes_given_are_not_modified(self):
         given = np.zeros((1, 1, 1), dtype=bool)
         xds = image(noise_plane())
@@ -466,6 +549,17 @@ def test_the_data_groups_name_the_variables():
     assert xds.attrs["data_groups"]["masked"]["mask"] == "MASK_AUTOMATIC"
     assert "mask" not in xds.attrs["data_groups"]["residual"]
     assert "MASK" not in xds
+
+
+def test_growth_stays_in_its_plane():
+    previous = np.zeros((1, 2, 1, N, N), dtype=bool)
+    previous[0, 0, 0, 40:48, 40:48] = True
+    channels = np.stack([noise_plane(1, 0.1), noise_plane(2, 0.1)])
+    channels[:, 40:60, 40:48] = 0.3
+    xds = image(channels[None, :, None], mask=previous)
+    make_auto_mask(xds, {})
+    assert xds.MASK.values[0, 0, 0, 55, 44]
+    assert not xds.MASK.values[0, 1, 0].any()
 
 
 def test_every_plane_gets_its_own_mask():

@@ -108,6 +108,7 @@ def _target_files():
         "node_tasks/imaging/image_cube_single_field.py",
         "node_tasks/imaging/image_continuum_single_field.py",
         "node_tasks/imaging/utils/skunk_works_msv2.py",
+        "processing_functions/image_analysis/make_auto_mask.py",
         "processing_functions/imaging/image_cube_single_field.py",
         "processing_functions/imaging/calculate_imaging_weights.py",
         "processing_functions/imaging/image_continuum_single_field.py",
