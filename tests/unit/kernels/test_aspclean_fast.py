@@ -1300,51 +1300,66 @@ def _mapped_plane():
     return _plane(psf, dirty, mask, _threshold(dirty, mask, 0.3), 10)
 
 
-def _shifted(inputs):
-    """``inputs`` with every array moved to a misaligned address."""
-    return {
+def _shifted_call(function, inputs, threads, options):
+    """``_call`` with every array of the call (fresh copies) at a misaligned
+    address."""
+    arguments = {
         k: _misaligned(v) if isinstance(v, np.ndarray) else v for k, v in inputs.items()
     }
+    try:
+        result = function(**arguments, processing_function_threads=threads, **options)
+    except Exception as e:  # the reference's exception is the expected outcome
+        return type(e), str(e)
+    return np.array(arguments["residual"]), np.array(arguments["model"]), result
 
 
 def test_concurrent_calls():
     """Python threads in the fast kernel at once (the GIL is released): planes
     and cubes, a plane whose large buffers are mapped, misaligned arrays, a
-    declined call and calls that raise; each gives the outcome it gives alone
-    (the reference's at the same thread count)."""
-    jobs = {
-        "holes": ("clean", _scene("holes"), 3, KERNEL | RECORD),
-        "negcut": ("clean", _scene("negcut"), 1, KERNEL | RECORD),
-        "point_patch": ("clean", _scene("point_patch"), 2, CORAL | RECORD),
-        "cube": ("clean_cube", _cube(), 4, CORAL | {"record_iteration_history": True}),
-        "mapped": ("clean", _mapped_plane(), 2, CORAL | RECORD),
-        "misaligned": ("clean", _shifted(_scene("cut_back_60")), 2, KERNEL | RECORD),
-        "misaligned_cube": ("clean_cube", _shifted(_cube()), 3, KERNEL),
-        "declined": ("clean", _edited("psf_nan_and_minus_inf"), 2, CORAL | RECORD),
-        "raises": ("clean", _scene("cut_back_1"), 2, {"asp_min_mask_coverage": 1.0}),
-        "cube_raises": ("clean_cube", _cube(), 2, {"asp_largest_scale": -2}),
+    declined call and calls that raise; each gives the outcome the reference
+    gives at the same thread count (on aligned arrays: it reads misaligned
+    ones in place, which is undefined)."""
+    jobs = {  # name -> (entry, inputs, threads, options, misaligned)
+        "holes": ("clean", _scene("holes"), 3, KERNEL | RECORD, False),
+        "negcut": ("clean", _scene("negcut"), 1, KERNEL | RECORD, False),
+        "point_patch": ("clean", _scene("point_patch"), 2, CORAL | RECORD, False),
+        "cube": (
+            "clean_cube",
+            _cube(),
+            4,
+            CORAL | {"record_iteration_history": True},
+            False,
+        ),
+        "mapped": ("clean", _mapped_plane(), 2, CORAL | RECORD, False),
+        "misaligned": ("clean", _scene("cut_back_60"), 2, KERNEL | RECORD, True),
+        "misaligned_cube": ("clean_cube", _cube(), 3, KERNEL, True),
+        "declined": (
+            "clean",
+            _edited("psf_nan_and_minus_inf"),
+            2,
+            CORAL | RECORD,
+            False,
+        ),
+        "raises": (
+            "clean",
+            _scene("cut_back_1"),
+            2,
+            {"asp_min_mask_coverage": 1.0},
+            False,
+        ),
+        "cube_raises": ("clean_cube", _cube(), 2, {"asp_largest_scale": -2}, False),
     }
-
-    def run(function, entry, inputs, threads, options):
-        """``_call`` that keeps a misaligned residual and model misaligned."""
-        if inputs["residual"].flags.aligned:
-            return _call(function, inputs, threads, options)
-        arguments = inputs | {k: _misaligned(inputs[k]) for k in ("residual", "model")}
-        try:
-            result = function(
-                **arguments, processing_function_threads=threads, **options
-            )
-        except Exception as e:  # the reference's exception is the expected outcome
-            return type(e), str(e)
-        return np.array(arguments["residual"]), np.array(arguments["model"]), result
-
-    expected = {name: run(REFERENCE[job[0]], *job) for name, job in jobs.items()}
+    expected = {
+        name: _call(REFERENCE[entry], inputs, threads, options)
+        for name, (entry, inputs, threads, options, _) in jobs.items()
+    }
     got, errors = [], []
 
     def worker(name):
         try:
-            entry, *job = jobs[name]
-            got.append((name, run(FAST[entry], entry, *job)))
+            entry, inputs, threads, options, misaligned = jobs[name]
+            call = _shifted_call if misaligned else _call
+            got.append((name, call(FAST[entry], inputs, threads, options)))
         except BaseException as e:  # reported below
             errors.append(e)
 
