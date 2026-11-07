@@ -4,16 +4,15 @@
 // difference, as in the generic build. Everything is internal to this unit
 // except the table it exports.
 
-#if defined(__x86_64__) || defined(_M_X64)
-
-#include <immintrin.h>
-
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 
 #include "hclean_fast_kernels.hpp"
+
+#if defined(HCLEAN_FAST_AVX2)  // the build's AVX2 unit, on an x86-64 target
+
+#include <immintrin.h>
 
 namespace {
 
@@ -50,6 +49,23 @@ struct Simd<double> {
     static V clear(V v, V keep) { return _mm256_and_pd(v, keep); }
     static void store_squares(double* out, V v, V keep) {
         _mm256_storeu_pd(out, _mm256_and_pd(_mm256_mul_pd(v, v), keep));
+    }
+    // The largest lane of a and b (none is NaN).
+    static double largest(V a, V b) {
+        const V m = _mm256_max_pd(a, b);
+        const __m128d h = _mm_max_pd(_mm256_castpd256_pd128(m), _mm256_extractf128_pd(m, 1));
+        return _mm_cvtsd_f64(_mm_max_sd(h, _mm_unpackhi_pd(h, h)));
+    }
+    // The smallest offset (at_a, at_b) of the lanes whose maximum (max_a,
+    // max_b) is `value`.
+    static int first(V max_a, V at_a, V max_b, V at_b, double value) {
+        const V target = _mm256_set1_pd(value);
+        const V none = _mm256_set1_pd(__builtin_inf());
+        const V a = _mm256_blendv_pd(none, at_a, _mm256_cmp_pd(max_a, target, _CMP_EQ_OQ));
+        const V b = _mm256_blendv_pd(none, at_b, _mm256_cmp_pd(max_b, target, _CMP_EQ_OQ));
+        const V m = _mm256_min_pd(a, b);
+        const __m128d h = _mm_min_pd(_mm256_castpd256_pd128(m), _mm256_extractf128_pd(m, 1));
+        return static_cast<int>(_mm_cvtsd_f64(_mm_min_sd(h, _mm_unpackhi_pd(h, h))));
     }
 };
 
@@ -101,6 +117,25 @@ struct Simd<float> {
         _mm256_storeu_pd(out, _mm256_and_pd(_mm256_mul_pd(low, low), keep.low));
         _mm256_storeu_pd(out + 4, _mm256_and_pd(_mm256_mul_pd(high, high), keep.high));
     }
+    // The largest lane of a and b (none is NaN).
+    static float largest(V a, V b) {
+        const V m = _mm256_max_ps(a, b);
+        __m128 h = _mm_max_ps(_mm256_castps256_ps128(m), _mm256_extractf128_ps(m, 1));
+        h = _mm_max_ps(h, _mm_movehl_ps(h, h));
+        return _mm_cvtss_f32(_mm_max_ss(h, _mm_shuffle_ps(h, h, 1)));
+    }
+    // The smallest offset (at_a, at_b) of the lanes whose maximum (max_a,
+    // max_b) is `value`.
+    static int first(V max_a, V at_a, V max_b, V at_b, float value) {
+        const V target = _mm256_set1_ps(value);
+        const V none = _mm256_set1_ps(__builtin_inff());
+        const V a = _mm256_blendv_ps(none, at_a, _mm256_cmp_ps(max_a, target, _CMP_EQ_OQ));
+        const V b = _mm256_blendv_ps(none, at_b, _mm256_cmp_ps(max_b, target, _CMP_EQ_OQ));
+        const V m = _mm256_min_ps(a, b);
+        __m128 h = _mm_min_ps(_mm256_castps256_ps128(m), _mm256_extractf128_ps(m, 1));
+        h = _mm_min_ps(h, _mm_movehl_ps(h, h));
+        return static_cast<int>(_mm_cvtss_f32(_mm_min_ss(h, _mm_shuffle_ps(h, h, 1))));
+    }
 };
 
 #include "hclean_fast_kernels.inc"
@@ -111,4 +146,4 @@ hclean_fast::Kernels hclean_fast::avx2_kernels() {
     return {"avx2", search_f64, search_f32, flush_f64, flush_f32};
 }
 
-#endif  // defined(__x86_64__) || defined(_M_X64)
+#endif  // defined(HCLEAN_FAST_AVX2)

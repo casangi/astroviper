@@ -8,11 +8,13 @@
 // only) each compile it once, with lanes of their own.
 //
 // Every version performs the reference's rounded operations pixel by pixel,
-// in its order and without FMA, so every version gives the same bits.
+// in its order and without FMA, so every version gives the same bits (a NaN
+// result is a NaN in every version, its sign and payload unspecified).
 //
-// This header is included by the AVX2 unit and therefore declares only plain
-// types and functions: an AVX2 unit must define no weak symbol (no inline or
-// template code is instantiated in it), see cmake/AstroviperKernels.cmake.
+// This header is included by the AVX2 unit and therefore declares only
+// aggregates (some of them templates) without member functions, and plain
+// functions: an AVX2 unit must define no weak symbol (no inline or template
+// code is emitted in it), see cmake/AstroviperKernels.cmake.
 
 #include <cstddef>
 #include <cstdint>
@@ -89,8 +91,14 @@ struct Kernels {
     void (*flush_f32)(const ExteriorFlush<float>& flush, int y_begin, int y_end);
 };
 
+// The AVX2 routines exist where the build adds the AVX2 unit (AV_HAVE_AVX2)
+// and the target is x86-64, the condition of that unit's body.
+#if defined(AV_HAVE_AVX2) && (defined(__x86_64__) || defined(_M_X64))
+#define HCLEAN_FAST_AVX2 1
+#endif
+
 Kernels generic_kernels();
-#if defined(AV_HAVE_AVX2)
+#if defined(HCLEAN_FAST_AVX2)
 Kernels avx2_kernels();
 #endif
 

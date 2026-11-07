@@ -13,7 +13,6 @@
 #include <cstring>
 #include <exception>
 #include <memory>
-#include <mutex>
 #include <new>
 #include <system_error>
 #include <thread>
@@ -43,6 +42,11 @@ using std::size_t;
 // which were slower than one thread per plane at 12 and 24 threads (M).
 constexpr long kPixelsPerThread = 16384;
 
+// The same for the crew of a lone iterating plane, whose other threads would
+// only wait: 8 threads on a 256 x 256 plane were 1.5x as fast as 4 (M, the
+// e2e review's variant).
+constexpr long kLonePixelsPerThread = 4096;
+
 // A call starts a thread for at most every kUpdatesPerThread pixel updates of
 // its work (E): starting, running and joining a thread costs about 25-35 us
 // (M, a call of 24 planes of 8 x 8 for one iteration on 1 to 24 threads),
@@ -52,6 +56,11 @@ constexpr double kUpdatesPerThread = 131072.0;
 // The pixels of a tile of the final pass over a plane, which applies the
 // deferred subtractions and takes the binding's summary (whole rows).
 constexpr int kTilePixels = 8192;
+
+// The subtractions from E that a plane defers at most: when that many are
+// pending they are applied, in order, so that the memory of a plane does not
+// grow with its iterations (32 bytes each, 512 KiB in all).
+constexpr size_t kMaxPending = 16384;
 
 // ------------------------------------------------------------------ threads
 
@@ -114,7 +123,9 @@ private:
 // when all have returned; the other ranks call serve(rank), which runs the
 // steps until the leader calls dismiss() or runs a step with `last`, after
 // which they return without waiting to be dismissed. A step starts only once
-// the previous one has ended on every rank.
+// the previous one has ended on every rank. A step must not throw (it is
+// noexcept, which run() checks): a rank that left a step early would never be
+// awaited.
 class Crew {
 public:
     int size() const { return size_; }
@@ -124,11 +135,12 @@ public:
 
     template <typename Step>
     void run(Step& step, bool last = false) {
+        static_assert(std::is_nothrow_invocable_v<Step&, int>, "a crew's steps must be noexcept");
         if (size_ == 1) {
             step(0);
             return;
         }
-        call_ = [](void* function, int rank) { (*static_cast<Step*>(function))(rank); };
+        call_ = [](void* function, int rank) noexcept { (*static_cast<Step*>(function))(rank); };
         step_ = &step;
         last_ = last;
         pending_.store(size_ - 1, std::memory_order_relaxed);
@@ -185,7 +197,7 @@ private:
     }
 
     int size_ = 1;
-    void (*call_)(void*, int) = nullptr;
+    void (*call_)(void*, int) noexcept = nullptr;
     void* step_ = nullptr;
     bool last_ = false;
     bool dismissed_ = false;
@@ -207,6 +219,26 @@ public:
 
 private:
     Crew& crew_;
+};
+
+// The first exception that the threads of a group throw, kept for the thread
+// that waits for them all; the others read failed() to stop early.
+class FirstError {
+public:
+    void record(std::exception_ptr error) noexcept {
+        if (!failed_.exchange(true, std::memory_order_acq_rel)) error_ = std::move(error);
+    }
+
+    bool failed() const { return failed_.load(std::memory_order_relaxed); }
+
+    // By the waiting thread, once every thread of the group has finished.
+    void rethrow() {
+        if (error_) std::rethrow_exception(std::exchange(error_, nullptr));
+    }
+
+private:
+    std::atomic<bool> failed_{false};
+    std::exception_ptr error_;
 };
 
 // The threads of a call: the calling thread (member 0) and up to size - 1
@@ -241,7 +273,7 @@ public:
 
     int size() const { return crew_.size(); }
 
-    bool failed() const { return failed_.load(std::memory_order_relaxed); }
+    bool failed() const { return error_.failed(); }
 
     template <typename Phase>
     void run(Phase&& phase) {
@@ -258,28 +290,20 @@ public:
 private:
     template <typename Phase>
     void run_phase(Phase& phase, bool last) {
-        auto guarded = [&](int member) {
+        auto guarded = [&](int member) noexcept {
             try {
                 phase(member);
             } catch (...) {
-                fail(std::current_exception());
+                error_.record(std::current_exception());
             }
         };
         crew_.run(guarded, last);
-        if (error_) std::rethrow_exception(std::exchange(error_, nullptr));
-    }
-
-    void fail(std::exception_ptr error) {
-        const std::lock_guard<std::mutex> lock(mutex_);
-        if (!error_) error_ = std::move(error);
-        failed_.store(true, std::memory_order_relaxed);
+        error_.rethrow();
     }
 
     Crew crew_;  // constructed before the threads start and destroyed after they end
     std::vector<std::thread> threads_;
-    std::mutex mutex_;
-    std::exception_ptr error_;
-    std::atomic<bool> failed_{false};
+    FirstError error_;
 };
 
 // The CPUs this process may run on.
@@ -296,23 +320,54 @@ int available_cpus() {
     return count > 0 ? static_cast<int>(count) : 1;
 }
 
-// ------------------------------------------------------------------ plans
+// ------------------------------------------------------------------ buffers
 
-// A pixel box with inclusive bounds, as in hclean.cpp.
-struct Box {
-    int i0 = 0, j0 = 0, i1 = -1, j1 = -1;
+// The cache line of the buffers that different threads write.
+constexpr size_t kLine = 64;
+
+// An allocator of whole cache lines, so that the buffers of different threads
+// (the row results of every pass, the deferred subtractions, the plans) share
+// none: a line that two threads write makes them wait on each other at every
+// pass. 64 planes of 8 x 8 at 12 threads took 2.3 times the CPU time per
+// plane and iteration of one thread on one plane, with tiny row buffers
+// allocated one after another (M).
+template <typename T>
+struct LineAllocator {
+    using value_type = T;
+
+    LineAllocator() = default;
+    template <typename U>
+    LineAllocator(const LineAllocator<U>&) noexcept {}
+
+    T* allocate(size_t n) {
+        if (n > (static_cast<size_t>(-1) - kLine) / sizeof(T)) throw std::bad_alloc();
+        const size_t bytes = (n * sizeof(T) + kLine - 1) / kLine * kLine;
+        return static_cast<T*>(::operator new(bytes, std::align_val_t{kLine}));
+    }
+    void deallocate(T* p, size_t) noexcept { ::operator delete(p, std::align_val_t{kLine}); }
 };
+
+template <typename T, typename U>
+bool operator==(const LineAllocator<T>&, const LineAllocator<U>&) noexcept {
+    return true;
+}
+
+// A buffer of a call, in whole cache lines of its own.
+template <typename T>
+using Buffer = std::vector<T, LineAllocator<T>>;
+
+// ------------------------------------------------------------------ plans
 
 // The split of a plane into the pixels the passes keep current, S (the
 // segments of the searched rows), and the others, E.
 struct Plan {
-    Box box;            // the clean box shrunk to the mask's bounding box (clean<T>'s)
-    long searched = 0;  // the searched pixels: the clean box inside the mask
-    long work = 0;      // the pixels of the segments, a pass's work
-    std::vector<SearchRow> rows;
-    std::vector<Run> runs;      // the segments of S
-    std::vector<Run> exterior;  // the runs of E: those of row y are
-    std::vector<int> exterior_start;  // exterior[exterior_start[y], exterior_start[y + 1])
+    int scan_begin = 0;  // the first column of clean<T>'s box (mask_bounding_box)
+    long searched = 0;   // the searched pixels: the clean box inside the mask
+    long work = 0;       // the pixels of the segments, a pass's work
+    Buffer<SearchRow> rows;
+    Buffer<Run> runs;            // the segments of S
+    Buffer<Run> exterior;        // the runs of E: those of row y are
+    Buffer<int> exterior_start;  // exterior[exterior_start[y], exterior_start[y + 1])
 };
 
 // Eight bool bytes all false, all true.
@@ -321,7 +376,7 @@ constexpr std::uint64_t kAllSet = 0x0101010101010101ULL;
 
 // Appends the runs of the mask bytes in [x0, x1) that are not 0 (true, as the
 // reference tests them) to runs.
-void mask_runs(const std::uint8_t* mask, int x0, int x1, std::vector<Run>& runs) {
+void mask_runs(const std::uint8_t* mask, int x0, int x1, Buffer<Run>& runs) {
     int x = x0;
     while (x < x1) {
         for (std::uint64_t bytes; x + 8 <= x1; x += 8) {
@@ -361,13 +416,19 @@ void reserve_plan(Plan& plan, int w, int h, int ny) {
     plan.exterior_start.reserve(static_cast<size_t>(ny) + 1);
 }
 
-// The plan of a plane with the binding's clean box [xbeg, xend) x [ybeg, yend).
-// The searched pixels are the box inside the mask; clean<T>'s box
-// (mask_bounding_box of hclean.cpp) is their bounding box, or the clean box
-// itself when there are none. `runs` holds the mask runs of one row.
-void build_plan(Plan& plan, std::vector<Run>& runs, const std::uint8_t* mask, int nx, int ny,
+// The plan of a plane with the binding's clean box [xbeg, xend) x [ybeg, yend),
+// replacing what `plan` held. The searched pixels are the box inside the mask;
+// clean<T>'s box (mask_bounding_box of hclean.cpp) is their bounding box, or
+// the clean box itself when there are none. `runs` holds the mask runs of one
+// row.
+void build_plan(Plan& plan, Buffer<Run>& runs, const std::uint8_t* mask, int nx, int ny,
                 int xbeg, int xend, int ybeg, int yend) {
-    Box box{xend, yend, -1, -1};
+    plan.searched = 0;
+    plan.work = 0;
+    plan.rows.clear();
+    plan.runs.clear();
+    plan.exterior.clear();
+    int scan_begin = xend;
     for (int y = ybeg; y < yend; ++y) {
         runs.clear();
         if (mask == nullptr) {
@@ -397,12 +458,9 @@ void build_plan(Plan& plan, std::vector<Run>& runs, const std::uint8_t* mask, in
         plan.rows.push_back({y, first, last, pixels, masked});
         plan.searched += searched;
         plan.work += pixels;
-        box.i0 = std::min(box.i0, runs.front().begin);
-        box.i1 = std::max(box.i1, runs.back().end - 1);
-        box.j0 = std::min(box.j0, y);
-        box.j1 = y;
+        scan_begin = std::min(scan_begin, runs.front().begin);
     }
-    plan.box = plan.rows.empty() ? Box{xbeg, ybeg, xend - 1, yend - 1} : box;
+    plan.scan_begin = plan.rows.empty() ? xbeg : scan_begin;
     plan.exterior_start.resize(static_cast<size_t>(ny) + 1);
     size_t next = 0;
     for (int y = 0; y < ny; ++y) {
@@ -433,7 +491,7 @@ bool in_search(const Plan& plan, int y, int x) {
 
 // The searched rows split into `parts` ranges of consecutive rows with about
 // as much work each: part t is rows [split[t], split[t + 1]).
-void split_rows(const Plan& plan, int parts, std::vector<int>& split) {
+void split_rows(const Plan& plan, int parts, Buffer<int>& split) {
     const int n = static_cast<int>(plan.rows.size());
     split.assign(static_cast<size_t>(parts) + 1, n);
     split[0] = 0;
@@ -463,8 +521,9 @@ Extrema<T> no_extrema() {
     }
 }
 
+// A plane of a call (in cache lines of its own: threads write their planes).
 template <typename T>
-struct Plane {
+struct alignas(kLine) Plane {
     T* residual = nullptr;
     T* model = nullptr;
     const T* psf = nullptr;
@@ -472,20 +531,30 @@ struct Plane {
     int max_iter = 0;
     T threshold = 0;
     IterationHistory* history = nullptr;
-    Plan plan;  // planes with a budget only
-    std::vector<Component<T>> components;
-    size_t flushed = 0;  // components already subtracted from E
-    std::vector<Extrema<T>> tiles;  // of the final pass
+    bool iterates = false;  // the team's schedule: its first stop test lets it iterate (a hint)
+    Plan plan;              // while the plane is cleaned (a budget only)
+    Buffer<Component<T>> components;  // the subtractions not yet applied to E
+    Buffer<Extrema<T>> tiles;         // of a final pass that several threads share
     T total = 0;
 };
 
 // The buffers of a crew's passes.
 template <typename T>
 struct Rows {
-    std::vector<double> sum;
-    std::vector<T> max;
-    std::vector<int> ix;
-    std::vector<int> split;
+    Buffer<double> sum;
+    Buffer<T> max;
+    Buffer<int> ix;
+    Buffer<int> split;
+};
+
+// A thread's buffers, which each plane it cleans alone uses in turn
+// (reserved before the first write, so that cleaning allocates nothing).
+template <typename T>
+struct alignas(kLine) Scratch {
+    Plan plan;
+    Buffer<Component<T>> components;
+    Buffer<Run> runs;  // the mask runs of one row
+    Rows<T> rows;
 };
 
 inline void search(const Kernels& kernels, const SearchPass<double>& pass, int begin, int end) {
@@ -522,10 +591,9 @@ int tiles(const Cube<T>& c) {
 
 // The subtractions of the plane not yet applied to E, as an exterior flush.
 template <typename T>
-ExteriorFlush<T> pending(const Cube<T>& c, Plane<T>& p) {
-    return {p.residual, c.nx, p.psf, c.psf_nx, p.plan.exterior.data(),
-            p.plan.exterior_start.data(), p.components.data() + p.flushed,
-            static_cast<int>(p.components.size() - p.flushed)};
+ExteriorFlush<T> pending(const Cube<T>& c, const Plane<T>& p) {
+    return {p.residual, c.nx, p.psf, c.psf_nx, p.plan.exterior.data(), p.plan.exterior_start.data(),
+            p.components.data(), static_cast<int>(p.components.size())};
 }
 
 // The component that subtracts pv x PSF at pixel (py, px): the footprint and
@@ -542,19 +610,20 @@ Component<T> component(const Cube<T>& c, T pv, int py, int px) {
     return k;
 }
 
-// Applies the plane's pending subtractions to E, with its crew.
+// Applies the plane's pending subtractions to E, with its crew, and forgets
+// them.
 template <typename T>
 void flush_exterior(const Cube<T>& c, Plane<T>& p, Crew& crew, const Kernels& kernels) {
     const ExteriorFlush<T> exterior = pending(c, p);
     const int rows = tile_rows(c), n_tiles = tiles(c);
     std::atomic<int> next{0};
-    auto step = [&](int) {
+    auto step = [&](int) noexcept {
         for (int t; (t = next.fetch_add(1, std::memory_order_relaxed)) < n_tiles;) {
             flush(kernels, exterior, t * rows, std::min(c.ny, (t + 1) * rows));
         }
     };
     crew.run(step);
-    p.flushed = p.components.size();
+    p.components.clear();
 }
 
 // The binding's total of a plane: |model[i]| summed in T, one sequential sum
@@ -562,7 +631,7 @@ void flush_exterior(const Cube<T>& c, Plane<T>& p, Crew& crew, const Kernels& ke
 // (the sum is >= +0 or NaN): eight values at a time are tested for +-0 at
 // once, by their bits without the sign.
 template <typename T>
-T sum_of_magnitudes(const T* model, size_t n) {
+T sum_of_magnitudes(const T* model, size_t n) noexcept {
     using Bits = std::conditional_t<std::is_same_v<T, float>, std::uint32_t, std::uint64_t>;
     constexpr Bits kMagnitude = static_cast<Bits>(~Bits{0}) >> 1;
     constexpr size_t kGroup = 8;
@@ -586,19 +655,9 @@ T sum_of_magnitudes(const T* model, size_t n) {
     return total;
 }
 
-// Item i of the final pass over a plane: i = 0 sums |model| (the binding's
-// total), and i = 1 + t applies the pending subtractions to the rows of tile
-// t and takes maximg's extrema over them.
+// maximg's extrema of rows [y0, y1) of a plane folded into e, in index order.
 template <typename T>
-void finish_item(const Cube<T>& c, Plane<T>& p, int item, const Kernels& kernels) {
-    if (item == 0) {
-        p.total = sum_of_magnitudes(p.model, plane_pixels(c));
-        return;
-    }
-    const int tile = item - 1, rows = tile_rows(c);
-    const int y0 = tile * rows, y1 = std::min(c.ny, y0 + rows);
-    if (p.flushed < p.components.size()) flush(kernels, pending(c, p), y0, y1);
-    Extrema<T> e = no_extrema<T>();
+void fold_extrema(const Cube<T>& c, const Plane<T>& p, int y0, int y1, Extrema<T>& e) noexcept {
     const size_t begin = static_cast<size_t>(y0) * c.nx, end = static_cast<size_t>(y1) * c.nx;
     for (size_t i = begin; i < end; ++i) {
         if (p.mask == nullptr || p.mask[i] != 0) {
@@ -607,38 +666,145 @@ void finish_item(const Cube<T>& c, Plane<T>& p, int item, const Kernels& kernels
             if (w < e.low) e.low = w;
         }
     }
+}
+
+// Item i of a final pass that several threads share: i = 0 sums |model| (the
+// binding's total), and i = 1 + t applies the pending subtractions to the
+// rows of tile t and takes maximg's extrema over them.
+template <typename T>
+void finish_item(const Cube<T>& c, Plane<T>& p, int item, const Kernels& kernels) noexcept {
+    if (item == 0) {
+        p.total = sum_of_magnitudes(p.model, plane_pixels(c));
+        return;
+    }
+    const int tile = item - 1, rows = tile_rows(c);
+    const int y0 = tile * rows, y1 = std::min(c.ny, y0 + rows);
+    if (!p.components.empty()) flush(kernels, pending(c, p), y0, y1);
+    Extrema<T> e = no_extrema<T>();
+    fold_extrema(c, p, y0, y1, e);
     p.tiles[tile] = e;
 }
 
-// The binding's summary of plane `index` once its final pass is done: maximg's
-// extrema (the tiles merged in order, as one scan finds them), final_peak,
-// converged and total_flux.
+// The extrema of the tiles merged in order, as one scan finds them.
 template <typename T>
-void summarize(const Cube<T>& c, int index, Plane<T>& p) {
-    p.flushed = p.components.size();
+Extrema<T> merged(const Buffer<Extrema<T>>& tiles) {
     Extrema<T> e = no_extrema<T>();
-    for (const Extrema<T>& tile : p.tiles) {
+    for (const Extrema<T>& tile : tiles) {
         if (tile.high > e.high) e.high = tile.high;
         if (tile.low < e.low) e.low = tile.low;
     }
+    return e;
+}
+
+// The binding's summary of plane `index` from maximg's extrema of its final
+// residual: final_peak, converged and total_flux.
+template <typename T>
+void summarize(const Cube<T>& c, int index, const Plane<T>& p, const Extrema<T>& e) {
     const T peak = std::max(std::abs(e.low), std::abs(e.high));
     c.final_peak[index] = peak;
     c.total_flux[index] = p.total;
     c.converged[index] = peak <= p.threshold;
 }
 
-// The final pass over one plane, with its crew.
+// The final pass over one plane, with its crew. A thread alone takes the
+// tiles in order and folds their extrema as it goes (no tiles are kept).
 template <typename T>
 void finish(const Cube<T>& c, int index, Plane<T>& p, Crew& crew, const Kernels& kernels) {
+    if (crew.size() == 1) {
+        const int rows = tile_rows(c), n_tiles = tiles(c);
+        Extrema<T> e = no_extrema<T>();
+        for (int t = 0; t < n_tiles; ++t) {
+            const int y0 = t * rows, y1 = std::min(c.ny, y0 + rows);
+            if (!p.components.empty()) flush(kernels, pending(c, p), y0, y1);
+            fold_extrema(c, p, y0, y1, e);
+        }
+        p.total = sum_of_magnitudes(p.model, plane_pixels(c));
+        summarize(c, index, p, e);
+        return;
+    }
     const int items = 1 + tiles(c);
     std::atomic<int> next{0};
-    auto step = [&](int) {
+    auto step = [&](int) noexcept {
         for (int i; (i = next.fetch_add(1, std::memory_order_relaxed)) < items;) {
             finish_item(c, p, i, kernels);
         }
     };
     crew.run(step);
-    summarize(c, index, p);
+    summarize(c, index, p, merged(p.tiles));
+}
+
+// Frees what plane p used while it was cleaned.
+template <typename T>
+void release(Plane<T>& p) {
+    p.plan = Plan{};
+    Buffer<Component<T>>().swap(p.components);
+}
+
+// The plane's sum of squares and peak from a pass over its searched rows, the
+// rows taken in row order as in both reference kernels (the first row with
+// the largest |value| wins), and the peak's pixel (px, py): clean_cube keeps
+// the previous one when no pixel is above 0, clean_cube_many_threads takes the
+// first pixel of the clean box.
+template <typename T>
+T plane_peak(const Cube<T>& c, const Plan& plan, const Rows<T>& rows, double& sum_squares, int& px,
+             int& py) {
+    const int n_rows = static_cast<int>(plan.rows.size());
+    const T zero = static_cast<T>(0);
+    sum_squares = 0.0;
+    T peak = zero;
+    if (c.entry == Entry::clean_cube) {
+        for (int i = 0; i < n_rows; ++i) {
+            sum_squares += rows.sum[i];
+            if (rows.max[i] > peak) {
+                peak = rows.max[i];
+                px = rows.ix[i];
+                py = plan.rows[i].y;
+            }
+        }
+    } else {
+        T best = static_cast<T>(-1);
+        for (int i = 0; i < n_rows; ++i) {
+            sum_squares += rows.sum[i];
+            if (rows.max[i] > best) {
+                best = rows.max[i];
+                px = rows.ix[i];
+                py = plan.rows[i].y;
+            }
+        }
+        if (best > zero) {
+            peak = best;
+        } else {  // a zero peak (or no searched pixel): the first pixel of the clean box
+            px = c.xbeg;
+            py = c.ybeg;
+        }
+    }
+    return peak;
+}
+
+// The threshold of iteration `iter`: threshold x 2^(iter / speedup) when
+// speedup > 0, as in both reference kernels.
+template <typename T>
+T iteration_threshold(const Cube<T>& c, T threshold, int iter) {
+    const T zero = static_cast<T>(0), two = static_cast<T>(2);
+    return c.speedup > zero ? threshold * std::pow(two, static_cast<T>(iter) / c.speedup) : threshold;
+}
+
+// Whether plane p iterates at all: its first search and stop test as
+// iterate() makes them, on one thread (a hint for the schedule: iterate()
+// makes them again and decides).
+template <typename T>
+bool iterates(const Cube<T>& c, const Plane<T>& p, Rows<T>& rows, const Kernels& kernels) {
+    const Plan& plan = p.plan;
+    const SearchPass<T> pass{p.residual,      c.nx,           p.psf,          c.psf_nx,
+                             p.mask,          plan.rows.data(), plan.runs.data(), nullptr,
+                             rows.sum.data(), rows.max.data(), rows.ix.data(), plan.scan_begin};
+    search(kernels, pass, 0, static_cast<int>(plan.rows.size()));
+    double sum_squares = 0.0;
+    int px = 0, py = 0;
+    const T peak = plane_peak(c, plan, rows, sum_squares, px, py);
+    PlaneStopTest<T> stop_test;
+    return stop_test.check(peak, sum_squares, iteration_threshold(c, p.threshold, 0), c.divergence) ==
+           STOP_NONE;
 }
 
 // The model update of plane `index` (a budget > 0), with its crew: clean<T>
@@ -649,12 +815,13 @@ template <typename T>
 void iterate(const Cube<T>& c, int index, Plane<T>& p, Crew& crew, Rows<T>& rows,
              const Kernels& kernels) {
     const Plan& plan = p.plan;
-    const int n_rows = static_cast<int>(plan.rows.size());
     split_rows(plan, crew.size(), rows.split);
     SearchPass<T> pass{p.residual,        c.nx,           p.psf,           c.psf_nx,
                        p.mask,            plan.rows.data(), plan.runs.data(), nullptr,
-                       rows.sum.data(),   rows.max.data(), rows.ix.data(),  plan.box.i0};
-    auto step = [&](int rank) { search(kernels, pass, rows.split[rank], rows.split[rank + 1]); };
+                       rows.sum.data(),   rows.max.data(), rows.ix.data(),  plan.scan_begin};
+    auto step = [&](int rank) noexcept {
+        search(kernels, pass, rows.split[rank], rows.split[rank + 1]);
+    };
     const auto scan = [&](const Component<T>* subtracted) {
         pass.component = subtracted;
         crew.run(step);
@@ -662,57 +829,30 @@ void iterate(const Cube<T>& c, int index, Plane<T>& p, Crew& crew, Rows<T>& rows
 
     IterationHistory* const history = p.history;
     const double n_searched = static_cast<double>(plan.searched);
-    const T zero = static_cast<T>(0), two = static_cast<T>(2);
+    const T zero = static_cast<T>(0);
     PlaneStopTest<T> stop_test;
     int stop = STOP_NONE;
     int px = 0, py = 0;  // clean<T> keeps the peak's pixel between iterations: (0, 0) at first
     scan(nullptr);
     int iter = 0;
     for (; iter < p.max_iter; ++iter) {
-        // The plane's sum of squares and peak, the rows taken in row order as
-        // in both reference kernels: the first row with the largest |value|.
         double sum_squares = 0.0;
-        T peak = zero;
-        if (c.entry == Entry::clean_cube) {
-            for (int i = 0; i < n_rows; ++i) {
-                sum_squares += rows.sum[i];
-                if (rows.max[i] > peak) {
-                    peak = rows.max[i];
-                    px = rows.ix[i];
-                    py = plan.rows[i].y;
-                }
-            }
-        } else {
-            T best = static_cast<T>(-1);
-            for (int i = 0; i < n_rows; ++i) {
-                sum_squares += rows.sum[i];
-                if (rows.max[i] > best) {
-                    best = rows.max[i];
-                    px = rows.ix[i];
-                    py = plan.rows[i].y;
-                }
-            }
-            if (best > zero) {
-                peak = best;
-            } else {  // a zero peak (or no searched pixel): the first pixel of the clean box
-                px = c.xbeg;
-                py = c.ybeg;
-            }
-        }
+        const T peak = plane_peak(c, plan, rows, sum_squares, px, py);
         // The pass summed the squares of the residual the previous iteration
         // left: its RMS.
         if (history != nullptr && iter > 0) history->rms.push_back(std::sqrt(sum_squares / n_searched));
-        const T threshold =
-            c.speedup > zero ? p.threshold * std::pow(two, static_cast<T>(iter) / c.speedup)
-                             : p.threshold;
-        const int reason = stop_test.check(peak, sum_squares, threshold, c.divergence);
+        const int reason =
+            stop_test.check(peak, sum_squares, iteration_threshold(c, p.threshold, iter), c.divergence);
         if (reason != STOP_NONE) {
             stop = reason;
             break;
         }
         // The peak's pixel is searched, so current, unless the peak is zero:
         // then it may lie in E, whose pending subtractions are applied first.
-        if (!(peak > zero) && !in_search(plan, py, px)) flush_exterior(c, p, crew, kernels);
+        // They are applied as well when kMaxPending of them are pending.
+        if ((!(peak > zero) && !in_search(plan, py, px)) || p.components.size() >= kMaxPending) {
+            flush_exterior(c, p, crew, kernels);
+        }
         const size_t at = static_cast<size_t>(py) * c.nx + px;
         const T value = p.residual[at];
         const T pv = c.gain * value;
@@ -726,7 +866,7 @@ void iterate(const Cube<T>& c, int index, Plane<T>& p, Crew& crew, Rows<T>& rows
     // last pass summed it.
     if (history != nullptr && history->rms.size() < history->peak.size()) {
         double sum_squares = 0.0;
-        for (int i = 0; i < n_rows; ++i) sum_squares += rows.sum[i];
+        for (size_t i = 0; i < plan.rows.size(); ++i) sum_squares += rows.sum[i];
         history->rms.push_back(std::sqrt(sum_squares / n_searched));
     }
     c.iterations[index] = iter;
@@ -734,45 +874,65 @@ void iterate(const Cube<T>& c, int index, Plane<T>& p, Crew& crew, Rows<T>& rows
 }
 
 // How the planes share a team of `team` threads, given the planes with a
-// budget (`active`) and the largest work of a pass among them (pixels).
+// budget (`active`), those of them that iterate at all (`iterating`: the
+// others stop at their first search, by the hint of iterates()) and the
+// largest work of a pass among those (pixels).
 struct Schedule {
     int crews = 1;      // crews that iterate planes side by side
     int crew_size = 1;  // threads per crew
     bool deferred = false;  // the planes' final passes wait for the whole team
 };
 
-Schedule schedule(int team, int active, long largest_work) {
+Schedule schedule(int team, int active, int iterating, long largest_work) {
     Schedule s;
-    if (active == 0) {
+    if (iterating == 0) {
+        // Every plane stops at its first search: one pass each, on threads of
+        // their own, then the final passes on the whole team.
+        s.crews = std::clamp(team, 1, std::max(active, 1));
         s.deferred = true;
         return s;
     }
-    // A crew of more threads than its plane's pass justifies would
-    // spend more time synchronising than it saves; side by side, crews share
-    // no step.
+    if (iterating >= 2 * team) {
+        // At least two iterating planes per thread: whole planes per thread,
+        // as the reference clean_cube runs them (a crew of one synchronises
+        // nothing).
+        s.crews = team;
+        return s;
+    }
+    // A crew of more threads than its plane's pass justifies would spend more
+    // time synchronising than it saves; side by side, crews share no step.
+    // Planes that stop at once count for nothing, so that no crew sits idle
+    // while the others iterate (Stokes V beside I).
     const long justified = std::clamp(largest_work / kPixelsPerThread, 1L, static_cast<long>(team));
     const int useful = static_cast<int>(justified);
-    s.crews = std::clamp(team / useful, 1, active);
-    // One crew for several planes (it runs them one after another): every
-    // thread, as the planes justify more than half of them.
-    s.crew_size = (s.crews == 1 && active > 1) ? team : std::min(useful, team / s.crews);
-    // When every plane has a crew of its own but the crews leave threads idle,
-    // the whole team does the final passes, after the iterations (the memory
-    // of no more than `team` planes' components is kept until then).
-    s.deferred = s.crews == active && s.crews * s.crew_size < team;
+    s.crews = std::clamp(team / useful, 1, iterating);
+    // One crew runs the planes one after another: every thread for planes
+    // that justify more than half of the team, and for a lone iterating
+    // plane as many as its pass keeps busy (kLonePixelsPerThread each), as
+    // the other threads would only wait.
+    s.crew_size = s.crews > 1 ? std::min(useful, team / s.crews)
+                              : static_cast<int>(std::clamp(largest_work / kLonePixelsPerThread,
+                                                            static_cast<long>(useful),
+                                                            static_cast<long>(team)));
+    // When every iterating plane has a crew of its own but the crews leave
+    // threads idle, the whole team does the final passes, after the
+    // iterations (the memory of no more than `team` planes' components is
+    // kept until then).
+    s.deferred = s.crews == iterating && s.crews * s.crew_size < team;
     return s;
 }
 
 // The threads of a call: processing_function_threads (< 1 counts as 1, as in
-// both reference entries), at most the CPUs the process may run on, the
-// threads its work can use (`usable`) and those it justifies: one per
-// kUpdatesPerThread of `updates`, the pixel updates of the call at most.
+// both reference entries), at most the threads its work can use (`usable`),
+// those it justifies (one per kUpdatesPerThread of `updates`, the pixel
+// updates of the call at most) and the CPUs the process may run on.
 int team_size(int requested, long usable, double updates) {
-    long threads = std::min<long>(std::max(requested, 1), available_cpus());
-    threads = std::min(threads, usable);
+    long threads = std::min<long>(std::max(requested, 1), usable);
     const double justified = updates / kUpdatesPerThread;
     if (justified < static_cast<double>(threads)) threads = static_cast<long>(justified);
-    return static_cast<int>(std::max(threads, 1L));
+    threads = std::max(threads, 1L);
+    if (threads > 1) threads = std::min<long>(threads, available_cpus());  // a system call
+    return static_cast<int>(threads);
 }
 
 // Runs work(member) on `threads` threads side by side, the calling thread
@@ -780,19 +940,14 @@ int team_size(int requested, long usable, double updates) {
 // the reference clean_cube runs its threads: each starts on its work at once,
 // and none waits for another. A thread that cannot be started leaves fewer
 // members. The first exception that a member throws is rethrown once all
-// have ended, and sets `failed`, which the others read to stop early.
+// have ended; the others read error.failed() to stop early.
 template <typename Work>
-void run_side_by_side(std::vector<std::thread>& workers, int threads, std::atomic<bool>& failed,
-                      Work& work) {
-    std::mutex mutex;
-    std::exception_ptr error;
-    const auto guarded = [&](int member) {
+void run_side_by_side(std::vector<std::thread>& workers, int threads, FirstError& error, Work& work) {
+    const auto guarded = [&](int member) noexcept {
         try {
             work(member);
         } catch (...) {
-            const std::lock_guard<std::mutex> lock(mutex);
-            if (!error) error = std::current_exception();
-            failed.store(true, std::memory_order_relaxed);
+            error.record(std::current_exception());
         }
     };
     for (int member = 1; member < threads; ++member) {
@@ -806,7 +961,7 @@ void run_side_by_side(std::vector<std::thread>& workers, int threads, std::atomi
     }
     guarded(0);
     for (std::thread& worker : workers) worker.join();
-    if (error) std::rethrow_exception(error);
+    error.rethrow();
 }
 
 }  // namespace
@@ -823,20 +978,21 @@ bool clean_cube(const Cube<T>& c) {
     std::vector<Plane<T>> planes;
     int threads = 1;
     bool side_by_side = false;
-    std::vector<std::thread> workers;          // side by side: the threads after the caller
-    std::vector<std::vector<Run>> mask_rows;   // side by side: each thread's mask runs of a row
+    std::vector<std::thread> workers;  // side by side: the threads after the caller
+    std::vector<Scratch<T>> scratch;   // side by side: each thread's buffers
     std::unique_ptr<Team> team;
     Schedule s;
     std::unique_ptr<Crew[]> crews;
-    std::vector<Rows<T>> rows;  // a crew's, or (side by side) a thread's
+    std::vector<Rows<T>> rows;  // a crew's
     try {
         planes.resize(static_cast<size_t>(nplanes));
-        int active = 0;
+        int active = 0, most_iterations = 0;
         // The work the call can use and justifies, at most: a pass searches
         // at most the clean box, and the final pass reads every pixel and
         // subtracts each component at most once from each pixel of E, which
         // is the plane outside the clean box (no mask) or at most the plane.
-        const long box = static_cast<long>(c.xend - c.xbeg) * (c.yend - c.ybeg);
+        const int w = c.xend - c.xbeg, h = std::max(c.yend - c.ybeg, 0);
+        const long box = static_cast<long>(w) * h;
         const double exterior = c.mask != nullptr ? static_cast<double>(plane_size)
                                                   : static_cast<double>(plane_size - box);
         double pass_updates = 0.0, final_updates = 0.0;
@@ -853,11 +1009,10 @@ bool clean_cube(const Cube<T>& c) {
             p.max_iter = c.max_iter[pl];
             p.threshold = c.threshold[pl];
             p.history = c.history != nullptr ? c.history + pl : nullptr;
-            p.tiles.resize(static_cast<size_t>(tiles(c)));
             final_updates += static_cast<double>(plane_size);
             if (p.max_iter > 0) {
                 ++active;
-                p.components.reserve(static_cast<size_t>(std::min(p.max_iter, 256)));
+                most_iterations = std::max(most_iterations, p.max_iter);
                 pass_updates += static_cast<double>(box) * p.max_iter;
                 final_updates += exterior * p.max_iter;
             }
@@ -874,47 +1029,72 @@ bool clean_cube(const Cube<T>& c) {
         const long usable = std::max(active * crew_threads, final_threads);
         threads = team_size(c.threads, usable, pass_updates + final_updates);
         // Planes too small for a crew of two (a pass of fewer than 2 x
-        // kPixelsPerThread pixels) and no more threads than planes with a
-        // budget: schedule() would give every thread planes of its own and
-        // defer nothing, so the threads run side by side from their start,
-        // each building the plans of the planes it cleans (in memory reserved
-        // here). Starting a thread costs about 25-35 us (M), and the phases
-        // of a team wait for all of its threads.
-        side_by_side = box < 2 * kPixelsPerThread && threads <= active;
+        // kPixelsPerThread pixels) get at most a thread per plane with a
+        // budget (one without any), and run side by side, as the reference
+        // clean_cube runs them: each thread builds the plans of the planes it
+        // cleans in its own buffers, reserved here, and waits for no other.
+        // More threads could only wait for the final passes, and starting one
+        // costs about 25-35 us (M).
+        side_by_side = box < 2 * kPixelsPerThread;
         if (side_by_side) {
-            const int w = c.xend - c.xbeg, h = std::max(c.yend - c.ybeg, 0);
-            for (Plane<T>& p : planes) {
-                if (p.max_iter > 0) reserve_plan(p.plan, w, h, c.ny);
-            }
-            mask_rows.resize(static_cast<size_t>(threads));
-            rows.resize(static_cast<size_t>(threads));
-            for (int member = 0; member < threads; ++member) {
-                mask_rows[member].reserve(static_cast<size_t>(std::max(w, 0)) / 2 + 1);
-                rows[member].sum.resize(static_cast<size_t>(h));
-                rows[member].max.resize(static_cast<size_t>(h));
-                rows[member].ix.resize(static_cast<size_t>(h));
-                rows[member].split.reserve(2);
+            threads = std::min(threads, std::max(active, 1));
+            scratch.resize(static_cast<size_t>(threads));
+            for (Scratch<T>& own : scratch) {
+                if (active == 0) break;
+                reserve_plan(own.plan, w, h, c.ny);
+                own.components.reserve(std::min(static_cast<size_t>(most_iterations), kMaxPending));
+                own.runs.reserve(static_cast<size_t>(std::max(w, 0)) / 2 + 1);
+                own.rows.sum.resize(static_cast<size_t>(h));
+                own.rows.max.resize(static_cast<size_t>(h));
+                own.rows.ix.resize(static_cast<size_t>(h));
+                own.rows.split.reserve(2);
             }
             workers.reserve(static_cast<size_t>(threads - 1));
         } else {
             team = std::make_unique<Team>(threads);
+            // The plans of the planes with a budget.
             std::atomic<int> next{0};
             team->run([&](int) {
-                std::vector<Run> runs;  // of the mask, in one row
+                Buffer<Run> runs;  // of the mask, in one row
                 for (int pl; (pl = next.fetch_add(1, std::memory_order_relaxed)) < nplanes;) {
                     Plane<T>& p = planes[pl];
-                    if (p.max_iter > 0) {
-                        build_plan(p.plan, runs, p.mask, c.nx, c.ny, c.xbeg, c.xend, c.ybeg, c.yend);
-                    }
+                    if (p.max_iter <= 0) continue;
+                    p.components.reserve(static_cast<size_t>(std::min(p.max_iter, 256)));
+                    build_plan(p.plan, runs, p.mask, c.nx, c.ny, c.xbeg, c.xend, c.ybeg, c.yend);
+                    p.iterates = true;
                 }
             });
-            long largest = 0;
-            size_t most_rows = 0;
-            for (const Plane<T>& p : planes) {
-                largest = std::max(largest, p.plan.work);
-                most_rows = std::max(most_rows, p.plan.rows.size());
+            const auto schedule_iterating = [&] {
+                int iterating = 0;
+                long largest = 0;
+                for (const Plane<T>& p : planes) {
+                    if (p.max_iter <= 0 || !p.iterates) continue;
+                    ++iterating;
+                    largest = std::max(largest, p.plan.work);
+                }
+                return schedule(team->size(), active, iterating, largest);
+            };
+            s = schedule_iterating();
+            if (s.crews > 1) {
+                // Crews side by side: only the planes that iterate at all
+                // count (the hint of their first search), so that no crew
+                // waits idle beside a plane that stops at once.
+                next.store(0, std::memory_order_relaxed);
+                team->run([&](int) {
+                    Rows<T> first;  // of a plane's first search
+                    for (int pl; (pl = next.fetch_add(1, std::memory_order_relaxed)) < nplanes;) {
+                        Plane<T>& p = planes[pl];
+                        if (p.max_iter <= 0) continue;
+                        first.sum.resize(p.plan.rows.size());
+                        first.max.resize(p.plan.rows.size());
+                        first.ix.resize(p.plan.rows.size());
+                        p.iterates = iterates(c, p, first, kernels);
+                    }
+                });
+                s = schedule_iterating();
             }
-            s = schedule(team->size(), active, largest);
+            size_t most_rows = 0;
+            for (const Plane<T>& p : planes) most_rows = std::max(most_rows, p.plan.rows.size());
             crews.reset(new Crew[static_cast<size_t>(s.crews)]);
             rows.resize(static_cast<size_t>(s.crews));
             for (int g = 0; g < s.crews; ++g) {
@@ -923,6 +1103,9 @@ bool clean_cube(const Cube<T>& c) {
                 rows[g].max.resize(most_rows);
                 rows[g].ix.resize(most_rows);
                 rows[g].split.reserve(static_cast<size_t>(s.crew_size) + 1);
+            }
+            if (s.deferred || s.crew_size > 1) {  // final passes that several threads share
+                for (Plane<T>& p : planes) p.tiles.resize(static_cast<size_t>(tiles(c)));
             }
         }
     } catch (const std::bad_alloc&) {
@@ -940,21 +1123,28 @@ bool clean_cube(const Cube<T>& c) {
 
     if (side_by_side) {
         std::atomic<int> next{0};
-        std::atomic<bool> failed{false};
+        FirstError error;
         auto clean_planes = [&](int member) {
+            Scratch<T>& own = scratch[member];
             Crew alone;  // of one thread: its steps run on this one
-            for (int pl; !failed.load(std::memory_order_relaxed) &&
-                         (pl = next.fetch_add(1, std::memory_order_relaxed)) < nplanes;) {
+            for (int pl; !error.failed() && (pl = next.fetch_add(1, std::memory_order_relaxed)) < nplanes;) {
                 Plane<T>& p = planes[pl];
-                if (p.max_iter > 0) {
-                    build_plan(p.plan, mask_rows[member], p.mask, c.nx, c.ny, c.xbeg, c.xend, c.ybeg,
-                               c.yend);
-                    iterate(c, pl, p, alone, rows[member], kernels);
+                if (p.max_iter <= 0) {
+                    finish(c, pl, p, alone, kernels);
+                    continue;
                 }
+                // The plane uses this thread's buffers, and gives them back.
+                std::swap(p.plan, own.plan);
+                std::swap(p.components, own.components);
+                build_plan(p.plan, own.runs, p.mask, c.nx, c.ny, c.xbeg, c.xend, c.ybeg, c.yend);
+                iterate(c, pl, p, alone, own.rows, kernels);
                 finish(c, pl, p, alone, kernels);
+                p.components.clear();
+                std::swap(p.plan, own.plan);
+                std::swap(p.components, own.components);
             }
         };
-        run_side_by_side(workers, threads, failed, clean_planes);
+        run_side_by_side(workers, threads, error, clean_planes);
         return true;
     }
 
@@ -973,7 +1163,10 @@ bool clean_cube(const Cube<T>& c) {
         for (int pl; !team->failed() && (pl = next.fetch_add(1, std::memory_order_relaxed)) < nplanes;) {
             Plane<T>& p = planes[pl];
             if (p.max_iter > 0) iterate(c, pl, p, crew, rows[g], kernels);
-            if (!s.deferred) finish(c, pl, p, crew, kernels);
+            if (!s.deferred) {
+                finish(c, pl, p, crew, kernels);
+                release(p);
+            }
         }
     };
     if (!s.deferred) {
@@ -995,7 +1188,7 @@ bool clean_cube(const Cube<T>& c) {
                 }
             }
         });
-        for (int pl = 0; pl < nplanes; ++pl) summarize(c, pl, planes[pl]);
+        for (int pl = 0; pl < nplanes; ++pl) summarize(c, pl, planes[pl], merged(planes[pl].tiles));
     }
     return true;
 }
@@ -1003,10 +1196,12 @@ bool clean_cube(const Cube<T>& c) {
 const Kernels& kernels() {
     static const Kernels selected = [] {
         const bool avx2 = astroviper::fast::select_isa() == astroviper::fast::Isa::avx2;
-#if defined(AV_HAVE_AVX2)
+#if defined(HCLEAN_FAST_AVX2)
         if (avx2) return avx2_kernels();
 #endif
-        static_cast<void>(avx2);  // no AVX2 routines in this build
+        static_cast<void>(avx2);  // read in a build with the AVX2 routines only
+        // The baseline routines: a CPU without AVX2, the generic override, or
+        // a build without the AVX2 routines.
         return generic_kernels();
     }();
     return selected;

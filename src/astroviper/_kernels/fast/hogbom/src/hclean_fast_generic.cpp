@@ -2,9 +2,8 @@
 // (hclean_fast_kernels.hpp): portable C++ with one lane, which the compiler
 // may vectorise where that keeps the operations of each pixel. It is the only
 // build on platforms other than x86-64 and the ASTROVIPER_KERNELS_ISA=generic
-// override, and gives the AVX2 routines' bits.
+// override, and gives the AVX2 routines' bits (NaN payloads aside).
 
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 

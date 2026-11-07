@@ -1,14 +1,17 @@
 // The code of the fast Hogbom routines shared by every ISA build
 // (hclean_fast_kernels.hpp). Included inside an anonymous namespace by
-// hclean_fast_generic.cpp and hclean_fast_avx2.cpp, after <cmath>, <cstdint>,
+// hclean_fast_generic.cpp and hclean_fast_avx2.cpp, after <cstdint>,
 // hclean_fast_kernels.hpp and the unit's Simd<double> and Simd<float>: W
 // lanes with load, store, splat, mul and sub, and for W > 1 also zero, iota,
-// add, magnitude, greater, select, store_squares, and keep and clear (the
-// lanes the mask searches). Everything here has internal linkage, so the
-// AVX2 unit defines no weak symbol.
+// add, magnitude, greater, select, store_squares, keep and clear (the lanes
+// the mask searches), and largest and first (the reduction of the lanes'
+// maxima). Everything here has internal linkage and calls no function of a
+// standard header, so the AVX2 unit defines no weak symbol, even at -O0.
 //
 // The bits are the reference's (hclean.cpp: clean<T>, the cube kernels and
-// scan_row):
+// scan_row) for every value that is not a NaN; a NaN result is a NaN, whose
+// sign and payload depend on the operand order the compiler picks for a
+// commutative operation, in the reference as here:
 //  * a subtraction r = r - pv * psf is a rounded product, then a rounded
 //    difference (both units are built with -ffp-contract=off, and -mavx2 does
 //    not enable FMA), pixel by pixel, so the order of the lanes does not
@@ -24,6 +27,7 @@
 //    its first strict maximum, and the first column holding the row's largest
 //    |v| is the smallest column among the lanes that hold it. NaN is above
 //    nothing, as in scan_row, and a pixel that is not searched counts as 0.
+// A short row (short_row) does the same operations pixel by pixel.
 
 using hclean_fast::Component;
 using hclean_fast::ExteriorFlush;
@@ -36,12 +40,38 @@ constexpr int kRows = 8;     // rows whose sums are interleaved
 constexpr int kBlock = 8;    // vectors per register block of the deferred subtraction
 constexpr int kAhead = 6;    // components ahead whose PSF samples are prefetched
 
+// A searched row of at most kShortRow pixels is scanned pixel by pixel
+// (short_row): on so few pixels the setup and the reduction of the lanes cost
+// more than they save (M).
+constexpr int kShortRow = 48;
+
 inline int min_int(int a, int b) {
     return b < a ? b : a;
 }
 
 inline int max_int(int a, int b) {
     return a < b ? b : a;
+}
+
+// |v|, inline at every optimisation level (std::abs of <cmath> is a weak
+// symbol at -O0).
+inline double magnitude_of(double v) {
+    return __builtin_fabs(v);
+}
+
+inline float magnitude_of(float v) {
+    return __builtin_fabsf(v);
+}
+
+// Folds the searched pixel v at column x into a row's sum of squares and its
+// first strict maximum of |v|, without a branch on the data.
+template <typename T>
+inline void fold_pixel(T v, int x, double& sum, T& peak, int& peak_x) {
+    sum += static_cast<double>(v) * static_cast<double>(v);
+    const T magnitude = magnitude_of(v);
+    const bool above = magnitude > peak;  // false for NaN
+    peak_x = above ? x : peak_x;
+    peak = above ? magnitude : peak;
 }
 
 // Pixels [begin, end) of a row, end - begin <= kChunk: with Update, each
@@ -93,25 +123,11 @@ inline void span(T* __restrict row, const T* __restrict psf, const std::uint8_t*
                 fold(x, max0, at0, offset0);
                 x += W;
             }
-            alignas(64) T lane_max[2 * W];
-            alignas(64) T lane_at[2 * W];
-            S::store(lane_max, max0);
-            S::store(lane_max + W, max1);
-            S::store(lane_at, at0);
-            S::store(lane_at + W, at1);
-            T largest = lane_max[0];
-            for (int lane = 1; lane < 2 * W; ++lane) {
-                if (lane_max[lane] > largest) largest = lane_max[lane];
-            }
+            // The lanes' maxima are >= +0 and never NaN.
+            const T largest = S::largest(max0, max1);
             if (largest > peak) {  // then every lane holding it found it at least once
-                int first = kChunk;
-                for (int lane = 0; lane < 2 * W; ++lane) {
-                    if (lane_max[lane] == largest) {
-                        first = min_int(first, static_cast<int>(lane_at[lane]));
-                    }
-                }
                 peak = largest;
-                peak_x = begin + first;
+                peak_x = begin + S::first(max0, at0, max1, at1, largest);
             }
         }
     }
@@ -128,12 +144,76 @@ inline void span(T* __restrict row, const T* __restrict psf, const std::uint8_t*
             }
         }
         squares[x - begin] = static_cast<double>(v) * static_cast<double>(v);
-        const T magnitude = std::abs(v);
-        if (magnitude > peak) {
-            peak = magnitude;
-            peak_x = x;
+        const T magnitude = magnitude_of(v);
+        const bool above = magnitude > peak;
+        peak_x = above ? x : peak_x;
+        peak = above ? magnitude : peak;
+    }
+}
+
+// Pixels [begin, end) of a short row: span() and the row's chain in one loop.
+template <typename T, bool Update, bool Masked>
+inline void short_span(T* __restrict row, const T* __restrict psf, const std::uint8_t* __restrict mask,
+                       T pv, int begin, int end, double& sum, T& peak, int& peak_x) {
+    for (int x = begin; x < end; ++x) {
+        T v = row[x];
+        if constexpr (Update) {
+            v = v - pv * psf[x - begin];
+            row[x] = v;
+        }
+        if constexpr (Masked) {
+            if (mask[x] == 0) continue;
+        }
+        fold_pixel(v, x, sum, peak, peak_x);
+    }
+}
+
+// The segment [begin, end) of a short row: subtracted inside the footprint
+// [x1, x2) (psf: the PSF sample of column x1), with the row's kind.
+template <typename T, bool Masked>
+inline void short_segment(T* row, const T* psf, const std::uint8_t* mask, T pv, int x1, int x2,
+                          int begin, int end, double& sum, T& peak, int& peak_x) {
+    const int u0 = max_int(begin, x1), u1 = min_int(end, x2);
+    if (u0 >= u1) {
+        short_span<T, false, Masked>(row, nullptr, mask, pv, begin, end, sum, peak, peak_x);
+        return;
+    }
+    short_span<T, false, Masked>(row, nullptr, mask, pv, begin, u0, sum, peak, peak_x);
+    short_span<T, true, Masked>(row, psf + (u0 - x1), mask, pv, u0, u1, sum, peak, peak_x);
+    short_span<T, false, Masked>(row, nullptr, mask, pv, u1, end, sum, peak, peak_x);
+}
+
+// Searched row `index` of a pass, of at most kShortRow pixels.
+template <typename T>
+inline void short_row(const SearchPass<T>& pass, int index, T pv) {
+    const SearchRow& searched = pass.rows[index];
+    const std::size_t row_offset = static_cast<std::size_t>(searched.y) * pass.nx;
+    T* const row = pass.residual + row_offset;
+    const Component<T>* const component = pass.component;
+    int x1 = 0, x2 = 0;  // the footprint's columns in this row, none by default
+    const T* psf = nullptr;
+    if (component != nullptr && searched.y >= component->y1 && searched.y <= component->y2) {
+        x1 = component->x1;
+        x2 = component->x2 + 1;
+        psf = pass.psf + (component->offset + static_cast<std::ptrdiff_t>(searched.y) * pass.psf_nx +
+                          component->x1);
+    }
+    double sum = 0.0;
+    T peak = 0;
+    int peak_x = pass.scan_begin;
+    for (int r = searched.run_begin; r < searched.run_end; ++r) {
+        const Run run = pass.runs[r];
+        if (searched.masked) {
+            short_segment<T, true>(row, psf, pass.mask + row_offset, pv, x1, x2, run.begin, run.end,
+                                   sum, peak, peak_x);
+        } else {
+            short_segment<T, false>(row, psf, nullptr, pv, x1, x2, run.begin, run.end, sum, peak,
+                                    peak_x);
         }
     }
+    pass.row_sum[index] = sum;
+    pass.row_max[index] = peak;
+    pass.row_ix[index] = peak_x;
 }
 
 // The progress of the fused pass along one searched row.
@@ -188,64 +268,96 @@ inline int chunk(const Run* runs, Cursor<T>& c, T pv, double* squares) {
     return filled;
 }
 
+// The searched rows index[0, count), count <= kRows, their chains interleaved.
 template <typename T>
-void search(const SearchPass<T>& pass, int row_begin, int row_end) {
+void search_rows(const SearchPass<T>& pass, const int* index, int count, T pv) {
     alignas(64) double squares[kRows][kChunk];
     const Component<T>* component = pass.component;
-    const T pv = component != nullptr ? component->pv : static_cast<T>(0);
-    for (int first = row_begin; first < row_end; first += kRows) {
-        const int count = min_int(kRows, row_end - first);
-        Cursor<T> cursor[kRows];
-        for (int g = 0; g < count; ++g) {
-            const SearchRow& searched = pass.rows[first + g];
-            Cursor<T>& c = cursor[g];
-            const std::size_t row_offset = static_cast<std::size_t>(searched.y) * pass.nx;
-            c.row = pass.residual + row_offset;
-            if (searched.masked) c.mask = pass.mask + row_offset;
-            c.run = searched.run_begin;
-            c.run_end = searched.run_end;
-            c.x = pass.runs[searched.run_begin].begin;
-            c.peak_x = pass.scan_begin;
-            if (component != nullptr && searched.y >= component->y1 && searched.y <= component->y2) {
-                c.x1 = component->x1;
-                c.x2 = component->x2 + 1;
-                c.psf = pass.psf + (component->offset +
-                                    static_cast<std::ptrdiff_t>(searched.y) * pass.psf_nx +
-                                    component->x1);
-            }
-        }
-        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0, s5 = 0.0, s6 = 0.0, s7 = 0.0;
-        for (;;) {
-            int filled[kRows] = {};
-            int longest = 0;
-            for (int g = 0; g < count; ++g) {
-                filled[g] = chunk<T>(pass.runs, cursor[g], pv, squares[g]);
-                longest = max_int(longest, filled[g]);
-            }
-            if (longest == 0) break;
-            for (int g = 0; g < kRows; ++g) {
-                for (int i = filled[g]; i < longest; ++i) squares[g][i] = 0.0;
-            }
-            // kRows chains, each in its row's column order.
-            for (int i = 0; i < longest; ++i) {
-                s0 += squares[0][i];
-                s1 += squares[1][i];
-                s2 += squares[2][i];
-                s3 += squares[3][i];
-                s4 += squares[4][i];
-                s5 += squares[5][i];
-                s6 += squares[6][i];
-                s7 += squares[7][i];
-            }
-        }
-        const double sums[kRows] = {s0, s1, s2, s3, s4, s5, s6, s7};
-        for (int g = 0; g < count; ++g) {
-            pass.row_sum[first + g] = sums[g];
-            pass.row_max[first + g] = cursor[g].peak;
-            pass.row_ix[first + g] = cursor[g].peak_x;
+    Cursor<T> cursor[kRows];
+    for (int g = 0; g < count; ++g) {
+        const SearchRow& searched = pass.rows[index[g]];
+        Cursor<T>& c = cursor[g];
+        const std::size_t row_offset = static_cast<std::size_t>(searched.y) * pass.nx;
+        c.row = pass.residual + row_offset;
+        if (searched.masked) c.mask = pass.mask + row_offset;
+        c.run = searched.run_begin;
+        c.run_end = searched.run_end;
+        c.x = pass.runs[searched.run_begin].begin;
+        c.peak_x = pass.scan_begin;
+        if (component != nullptr && searched.y >= component->y1 && searched.y <= component->y2) {
+            c.x1 = component->x1;
+            c.x2 = component->x2 + 1;
+            c.psf = pass.psf + (component->offset +
+                                static_cast<std::ptrdiff_t>(searched.y) * pass.psf_nx +
+                                component->x1);
         }
     }
+    double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0, s5 = 0.0, s6 = 0.0, s7 = 0.0;
+    for (;;) {
+        int filled[kRows] = {};
+        int longest = 0;
+        for (int g = 0; g < count; ++g) {
+            filled[g] = chunk<T>(pass.runs, cursor[g], pv, squares[g]);
+            longest = max_int(longest, filled[g]);
+        }
+        if (longest == 0) break;
+        for (int g = 0; g < kRows; ++g) {
+            for (int i = filled[g]; i < longest; ++i) squares[g][i] = 0.0;
+        }
+        // kRows chains, each in its row's column order.
+        for (int i = 0; i < longest; ++i) {
+            s0 += squares[0][i];
+            s1 += squares[1][i];
+            s2 += squares[2][i];
+            s3 += squares[3][i];
+            s4 += squares[4][i];
+            s5 += squares[5][i];
+            s6 += squares[6][i];
+            s7 += squares[7][i];
+        }
+    }
+    const double sums[kRows] = {s0, s1, s2, s3, s4, s5, s6, s7};
+    for (int g = 0; g < count; ++g) {
+        pass.row_sum[index[g]] = sums[g];
+        pass.row_max[index[g]] = cursor[g].peak;
+        pass.row_ix[index[g]] = cursor[g].peak_x;
+    }
 }
+
+template <typename T>
+void search(const SearchPass<T>& pass, int row_begin, int row_end) {
+    const T pv = pass.component != nullptr ? pass.component->pv : static_cast<T>(0);
+    int group[kRows];
+    int count = 0;
+    for (int i = row_begin; i < row_end; ++i) {
+        if (pass.rows[i].pixels <= kShortRow) {
+            short_row(pass, i, pv);
+            continue;
+        }
+        group[count++] = i;
+        if (count == kRows) {
+            search_rows(pass, group, count, pv);
+            count = 0;
+        }
+    }
+    if (count > 0) search_rows(pass, group, count, pv);
+}
+
+// The deferred subtraction of components[0, count), in their order, from the
+// exterior runs of rows [y_begin, y_end) (flush_rows), in two ways that make
+// the same operations on every pixel:
+//  * a long run (kBlockedRun pixels or more) in blocks of kBlock vectors held
+//    in registers while every component passes over them (flush_block): the
+//    fewest loads and stores where the footprints cover long spans of a row
+//    (M: HL Tau's call at 6 threads takes 9 % longer the second way);
+//  * a short run, and the tail of a long one, a chunk of at most kFlushChunk
+//    pixels at a time, the components passing in their order, each over the
+//    part of the chunk inside its footprint (flush_span): no block straddles a
+//    footprint's edge and no pixel loops over the components alone (M: on
+//    planes of at most 160 x 160 pixels, blocks took 1.25 times as long in
+//    the geometric mean, and up to 7 times).
+constexpr int kBlockedRun = 256;   // pixels
+constexpr int kFlushChunk = 1024;  // pixels, in the first-level cache meanwhile (8 KiB of double)
 
 // Prefetches the PSF samples that component c will subtract from the block
 // [x0, x0 + kWidth) of a row (row_offset = the row times psf_nx) if its
@@ -300,46 +412,64 @@ inline void flush_block(const ExteriorFlush<T>& exterior, T* __restrict row, int
     for (int j = 0; j < NV; ++j) S::store(row + x0 + j * W, acc[j]);
 }
 
-// Columns [x0, x1) of row y, one by one.
+// row[0, count) loses pv x samples[0, count), pixel by pixel: a rounded
+// product, then a rounded difference.
 template <typename T>
-inline void flush_pixels(const ExteriorFlush<T>& exterior, T* row, int y, std::ptrdiff_t row_offset,
-                         int x0, int x1) {
-    for (int x = x0; x < x1; ++x) {
-        T v = row[x];
+inline void subtract_span(T* __restrict row, const T* __restrict samples, T pv, int count) {
+    using S = Simd<T>;
+    int i = 0;
+    if constexpr (S::W > 1) {
+        using V = typename S::V;
+        constexpr int W = S::W;
+        const V vpv = S::splat(pv);
+        for (; i + 2 * W <= count; i += 2 * W) {
+            const V a = S::sub(S::load(row + i), S::mul(vpv, S::load(samples + i)));
+            const V b = S::sub(S::load(row + i + W), S::mul(vpv, S::load(samples + i + W)));
+            S::store(row + i, a);
+            S::store(row + i + W, b);
+        }
+        if (i + W <= count) {
+            S::store(row + i, S::sub(S::load(row + i), S::mul(vpv, S::load(samples + i))));
+            i += W;
+        }
+    }
+    for (; i < count; ++i) row[i] = row[i] - pv * samples[i];
+}
+
+// Columns [begin, end) of row y, chunk by chunk, each component in turn over
+// the part of the chunk inside its footprint.
+template <typename T>
+inline void flush_span(const ExteriorFlush<T>& exterior, T* row, int y, std::ptrdiff_t row_offset,
+                       int begin, int end) {
+    for (int x0 = begin, x1; x0 < end; x0 = x1) {
+        x1 = end - x0 > kFlushChunk ? x0 + kFlushChunk : end;
         for (int k = 0; k < exterior.count; ++k) {
             const Component<T>& c = exterior.components[k];
-            if (y < c.y1 || y > c.y2 || x < c.x1 || x > c.x2) continue;
-            v = v - c.pv * exterior.psf[c.offset + row_offset + x];
+            if (y < c.y1 || y > c.y2) continue;
+            const int lo = max_int(x0, c.x1), hi = min_int(x1, c.x2 + 1);
+            if (lo < hi) {
+                subtract_span(row + lo, exterior.psf + (c.offset + row_offset + lo), c.pv, hi - lo);
+            }
         }
-        row[x] = v;
     }
 }
 
 template <typename T>
 void flush_rows(const ExteriorFlush<T>& exterior, int y_begin, int y_end) {
-    constexpr int W = Simd<T>::W;
+    constexpr int kBlockPixels = kBlock * Simd<T>::W;
     if (exterior.count <= 0) return;
     for (int y = y_begin; y < y_end; ++y) {
-        T* row = exterior.residual + static_cast<std::size_t>(y) * exterior.nx;
+        T* const row = exterior.residual + static_cast<std::size_t>(y) * exterior.nx;
         const std::ptrdiff_t row_offset = static_cast<std::ptrdiff_t>(y) * exterior.psf_nx;
         for (int r = exterior.row_start[y]; r < exterior.row_start[y + 1]; ++r) {
-            const int end = exterior.runs[r].end;
-            int x = exterior.runs[r].begin;
-            for (; x + kBlock * W <= end; x += kBlock * W) {
-                flush_block<T, kBlock>(exterior, row, y, row_offset, x);
+            const Run run = exterior.runs[r];
+            int x = run.begin;
+            if (run.end - run.begin >= kBlockedRun) {
+                for (; run.end - x >= kBlockPixels; x += kBlockPixels) {
+                    flush_block<T, kBlock>(exterior, row, y, row_offset, x);
+                }
             }
-            // The rest in halving blocks, so that a short tail pays the cost
-            // per component a few times only.
-            for (; x + 4 * W <= end; x += 4 * W) flush_block<T, 4>(exterior, row, y, row_offset, x);
-            if (x + 2 * W <= end) {
-                flush_block<T, 2>(exterior, row, y, row_offset, x);
-                x += 2 * W;
-            }
-            if (x + W <= end) {
-                flush_block<T, 1>(exterior, row, y, row_offset, x);
-                x += W;
-            }
-            if (x < end) flush_pixels<T>(exterior, row, y, row_offset, x, end);
+            if (x < run.end) flush_span(exterior, row, y, row_offset, x, run.end);
         }
     }
 }
