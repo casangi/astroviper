@@ -1298,6 +1298,10 @@ print("RESULT", status("VmHWM:") - start)
 
 
 @pytest.mark.skipif(not os.path.exists("/proc/self/clear_refs"), reason="Linux /proc")
+@pytest.mark.skipif(
+    "asan" in os.environ.get("LD_PRELOAD", ""),
+    reason="AddressSanitizer's redzones and quarantine change the peaks",
+)
 def test_misaligned_arrays_copy_only_the_residual_and_the_model(run_python):
     """The PSF and the mask are read in place at any address: misaligned
     arrays raise a call's peak memory by the copies of the residual and the
