@@ -881,14 +881,18 @@ def _cpu_seconds():
     return usage.ru_utime + usage.ru_stime
 
 
-def test_idle_threads_sleep_and_nothing_runs_after_a_call():
-    """12 small planes and 12 threads: the planes that stop at once leave
-    their crews idle while one plane runs 20000 iterations (no exterior
-    pixels, so no final subtractions). The idle threads poll for a bounded
-    time and then sleep: the call's CPU time stays near that of the one busy
-    crew (a few threads), far from 12 threads polling throughout. After the
-    call returns, the process burns no CPU."""
-    case = _case(128, 128, np.float64, planes=(1, 3, 4), mask=None, niter=20000)
+@pytest.mark.parametrize("planes_with_budgets", [2, 12])
+def test_idle_threads_sleep_and_nothing_runs_after_a_call(planes_with_budgets):
+    """12 small masked planes and 12 threads, one plane running 20000
+    iterations (an all-true mask, so no final subtractions). With budgets on
+    2 planes, the team's other 10 threads wait for the final passes, deferred
+    to the whole team: they poll for a bounded time and then sleep. With
+    budgets on all 12, the planes run side by side, a thread each, and the
+    threads of the planes that stop at once end. Either way the call's CPU
+    time stays near that of the one busy thread, far from 12 threads polling
+    throughout, and after the call returns the process burns no CPU."""
+    case = _case(128, 128, np.float64, planes=(1, 3, 4), mask="all", niter=20000)
+    case["kwargs"]["max_iter_per_cycle_updated"].flat[planes_with_budgets:] = 0
     case["kwargs"]["threshold_per_cycle"] = np.full((1, 3, 4), 1e6)
     case["kwargs"]["threshold_per_cycle"][0, 0, 0] = 0.0
     case["kwargs"] |= _divergence(0.1, on=False)
@@ -897,7 +901,7 @@ def test_idle_threads_sleep_and_nothing_runs_after_a_call():
     wall, cpu = time.perf_counter() - start, _cpu_seconds() - cpu
     assert result["iterations_performed"][0, 0, 0] == 20000
     assert result["iterations_performed"].sum() == 20000
-    assert cpu < 4.0 * wall + 0.02, (cpu, wall)
+    assert cpu < 3.0 * wall + 0.02, (cpu, wall)
     cpu = _cpu_seconds()
     time.sleep(0.2)
     assert _cpu_seconds() - cpu < 0.02

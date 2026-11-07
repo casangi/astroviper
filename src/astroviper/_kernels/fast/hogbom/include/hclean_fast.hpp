@@ -11,8 +11,8 @@
 //      pass per iteration subtracts the previous component from them and
 //      searches them for the next one (the fused pass). The pass also keeps
 //      current the other pixels of the clean box that lie in short runs (of
-//      up to 32 pixels) between searched ones or between them and the box's
-//      edge, which cost less updated at once than deferred;
+//      up to 32 pixels) between searched ones, which cost less updated at
+//      once than deferred;
 //   E  every other pixel. Nothing reads them during the model update, so
 //      their subtractions are deferred to its end and then applied component
 //      after component in the original order (or earlier, when a zero peak
@@ -29,7 +29,10 @@
 // small planes (a thread alone on a plane when they are small enough). A crew
 // synchronises at every iteration; its threads wait for the next step by
 // polling for a bounded time that adapts to how their recent waits ended, and
-// then sleep, and every thread of a call has ended when it returns. Unlike
+// then sleep. Planes too small for a crew of two, with no more threads than
+// planes, run as the reference clean_cube runs them: each thread cleans whole
+// planes from its start and waits for none. Every thread of a call has ended
+// when it returns. Unlike
 // the reference clean_cube, which runs one thread per plane, the fast one
 // puts several threads on one plane when that is faster: the same results,
 // from more cores at once. The results never depend on the number of threads

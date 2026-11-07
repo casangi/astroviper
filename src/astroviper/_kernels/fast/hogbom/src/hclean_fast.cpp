@@ -38,9 +38,10 @@ using std::size_t;
 
 // The pass that justifies a thread of a crew (E): one thread per
 // kPixelsPerThread pixels of a pass over the crew's largest plane, so that a
-// pass gives each thread about 5 us of work against well under a microsecond
-// to synchronise.
-constexpr long kPixelsPerThread = 8192;
+// pass gives each thread about 10 us of work against about a microsecond to
+// synchronise. Half as many made crews of two threads on 128 x 128 planes,
+// which were slower than one thread per plane at 12 and 24 threads (M).
+constexpr long kPixelsPerThread = 16384;
 
 // A call starts a thread for at most every kUpdatesPerThread pixel updates of
 // its work (E): starting, running and joining a thread costs about 25-35 us
@@ -65,11 +66,21 @@ inline void relax() {
 // How long a thread polls before it sleeps, for one waiter: doubled after a
 // wait that ended while polling, halved after one that had to sleep (the
 // event came late, or the machine is oversubscribed), within [kMinPoll,
-// kMaxPoll], starting from kMinPoll. A crew that keeps pace soon polls
-// through its short gaps; one that waits long sleeps and burns no CPU, and
-// new threads do not poll while their team is still being started.
+// kMaxPoll], starting from kMaxPoll. A crew that keeps pace polls through its
+// short gaps; one that waits long sleeps and burns no CPU. A wait that sleeps
+// lets its CPU go idle, and waking an idle CPU can cost hundreds of
+// microseconds: starting from kMinPoll made 64 x 64 planes at 12 and 24
+// threads take 1.3-1.4x as long (M). The first wait of a team's thread, for
+// the rest of the team to be started, may poll for up to kStartPoll.
 class Patience {
 public:
+    // Starting and joining a thread costs about 25-35 us (M), so a team of 24
+    // starts in under a millisecond (E).
+    static constexpr std::chrono::nanoseconds kStartPoll{1'000'000};
+
+    // `first` is the budget of the first wait.
+    explicit Patience(std::chrono::nanoseconds first = kMaxPoll) : budget_(first) {}
+
     // Polls ready() until it holds (true) or the budget is spent (false).
     template <typename Ready>
     bool poll(Ready ready) {
@@ -79,12 +90,12 @@ public:
             for (int i = 0; i < kRelaxes; ++i) {
                 relax();
                 if (ready()) {
-                    if (budget_ < kMaxPoll) budget_ = std::min(2 * budget_, kMaxPoll);
+                    if (budget_ != kMaxPoll) budget_ = std::min(2 * budget_, kMaxPoll);
                     return true;
                 }
             }
             if (Clock::now() >= deadline) {
-                if (budget_ > kMinPoll) budget_ = std::max(budget_ / 2, kMinPoll);
+                if (budget_ != kMinPoll) budget_ = std::clamp(budget_ / 2, kMinPoll, kMaxPoll);
                 return false;
             }
         }
@@ -95,14 +106,15 @@ private:
     static constexpr std::chrono::nanoseconds kMinPoll{1'000};
     static constexpr std::chrono::nanoseconds kMaxPoll{50'000};
     static constexpr int kRelaxes = 32;  // between two readings of the clock
-    std::chrono::nanoseconds budget_ = kMinPoll;
+    std::chrono::nanoseconds budget_;
 };
 
 // A crew: size() threads that run their leader's steps together. The leader
 // (rank 0) calls run(step), which calls step(rank) on every rank and returns
 // when all have returned; the other ranks call serve(rank), which runs the
-// steps until the leader calls dismiss(). A step starts only once the
-// previous one has ended on every rank.
+// steps until the leader calls dismiss() or runs a step with `last`, after
+// which they return without waiting to be dismissed. A step starts only once
+// the previous one has ended on every rank.
 class Crew {
 public:
     int size() const { return size_; }
@@ -111,13 +123,14 @@ public:
     void resize(int size) { size_ = size; }
 
     template <typename Step>
-    void run(Step& step) {
+    void run(Step& step, bool last = false) {
         if (size_ == 1) {
             step(0);
             return;
         }
         call_ = [](void* function, int rank) { (*static_cast<Step*>(function))(rank); };
         step_ = &step;
+        last_ = last;
         pending_.store(size_ - 1, std::memory_order_relaxed);
         advance();
         step(0);
@@ -134,16 +147,17 @@ public:
         advance();
     }
 
-    void serve(int rank) {
-        Patience patience;
+    void serve(int rank, Patience patience = Patience()) {
         for (std::uint32_t seen = 0;;) {
             seen = await(seen, patience);
             if (dismissed_) return;
+            const bool last = last_;  // the leader writes it again only after this step
             call_(step_, rank);
             if (pending_.fetch_sub(1, std::memory_order_seq_cst) == 1 &&
                 leader_asleep_.load(std::memory_order_seq_cst)) {
                 pending_.notify_one();
             }
+            if (last) return;
         }
     }
 
@@ -173,6 +187,7 @@ private:
     int size_ = 1;
     void (*call_)(void*, int) = nullptr;
     void* step_ = nullptr;
+    bool last_ = false;
     bool dismissed_ = false;
     alignas(64) Patience patience_;  // the leader's, written only when it adapts
     alignas(64) std::atomic<std::uint32_t> generation_{0};
@@ -196,17 +211,19 @@ private:
 
 // The threads of a call: the calling thread (member 0) and up to size - 1
 // more, which run every phase with it (phase(member) on each member) until
-// the team is destroyed, when they have all ended. A thread that cannot be
-// started leaves a smaller team: the results do not depend on the number of
-// threads. The first exception that a phase throws on any member is rethrown
-// by run() once every member has finished the phase.
+// its last phase (run_last) or until the team is destroyed; when it is, they
+// have all ended. A thread that cannot be started leaves a smaller team: the
+// results do not depend on the number of threads. The first exception that a
+// phase throws on any member is rethrown by run() or run_last() once every
+// member has finished the phase.
 class Team {
 public:
     explicit Team(int size) {
         threads_.reserve(static_cast<size_t>(size - 1));
         for (int member = 1; member < size; ++member) {
             try {
-                threads_.emplace_back([this, member] { crew_.serve(member); });
+                threads_.emplace_back(
+                    [this, member] { crew_.serve(member, Patience(Patience::kStartPoll)); });
             } catch (const std::system_error&) {
                 break;
             } catch (const std::bad_alloc&) {
@@ -228,6 +245,19 @@ public:
 
     template <typename Phase>
     void run(Phase&& phase) {
+        run_phase(phase, false);
+    }
+
+    // The team's last phase: its threads end with it, so that none has to be
+    // woken to end (the team runs nothing after it).
+    template <typename Phase>
+    void run_last(Phase&& phase) {
+        run_phase(phase, true);
+    }
+
+private:
+    template <typename Phase>
+    void run_phase(Phase& phase, bool last) {
         auto guarded = [&](int member) {
             try {
                 phase(member);
@@ -235,11 +265,10 @@ public:
                 fail(std::current_exception());
             }
         };
-        crew_.run(guarded);
+        crew_.run(guarded, last);
         if (error_) std::rethrow_exception(std::exchange(error_, nullptr));
     }
 
-private:
     void fail(std::exception_ptr error) {
         const std::lock_guard<std::mutex> lock(mutex_);
         if (!error_) error_ = std::move(error);
@@ -312,20 +341,33 @@ void mask_runs(const std::uint8_t* mask, int x0, int x1, std::vector<Run>& runs)
 }
 
 // Runs of the mask at most this many pixels apart are merged into one
-// segment of a searched row, and a segment is extended to the edge of the
-// clean box when it is at most this many pixels away (E): updating those
-// pixels at every iteration costs less than a short run of E, in the passes
-// and in the final subtractions.
+// segment of a searched row (E): updating the pixels between them at every
+// iteration costs less than a segment of their own, in the passes and in the
+// final subtractions.
 constexpr int kMergeGap = 32;
+
+// Reserves all that build_plan can need for a plane of ny rows with a clean
+// box of w x h pixels, so that building its plan allocates nothing. The
+// segments of a row are more than kMergeGap pixels apart, so a row of w
+// pixels has at most (w + kMergeGap + 1) / (kMergeGap + 2) of them, and E one
+// run more. (The mask runs of a row, build_plan's `runs`, are at most
+// w / 2 + 1.)
+void reserve_plan(Plan& plan, int w, int h, int ny) {
+    const size_t rows = static_cast<size_t>(std::max(h, 0));
+    const size_t segments = rows * static_cast<size_t>((std::max(w, 0) + kMergeGap + 1) / (kMergeGap + 2));
+    plan.rows.reserve(rows);
+    plan.runs.reserve(segments);
+    plan.exterior.reserve(static_cast<size_t>(ny) + segments);
+    plan.exterior_start.reserve(static_cast<size_t>(ny) + 1);
+}
 
 // The plan of a plane with the binding's clean box [xbeg, xend) x [ybeg, yend).
 // The searched pixels are the box inside the mask; clean<T>'s box
 // (mask_bounding_box of hclean.cpp) is their bounding box, or the clean box
-// itself when there are none.
-void build_plan(Plan& plan, const std::uint8_t* mask, int nx, int ny, int xbeg, int xend, int ybeg,
-                int yend) {
+// itself when there are none. `runs` holds the mask runs of one row.
+void build_plan(Plan& plan, std::vector<Run>& runs, const std::uint8_t* mask, int nx, int ny,
+                int xbeg, int xend, int ybeg, int yend) {
     Box box{xend, yend, -1, -1};
-    std::vector<Run> runs;  // of the mask, in one row
     for (int y = ybeg; y < yend; ++y) {
         runs.clear();
         if (mask == nullptr) {
@@ -350,16 +392,6 @@ void build_plan(Plan& plan, const std::uint8_t* mask, int nx, int ny, int xbeg, 
         }
         plan.runs.push_back(segment);
         const int last = static_cast<int>(plan.runs.size());
-        Run& head = plan.runs[first];
-        Run& tail = plan.runs[last - 1];
-        if (head.begin > xbeg && head.begin - xbeg <= kMergeGap) {
-            head.begin = xbeg;
-            masked = true;
-        }
-        if (tail.end < xend && xend - tail.end <= kMergeGap) {
-            tail.end = xend;
-            masked = true;
-        }
         int pixels = 0;
         for (int r = first; r < last; ++r) pixels += plan.runs[r].end - plan.runs[r].begin;
         plan.rows.push_back({y, first, last, pixels, masked});
@@ -743,6 +775,40 @@ int team_size(int requested, long usable, double updates) {
     return static_cast<int>(std::max(threads, 1L));
 }
 
+// Runs work(member) on `threads` threads side by side, the calling thread
+// being member 0 and `workers` (with room reserved) holding the others, as
+// the reference clean_cube runs its threads: each starts on its work at once,
+// and none waits for another. A thread that cannot be started leaves fewer
+// members. The first exception that a member throws is rethrown once all
+// have ended, and sets `failed`, which the others read to stop early.
+template <typename Work>
+void run_side_by_side(std::vector<std::thread>& workers, int threads, std::atomic<bool>& failed,
+                      Work& work) {
+    std::mutex mutex;
+    std::exception_ptr error;
+    const auto guarded = [&](int member) {
+        try {
+            work(member);
+        } catch (...) {
+            const std::lock_guard<std::mutex> lock(mutex);
+            if (!error) error = std::current_exception();
+            failed.store(true, std::memory_order_relaxed);
+        }
+    };
+    for (int member = 1; member < threads; ++member) {
+        try {
+            workers.emplace_back(guarded, member);
+        } catch (const std::system_error&) {
+            break;
+        } catch (const std::bad_alloc&) {
+            break;
+        }
+    }
+    guarded(0);
+    for (std::thread& worker : workers) worker.join();
+    if (error) std::rethrow_exception(error);
+}
+
 }  // namespace
 
 template <typename T>
@@ -755,10 +821,14 @@ bool clean_cube(const Cube<T>& c) {
 
     // Everything that can fail to allocate, before the first write.
     std::vector<Plane<T>> planes;
+    int threads = 1;
+    bool side_by_side = false;
+    std::vector<std::thread> workers;          // side by side: the threads after the caller
+    std::vector<std::vector<Run>> mask_rows;   // side by side: each thread's mask runs of a row
     std::unique_ptr<Team> team;
     Schedule s;
     std::unique_ptr<Crew[]> crews;
-    std::vector<Rows<T>> rows;
+    std::vector<Rows<T>> rows;  // a crew's, or (side by side) a thread's
     try {
         planes.resize(static_cast<size_t>(nplanes));
         int active = 0;
@@ -802,29 +872,58 @@ bool clean_cube(const Cube<T>& c) {
             static_cast<long>(nplanes) * tiles(c),
             static_cast<long>(std::min(final_updates / kUpdatesPerThread, static_cast<double>(requested))));
         const long usable = std::max(active * crew_threads, final_threads);
-        team = std::make_unique<Team>(team_size(c.threads, usable, pass_updates + final_updates));
-        std::atomic<int> next{0};
-        team->run([&](int) {
-            for (int pl; (pl = next.fetch_add(1, std::memory_order_relaxed)) < nplanes;) {
-                Plane<T>& p = planes[pl];
-                if (p.max_iter > 0) build_plan(p.plan, p.mask, c.nx, c.ny, c.xbeg, c.xend, c.ybeg, c.yend);
+        threads = team_size(c.threads, usable, pass_updates + final_updates);
+        // Planes too small for a crew of two (a pass of fewer than 2 x
+        // kPixelsPerThread pixels) and no more threads than planes with a
+        // budget: schedule() would give every thread planes of its own and
+        // defer nothing, so the threads run side by side from their start,
+        // each building the plans of the planes it cleans (in memory reserved
+        // here). Starting a thread costs about 25-35 us (M), and the phases
+        // of a team wait for all of its threads.
+        side_by_side = box < 2 * kPixelsPerThread && threads <= active;
+        if (side_by_side) {
+            const int w = c.xend - c.xbeg, h = std::max(c.yend - c.ybeg, 0);
+            for (Plane<T>& p : planes) {
+                if (p.max_iter > 0) reserve_plan(p.plan, w, h, c.ny);
             }
-        });
-        long largest = 0;
-        size_t most_rows = 0;
-        for (const Plane<T>& p : planes) {
-            largest = std::max(largest, p.plan.work);
-            most_rows = std::max(most_rows, p.plan.rows.size());
-        }
-        s = schedule(team->size(), active, largest);
-        crews.reset(new Crew[static_cast<size_t>(s.crews)]);
-        rows.resize(static_cast<size_t>(s.crews));
-        for (int g = 0; g < s.crews; ++g) {
-            crews[g].resize(s.crew_size);
-            rows[g].sum.resize(most_rows);
-            rows[g].max.resize(most_rows);
-            rows[g].ix.resize(most_rows);
-            rows[g].split.reserve(static_cast<size_t>(s.crew_size) + 1);
+            mask_rows.resize(static_cast<size_t>(threads));
+            rows.resize(static_cast<size_t>(threads));
+            for (int member = 0; member < threads; ++member) {
+                mask_rows[member].reserve(static_cast<size_t>(std::max(w, 0)) / 2 + 1);
+                rows[member].sum.resize(static_cast<size_t>(h));
+                rows[member].max.resize(static_cast<size_t>(h));
+                rows[member].ix.resize(static_cast<size_t>(h));
+                rows[member].split.reserve(2);
+            }
+            workers.reserve(static_cast<size_t>(threads - 1));
+        } else {
+            team = std::make_unique<Team>(threads);
+            std::atomic<int> next{0};
+            team->run([&](int) {
+                std::vector<Run> runs;  // of the mask, in one row
+                for (int pl; (pl = next.fetch_add(1, std::memory_order_relaxed)) < nplanes;) {
+                    Plane<T>& p = planes[pl];
+                    if (p.max_iter > 0) {
+                        build_plan(p.plan, runs, p.mask, c.nx, c.ny, c.xbeg, c.xend, c.ybeg, c.yend);
+                    }
+                }
+            });
+            long largest = 0;
+            size_t most_rows = 0;
+            for (const Plane<T>& p : planes) {
+                largest = std::max(largest, p.plan.work);
+                most_rows = std::max(most_rows, p.plan.rows.size());
+            }
+            s = schedule(team->size(), active, largest);
+            crews.reset(new Crew[static_cast<size_t>(s.crews)]);
+            rows.resize(static_cast<size_t>(s.crews));
+            for (int g = 0; g < s.crews; ++g) {
+                crews[g].resize(s.crew_size);
+                rows[g].sum.resize(most_rows);
+                rows[g].max.resize(most_rows);
+                rows[g].ix.resize(most_rows);
+                rows[g].split.reserve(static_cast<size_t>(s.crew_size) + 1);
+            }
         }
     } catch (const std::bad_alloc&) {
         return false;
@@ -839,8 +938,30 @@ bool clean_cube(const Cube<T>& c) {
         c.stop_code[pl] = STOP_NONE;
     }
 
+    if (side_by_side) {
+        std::atomic<int> next{0};
+        std::atomic<bool> failed{false};
+        auto clean_planes = [&](int member) {
+            Crew alone;  // of one thread: its steps run on this one
+            for (int pl; !failed.load(std::memory_order_relaxed) &&
+                         (pl = next.fetch_add(1, std::memory_order_relaxed)) < nplanes;) {
+                Plane<T>& p = planes[pl];
+                if (p.max_iter > 0) {
+                    build_plan(p.plan, mask_rows[member], p.mask, c.nx, c.ny, c.xbeg, c.xend, c.ybeg,
+                               c.yend);
+                    iterate(c, pl, p, alone, rows[member], kernels);
+                }
+                finish(c, pl, p, alone, kernels);
+            }
+        };
+        run_side_by_side(workers, threads, failed, clean_planes);
+        return true;
+    }
+
+    // The iterations (and final passes) of the planes, the team's last phase
+    // unless the final passes are deferred to the whole team.
     std::atomic<int> next{0};
-    team->run([&](int member) {
+    const auto clean_planes = [&](int member) {
         const int g = member / s.crew_size, rank = member % s.crew_size;
         if (g >= s.crews) return;
         Crew& crew = crews[g];
@@ -854,15 +975,17 @@ bool clean_cube(const Cube<T>& c) {
             if (p.max_iter > 0) iterate(c, pl, p, crew, rows[g], kernels);
             if (!s.deferred) finish(c, pl, p, crew, kernels);
         }
-    });
-
-    if (s.deferred) {
+    };
+    if (!s.deferred) {
+        team->run_last(clean_planes);
+    } else {
+        team->run(clean_planes);
         // The final passes of every plane on the whole team: first the sums of
         // |model| (the longest items), then the tiles.
         const int n_tiles = tiles(c);
         const long items = static_cast<long>(nplanes) * (1 + n_tiles);
         std::atomic<long> next_item{0};
-        team->run([&](int) {
+        team->run_last([&](int) {
             for (long i; (i = next_item.fetch_add(1, std::memory_order_relaxed)) < items;) {
                 if (i < nplanes) {
                     finish_item(c, planes[i], 0, kernels);
