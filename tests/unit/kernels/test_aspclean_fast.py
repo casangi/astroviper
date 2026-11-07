@@ -1256,6 +1256,61 @@ def test_misaligned_arrays(entry):
     _assert_same((shifted["residual"], shifted["model"], result), expected, entry)
 
 
+MISALIGNED_PEAK = """
+import sys
+import numpy as np
+from astroviper._kernels import impl
+
+
+def status(key):
+    with open("/proc/self/status") as f:
+        return next(int(line.split()[1]) * 1024 for line in f if line.startswith(key))
+
+
+def reset_peak():  # VmHWM := VmRSS
+    with open("/proc/self/clear_refs", "w") as f:
+        f.write("5")
+
+
+def moved(a):
+    raw = np.empty(a.nbytes + 1, np.uint8)
+    view = raw[1 : 1 + a.nbytes].view(a.dtype).reshape(a.shape)
+    view[...] = a
+    return view
+
+
+clean = impl("asp", "clean", "fast")
+n = 1024
+yy, xx = np.mgrid[0:n, 0:n]
+psf = np.exp(-((xx - n // 2) ** 2 + (yy - n // 2) ** 2) / 8.0)
+dirty = np.exp(-((xx - 500) ** 2 + (yy - 530) ** 2) / 800.0) + 1e-3 * np.cos(0.3 * xx * yy)
+mask = (np.hypot(xx - 512.0, yy - 512.0) < 300).astype(float)
+arrays = {"residual": dirty, "psf": psf, "model": np.full((n, n), 0.0), "mask": mask}
+if sys.argv[1] == "misaligned":
+    arrays = {k: moved(v) for k, v in arrays.items()}
+small = {k: np.ascontiguousarray(v[480:544, 480:544]) for k, v in arrays.items()}
+clean(**small, gain=0.3, max_iter_per_cycle_updated=2, processing_function_threads=2)
+start = status("VmRSS:")
+reset_peak()
+clean(**arrays, gain=0.3, max_iter_per_cycle_updated=8, processing_function_threads=2)
+print("RESULT", status("VmHWM:") - start)
+"""
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/clear_refs"), reason="Linux /proc")
+def test_misaligned_arrays_copy_only_the_residual_and_the_model(run_python):
+    """The PSF and the mask are read in place at any address: misaligned
+    arrays raise a call's peak memory by the copies of the residual and the
+    model (2 planes), not of all four arrays (fresh processes, 1024^2)."""
+    peaks = {
+        mode: int(run_python("-c", MISALIGNED_PEAK, mode).rpartition("RESULT ")[2])
+        for mode in ("aligned", "misaligned")
+    }
+    plane = 1024 * 1024 * 8
+    assert peaks["aligned"] > plane, peaks  # the measurement sees the call's buffers
+    assert peaks["misaligned"] - peaks["aligned"] < 3 * plane, peaks
+
+
 @pytest.mark.parametrize("shifted", [False, True], ids=["aligned", "misaligned"])
 @pytest.mark.parametrize("alias", ["model", "psf", "mask"])
 def test_arguments_that_are_the_residual(alias, shifted):
