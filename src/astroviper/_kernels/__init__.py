@@ -25,7 +25,7 @@ kernel      entries                           implementations
 ``dft``     ``dft_predict``                   ``ref``, ``fast``
 ``hogbom``  ``clean_cube``,                   ``ref``
             ``clean_cube_many_threads``
-``asp``     ``clean``, ``clean_cube``         ``ref``
+``asp``     ``clean``, ``clean_cube``         ``ref``, ``fast``
 ==========  ================================  ===============
 
 ``ASTROVIPER_KERNELS_TRACE=<dir>``

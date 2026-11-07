@@ -14,6 +14,9 @@ the installed extensions outside ``_kernels``, so a new reference extension
 cannot escape the rules. Skipped off x86-64 and when ``objdump`` (binutils) is
 not installed.
 
+A fast module built for the baseline instruction set only
+(``BASELINE_FAST_MODULES``) follows the rules of the reference modules.
+
 The fast modules (``FAST_MODULES``) have no fused multiply-add either. Their
 AVX2 code lives in ``*_avx2.cpp`` units built without LTO, which must define
 no weak or unique symbol (``nm`` types W, V, u): the linker may otherwise keep
@@ -25,6 +28,13 @@ byte; the test is skipped when there is none. Where a C++ compiler is on the
 path, each AVX2 unit is also compiled at every optimisation level a build
 type gives it (Debug: -Og, see cmake/AstroviperKernels.cmake) and checked the
 same way.
+
+A fast module that is not installed (a build with
+``ASTROVIPER_BUILD_FAST_KERNELS=OFF``, or one whose compile probe skipped it)
+skips its tests, unless ``ASTROVIPER_EXPECT_FAST_KERNELS`` is set (not empty
+or ``0``), as a Linux x86-64 CI job should set it: then it fails them, so that
+a module silently lost from such a build is caught. A reference module must be
+installed.
 """
 
 import importlib.machinery
@@ -54,6 +64,8 @@ REFERENCE_MODULES = [
 
 #: The fast-kernel modules, relative to the ``astroviper`` package.
 FAST_MODULES = ["_kernels/fast/dft/_dft_fast_ext"]
+#: The fast-kernel modules with no AVX2 unit (no AVX2 code at all).
+BASELINE_FAST_MODULES = ["_kernels/fast/aspclean/_aspclean_fast_ext"]
 
 #: FMA3 (vfmadd231pd, vfnmsub132ss, vfmaddsub213ps, ...) and FMA4 mnemonics.
 FMA = re.compile(r"\bvfn?m(?:add|sub|addsub|subadd)\w*")
@@ -80,6 +92,11 @@ def _package():
     return Path(importlib.util.find_spec("astroviper").origin).parent
 
 
+EXPECT = "ASTROVIPER_EXPECT_FAST_KERNELS"
+#: Whether every fast module must be installed (see the module docstring).
+EXPECT_FAST_KERNELS = os.environ.get(EXPECT, "") not in ("", "0")
+
+
 def _module_file(relative):
     """Installed file of an extension module, found without importing it."""
     package = _package()
@@ -87,7 +104,19 @@ def _module_file(relative):
         path = package / (relative + suffix)
         if path.is_file():
             return path
-    pytest.fail(f"extension module astroviper/{relative} is not installed")
+    message = f"extension module astroviper/{relative} is not installed"
+    if relative.startswith("_kernels/") and not EXPECT_FAST_KERNELS:
+        pytest.skip(f"{message} (fast kernels not built)")
+    pytest.fail(message)
+
+
+def _assert_baseline_code(relative):
+    """No fused multiply-add and no register wider than xmm in the module."""
+    text = _instructions(_module_file(relative))
+    assert len(INSTRUCTION.findall(text)) > 1000, "no code was disassembled"
+    assert XMM_REGISTER.search(text), "the register pattern matches nothing"
+    assert sorted(set(FMA.findall(text))) == []
+    assert sorted(set(WIDE_REGISTER.findall(text))) == []
 
 
 def _instructions(path):
@@ -134,11 +163,14 @@ def test_reference_module_list_is_complete():
 
 @pytest.mark.parametrize("relative", REFERENCE_MODULES, ids=lambda r: r.split("/")[-1])
 def test_reference_module_has_no_fma_and_no_wide_registers(relative):
-    text = _instructions(_module_file(relative))
-    assert len(INSTRUCTION.findall(text)) > 1000, "no code was disassembled"
-    assert XMM_REGISTER.search(text), "the register pattern matches nothing"
-    assert sorted(set(FMA.findall(text))) == []
-    assert sorted(set(WIDE_REGISTER.findall(text))) == []
+    _assert_baseline_code(relative)
+
+
+@pytest.mark.parametrize(
+    "relative", BASELINE_FAST_MODULES, ids=lambda r: r.split("/")[-1]
+)
+def test_baseline_fast_module_has_no_fma_and_no_wide_registers(relative):
+    _assert_baseline_code(relative)
 
 
 @pytest.mark.parametrize("relative", FAST_MODULES, ids=lambda r: r.split("/")[-1])

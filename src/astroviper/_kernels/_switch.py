@@ -46,7 +46,10 @@ _REGISTRY = {
         "fast": "astroviper._kernels.fast.dft",
     },
     "hogbom": {"ref": f"{_IMAGING}.deconvolvers.hogbom._hogbom_ext"},
-    "asp": {"ref": f"{_IMAGING}.deconvolvers.aspclean._aspclean_ext"},
+    "asp": {
+        "ref": f"{_IMAGING}.deconvolvers.aspclean._aspclean_ext",
+        "fast": "astroviper._kernels.fast.aspclean",
+    },
 }
 
 _logger = logging.getLogger("astroviper.kernels")
@@ -156,7 +159,12 @@ def impl(kernel, entry, name):
     try:
         module = import_module(module_name)
     except ImportError as e:
-        if e.name != module_name:
+        # The module, or the compiled extension of a package (a submodule
+        # that cannot be found), was not built; other errors stay as they are.
+        missing_extension = isinstance(e, ModuleNotFoundError) and (
+            e.name or ""
+        ).startswith(module_name + ".")
+        if e.name != module_name and not missing_extension:
             raise
         raise ImportError(
             f"{kernel}={name}: module {module_name} is not available "

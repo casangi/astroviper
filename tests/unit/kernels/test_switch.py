@@ -91,18 +91,21 @@ def test_reference_selections(value):
 
 
 @pytest.mark.parametrize(
-    "value, dft, hogbom",
+    "value, dft, hogbom, asp",
     [
-        ("fast", "fast", "fast"),
-        ("*=FAST", "fast", "fast"),
-        ("hogbom=fast", "ref", "fast"),
-        ("fast,hogbom=ref", "fast", "ref"),
-        ("hogbom=ref,fast", "fast", "fast"),
-        ("ref,hogbom=fast,dft=ref", "ref", "fast"),
+        ("fast", "fast", "fast", "fast"),
+        ("*=FAST", "fast", "fast", "fast"),
+        ("hogbom=fast", "ref", "fast", "ref"),
+        ("fast,hogbom=ref", "fast", "ref", "fast"),
+        ("hogbom=ref,fast", "fast", "fast", "fast"),
+        ("ref,hogbom=fast,dft=ref", "ref", "fast", "ref"),
+        ("fast,dft=ref", "ref", "fast", "fast"),
+        ("asp=fast", "ref", "ref", "fast"),
+        ("fast,asp=ref", "fast", "fast", "ref"),
     ],
 )
-def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom):
-    assert parse(value) == {**ALL_REFERENCE, "dft": dft, "hogbom": hogbom}
+def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom, asp):
+    assert parse(value) == {**ALL_REFERENCE, "dft": dft, "hogbom": hogbom, "asp": asp}
 
 
 @pytest.mark.parametrize(
@@ -113,7 +116,10 @@ def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom):
             "dft=fsat",
             "unknown implementation 'fsat'; implementations: fast, gpu, ref, ref1",
         ),
-        ("asp=gpu", "'asp' has no implementation 'gpu'; its implementations: ref"),
+        (
+            "asp=gpu",
+            "'asp' has no implementation 'gpu'; its implementations: fast, ref",
+        ),
         ("hogbom=fast", "'hogbom' has no implementation 'fast'"),
         ("gpu", "no kernel implements 'gpu' yet"),
         ("dft=ref:avx2", "variants (':...') are not supported"),
@@ -150,7 +156,7 @@ def test_registry_holds_the_reference_pairs():
     assert {k: set(v) for k, v in _switch._REGISTRY.items()} == {
         "dft": {"ref", "fast"},
         "hogbom": {"ref"},
-        "asp": {"ref"},
+        "asp": {"ref", "fast"},
     }
     for kernel, (shim, ext, entries) in SHIMS.items():
         assert _switch._ENTRIES[kernel] == entries
@@ -369,6 +375,24 @@ def test_import_error_inside_a_module_is_not_relabelled(fake_module):
         impl("hogbom", "clean_cube", "fast")
     assert caught.value.name == "_kernels_fake_missing_dependency"
     assert "is not available" not in str(caught.value)
+
+
+def test_missing_extension_of_a_package_raises_import_error(fake_module, tmp_path):
+    """A registered package whose compiled extension (a submodule) was not
+    built, as in a build without the fast kernels."""
+    package = fake_module("_kernels_fake_package")
+    (tmp_path / package).mkdir()
+    (tmp_path / package / "__init__.py").write_text(
+        f"from {package}._fast_ext import clean_cube\n"
+    )
+    importlib.invalidate_caches()
+    with pytest.raises(ImportError) as caught:
+        impl("hogbom", "clean_cube", "fast")
+    assert str(caught.value) == (
+        f"hogbom=fast: module {package} is not available "
+        "(not built, or skipped by its compile probe)"
+    )
+    assert caught.value.__cause__.name == f"{package}._fast_ext"
 
 
 def test_info_logged_once_per_kernel_and_impl_with_isa(fake_module, caplog):
