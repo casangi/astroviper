@@ -188,6 +188,35 @@ def _assert_refused_before_writing(tmp_path, match, **kwargs):
     assert list(ps_store.iterdir()) == []
 
 
+def test_a_clean_mask_with_auto_mask_params_is_refused_before_writing(tmp_path):
+    mask_file = tmp_path / "mask.npy"
+    np.save(mask_file, np.ones((8, 8), dtype=bool))
+    _assert_refused_before_writing(
+        tmp_path,
+        "exclude each other",
+        image_params={
+            "n_taylor_terms": 1,
+            "image_size": [8, 8],
+            "reference_frequency": 1.0e9,
+        },
+        clean_mask=str(mask_file),
+        auto_mask_params={},
+    )
+
+
+def test_an_unknown_auto_mask_parameter_is_refused_before_writing(tmp_path):
+    _assert_refused_before_writing(
+        tmp_path,
+        "Unknown auto_mask_params keys",
+        image_params={
+            "n_taylor_terms": 1,
+            "image_size": [8, 8],
+            "reference_frequency": 1.0e9,
+        },
+        auto_mask_params={"noise": 5.0},
+    )
+
+
 @pytest.mark.parametrize("deconvolver", ["hogbom", "asp", "mtmfs"])
 @pytest.mark.parametrize(
     "options",

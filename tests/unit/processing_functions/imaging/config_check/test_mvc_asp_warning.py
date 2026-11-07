@@ -47,6 +47,22 @@ def test_workflow_warns_for_the_mvc_asp_combination_only(
         assert "Give a clean_mask" in warning.call_args.args[0]
 
 
+def test_an_automatic_mask_does_not_warn(monkeypatch):
+    warning = Mock()
+    monkeypatch.setattr("toolviper.utils.logger.warning", warning)
+    check_driver_workflow(
+        {
+            "continuum_mode": "mvc",
+            "deconvolver": "asp",
+            "cycle_control_params": {},
+            "clean_mask": None,
+            "auto_mask_params": {},
+        },
+        mode=CONTINUUM_SINGLE_FIELD,
+    )
+    warning.assert_not_called()
+
+
 @pytest.mark.parametrize("value", ["false", 1, None])
 def test_standalone_workflow_checker_validates_flag_before_warning(monkeypatch, value):
     warning = Mock()
