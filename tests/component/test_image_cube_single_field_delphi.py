@@ -10,8 +10,10 @@ import inspect
 import json
 
 import numpy as np
+import pytest
 from astropy.coordinates import SkyCoord
 from xradio.image import load_image
+from xradio.measurement_set import open_processing_set
 
 import astroviper.distributed_applications as distributed_applications
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
@@ -68,13 +70,20 @@ def _simulate_noisy_alma(ps_store):
     )["ps_store"]
 
 
-def test_delphi_parameters_file_then_image_from_it(tmp_path):
+@pytest.mark.parametrize("named_field", [False, True])
+def test_delphi_parameters_file_then_image_from_it(tmp_path, named_field):
     ps_store = _simulate_noisy_alma(str(tmp_path / "alma.ps.zarr"))
+    field_name = None
+    if named_field:
+        fields = open_processing_set(ps_store).xr_ps.get_combined_field_and_source_xds()
+        field_name = str(fields.attrs["center_field_name"])
     image_store = str(tmp_path / "alma.img.zarr")
     parameters = delphi_module.image_cube_single_field_delphi(
         ps_store,
         image_store,
         processing_set_data_group_name="base",
+        field_name=field_name,
+        mpi_cluster_setup={"max_workers": 2},
         calculate_parameters_only=True,
         n_mapping_parallelism={"frequency": 2},
     )
@@ -99,6 +108,8 @@ def test_delphi_parameters_file_then_image_from_it(tmp_path):
         "oversampling": 300,
         "interpolation": "linear",
     }
+    assert arguments["mpi_cluster_setup"] == {"max_workers": 2}
+    assert arguments["field_name"] == field_name
     image_params = arguments["image_params"]
     assert image_params["fft_padding"] == 1.2
     assert image_params["polarization_coords"] == ["I", "Q"]

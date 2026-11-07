@@ -5,7 +5,6 @@ before every model update.
 """
 
 import math
-import numbers
 
 import numpy as np
 import scipy.fft
@@ -37,82 +36,6 @@ MAD_TO_SIGMA = 1.4826
 CHAUVENET_MAX_ITERATIONS = 5
 # Half width of the smoothing kernel in units of its major axis FWHM.
 KERNEL_HALF_WIDTH = 3.0
-
-
-def validate_auto_mask_params(auto_mask_params, clean_mask=None):
-    """Complete and check ``auto_mask_params``.
-
-    Parameters
-    ----------
-    auto_mask_params : dict or None
-        The ``auto_mask_params`` of the imaging applications.
-    clean_mask : str or None, optional
-        The ``clean_mask`` of the imaging applications, refused together with
-        ``auto_mask_params``.
-
-    Returns
-    -------
-    dict or None
-        Every key of :data:`AUTO_MASK_DEFAULTS`; ``None`` when
-        ``auto_mask_params`` is ``None``.
-
-    Raises
-    ------
-    ValueError
-        If ``auto_mask_params`` has an unknown key or a value out of range, or
-        comes with a ``clean_mask``.
-    """
-    if auto_mask_params is None:
-        return None
-    if clean_mask is not None:
-        raise ValueError("clean_mask and auto_mask_params exclude each other.")
-    unknown = sorted(set(auto_mask_params) - set(AUTO_MASK_DEFAULTS))
-    if unknown:
-        raise ValueError(f"Unknown auto_mask_params keys: {unknown}.")
-    params = {**AUTO_MASK_DEFAULTS, **auto_mask_params}
-
-    for key in ("grow_prune", "fast_noise"):
-        if not isinstance(params[key], bool | np.bool_):
-            raise ValueError(f"{key} must be a bool; got {params[key]!r}.")
-    if (
-        isinstance(params["grow_iterations"], bool | np.bool_)
-        or not isinstance(params["grow_iterations"], numbers.Integral)
-        or params["grow_iterations"] < 0
-    ):
-        raise ValueError(
-            "grow_iterations must be a non-negative integer; got "
-            f"{params['grow_iterations']!r}."
-        )
-    for key in set(AUTO_MASK_DEFAULTS) - {
-        "grow_prune",
-        "fast_noise",
-        "grow_iterations",
-    }:
-        value = params[key]
-        if (
-            isinstance(value, bool | np.bool_)
-            or not isinstance(value, numbers.Real)
-            or not math.isfinite(value)
-        ):
-            raise ValueError(f"{key} must be a finite number; got {value!r}.")
-    for key in (
-        "sidelobe_threshold",
-        "noise_threshold",
-        "low_noise_threshold",
-        "negative_threshold",
-        "min_beam_fraction",
-    ):
-        if params[key] < 0:
-            raise ValueError(f"{key} must not be negative; got {params[key]!r}.")
-    if params["smooth_factor"] <= 0:
-        raise ValueError(
-            f"smooth_factor must be positive; got {params['smooth_factor']!r}."
-        )
-    if not 0 < params["cut_threshold"] < 1:
-        raise ValueError(
-            f"cut_threshold must lie in (0, 1); got {params['cut_threshold']!r}."
-        )
-    return params
 
 
 def _chauvenet_sample(values):
@@ -386,6 +309,8 @@ def make_auto_mask(
     image_data_group_in_name="residual",
     image_data_group_out_name="residual",
     image_data_group_out_modified=None,
+    *,
+    input_checked: bool = False,
 ):
     """Update the automatic CLEAN mask from the residual of every plane.
 
@@ -408,8 +333,7 @@ def make_auto_mask(
         residual update. The mask is written to it as the ``mask`` of the
         output group.
     auto_mask_params : dict
-        Keys of :data:`AUTO_MASK_DEFAULTS`
-        (:func:`validate_auto_mask_params`).
+        Keys of :data:`AUTO_MASK_DEFAULTS`; those left out take these defaults.
     primary_beam_limit : float, optional
         Fraction of the peak primary beam: the pixels below it and where the
         primary beam is 0 stay outside the statistics and the mask.
@@ -431,6 +355,11 @@ def make_auto_mask(
     image_data_group_out_modified : dict, optional
         Role to data-variable name of the output group. Default
         ``{"mask": "MASK"}``.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
 
     Returns
     -------
@@ -440,6 +369,15 @@ def make_auto_mask(
         with ``min_percent_change`` at or above 0 and ``threshold_reached``,
         did not change or changed by less than that percentage.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check._predicates import (
+            check_auto_mask_params,
+            check_primary_beam_limit,
+        )
+
+        check_auto_mask_params(auto_mask_params)
+        check_primary_beam_limit(primary_beam_limit)
+
     params = {**AUTO_MASK_DEFAULTS, **auto_mask_params}
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {"mask": "MASK"}

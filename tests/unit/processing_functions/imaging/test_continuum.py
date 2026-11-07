@@ -361,7 +361,7 @@ def test_primary_beam_correction_restores_every_taylor_term():
 
     result, _ = restore_continuum_image(
         image,
-        primary_beam_correction=True,
+        restoration_output="both",
         primary_beam_limit=0.2,
         continuum_mode="mvc",
     )
@@ -405,14 +405,12 @@ def test_corrected_only_continuum_restoration_matches_the_both_product_path():
 
     both, _ = restore_continuum_image(
         both_image,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         restoration_output="both",
         continuum_mode="mvc",
     )
     corrected_only, _ = restore_continuum_image(
         corrected_only_image,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         restoration_output="primary_beam_corrected",
         continuum_mode="mvc",
@@ -554,7 +552,6 @@ def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore()
 
     result, _ = restore_continuum_image(
         image,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         restoration_output="both",
         continuum_mode="mfs",
@@ -1570,7 +1567,8 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency(
     result = _convert_primary_beam_to_reference_frequency(
         image,
         image_params=image_params,
-        reference_frequency_hz=1.5e9,
+        reference_frequency=1.5e9,
+        n_taylor_terms=2,
         float_dtype=np.float64,
         image_data_group_in_name="residual",
         make_primary_beam_taylor=make_primary_beam_taylor,
@@ -1589,7 +1587,7 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency(
     assert ("MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR" in result) is (make_primary_beam_taylor)
     assert ("MFS_PRIMARY_BEAM_FIT_MOMENTS" in result) is make_primary_beam_taylor
     assert "PRIMARY_BEAM" not in result
-    assert result["PRIMARY_BEAM_REFERENCE"].attrs["reference_frequency_hz"] == 1.5e9
+    assert result["PRIMARY_BEAM_REFERENCE"].attrs["reference_frequency"] == 1.5e9
     if make_primary_beam_taylor:
         assert result.MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR.shape == (1, 2, 1, 8, 8)
         assert result.MFS_PRIMARY_BEAM_FIT_MOMENTS.shape == (1, 3, 1)
@@ -1675,8 +1673,9 @@ def test_mfs_primary_beam_taylor_inputs_reuse_channel_imaging_weights(monkeypatc
 
     result = _convert_primary_beam_to_reference_frequency(
         image,
-        image_params={"image_size": [1, 1], "n_taylor_terms": 2},
-        reference_frequency_hz=1.0e9,
+        image_params={"image_size": [1, 1]},
+        reference_frequency=1.0e9,
+        n_taylor_terms=2,
         float_dtype=np.float64,
         channel_imaging_weight_sums=spectral_weights,
     )
@@ -2024,15 +2023,27 @@ def test_residual_cycle_times_prediction_stages_once(
         "fft_padding": 1.2,
     }
 
+    kernel_params = {"type": "prolate_spheroidal_casa"}
+    prediction_calls = []
+
+    def fake_predict(*args, **kwargs):
+        assert kwargs["input_checked"] is True
+        prediction_calls.append(kwargs)
+
+    def fake_prepare_model(*args, **kwargs):
+        assert kwargs["input_checked"] is True
+        assert kwargs["gridding_kernel_params"] is kernel_params
+        return xr.Dataset()
+
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.residual_cycle_continuum_single_field."
         "make_visibility_model_continuum_single_field",
-        lambda *args, **kwargs: None,
+        fake_predict,
     )
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.image_continuum_single_field."
         "prepare_model_uv_mvc_single_field",
-        lambda *args, **kwargs: xr.Dataset(),
+        fake_prepare_model,
     )
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.residual_update."
@@ -2046,6 +2057,7 @@ def test_residual_cycle_times_prediction_stages_once(
     )
 
     def fake_grid(*args, **kwargs):
+        assert kwargs["input_checked"] is True
         return args[1], pd.DataFrame()
 
     monkeypatch.setattr(
@@ -2081,6 +2093,7 @@ def test_residual_cycle_times_prediction_stages_once(
         model_xds=xr.Dataset(),
         primary_beam_xds=xr.Dataset(),
         visibility_memory_mode=visibility_memory_mode,
+        gridding_kernel_params=kernel_params,
         observed_visibility_grid_xds=(
             xr.Dataset() if continuum_mode == "mvc" else None
         ),
@@ -2091,6 +2104,9 @@ def test_residual_cycle_times_prediction_stages_once(
         0.7 if visibility_memory_mode == "recompute" else 0.0
     )
     assert timing.T_grid.iloc[0] == pytest.approx(0.4)
+
+    assert len(prediction_calls) == (1 if continuum_mode == "mfs" else 0)
+    assert kernel_params == {"type": "prolate_spheroidal_casa"}
 
 
 def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
@@ -2417,6 +2433,14 @@ def test_auto_mask_comes_from_taylor_term_zero_and_reaches_every_term():
     assert not image.MASK.values[0, 0, 1].any()
     assert state["planes_stopped"][0, 0, 1]
     assert image.attrs["data_groups"]["residual"]["mask"] == "MASK"
+
+
+def test_auto_mask_checks_a_direct_call():
+    image = _continuum_image_with_two_sources()
+    with pytest.raises(ValueError, match="Unknown auto_mask_params keys"):
+        make_auto_mask_continuum(image, {"noise": 5.0})
+    with pytest.raises(ValueError, match="primary_beam_limit"):
+        make_auto_mask_continuum(image, {}, primary_beam_limit=2.0)
 
 
 def test_auto_mask_follows_the_data_groups():

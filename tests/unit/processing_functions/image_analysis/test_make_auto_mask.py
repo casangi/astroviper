@@ -8,6 +8,7 @@ import scipy.signal
 import xarray as xr
 
 from astroviper.processing_functions.image_analysis.make_auto_mask import (
+    AUTO_MASK_DEFAULTS,
     _bounding_box,
     _chauvenet_sample,
     _grow,
@@ -16,7 +17,6 @@ from astroviper.processing_functions.image_analysis.make_auto_mask import (
     _prune,
     _smooth_and_cut,
     make_auto_mask,
-    validate_auto_mask_params,
 )
 from astroviper.processing_functions.imaging.restore import (
     _elliptical_gaussian_kernel,
@@ -84,63 +84,36 @@ def plane_mask(xds):
     return xds.MASK.values[0, 0, 0]
 
 
-class TestValidate:
-    def test_none_stays_none(self):
-        assert validate_auto_mask_params(None) is None
+def test_the_defaults_are_those_of_tclean():
+    assert AUTO_MASK_DEFAULTS == {
+        "sidelobe_threshold": 3.0,
+        "noise_threshold": 5.0,
+        "low_noise_threshold": 1.5,
+        "negative_threshold": 0.0,
+        "smooth_factor": 1.0,
+        "min_beam_fraction": 0.3,
+        "cut_threshold": 0.01,
+        "grow_iterations": 75,
+        "grow_prune": True,
+        "min_percent_change": -1.0,
+        "fast_noise": True,
+    }
 
-    def test_empty_dict_gives_the_defaults(self):
-        assert validate_auto_mask_params({}) == {
-            "sidelobe_threshold": 3.0,
-            "noise_threshold": 5.0,
-            "low_noise_threshold": 1.5,
-            "negative_threshold": 0.0,
-            "smooth_factor": 1.0,
-            "min_beam_fraction": 0.3,
-            "cut_threshold": 0.01,
-            "grow_iterations": 75,
-            "grow_prune": True,
-            "min_percent_change": -1.0,
-            "fast_noise": True,
-        }
 
-    def test_given_values_are_kept(self):
-        params = validate_auto_mask_params({"noise_threshold": 4.25})
-        assert params["noise_threshold"] == 4.25
-        assert params["sidelobe_threshold"] == 3.0
+class TestConfiguration:
+    def test_a_direct_call_is_checked(self):
+        with pytest.raises(ValueError, match="Unknown auto_mask_params keys"):
+            make_auto_mask(image(noise_plane()), {"noise": 5.0})
+        with pytest.raises(ValueError, match="primary_beam_limit"):
+            make_auto_mask(image(noise_plane()), {}, primary_beam_limit=2.0)
 
-    def test_refuses_a_clean_mask(self):
-        with pytest.raises(ValueError, match="exclude each other"):
-            validate_auto_mask_params({}, clean_mask="mask.npy")
+    def test_a_checked_call_is_not(self):
+        make_auto_mask(image(noise_plane()), {"noise": 5.0}, input_checked=True)
 
-    def test_no_auto_mask_leaves_a_clean_mask_alone(self):
-        assert validate_auto_mask_params(None, clean_mask="mask.npy") is None
-
-    def test_refuses_an_unknown_key(self):
-        with pytest.raises(ValueError, match="sidelobethreshold"):
-            validate_auto_mask_params({"sidelobethreshold": 3.0})
-
-    @pytest.mark.parametrize(
-        "key, value, message",
-        [
-            ("sidelobe_threshold", -1.0, "must not be negative"),
-            ("noise_threshold", "5", "finite number"),
-            ("low_noise_threshold", math.nan, "finite number"),
-            ("negative_threshold", True, "finite number"),
-            ("min_beam_fraction", -0.1, "must not be negative"),
-            ("smooth_factor", 0.0, "must be positive"),
-            ("cut_threshold", 0.0, "must lie in"),
-            ("cut_threshold", 1.0, "must lie in"),
-            ("grow_iterations", -1, "non-negative integer"),
-            ("grow_iterations", 1.5, "non-negative integer"),
-            ("grow_iterations", True, "non-negative integer"),
-            ("grow_prune", 1, "must be a bool"),
-            ("fast_noise", "yes", "must be a bool"),
-            ("min_percent_change", math.inf, "finite number"),
-        ],
-    )
-    def test_refuses_a_bad_value(self, key, value, message):
-        with pytest.raises(ValueError, match=message):
-            validate_auto_mask_params({key: value})
+    def test_the_parameters_given_are_not_changed(self):
+        params = {"noise_threshold": 4.25}
+        make_auto_mask(image(noise_plane()), params)
+        assert params == {"noise_threshold": 4.25}
 
 
 def test_the_noise_stays_inside_the_primary_beam():
@@ -157,7 +130,7 @@ def test_the_noise_stays_inside_the_primary_beam():
 
 class TestStatistics:
     def test_thresholds_set_by_the_sidelobes(self):
-        params = validate_auto_mask_params({})
+        params = AUTO_MASK_DEFAULTS
         mask, grow, negative, noise_sets = _plane_thresholds(
             10.0, 0.1, 1.0, 0.5, params
         )
@@ -165,7 +138,7 @@ class TestStatistics:
         assert not noise_sets
 
     def test_thresholds_set_by_the_noise(self):
-        params = validate_auto_mask_params({"negative_threshold": 4.0})
+        params = {**AUTO_MASK_DEFAULTS, "negative_threshold": 4.0}
         mask, grow, negative, noise_sets = _plane_thresholds(
             10.0, 0.01, 1.0, 1.0, params
         )

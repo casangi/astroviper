@@ -394,7 +394,9 @@ def test_subtraction_psf_of_twice_the_size_holds_the_image_psf(simulated):
 def test_refused_kernel_keys_with_the_dft(simulated):
     store, _ = simulated("small_100GHz", False)
     for extra in ({"support": 7}, {"oversampling": 100}, {"interpolation": "linear"}):
-        with pytest.raises(ValueError, match="do not apply to the type 'dft'"):
+        with pytest.raises(
+            ValueError, match="DFT accepts only gridding_kernel_params="
+        ):
             _image(store, "small_100GHz", {**DFT, **extra})
 
 
@@ -433,3 +435,24 @@ def test_the_prediction_into_an_existing_output_is_subtracted(model_group):
     np.testing.assert_allclose(
         ps_xdt["ms"]["VISIBILITY_RESIDUAL"].values, 0.75, rtol=0, atol=1e-15
     )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "add_dft_image_continuum_single_field",
+        "make_dft_undeconvolved_image_continuum_single_field",
+        "make_dft_point_spread_function_continuum_single_field",
+        "make_dft_visibility_model_continuum_single_field",
+    ],
+)
+@pytest.mark.parametrize(
+    "count,frequency",
+    [(1.5, 1e9), (True, 1e9), ("2", 1e9), (1, "1e9"), (1, 0), (1, float("nan"))],
+)
+def test_dft_rejects_original_parameters_before_accessing_data(name, count, frequency):
+    from astroviper.processing_functions.imaging import direct_fourier_transform
+
+    function = getattr(direct_fourier_transform, name)
+    with pytest.raises((TypeError, ValueError)):
+        function(None, None, count, frequency)

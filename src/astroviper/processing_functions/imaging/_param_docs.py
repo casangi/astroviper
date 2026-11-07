@@ -23,7 +23,16 @@ _IMAGE_PARAMS_DOC = (
     "``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is\n"
     '``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image\n'
     'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
-    "correlations (see ``instrument_polarization_basis``)."
+    "correlations (see ``instrument_polarization_basis``). The labels must be a\n"
+    "nonempty one-dimensional vector. An xarray DataArray must have exactly\n"
+    "the dimension ``polarization``; other dimension names are rejected.\n"
+    "``time_coords`` accepts XRADIO image-factory time formats: numeric MJD\n"
+    "(UTC) days, numeric strings, ISO time strings, datetime64 values, Python\n"
+    "datetime objects, or Astropy Time, as scalars or one-dimensional sequences.\n"
+    "Times must be finite and nonempty; validation preserves the supplied values.\n"
+    "Distributed single-field imagers require exactly one image time plane and\n"
+    "an explicit ``fft_padding``. Designed kernels, including the default,\n"
+    "require padding at least 1.05; CASA's fixed kernel permits 1.0."
 )
 
 _CONTINUUM_IMAGE_PARAMS_DOC = (
@@ -108,7 +117,8 @@ _AUTO_MASK_DATA_GROUP_OUT_DOC = 'Data group that gets the mask. Default ``"resid
 
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
-    'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
+    'threaded across planes) requires one Taylor term. Use ``"mtmfs"``\n'
+    'for two to four terms. ``"asp"``\n'
     "(C++, adaptive scale pixel) cleans Taylor term zero only and needs\n"
     '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
     "(``asp_scale_significance``) needs a ``clean_mask`` or an automatic mask\n"
@@ -120,7 +130,8 @@ _CONTINUUM_DECONVOLVER_DOC = (
     'warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
     "synthesis) cleans the Taylor terms together and needs\n"
     '``image_params["n_taylor_terms"]`` from 2 to 4. Other values are\n'
-    "refused before anything is written."
+    "refused before anything is written, without substituting another algorithm\n"
+    "or Taylor order."
 )
 
 _CONTINUUM_MODE_DOC = (
@@ -141,7 +152,31 @@ _CONTINUUM_MODE_DOC = (
     'parallel hands only; ``["I", "Q", "U", "V"]`` is refused.'
 )
 
+_FIELD_NAME_DOC = (
+    "Reserved field-selection argument, retained for future support. It does\n"
+    "not currently filter fields; prepare a single-field input Processing Set."
+)
+
 IMAGING_PARAM_DOCS = {
+    "hessian_cache": (
+        "Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.\n"
+        "Reuse requires matching PSF contents, coordinates, precision, Taylor basis,\n"
+        "geometry, scales, scale bias, and cell sampling. Changing-product checks\n"
+        "always run. None disables reuse; input_checked does not control this cache."
+    ),
+    "image_cube_single_field.field_name": _FIELD_NAME_DOC,
+    "image_continuum_single_field.field_name": _FIELD_NAME_DOC,
+    "point_spread_function_cube_single_field.field_name": _FIELD_NAME_DOC,
+    "feather.selection": """``xarray`` ``isel`` selection applied to both input images (e.g. a
+frequency channel range or an ``l``/``m`` sub-window). Chunking is determined
+from the selected images.""",
+    "feather.fft_backend": """FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).""",
+    "require_complete": """Require all coordinates and cycle controls needed by a distributed driver.
+Lower-level entry points check only the configuration they receive.""",
+    "input_checked": """Skip configuration checks already performed by the calling layer.
+Runtime checks on newly created data always remain active. For graph nodes
+using an input_params dictionary, its input_checked entry also carries this
+flag. Set it only for an unchanged configuration in the same imaging mode.""",
     "image_params": _IMAGE_PARAMS_DOC,
     "make_primary_beam_single_field.image_params": _PRIMARY_BEAM_IMAGE_PARAMS_DOC,
     "make_continuum_primary_beam_single_field.image_params": (
@@ -151,7 +186,7 @@ IMAGING_PARAM_DOCS = {
         _CONTINUUM_PRIMARY_BEAM_RESOLUTION_PARAMS_DOC
     ),
     "make_auto_mask.auto_mask_params": (
-        "Keys of :data:`AUTO_MASK_DEFAULTS`\n(:func:`validate_auto_mask_params`)."
+        "Keys of :data:`AUTO_MASK_DEFAULTS`; those left out take these defaults."
     ),
     "make_auto_mask_continuum.auto_mask_params": "The automatic mask parameters.",
     "make_auto_mask.image_data_group_in_name": _AUTO_MASK_DATA_GROUP_IN_DOC,
@@ -223,8 +258,9 @@ IMAGING_PARAM_DOCS = {
     "residual_cycle_continuum_single_field.image_params": (_CONTINUUM_IMAGE_PARAMS_DOC),
     "imaging_weights_params": (
         'Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,\n'
-        '``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs\n'
-        'trade-off. ``weighting_scope`` is ``"local"`` for a density per\n'
+        '``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an\n'
+        "explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.\n"
+        '``weighting_scope`` is ``"local"`` for a density per\n'
         'frequency channel or ``"global"`` for one density across all selected\n'
         "channels in distributed continuum imaging. Natural weighting is\n"
         "independent of this scope."
@@ -568,6 +604,7 @@ IMAGING_PARAM_DOCS = {
         'few planes, e.g. single-channel imaging) or ``"asp"``.'
     ),
     "image_continuum_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
+    "check_continuum_model_products.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
     "residual_update_continuum_single_field.deconvolver": (_CONTINUUM_DECONVOLVER_DOC),
     "model_update_mtmfs_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
     "instrument_polarization_basis": (
@@ -643,18 +680,32 @@ IMAGING_PARAM_DOCS = {
     ),
     "image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
-        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).'
+        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
+        "The distributed cube writer does not publish UV grids; standalone\n"
+        "processing functions may retain their working grids in memory."
     ),
-    "primary_beam_correction": (
-        "If ``True`` write the primary beam corrected restored sky to the\n"
-        "``sky_restored_primary_beam_corrected``\n"
-        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable. Cube imaging and\n"
-        "MVC divide the model and residual by their channel or common (power)\n"
-        "primary beam before restoration. MFS instead divides the apparent\n"
-        "Taylor polynomials by the fitted primary-beam Taylor polynomial.\n"
-        "Pixels below the zeroth-order primary-\n"
-        "beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires\n"
-        "``restore``."
+    "restore_continuum_image.continuum_mode": (
+        "Continuum construction convention. When omitted, infer it from the\n"
+        "residual or image metadata. An explicit value must agree with any\n"
+        "stored metadata. MFS corrects the Taylor polynomial as a whole; MVC\n"
+        "divides each coefficient by its already-constructed common primary\n"
+        "beam."
+    ),
+    "restore_continuum_image.deconvolver": (
+        "Deconvolver that produced the model. MT-MFS restoration applies the\n"
+        "Taylor Hessian's principal solution to a private copy of every residual\n"
+        "Taylor term before restoration. The stored residual remains unchanged."
+    ),
+    "restoration_output": (
+        'Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,\n'
+        'or ``"both"``. Cube outputs are ``SKY_RESTORED`` and\n'
+        "``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are\n"
+        "``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.\n"
+        "Cube corrects the model and residual by the channel power primary beam\n"
+        "before convolution. MFS divides their Taylor polynomials; MVC divides\n"
+        "by its common power primary beam. Corrected pixels below\n"
+        "``primary_beam_limit`` are blanked with NaN. Imaging workflows use this\n"
+        "selector only when ``restore=True``."
     ),
     "psf_fitting_method": (
         'Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or\n'
@@ -669,20 +720,21 @@ IMAGING_PARAM_DOCS = {
     "image_continuum_single_field.image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
-        "Restoration automatically retains its mode-specific restored Taylor\n"
-        "product and the "
-        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.'
+        "Restoration automatically retains its selected restored Taylor\n"
+        "products and the "
+        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.\n'
+        "Restored and spectral products require ``restore=True``. Alpha products\n"
+        "require at least two Taylor terms; beta requires at least three.\n"
+        "MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;\n"
+        "MVC cannot publish channel UV grids. Unavailable products are rejected\n"
+        "before input reads or graph construction."
     ),
     "image_continuum_single_field.restore": (
         "If ``True`` restore every Taylor coefficient after deconvolution and\n"
-        "always produce the intrinsic, primary-beam-corrected Taylor image in\n"
-        "``SKY_RESTORED_FLAT_SKY``. This is the sole restored sky product for\n"
-        "both MFS and MVC; the apparent ``SKY_RESTORED_FLAT_NOISE`` image is not\n"
-        "written. Pixels below ``primary_beam_limit`` are blanked with NaN. With\n"
-        "at least two Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``;\n"
-        "with at least three, also write ``BETA``. ``ALPHA_ERROR`` is CASA's\n"
-        "pixel-residual diagnostic, not a statistically calibrated one-sigma\n"
-        "uncertainty."
+        "write the products selected by ``restoration_output``. With at least\n"
+        "two Taylor terms also write ``ALPHA`` and ``ALPHA_ERROR``; with at least\n"
+        "three also write ``BETA``. ``ALPHA_ERROR`` is a pixel-residual diagnostic,\n"
+        "not a statistically calibrated one-sigma uncertainty."
     ),
     "clean_mask": (
         'Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:\n'

@@ -506,7 +506,7 @@ def image(
         processing_function_threads=1,
         n_mapping_parallelism={"frequency": n_mapping_parallelism},
         restore=restore,
-        primary_beam_correction=restore,
+        restoration_output=("both" if restore else "apparent"),
         overwrite=True,
     )
     return image_store, result["deconvolution"], controls

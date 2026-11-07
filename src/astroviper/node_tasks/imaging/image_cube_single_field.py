@@ -116,7 +116,7 @@ def _visibility_to_image_frequency_maps(ps_xdt, img_xds):
 
     return {
         ms_name: map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values, img_xds.frequency.values
+            ms_xdt.frequency.values, img_xds.frequency.values, input_checked=True
         )
         for ms_name, ms_xdt in ps_xdt.items()
     }
@@ -525,7 +525,7 @@ def image_cube_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     restore=False,
-    primary_beam_correction=False,
+    restoration_output="apparent",
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
@@ -543,6 +543,8 @@ def image_cube_single_field(
     output_image_format="zarr",
     task_time_kill_switch_seconds=None,
     report_statistics=False,
+    *,
+    input_checked: bool = False,
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
 
@@ -580,11 +582,21 @@ def image_cube_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -875,20 +887,22 @@ def image_cube_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     restore : bool, optional
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
-    primary_beam_correction : bool, optional
-        If ``True`` write the primary beam corrected restored sky to the
-        ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable. Cube imaging and
-        MVC divide the model and residual by their channel or common (power)
-        primary beam before restoration. MFS instead divides the apparent
-        Taylor polynomials by the fitted primary-beam Taylor polynomial.
-        Pixels below the zeroth-order primary-
-        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
-        ``restore``.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
+        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
+        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
+        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
+        Cube corrects the model and residual by the channel power primary beam
+        before convolution. MFS divides their Taylor polynomials; MVC divides
+        by its common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
+        selector only when ``restore=True``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -1108,6 +1122,12 @@ def image_cube_single_field(
         number for a plane whose peak is above ``entropy_max_snr`` times its
         RMS). Default ``False``.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
@@ -1141,6 +1161,14 @@ def image_cube_single_field(
           :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`.
           The reduce concatenates the chunks along ``frequency``.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import toolviper.utils.logger as logger
@@ -1155,10 +1183,6 @@ def image_cube_single_field(
         "Memory usage at start of image_cube_single_field_node_task: "
         + str(get_rss_gb())
         + " GB"
-    )
-
-    assert memory_mode == "in_memory", (
-        "Currently only memory_mode='in_memory' is implemented."
     )
 
     if image_data_variables_keep is None:
@@ -1356,13 +1380,14 @@ def image_cube_single_field(
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
             restore=restore,
-            primary_beam_correction=primary_beam_correction,
+            restoration_output=restoration_output,
             psf_fitting_method=psf_fitting_method,
             gridding_kernel_params=gridding_kernel_params,
             primary_beam_params=primary_beam_params,
             clean_mask=clean_mask,
             auto_mask_params=auto_mask_params,
             task_id=task_id,
+            input_checked=True,
         )
 
         start = time.time()

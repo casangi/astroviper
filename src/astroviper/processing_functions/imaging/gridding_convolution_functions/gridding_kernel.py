@@ -162,66 +162,27 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
         ``support``, ``oversampling`` or ``interpolation`` given with the
         type ``"dft"``.
     """
-    params = dict(DEFAULT_GRIDDING_KERNEL_PARAMS)
-    if gridding_kernel_params:
-        unknown = set(gridding_kernel_params) - set(params)
-        if unknown:
-            raise ValueError(
-                f"unknown gridding_kernel_params key(s) {sorted(unknown)}; "
-                f"expected {sorted(params)}"
-            )
+    from astroviper.processing_functions.imaging.config_check._gridding import (
+        check_gridding_kernel_parameters,
+    )
+
+    try:
+        check_gridding_kernel_parameters(gridding_kernel_params)
+    except TypeError as error:
+        raise ValueError(str(error)) from error
+    # Build effective parameters without changing the caller's recipe.
+    if gridding_kernel_params is not None:
+        if gridding_kernel_params.get("type") == DIRECT_FOURIER_TRANSFORM:
+            return {"type": DIRECT_FOURIER_TRANSFORM}
         if gridding_kernel_params.get("type") == "prolate_spheroidal_casa":
-            # CASA's kernel takes CASA's sampling for the keys not given
-            params = dict(CASA_GRIDDING_KERNEL_PARAMS)
-        params.update(gridding_kernel_params)
-    if params["type"] == DIRECT_FOURIER_TRANSFORM:
-        given = sorted(set(gridding_kernel_params) - {"type"})
-        if given:
-            raise ValueError(
-                f"gridding_kernel_params key(s) {given} do not apply to the type "
-                f"{DIRECT_FOURIER_TRANSFORM!r}: the direct Fourier transform uses no "
-                "gridding kernel (no support, oversampling or table lookup); pass "
-                f'{{"type": "{DIRECT_FOURIER_TRANSFORM}"}} alone'
-            )
-        return {"type": DIRECT_FOURIER_TRANSFORM}
-    if params["type"] not in KERNEL_TYPES:
-        raise ValueError(
-            f"gridding_kernel_params['type'] {params['type']!r} is not one of "
-            f"{(*KERNEL_TYPES, DIRECT_FOURIER_TRANSFORM)}"
-        )
-    support = params["support"]
-    if (
-        not isinstance(support, int | np.integer)
-        or support < MIN_SUPPORT
-        or support % 2 == 0
-    ):
-        raise ValueError(
-            "gridding_kernel_params['support'] must be an odd integer of at least "
-            f"{MIN_SUPPORT}, got {support!r}"
-        )
-    if (
-        params["type"] == "prolate_spheroidal_casa"
-        and support != PROLATE_SPHEROIDAL_SUPPORT
-    ):
-        raise ValueError(
-            "the prolate_spheroidal_casa kernel is Schwab's rational approximation "
-            f"of the m = 6, alpha = 1 function and spans {PROLATE_SPHEROIDAL_SUPPORT} "
-            f"grid points; got support {support} (the prolate_spheroidal kernel "
-            "takes any odd support)"
-        )
-    oversampling = params["oversampling"]
-    if not isinstance(oversampling, int | np.integer) or oversampling < 1:
-        raise ValueError(
-            "gridding_kernel_params['oversampling'] must be a positive integer, "
-            f"got {oversampling!r}"
-        )
-    if params["interpolation"] not in INTERPOLATIONS:
-        raise ValueError(
-            f"gridding_kernel_params['interpolation'] {params['interpolation']!r} "
-            f"is not one of {tuple(INTERPOLATIONS)}"
-        )
-    params["support"] = int(support)
-    params["oversampling"] = int(oversampling)
+            defaults = CASA_GRIDDING_KERNEL_PARAMS
+        else:
+            defaults = DEFAULT_GRIDDING_KERNEL_PARAMS
+    else:
+        defaults = DEFAULT_GRIDDING_KERNEL_PARAMS
+    params = {**defaults, **(gridding_kernel_params or {})}
+    params["support"] = int(params["support"])
+    params["oversampling"] = int(params["oversampling"])
     return params
 
 
@@ -264,20 +225,12 @@ def kept_half_width(fft_padding):
     -------
     float
     """
-    if fft_padding is None:
-        raise ValueError(
-            "the prolate_spheroidal, exponential_semicircle and least_misfit "
-            "gridding kernels are designed for the image region the padding "
-            "keeps: pass fft_padding"
-        )
-    fft_padding = float(fft_padding)
-    if fft_padding < MIN_DESIGN_PADDING:
-        raise ValueError(
-            "the prolate_spheroidal, exponential_semicircle and least_misfit "
-            f"gridding kernels need fft_padding >= {MIN_DESIGN_PADDING} to suppress "
-            f"the aliases at the edge of the image kept; got {fft_padding}"
-        )
-    return 0.5 / fft_padding
+    from astroviper.processing_functions.imaging.config_check._gridding import (
+        check_kernel_padding,
+    )
+
+    check_kernel_padding(fft_padding)
+    return 0.5 / float(fft_padding)
 
 
 class GriddingKernel:
@@ -330,10 +283,11 @@ class GriddingKernel:
                 f"a kernel table of support {support} and oversampling "
                 f"{oversampling} has {expected} entries, got shape {table.shape}"
             )
-        if interpolation not in INTERPOLATIONS:
-            raise ValueError(f"unknown kernel interpolation {interpolation!r}")
-        if kernel_type not in KERNEL_TYPES:
-            raise ValueError(f"unknown kernel type {kernel_type!r}")
+        from astroviper.processing_functions.imaging.config_check._gridding import (
+            check_kernel_options,
+        )
+
+        check_kernel_options(kernel_type, interpolation)
         self.table = table
         self.support = int(support)
         self.oversampling = int(oversampling)
