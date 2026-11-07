@@ -143,17 +143,26 @@ def _prune(mask, min_pixels):
         return mask
     box = _bounding_box(mask)
     labels, _ = scipy.ndimage.label(mask[box])
-    keep = np.bincount(labels.ravel()) >= min_pixels
+    keep = np.bincount(labels[mask[box]]) >= min_pixels
     keep[0] = False
     pruned = np.zeros_like(mask)
     pruned[box] = keep[labels]
     return pruned
 
 
+def _convolve(box, kernel):
+    """Convolution of a bool ``box``, padded to the FFT size, two spectra at most."""
+    shape = [
+        scipy.fft.next_fast_len(size + kernel.shape[0] - 1, real=True)
+        for size in box.shape
+    ]
+    spectrum = scipy.fft.rfft2(box.astype(np.float64), shape)
+    spectrum *= scipy.fft.rfft2(kernel, shape)
+    return scipy.fft.irfft2(spectrum, shape)
+
+
 def _smooth_and_cut(mask, kernel, cut_threshold):
     """``mask`` smoothed with ``kernel`` and cut at a fraction of its peak."""
-    import scipy.signal
-
     if not mask.any():
         return mask
     # Beyond the reach of the kernel the smoothed mask is 0, so only the box of
@@ -161,7 +170,7 @@ def _smooth_and_cut(mask, kernel, cut_threshold):
     half_width = kernel.shape[0] // 2
     box = _bounding_box(mask)
     reach = _bounding_box(mask, half_width)
-    smoothed = scipy.signal.fftconvolve(mask[box].astype(np.float64), kernel)[
+    smoothed = _convolve(mask[box], kernel)[
         tuple(
             slice(
                 wide.start - narrow.start + half_width,
