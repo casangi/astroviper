@@ -1464,6 +1464,18 @@ def test_calls_release_the_gil(entry):
     assert busy > 0.25 * idle
 
 
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_calls_use_at_most_their_threads(entry):
+    """CPU time per wall second of a call at 2 threads stays below 2.5: the
+    calling thread works one share, the pool the others (a call that ran on
+    more threads than processing_function_threads would exceed it on a
+    machine with free cores)."""
+    inputs = _mapped_plane() if entry == "clean" else _cube()
+    cpu, wall = time.process_time(), time.perf_counter()
+    _call(FAST[entry], inputs, 2, CORAL)
+    assert (time.process_time() - cpu) / (time.perf_counter() - wall) < 2.5
+
+
 ONE_THREAD = """
 import os
 import numpy as np
