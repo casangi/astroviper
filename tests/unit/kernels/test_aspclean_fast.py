@@ -1036,7 +1036,7 @@ dirty = np.real(np.fft.ifft2(np.fft.fft2(sky) * np.fft.fft2(np.fft.ifftshift(psf
 mask = np.zeros((n, n), bool)
 mask[34:63, 34:63] = True
 out = {}
-for coverage in (None, 0.0, 0.9, 0.999, 1.0):
+for coverage in (None, 0.0, 0.9, 0.999, 1.0, -0.1, float("nan")):
     for kernels in ("asp=fast", "asp=ref"):
         os.environ["ASTROVIPER_KERNELS"] = kernels
         params = {"gain": 0.3, "max_iter": 40, "threshold": 1e-3}
@@ -1060,7 +1060,7 @@ print("RESULT", json.dumps(out))
 def test_asp_clean_passes_the_coverage_to_the_fast_kernel(run_python, tmp_path):
     """``deconvolution.asp_clean`` through the hooked shim: each coverage
     (the default, 0, 0.9, 0.999) reaches the fast kernel, which gives the
-    reference's bytes; 1.0 raises the reference's error."""
+    reference's bytes; 1.0, -0.1 and NaN raise the reference's error."""
     trace = tmp_path / "trace"
     out = run_python(
         "-c",
@@ -1069,14 +1069,15 @@ def test_asp_clean_passes_the_coverage_to_the_fast_kernel(run_python, tmp_path):
         ASTROVIPER_KERNELS_TRACE=str(trace),
     )
     results = json.loads(out.rpartition("RESULT ")[2])
-    for coverage in ("None", "0.0", "0.9", "0.999", "1.0"):
+    for coverage in ("None", "0.0", "0.9", "0.999", "1.0", "-0.1", "nan"):
         assert results[f"{coverage}-asp=fast"] == results[f"{coverage}-asp=ref"], (
             coverage
         )
-    assert results["1.0-asp=fast"] == [
-        "ValueError",
-        "asp_min_mask_coverage must be at least 0 and below 1",
-    ]
+    for coverage in ("1.0", "-0.1", "nan"):
+        assert results[f"{coverage}-asp=fast"] == [
+            "ValueError",
+            "asp_min_mask_coverage must be at least 0 and below 1",
+        ], coverage
     assert (
         len(
             {
@@ -1092,6 +1093,6 @@ def test_asp_clean_passes_the_coverage_to_the_fast_kernel(run_python, tmp_path):
         (r["kernel"], r["entry"], r["impl"], r["path"], r["error"]) for r in records
     ] == [
         ("asp", "clean_cube", impl_, impl_, error)
-        for error in (None, None, None, None, "ValueError")
+        for error in (None,) * 4 + ("ValueError",) * 3
         for impl_ in ("fast", "ref")
     ]
