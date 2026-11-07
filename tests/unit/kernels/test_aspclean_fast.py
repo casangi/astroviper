@@ -7,14 +7,21 @@ the fast kernel on copies of the same inputs and asserts the same bytes: the
 residual, the model and every value of the returned dict (the components, the
 residual-shaped fits, the iteration history and every count; only the wall
 times of ``timing`` are skipped), NaN payloads and signed zeros included, or
-the same exception type and message. Small inputs (at most 256^2), but for one
-768^2 plane, whose large work buffers are mapped from the system.
+the same exception type and message. Small inputs (at most 256^2), but for a
+512^2 and a 768^2 plane, whose large work buffers are mapped from the system,
+and a 480 x 8192 plane, whose scale convolutions do not fit the fused pass.
 
 * The entries are the reference's: the docstrings (so the names, types and
   defaults of the parameters, ``asp_min_mask_coverage = 0.995`` last), the
   refused control values (``ValueError``), the binding's checks, any thread
-  count, pickled arrays, misaligned arrays (read through aligned copies),
-  concurrent calls.
+  count, pickled arrays, misaligned arrays (the PSF and mask read in place,
+  the residual and model through aligned copies), aliased arrays, empty
+  planes (the reference crashes on them), concurrent calls of every kind with
+  the GIL released, and a call at 1 thread starts no thread.
+* Calls that decline to the reference (a PSF or model that is not finite or
+  of magnitude 2^64 or more, such a residual where it is searched): the
+  reference's outcome at the same thread count, traced with path
+  ``"declined"``; NaN, infinite and huge values elsewhere do not decline.
 * The scenes of #410's tests and more (``asp_min_mask_coverage``): two mask
   boxes, a tight mask with holes, soft masks, a full mask and no mask, a mask
   too small for every scale, fits cut back (to the widest Gaussian on the
@@ -28,7 +35,9 @@ the same exception type and message. Small inputs (at most 256^2), but for one
   defaults (gain 0.1), the kernel's as #410's tests run it (gain 0.3) and the
   options ``deconvolution.asp_clean`` passes.
 * Cubes of such planes with their own thresholds, iteration limits and PSFs
-  (or one broadcast PSF), float64 and float32, at 1 to 12 threads.
+  (or one broadcast PSF), float64 and float32, at 1 to 12 threads; models that
+  are not zero on input (signed zeros, subnormals, values); exact ties of the
+  peak search.
 * Through the switch: ``deconvolution.asp_clean`` with ``asp=fast`` passes
   ``asp_min_mask_coverage`` (its default and other values) to the fast
   kernel and gives the reference's bytes, and the reference's error for a
@@ -37,15 +46,18 @@ the same exception type and message. Small inputs (at most 256^2), but for one
 
 import json
 import math
+import os
 import pickle
 import re
 import threading
+import time
 from functools import cache
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from astroviper._kernels import impl
+from astroviper._kernels import dispatch, impl
 
 ext = pytest.importorskip(
     "astroviper._kernels.fast.aspclean._aspclean_fast_ext",
@@ -183,9 +195,9 @@ def _threshold(residual, mask, fraction=0.1):
     return fraction * float(region.max()) if region.size else 0.0
 
 
-def _plane(psf, dirty, mask, threshold, max_iter, dtype=np.float64):
+def _plane(psf, dirty, mask, threshold, max_iter, dtype=np.float64, model=None):
     """The arguments of a ``clean`` call (residual and model are copied by
-    ``_call``; the others are read-only)."""
+    ``_call``; the others are read-only); the model is zero by default."""
     inputs = {
         "residual": np.ascontiguousarray(dirty, dtype),
         "psf": np.ascontiguousarray(psf, dtype),
@@ -195,7 +207,11 @@ def _plane(psf, dirty, mask, threshold, max_iter, dtype=np.float64):
         "threshold_per_cycle": float(threshold),
         "max_iter_per_cycle_updated": max_iter,
     }
-    inputs["model"] = np.zeros_like(inputs["residual"])
+    inputs["model"] = (
+        np.zeros_like(inputs["residual"])
+        if model is None
+        else np.ascontiguousarray(model, dtype)
+    )
     for value in inputs.values():
         if isinstance(value, np.ndarray):
             value.flags.writeable = False
@@ -677,6 +693,63 @@ def test_float32_mask_at_the_search_threshold():
         _check(inputs, **CORAL, **RECORD)
 
 
+def _mixed_model(shape, dtype, seed):
+    """A model as an imaging run passes it from its second major cycle on,
+    with the values whose updates are easy to get wrong: -0, the smallest
+    subnormals of both signs, and values."""
+    rng = np.random.default_rng(seed)
+    tiny = np.finfo(dtype).smallest_subnormal
+    pick = rng.random(shape)
+    model = (1e-3 * rng.standard_normal(shape)).astype(dtype)
+    model[pick < 0.3] = -0.0
+    model[(pick >= 0.3) & (pick < 0.4)] = tiny
+    model[(pick >= 0.4) & (pick < 0.5)] = -tiny
+    return model
+
+
+@pytest.mark.parametrize(
+    "scene, base, dtype",
+    [
+        ("tight", "kernel", np.float64),
+        ("cut_back_60", "kernel", np.float64),
+        ("holes", "coral", np.float64),
+        ("soft_box_30", "kernel", np.float32),
+    ],
+)
+def test_models_that_are_not_zero_on_input(scene, base, dtype):
+    """The model update adds every component to the model it is given, as the
+    reference does (an addition of +-0 skipped would flip a -0 model pixel)."""
+    psf, dirty, mask, threshold, max_iter = SCENES[scene]()
+    model = _mixed_model(np.shape(dirty), dtype, len(scene))
+    inputs = _plane(psf, dirty, mask, threshold, max_iter, dtype, model=model)
+    _check(inputs, **BASES[base], **RECORD)
+
+
+@pytest.mark.parametrize(
+    "peaks",
+    [
+        pytest.param(
+            [((60, 150), 1.0), ((150, 60), 1.0), ((150, 200), 1.0)], id="rows"
+        ),
+        pytest.param([((75, 75), 1.0), ((125, 125), -1.0)], id="min_max"),
+        pytest.param([((0, 0), 1.0), ((100, 100), 1.0)], id="origin_tie"),
+    ],
+)
+@pytest.mark.parametrize("masked", [True, False], ids=["ones", "no_mask"])
+def test_exact_ties_of_the_peak_search(peaks, masked):
+    """Equal maxima in different rows, |min| == |max|, and a tie with the
+    (0, 0) start of a whole-image box: the per-row extrema, merged in scan
+    order (on 2 threads at 256^2), keep the serial scan's first pixel."""
+    n = 256
+    dirty = np.zeros((n, n))
+    for (j, i), value in peaks:
+        dirty[j, i] = value
+    psf = _gauss(n, n, n // 2, n // 2, 1.5)
+    inputs = _plane(psf, dirty, np.ones((n, n)) if masked else None, 1e-3, 6)
+    for base in ("kernel", "defaults"):
+        _check(inputs, threads=(1, 2, 7), **BASES[base], **RECORD)
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -724,6 +797,23 @@ def test_mapped_work_buffers():
     inputs = _plane(psf, dirty, mask, _threshold(dirty, mask, 0.3), 8)
     for _ in range(2):
         _check(inputs, threads=(1, 6), **CORAL, **RECORD)
+
+
+def test_unfused_scale_convolutions():
+    """A 480 x 8192 plane whose mask box covers every row: the rows of the
+    four scale convolutions of its mask (4 x 480 x 4097 complex values, 126 MB)
+    and those of its search exceed the 96 MiB one fused column pass may hold,
+    so each scale makes its own passes (convolveScalesRows)."""
+    ny, nx = 480, 8192
+    assert 4 * ny * (nx // 2 + 1) * 16 > 96 << 20
+    rng = np.random.default_rng(ny)
+    dirty = _gauss(ny, nx, 240, 3200, 12.0, 2e-3) + 2e-5 * rng.standard_normal((ny, nx))
+    dirty += _gauss(ny, nx, 230, 3150, 2.0, 4e-3) + _gauss(ny, nx, 250, 3260, 2.0, 3e-3)
+    mask = np.zeros((ny, nx))
+    mask[:, 3000:3400] = 1.0
+    inputs = _plane(_psf(ny, nx), dirty, mask, _threshold(dirty, mask), 12)
+    for base in ("kernel", "coral"):
+        _check(inputs, threads=(1, 6), **BASES[base], **RECORD)
 
 
 # ---------------------------------------------------------------- cubes
@@ -788,6 +878,120 @@ def test_cube_dtypes_and_psfs(dtype, broadcast):
     _check(_cube(dtype, broadcast), threads=(1, 5, 12), entry="clean_cube", **CORAL)
 
 
+# ---------------------------------------------------------------- declined calls
+def _nan(sign, payload):
+    """The quiet NaN with this sign bit and payload."""
+    bits = (0xFFF8000000000000 if sign else 0x7FF8000000000000) | payload
+    return np.frombuffer(np.uint64(bits).tobytes(), np.float64)[0]
+
+
+@cache
+def _small_scene(ny, nx):
+    psf = _psf(ny, nx, 1.5)
+    sky = _gauss(ny, nx, ny // 2, nx // 2, 3.0, 2e-3)
+    sky[ny // 2 - 3, nx // 2 + 4] += 3e-3
+    mask = _disk(ny, nx, ny // 2, nx // 2, 0.35 * min(ny, nx))
+    return psf, _noisy(sky, psf, ny * nx, mask < 0.5, 5e-5), mask
+
+
+#: Just below 2^64 in float32, and so in float64.
+BELOW_2_TO_THE_64 = float(np.nextafter(np.float32(2.0**64), np.float32(0.0)))
+#: name -> (argument, [(pixel, value)]): the values that decline a call (the
+#: review's cases: NaN and infinite PSF pixels, a PSF whose transform
+#: overflows, a float32 model with NaNs; magnitudes of 2^64 and more), and
+#: values that do not: the model update never computes with them, or they are
+#: below 2^64.
+DECLINED = {
+    "psf_nan_and_minus_inf": ("psf", [((3, 5), np.nan), ((55, 50), -np.inf)]),
+    "psf_negative_nan_payload": ("psf", [((40, 30), _nan(1, 0xBEEF))]),
+    "psf_huge_pair": ("psf", [((3, 5), 1.5e308), ((55, 50), 1.6e308)]),
+    "psf_2_to_the_64": ("psf", [((3, 5), 2.0**64)]),
+    "model_nans": (
+        "model",
+        [((2, 3), np.nan), ((50, 4), np.inf), ((5, 52), _nan(1, 0x31))],
+    ),
+    "model_2_to_the_64": ("model", [((2, 3), -(2.0**64))]),
+    "residual_nan_searched": ("residual", [((32, 34), np.nan)]),
+    "residual_inf_searched": ("residual", [((30, 31), np.inf), ((33, 30), -np.inf)]),
+    "residual_huge_outside": ("residual", [((2, 2), 1e30)]),
+}
+NOT_DECLINED = {
+    "residual_nan_outside": ("residual", [((2, 3), _nan(1, 0xABC)), ((58, 4), np.inf)]),
+    "residual_inf_at_0.99": ("residual", [((5, 6), np.inf)]),
+    "mask_nan_and_inf": ("mask", [((32, 31), np.nan), ((20, 40), np.inf)]),
+    "model_below_2_to_the_64": ("model", [((2, 3), -BELOW_2_TO_THE_64)]),
+}
+
+
+def _edited(name, shape=(64, 64), dtype=np.float64):
+    """A small plane with the values of DECLINED[name] or NOT_DECLINED[name]."""
+    argument, edits = (DECLINED | NOT_DECLINED)[name]
+    psf, dirty, mask = _small_scene(*shape)
+    arrays = {
+        "psf": psf,
+        "residual": dirty,
+        "mask": mask.copy(),
+        "model": np.zeros(shape),
+    }
+    arrays[argument] = np.array(arrays[argument], np.float64)
+    for pixel, value in edits:
+        arrays[argument][pixel] = value
+    if name == "residual_inf_at_0.99":
+        arrays["mask"][5, 6] = 0.99  # not above the search threshold: set aside
+    with np.errstate(over="ignore"):  # 1.5e308 is infinite in float32
+        return _plane(
+            arrays["psf"],
+            arrays["residual"],
+            arrays["mask"],
+            _threshold(dirty, mask, 0.05),
+            12,
+            dtype,
+            model=arrays["model"],
+        )
+
+
+def _check_at_the_same_counts(inputs, threads, entry="clean", **options):
+    """The fast entry's outcome is the reference's at the same thread count (a
+    declined call runs the reference at its own count, whose NaN bits can
+    depend on it)."""
+    for n in threads:
+        expected = _call(REFERENCE[entry], inputs, n, options)
+        _assert_same(
+            _call(FAST[entry], inputs, n, options), expected, f"{entry} at {n}"
+        )
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+@pytest.mark.parametrize("shape", [(64, 64), (61, 67)])
+@pytest.mark.parametrize("name", list(DECLINED))
+def test_declined_calls_are_the_references(name, shape, dtype):
+    inputs = _edited(name, shape, dtype)
+    for base in ("kernel", "coral"):
+        _check_at_the_same_counts(inputs, (1, 4, 7), **BASES[base], **RECORD)
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+@pytest.mark.parametrize("name", list(NOT_DECLINED))
+def test_values_that_do_not_decline(name, dtype):
+    """Values the model update never computes with: the fast kernel's bits."""
+    inputs = _edited(name, (64, 64), dtype)
+    for base in ("kernel", "coral"):
+        _check(inputs, **BASES[base], **RECORD)
+
+
+def test_a_cube_with_one_declined_plane():
+    """A NaN PSF pixel in one plane: the reference runs the whole cube, whose
+    planes share its threads."""
+    cube = dict(_cube())
+    psf = cube["psf"].copy()
+    psf[0, 1, 0, 3, 5] = np.nan
+    psf.flags.writeable = False
+    cube["psf"] = psf
+    _check_at_the_same_counts(
+        cube, (1, 2, 5), entry="clean_cube", **KERNEL, record_iteration_history=True
+    )
+
+
 def test_cube_without_planes_still_checks_the_controls():
     n = 16
     inputs = {
@@ -802,6 +1006,23 @@ def test_cube_without_planes_still_checks_the_controls():
     assert outcome[0] is ValueError
 
 
+@pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("ny, nx", [(0, 0), (0, 5), (5, 0)])
+def test_empty_planes(entry, ny, nx):
+    """The reference reads past the end of an empty PSF to estimate its width
+    (and the process dies); the fast kernel takes the floor width, 1, so it
+    returns what the reference returns with asp_psf_width=1."""
+    shape = (ny, nx) if entry == "clean" else (1, 1, 1, ny, nx)
+    inputs = {k: np.zeros(shape) for k in ("residual", "psf", "model")}
+    if entry == "clean_cube":
+        inputs["threshold_per_cycle"] = np.zeros((1, 1, 1))
+        inputs["max_iter_per_cycle_updated"] = np.full((1, 1, 1), 5, np.int32)
+    expected = _call(REFERENCE[entry], inputs, 1, CORAL | {"asp_psf_width": 1.0})
+    for threads in (1, 4):
+        got = _call(FAST[entry], inputs, threads, CORAL)
+        _assert_same(got, expected, f"{entry} at {threads} threads")
+
+
 # ---------------------------------------------------------------- the entries
 def test_entries_are_the_references():
     """The same names, parameters (types, defaults, order: asp_min_mask_coverage
@@ -814,6 +1035,30 @@ def test_entries_are_the_references():
             r", asp_min_mask_coverage: [^,]+ = 0\.995\) -> dict$", signature
         )
     assert ext.ISA == "generic"
+
+
+REPO = Path(__file__).parents[3]
+
+
+def _function(path, signature):
+    """The text of the function of ``path`` that starts with ``signature``, to
+    its closing brace (the first one at the start of a line)."""
+    text = (REPO / path).read_text()
+    start = text.index(signature)
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+def test_psf_gaussian_width_is_a_verbatim_copy_of_the_reference():
+    signature = "double psf_gaussian_width(const double* psf, int nx, int ny) {"
+    reference = _function(
+        "src/astroviper/processing_functions/imaging/deconvolvers/aspclean/src/asp_clean.cpp",
+        signature,
+    )
+    fast = _function(
+        "src/astroviper/_kernels/fast/aspclean/src/asp_clean_fast.cpp", signature
+    )
+    assert fast == reference
+    assert reference.count("\n") > 60
 
 
 def test_an_unknown_isa_override_fails_the_import(run_python):
@@ -1011,32 +1256,217 @@ def test_misaligned_arrays(entry):
     _assert_same((shifted["residual"], shifted["model"], result), expected, entry)
 
 
-def test_concurrent_calls():
-    """Python threads in the fast kernel at once (the GIL is released): each
-    call gives the bits it gives alone."""
-    names = ["holes", "cut_back_60", "negcut", "point_patch"]
-    expected = {
-        n: _call(REFERENCE["clean"], _scene(n), 2, KERNEL | RECORD) for n in names
-    }
-    got, errors = {}, []
+@pytest.mark.parametrize("shifted", [False, True], ids=["aligned", "misaligned"])
+@pytest.mark.parametrize("alias", ["model", "psf", "mask"])
+def test_arguments_that_are_the_residual(alias, shifted):
+    """One array passed as the residual and as the model, the PSF or the mask:
+    the kernel sees the updates of it, as the reference does (given an aligned
+    array: it reads a misaligned one in place, which is undefined). As a mask,
+    the residual has a value that is not finite outside its search region,
+    which the model update sets aside: zero, then its value again."""
+    psf, dirty, threshold = _scene("holes")["psf"], _scene("holes")["residual"], 1e-3
+    scale = 1000.0 if alias == "mask" else 1.0
+    dirty = scale * np.array(dirty)
+    if alias == "mask":
+        dirty[2, 3] = np.nan
+    options = KERNEL | RECORD
 
-    def run(name):
+    def run(function, array):
+        arguments = {
+            "psf": psf,
+            "model": np.zeros_like(array),
+            "mask": np.array([]),
+            "threshold_per_cycle": scale * threshold,
+            "max_iter_per_cycle_updated": 40,
+        }
+        arguments |= {"residual": array, alias: array}
+        result = function(**arguments, processing_function_threads=3, **options)
+        return np.array(array), np.array(arguments["model"]), result
+
+    expected = run(REFERENCE["clean"], dirty.copy())
+    array = _misaligned(dirty) if shifted else dirty.copy()
+    _assert_same(run(FAST["clean"], array), expected, alias)
+
+
+@cache
+def _mapped_plane():
+    """A 512^2 plane: its padded PSF spectrum (4.7 MB) is mapped from the
+    system."""
+    n = 512
+    psf = _psf(n, n, 2.5)
+    sky = _gauss(n, n, 250, 260, 16.0, 2e-3) + _gauss(n, n, 220, 290, 2.0, 5e-3)
+    mask = _disk(n, n, 256, 256, 110.0)
+    dirty = _noisy(sky, psf, n, mask < 0.5, 1e-4)
+    return _plane(psf, dirty, mask, _threshold(dirty, mask, 0.3), 10)
+
+
+def _shifted(inputs):
+    """``inputs`` with every array moved to a misaligned address."""
+    return {
+        k: _misaligned(v) if isinstance(v, np.ndarray) else v for k, v in inputs.items()
+    }
+
+
+def test_concurrent_calls():
+    """Python threads in the fast kernel at once (the GIL is released): planes
+    and cubes, a plane whose large buffers are mapped, misaligned arrays, a
+    declined call and calls that raise; each gives the outcome it gives alone
+    (the reference's at the same thread count)."""
+    jobs = {
+        "holes": ("clean", _scene("holes"), 3, KERNEL | RECORD),
+        "negcut": ("clean", _scene("negcut"), 1, KERNEL | RECORD),
+        "point_patch": ("clean", _scene("point_patch"), 2, CORAL | RECORD),
+        "cube": ("clean_cube", _cube(), 4, CORAL | {"record_iteration_history": True}),
+        "mapped": ("clean", _mapped_plane(), 2, CORAL | RECORD),
+        "misaligned": ("clean", _shifted(_scene("cut_back_60")), 2, KERNEL | RECORD),
+        "misaligned_cube": ("clean_cube", _shifted(_cube()), 3, KERNEL),
+        "declined": ("clean", _edited("psf_nan_and_minus_inf"), 2, CORAL | RECORD),
+        "raises": ("clean", _scene("cut_back_1"), 2, {"asp_min_mask_coverage": 1.0}),
+        "cube_raises": ("clean_cube", _cube(), 2, {"asp_largest_scale": -2}),
+    }
+
+    def run(function, entry, inputs, threads, options):
+        """``_call`` that keeps a misaligned residual and model misaligned."""
+        if inputs["residual"].flags.aligned:
+            return _call(function, inputs, threads, options)
+        arguments = inputs | {k: _misaligned(inputs[k]) for k in ("residual", "model")}
         try:
-            got[name] = _call(FAST["clean"], _scene(name), 3, KERNEL | RECORD)
+            result = function(
+                **arguments, processing_function_threads=threads, **options
+            )
+        except Exception as e:  # the reference's exception is the expected outcome
+            return type(e), str(e)
+        return np.array(arguments["residual"]), np.array(arguments["model"]), result
+
+    expected = {name: run(REFERENCE[job[0]], *job) for name, job in jobs.items()}
+    got, errors = [], []
+
+    def worker(name):
+        try:
+            entry, *job = jobs[name]
+            got.append((name, run(FAST[entry], entry, *job)))
         except BaseException as e:  # reported below
             errors.append(e)
 
-    workers = [threading.Thread(target=run, args=(n,)) for n in names * 2]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join()
+    threads = [threading.Thread(target=worker, args=(n,)) for n in list(jobs) * 2]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
     assert errors == []
-    for name in names:
-        _assert_same(got[name], expected[name], name)
+    assert sorted(name for name, _ in got) == sorted(list(jobs) * 2)
+    for name, outcome in got:
+        _assert_same(outcome, expected[name], name)
+
+
+def _spin_rate(during):
+    """Iterations per second of a Python loop in another thread while
+    ``during()`` runs in this one."""
+    stop, count = threading.Event(), []
+
+    def spin():
+        n = 0
+        while not stop.is_set():
+            n += 1
+        count.append(n)
+
+    spinner = threading.Thread(target=spin)
+    spinner.start()
+    start = time.perf_counter()
+    during()
+    elapsed = time.perf_counter() - start
+    stop.set()
+    spinner.join()
+    return count[0] / elapsed
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_calls_release_the_gil(entry):
+    """A Python thread keeps running while a call runs on 2 threads; one that
+    held the GIL would stop it."""
+    inputs = _mapped_plane() if entry == "clean" else _cube()
+    idle = _spin_rate(lambda: time.sleep(0.3))
+    busy = _spin_rate(lambda: _call(FAST[entry], inputs, 2, CORAL))
+    assert busy > 0.25 * idle
+
+
+ONE_THREAD = """
+import os
+import numpy as np
+from astroviper._kernels import impl
+
+n = 96
+yy, xx = np.mgrid[0:n, 0:n]
+psf = np.exp(-((xx - n // 2) ** 2 + (yy - n // 2) ** 2) / 8.0)
+dirty = np.exp(-((xx - 50) ** 2 + (yy - 44) ** 2) / 50.0) + 1e-3 * np.cos(xx * yy)
+before = len(os.listdir("/proc/self/task"))
+for entry, args in (("clean", (dirty.copy(), psf, np.zeros_like(dirty))),
+                    ("clean_cube", (dirty[None, None, None].copy(), psf[None, None, None],
+                                    np.zeros((1, 1, 1, n, n))))):
+    kwargs = {} if entry == "clean" else {
+        "threshold_per_cycle": np.zeros((1, 1, 1)),
+        "max_iter_per_cycle_updated": np.full((1, 1, 1), 30, np.int32)}
+    impl("asp", entry, "fast")(*args, gain=0.3, processing_function_threads=1,
+                               asp_residual_components=True, asp_scale_significance=True,
+                               **kwargs)
+print("RESULT", before, len(os.listdir("/proc/self/task")))
+"""
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/task"), reason="Linux /proc")
+def test_a_call_at_one_thread_starts_no_thread(run_python):
+    before, after = run_python("-c", ONE_THREAD).rpartition("RESULT ")[2].split()
+    assert after == before
 
 
 # ---------------------------------------------------------------- the switch
+def _traced(monkeypatch, tmp_path, entry, inputs, threads=2, **options):
+    """``(impl, path, error)`` of the trace line of one call through the
+    kernel switch with ``asp=fast``."""
+    trace = tmp_path / "trace"
+    monkeypatch.setenv("ASTROVIPER_KERNELS", "asp=fast")
+    monkeypatch.setenv("ASTROVIPER_KERNELS_TRACE", str(trace))
+    _call(dispatch("asp", REFERENCE[entry]), inputs, threads, options)
+    (path,) = trace.iterdir()
+    record = json.loads(path.read_text().splitlines()[-1])
+    return record["impl"], record["path"], record["error"]
+
+
+@pytest.mark.parametrize("name", list(DECLINED) + list(NOT_DECLINED))
+def test_traced_paths(name, monkeypatch, tmp_path):
+    path = "declined" if name in DECLINED else "fast"
+    traced = _traced(monkeypatch, tmp_path, "clean", _edited(name), **KERNEL)
+    assert traced == ("fast", path, None)
+
+
+def test_traced_paths_of_cubes_and_refused_controls(monkeypatch, tmp_path):
+    """A cube declines as a whole; a refused control raises the reference's
+    error before anything declines."""
+    cube = dict(_cube())
+    cube["psf"] = cube["psf"].copy()
+    cube["psf"][0, 2, 0, 60, 60] = np.inf
+    assert _traced(monkeypatch, tmp_path, "clean_cube", _cube(), **KERNEL) == (
+        "fast",
+        "fast",
+        None,
+    )
+    assert _traced(monkeypatch, tmp_path, "clean_cube", cube, **KERNEL) == (
+        "fast",
+        "declined",
+        None,
+    )
+    refused = KERNEL | {"asp_min_mask_coverage": 1.0}
+    for entry, inputs in (
+        ("clean", _edited("psf_nan_and_minus_inf")),
+        ("clean_cube", cube),
+    ):
+        assert _traced(monkeypatch, tmp_path, entry, inputs, **refused) == (
+            "fast",
+            "fast",
+            "ValueError",
+        )
+
+
 PASS_THROUGH = """
 import json, os, sys
 import numpy as np
