@@ -50,6 +50,14 @@ struct Simd<double> {
     static void store_squares(double* out, V v, V keep) {
         _mm256_storeu_pd(out, _mm256_and_pd(_mm256_mul_pd(v, v), keep));
     }
+    // A sum of squares per lane (a lane per row of the column pass).
+    using Sums = __m256d;
+    static Sums no_sums() { return _mm256_setzero_pd(); }
+    static void add_squares(Sums& sums, V v) { sums = _mm256_add_pd(sums, _mm256_mul_pd(v, v)); }
+    static void add_squares(Sums& sums, V v, V keep) {
+        sums = _mm256_add_pd(sums, _mm256_and_pd(_mm256_mul_pd(v, v), keep));
+    }
+    static void store_sums(double* out, Sums sums) { _mm256_storeu_pd(out, sums); }
     // The largest lane of a and b (none is NaN).
     static double largest(V a, V b) {
         const V m = _mm256_max_pd(a, b);
@@ -117,6 +125,27 @@ struct Simd<float> {
         _mm256_storeu_pd(out, _mm256_and_pd(_mm256_mul_pd(low, low), keep.low));
         _mm256_storeu_pd(out + 4, _mm256_and_pd(_mm256_mul_pd(high, high), keep.high));
     }
+    // A sum of squares (in double) per lane, lanes 0-3 and 4-7.
+    struct Sums {
+        __m256d low, high;
+    };
+    static Sums no_sums() { return {_mm256_setzero_pd(), _mm256_setzero_pd()}; }
+    static void add_squares(Sums& sums, V v) {
+        const __m256d low = _mm256_cvtps_pd(_mm256_castps256_ps128(v));
+        const __m256d high = _mm256_cvtps_pd(_mm256_extractf128_ps(v, 1));
+        sums.low = _mm256_add_pd(sums.low, _mm256_mul_pd(low, low));
+        sums.high = _mm256_add_pd(sums.high, _mm256_mul_pd(high, high));
+    }
+    static void add_squares(Sums& sums, V v, const Keep& keep) {
+        const __m256d low = _mm256_cvtps_pd(_mm256_castps256_ps128(v));
+        const __m256d high = _mm256_cvtps_pd(_mm256_extractf128_ps(v, 1));
+        sums.low = _mm256_add_pd(sums.low, _mm256_and_pd(_mm256_mul_pd(low, low), keep.low));
+        sums.high = _mm256_add_pd(sums.high, _mm256_and_pd(_mm256_mul_pd(high, high), keep.high));
+    }
+    static void store_sums(double* out, const Sums& sums) {
+        _mm256_storeu_pd(out, sums.low);
+        _mm256_storeu_pd(out + 4, sums.high);
+    }
     // The largest lane of a and b (none is NaN).
     static float largest(V a, V b) {
         const V m = _mm256_max_ps(a, b);
@@ -143,7 +172,8 @@ struct Simd<float> {
 }  // namespace
 
 hclean_fast::Kernels hclean_fast::avx2_kernels() {
-    return {"avx2", search_f64, search_f32, flush_f64, flush_f32};
+    return {"avx2",     search_f64, search_f32,  flush_f64,  flush_f32,
+            direct_f64, direct_f32, columns_f64, columns_f32};
 }
 
 #endif  // defined(HCLEAN_FAST_AVX2)

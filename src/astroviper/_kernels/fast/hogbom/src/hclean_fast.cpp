@@ -53,6 +53,56 @@ constexpr long kLonePixelsPerThread = 4096;
 // about 30,000 updates of a pass, so that a thread gets 4 times its cost.
 constexpr double kUpdatesPerThread = 131072.0;
 
+// The work of an iteration of the direct pass, in such updates (E): about one
+// per kDirectPixelsPerUpdate pixels of the box it scans and of the footprint
+// it subtracts (at most the plane), and kIterationUpdates for the stop tests,
+// the component and the setup of the pass, which outweigh the pixels of a
+// tiny plane.
+constexpr double kDirectPixelsPerUpdate = 4.0;
+constexpr double kIterationUpdates = 16.0;
+
+// Planes cleaned side by side get about sqrt(work / kThreadUpdates) threads
+// (E), which minimises work / n + n x the cost of a thread: about 22 us each
+// in the reference clean_cube (M: 24 planes of 8 x 8 for 200 iterations took
+// 280 us at 12 threads and 571 us at 24, for about 340 us of work).
+constexpr double kThreadUpdates = 20000.0;
+
+// The planes that the direct pass cleans (E, measured on this machine): planes
+// of at most kDirectPixels pixels, and planes of at most kDirectWidth columns
+// and kDirectNarrowPixels pixels (512 KiB of float64, the second-level cache).
+// On those the split into S and E saves little, and its plan, the per-row
+// results of its passes and the deferred subtractions over short runs cost
+// more than an immediate subtraction. A larger plane is better split: the
+// direct pass reads its pixels twice an iteration (to subtract and to scan),
+// the split's fused pass once (M: 12 planes of 1400 x 48 with a PSF of twice
+// their size took 26 ms in the reference and 43 ms direct at 12 threads).
+constexpr long kDirectPixels = 8192;
+constexpr int kDirectWidth = 64;
+constexpr long kDirectNarrowPixels = 65536;
+
+// A small clean box on a plane of at least kSharedFinalPixels pixels leaves
+// final passes (the deferred subtractions from the rest of the plane) that
+// the call's threads share in a team (E): on smaller planes they are too
+// short for a team's start to pay.
+constexpr size_t kSharedFinalPixels = 65536;
+
+// The direct pass holds a plane column by column (ColumnPass) when the box it
+// scans has at most kColumnWidth columns and either at least kColumnRows rows
+// or a plane of at most kColumnWidth columns and as many rows, from its pass
+// kRowPasses + 2 on, if its budget exceeds 2 kRowPasses (E): along so few
+// columns, lanes along the rows find too little to do, while a lane per row
+// fills them, and on so narrow a plane the footprint's columns are as long as
+// its rows or longer. The transposes of the plane, its mask and its PSF cost
+// about two of its passes, so it makes its first passes row by row: a plane
+// that stops early pays none of them (M: one that stopped after 5 lost 3 %).
+constexpr int kColumnWidth = 64;
+constexpr int kColumnRows = 8;
+constexpr int kRowPasses = 8;
+
+// The values and mask bytes after a plane held column by column that the
+// column pass reads (and ignores): the most lanes of a routine.
+constexpr size_t kColumnPad = 8;
+
 // The pixels of a tile of the final pass over a plane, which applies the
 // deferred subtractions and takes the binding's summary (whole rows).
 constexpr int kTilePixels = 8192;
@@ -548,13 +598,19 @@ struct Rows {
 };
 
 // A thread's buffers, which each plane it cleans alone uses in turn
-// (reserved before the first write, so that cleaning allocates nothing).
+// (reserved before the first write, so that cleaning allocates nothing): a
+// split plane's plan, components and rows, or a plane held column by column,
+// its mask and its PSF (and which PSF that is).
 template <typename T>
 struct alignas(kLine) Scratch {
     Plan plan;
     Buffer<Component<T>> components;
     Buffer<Run> runs;  // the mask runs of one row
     Rows<T> rows;
+    Buffer<T> columns;
+    Buffer<std::uint8_t> mask_columns;
+    Buffer<T> psf_columns;
+    const T* psf = nullptr;
 };
 
 inline void search(const Kernels& kernels, const SearchPass<double>& pass, int begin, int end) {
@@ -573,9 +629,33 @@ inline void flush(const Kernels& kernels, const ExteriorFlush<float>& exterior, 
     kernels.flush_f32(exterior, begin, end);
 }
 
+inline void direct(const Kernels& kernels, const DirectPass<double>& pass, DirectScan<double>& scan) {
+    kernels.direct_f64(pass, scan);
+}
+
+inline void direct(const Kernels& kernels, const DirectPass<float>& pass, DirectScan<float>& scan) {
+    kernels.direct_f32(pass, scan);
+}
+
+inline void columns(const Kernels& kernels, const ColumnPass<double>& pass, DirectScan<double>& scan) {
+    kernels.columns_f64(pass, scan);
+}
+
+inline void columns(const Kernels& kernels, const ColumnPass<float>& pass, DirectScan<float>& scan) {
+    kernels.columns_f32(pass, scan);
+}
+
 template <typename T>
 size_t plane_pixels(const Cube<T>& c) {
     return static_cast<size_t>(c.ny) * static_cast<size_t>(c.nx);
+}
+
+// Whether the direct pass cleans the planes of a call (they share their shape).
+template <typename T>
+bool unsplit_planes(const Cube<T>& c) {
+    const size_t pixels = plane_pixels(c);
+    return pixels <= static_cast<size_t>(kDirectPixels) ||
+           (c.nx <= kDirectWidth && pixels <= static_cast<size_t>(kDirectNarrowPixels));
 }
 
 template <typename T>
@@ -873,6 +953,211 @@ void iterate(const Cube<T>& c, int index, Plane<T>& p, Crew& crew, Rows<T>& rows
     c.stop_code[index] = stop;
 }
 
+// clean<T>'s box of a plane, [x0, x1) x [y0, y1) (mask_bounding_box of
+// hclean.cpp): the bounding box of the searched pixels, which are the clean box
+// inside the mask, or the clean box itself when there are none; and how many
+// pixels are searched.
+struct SearchBox {
+    int x0, x1, y0, y1;
+    long searched;
+};
+
+template <typename T>
+SearchBox search_box(const Cube<T>& c, const std::uint8_t* mask) {
+    const SearchBox clean{c.xbeg, c.xend, c.ybeg, c.yend,
+                          static_cast<long>(c.xend - c.xbeg) * static_cast<long>(c.yend - c.ybeg)};
+    if (mask == nullptr) return clean;
+    SearchBox box{c.xend, c.xbeg, c.yend, c.ybeg, 0};
+    for (int y = c.ybeg; y < c.yend; ++y) {
+        const std::uint8_t* const row = mask + static_cast<size_t>(y) * c.nx;
+        int count = 0;
+        for (int x = c.xbeg; x < c.xend; ++x) count += row[x] != 0;
+        if (count == 0) continue;
+        int first = c.xbeg, last = c.xend - 1;
+        while (row[first] == 0) ++first;
+        while (row[last] == 0) --last;
+        box.x0 = std::min(box.x0, first);
+        box.x1 = std::max(box.x1, last + 1);
+        box.y0 = std::min(box.y0, y);
+        box.y1 = y + 1;
+        box.searched += count;
+    }
+    return box.searched > 0 ? box : SearchBox{clean.x0, clean.x1, clean.y0, clean.y1, 0};
+}
+
+// out[s * rows + r] = in[r * cols + s]: a plane of rows x cols held column by
+// column (bits copied as they are).
+template <typename T>
+void transpose(const T* in, int rows, int cols, T* out) noexcept {
+    for (int r = 0; r < rows; ++r) {
+        for (int s = 0; s < cols; ++s) {
+            out[static_cast<size_t>(s) * rows + r] = in[static_cast<size_t>(r) * cols + s];
+        }
+    }
+}
+
+// The direct passes over a plane: row by row (DirectPass), and with `own`
+// (a thread's buffers, reserved before the first write) column by column
+// (ColumnPass) from its pass kRowPasses + 2 on, until release() writes the
+// plane back.
+template <typename T>
+struct DirectPasses {
+    const Cube<T>& c;
+    const Kernels& kernels;
+    Scratch<T>* own;
+    DirectPass<T> rows;
+    ColumnPass<T> held{};
+    Component<T> subtracted{};
+    int passes = 0;
+
+    // A pass with no component, and with the component that subtracts
+    // pv x PSF at pixel (py, px).
+    void run(DirectScan<T>& scan) {
+        rows.component = nullptr;
+        direct(kernels, rows, scan);
+    }
+    void run(T pv, int py, int px, DirectScan<T>& scan) {
+        subtracted = component(c, pv, py, px);
+        if (held.columns == nullptr && own != nullptr && ++passes > kRowPasses) hold();
+        if (held.columns == nullptr) {
+            rows.component = &subtracted;
+            direct(kernels, rows, scan);
+            return;
+        }
+        // component()'s footprint, with the offset of the PSF held column by column.
+        subtracted.offset = static_cast<std::ptrdiff_t>(c.psf_nx / 2 - px) * c.psf_ny + (c.psf_ny / 2 - py);
+        held.component = &subtracted;
+        columns(kernels, held, scan);
+    }
+    T value(int py, int px) const {
+        return held.columns == nullptr ? rows.residual[static_cast<size_t>(py) * c.nx + px]
+                                       : held.columns[static_cast<size_t>(px) * c.ny + py];
+    }
+
+    // The plane, its mask and its PSF (unless the thread holds it already)
+    // column by column. The buffers grow within the room reserved before the
+    // first write, so nothing is allocated (and the zeros after the plane,
+    // which the column pass reads, are written once per thread).
+    void hold() noexcept {
+        const size_t pixels = static_cast<size_t>(c.ny) * static_cast<size_t>(c.nx);
+        own->columns.resize(pixels + kColumnPad);
+        if (rows.mask != nullptr) own->mask_columns.resize(pixels + kColumnPad);
+        own->psf_columns.resize(static_cast<size_t>(c.psf_ny) * static_cast<size_t>(c.psf_nx));
+        transpose(rows.residual, c.ny, c.nx, own->columns.data());
+        if (rows.mask != nullptr) transpose(rows.mask, c.ny, c.nx, own->mask_columns.data());
+        if (own->psf != rows.psf) {
+            transpose(rows.psf, c.psf_ny, c.psf_nx, own->psf_columns.data());
+            own->psf = rows.psf;
+        }
+        held = {own->columns.data(), c.ny, own->psf_columns.data(), c.psf_ny,
+                rows.mask != nullptr ? own->mask_columns.data() : nullptr,
+                rows.xbeg, rows.xend, rows.ybeg, rows.yend, nullptr};
+    }
+    void release() noexcept {
+        if (held.columns != nullptr) transpose(held.columns, c.nx, c.ny, rows.residual);
+        held.columns = nullptr;
+    }
+};
+
+// The model update of plane `index` (a budget > 0) by direct passes (`pass`),
+// on this thread: clean<T> for Entry::clean_cube, the per-plane part of
+// clean_cube_many_threads for Entry::clean_cube_many_threads. Each pass
+// subtracts the previous component from its whole footprint, then scans the
+// box for the next peak, so every pixel is current and nothing is deferred.
+template <typename T, typename Pass>
+void iterate_direct(const Cube<T>& c, int index, Plane<T>& p, double n_searched, Pass& pass) {
+    DirectScan<T> scan;
+    pass.run(scan);
+    IterationHistory* const history = p.history;
+    const T zero = static_cast<T>(0);
+    PlaneStopTest<T> stop_test;
+    int stop = STOP_NONE;
+    int px = 0, py = 0;  // clean<T> keeps the peak's pixel between iterations: (0, 0) at first
+    int iter = 0;
+    for (; iter < p.max_iter; ++iter) {
+        // The pass summed the squares of the residual the previous iteration
+        // left: its RMS.
+        if (history != nullptr && iter > 0) history->rms.push_back(std::sqrt(scan.sum_squares / n_searched));
+        // The peak and its pixel (plane_peak's conventions for a zero peak).
+        T peak = zero;
+        if (scan.peak > zero) {
+            peak = scan.peak;
+            px = scan.x;
+            py = scan.y;
+        } else if (c.entry == Entry::clean_cube_many_threads) {
+            px = c.xbeg;
+            py = c.ybeg;
+        }
+        const int reason =
+            stop_test.check(peak, scan.sum_squares, iteration_threshold(c, p.threshold, iter), c.divergence);
+        if (reason != STOP_NONE) {
+            stop = reason;
+            break;
+        }
+        const T value = pass.value(py, px);
+        const T pv = c.gain * value;
+        p.model[static_cast<size_t>(py) * c.nx + px] += pv;
+        if (history != nullptr) history->add_component(value, py, px, pv);
+        pass.run(pv, py, px, scan);
+    }
+    if (stop == STOP_NONE && iter >= p.max_iter) stop = STOP_MAX_ITER;
+    // The RMS after the last iteration of a plane that spent its budget: the
+    // last pass summed it.
+    if (history != nullptr && history->rms.size() < history->peak.size()) {
+        history->rms.push_back(std::sqrt(scan.sum_squares / n_searched));
+    }
+    c.iterations[index] = iter;
+    c.stop_code[index] = stop;
+}
+
+// Whether the planes of a call may be held column by column: those of the
+// direct pass whose clean box is narrow enough (or whose mask may make it so)
+// and tall enough or on a narrow plane, if a budget is at least twice the
+// passes made row by row.
+template <typename T>
+bool column_planes(const Cube<T>& c, bool unsplit, int most_iterations) {
+    return unsplit && most_iterations > 2 * kRowPasses &&
+           (c.yend - c.ybeg >= kColumnRows || (c.nx <= kColumnWidth && c.ny >= c.nx)) &&
+           (c.xend - c.xbeg <= kColumnWidth || c.mask != nullptr);
+}
+
+// The model update of plane `index` (a budget > 0) by the direct pass, on this
+// thread, held column by column in `own`'s buffers (their room reserved
+// before the first write when column_planes() holds, or null) when its box
+// suits that.
+template <typename T>
+void clean_direct(const Cube<T>& c, int index, Plane<T>& p, Scratch<T>* own, const Kernels& kernels) {
+    const SearchBox box = search_box(c, p.mask);
+    // A mask that keeps every pixel of the box is read as none.
+    const bool every = box.searched == static_cast<long>(box.x1 - box.x0) * (box.y1 - box.y0);
+    const bool narrow = box.x1 - box.x0 <= kColumnWidth && p.max_iter > 2 * kRowPasses &&
+                        (box.y1 - box.y0 >= kColumnRows || (c.nx <= kColumnWidth && c.ny >= c.nx));
+    const DirectPass<T> rows{p.residual, c.nx,   p.psf,  c.psf_nx, every ? nullptr : p.mask,
+                             box.x0,     box.x1, box.y0, box.y1,   nullptr};
+    DirectPasses<T> passes{c, kernels, narrow ? own : nullptr, rows};
+    try {
+        iterate_direct(c, index, p, static_cast<double>(box.searched), passes);
+    } catch (...) {  // the history outgrew the memory: the plane is left as far as it got
+        passes.release();
+        throw;
+    }
+    passes.release();
+}
+
+// Whether plane p stops at its first search, as its model update would make
+// it (a hint for the schedule: the update makes it again and decides).
+template <typename T>
+bool stops_at_once(const Cube<T>& c, const Plane<T>& p, const Kernels& kernels) {
+    const SearchBox box = search_box(c, p.mask);
+    const DirectPass<T> pass{p.residual, c.nx,   p.psf,  c.psf_nx, p.mask,
+                             box.x0,     box.x1, box.y0, box.y1,   nullptr};
+    DirectScan<T> scan;
+    direct(kernels, pass, scan);
+    PlaneStopTest<T> stop_test;
+    const T threshold = iteration_threshold(c, p.threshold, 0);
+    return stop_test.check(scan.peak, scan.sum_squares, threshold, c.divergence) != STOP_NONE;
+}
+
 // How the planes share a team of `team` threads, given the planes with a
 // budget (`active`), those of them that iterate at all (`iterating`: the
 // others stop at their first search, by the hint of iterates()) and the
@@ -935,14 +1220,31 @@ int team_size(int requested, long usable, double updates) {
     return static_cast<int>(threads);
 }
 
-// Runs work(member) on `threads` threads side by side, the calling thread
-// being member 0 and `workers` (with room reserved) holding the others, as
-// the reference clean_cube runs its threads: each starts on its work at once,
-// and none waits for another. A thread that cannot be started leaves fewer
-// members. The first exception that a member throws is rethrown once all
-// have ended; the others read error.failed() to stop early.
-template <typename Work>
-void run_side_by_side(std::vector<std::thread>& workers, int threads, FirstError& error, Work& work) {
+// The threads of planes cleaned side by side: processing_function_threads
+// (< 1 counts as 1), at most one per plane with a budget (`active`) and the
+// CPUs, and about sqrt(updates / kThreadUpdates) for the call's `updates`:
+// started one after another, they finish after about updates / n + n thread
+// costs.
+int side_by_side_threads(int requested, int active, double updates) {
+    long threads = std::min<long>(std::max(requested, 1), std::max(active, 1));
+    const double balanced = std::sqrt(updates / kThreadUpdates);
+    if (balanced < static_cast<double>(threads)) threads = std::max(1L, std::lround(balanced));
+    if (threads > 1) threads = std::min<long>(threads, available_cpus());  // a system call
+    return static_cast<int>(threads);
+}
+
+// Runs work(member) on up to `threads` threads side by side, the calling
+// thread being member 0 and `workers` (with room reserved) holding the others,
+// as the reference clean_cube runs its threads: each starts on its work at
+// once, and none waits for another. The calling thread starts the others one
+// after another, and only while left() says that work is left for one (planes
+// that no thread has taken): when the planes take less time than a thread's
+// start, the threads already running take them all. A thread that cannot be
+// started leaves fewer members. The first exception that a member throws is
+// rethrown once all have ended; the others read error.failed() to stop early.
+template <typename Work, typename Left>
+void run_side_by_side(std::vector<std::thread>& workers, int threads, FirstError& error, Work& work,
+                      const Left& left) {
     const auto guarded = [&](int member) noexcept {
         try {
             work(member);
@@ -950,7 +1252,7 @@ void run_side_by_side(std::vector<std::thread>& workers, int threads, FirstError
             error.record(std::current_exception());
         }
     };
-    for (int member = 1; member < threads; ++member) {
+    for (int member = 1; member < threads && left(); ++member) {
         try {
             workers.emplace_back(guarded, member);
         } catch (const std::system_error&) {
@@ -973,6 +1275,7 @@ bool clean_cube(const Cube<T>& c) {
     const size_t plane_size = plane_pixels(c);
     const size_t psf_plane_size = static_cast<size_t>(c.psf_ny) * static_cast<size_t>(c.psf_nx);
     const Kernels& kernels = hclean_fast::kernels();
+    const bool unsplit = unsplit_planes(c);  // the direct pass cleans the planes
 
     // Everything that can fail to allocate, before the first write.
     std::vector<Plane<T>> planes;
@@ -988,14 +1291,21 @@ bool clean_cube(const Cube<T>& c) {
         planes.resize(static_cast<size_t>(nplanes));
         int active = 0, most_iterations = 0;
         // The work the call can use and justifies, at most: a pass searches
-        // at most the clean box, and the final pass reads every pixel and
-        // subtracts each component at most once from each pixel of E, which
-        // is the plane outside the clean box (no mask) or at most the plane.
+        // at most the clean box (a direct pass also subtracts from at most
+        // the plane, kDirectPixelsPerUpdate pixels an update, and costs
+        // kIterationUpdates besides), and the final pass reads every pixel
+        // and, after a split, subtracts each component at most once from each
+        // pixel of E, which is the plane outside the clean box (no mask) or at
+        // most the plane.
         const int w = c.xend - c.xbeg, h = std::max(c.yend - c.ybeg, 0);
         const long box = static_cast<long>(w) * h;
-        const double exterior = c.mask != nullptr ? static_cast<double>(plane_size)
-                                                  : static_cast<double>(plane_size - box);
-        double pass_updates = 0.0, final_updates = 0.0;
+        const double pixels = static_cast<double>(plane_size);
+        const double iteration = unsplit ? (static_cast<double>(box) + pixels) / kDirectPixelsPerUpdate +
+                                               kIterationUpdates
+                                         : static_cast<double>(box);
+        const double outside = unsplit ? 0.0 : static_cast<double>(plane_size - box);  // in E in any case
+        const double exterior = c.mask != nullptr && !unsplit ? pixels : outside;
+        double pass_updates = 0.0, final_updates = 0.0, final_least = 0.0;
         for (int pl = 0; pl < nplanes; ++pl) {
             const int t = pl / (c.nf * c.np_img);
             const int f = (pl / c.np_img) % c.nf;
@@ -1009,12 +1319,14 @@ bool clean_cube(const Cube<T>& c) {
             p.max_iter = c.max_iter[pl];
             p.threshold = c.threshold[pl];
             p.history = c.history != nullptr ? c.history + pl : nullptr;
-            final_updates += static_cast<double>(plane_size);
+            final_updates += pixels;
+            final_least += pixels;
             if (p.max_iter > 0) {
                 ++active;
                 most_iterations = std::max(most_iterations, p.max_iter);
-                pass_updates += static_cast<double>(box) * p.max_iter;
+                pass_updates += iteration * p.max_iter;
                 final_updates += exterior * p.max_iter;
+                final_least += outside * p.max_iter;
             }
         }
         // A crew per plane with a budget, of up to one thread per
@@ -1022,25 +1334,55 @@ bool clean_cube(const Cube<T>& c) {
         // final passes, if their work justifies that many (both bounded by
         // the request, which bounds the team anyway).
         const long requested = std::max(c.threads, 1);
+        const auto final_threads = [&](double updates) {  // the threads of the final passes' work
+            const double justified = std::min(updates / kUpdatesPerThread, static_cast<double>(requested));
+            return std::min(static_cast<long>(nplanes) * tiles(c), static_cast<long>(justified));
+        };
         const long crew_threads = std::clamp(box / kPixelsPerThread, 1L, requested);
-        const long final_threads = std::min(
-            static_cast<long>(nplanes) * tiles(c),
-            static_cast<long>(std::min(final_updates / kUpdatesPerThread, static_cast<double>(requested))));
-        const long usable = std::max(active * crew_threads, final_threads);
-        threads = team_size(c.threads, usable, pass_updates + final_updates);
-        // Planes too small for a crew of two (a pass of fewer than 2 x
-        // kPixelsPerThread pixels) get at most a thread per plane with a
-        // budget (one without any), and run side by side, as the reference
-        // clean_cube runs them: each thread builds the plans of the planes it
-        // cleans in its own buffers, reserved here, and waits for no other.
-        // More threads could only wait for the final passes, and starting one
-        // costs about 25-35 us (M).
-        side_by_side = box < 2 * kPixelsPerThread;
+        // The planes of the direct pass, and planes too small for a crew of
+        // two (a pass of fewer than 2 x kPixelsPerThread pixels), get at most
+        // a thread per plane with a budget (one without any) and run side by
+        // side, as the reference clean_cube runs them: each thread cleans
+        // whole planes (after a split, with plans in its own buffers, reserved
+        // here) and waits for no other. More threads could only wait for the
+        // final passes, and starting one costs about 25-35 us (M). Unless the
+        // final passes are long, of a small box on a large plane: they then go
+        // to the team, whose idle threads share them, if they justify more
+        // threads than planes with a budget, counting only the pixels outside
+        // the clean box (which E always holds) of the planes that iterate (by
+        // the hint of their first search). A thread per plane made one thread
+        // subtract all the deferred components from the rest of a 2048 x 2048
+        // plane (8.4 times as long as a team, as the adversarial review
+        // measured).
+        bool unshared = plane_size < kSharedFinalPixels || tiles(c) == 1 ||
+                        final_threads(final_least) <= std::max(active, 1);
+        if (!unsplit && box < 2 * kPixelsPerThread && !unshared) {
+            double least = 0.0;
+            for (const Plane<T>& p : planes) {
+                least += pixels;
+                if (p.max_iter > 0 && !stops_at_once(c, p, kernels)) least += outside * p.max_iter;
+            }
+            unshared = final_threads(least) <= std::max(active, 1);
+        }
+        side_by_side = unsplit || (box < 2 * kPixelsPerThread && unshared);
+        if (unsplit) {
+            threads = side_by_side_threads(c.threads, active, pass_updates + final_updates);
+        } else {
+            const long usable = std::max(active * crew_threads, final_threads(final_updates));
+            threads = team_size(c.threads, usable, pass_updates + final_updates);
+            if (side_by_side) threads = std::min(threads, std::max(active, 1));
+        }
         if (side_by_side) {
-            threads = std::min(threads, std::max(active, 1));
-            scratch.resize(static_cast<size_t>(threads));
+            const bool by_columns = column_planes(c, unsplit, most_iterations);
+            scratch.resize(unsplit && !by_columns ? 0 : static_cast<size_t>(threads));
             for (Scratch<T>& own : scratch) {
                 if (active == 0) break;
+                if (unsplit) {  // room for a plane held column by column (and more), its mask, its PSF
+                    own.columns.reserve(plane_size + kColumnPad);
+                    if (c.mask != nullptr) own.mask_columns.reserve(plane_size + kColumnPad);
+                    own.psf_columns.reserve(psf_plane_size);
+                    continue;
+                }
                 reserve_plan(own.plan, w, h, c.ny);
                 own.components.reserve(std::min(static_cast<size_t>(most_iterations), kMaxPending));
                 own.runs.reserve(static_cast<size_t>(std::max(w, 0)) / 2 + 1);
@@ -1125,15 +1467,17 @@ bool clean_cube(const Cube<T>& c) {
         std::atomic<int> next{0};
         FirstError error;
         auto clean_planes = [&](int member) {
-            Scratch<T>& own = scratch[member];
             Crew alone;  // of one thread: its steps run on this one
             for (int pl; !error.failed() && (pl = next.fetch_add(1, std::memory_order_relaxed)) < nplanes;) {
                 Plane<T>& p = planes[pl];
-                if (p.max_iter <= 0) {
+                if (p.max_iter <= 0 || unsplit) {
+                    Scratch<T>* const own = scratch.empty() ? nullptr : &scratch[member];
+                    if (p.max_iter > 0) clean_direct(c, pl, p, own, kernels);
                     finish(c, pl, p, alone, kernels);
                     continue;
                 }
                 // The plane uses this thread's buffers, and gives them back.
+                Scratch<T>& own = scratch[member];
                 std::swap(p.plan, own.plan);
                 std::swap(p.components, own.components);
                 build_plan(p.plan, own.runs, p.mask, c.nx, c.ny, c.xbeg, c.xend, c.ybeg, c.yend);
@@ -1144,7 +1488,8 @@ bool clean_cube(const Cube<T>& c) {
                 std::swap(p.components, own.components);
             }
         };
-        run_side_by_side(workers, threads, error, clean_planes);
+        const auto left = [&] { return next.load(std::memory_order_relaxed) < nplanes && !error.failed(); };
+        run_side_by_side(workers, threads, error, clean_planes, left);
         return true;
     }
 

@@ -22,18 +22,32 @@
 //      their subtractions are deferred to its end and then applied component
 //      after component in the original order (or earlier, when a zero peak
 //      that a negative threshold keeps running points at one of them).
-// Every pixel therefore undergoes the reference's sequence of rounded
-// operations, and the row sums and peaks are formed exactly as the
-// reference's scan_row forms them (hclean_fast_kernels.inc), so the residual,
-// model, iterations, stop codes and iteration history are the reference's.
+// Small planes (of at most 8,192 pixels, or of at most 64 columns and 65,536
+// pixels) are not split: on them the plans, the per-row results and the
+// deferred subtractions over short runs would cost more than they save. Each
+// iteration's pass there (the direct pass) subtracts the previous component
+// from its whole footprint and then scans the box, as the reference does in
+// two passes. A box of at most 64 columns, of at least 8 rows or on a plane of
+// at most 64 columns and as many rows, is held column by column after the
+// plane's first 9 passes (when its budget exceeds 16), so that the lanes take
+// a row each instead of a few pixels of one. Every pixel therefore undergoes
+// the reference's sequence of rounded operations, and the row sums and peaks
+// are formed exactly as the reference's scan_row forms them
+// (hclean_fast_kernels.inc), so the residual, model, iterations, stop codes
+// and iteration history are the reference's.
 //
 // Threads: a call uses up to processing_function_threads of them (< 1 counts
 // as 1, as in both reference entries), and no more than the CPUs it may run
-// on and its work justify. Planes too small for a crew of two get no more
-// threads than planes with a budget, and run as the reference clean_cube
-// runs them: each thread cleans whole planes from its start and waits for
-// none. Other planes run in crews: whole planes per thread when at least
-// twice as many planes as threads iterate, else one crew for large planes
+// on and its work justify. Small planes, and planes too small for a crew of
+// two, get no more threads than planes with a budget, and run as the
+// reference clean_cube runs them: each thread cleans whole planes from its
+// start and waits for none (small planes on up to about sqrt(work / the cost
+// of a thread) threads, which start one after another while planes are left
+// that none has taken). A small clean box on a plane of at least 65,536
+// pixels, whose final passes subtract the deferred components from the rest
+// of the plane, has them shared by a team. Other planes run in crews: whole
+// planes per thread when at least twice as many planes as threads iterate,
+// else one crew for large planes
 // (or a lone iterating one), which runs them one after another, or several
 // smaller crews side by side. A plane that stops at its first search (Stokes
 // V beside I) counts for no crew. A crew synchronises at every iteration; its
@@ -45,9 +59,11 @@
 // depend on the number of threads or on the instruction set.
 //
 // Memory: besides its inputs and the iteration history, a call keeps the
-// plans of its planes with a budget (a few bytes per row and per segment of
-// each) and at most 16,384 deferred subtractions per plane in flight (32
-// bytes each), which are applied, in order, whenever that many are pending.
+// plans of its split planes with a budget (a few bytes per row and per
+// segment of each) and at most 16,384 deferred subtractions per plane in
+// flight (32 bytes each), which are applied, in order, whenever that many are
+// pending; and for a small plane held column by column, a copy of the plane,
+// its mask and its PSF per thread.
 
 #include <cstdint>
 

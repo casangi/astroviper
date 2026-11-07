@@ -2,11 +2,12 @@
 // (hclean_fast_kernels.hpp). Included inside an anonymous namespace by
 // hclean_fast_generic.cpp and hclean_fast_avx2.cpp, after <cstdint>,
 // hclean_fast_kernels.hpp and the unit's Simd<double> and Simd<float>: W
-// lanes with load, store, splat, mul and sub, and for W > 1 also zero, iota,
-// add, magnitude, greater, select, store_squares, keep and clear (the lanes
-// the mask searches), and largest and first (the reduction of the lanes'
-// maxima). Everything here has internal linkage and calls no function of a
-// standard header, so the AVX2 unit defines no weak symbol, even at -O0.
+// lanes with load, store, splat, mul, sub, zero, magnitude, greater, select,
+// keep and clear (the lanes the mask searches), and sums of squares in double
+// (Sums, no_sums, add_squares and store_sums); for W > 1 also iota, add and
+// store_squares, and largest and first (the reduction of the lanes' maxima).
+// Everything here has internal linkage and calls no function of a standard
+// header, so the AVX2 unit defines no weak symbol, even at -O0.
 //
 // The bits are the reference's (hclean.cpp: clean<T>, the cube kernels and
 // scan_row) for every value that is not a NaN; a NaN result is a NaN, whose
@@ -27,9 +28,15 @@
 //    its first strict maximum, and the first column holding the row's largest
 //    |v| is the smallest column among the lanes that hold it. NaN is above
 //    nothing, as in scan_row, and a pixel that is not searched counts as 0.
-// A short row (short_row) does the same operations pixel by pixel.
+// A short row (short_row) does the same operations pixel by pixel. The direct
+// pass over a small plane subtracts each component from its whole footprint
+// before it scans the box, so it too makes the reference's operations on
+// every pixel in their order, and scans the rows as the fused pass does.
 
+using hclean_fast::ColumnPass;
 using hclean_fast::Component;
+using hclean_fast::DirectPass;
+using hclean_fast::DirectScan;
 using hclean_fast::ExteriorFlush;
 using hclean_fast::Run;
 using hclean_fast::SearchPass;
@@ -474,6 +481,216 @@ void flush_rows(const ExteriorFlush<T>& exterior, int y_begin, int y_end) {
     }
 }
 
+// ------------------------------------------------------------------ the direct pass
+
+// The bits of v where `keep` is all ones, +0.0 where it is 0: a pixel of a
+// box row that the mask leaves out adds +0.0 to the row's sum, which leaves it
+// unchanged (it is >= +0, NaN or +inf), and its |value| counts as 0, without a
+// branch on the mask (a random mask would mispredict half of them).
+inline double kept(double v, std::uint64_t keep) {
+    return __builtin_bit_cast(double, __builtin_bit_cast(std::uint64_t, v) & keep);
+}
+
+inline float kept(float v, std::uint64_t keep) {
+    const auto bits = __builtin_bit_cast(std::uint32_t, v) & static_cast<std::uint32_t>(keep);
+    return __builtin_bit_cast(float, bits);
+}
+
+// All ones for a mask byte that is not 0 (searched, as the reference tests
+// it), else 0.
+inline std::uint64_t keep_bits(std::uint8_t byte) {
+    return std::uint64_t{0} - static_cast<std::uint64_t>(byte != 0);
+}
+
+// Pixels [begin, end) of a box row of at most kShortRow pixels, in one chain:
+// scan_row's sum of squares and first strict maximum of |value|.
+template <typename T, bool Masked>
+inline void scan_short(const T* __restrict row, const std::uint8_t* __restrict mask, int begin, int end,
+                       double& sum, T& peak, int& peak_x) {
+    for (int x = begin; x < end; ++x) {
+        const T v = row[x];
+        if constexpr (Masked) {
+            const std::uint64_t keep = keep_bits(mask[x]);
+            sum += kept(static_cast<double>(v) * static_cast<double>(v), keep);
+            const T magnitude = kept(magnitude_of(v), keep);
+            const bool above = magnitude > peak;  // false for NaN
+            peak_x = above ? x : peak_x;
+            peak = above ? magnitude : peak;
+        } else {
+            fold_pixel(v, x, sum, peak, peak_x);
+        }
+    }
+}
+
+template <typename T>
+inline T* direct_row(const DirectPass<T>& pass, int y) {
+    return pass.residual + static_cast<std::size_t>(y) * pass.nx;
+}
+
+// The mask of row y of a pass with a mask (Masked), else null.
+template <typename T, bool Masked>
+inline const std::uint8_t* direct_mask(const DirectPass<T>& pass, int y) {
+    return Masked ? pass.mask + static_cast<std::size_t>(y) * pass.nx : nullptr;
+}
+
+// Row y of component c's footprint loses pv x PSF over the footprint's columns.
+template <typename T>
+inline void subtract_row(const DirectPass<T>& pass, const Component<T>& c, int y) {
+    const std::ptrdiff_t at = c.offset + static_cast<std::ptrdiff_t>(y) * pass.psf_nx + c.x1;
+    subtract_span(direct_row(pass, y) + c.x1, pass.psf + at, c.pv, c.x2 - c.x1 + 1);
+}
+
+// A box row's sum of squares and peak, folded into the plane's in row order:
+// the first row with the largest peak wins, as in clean<T>.
+template <typename T>
+inline void fold_row(DirectScan<T>& scan, double sum, T peak, int peak_x, int y) {
+    scan.sum_squares += sum;
+    if (peak > scan.peak) {
+        scan.peak = peak;
+        scan.x = peak_x;
+        scan.y = y;
+    }
+}
+
+// The box rows of a direct pass with more than kShortRow pixels each: in
+// groups of kRows rows, subtracted (in the footprint), then scanned a chunk at
+// a time with lanes, their chains interleaved as search_rows interleaves them.
+template <typename T, bool Masked>
+void scan_long_rows(const DirectPass<T>& pass, DirectScan<T>& scan) {
+    alignas(64) double squares[kRows][kChunk];
+    const Component<T>* const c = pass.component;
+    for (int y0 = pass.ybeg; y0 < pass.yend; y0 += kRows) {
+        const int count = min_int(kRows, pass.yend - y0);
+        T peak[kRows];
+        int peak_x[kRows];
+        for (int g = 0; g < count; ++g) {
+            peak[g] = static_cast<T>(0);
+            peak_x[g] = pass.xbeg;
+            if (c != nullptr && y0 + g >= c->y1 && y0 + g <= c->y2) subtract_row(pass, *c, y0 + g);
+        }
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0, s5 = 0.0, s6 = 0.0, s7 = 0.0;
+        for (int x0 = pass.xbeg; x0 < pass.xend; x0 += kChunk) {
+            const int x1 = min_int(pass.xend, x0 + kChunk), n = x1 - x0;
+            for (int g = 0; g < count; ++g) {
+                const int y = y0 + g;
+                span<T, false, Masked>(direct_row(pass, y), nullptr, direct_mask<T, Masked>(pass, y),
+                                       static_cast<T>(0), x0, x1, squares[g], peak[g], peak_x[g]);
+            }
+            for (int g = count; g < kRows; ++g) {
+                for (int i = 0; i < n; ++i) squares[g][i] = 0.0;
+            }
+            // kRows chains, each in its row's column order.
+            for (int i = 0; i < n; ++i) {
+                s0 += squares[0][i];
+                s1 += squares[1][i];
+                s2 += squares[2][i];
+                s3 += squares[3][i];
+                s4 += squares[4][i];
+                s5 += squares[5][i];
+                s6 += squares[6][i];
+                s7 += squares[7][i];
+            }
+        }
+        const double sums[kRows] = {s0, s1, s2, s3, s4, s5, s6, s7};
+        for (int g = 0; g < count; ++g) fold_row(scan, sums[g], peak[g], peak_x[g], y0 + g);
+    }
+}
+
+template <typename T, bool Masked>
+void direct_pass(const DirectPass<T>& pass, DirectScan<T>& scan) {
+    const Component<T>* const c = pass.component;
+    if (c != nullptr) {  // the footprint's rows above and below the box
+        const int above = min_int(c->y2 + 1, pass.ybeg);
+        for (int y = c->y1; y < above; ++y) subtract_row(pass, *c, y);
+        for (int y = max_int(c->y1, pass.yend); y <= c->y2; ++y) subtract_row(pass, *c, y);
+    }
+    scan.sum_squares = 0.0;
+    scan.peak = static_cast<T>(0);
+    scan.x = pass.xbeg;
+    scan.y = pass.ybeg;
+    if (pass.xend - pass.xbeg > kShortRow) {
+        scan_long_rows<T, Masked>(pass, scan);
+        return;
+    }
+    for (int y = pass.ybeg; y < pass.yend; ++y) {
+        if (c != nullptr && y >= c->y1 && y <= c->y2) subtract_row(pass, *c, y);
+        double sum = 0.0;
+        T peak = static_cast<T>(0);
+        int peak_x = pass.xbeg;
+        scan_short<T, Masked>(direct_row(pass, y), direct_mask<T, Masked>(pass, y), pass.xbeg, pass.xend,
+                              sum, peak, peak_x);
+        fold_row(scan, sum, peak, peak_x, y);
+    }
+}
+
+template <typename T>
+void direct(const DirectPass<T>& pass, DirectScan<T>& scan) {
+    if (pass.mask != nullptr) {
+        direct_pass<T, true>(pass, scan);
+    } else {
+        direct_pass<T, false>(pass, scan);
+    }
+}
+
+// The direct pass over a plane held column by column (ColumnPass): the
+// footprint subtracted a column at a time, then the box rows scanned W at a
+// time, lane g holding row y0 + g: its sum of squares chained in column order,
+// its first strict maximum of |value| and that column, as scan_row forms them.
+template <typename T, bool Masked>
+void column_pass(const ColumnPass<T>& pass, DirectScan<T>& scan) {
+    using S = Simd<T>;
+    using V = typename S::V;
+    constexpr int W = S::W;
+    const Component<T>* const c = pass.component;
+    if (c != nullptr) {
+        for (int x = c->x1; x <= c->x2; ++x) {
+            const std::ptrdiff_t at = c->offset + static_cast<std::ptrdiff_t>(x) * pass.psf_ny + c->y1;
+            subtract_span(pass.columns + static_cast<std::size_t>(x) * pass.ny + c->y1, pass.psf + at, c->pv,
+                          c->y2 - c->y1 + 1);
+        }
+    }
+    scan.sum_squares = 0.0;
+    scan.peak = static_cast<T>(0);
+    scan.x = pass.xbeg;
+    scan.y = pass.ybeg;
+    for (int y0 = pass.ybeg; y0 < pass.yend; y0 += W) {
+        typename S::Sums sums = S::no_sums();
+        V peak = S::zero();
+        V first = S::splat(static_cast<T>(pass.xbeg));
+        for (int x = pass.xbeg; x < pass.xend; ++x) {
+            const std::size_t i = static_cast<std::size_t>(x) * pass.ny + static_cast<std::size_t>(y0);
+            const V v = S::load(pass.columns + i);
+            V magnitude = S::magnitude(v);
+            if constexpr (Masked) {
+                const auto keep = S::keep(pass.mask + i);
+                S::add_squares(sums, v, keep);
+                magnitude = S::clear(magnitude, keep);
+            } else {
+                S::add_squares(sums, v);
+            }
+            const auto above = S::greater(magnitude, peak);  // false for NaN
+            peak = S::select(peak, magnitude, above);
+            first = S::select(first, S::splat(static_cast<T>(x)), above);  // exact: x < 2^24
+        }
+        alignas(64) double sum[W];
+        alignas(64) T largest[W], at[W];
+        S::store_sums(sum, sums);
+        S::store(largest, peak);
+        S::store(at, first);
+        const int rows = min_int(W, pass.yend - y0);
+        for (int g = 0; g < rows; ++g) fold_row(scan, sum[g], largest[g], static_cast<int>(at[g]), y0 + g);
+    }
+}
+
+template <typename T>
+void columns(const ColumnPass<T>& pass, DirectScan<T>& scan) {
+    if (pass.mask != nullptr) {
+        column_pass<T, true>(pass, scan);
+    } else {
+        column_pass<T, false>(pass, scan);
+    }
+}
+
 void search_f64(const SearchPass<double>& pass, int row_begin, int row_end) {
     search<double>(pass, row_begin, row_end);
 }
@@ -488,4 +705,20 @@ void flush_f64(const ExteriorFlush<double>& exterior, int y_begin, int y_end) {
 
 void flush_f32(const ExteriorFlush<float>& exterior, int y_begin, int y_end) {
     flush_rows<float>(exterior, y_begin, y_end);
+}
+
+void direct_f64(const DirectPass<double>& pass, DirectScan<double>& scan) {
+    direct<double>(pass, scan);
+}
+
+void direct_f32(const DirectPass<float>& pass, DirectScan<float>& scan) {
+    direct<float>(pass, scan);
+}
+
+void columns_f64(const ColumnPass<double>& pass, DirectScan<double>& scan) {
+    columns<double>(pass, scan);
+}
+
+void columns_f32(const ColumnPass<float>& pass, DirectScan<float>& scan) {
+    columns<float>(pass, scan);
 }
