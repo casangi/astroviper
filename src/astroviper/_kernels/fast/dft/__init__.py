@@ -19,9 +19,11 @@ w) before anything is written:
     bit (large only near the horizon, where n is ill-conditioned), and of its
     own sums: usually a few eps sum|M/n|, at most about the chain length's
     worth, and in another order than the reference's, so that at a given
-    sample the reference can be the closer. At the edge of float32's range, a
-    complex64 sample of one kernel can overflow to inf where the other's is
-    finite. It writes the samples that the reference writes and no other. A
+    sample the reference can be the closer (both lose relative precision
+    where values are subnormal). Where a sample's terms reach beyond
+    float32's range, a complex64 sample of one kernel can overflow to inf
+    where the other's is finite. It writes the samples that the reference
+    writes and no other. A
     sample's bits do not depend on the threads or the instruction set, nor on
     how the rows and channels are split into calls that take S (a split can
     change the path of a part, as the path is decided per call).

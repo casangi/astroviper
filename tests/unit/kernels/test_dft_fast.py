@@ -10,10 +10,11 @@ entry, which returns it. Small inputs only.
   per sample, on random and adversarial coherent inputs, against the exact
   sum and against the exact sum of the weights path S shares with the
   reference (at any phase, its phases being exact), and against the
-  reference's error there (the plan's bound (2), which holds on these inputs,
-  though path S's summation order breaks it on some others); a slightly
-  perturbed, a non-finite or a largest-float result fails the bounds, and a
-  correct one at the float32 overflow edge passes them.
+  reference's error there (the plan's bound (2), which holds on the accuracy
+  inputs, though path S's summation order breaks it on others, as on the
+  folded-order strip); a slightly perturbed, a non-finite or a largest-float
+  result fails the bounds, and a right finite one at the float32 overflow
+  edge passes them.
 * Path S is invariant: bitwise across thread counts, splits of the rows into
   calls, concurrent calls, and the generic and AVX2 routines (two
   subprocesses), also through the depth-blocked GEMM of wide images.
@@ -213,24 +214,26 @@ def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
         reference (``oracles.predict(kernel_weights=True)``): path S's own
         arithmetic, with no 2 pi T term, so that a non-exact path S shows at
         any phase (its own error is a few eps sum|W| where the roundings of
-        its sums do not line up, up to about L eps sum|W| where they do);
+        its sums do not line up, up to about L eps sum|W| where they do, and
+        up to U where its values are subnormal);
     (c64) complex64 outputs: |V_fast - V_ref| <= 1 ulp32 + the bound (1) + the
         error of the reference's complex128 result ``v_ref128``, where the
-        reference's complex64 result is finite (one that overflowed leaves
-        path S to the other bounds).
+        reference's complex64 result is finite (where it overflowed, (2) is
+        void too, and (1) and (1t) judge path S).
 
     Path S's phases are exact (``dft_s_kernels.inc``), so its error does not
     grow with T, while the reference's does (it rounds u l, v m and their sum,
     up to about 2 pi T eps sum|M/n|). The weights' error, which both kernels
-    share bit for bit, reaches about kappa eps sum|M/n| near the horizon and
-    stands on both sides of (2); where the roundings of path S's sums do not
-    line up, as on the accuracy inputs here, its own error is a few eps
-    sum|W|, and (2) holds.
+    share bit for bit, reaches about kappa eps sum|M/n| near the horizon (and
+    U for subnormal values) and stands on both sides of (2); where the
+    roundings of path S's sums do not line up, as on the accuracy inputs
+    here, its own error is a few eps sum|W| beyond U, and (2) holds.
 
     ulp_out is that of the largest of |V_oracle| and |V_fast| (and |V_ref| for
     bound (2)) in the output dtype (``_ulp``). Only the predicted samples
     count (``keep`` excludes others, such as NaN outputs); a NaN or infinite
-    output there fails every bound. Returns ``{criterion: number of failing
+    output there fails (1) and (1t), and (2) and (c64) as well where the
+    reference's output is finite. Returns ``{criterion: number of failing
     components}``.
     """
     exact, norm, turns = oracles.predict(**call)
@@ -275,7 +278,8 @@ def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
         if v_fast.dtype == np.complex64:
             ref128 = np.abs(part(v_ref128[used]).astype(oracles.LONG) - x_or)
             ulp32 = _ulp(np.maximum(np.abs(x_fast), np.abs(x_ref)), np.float32)
-            close = np.abs(x_fast - x_ref) <= ulp32 + budget + ref128
+            with np.errstate(invalid="ignore"):  # inf - inf where both are
+                close = np.abs(x_fast - x_ref) <= ulp32 + budget + ref128
             failed["complex64"] += int(np.sum(~close & np.isfinite(x_ref)))
     return failed
 
@@ -889,9 +893,9 @@ def test_an_unencodable_keyword_is_the_reference(run_python):
         "    print(ext.dft_predict(*args, **{'\\udcff': 2}), flush=True)\n"
         "impl('dft', 'dft_predict', sys.argv[1])(*args, **{'\\udcff': 2})\n"
     )
-    fast_run, ref_run = (  # no faulthandler dump: its stack frames differ
-        run_python("-c", code, name, check=False, PYTHONFAULTHANDLER="")
-        for name in ("fast", "ref")
+    quiet = {"PYTHONFAULTHANDLER": "", "PYTHONDEVMODE": ""}  # its frames differ
+    fast_run, ref_run = (
+        run_python("-c", code, name, check=False, **quiet) for name in ("fast", "ref")
     )
     assert fast_run.stdout == "declined\n" and ref_run.returncode != 0
     assert (fast_run.returncode, fast_run.stderr) == (
