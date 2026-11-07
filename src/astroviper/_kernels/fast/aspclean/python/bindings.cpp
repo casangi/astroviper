@@ -3,11 +3,20 @@
 // with its names, parameters, defaults, docstrings, checks, exceptions and
 // results, calling aspclean_fast:: instead of aspclean::. The reference's test
 // helpers (psf_gaussian_width, convolve_centered, lbfgs_minimize) are not
-// hooked and not repeated here. Two changes, which change no value: a
-// misaligned array is read (and the residual and the model written back)
-// through an aligned copy (Aligned), and the components are copied only when
-// there is one (memcpy from the null data() of an empty vector is undefined,
-// even of 0 bytes).
+// hooked and not repeated here. The changes, none of which changes a value:
+//  * after the checks, a call that needs the reference (its PSF, model or
+//    searched residual holds a value that is not finite, or one of magnitude
+//    2^64 or more: aspclean_fast::needs_reference) is declined: the reference
+//    binding runs it with the same arguments, and the kernel switch traces it
+//    with path "declined";
+//  * the PSF and the mask are read in place at any alignment (Unaligned); a
+//    misaligned residual or model is updated through an aligned copy
+//    (Aligned) that goes back to the caller's buffer at the end; an argument
+//    that is the residual or the model itself (the same address) is read from
+//    that array's working buffer, as the reference updates such an array in
+//    place;
+//  * the components are copied only when there is one (memcpy from the null
+//    data() of an empty vector is undefined, even of 0 bytes).
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -80,8 +89,8 @@ static py::array_t<double> history_array(const std::vector<double>& values) {
 template <typename T>
 class Aligned {
 public:
-    Aligned(const py::buffer_info& info, bool write_back)
-        : caller_(info.ptr), count_(static_cast<std::size_t>(info.size)), write_back_(write_back) {
+    Aligned(void* caller, std::size_t count, bool write_back)
+        : caller_(caller), count_(count), write_back_(write_back) {
         if (count_ == 0 || reinterpret_cast<std::uintptr_t>(caller_) % alignof(T) == 0) {
             data_ = static_cast<T*>(caller_);
             return;
@@ -90,6 +99,8 @@ public:
         std::memcpy(copy_.data(), caller_, count_ * sizeof(T));
         data_ = copy_.data();
     }
+    Aligned(const py::buffer_info& info, bool write_back)
+        : Aligned(info.ptr, static_cast<std::size_t>(info.size), write_back) {}
     Aligned(const Aligned&) = delete;
     Aligned& operator=(const Aligned&) = delete;
     ~Aligned() {
@@ -106,6 +117,61 @@ private:
 };
 
 template <typename T>
+static aspclean_fast::Unaligned<T> items(const void* p) {
+    return {static_cast<const unsigned char*>(p)};
+}
+
+// A read-only argument at `p` (null: absent): read in place at any alignment,
+// or from the residual's or the model's working buffer when it is that array
+// itself (the same address), so that the kernel sees the updates of it, as the
+// reference, which works in place, does.
+template <typename T>
+static aspclean_fast::Unaligned<T> read_only(const void* p, const void* residual, const T* residual_data,
+                                            const void* model, const T* model_data) {
+    if (p != nullptr && p == residual) return items<T>(residual_data);
+    if (p != nullptr && p == model) return items<T>(model_data);
+    return items<T>(p);
+}
+
+// Whether the call must run the reference (aspclean_fast::needs_reference),
+// from the caller's buffers before anything is written; the GIL is released.
+template <typename T>
+static bool declines(const py::buffer_info& residual, const py::buffer_info& model, const py::buffer_info& psf,
+                     const py::buffer_info& mask, int threads) {
+    py::gil_scoped_release release;
+    return aspclean_fast::needs_reference<T>(items<T>(residual.ptr), items<T>(model.ptr), items<T>(psf.ptr),
+                                             items<T>(mask.ptr), static_cast<std::size_t>(residual.size),
+                                             static_cast<std::size_t>(psf.size), threads);
+}
+
+// Runs a declined call: the reference's entry with the call's arguments (so
+// its result, exception and bits are the reference's), after telling the
+// kernel switch, whose trace line of the call then has path "declined".
+static py::dict run_reference(const char* entry, const py::dict& arguments) {
+    py::module_::import("astroviper._kernels._switch").attr("report_path")("asp", "declined");
+    return py::module_::import("astroviper.processing_functions.imaging.deconvolvers.aspclean._aspclean_ext")
+        .attr(entry)(**arguments)
+        .cast<py::dict>();
+}
+
+// The keyword arguments of the options that clean and clean_cube share.
+static void add_options(py::dict& a, const aspclean::AspOptions& o) {
+    a["asp_scale_significance"] = o.asp_scale_significance;
+    a["asp_significance"] = o.asp_significance;
+    a["asp_residual_components"] = o.asp_residual_components;
+    a["asp_residual_component_noise_floor"] = o.asp_residual_component_noise_floor;
+    a["asp_residual_component_min_fraction"] = o.asp_residual_component_min_fraction;
+    a["asp_residual_component_max_epsilon_fraction"] = o.asp_residual_component_max_epsilon_fraction;
+    a["asp_residual_component_switch_factor"] = o.asp_residual_component_switch_factor;
+    a["asp_residual_component_floor_at_threshold"] = o.asp_residual_component_floor_at_threshold;
+    a["asp_residual_component_positive_only"] = o.asp_residual_component_positive_only;
+    a["asp_significance_gain"] = o.asp_significance_gain;
+    a["asp_no_change_tolerance"] = o.asp_no_change_tolerance;
+    a["record_iteration_history"] = o.record_iteration_history;
+    a["asp_min_mask_coverage"] = o.asp_min_mask_coverage;
+}
+
+template <typename T, typename Arguments>
 static py::dict plane_impl(py::array residual, py::array psf, py::array model,
                            py::array mask, double gain, double threshold_per_cycle,
                            int max_iter_per_cycle_updated, double asp_fused_threshold,
@@ -114,7 +180,7 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
                            bool verbose, int max_iter_divergence,
                            double divergence_rms_factor, double divergence_peak_factor,
                            int processing_function_threads, bool asp_stop_after_hogbom_run,
-                           const aspclean::AspOptions& options) {
+                           const aspclean::AspOptions& options, const Arguments& arguments) {
     const int ny = static_cast<int>(residual.shape(0));
     const int nx = static_cast<int>(residual.shape(1));
     const std::vector<py::ssize_t> shp = {ny, nx};
@@ -126,7 +192,15 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     py::buffer_info ki;
     if (mask.size() > 0) ki = check_array<T>(mask, "mask", 2, shp, false);
     // No mask: a null pointer (ki holds none).
-    const Aligned<T> rd(ri, true), md(mi, true), pd(pi, false), kd(ki, false);
+    aspclean_fast::check_controls(asp_psf_width, asp_largest_scale, asp_stop_point_mode,
+                                  asp_scale_normalization_method, options.asp_min_mask_coverage);
+    if (declines<T>(ri, mi, pi, ki, processing_function_threads))
+        return run_reference("clean", arguments());
+    // A model that is the residual itself shares its working buffer.
+    const bool shared = mi.ptr == ri.ptr;
+    const Aligned<T> rd(ri, true);
+    const Aligned<T> md(shared ? nullptr : mi.ptr, shared ? 0 : static_cast<std::size_t>(mi.size), true);
+    T* const modelp = shared ? rd.get() : md.get();
 
     deconvolvers::DivergenceControl<double> divergence;
     divergence.max_iter_divergence = max_iter_divergence;
@@ -136,7 +210,8 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     {
         py::gil_scoped_release release;  // C++ touches no Python objects
         res = aspclean_fast::aspclean_plane<T>(
-            rd.get(), md.get(), pd.get(), kd.get(), nx, ny, gain, threshold_per_cycle,
+            rd.get(), modelp, read_only<T>(pi.ptr, ri.ptr, rd.get(), mi.ptr, modelp),
+            read_only<T>(ki.ptr, ri.ptr, rd.get(), mi.ptr, modelp), nx, ny, gain, threshold_per_cycle,
             max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width, asp_largest_scale,
             asp_stop_point_mode, asp_scale_normalization_method, asp_stop_after_hogbom_run,
             verbose, divergence, processing_function_threads, options);
@@ -223,6 +298,31 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
     options.asp_no_change_tolerance = asp_no_change_tolerance;
     options.record_iteration_history = record_iteration_history;
     options.asp_min_mask_coverage = asp_min_mask_coverage;
+    // The call's arguments by name, for the reference when the call declines.
+    const auto arguments = [&] {
+        py::dict a;
+        a["residual"] = residual;
+        a["psf"] = psf;
+        a["model"] = model;
+        a["mask"] = mask;
+        a["gain"] = gain;
+        a["threshold_per_cycle"] = threshold_per_cycle;
+        a["max_iter_per_cycle_updated"] = max_iter_per_cycle_updated;
+        a["asp_fused_threshold"] = asp_fused_threshold;
+        a["asp_psf_width"] = asp_psf_width;
+        a["asp_largest_scale"] = asp_largest_scale;
+        a["asp_stop_point_mode"] = asp_stop_point_mode;
+        a["asp_scale_normalization_method"] = asp_scale_normalization_method;
+        a["verbose"] = verbose;
+        a["max_iter_divergence"] = max_iter_divergence;
+        a["divergence_rms_factor"] = divergence_rms_factor;
+        a["divergence_peak_factor"] = divergence_peak_factor;
+        a["processing_function_threads"] = processing_function_threads;
+        a["asp_stop_after_hogbom_run"] = asp_stop_after_hogbom_run;
+        a["record_components"] = record_components;
+        add_options(a, options);
+        return a;
+    };
     if (residual.ndim() != 2)
         throw std::runtime_error("residual must be a 2D array [ny, nx]");
     auto dt = residual.dtype();
@@ -232,18 +332,20 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                  asp_largest_scale, asp_stop_point_mode,
                                  asp_scale_normalization_method, verbose, max_iter_divergence,
                                  divergence_rms_factor, divergence_peak_factor,
-                                 processing_function_threads, asp_stop_after_hogbom_run, options);
+                                 processing_function_threads, asp_stop_after_hogbom_run, options,
+                                 arguments);
     if (dt.equal(py::dtype::of<double>()))
         return plane_impl<double>(residual, psf, model, mask, gain, threshold_per_cycle,
                                   max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
                                   asp_largest_scale, asp_stop_point_mode,
                                   asp_scale_normalization_method, verbose, max_iter_divergence,
                                   divergence_rms_factor, divergence_peak_factor,
-                                  processing_function_threads, asp_stop_after_hogbom_run, options);
+                                  processing_function_threads, asp_stop_after_hogbom_run, options,
+                                  arguments);
     throw std::runtime_error("residual must be float32 or float64");
 }
 
-template <typename T>
+template <typename T, typename Arguments>
 static py::dict cube_impl(py::array residual, py::array psf, py::array model,
                           py::array mask, double gain, py::array threshold_per_cycle,
                           py::array max_iter_per_cycle_updated, double asp_fused_threshold,
@@ -251,7 +353,8 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
                           int asp_scale_normalization_method,
                           int processing_function_threads, int max_iter_divergence,
                           double divergence_rms_factor, double divergence_peak_factor,
-                          bool asp_stop_after_hogbom_run, const aspclean::AspOptions& options) {
+                          bool asp_stop_after_hogbom_run, const aspclean::AspOptions& options,
+                          const Arguments& arguments) {
     const int nt = static_cast<int>(residual.shape(0));
     const int nf = static_cast<int>(residual.shape(1));
     const int np_img = static_cast<int>(residual.shape(2));
@@ -289,7 +392,15 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     py::buffer_info nit_info =
         check_array<int>(max_iter_per_cycle_updated, "max_iter_per_cycle_updated", 3, cshp, false);
     // No mask: a null pointer (ki holds none).
-    const Aligned<T> rd(ri, true), md(mi, true), pd(pi, false), kd(ki, false);
+    aspclean_fast::check_controls(asp_psf_width, asp_largest_scale, asp_stop_point_mode,
+                                  asp_scale_normalization_method, options.asp_min_mask_coverage);
+    if (declines<T>(ri, mi, pi, ki, processing_function_threads))
+        return run_reference("clean_cube", arguments());
+    // A model that is the residual itself shares its working buffer.
+    const bool shared = mi.ptr == ri.ptr;
+    const Aligned<T> rd(ri, true);
+    const Aligned<T> md(shared ? nullptr : mi.ptr, shared ? 0 : static_cast<std::size_t>(mi.size), true);
+    T* const modelp = shared ? rd.get() : md.get();
     const Aligned<double> thr(thr_info, false);
     const Aligned<int> nit(nit_info, false);
 
@@ -302,7 +413,8 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     {
         py::gil_scoped_release release;
         aspclean_fast::aspclean_cube<T>(
-            rd.get(), md.get(), pd.get(), kd.get(), nt, nf, np_img, np_psf, nx,
+            rd.get(), modelp, read_only<T>(pi.ptr, ri.ptr, rd.get(), mi.ptr, modelp),
+            read_only<T>(ki.ptr, ri.ptr, rd.get(), mi.ptr, modelp), nt, nf, np_img, np_psf, nx,
             ny, gain, thr.get(), nit.get(), asp_fused_threshold, asp_psf_width, asp_largest_scale,
             asp_stop_point_mode, asp_scale_normalization_method, asp_stop_after_hogbom_run,
             processing_function_threads, divergence, results.data(), options);
@@ -411,6 +523,29 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
     options.asp_no_change_tolerance = asp_no_change_tolerance;
     options.record_iteration_history = record_iteration_history;
     options.asp_min_mask_coverage = asp_min_mask_coverage;
+    // The call's arguments by name, for the reference when the call declines.
+    const auto arguments = [&] {
+        py::dict a;
+        a["residual"] = residual;
+        a["psf"] = psf;
+        a["model"] = model;
+        a["mask"] = mask;
+        a["gain"] = gain;
+        a["threshold_per_cycle"] = threshold_per_cycle;
+        a["max_iter_per_cycle_updated"] = max_iter_per_cycle_updated;
+        a["asp_fused_threshold"] = asp_fused_threshold;
+        a["asp_psf_width"] = asp_psf_width;
+        a["asp_largest_scale"] = asp_largest_scale;
+        a["asp_stop_point_mode"] = asp_stop_point_mode;
+        a["asp_scale_normalization_method"] = asp_scale_normalization_method;
+        a["processing_function_threads"] = processing_function_threads;
+        a["max_iter_divergence"] = max_iter_divergence;
+        a["divergence_rms_factor"] = divergence_rms_factor;
+        a["divergence_peak_factor"] = divergence_peak_factor;
+        a["asp_stop_after_hogbom_run"] = asp_stop_after_hogbom_run;
+        add_options(a, options);
+        return a;
+    };
     if (residual.ndim() != 5)
         throw std::runtime_error(
             "residual must be a 5D array [time, frequency, polarization, y, x]");
@@ -421,14 +556,14 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                 asp_largest_scale, asp_stop_point_mode,
                                 asp_scale_normalization_method, processing_function_threads,
                                 max_iter_divergence, divergence_rms_factor,
-                                divergence_peak_factor, asp_stop_after_hogbom_run, options);
+                                divergence_peak_factor, asp_stop_after_hogbom_run, options, arguments);
     if (dt.equal(py::dtype::of<double>()))
         return cube_impl<double>(residual, psf, model, mask, gain, threshold_per_cycle,
                                  max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
                                  asp_largest_scale, asp_stop_point_mode,
                                  asp_scale_normalization_method, processing_function_threads,
                                  max_iter_divergence, divergence_rms_factor,
-                                 divergence_peak_factor, asp_stop_after_hogbom_run, options);
+                                 divergence_peak_factor, asp_stop_after_hogbom_run, options, arguments);
     throw std::runtime_error("residual must be float32 or float64");
 }
 

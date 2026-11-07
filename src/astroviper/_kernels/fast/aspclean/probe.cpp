@@ -2,7 +2,8 @@
 // language and library features its sources use, POSIX mmap (its large
 // buffers), and pocketfft's SIMD lanes, which its transforms need (pocketfft
 // turns them off for compilers it does not know). The reference's include
-// directory is on the probe's path.
+// directory is on the probe's path. The probe is compiled and linked, never
+// run: the value main returns only states what the calls are for.
 #include <sys/mman.h>
 
 #include <atomic>

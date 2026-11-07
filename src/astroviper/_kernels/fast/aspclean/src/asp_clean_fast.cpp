@@ -4,7 +4,10 @@
 // feeds a decision or an output are those of the reference, asp_clean.cpp of
 // deconvolvers/aspclean at e0c0d126 (casangi/astroviper#410,
 // asp_min_mask_coverage), so the model, the residual, the components and the
-// history are the same bits. What changes is how the work is done:
+// history are the same bits. A call with a value that is not finite (or of
+// magnitude 2^64 or more) where the transforms would read it is the
+// reference's to run (needs_reference): only on such values can a NaN's sign
+// bit or payload differ. What changes is how the work is done:
 //  * the 2-D transforms are those of asp_fft2.hpp: pocketfft's own 1-D plans
 //    (bit-identical lines), pruned to the rows that are non-zero on input or
 //    read on output, fused with the products of the spectra and with the
@@ -39,6 +42,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -415,8 +419,7 @@ struct FastObjective {
                     for (int ky = 0; ky < ly; ++ky) {
                         const cv gyk = aspfft2::vbroadcast(Gy[static_cast<std::size_t>(ky)]);
                         const cv hyk = aspfft2::vbroadcast(Hy[static_cast<std::size_t>(ky)]);
-                        const cv p = aspfft2::vlanes(reinterpret_cast<const cd*>(psfFT) +
-                                                         static_cast<std::size_t>(ky) * hx, k0, nl);
+                        const cv p = aspfft2::vlanes(psfFT + static_cast<std::size_t>(ky) * hx, k0, nl);
                         const cv gg = aspfft2::vmul(gxk, gyk);
                         SA[ky] = aspfft2::vscale(aspfft2::vmul(gg, p), norm);
                         SD[ky] = aspfft2::vscale(
@@ -472,7 +475,7 @@ struct FastObjective {
 template <typename T>
 class Cleaner {
 public:
-    Cleaner(T* residual, T* model, const T* psf, const T* mask, int nx, int ny, double gain, double threshold,
+    Cleaner(T* residual, T* model, Unaligned<T> psf, Unaligned<T> mask, int nx, int ny, double gain, double threshold,
             int max_iter_per_cycle_updated, double asp_fused_threshold, double asp_psf_width, int asp_largest_scale,
             int asp_stop_point_mode, int asp_scale_normalization_method, bool asp_stop_after_hogbom_run,
             bool verbose, const deconvolvers::DivergenceControl<double>& divergence, const FftThreads& fft_threads,
@@ -515,8 +518,8 @@ public:
 private:
     T* residual_;
     T* model_;
-    const T* psf_;
-    const T* mask_;
+    Unaligned<T> psf_;   // read once, at setup
+    Unaligned<T> mask_;  // read once, at setup; null: no mask
     int nx_, ny_;
 
     double gain_, threshold_;
@@ -779,9 +782,9 @@ private:
                                                         static_cast<std::size_t>(padNy_), F);
                                    plan->exec(F, 1.0, true);
                                    for (int ky = 0; ky < padNy_; ++ky)
-                                       F[ky] = aspfft2::vmul(F[ky], aspfft2::vlanes(reinterpret_cast<const cd*>(
-                                                                         psfXfrPad_.data()) + static_cast<std::size_t>(ky) * hx,
-                                                                     k0, nl));
+                                       F[ky] = aspfft2::vmul(F[ky], aspfft2::vlanes(psfXfrPad_.data() +
+                                                                                        static_cast<std::size_t>(ky) * hx,
+                                                                                    k0, nl));
                                    plan->exec(F, 1.0, false);
                                    aspfft2::scatter(F, 0, static_cast<std::size_t>(ny_), padSpec_.data(), hx, k0, nl);
                                });
@@ -823,8 +826,10 @@ private:
         psfCutouts_.threads = &fftThreads_;
         psfCutouts_.cache.clear();
 
+        // An empty plane has no PSF to measure (the reference reads past the
+        // end of it, and crashes): it takes the floor width.
         if (psfWidthInput_ > 0.0) psfWidth_ = psfWidthInput_;
-        else psfWidth_ = psf_gaussian_width(psfd_.data(), nx_, ny_);
+        else psfWidth_ = psfd_.empty() ? 1.0 : psf_gaussian_width(psfd_.data(), nx_, ny_);
         if (psfWidth_ < 1.0) psfWidth_ = 1.0;
 
         setInitScaleXfrs();
@@ -1745,8 +1750,8 @@ private:
                                    const cv xk = aspfft2::vlanes(X.data(), k0, nl);
                                    for (int ky = 0; ky < padNy_; ++ky) {
                                        const cd ay = norm * Y[static_cast<std::size_t>(ky)];
-                                       const cv p = aspfft2::vlanes(reinterpret_cast<const cd*>(psfXfrPad_.data()) +
-                                                                        static_cast<std::size_t>(ky) * hx, k0, nl);
+                                       const cv p =
+                                           aspfft2::vlanes(psfXfrPad_.data() + static_cast<std::size_t>(ky) * hx, k0, nl);
                                        P[ky] = aspfft2::vmul(aspfft2::vmul(aspfft2::vbroadcast(ay), xk), p);
                                    }
                                    plan->exec(P, 1.0, false);
@@ -1768,29 +1773,15 @@ private:
     }
 };
 
-void check_controls(double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
-                    int asp_scale_normalization_method, double asp_min_mask_coverage) {
-    if (asp_psf_width != -1.0 && !(std::isfinite(asp_psf_width) && asp_psf_width > 0.0))
-        throw std::invalid_argument("asp_psf_width must be positive, or -1 to estimate it");
-    if (asp_largest_scale < -1)
-        throw std::invalid_argument("asp_largest_scale must be at least 0, or -1 for the default scales");
-    if (asp_stop_point_mode == 0 || asp_stop_point_mode < -1)
-        throw std::invalid_argument("asp_stop_point_mode must be positive, or -1 to disable it");
-    if (asp_scale_normalization_method != 1 && asp_scale_normalization_method != 2)
-        throw std::invalid_argument("asp_scale_normalization_method must be 1 or 2");
-    if (!(asp_min_mask_coverage >= 0.0 && asp_min_mask_coverage < 1.0))
-        throw std::invalid_argument("asp_min_mask_coverage must be at least 0 and below 1");
-}
-
 template <typename T>
-AspResult clean_plane(T* residual, T* model, const T* psf, const T* mask, int nx, int ny, double gain,
+AspResult clean_plane(T* residual, T* model, Unaligned<T> psf, Unaligned<T> mask, int nx, int ny, double gain,
                       double threshold_per_cycle, int max_iter_per_cycle_updated, double asp_fused_threshold,
                       double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
                       int asp_scale_normalization_method, bool asp_stop_after_hogbom_run, bool verbose,
                       const deconvolvers::DivergenceControl<double>& divergence, const FftThreads& fft_threads,
                       const AspOptions& options = AspOptions{}) {
     std::vector<std::pair<std::size_t, T>> nonFinite;
-    if (mask != nullptr) {
+    if (mask) {
         const std::size_t n = static_cast<std::size_t>(nx) * ny;
         for (std::size_t k = 0; k < n; ++k)
             if (!(static_cast<double>(mask[k]) > kMaskThreshold) && !std::isfinite(residual[k])) {
@@ -1807,10 +1798,69 @@ AspResult clean_plane(T* residual, T* model, const T* psf, const T* mask, int nx
     return result;
 }
 
+// Whether one of the n items of `a` is not finite or of magnitude 2^64 or
+// more, that is, has a biased exponent e of at least bias + 64: exactly then
+// does e + (2^bits - bias - 64), added in the exponent field, carry into the
+// top bit of the word. An and, an add and an or per item, which vectorise;
+// `threads` share the items.
+template <typename T>
+bool any_wild(Unaligned<T> a, std::size_t n, std::size_t threads) {
+    static_assert(std::numeric_limits<T>::is_iec559 && (sizeof(T) == 4 || sizeof(T) == 8));
+    using U = std::conditional_t<sizeof(T) == 8, std::uint64_t, std::uint32_t>;
+    constexpr int kExponentBits = sizeof(T) == 8 ? 11 : 8;
+    constexpr int kFractionBits = std::numeric_limits<T>::digits - 1;
+    constexpr U kBias = (U(1) << (kExponentBits - 1)) - 1;
+    constexpr U kExponent = ((U(1) << kExponentBits) - 1) << kFractionBits;
+    constexpr U kCarry = ((U(1) << kExponentBits) - kBias - 64) << kFractionBits;
+    std::atomic<bool> wild{false};
+    parallel_for(threads_for(threads, double(n), 8 * kElemGrain), n, [&](std::size_t b, std::size_t e) {
+        U any = 0;
+        for (std::size_t k = b; k < e; ++k) {
+            U bits;
+            std::memcpy(&bits, a.bytes + k * sizeof(T), sizeof(T));
+            any |= (bits & kExponent) + kCarry;
+        }
+        if (any >> (8 * sizeof(U) - 1)) wild.store(true, std::memory_order_relaxed);
+    });
+    return wild.load(std::memory_order_relaxed);
+}
+
 }  // namespace
 
+void check_controls(double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
+                    int asp_scale_normalization_method, double asp_min_mask_coverage) {
+    if (asp_psf_width != -1.0 && !(std::isfinite(asp_psf_width) && asp_psf_width > 0.0))
+        throw std::invalid_argument("asp_psf_width must be positive, or -1 to estimate it");
+    if (asp_largest_scale < -1)
+        throw std::invalid_argument("asp_largest_scale must be at least 0, or -1 for the default scales");
+    if (asp_stop_point_mode == 0 || asp_stop_point_mode < -1)
+        throw std::invalid_argument("asp_stop_point_mode must be positive, or -1 to disable it");
+    if (asp_scale_normalization_method != 1 && asp_scale_normalization_method != 2)
+        throw std::invalid_argument("asp_scale_normalization_method must be 1 or 2");
+    if (!(asp_min_mask_coverage >= 0.0 && asp_min_mask_coverage < 1.0))
+        throw std::invalid_argument("asp_min_mask_coverage must be at least 0 and below 1");
+}
+
 template <typename T>
-AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask, int nx, int ny, double gain,
+bool needs_reference(Unaligned<T> residual, Unaligned<T> model, Unaligned<T> psf, Unaligned<T> mask,
+                     std::size_t n, std::size_t npsf, int threads) {
+    const std::size_t nt = static_cast<std::size_t>(std::max(1, threads));
+    if (any_wild(psf, npsf, nt) || any_wild(model, n, nt)) return true;
+    if (!any_wild(residual, n, nt)) return false;
+    // The residual has a wild value: is it one the model update reads? A value
+    // that is not finite outside the search region is zero during the model
+    // update (clean_plane), as in the reference.
+    for (std::size_t k = 0; k < n; ++k) {
+        const double r = static_cast<double>(residual[k]);
+        if (std::isfinite(r) ? !(std::fabs(r) < 0x1p64)
+                             : (!mask || static_cast<double>(mask[k]) > kMaskThreshold))
+            return true;
+    }
+    return false;
+}
+
+template <typename T>
+AspResult aspclean_plane(T* residual, T* model, Unaligned<T> psf, Unaligned<T> mask, int nx, int ny, double gain,
                          double threshold_per_cycle, int max_iter_per_cycle_updated, double asp_fused_threshold,
                          double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
                          int asp_scale_normalization_method, bool asp_stop_after_hogbom_run, bool verbose,
@@ -1825,8 +1875,8 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask, int
 }
 
 template <typename T>
-void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt, int nf, int np_img, int np_psf,
-                   int nx, int ny, double gain, const double* threshold_per_cycle,
+void aspclean_cube(T* residual, T* model, Unaligned<T> psf, Unaligned<T> mask, int nt, int nf, int np_img,
+                   int np_psf, int nx, int ny, double gain, const double* threshold_per_cycle,
                    const int* max_iter_per_cycle_updated, double asp_fused_threshold, double asp_psf_width,
                    int asp_largest_scale, int asp_stop_point_mode, int asp_scale_normalization_method,
                    bool asp_stop_after_hogbom_run, int processing_function_threads,
@@ -1850,9 +1900,9 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt, i
             const int pidx = (np_psf == 1) ? 0 : pp;
             const std::size_t img_off = ((static_cast<std::size_t>(tt) * nf + nn) * np_img + pp) * plane;
             const std::size_t psf_off = ((static_cast<std::size_t>(tt) * nf + nn) * np_psf + pidx) * plane;
-            const T* maskp = mask ? mask + img_off : nullptr;
-            results[p] = clean_plane<T>(residual + img_off, model + img_off, psf + psf_off, maskp, nx, ny, gain,
-                                        threshold_per_cycle[p], max_iter_per_cycle_updated[p], asp_fused_threshold,
+            results[p] = clean_plane<T>(residual + img_off, model + img_off, psf.at(psf_off), mask.at(img_off), nx,
+                                        ny, gain, threshold_per_cycle[p], max_iter_per_cycle_updated[p],
+                                        asp_fused_threshold,
                                         asp_psf_width, asp_largest_scale, asp_stop_point_mode,
                                         asp_scale_normalization_method, asp_stop_after_hogbom_run, false, divergence,
                                         fft_threads, options);
@@ -1869,18 +1919,21 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt, i
     }
 }
 
-template AspResult aspclean_plane<float>(float*, float*, const float*, const float*, int, int, double, double, int,
-                                         double, double, int, int, int, bool, bool,
+template bool needs_reference<float>(Unaligned<float>, Unaligned<float>, Unaligned<float>, Unaligned<float>,
+                                      std::size_t, std::size_t, int);
+template bool needs_reference<double>(Unaligned<double>, Unaligned<double>, Unaligned<double>, Unaligned<double>,
+                                       std::size_t, std::size_t, int);
+template AspResult aspclean_plane<float>(float*, float*, Unaligned<float>, Unaligned<float>, int, int, double, double,
+                                         int, double, double, int, int, int, bool, bool,
                                          const deconvolvers::DivergenceControl<double>&, int, const AspOptions&);
-template AspResult aspclean_plane<double>(double*, double*, const double*, const double*, int, int, double, double,
-                                          int, double, double, int, int, int, bool, bool,
+template AspResult aspclean_plane<double>(double*, double*, Unaligned<double>, Unaligned<double>, int, int, double,
+                                          double, int, double, double, int, int, int, bool, bool,
                                           const deconvolvers::DivergenceControl<double>&, int, const AspOptions&);
-template void aspclean_cube<float>(float*, float*, const float*, const float*, int, int, int, int, int, int, double,
-                                   const double*, const int*, double, double, int, int, int, bool, int,
+template void aspclean_cube<float>(float*, float*, Unaligned<float>, Unaligned<float>, int, int, int, int, int, int,
+                                   double, const double*, const int*, double, double, int, int, int, bool, int,
                                    const deconvolvers::DivergenceControl<double>&, AspResult*, const AspOptions&);
-template void aspclean_cube<double>(double*, double*, const double*, const double*, int, int, int, int, int, int,
-                                    double, const double*, const int*, double, double, int, int, int, bool, int,
+template void aspclean_cube<double>(double*, double*, Unaligned<double>, Unaligned<double>, int, int, int, int, int,
+                                    int, double, const double*, const int*, double, double, int, int, int, bool, int,
                                     const deconvolvers::DivergenceControl<double>&, AspResult*, const AspOptions&);
-
 
 }  // namespace aspclean_fast

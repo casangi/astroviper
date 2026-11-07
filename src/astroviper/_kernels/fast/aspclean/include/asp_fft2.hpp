@@ -8,10 +8,13 @@
 // along x (the rows) then c2c along y (the columns); inverse, c2c along y then
 // c2r along x with the factor 1 / (nx ny). pocketfft computes every 1-D line
 // on its own, and its SIMD path (VL lines in the lanes of a GCC vector) does
-// per lane exactly the IEEE operations of its scalar path (no contraction:
-// -ffp-contract=off). So each line here is the same plan of the same length,
-// run on the same values with the same factor, in VL lanes; only which lines
-// are computed, in which order and by which thread differs:
+// per lane the IEEE operations of its scalar path (no contraction:
+// -ffp-contract=off), which gives the same values; on a line that holds a
+// value that is not finite only a NaN's sign bit or payload may differ (which
+// NaN an operation on two NaNs returns is left open), and the module declines
+// such calls (needs_reference). So each line here is the same plan of the same
+// length, run on the same values with the same factor, in VL lanes; only which
+// lines are computed, in which order and by which thread differs:
 //  * a row known to be zero is not transformed: its half spectrum (signed
 //    zeros only) is that of one zero row run through the same plan;
 //  * rows of an inverse transform the caller never reads are not computed;
@@ -23,8 +26,7 @@
 // Elementwise products keep the operand order of the reference expressions.
 //
 // The lanes are those of the baseline instruction set (VL = 2 doubles with
-// SSE2): the module has no AVX2 build, whose lanes give some NaNs another
-// sign bit than the reference's.
+// SSE2): the module has no AVX2 build.
 
 #include <sys/mman.h>  // the large buffers (POSIX: the fast modules build on Linux and macOS)
 
@@ -59,17 +61,24 @@ static_assert(sizeof(cd) == sizeof(cx) && alignof(cd) == alignof(cx),
 
 // ---------------------------------------------------------------------------
 // Memory: uninitialised buffers. One of 4 MB or more is mapped from the system
-// and unmapped when it is freed, so that a call leaves no memory behind:
-// glibc's malloc serves such a block from the arena of the thread that asks
-// once its mmap threshold has risen (up to 32 MB), and keeps it after it is
-// freed (a model update frees tens of them, M: 0.6 GiB kept after three
-// 2048^2 cube calls). Smaller buffers come from malloc, 64-byte aligned. With
-// AddressSanitizer every buffer comes from malloc, which its redzones cover.
-// A mapping of 4 MB or more is advised for huge pages only when built with
-// ASTROVIPER_ASP_FAST_HUGEPAGES=1 (it gave no speed in this work's runs, M).
+// and unmapped when it is freed, so that a call returns them: glibc's malloc
+// serves such a block from the arena of the thread that asks once its mmap
+// threshold has risen (up to 32 MB), and keeps it after it is freed (a model
+// update frees tens of them, M: 0.6 GiB kept after three 2048^2 cube calls).
+// Smaller buffers come from malloc, 64-byte aligned, and stay in its arenas
+// after a call, as the reference's buffers do. Under AddressSanitizer every
+// buffer comes from malloc, which its redzones cover.
 // ---------------------------------------------------------------------------
 #if defined(__SANITIZE_ADDRESS__)
+#define ASPFFT2_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)  // Clang's test (older releases define no __SANITIZE_ADDRESS__)
+#define ASPFFT2_ASAN 1
+#endif
+#endif
+#ifdef ASPFFT2_ASAN
 constexpr std::size_t kMappedBytes = SIZE_MAX;
+#undef ASPFFT2_ASAN
 #else
 constexpr std::size_t kMappedBytes = std::size_t(4) << 20;
 #endif
@@ -78,9 +87,6 @@ inline void* alloc_bytes(std::size_t bytes) {
     if (bytes >= kMappedBytes) {
         void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (p == MAP_FAILED) throw std::bad_alloc();
-#if defined(ASTROVIPER_ASP_FAST_HUGEPAGES) && ASTROVIPER_ASP_FAST_HUGEPAGES && defined(MADV_HUGEPAGE)
-        madvise(p, bytes, MADV_HUGEPAGE);
-#endif
         return p;
     }
     void* p = std::aligned_alloc(64, (std::max<std::size_t>(bytes, 1) + 63) / 64 * 64);
@@ -160,7 +166,10 @@ inline std::size_t threads_for(std::size_t nthreads, double work, double grain) 
 }
 
 // Per-thread scratch kept across calls (pocketfft's pool threads live as long
-// as the process), so no transform faults in fresh pages.
+// as the process), so no transform faults in fresh pages. A pass below holds
+// its thread's scratch while it runs the caller's callbacks (load, use, body),
+// so a callback must not run a transform pass itself: on the same thread it
+// would resize and overwrite the scratch the outer pass still reads.
 template <typename T, int Slot>
 inline Buf<T>& tl_buf(std::size_t n) {
     thread_local Buf<T> b;
@@ -195,6 +204,15 @@ inline cv vlanes(const cd* z, std::size_t k0, std::size_t nl) {
         const cd w = l < nl ? z[k0 + l] : cd(0.0, 0.0);
         v.r[l] = w.real();
         v.i[l] = w.imag();
+    }
+    return v;
+}
+// The same for pocketfft's complex type (the spectra this module makes).
+inline cv vlanes(const cx* z, std::size_t k0, std::size_t nl) {
+    cv v;
+    for (std::size_t l = 0; l < VL; ++l) {
+        v.r[l] = l < nl ? z[k0 + l].r : 0.0;
+        v.i[l] = l < nl ? z[k0 + l].i : 0.0;
     }
     return v;
 }
@@ -238,7 +256,7 @@ inline bool all_positive_zero(const double* a, std::size_t n) {
 }
 
 // ---------------------------------------------------------------------------
-// Row passes.
+// Row passes. Their callbacks must not run a transform pass (see tl_buf).
 // ---------------------------------------------------------------------------
 
 // Forward r2c of real rows of length n: load(r, dst) writes row r (n values),
@@ -305,7 +323,8 @@ void c2r_rows(std::size_t n, std::size_t nrows, double fct, std::size_t nthreads
 // ---------------------------------------------------------------------------
 // Column passes: body(k0, nl, bufs) for the column blocks [k0, k0 + nl) of a
 // half spectrum hx columns wide, nl <= VL, with `nbuf` per-thread vector
-// buffers of `len` values each.
+// buffers of `len` values each. The body must not run a transform pass (see
+// tl_buf).
 // ---------------------------------------------------------------------------
 template <typename Body>
 void column_blocks(std::size_t hx, std::size_t len, std::size_t nbuf, std::size_t nthreads, Body&& body) {
