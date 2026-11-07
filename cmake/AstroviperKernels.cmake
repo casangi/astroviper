@@ -95,13 +95,19 @@ function(astroviper_add_fast_kernel_module)
         get_filename_component(_dir "${_dir}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
         list(APPEND CMAKE_REQUIRED_INCLUDES "${_dir}")
     endforeach()
-    # The cached result is keyed on the probe's content and include
-    # directories, and editing the probe re-runs configure, so an incremental
+    # The cached result is keyed on what decides it: the probe's content, its
+    # include directories, the compiler and the flags try_compile builds it
+    # with (CMAKE_CXX_FLAGS and the per-configuration ones). Editing the probe
+    # re-runs configure, and a changed key re-runs the probe, so an incremental
     # build directory never keeps a stale verdict.
     set(_probe_file "${CMAKE_CURRENT_SOURCE_DIR}/${FK_PROBE}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_probe_file}")
     file(READ "${_probe_file}" _probe)
-    string(SHA256 _probe_key "${_probe}|${CMAKE_REQUIRED_INCLUDES}")
+    string(CONCAT _probe_inputs "${_probe}" "|${CMAKE_REQUIRED_INCLUDES}|${CMAKE_REQUIRED_FLAGS}"
+        "|${CMAKE_REQUIRED_LINK_OPTIONS}|${CMAKE_CXX_COMPILER}|${CMAKE_CXX_COMPILER_VERSION}"
+        "|${CMAKE_CXX_STANDARD}|${CMAKE_CXX_FLAGS}|${CMAKE_CXX_FLAGS_DEBUG}|${CMAKE_CXX_FLAGS_RELEASE}"
+        "|${CMAKE_CXX_FLAGS_RELWITHDEBINFO}|${CMAKE_CXX_FLAGS_MINSIZEREL}|${CMAKE_TRY_COMPILE_CONFIGURATION}")
+    string(SHA256 _probe_key "${_probe_inputs}")
     string(SUBSTRING "${_probe_key}" 0 16 _probe_key)
     set(_probe_result AV_FAST_PROBE_${FK_NAME}_${_probe_key})
     check_cxx_source_compiles("${_probe}" ${_probe_result})
