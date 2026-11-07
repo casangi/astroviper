@@ -2,38 +2,59 @@
 
 The implementation is called directly (``astroviper._kernels.impl``), so these
 tests run in any session. Small inputs only. The oracle is the reference
-binding, and every comparison is bitwise on unsigned-integer views (-0.0 and
-NaN payloads count) of everything a call returns or changes: the residual and
-model cubes, the iterations, stop codes, converged and diverged flags,
-final_peak, total_flux_cleaned and the six iteration-history records.
+binding, and every comparison is bitwise on unsigned-integer views (-0.0
+counts) of everything a call returns or changes: the residual and model
+cubes, the iterations, stop codes, converged and diverged flags, final_peak,
+total_flux_cleaned and the six iteration-history records; the arguments a
+call only reads must be unchanged after it. The contract leaves the sign and
+payload of a NaN result unspecified (in the reference they depend on the
+compiler's operand order): the NaN-payload test compares NaNs as NaNs, and
+every other test feeds only ``np.nan``, whose bits both kernels keep, and so
+compares NaN bits too.
 
 * Each fast entry against its own reference entry (they differ in corner
   cases: a zero peak that a negative threshold keeps running, negative
   budgets), on seeded random cubes and on edge cases: masks (none, all-true,
   boxes, a disk, a ring, short runs, checkerboards, stripes, empty, a single
-  pixel), NaN and infinities inside and outside the searched pixels, ties,
-  -0.0, subnormal and huge values, float32 and float64, PSFs of the image's
-  size and of twice it, clean boxes that the binding clamps, edge gains,
-  thresholds, speedups, budgets and divergence controls, accumulated models.
+  pixel, bytes other than 0 and 1), NaN and infinities inside and outside the
+  searched pixels, NaNs of other payloads, ties, -0.0, subnormal and huge
+  values, float32 and float64, PSFs of the image's size and of twice it,
+  clean boxes that the binding clamps, edge gains, thresholds, speedups,
+  budgets and divergence controls, accumulated models, rows on either side
+  of the short-row limit, more iterations than a plane defers.
 * Multi-plane cubes: per-plane budgets, thresholds and masks, a broadcast PSF,
-  Stokes I active with V idle, many small planes at 1 to 24 threads.
+  Stokes I active with V idle, many small planes at 1 to 24 threads, and the
+  production paths: crews of several threads on a plane, side by side or one
+  after another, rows of several chunks, zero peaks flushed by a crew.
 * Invariance: bitwise across thread counts (0, -1 and 1 to 24) and between the
-  generic and AVX2 routines (two subprocesses).
+  generic and AVX2 routines (two subprocesses); the bitwise tests of this
+  file pass with the generic routines too (a subprocess). The AVX2 unit
+  defines no weak symbol at -O0 either (an empty CMAKE_BUILD_TYPE).
 * Declined calls are the reference's, bit for bit and exception for
   exception; arrays the call writes that share memory with another argument
   decline; misaligned arrays take the fast path through aligned copies.
-* No thread outlives a call, the GIL is released during it, and the trace of
-  the hooked shim names each call's path.
+* Resources: no thread outlives a call, small planes start no more threads
+  than planes with a budget, the GIL is released during a call, threads that
+  cannot be started leave a smaller team with the same bits, memory does not
+  grow with the iterations, and an error after the first write leaves a
+  misaligned cube as cleaned as an aligned one. Without the extension the
+  package raises ModuleNotFoundError, so that this module skips.
+* The trace of the hooked shim names each call's path.
 """
 
 import json
 import os
+import platform
+import re
 import resource
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -387,34 +408,51 @@ def _bits(array):
 
 
 def _run(function, case, threads=1, **changes):
+    """A call on copies of the residual and model; the arguments it only reads
+    must be unchanged after it."""
     residual, model = case["residual"].copy(), case["model"].copy()
     kwargs = case["kwargs"] | {"processing_function_threads": threads} | changes
+    read = [case["psf"]] + [v for v in kwargs.values() if isinstance(v, np.ndarray)]
+    before = [_bits(a).tobytes() for a in read]
     result = function(
         residual_cube=residual, psf_cube=case["psf"], model_cube=model, **kwargs
     )
+    assert [_bits(a).tobytes() for a in read] == before, "a read-only argument changed"
     return result, residual, model
 
 
-def _assert_same(expected, actual):
-    """Bitwise: the results (keys in order, dtypes, shapes, bits) and the cubes."""
+def _canonical(array):
+    """The array with every NaN the dtype's np.nan (its sign and payload are
+    not part of the contract)."""
+    array = np.asarray(array)
+    if array.dtype.kind != "f":
+        return array
+    return np.where(np.isnan(array), np.array(np.nan, array.dtype), array)
+
+
+def _assert_same(expected, actual, nan_bits=True, skip=()):
+    """Bitwise: the results (keys in order, dtypes, shapes, bits) and the cubes.
+    With nan_bits=False a NaN only has to be a NaN; `skip` names results not
+    compared."""
     (result, residual, model), (fast_result, fast_residual, fast_model) = (
         expected,
         actual,
     )
+    view = _bits if nan_bits else (lambda a: _bits(_canonical(a)))
     assert list(fast_result) == list(result)
     for key in SCALARS:
         a, b = np.asarray(result[key]), np.asarray(fast_result[key])
         assert a.dtype == b.dtype and a.shape == b.shape, key
-        assert np.array_equal(_bits(a), _bits(b)), key
+        assert np.array_equal(view(a), view(b)), key
     for key in HISTORY:
-        if key not in result:
+        if key not in result or key in skip:
             continue
         for t, f, p in np.ndindex(np.asarray(result["stop_code"]).shape):
             a, b = result[key][t][f][p], fast_result[key][t][f][p]
             assert a.dtype == b.dtype and a.shape == b.shape, (key, t, f, p)
-            assert np.array_equal(_bits(a), _bits(b)), (key, t, f, p)
-    assert np.array_equal(_bits(fast_residual), _bits(residual)), "residual"
-    assert np.array_equal(_bits(fast_model), _bits(model)), "model"
+            assert np.array_equal(view(a), view(b)), (key, t, f, p)
+    assert np.array_equal(view(fast_residual), view(residual)), "residual"
+    assert np.array_equal(view(fast_model), view(model)), "model"
 
 
 def _check(entry, case, threads=(1, 6)):
@@ -713,6 +751,202 @@ def test_the_two_entries_differ_only_in_their_corner_cases():
     assert b["iterations_performed"].tolist() == [[[0]]]
 
 
+#: +NaN, -NaN and NaN of another payload, as unsigned bits.
+NAN_PAYLOADS = {
+    np.float32: (0x7FC00000, 0xFFC00000, 0x7FC00123),
+    np.float64: (0x7FF8000000000000, 0xFFF8000000000000, 0x7FF8000000000123),
+}
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("gain", [0.1, float("nan")])
+def test_nan_payloads_are_nan_where_the_reference_has_nan(entry, dtype, gain):
+    """NaNs of three payloads in one searched row and one in the PSF, with the
+    history: every result that is not a NaN has the reference's bits, and every
+    NaN result is a NaN where the reference has one. Which NaN an operation on
+    two NaNs keeps is the compiler's operand order (in the reference it differs
+    between its scan, its last sum and its two entries), so the sign and
+    payload of a NaN are not part of the contract."""
+    case = _case(
+        48, 52, dtype, planes=(1, 1, 2), mask=None, niter=40, gain=gain, seed=70
+    )
+    for plane in range(2):
+        _bits(case["residual"])[0, 0, plane, 20, [7, 20, 33]] = NAN_PAYLOADS[dtype]
+        _bits(case["psf"])[0, 0, plane, 30, 21] = NAN_PAYLOADS[dtype][2]
+    expected = _run(REFERENCE[entry], case)
+    assert np.isnan(expected[1]).any()
+    for threads in (1, 3):
+        _assert_same(expected, _run(FAST[entry], case, threads), nan_bits=False)
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_mask_bytes_other_than_one_change_only_the_history_rms(entry):
+    """A mask of the bytes 0, 1, 2, 128 and 255 seen as bool (NumPy never makes
+    one): both kernels search the pixels whose byte is not 0, so every result
+    is the reference's but the history RMS, which the reference divides by the
+    sum of the raw bytes (a bool that is not 0 or 1 is undefined behaviour);
+    the fast kernel's is that of the same mask in 0 and 1."""
+    rng = np.random.default_rng(72)
+    raw = rng.choice(np.array([0, 1, 2, 128, 255], np.uint8), size=(1, 1, 2, 40, 44))
+    case = _case(40, 44, np.float64, planes=(1, 1, 2), niter=60, seed=72)
+    case["kwargs"]["mask_cube"] = raw.view(bool)
+    plain = case | {"kwargs": case["kwargs"] | {"mask_cube": raw != 0}}
+    for threads in (1, 2):
+        fast = _run(FAST[entry], case, threads)
+        _assert_same(_run(FAST[entry], plain, threads), fast)
+        _assert_same(
+            _run(REFERENCE[entry], case), fast, skip=("iteration_residual_rms",)
+        )
+        quiet = {"record_iteration_history": False}
+        _assert_same(
+            _run(REFERENCE[entry], case, **quiet),
+            _run(FAST[entry], case, threads, **quiet),
+        )
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+@pytest.mark.parametrize("nx", [1, 7, 8, 9, 16, 17, 33, 47, 48, 49, 50, 64, 65])
+def test_rows_either_side_of_the_short_row_limit_are_the_reference(entry, dtype, nx):
+    """Rows of up to 48 pixels are scanned pixel by pixel, longer ones with
+    lanes: widths on either side of that limit and of the lane counts, masks
+    that split the rows, and a clean box that clips them."""
+    for mask in (None, "runs", "disk", "checker", "random50"):
+        _check(
+            entry, _case(24, nx, dtype, mask=mask, niter=60, seed=73 + nx), threads=(1,)
+        )
+    clipped = _case(
+        24, nx, dtype, mask=None, niter=60, clean_box=(1, nx - 1, 2, 20), seed=74
+    )
+    _check(entry, clipped, threads=(1,))
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+@pytest.mark.parametrize("nx", [255, 256, 257, 300])
+def test_exterior_runs_either_side_of_the_block_limit_are_the_reference(
+    entry, dtype, nx
+):
+    """The deferred subtractions go over a run of at least 256 pixels outside
+    the searched ones in register blocks, and over shorter runs and the tails
+    a chunk at a time: whole rows of such widths, the runs beside a clean box
+    (from column 0 and from further in), a disk mask, under footprints that
+    the plane clips and under footprints that cover it (a PSF of twice the
+    image)."""
+    middle = (nx // 2 - 4, nx // 2 + 4, 4, 8)
+    for clean_box, mask, twice in (
+        (middle, None, False),
+        (middle, None, True),
+        ((2, 10, 4, 8), None, False),
+        ((-1, -1, -1, -1), "disk", False),
+    ):
+        case = _case(
+            12,
+            nx,
+            dtype,
+            planes=(1, 1, 2),
+            mask=mask,
+            niter=60,
+            clean_box=clean_box,
+            twice=twice,
+            seed=75 + nx,
+        )
+        _check(entry, case, threads=(1, 2))
+
+
+def _production_cases():
+    """The paths of production-sized planes, at 1, 6 and 12 threads (E, from
+    the sizing rules of hclean_fast.cpp): crews of 3 side by side (4 planes of
+    200 x 300), one crew of 6 over two planes (320 x 320, as for HL Tau) and
+    two crews of 5 or 6, rows of two 256-pixel chunks, a lone iterating plane
+    whose crew has the free threads (Stokes V, or Q, U and V, stopping at
+    once), planes without a searched pixel whose zero peaks flush the deferred
+    subtractions before the final passes of the whole team, and a row of three
+    chunks."""
+    cases = {}
+    for dtype in (np.float64, np.float32):
+        t = dtype.__name__
+        for mask in (None, "runs", "disk"):
+            cases[f"4 planes 200x300, mask {mask} {t}"] = _case(
+                200, 300, dtype, planes=(1, 1, 4), mask=mask, niter=40, seed=80
+            )
+            cases[f"2 planes 320x320, mask {mask} {t}"] = _case(
+                320, 320, dtype, planes=(1, 1, 2), mask=mask, niter=40, seed=81
+            )
+        cases[f"2 planes 256x256, V stops at once {t}"] = _case(
+            256, 256, dtype, planes=(1, 1, 2), niter=60, threshold=[1e-5, 1e6], seed=82
+        )
+        cases[f"4 planes 200x300, Q, U and V stop at once {t}"] = _case(
+            200,
+            300,
+            dtype,
+            planes=(1, 1, 4),
+            niter=60,
+            threshold=[1e-5, 1e6, 1e6, 1e6],
+            seed=83,
+        )
+        cases[f"2 planes 200x300, zero peaks {t}"] = _case(
+            200,
+            300,
+            dtype,
+            planes=(1, 1, 2),
+            mask="empty",
+            niter=8,
+            threshold=-1.0,
+            divergence=False,
+            seed=84,
+        )
+        cases[f"1 row of 700 {t}"] = _case(
+            1, 700, dtype, mask="runs", niter=60, seed=85
+        )
+    return cases
+
+
+PRODUCTION = _production_cases()
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("name", list(PRODUCTION))
+def test_production_paths_are_the_reference(entry, name):
+    _check(entry, PRODUCTION[name], threads=(1, 6, 12))
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_more_subtractions_than_a_plane_defers_are_the_reference(entry):
+    """More iterations than a plane defers subtractions from the pixels outside
+    the searched ones (16,384): it applies them, in order, whenever that many
+    are pending, so that its memory does not grow with the iterations. Small
+    planes side by side (20,000 iterations), and a plane cleaned by a crew of
+    two (17,000 iterations on a 100 x 100 mask of a 192 x 192 plane)."""
+    small = _case(
+        24,
+        28,
+        np.float64,
+        planes=(1, 1, 2),
+        mask="disk",
+        niter=20000,
+        threshold=-1.0,
+        divergence=False,
+        seed=86,
+    )
+    _check(entry, small, threads=(1, 2))
+    square = np.zeros((192, 192), bool)
+    square[40:140, 50:150] = True
+    crew = _case(
+        192,
+        192,
+        np.float64,
+        mask=square,
+        niter=17000,
+        threshold=-1.0,
+        divergence=False,
+        history=False,
+        seed=87,
+    )
+    _check(entry, crew, threads=(1, 6))
+
+
 # ---------------------------------------------------------------- invariance
 ISA_RUN = """
 import sys
@@ -806,6 +1040,52 @@ def test_generic_and_avx2_routines_give_the_same_bits(run_python, tmp_path):
     assert results["avx2"] == results["generic"]
 
 
+#: The C++ compiler and nm for a fresh compile of the AVX2 unit, if any.
+CXX = os.environ.get("CXX") or shutil.which("c++") or shutil.which("g++")
+NM = shutil.which("nm")
+
+
+@pytest.mark.skipif(
+    platform.machine().lower() not in ("x86_64", "amd64") or CXX is None or NM is None,
+    reason="needs x86-64, a C++ compiler and nm",
+)
+def test_the_avx2_unit_defines_no_weak_symbol_at_o0(tmp_path):
+    """A build without CMAKE_BUILD_TYPE compiles the AVX2 unit without any -O
+    flag. At -O0 too it defines no weak or unique symbol (nm types W, V, u):
+    it calls no function of a standard header and has no exception tables,
+    so no AVX2 copy of a function can replace a generic caller's.
+    test_binary_isa.py checks the levels of the build types."""
+    module = Path(__file__).parents[3] / "src/astroviper/_kernels/fast/hogbom"
+    target = tmp_path / "hclean_fast_avx2.o"
+    subprocess.run(
+        [
+            CXX,
+            "-std=c++23",
+            "-fPIC",
+            "-ffp-contract=off",
+            "-mavx2",
+            "-fno-lto",
+            "-O0",
+            "-DAV_HAVE_AVX2=1",
+            f"-I{module / 'include'}",
+            "-c",
+            str(module / "src/hclean_fast_avx2.cpp"),
+            "-o",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    listing = subprocess.run(
+        [NM, str(target)], check=True, capture_output=True, text=True
+    )
+    symbols = [
+        line.split()[-2:] for line in listing.stdout.splitlines() if line.strip()
+    ]
+    assert [s for s in symbols if s[0] in ("W", "V", "u")] == []
+    assert ["T", "_ZN11hclean_fast12avx2_kernelsEv"] in symbols
+
+
 def test_an_unknown_isa_override_fails_the_import(run_python):
     done = run_python(
         "-c",
@@ -815,6 +1095,40 @@ def test_an_unknown_isa_override_fails_the_import(run_python):
     )
     assert done.returncode != 0
     assert "ASTROVIPER_KERNELS_ISA=avx512: expected 'generic'" in done.stderr
+
+
+def test_the_generic_routines_pass_the_bitwise_tests(run_python, tmp_path):
+    """The routines that every platform without AVX2 runs (aarch64, macOS):
+    this module's comparisons with the reference, in a pytest subprocess with
+    ASTROVIPER_KERNELS_ISA=generic."""
+    isa = "from astroviper._kernels.fast.hogbom import ISA; print(ISA)"
+    assert run_python("-c", isa, ASTROVIPER_KERNELS_ISA="generic").strip() == "generic"
+    environ = {
+        k: v for k, v in os.environ.items() if not k.startswith("ASTROVIPER_KERNELS")
+    }
+    environ |= {"ASTROVIPER_KERNELS_ISA": "generic", "PYTEST_ADDOPTS": ""}
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            __file__,
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-k",
+            "(are_the_reference or where_the_reference) and not declined",
+            f"--basetemp={tmp_path / 'inner'}",
+        ],
+        cwd=Path(__file__).parents[3],
+        env=environ,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    assert done.returncode == 0, done.stdout[-4000:] + done.stderr[-2000:]
+    passed = re.search(r"(\d+) passed", done.stdout)
+    assert passed and int(passed.group(1)) >= 300, done.stdout[-2000:]
 
 
 def test_concurrent_calls_give_the_bits_of_serial_calls():
@@ -883,14 +1197,12 @@ def _cpu_seconds():
 
 @pytest.mark.parametrize("planes_with_budgets", [2, 12])
 def test_idle_threads_sleep_and_nothing_runs_after_a_call(planes_with_budgets):
-    """12 small masked planes and 12 threads, one plane running 20000
-    iterations (an all-true mask, so no final subtractions). With budgets on
-    2 planes, the team's other 10 threads wait for the final passes, deferred
-    to the whole team: they poll for a bounded time and then sleep. With
-    budgets on all 12, the planes run side by side, a thread each, and the
-    threads of the planes that stop at once end. Either way the call's CPU
-    time stays near that of the one busy thread, far from 12 threads polling
-    throughout, and after the call returns the process burns no CPU."""
+    """12 small masked planes and 12 threads requested, one plane running
+    20000 iterations (an all-true mask, so no final subtractions). The planes
+    run side by side, one thread per plane with a budget (2 or 12), and the
+    threads of the planes that stop at once end. The call's CPU time stays
+    near that of the one busy thread, far from 12 threads polling throughout,
+    and after the call returns the process burns no CPU."""
     case = _case(128, 128, np.float64, planes=(1, 3, 4), mask="all", niter=20000)
     case["kwargs"]["max_iter_per_cycle_updated"].flat[planes_with_budgets:] = 0
     case["kwargs"]["threshold_per_cycle"] = np.full((1, 3, 4), 1e6)
@@ -905,6 +1217,216 @@ def test_idle_threads_sleep_and_nothing_runs_after_a_call(planes_with_budgets):
     cpu = _cpu_seconds()
     time.sleep(0.2)
     assert _cpu_seconds() - cpu < 0.02
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/task"), reason="needs /proc")
+def test_small_planes_start_no_more_threads_than_planes_with_a_budget():
+    """12 planes of 64 x 64 with budgets on 4, at 24 threads: at most 4
+    threads (the caller and 3 more), as many as the reference clean_cube
+    starts for 4 planes; more would only wait for the final passes."""
+    case = _case(
+        64,
+        64,
+        np.float64,
+        planes=(1, 3, 4),
+        niter=6000,
+        divergence=False,
+        history=False,
+        seed=76,
+    )
+    case["kwargs"]["max_iter_per_cycle_updated"].flat[4:] = 0
+    before = _thread_count()
+    seen, done = [], threading.Event()
+
+    def sample():
+        while not done.is_set():
+            seen.append(_thread_count())
+            time.sleep(0.0005)
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(30.0)
+    sampler = threading.Thread(target=sample)
+    try:
+        sampler.start()
+        _run(FAST["clean_cube"], case, 24)
+        done.set()
+        sampler.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert before + 1 < max(seen) <= before + 1 + 3, (before, max(seen))
+
+
+#: Input of the subprocess tests below: `case(planes, n, niter, mask)` makes the
+#: keyword arguments of a call (a Gaussian PSF and four point sources a plane).
+SUBPROCESS_CASES = """
+import json, resource, sys, threading
+import numpy as np
+from astroviper._kernels import impl
+from astroviper._kernels.fast.hogbom import _hogbom_fast_ext as ext
+
+def case(planes, n, niter, mask=True, threshold=0.0, history=False):
+    rng = np.random.default_rng(n)
+    y, x = np.mgrid[0:n, 0:n] - n // 2
+    psf = np.exp(-(x * x + y * y) / 8.0)
+    residual = np.zeros(planes + (n, n))
+    for index in np.ndindex(planes):
+        for _ in range(4):
+            dy, dx = rng.integers(-n // 4, n // 4, 2)
+            residual[index] += rng.uniform(0.5, 2) * np.roll(psf, (dy, dx), (0, 1))
+    disk = np.broadcast_to(x * x + y * y < (0.4 * n) ** 2, residual.shape)
+    return dict(
+        residual_cube=residual,
+        psf_cube=np.ascontiguousarray(np.broadcast_to(psf, residual.shape)),
+        model_cube=np.zeros_like(residual),
+        mask_cube=np.ascontiguousarray(disk) if mask else np.array([]),
+        max_iter_per_cycle_updated=np.full(planes, niter, np.int32),
+        gain=0.1,
+        threshold_per_cycle=np.full(planes, threshold),
+        max_iter_divergence=-1,
+        record_iteration_history=history,
+    )
+
+def copied(kwargs):
+    return {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
+
+def bits(kwargs, result):  # of a call without the history
+    out = [kwargs["residual_cube"].tobytes(), kwargs["model_cube"].tobytes()]
+    return out + [np.asarray(value).tobytes() for value in result.values()]
+"""
+
+NO_THREADS = (
+    SUBPROCESS_CASES
+    + """
+cases = {"side by side": case((1, 3, 4), 40, 200), "team": case((1, 1, 2), 256, 200, mask=False)}
+expected = {}
+for name, kwargs in cases.items():
+    for entry in ("clean_cube", "clean_cube_many_threads"):
+        k = copied(kwargs)
+        expected[name, entry] = bits(k, impl("hogbom", entry, "ref")(**k, processing_function_threads=1))
+resource.setrlimit(resource.RLIMIT_NPROC, (1, resource.getrlimit(resource.RLIMIT_NPROC)[1]))
+try:
+    threading.Thread(target=lambda: None).start()
+except RuntimeError:
+    pass
+else:
+    print("RESULT", json.dumps(None))
+    sys.exit()
+same = {}
+for (name, entry), want in expected.items():
+    k = copied(cases[name])
+    result = getattr(ext, entry)(**k, processing_function_threads=12)
+    same[f"{name} {entry}"] = result is not None and bits(k, result) == want
+print("RESULT", json.dumps(same))
+"""
+)
+
+
+def test_threads_that_cannot_start_leave_the_same_bits(run_python):
+    """With RLIMIT_NPROC at 1 no thread can start: a call at 12 threads takes
+    the fast path on the threads it has (small planes side by side, and the
+    team of larger ones), with the reference's bits."""
+    out = run_python("-c", NO_THREADS)
+    same = json.loads(out.rpartition("RESULT ")[2])
+    if same is None:
+        pytest.skip("RLIMIT_NPROC is not enforced here (a privileged user)")
+    assert same and all(same.values()), same
+
+
+MEMORY = (
+    SUBPROCESS_CASES
+    + """
+def misaligned(array):
+    buffer = np.zeros(array.nbytes + 1, np.uint8)
+    copy = buffer[1:].view(array.dtype).reshape(array.shape)
+    copy[...] = array
+    return copy
+
+def address_space():
+    with open("/proc/self/status") as status:
+        line = next(s for s in status if s.startswith("VmSize:"))
+    return int(line.split()[1]) * 1024
+
+ext.clean_cube(**case((1, 1, 1), 16, 100), processing_function_threads=1)
+limit = address_space() + 16 * 2**20
+resource.setrlimit(resource.RLIMIT_AS, (limit, resource.getrlimit(resource.RLIMIT_AS)[1]))
+# 600,000 iterations without the history: 19 MB of subtractions kept until
+# the end would exceed the limit; the 16,384 a plane defers at most do not.
+long = ext.clean_cube(**case((1, 1, 1), 16, 600_000, threshold=-1.0), processing_function_threads=1)
+# The history of 10 million iterations cannot fit: the error comes after the
+# first write, and a misaligned cube is written back as cleaned as it is.
+kwargs = case((1, 1, 1), 16, 10_000_000, threshold=-1.0, history=True)
+for name in ("residual_cube", "model_cube", "psf_cube"):
+    kwargs[name] = misaligned(kwargs[name])
+original = kwargs["residual_cube"].copy()
+try:
+    ext.clean_cube(**kwargs, processing_function_threads=1)
+    error = None
+except MemoryError:
+    error = "MemoryError"
+print("RESULT", json.dumps({
+    "iterations": None if long is None else int(long["iterations_performed"].sum()),
+    "error": error,
+    "written_back": not np.array_equal(kwargs["residual_cube"], original),
+}))
+"""
+)
+
+
+@pytest.mark.skipif(not os.path.isfile("/proc/self/status"), reason="needs /proc")
+def test_memory_does_not_grow_with_the_iterations_and_errors_write_back(run_python):
+    """Under an address-space limit of 16 MiB above the process's size: a call
+    of 600,000 iterations completes (a plane keeps at most 16,384 deferred
+    subtractions, 512 KiB), and a call whose iteration history outgrows the
+    limit raises MemoryError after its first write with its misaligned cube
+    written back, as an aligned cube would be."""
+    with open("/proc/self/maps") as maps:
+        if "libasan" in maps.read():
+            pytest.skip("AddressSanitizer reserves address space of its own")
+    out = run_python("-c", MEMORY)
+    result = json.loads(out.rpartition("RESULT ")[2])
+    assert result == {
+        "iterations": 600_000,
+        "error": "MemoryError",
+        "written_back": True,
+    }
+
+
+BLOCKED = """
+import importlib.abc, json, sys
+import pytest
+
+NAME = "astroviper._kernels.fast.hogbom._hogbom_fast_ext"
+
+class NotBuilt(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == NAME:
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return None
+
+sys.meta_path.insert(0, NotBuilt())
+try:
+    import astroviper._kernels.fast.hogbom
+    raised = None
+except ImportError as error:
+    raised = [type(error).__name__, error.name]
+try:
+    pytest.importorskip(NAME, reason="fast Hogbom module not built")
+    skipped = False
+except pytest.skip.Exception:
+    skipped = True
+print("RESULT", json.dumps({"raised": raised, "skipped": skipped}))
+"""
+
+
+def test_without_the_extension_the_package_raises_module_not_found(run_python):
+    """A build without the extension (fast kernels OFF, or a failed compile
+    probe): importing the package raises ModuleNotFoundError naming it, which
+    pytest.importorskip skips (it re-raises a plain ImportError), so that this
+    module skips instead of interrupting the session."""
+    out = run_python("-c", BLOCKED)
+    result = json.loads(out.rpartition("RESULT ")[2])
+    name = "astroviper._kernels.fast.hogbom._hogbom_fast_ext"
+    assert result == {"raised": ["ModuleNotFoundError", name], "skipped": True}
 
 
 def _outcome(function, make):
@@ -1055,6 +1577,19 @@ def test_planes_without_pixels_decline(entry):
     )
     arguments["mask_cube"] = np.array([])
     assert getattr(ext, entry)(**arguments) is None
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_a_keyword_that_cannot_be_encoded_raises(entry):
+    """The one error that is not the reference's (documented): a keyword whose
+    name is not valid UTF-8 (a lone surrogate) raises RuntimeError, where the
+    reference binding aborts the process while it formats its TypeError (so
+    the reference is not called here). Nothing is written."""
+    arguments = _arguments()
+    residual = arguments["residual_cube"].copy()
+    with pytest.raises(RuntimeError):
+        FAST[entry](**arguments, **{"\udc80": 1})
+    assert np.array_equal(_bits(arguments["residual_cube"]), _bits(residual))
 
 
 @pytest.mark.parametrize(
