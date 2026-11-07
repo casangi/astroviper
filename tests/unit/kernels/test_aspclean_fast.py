@@ -7,7 +7,8 @@ the fast kernel on copies of the same inputs and asserts the same bytes: the
 residual, the model and every value of the returned dict (the components, the
 residual-shaped fits, the iteration history and every count; only the wall
 times of ``timing`` are skipped), NaN payloads and signed zeros included, or
-the same exception type and message. Small inputs only (at most 256^2).
+the same exception type and message. Small inputs (at most 256^2), but for one
+768^2 plane, whose large work buffers are mapped from the system.
 
 * The entries are the reference's: the docstrings (so the names, types and
   defaults of the parameters, ``asp_min_mask_coverage = 0.995`` last), the
@@ -709,6 +710,20 @@ def test_options(options):
 def test_any_thread_count(threads):
     """Below 1 thread the transforms run on one, as in the reference."""
     _check(_scene("holes"), threads=(threads,), **CORAL, **RECORD)
+
+
+def test_mapped_work_buffers():
+    """A 768^2 plane, whose work buffers of 4 MB or more are mapped from the
+    system and unmapped when they are freed (``asp_fft2.hpp``), twice in a
+    row."""
+    n = 768
+    psf = _psf(n, n, 3.0)
+    sky = _gauss(n, n, 380, 390, 24.0, 2e-3) + _gauss(n, n, 330, 430, 2.0, 5e-3)
+    mask = _disk(n, n, 384, 384, 160.0)
+    dirty = _noisy(sky, psf, n, mask < 0.5, 1e-4)
+    inputs = _plane(psf, dirty, mask, _threshold(dirty, mask, 0.3), 8)
+    for _ in range(2):
+        _check(inputs, threads=(1, 6), **CORAL, **RECORD)
 
 
 # ---------------------------------------------------------------- cubes
