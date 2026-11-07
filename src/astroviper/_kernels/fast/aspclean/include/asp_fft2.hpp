@@ -30,6 +30,12 @@
 
 #include <sys/mman.h>  // the large buffers (POSIX: the fast modules build on Linux and macOS)
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <xmmintrin.h>  // MXCSR
+#else
+#include <cfenv>
+#endif
+
 #include <algorithm>
 #include <complex>
 #include <cstddef>
@@ -142,7 +148,43 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Threads: contiguous parts of [0, n) on pocketfft's pool.
+// Floating-point control (x86-64: MXCSR, with the rounding mode and the
+// flush-to-zero and denormals-are-zero bits) is per thread, and a pool thread
+// keeps the state of the thread that started it. The reference runs on the
+// calling thread most of the passes that run on the pool here, so each pool
+// task runs in the calling thread's state: with FTZ/DAZ or another rounding
+// set on the calling thread only (as a library built with -ffast-math sets
+// FTZ/DAZ when it is loaded), the bits still do not depend on the thread
+// count.
+// ---------------------------------------------------------------------------
+#if defined(__x86_64__) || defined(_M_X64)
+using FpState = unsigned int;
+inline FpState fp_state() { return _mm_getcsr(); }
+inline void set_fp_state(const FpState& s) { _mm_setcsr(s); }
+#else
+using FpState = std::fenv_t;
+inline FpState fp_state() {
+    std::fenv_t s;
+    std::fegetenv(&s);
+    return s;
+}
+inline void set_fp_state(const FpState& s) { std::fesetenv(&s); }
+#endif
+
+// f() on this thread in the state s; then this thread's own state again.
+template <typename F>
+void in_fp_state(const FpState& s, F&& f) {
+    struct Restore {
+        FpState own = fp_state();
+        ~Restore() { set_fp_state(own); }
+    } restore;
+    set_fp_state(s);
+    f();
+}
+
+// ---------------------------------------------------------------------------
+// Threads: contiguous parts of [0, n) on pocketfft's pool, in the calling
+// thread's floating-point state.
 // ---------------------------------------------------------------------------
 template <typename F>
 void parallel_for(std::size_t nthreads, std::size_t n, F&& f) {
@@ -152,10 +194,13 @@ void parallel_for(std::size_t nthreads, std::size_t n, F&& f) {
         f(std::size_t(0), n);
         return;
     }
+    const FpState caller = fp_state();
     pd::threading::thread_map(nthreads, [&] {
-        const std::size_t t = pd::threading::thread_id(), m = pd::threading::num_threads();
-        const std::size_t b = n * t / m, e = n * (t + 1) / m;
-        if (b < e) f(b, e);
+        in_fp_state(caller, [&] {
+            const std::size_t t = pd::threading::thread_id(), m = pd::threading::num_threads();
+            const std::size_t b = n * t / m, e = n * (t + 1) / m;
+            if (b < e) f(b, e);
+        });
     });
 }
 

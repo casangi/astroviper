@@ -34,6 +34,18 @@ The PSF and the mask are read in place at any address; a residual or model at
 an address that is not a multiple of its item size (Dask may hand a worker
 one) is updated through an aligned copy of its bytes, written back in place.
 
+Floating-point environment: each task on the transforms' thread pool runs in
+the calling thread's floating-point control state (on x86-64 MXCSR: rounding,
+flush-to-zero, denormals-are-zero), so the bits do not depend on the thread
+count in any environment. They are the reference's in the default
+environment, and whenever every thread has the same one. With flush-to-zero
+or denormals-are-zero set on the calling thread only (a library built with
+``-ffast-math`` does that when it is loaded), they are the reference's at 1
+thread; the reference's own bits at more threads can then change, as its
+transforms run on its pool, in the pool's state. Directed rounding on the
+calling thread only is not supported: the reference's bits change with its
+thread count there.
+
 The module is built for the baseline instruction set only (``ISA`` is
 ``"generic"``).
 """
