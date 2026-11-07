@@ -28,6 +28,10 @@ kernel      entries                           implementations
 ``asp``     ``clean``, ``clean_cube``         ``ref``
 ==========  ================================  ===============
 
+With ``hogbom=fast`` a call may put several threads on one plane, where the
+reference ``clean_cube`` runs one per plane, and it never starts more threads
+than the CPUs it may run on.
+
 ``ASTROVIPER_KERNELS_TRACE=<dir>``
     Each wrapped call appends one JSON line to
     ``<dir>/kernels-<host>-<pid>.jsonl``: kernel, entry, impl, path (the

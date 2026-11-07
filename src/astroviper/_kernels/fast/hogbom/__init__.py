@@ -4,11 +4,14 @@ Fast Hogbom minor cycle, selected by ``ASTROVIPER_KERNELS=hogbom=fast``.
 ``clean_cube`` and ``clean_cube_many_threads`` take the arguments of the
 reference entries (``deconvolvers/hogbom``) and give their results bit for
 bit: the residual and model cubes, the iterations, stop codes, flags,
-``final_peak``, ``total_flux_cleaned`` and the iteration history. Each plane's
-searched pixels (the clean box inside the mask) are kept current by one fused
-pass per iteration that subtracts the last component and searches for the
-next; the subtractions from the other pixels, which no iteration reads, are
-applied at the end of the model update in the original order
+``final_peak``, ``total_flux_cleaned`` and the iteration history. Bit for bit
+holds for every value that is not a NaN; a NaN result is a NaN in both, with
+its sign and payload unspecified (they depend on the operand order that the
+compiler picks for a commutative operation, in the reference too). Each
+plane's searched pixels (the clean box inside the mask) are kept current by
+one fused pass per iteration that subtracts the last component and searches
+for the next; the subtractions from the other pixels, which no iteration
+reads, are applied at the end of the model update in the original order
 (``include/hclean_fast.hpp``). The bits do not depend on the number of
 threads or on the instruction set.
 
@@ -19,6 +22,10 @@ the fast one may put several threads on one plane: the same results, from
 more cores at once. Its threads poll for a bounded time between the steps of
 an iteration and then sleep; none outlives a call.
 
+Memory: besides its inputs and the iteration history, a call keeps the plans
+of its planes and at most 16,384 deferred subtractions of 32 bytes per plane
+in flight; it does not grow with the iterations.
+
 Each call takes one path, reported to the kernel switch for its trace line:
 
 ``"fast"``
@@ -27,18 +34,24 @@ Each call takes one path, reported to the kernel switch for its trace line:
     Every call that the reference binding would not run exactly as given
     (another argument type or dtype, a failing check, an array the call
     writes that shares memory with another argument, image planes without
-    pixels) or that cannot allocate its buffers: the reference runs with the
-    same arguments, so the result is the reference's, bit for bit, and so is
-    any exception.
+    pixels) or that cannot allocate its buffers before its first write: the
+    reference runs with the same arguments, so the result is the reference's,
+    bit for bit, and so is any exception. One error differs: a keyword whose
+    name cannot be encoded as UTF-8 raises ``RuntimeError``, where the
+    reference binding aborts the process.
 
 Misaligned arrays (such as Dask's deserialised ones) are read through aligned
-copies, and the residual and model written back. ``ISA`` is the instruction
-set of this process: ``"avx2"`` when the CPU has it, or ``"generic"`` (set
-``ASTROVIPER_KERNELS_ISA=generic`` before the import to force it, for tests).
+copies, as much memory again as those arrays, and the residual and model
+written back. ``ISA`` is the instruction set of this process: ``"avx2"`` when
+the CPU has it, or ``"generic"`` (set ``ASTROVIPER_KERNELS_ISA=generic``
+before the import to force it, for tests).
 """
 
+# The extension by its module path: when it is not built, the import raises
+# ModuleNotFoundError naming it (``from <package> import <module>`` would
+# raise a plain ImportError, which ``pytest.importorskip`` does not skip).
+import astroviper._kernels.fast.hogbom._hogbom_fast_ext as _fast
 from astroviper._kernels._switch import report_path
-from astroviper._kernels.fast.hogbom import _hogbom_fast_ext as _fast
 from astroviper._kernels.fast.hogbom._hogbom_fast_ext import ISA
 from astroviper.processing_functions.imaging.deconvolvers.hogbom import (
     _hogbom_ext as _reference,

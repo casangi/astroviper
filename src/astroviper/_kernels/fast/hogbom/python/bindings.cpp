@@ -17,13 +17,21 @@
 // * a residual or model that shares memory with another array argument (the
 //   reference would read values it has already overwritten), and image planes
 //   without pixels (which the reference reads out of bounds);
-// * a call that cannot allocate what it needs before its first write.
+// * a call that cannot allocate what it needs before its first write
+//   (std::bad_alloc, or NumPy's MemoryError for the result arrays).
+//
+// One error is not the reference's: a keyword whose name cannot be encoded
+// as UTF-8 (a lone surrogate) raises RuntimeError here, where the reference
+// binding aborts the process while it formats its TypeError.
 //
 // A misaligned residual, model or PSF, which the reference reads in place
 // (Dask can hand its workers arrays at any offset of the frames it received),
-// is read through an aligned copy, and the residual and the model are then
-// written back. The results are assembled as the reference binding assembles
-// them, the same dtypes, shapes and keys in the same order.
+// is read through an aligned copy, as much memory again as the array, filled
+// and written back without the GIL: the residual and the model are written
+// back after the call, also when it raises after its first write, so that the
+// caller sees what an aligned caller sees. The results are assembled as the
+// reference binding assembles them, the same dtypes, shapes and keys in the
+// same order.
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -33,6 +41,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <optional>
 #include <string>
@@ -191,56 +200,89 @@ py::list per_plane_iteration_history(const std::vector<hclean::IterationHistory>
 }
 
 // The data of an array as the fast path reads or writes it: in place, or an
-// aligned copy of a misaligned array, which restore() writes back.
+// aligned copy of a misaligned array, allocated here with the GIL held and
+// filled by fill() and written back by restore() without it (they touch the
+// raw buffers only; the caller's references keep the array alive).
 template <typename T>
 class Aligned {
 public:
-    explicit Aligned(const py::array& array) : array_(array) {
-        if (has_flag(array, kNpyArrayAligned)) return;
-        copy_.resize(static_cast<std::size_t>(array.size()));
-        if (!copy_.empty()) {
-            std::memcpy(copy_.data(), array.data(), static_cast<std::size_t>(array.nbytes()));
+    explicit Aligned(const py::array& array)
+        : raw_(const_cast<void*>(array.data())), size_(static_cast<std::size_t>(array.size())) {
+        if (!has_flag(array, kNpyArrayAligned) && size_ > 0) {
+            copy_.reset(new T[size_]);  // every element is written by fill()
         }
     }
-    T* data() {
-        return copy_.empty() ? static_cast<T*>(const_cast<void*>(array_.data())) : copy_.data();
+    void fill() {
+        if (copy_) std::memcpy(copy_.get(), raw_, size_ * sizeof(T));
     }
+    T* data() { return copy_ ? copy_.get() : static_cast<T*>(raw_); }
     void restore() {
-        if (!copy_.empty()) std::memcpy(array_.mutable_data(), copy_.data(), copy_.size() * sizeof(T));
+        if (copy_) std::memcpy(raw_, copy_.get(), size_ * sizeof(T));
     }
 
 private:
-    py::array array_;
-    std::vector<T> copy_;
+    void* raw_;  // the array's data, at any alignment (only memcpy reads or writes it)
+    std::size_t size_;
+    std::unique_ptr<T[]> copy_;
 };
 
 // What a call allocates before the fast path runs: the aligned data of the
 // image cubes, the per-plane values (read once, through copies, at any
-// alignment) and the iteration histories.
+// alignment), the iteration histories and the per-plane result arrays,
+// allocated as the reference allocates them.
 template <typename T>
 struct Buffers {
     Buffers(const py::array& residual_cube, const py::array& model_cube, const py::array& psf_cube,
-            const py::array& max_iter, const py::array& threshold, long nplanes, bool record)
+            const py::array& max_iter, const py::array& threshold, int nt, int nf, int np_img,
+            bool record)
         : residual(residual_cube),
           model(model_cube),
           psf(psf_cube),
-          budgets(static_cast<std::size_t>(nplanes)),
-          thresholds(static_cast<std::size_t>(nplanes)),
-          history(record ? static_cast<std::size_t>(nplanes) : 0) {
-        if (nplanes > 0) {
+          budgets(static_cast<std::size_t>(max_iter.size())),
+          thresholds(static_cast<std::size_t>(threshold.size())),
+          history(record ? budgets.size() : 0),
+          iterations({nt, nf, np_img}),
+          final_peak({nt, nf, np_img}),
+          total_flux({nt, nf, np_img}),
+          converged({nt, nf, np_img}),
+          stop_code({nt, nf, np_img}),
+          diverged({nt, nf, np_img}) {
+        if (!budgets.empty()) {
             std::memcpy(budgets.data(), max_iter.data(), budgets.size() * sizeof(int));
             std::memcpy(thresholds.data(), threshold.data(), thresholds.size() * sizeof(T));
         }
+    }
+
+    // The aligned copies of the image cubes (without the GIL).
+    void fill() {
+        residual.fill();
+        model.fill();
+        psf.fill();
+    }
+
+    // The residual and model written back to misaligned caller arrays
+    // (without the GIL).
+    void restore() {
+        residual.restore();
+        model.restore();
     }
 
     Aligned<T> residual, model, psf;
     std::vector<int> budgets;
     std::vector<T> thresholds;
     std::vector<hclean::IterationHistory> history;
+    py::array_t<int> iterations;
+    py::array_t<T> final_peak;
+    py::array_t<T> total_flux;
+    py::array_t<bool> converged;
+    py::array_t<int> stop_code;
+    py::array_t<bool> diverged;
 };
 
+// The call with the bound arguments, or None; sets `written` before its
+// first write.
 template <typename T>
-py::object run(Entry entry, const Bound& bound) {
+py::object run(Entry entry, const Bound& bound, bool& written) {
     const std::optional<py::array> residual = ndarray(bound[kResidual]);
     const std::optional<py::array> psf = ndarray(bound[kPsf]);
     const std::optional<py::array> model = ndarray(bound[kModel]);
@@ -292,11 +334,11 @@ py::object run(Entry entry, const Bound& bound) {
     if (nplanes > INT_MAX || (nplanes > 0 && (ny == 0 || nx == 0))) return py::none();
 
     // Arrays the call writes may share no memory with another argument.
-    for (const py::array* written : {&*residual, &*model}) {
+    for (const py::array* target : {&*residual, &*model}) {
         for (const py::array* other : {&*residual, &*model, &*psf, &*max_iter, &*threshold}) {
-            if (written != other && overlaps(*written, *other)) return py::none();
+            if (target != other && overlaps(*target, *other)) return py::none();
         }
-        if (mask && overlaps(*written, *mask)) return py::none();
+        if (mask && overlaps(*target, *mask)) return py::none();
     }
 
     // The clean box, as the reference parses it (-1: full extent).
@@ -338,26 +380,13 @@ py::object run(Entry entry, const Bound& bound) {
         return py::none();
     }
 
-    // The results, allocated as the reference allocates them.
-    py::array_t<int> iters_arr({nt, nf, np_img});
-    py::array_t<T> final_peaks_arr({nt, nf, np_img});
-    py::array_t<T> total_flux_arr({nt, nf, np_img});
-    py::array_t<bool> converged_arr({nt, nf, np_img});
-    py::array_t<int> stop_code_arr({nt, nf, np_img});
-    py::array_t<bool> diverged_arr({nt, nf, np_img});
-
-    std::optional<Buffers<T>> buffers;
-    try {
-        buffers.emplace(*residual, *model, *psf, *max_iter, *threshold, nplanes, *record);
-    } catch (const std::bad_alloc&) {
-        return py::none();
-    }
+    Buffers<T> b(*residual, *model, *psf, *max_iter, *threshold, nt, nf, np_img, *record);
     {
         hclean_fast::Cube<T> cube{};
         cube.entry = entry;
-        cube.residual = buffers->residual.data();
-        cube.model = buffers->model.data();
-        cube.psf = buffers->psf.data();
+        cube.residual = b.residual.data();
+        cube.model = b.model.data();
+        cube.psf = b.psf.data();
         cube.mask = mask ? static_cast<const std::uint8_t*>(mask->data()) : nullptr;
         cube.nt = nt;
         cube.nf = nf;
@@ -371,60 +400,79 @@ py::object run(Entry entry, const Bound& bound) {
         cube.xend = xend;
         cube.ybeg = ybeg;
         cube.yend = yend;
-        cube.max_iter = buffers->budgets.data();
-        cube.threshold = buffers->thresholds.data();
+        cube.max_iter = b.budgets.data();
+        cube.threshold = b.thresholds.data();
         cube.gain = static_cast<T>(*gain);
         cube.speedup = static_cast<T>(*speedup);
         cube.divergence.max_iter_divergence = *max_iter_divergence;
         cube.divergence.rms_factor = *rms_factor;
         cube.divergence.peak_factor = static_cast<T>(*peak_factor);
         cube.threads = *threads;
-        cube.iterations = iters_arr.mutable_data();
-        cube.stop_code = stop_code_arr.mutable_data();
-        cube.history = *record ? buffers->history.data() : nullptr;
-        cube.final_peak = final_peaks_arr.mutable_data();
-        cube.total_flux = total_flux_arr.mutable_data();
-        cube.converged = converged_arr.mutable_data();
-        // An exception from here on (std::bad_alloc of a growing component
-        // list or history) comes after writes and propagates, as the
-        // reference's would.
+        cube.iterations = b.iterations.mutable_data();
+        cube.stop_code = b.stop_code.mutable_data();
+        cube.history = *record ? b.history.data() : nullptr;
+        cube.final_peak = b.final_peak.mutable_data();
+        cube.total_flux = b.total_flux.mutable_data();
+        cube.converged = b.converged.mutable_data();
         bool done = false;
         {
             py::gil_scoped_release release;
-            done = hclean_fast::clean_cube<T>(cube);
+            b.fill();
+            // clean_cube declines (false) before its first write, so anything
+            // it throws comes after it.
+            written = true;
+            try {
+                done = hclean_fast::clean_cube<T>(cube);
+            } catch (...) {
+                // After the first write (std::bad_alloc of a growing component
+                // list or history): it propagates, as the reference's would,
+                // with the cube partly cleaned, at any alignment.
+                b.restore();
+                throw;
+            }
+            if (done) b.restore();
         }
         if (!done) return py::none();
-        buffers->residual.restore();
-        buffers->model.restore();
     }
 
-    bool* dv = diverged_arr.mutable_data();
-    const int* stop = stop_code_arr.data();
+    bool* dv = b.diverged.mutable_data();
+    const int* stop = b.stop_code.data();
     for (long i = 0; i < nplanes; ++i) dv[i] = (stop[i] == hclean::STOP_DIVERGED);
 
     py::dict results;
-    results["iterations_performed"] = iters_arr;
-    results["final_peak"] = final_peaks_arr;
-    results["total_flux_cleaned"] = total_flux_arr;
-    results["converged"] = converged_arr;
-    results["stop_code"] = stop_code_arr;
-    results["diverged"] = diverged_arr;
+    results["iterations_performed"] = b.iterations;
+    results["final_peak"] = b.final_peak;
+    results["total_flux_cleaned"] = b.total_flux;
+    results["converged"] = b.converged;
+    results["stop_code"] = b.stop_code;
+    results["diverged"] = b.diverged;
     if (*record) {
         for (const auto& [name, member] : kIterationHistoryRecords) {
-            results[name] = per_plane_iteration_history(buffers->history, member, nt, nf, np_img);
+            results[name] = per_plane_iteration_history(b.history, member, nt, nf, np_img);
         }
     }
     return results;
 }
 
+// A call's result, or None. An allocation failure before the first write
+// (`written`, which run() sets) declines the call, as an argument error does.
 py::object call(Entry entry, const py::args& args, const py::kwargs& kwargs) {
-    Bound bound{};
-    if (!match(args, kwargs, bound)) return py::none();
-    const std::optional<py::array> residual = ndarray(bound[kResidual]);
-    if (!residual) return py::none();
-    if (of_type<float>(*residual)) return run<float>(entry, bound);
-    if (of_type<double>(*residual)) return run<double>(entry, bound);
-    return py::none();
+    bool written = false;
+    try {
+        Bound bound{};
+        if (!match(args, kwargs, bound)) return py::none();
+        const std::optional<py::array> residual = ndarray(bound[kResidual]);
+        if (!residual) return py::none();
+        if (of_type<float>(*residual)) return run<float>(entry, bound, written);
+        if (of_type<double>(*residual)) return run<double>(entry, bound, written);
+        return py::none();
+    } catch (const std::bad_alloc&) {
+        if (written) throw;
+        return py::none();
+    } catch (const py::error_already_set& error) {
+        if (written || !error.matches(PyExc_MemoryError)) throw;
+        return py::none();
+    }
 }
 
 }  // namespace
