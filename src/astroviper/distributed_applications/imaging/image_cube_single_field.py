@@ -713,6 +713,28 @@ def image_cube_single_field(
         - ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every
           pixel inside ``primary_beam_limit``. ``False`` measures it outside the
           mask or, without a mask, on the pixels Chauvenet's criterion leaves.
+    least_squares_params : dict or None, optional
+        Least-squares solve of the sky model inside the clean mask, a
+        prototype. ``None`` makes no solve. A dict adds one last imaging cycle
+        once the stop test has ended the others: its model update solves
+        ``M P M d = M R`` by conjugate residual, with ``M`` the clean mask of
+        the plane, ``P`` the PSF of twice the image size and ``R`` the
+        residual, and adds ``d`` to the model. ``max_cycles`` sets how many
+        CLEAN model updates come first, and they must have finished the mask.
+        Needs ``clean_mask`` or ``auto_mask_params``, and no ``clean_box``.
+        The model keeps no sign and nothing limits what is fitted inside the
+        mask, noise included. With ``record_iteration_history`` each step is
+        an entry with pixel -1 and scale -2.
+
+        - ``max_steps`` : Most steps per plane, each one FFT pair on the
+          bounding box of the mask. A plane stops earlier when the RMS of its
+          residual outside the mask, in that box, has fallen by less than 5
+          percent over 200 steps; a mask that fills its box, such as a
+          rectangle or the whole image, has no such stop.
+        - ``smooth_fwhm_pixels`` (optional) : FWHM, in pixels, of a Gaussian
+          the model increment is made of, within the mask, so that the solve
+          fits only structure that wide. For images whose residual is at the
+          noise, where an unsmoothed solve fits noise within a few steps.
     skunk_works : bool
         If ``True`` use the experimental performance I/O path in each node task:
         load only the data group's data variables straight from the Zarr chunk
@@ -1056,7 +1078,8 @@ def image_cube_single_field(
             thread_info,
             exact_psf_subtraction=cycle_control_params.get(
                 "exact_psf_subtraction", False
-            ),
+            )
+            or least_squares_params is not None,
             fft_padding=image_params.get("fft_padding"),
         )
     )
@@ -1661,7 +1684,8 @@ def calculate_mapping_parallelism_for_cube_imaging(
         Thread information as returned by :func:`get_thread_info`.
         If ``None``, thread information is queried automatically.
     exact_psf_subtraction : bool, optional
-        ``cycle_control_params["exact_psf_subtraction"]``: a channel also
+        ``cycle_control_params["exact_psf_subtraction"]`` or a least-squares
+        solve (``least_squares_params``): a channel also
         holds the PSF of twice the image size and, while it is made, the uv
         grid of every polarization and four FFT planes on its padded grid.
         Default ``False``.

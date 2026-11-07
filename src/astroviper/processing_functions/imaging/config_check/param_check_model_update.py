@@ -359,6 +359,11 @@ def check_model_update(config, *, mode, require_complete=False):
                     raise ValueError(
                         "clean_box must fit the image geometry: xmax <= size of m, ymax <= size of l."
                     )
+            # The solve fits the whole clean mask.
+            if config.get("least_squares_params") is not None:
+                raise ValueError(
+                    "least_squares_params solves the whole clean mask; give the box as clean_mask, not clean_box."
+                )
 
     # --- Requested scales ---
     # Validate the exact list before the kernel can sort or discard any scale.

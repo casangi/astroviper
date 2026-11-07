@@ -234,3 +234,18 @@ def test_unknown_report_format_is_refused(processing_set, tmp_path):
     with pytest.raises(AssertionError):  # the param.json schema
         _image(processing_set, str(tmp_path / "cube.img.zarr"), report="docx")
     assert not (tmp_path / "cube.img.zarr").exists()
+
+
+def test_the_least_squares_solve_through_the_driver(processing_set, tmp_path):
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[20:44, 20:44] = True
+    np.save(tmp_path / "mask.npy", mask)
+    result = _image(
+        processing_set,
+        str(tmp_path / "cube.img.zarr"),
+        clean_mask=str(tmp_path / "mask.npy"),
+        least_squares_params={"max_steps": 5},
+    )
+    for fields in result["deconvolution"].data.values():
+        assert len(fields["iter_done"]) == CYCLE_CONTROL_PARAMS["max_cycles"] + 2
+        assert fields["iter_done"][-1] == 0

@@ -1051,8 +1051,8 @@ def deconvolve(
     if "least_squares_rms_outside_mask" in results:
         rms_outside = results["least_squares_rms_outside_mask"]
         for key, fields in imaging_dict.data.items():
-            fields["least_squares_rms_outside_mask"] = rms_outside.get(
-                (key.time, key.chan, key.pol), []
+            fields["least_squares_rms_outside_mask"] = np.asarray(
+                rms_outside.get((key.time, key.chan, key.pol), [])
             )
     return imaging_dict
 

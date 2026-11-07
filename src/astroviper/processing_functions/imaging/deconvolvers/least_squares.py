@@ -2,6 +2,7 @@
 
 import numpy as np
 import scipy.fft
+import scipy.ndimage
 
 from astroviper.processing_functions.image_analysis.make_auto_mask import _bounding_box
 from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -9,16 +10,19 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     MODEL_UPDATE_DIVERGENCE,
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,
 )
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    COMPONENT_COUNT_FIELDS,
+)
 
-# A plane stops when the RMS of its residual outside the mask, which noise
-# fitted inside the mask cannot lower, has fallen by less than STOP_MIN_FALL
-# over the last STOP_WINDOW steps. Checked every STOP_EVERY steps.
+# A plane stops when the RMS of its residual outside the mask has fallen by
+# less than STOP_MIN_FALL over the last STOP_WINDOW steps. Checked every
+# STOP_EVERY steps.
 STOP_EVERY = 25
 STOP_WINDOW = 200
 STOP_MIN_FALL = 0.05
 
-# Energy below this share of the first step's is rounding, not residual.
-ROUNDING = 1e-24
+# A plane also stops when its energy falls below this share of the first step's.
+STOP_MIN_ENERGY = 1e-24
 
 
 def _psf_spectrum(psf, height, width, workers):
@@ -44,8 +48,13 @@ def _psf_spectrum(psf, height, width, workers):
     return scipy.fft.rfft2(kernel, workers=workers), shape
 
 
-def _solve_plane(residual, model, mask, psf, max_steps, workers, record):
-    """Conjugate residual on ``M P M d = M R``, ``residual`` and ``model`` in place.
+def _solve_plane(
+    residual, model, mask, psf, max_steps, workers, record, smooth_fwhm_pixels=None
+):
+    """Conjugate residual on ``S M P M S c = S M R``, ``residual`` and ``model`` in place.
+
+    ``S`` is the identity, or with ``smooth_fwhm_pixels`` a Gaussian of that
+    FWHM within the mask, so that the model changes by ``S c``.
 
     Returns
     -------
@@ -74,22 +83,36 @@ def _solve_plane(residual, model, mask, psf, max_steps, workers, record):
             :, :width
         ]
 
+    def basis(image):
+        masked = np.where(inside, image, 0.0)
+        if smooth_fwhm_pixels is None:
+            return masked
+        smoothed = scipy.ndimage.gaussian_filter(
+            masked,
+            smooth_fwhm_pixels / (2 * np.sqrt(2 * np.log(2))),
+            mode="constant",
+            truncate=3.5,
+        )
+        return np.where(inside, smoothed, 0.0)
+
     current = residual[box].astype(np.float64)
     update = np.zeros_like(current)
-    search = np.where(inside, current, 0.0)
+    search = basis(current)
+    shaped = basis(search)
+    search_response = convolve(shaped)
     direction = search.copy()
-    search_response = convolve(search)
+    shaped_direction = shaped.copy()
     direction_response = search_response.copy()
-    energy = first_energy = float(np.vdot(search, search_response))
+    energy = first_energy = float(np.vdot(search, basis(search_response)))
 
     history = {"peak": [], "rms": [], "flux": [], "rms_outside": []}
     window = STOP_WINDOW // STOP_EVERY
     stop_code = MODEL_UPDATE_MAX_ITER_PER_CYCLE
     steps = 0
     while steps < max_steps:
-        masked_response = direction_response[inside]
+        masked_response = basis(direction_response)
         curvature = float(np.vdot(masked_response, masked_response))
-        if not (energy > ROUNDING * first_energy and curvature > 0):
+        if not (energy > STOP_MIN_ENERGY * first_energy and curvature > 0):
             stop_code = (
                 MODEL_UPDATE_ALGORITHM
                 if np.isfinite(energy)
@@ -98,17 +121,19 @@ def _solve_plane(residual, model, mask, psf, max_steps, workers, record):
             break
         length = energy / curvature
         if record:
-            history["peak"].append(float(search.flat[np.abs(search).argmax()]))
-            history["flux"].append(length * float(direction.sum()))
-        update += length * direction
+            masked = np.where(inside, current, 0.0)
+            history["peak"].append(float(masked.flat[np.abs(masked).argmax()]))
+            history["flux"].append(length * float(shaped_direction.sum()))
+        update += length * shaped_direction
         current -= length * direction_response
-        search = np.where(inside, current, 0.0)
+        search = basis(current)
         steps += 1
         if record:
-            history["rms"].append(float(np.sqrt(np.vdot(search, search) / n_inside)))
+            masked = np.where(inside, current, 0.0)
+            history["rms"].append(float(np.sqrt(np.vdot(masked, masked) / n_inside)))
         if steps % STOP_EVERY == 0 and outside.any():
             rms_outside = history["rms_outside"]
-            rms_outside.append(float(current[outside].std()))
+            rms_outside.append(float(np.sqrt(np.mean(current[outside] ** 2))))
             if (
                 len(rms_outside) > window
                 and rms_outside[-1] > (1 - STOP_MIN_FALL) * rms_outside[-1 - window]
@@ -117,10 +142,12 @@ def _solve_plane(residual, model, mask, psf, max_steps, workers, record):
                 break
         if steps == max_steps:
             break
-        search_response = convolve(search)
-        previous, energy = energy, float(np.vdot(search, search_response))
+        shaped = basis(search)
+        search_response = convolve(shaped)
+        previous, energy = energy, float(np.vdot(search, basis(search_response)))
         beta = energy / previous
         direction = search + beta * direction
+        shaped_direction = shaped + beta * shaped_direction
         direction_response = search_response + beta * direction_response
 
     model[box] += update.astype(model.dtype)
@@ -185,15 +212,15 @@ def least_squares_solve(
     processing_function_threads : int, optional
         FFT workers.
     mask_cube : numpy.ndarray
-        ``(nt, nf, np, ny, nx)`` clean mask. A plane without a mask pixel, with
-        a residual that is zero or not finite in its mask, is left as it is.
+        ``(nt, nf, np, ny, nx)`` bool clean mask. A plane without a mask pixel,
+        with a residual that is zero or not finite in its mask, is left as it is.
     input_checked : bool, optional
         ``True`` when a caller has checked ``least_squares_params``.
 
     Returns
     -------
     dict
-        ``iterations_performed`` and ``stop_code`` per plane, the component
+        ``iterations_performed`` and ``stop_code`` per plane, zero component
         counts, ``least_squares_rms_outside_mask``, and the iteration history
         when it is asked for.
     """
@@ -223,12 +250,12 @@ def least_squares_solve(
             least_squares_params["max_steps"],
             processing_function_threads,
             record,
+            least_squares_params.get("smooth_fwhm_pixels"),
         )
     results = {
         "iterations_performed": steps,
         "stop_code": stop_code,
-        "n_point_components": np.zeros_like(steps),
-        "n_scale_components": np.zeros_like(steps),
+        **{field: np.zeros_like(steps) for field in COMPONENT_COUNT_FIELDS},
         "least_squares_rms_outside_mask": {
             index: fields["rms_outside"] for index, fields in history.items()
         },
