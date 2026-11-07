@@ -15,15 +15,16 @@ w) before anything is written:
     a GEMM over the folded model per model plane, with the phases ``u l`` and
     ``v m`` exact before one rounding of the reduced angle, so that its error
     does not grow with the phase (the reference's does). What remains is the
-    rounding of its sums, usually a few eps sum|M/n| and at most about the
-    chain length's worth; they run in another order than the reference's, so
-    at a given sample the reference can be the closer. A complex64 sample
-    within an ulp of the float32 overflow threshold can round to inf where
-    the reference's gives the largest float32. It writes the
-    samples that the reference writes and no other. A sample's bits do not
-    depend on the threads or the instruction set, nor on how the rows and
-    channels are split into calls that take S (a split can change the path of
-    a part, as the path is decided per call).
+    rounding of the weights M / n, which it shares with the reference bit for
+    bit (large only near the horizon, where n is ill-conditioned), and of its
+    own sums: usually a few eps sum|M/n|, at most about the chain length's
+    worth, and in another order than the reference's, so that at a given
+    sample the reference can be the closer. At the edge of float32's range, a
+    complex64 sample of one kernel can overflow to inf where the other's is
+    finite. It writes the samples that the reference writes and no other. A
+    sample's bits do not depend on the threads or the instruction set, nor on
+    how the rows and channels are split into calls that take S (a split can
+    change the path of a part, as the path is decided per call).
 ``"declined"``
     Anything else, including every call the reference binding would convert
     or reject and a call that cannot allocate its buffers or start its
