@@ -8,10 +8,11 @@ entry, which returns it. Small inputs only.
   finite turns).
 * Path S is accurate: the oracle bounds (``oracles.py``) in the output dtype,
   per sample, on random and adversarial coherent inputs, against the exact
-  sum, against the reference's error there (the plan's bound (2)) and against
-  the exact sum of the weights path S shares with the reference (at any
-  phase, its phases being exact); a slightly perturbed result fails the
-  bounds.
+  sum and against the exact sum of the weights path S shares with the
+  reference (at any phase, its phases being exact), and against the
+  reference's error there (the plan's bound (2), which holds for these inputs
+  but not for every summation order); a slightly perturbed or a non-finite
+  result fails the bounds.
 * Path S is invariant: bitwise across thread counts, splits of the rows into
   calls, concurrent calls, and the generic and AVX2 routines (two
   subprocesses), also through the depth-blocked GEMM of wide images.
@@ -175,7 +176,9 @@ def _plane_terms(call):
 
 def _ulp(x, dtype):
     real = np.finfo(np.dtype(dtype)).dtype
-    return np.spacing(np.abs(x).astype(np.float64).astype(real)).astype(oracles.LONG)
+    with np.errstate(invalid="ignore"):  # NaN for a non-finite x
+        y = np.spacing(np.abs(x).astype(np.float64).astype(real))
+    return y.astype(oracles.LONG)
 
 
 def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
@@ -190,10 +193,15 @@ def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
         quotients) x 2^-1074 for subnormal values;
     (2) |V_fast - V_or| <= |V_ref - V_or| + (16 + kappa) eps sum|M/n| + U
         + 1 ulp_out: the plan's bound (2), path S at least as close to the
-        exact sum as the reference at every sample, with the same two terms
-        (the weights' error, which both kernels share bit for bit, can exceed
-        16 eps sum|M/n| only through kappa or U, and the reference's other
-        errors can cancel part of it at a sample);
+        exact sum as the reference, with the same two terms (the weights'
+        error, which both kernels share bit for bit, can exceed 16 eps
+        sum|M/n| only through kappa or U, and the reference's other errors
+        can cancel part of it at a sample). It is checked on the inputs
+        here, but it is not a per-sample bound: path S's own rounding error
+        is bounded by its chain length only, as in (1t), and its folded order
+        (mirror pairs, then unpaired columns) can sum a bright pixel before
+        faint ones that the reference sums first, where the reference is the
+        closer (``test_folded_order_keeps_the_chain_bounds``);
     (1t) |V_fast - V_kw| <= (L + 8) eps sum|W| + U + 1/2 ulp_out against
         V_kw, the exact sum of the weights W that path S shares with the
         reference (``oracles.predict(kernel_weights=True)``): path S's own
@@ -204,13 +212,14 @@ def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
 
     Path S's phases are exact (``dft_s_kernels.inc``), so its error does not
     grow with T, while the reference's does (it rounds u l, v m and their sum,
-    up to about 2 pi T eps sum|M/n|): bound (2) holds because path S's own
-    error and the shared one are each a few eps sum|M/n| at most.
+    up to about 2 pi T eps sum|M/n|): where its terms' roundings do not line
+    up, as here, path S's own error and the shared one are a few eps
+    sum|M/n| each, and bound (2) holds.
 
     ulp_out is that of the largest of |V_oracle| and |V_fast| (and |V_ref| for
     bound (2)) in the output dtype. Only the predicted samples count (``keep``
-    excludes others, such as NaN outputs). Returns ``{criterion: number of
-    failing components}``.
+    excludes others, such as NaN outputs); a NaN or infinite output there
+    fails every bound. Returns ``{criterion: number of failing components}``.
     """
     exact, norm, turns = oracles.predict(**call)
     weighted, norm_weighted, _ = oracles.predict(**call, kernel_weights=True)
@@ -241,17 +250,21 @@ def _violations(call, v_fast, v_ref, v_ref128=None, keep=True):
             np.maximum(np.maximum(np.abs(x_or), np.abs(x_fast)), np.abs(x_ref)), dtype
         )
         ulp_weighted = _ulp(np.maximum(np.abs(x_kw), np.abs(x_fast)), dtype)
+        # Each bound counts the components it cannot confirm (not error <=
+        # budget), so that a NaN, which compares false, fails it.
         error = np.abs(x_fast - x_or)
-        failed["bound1"] += int(np.sum(error > budget + ulp / 2))
-        failed["bound2"] += int(np.sum(error > np.abs(x_ref - x_or) + budget2 + ulp2))
+        failed["bound1"] += int(np.sum(~(error <= budget + ulp / 2)))
+        failed["bound2"] += int(
+            np.sum(~(error <= np.abs(x_ref - x_or) + budget2 + ulp2))
+        )
         failed["bound1t"] += int(
-            np.sum(np.abs(x_fast - x_kw) > budget_weighted + ulp_weighted / 2)
+            np.sum(~(np.abs(x_fast - x_kw) <= budget_weighted + ulp_weighted / 2))
         )
         if v_fast.dtype == np.complex64:
             ref128 = np.abs(part(v_ref128[used]).astype(oracles.LONG) - x_or)
             ulp32 = _ulp(np.maximum(np.abs(x_fast), np.abs(x_ref)), np.float32)
             failed["complex64"] += int(
-                np.sum(np.abs(x_fast - x_ref) > ulp32 + budget + ref128)
+                np.sum(~(np.abs(x_fast - x_ref) <= ulp32 + budget + ref128))
             )
     return failed
 
@@ -427,6 +440,42 @@ def test_the_bounds_detect_a_perturbed_result():
         perturbed = v_fast.copy()
         perturbed[k] += sign * error
         assert _violations(call, perturbed, v_ref) == ACCURATE | failed
+
+
+@needs_oracle
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_the_bounds_detect_a_non_finite_result(dtype, bad):
+    """A NaN or infinite part of a predicted sample fails every bound."""
+    call = _call(_stokes_i(7, 12, 12))
+    path, v_fast = _path(call, dtype)
+    v_ref = _run(reference, call, dtype)
+    v_ref128 = _run(reference, call) if dtype == np.complex64 else None
+    assert path == "S" and _violations(call, v_fast, v_ref, v_ref128) == ACCURATE
+    v_fast[0, 0, 0, 0] = complex(bad, v_fast[0, 0, 0, 0].imag)
+    failed = {"bound1": 1, "bound2": 1, "bound1t": 1}
+    failed |= {"complex64": 1} if dtype == np.complex64 else {}
+    assert _violations(call, v_fast, v_ref, v_ref128) == ACCURATE | failed
+
+
+@needs_oracle
+def test_folded_order_keeps_the_chain_bounds():
+    """Bound (2) is not a per-sample bound. A 1 x 65 strip at u = v = 0: 1.0 at
+    the one positive m and 64 pixels of 2^-53 at m < 0. The reference sums the
+    faint pixels first and gets the exact 1 + 2^-47; path S sums the bright
+    pixel's mirror pair first, and adds each faint pixel to 1.0 in vain (64 eps
+    sum|M/n| off). Bounds (1) and (1t), which allow path S its chain length
+    (65), hold; bound (2), with the reference exact, fails."""
+    delta = 1e-12
+    model = np.array([2.0**-53] * 64 + [1.0]).reshape(1, 1, 1, 1, 65)
+    call = _call(model, n_time=1, n_baseline=1, frequency=(C,))
+    call["uvw"][...] = 0.0
+    call["l"] = np.array([0.0])
+    call["m"] = np.array([-k * delta for k in range(64, 0, -1)] + [delta])
+    path, v_fast = _path(call)
+    v_ref = _run(reference, call)
+    assert path == "S" and v_fast.item() == 1.0 and v_ref.item() == 1.0 + 2.0**-47
+    assert _violations(call, v_fast, v_ref) == ACCURATE | {"bound2": 1}
 
 
 @needs_oracle
@@ -770,6 +819,30 @@ def test_declined_calls_are_the_reference(name):
     assert ext.dft_predict(*args, **kwargs) == "declined"
     assert [a.tobytes() for a in args if isinstance(a, np.ndarray)] == before
     assert _outcome(fast, DECLINED[name]) == _outcome(reference, DECLINED[name])
+
+
+def test_an_unencodable_keyword_is_the_reference(run_python):
+    """A keyword name that UTF-8 cannot encode declines (names are compared in
+    place, by no conversion that could raise), and the call is then the
+    reference's. The reference binding aborts on it (pybind11 formatting its
+    error message), so each outcome is that of a fresh interpreter."""
+    code = (
+        "import sys\n"
+        "import numpy as np\n"
+        "from astroviper._kernels import impl\n"
+        "from astroviper._kernels.fast.dft import _dft_fast_ext as ext\n"
+        "args = [np.ones((1, 1, 1, 1, 1)), np.zeros((1, 1, 1, 1), complex),\n"
+        "        np.zeros((1, 1, 3)), np.array([1e9]), *[np.zeros(1, np.int64)] * 3,\n"
+        "        np.zeros(1), np.zeros(1)]\n"
+        "if sys.argv[1] == 'fast':\n"
+        "    print(ext.dft_predict(*args, **{'\\udcff': 2}), flush=True)\n"
+        "impl('dft', 'dft_predict', sys.argv[1])(*args, **{'\\udcff': 2})\n"
+    )
+    fast_run, ref_run = (
+        run_python("-c", code, name, check=False) for name in ("fast", "ref")
+    )
+    assert fast_run.stdout == "declined\n"
+    assert fast_run.returncode == ref_run.returncode != 0
 
 
 @pytest.mark.parametrize(

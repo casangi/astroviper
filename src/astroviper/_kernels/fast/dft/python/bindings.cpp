@@ -34,7 +34,6 @@
 #include <complex>
 #include <cstdint>
 #include <optional>
-#include <string>
 #include <utility>
 
 #include "dft_fast.hpp"
@@ -55,14 +54,18 @@ constexpr std::array<const char*, 10> kParameters = {
     "time_map", "pol_map", "l",   "m",               "processing_function_threads"};
 
 // The arguments matched to the parameters as pybind11 matches them, or false
-// where the reference's call would fail.
+// where the reference's call would fail. Names are compared in place, so that
+// matching allocates nothing and cannot raise (an unencodable name declines).
 bool match(const py::args& args, const py::kwargs& kwargs,
            std::array<py::handle, kParameters.size()>& bound) {
     if (args.size() > kParameters.size()) return false;
     for (std::size_t i = 0; i < args.size(); ++i) bound[i] = args[i].ptr();
     for (const auto& [key, value] : kwargs) {
-        const auto name = key.cast<std::string>();
-        const auto* found = std::find(kParameters.begin(), kParameters.end(), name);
+        const auto* found =
+            std::find_if(kParameters.begin(), kParameters.end(), [&](const char* name) {
+                return PyUnicode_Check(key.ptr()) &&
+                       PyUnicode_CompareWithASCIIString(key.ptr(), name) == 0;
+            });
         if (found == kParameters.end()) return false;
         py::handle& slot = bound[static_cast<std::size_t>(found - kParameters.begin())];
         if (slot) return false;  // given by position and by name
