@@ -17,11 +17,18 @@ and a 480 x 8192 plane, whose scale convolutions do not fit the fused pass.
   count, pickled arrays, misaligned arrays (the PSF and mask read in place,
   the residual and model through aligned copies), aliased arrays, empty
   planes (the reference crashes on them), concurrent calls of every kind with
-  the GIL released, and a call at 1 thread starts no thread.
+  the GIL released, and a call at 1 thread starts no thread; with flush-to-zero
+  or directed rounding set on the calling thread only, the bits do not depend
+  on the thread count.
 * Calls that decline to the reference (a PSF or model that is not finite or
-  of magnitude 2^64 or more, such a residual where it is searched): the
-  reference's outcome at the same thread count, traced with path
-  ``"declined"``; NaN, infinite and huge values elsewhere do not decline.
+  of magnitude 2^64 or more, such a residual where it is searched, a model
+  that overlaps the residual): the reference's outcome at the same thread
+  count, traced with path ``"declined"``; NaN, infinite and huge values
+  elsewhere do not decline. In a cube only such planes run the reference,
+  each alone, with the share of the threads its cube driver gives a plane.
+* Initial scales beyond the range of int (asp_psf_width up to 4e307, a PSF
+  much wider than the image), where the reference's conversions are
+  undefined: the values of its compiled code.
 * The scenes of #410's tests and more (``asp_min_mask_coverage``): two mask
   boxes, a tight mask with holes, soft masks, a full mask and no mask, a mask
   too small for every scale, fits cut back (to the widest Gaussian on the
@@ -44,11 +51,14 @@ and a 480 x 8192 plane, whose scale convolutions do not fit the fused pass.
   refused value.
 """
 
+import importlib
 import json
 import math
 import os
 import pickle
+import platform
 import re
+import sys
 import threading
 import time
 from functools import cache
@@ -816,6 +826,54 @@ def test_unfused_scale_convolutions():
         _check(inputs, threads=(1, 6), **BASES[base], **RECORD)
 
 
+# ---------------------------------------------------------------- huge scales
+@cache
+def _extended_scene(masked):
+    """A 64^2 plane of extended positive emission and two points, so that the
+    smoothed residual of a scale far wider than the image (the sum of the
+    residual) beats the peak; a disk mask or none."""
+    n = 64
+    psf = _psf(n, n)
+    sky = _gauss(n, n, 30, 34, 6.0, 1e-3)
+    sky[20, 40] += 2e-3
+    sky[44, 25] += 1.5e-3
+    mask = _disk(n, n, 32, 32, 26.0) if masked else None
+    quiet = _disk(n, n, 32, 32, 26.0) < 0.5
+    dirty = _noisy(sky, psf, n, quiet, 2e-5)
+    return _plane(psf, dirty, mask, _threshold(dirty, mask, 0.05), 12)
+
+
+#: asp_psf_width values whose initial scales (1, 2, 4 and 8 widths) reach
+#: beyond the range of int where the reference converts them to int (an
+#: undefined conversion, then signed overflow): 1e8 the noise border of the
+#: widest scale (3 x 8e8 px); 2e8 its mask border too (1.5 x 1.6e9 px), which
+#: on x86 then zeroes nothing, so that scale is searched; 1e9 and 1e300 every
+#: scale; 4e307 the widest scale infinite.
+HUGE_WIDTHS = (1e8, 2e8, 1e9, 1e300, 4e307)
+
+
+@pytest.mark.parametrize("masked", [False, True], ids=["no_mask", "disk"])
+@pytest.mark.parametrize("base", ["kernel", "coral"])
+@pytest.mark.parametrize("width", HUGE_WIDTHS)
+def test_scale_sizes_beyond_the_range_of_int(width, base, masked):
+    _check(_extended_scene(masked), **(BASES[base] | RECORD | {"asp_psf_width": width}))
+
+
+def test_a_psf_wider_than_the_image():
+    """A PSF flat to 2^-52 per pixel^2 (1 - 2^-52 r^2, exact in float64): its
+    estimated width is about 1.1e8 px, so the noise border of the widest
+    initial scale is beyond the range of int."""
+    n = 9
+    yy, xx = np.mgrid[0:n, 0:n]
+    psf = 1.0 - 2.0**-52 * ((xx - n // 2) ** 2 + (yy - n // 2) ** 2)
+    dirty = 1e-3 * np.cos(0.9 * xx + 0.4) * np.sin(0.7 * yy + 0.2)
+    dirty[3, 5] += 4e-3
+    inputs = _plane(psf, dirty, None, 0.0, 8)
+    for base in ("kernel", "coral"):
+        *_, result = _check(inputs, **BASES[base], **RECORD)
+        assert 3 * 8 * result["psf_width"] >= 2**31
+
+
 # ---------------------------------------------------------------- cubes
 @cache
 def _cube(dtype=np.float64, broadcast=False):
@@ -979,17 +1037,145 @@ def test_values_that_do_not_decline(name, dtype):
         _check(inputs, **BASES[base], **RECORD)
 
 
-def test_a_cube_with_one_declined_plane():
-    """A NaN PSF pixel in one plane: the reference runs the whole cube, whose
-    planes share its threads."""
+def _edited_cube(**edits):
+    """``_cube()`` with ``{argument: [(index, value)]}`` set (copies)."""
     cube = dict(_cube())
-    psf = cube["psf"].copy()
-    psf[0, 1, 0, 3, 5] = np.nan
-    psf.flags.writeable = False
-    cube["psf"] = psf
-    _check_at_the_same_counts(
-        cube, (1, 2, 5), entry="clean_cube", **KERNEL, record_iteration_history=True
+    for argument, values in edits.items():
+        array = np.array(cube[argument])
+        for index, value in values:
+            array[index] = value
+        array.flags.writeable = False
+        cube[argument] = array
+    return cube
+
+
+def _nan_plane_cube():
+    """``_cube()`` with a NaN in the search region of plane (0, 1, 1) and no
+    iterations there, as ``deconvolution.asp_clean`` makes such a plane."""
+    return _edited_cube(
+        residual=[((0, 1, 1, 64, 70), np.nan)],
+        mask=[((0, 1, 1, 64, 70), 1.0)],
+        max_iter_per_cycle_updated=[((0, 1, 1), 0)],
     )
+
+
+def test_a_cube_with_one_declined_plane():
+    """A NaN PSF pixel in plane (0, 1, 0): that plane alone runs the reference,
+    with the threads the reference's driver gives it (1 here: 1, 2 and 5
+    threads of the cube for 6 planes), the others the fast kernel: the
+    reference's bits at 1 thread."""
+    cube = _edited_cube(psf=[((0, 1, 0, 3, 5), np.nan)])
+    options = KERNEL | {"record_iteration_history": True}
+    expected = _call(REFERENCE["clean_cube"], cube, 1, options)
+    for threads in (1, 2, 5):
+        got = _call(FAST["clean_cube"], cube, threads, options)
+        _assert_same(got, expected, f"clean_cube at {threads} threads")
+
+
+def test_a_cube_with_a_nan_plane_as_deconvolution_makes_it():
+    """Its other planes run the fast kernel; the NaN plane, cleaned by the
+    reference with no iterations, has the same bits at any thread count."""
+    _check(
+        _nan_plane_cube(),
+        threads=(1, 2, 3, 6, 12),
+        entry="clean_cube",
+        **CORAL,
+        record_iteration_history=True,
+    )
+
+
+def test_only_the_declined_planes_run_the_reference(monkeypatch):
+    """The reference's clean_cube gets each plane that needs it, alone: a
+    1 x 1 x 1 cube with the plane's own iteration limit and the threads the
+    reference's driver gives a plane (12 // 6 for 6 planes)."""
+    module = importlib.import_module(
+        "astroviper.processing_functions.imaging.deconvolvers.aspclean._aspclean_ext"
+    )
+    original, calls = module.clean_cube, []
+
+    def clean_cube(**arguments):
+        calls.append(
+            (
+                arguments["residual"].shape,
+                arguments["max_iter_per_cycle_updated"].tolist(),
+                arguments["processing_function_threads"],
+            )
+        )
+        return original(**arguments)
+
+    cube = _nan_plane_cube()
+    expected = _call(original, cube, 4, CORAL)
+    monkeypatch.setattr(module, "clean_cube", clean_cube)
+    _assert_same(_call(FAST["clean_cube"], cube, 12, CORAL), expected, "clean_cube")
+    assert calls == [((1, 1, 1, 128, 128), [[[0]]], 2)]
+
+
+def _overlapping_cube(name):
+    """The NaN-plane cube with arrays that share memory: one array as the
+    residual and the model, as the residual and the PSF, or a model one row
+    into the residual's buffer."""
+    cube = _nan_plane_cube()
+    residual = np.array(cube["residual"])
+    if name == "model_is_residual":
+        return cube | {"residual": residual, "model": residual}
+    if name == "psf_is_residual":
+        return cube | {
+            "residual": residual,
+            "psf": residual,
+            "model": np.zeros_like(residual),
+        }
+    buffer = np.zeros(residual.size + 128)
+    shared = buffer[: residual.size].reshape(residual.shape)
+    shared[...] = residual
+    return cube | {"residual": shared, "model": buffer[128:].reshape(residual.shape)}
+
+
+@pytest.mark.parametrize(
+    "name, threads, path",
+    [
+        ("model_is_residual", 3, "fast"),
+        ("psf_is_residual", 3, "declined"),
+        # the reference's planes race on the overlap at more than 1 thread
+        ("model_overlaps_residual", 1, "declined"),
+    ],
+)
+def test_cube_arrays_that_overlap(name, threads, path, monkeypatch, tmp_path):
+    """A model that is the residual itself: the declined plane runs alone, the
+    others are updated in place. A PSF that is the residual, or a model one
+    row into the residual's buffer: the reference runs the whole cube."""
+    options = CORAL | {"record_iteration_history": True}
+
+    def run(function):
+        cube = _overlapping_cube(name)
+        result = function(**cube, processing_function_threads=threads, **options)
+        return np.array(cube["residual"]), np.array(cube["model"]), result
+
+    expected = run(REFERENCE["clean_cube"])
+    _assert_same(run(FAST["clean_cube"]), expected, name)
+    assert _trace_of(monkeypatch, tmp_path, "clean_cube", run) == ("fast", path, None)
+
+
+def test_a_model_that_overlaps_the_residual(monkeypatch, tmp_path):
+    """A model one row into the residual's buffer, at 4 threads: the
+    reference's bits (it updates the two in one order at any thread count)."""
+    inputs = _scene("holes")
+
+    def run(function, threads=4):
+        n = inputs["residual"].shape[1]
+        buffer = np.zeros(inputs["residual"].size + n)
+        residual = buffer[: inputs["residual"].size].reshape(inputs["residual"].shape)
+        residual[...] = inputs["residual"]
+        model = buffer[n:].reshape(residual.shape)
+        arguments = inputs | {"residual": residual, "model": model}
+        result = function(
+            **arguments, processing_function_threads=threads, **KERNEL, **RECORD
+        )
+        return np.array(residual), np.array(model), result
+
+    expected = run(REFERENCE["clean"], 1)
+    _assert_same(run(REFERENCE["clean"]), expected, "the reference at 4 threads")
+    _assert_same(run(FAST["clean"]), expected, "clean")
+    assert _trace_of(monkeypatch, tmp_path, "clean", run) == ("fast", "declined", None)
 
 
 def test_cube_without_planes_still_checks_the_controls():
@@ -1375,9 +1561,10 @@ def _shifted_call(function, inputs, threads, options):
 def test_concurrent_calls():
     """Python threads in the fast kernel at once (the GIL is released): planes
     and cubes, a plane whose large buffers are mapped, misaligned arrays, a
-    declined call and calls that raise; each gives the outcome the reference
-    gives at the same thread count (on aligned arrays: it reads misaligned
-    ones in place, which is undefined)."""
+    declined call, cubes with a plane that the reference cleans (from the
+    cube's worker threads, which take the GIL for it) and calls that raise;
+    each gives the outcome the reference gives at the same thread count (on
+    aligned arrays: it reads misaligned ones in place, which is undefined)."""
     jobs = {  # name -> (entry, inputs, threads, options, misaligned)
         "holes": ("clean", _scene("holes"), 3, KERNEL | RECORD, False),
         "negcut": ("clean", _scene("negcut"), 1, KERNEL | RECORD, False),
@@ -1392,6 +1579,14 @@ def test_concurrent_calls():
         "mapped": ("clean", _mapped_plane(), 2, CORAL | RECORD, False),
         "misaligned": ("clean", _scene("cut_back_60"), 2, KERNEL | RECORD, True),
         "misaligned_cube": ("clean_cube", _cube(), 3, KERNEL, True),
+        "nan_plane_cube": (
+            "clean_cube",
+            _nan_plane_cube(),
+            3,
+            CORAL | {"record_iteration_history": True},
+            False,
+        ),
+        "misaligned_nan_plane_cube": ("clean_cube", _nan_plane_cube(), 2, KERNEL, True),
         "declined": (
             "clean",
             _edited("psf_nan_and_minus_inf"),
@@ -1505,17 +1700,102 @@ def test_a_call_at_one_thread_starts_no_thread(run_python):
     assert after == before
 
 
+FP_STATE = """
+import ctypes, hashlib, json
+import numpy as np
+from astroviper._kernels import impl
+
+libm = ctypes.CDLL("libm.so.6")
+mode = ctypes.create_string_buffer(8)  # glibc x86-64 femode_t: x87 control word, MXCSR at 4
+
+
+def mxcsr(value=None):
+    libm.fegetmode(mode)
+    if value is not None:
+        mode[4:8] = value.to_bytes(4, "little")
+        libm.fesetmode(mode)
+    return int.from_bytes(mode.raw[4:8], "little")
+
+
+# a source near a corner: the Gaussian profiles of its scale components, and
+# their products in the model update, reach the subnormal range in the image
+n = 256
+yy, xx = np.mgrid[0:n, 0:n]
+psf = np.exp(-((xx - n // 2) ** 2 + (yy - n // 2) ** 2) / 2.0)
+sky = np.exp(-((xx - 24) ** 2 + (yy - 20) ** 2) / 50.0)
+dirty = np.real(np.fft.ifft2(np.fft.fft2(sky) * np.fft.fft2(np.fft.ifftshift(psf))))
+dirty += 1e-5 * np.cos(0.7 * xx) * np.sin(0.3 * yy)
+cube = {"threshold_per_cycle": np.zeros((1, 1, 2)),
+        "max_iter_per_cycle_updated": np.full((1, 1, 2), 12, np.int32)}
+inputs = {"clean": (dirty, psf, {"max_iter_per_cycle_updated": 12}),
+          "clean_cube": (np.stack([dirty, dirty[::-1]])[None, None], psf[None, None, None], cube)}
+functions = {(k, e): impl("asp", e, k) for k in ("fast", "ref") for e in inputs}
+
+
+def run(kernel, entry, threads, state):
+    residual, psf_, extra = inputs[entry]
+    r, m = residual.copy(), np.zeros_like(residual)
+    mxcsr(state)
+    try:
+        functions[kernel, entry](r, psf_, m, gain=0.3, processing_function_threads=threads, **extra)
+    finally:
+        mxcsr(default)
+    return hashlib.sha256(r.tobytes() + m.tobytes()).hexdigest()
+
+
+default = mxcsr()
+for kernel in ("fast", "ref"):  # both pools start in the default state
+    run(kernel, "clean", 4, default)
+states = {"default": default, "ftz_daz": default | 0x8040, "toward_zero": default | 0x6000}
+print("RESULT", json.dumps({f"{s} {k} {e} {t}": run(k, e, t, v) for s, v in states.items()
+                           for k in ("fast", "ref") for e in inputs for t in (1, 4)}))
+"""
+
+
+@pytest.mark.skipif(
+    platform.machine() not in ("x86_64", "AMD64")
+    or not sys.platform.startswith("linux"),
+    reason="sets MXCSR through glibc's femode_t",
+)
+def test_floating_point_state_of_the_calling_thread(run_python):
+    """Flush-to-zero and denormals-are-zero, or rounding toward zero, set on
+    the calling thread after the pools have started (whose threads keep the
+    default): the pool's tasks run in the calling thread's state, so the bits
+    do not depend on the thread count; with FTZ and DAZ they are the
+    reference's at 1 thread and here at 4 too (its transforms, on its pool,
+    see no subnormal number)."""
+    r = json.loads(run_python("-c", FP_STATE).rpartition("RESULT ")[2])
+    runs = (("fast", 1), ("fast", 4), ("ref", 1), ("ref", 4))
+    for entry in ENTRIES:
+        bits = {
+            state: {r[f"{state} {k} {entry} {t}"] for k, t in runs}
+            for state in ("default", "ftz_daz")
+        }
+        assert len(bits["default"]) == 1, entry
+        assert len(bits["ftz_daz"]) == 1, entry
+        assert bits["ftz_daz"] != bits["default"], f"{entry}: no subnormal number"
+        assert r[f"toward_zero fast {entry} 1"] == r[f"toward_zero fast {entry} 4"]
+
+
 # ---------------------------------------------------------------- the switch
-def _traced(monkeypatch, tmp_path, entry, inputs, threads=2, **options):
-    """``(impl, path, error)`` of the trace line of one call through the
-    kernel switch with ``asp=fast``."""
+def _trace_of(monkeypatch, tmp_path, entry, call):
+    """``(impl, path, error)`` of the trace line of ``call(function)``, with
+    ``function`` the entry hooked by the kernel switch with ``asp=fast``."""
     trace = tmp_path / "trace"
     monkeypatch.setenv("ASTROVIPER_KERNELS", "asp=fast")
     monkeypatch.setenv("ASTROVIPER_KERNELS_TRACE", str(trace))
-    _call(dispatch("asp", REFERENCE[entry]), inputs, threads, options)
+    call(dispatch("asp", REFERENCE[entry]))
     (path,) = trace.iterdir()
     record = json.loads(path.read_text().splitlines()[-1])
     return record["impl"], record["path"], record["error"]
+
+
+def _traced(monkeypatch, tmp_path, entry, inputs, threads=2, **options):
+    """``(impl, path, error)`` of the trace line of one call through the
+    kernel switch with ``asp=fast``."""
+    return _trace_of(
+        monkeypatch, tmp_path, entry, lambda f: _call(f, inputs, threads, options)
+    )
 
 
 @pytest.mark.parametrize("name", list(DECLINED) + list(NOT_DECLINED))
@@ -1526,17 +1806,25 @@ def test_traced_paths(name, monkeypatch, tmp_path):
 
 
 def test_traced_paths_of_cubes_and_refused_controls(monkeypatch, tmp_path):
-    """A cube declines as a whole; a refused control raises the reference's
-    error before anything declines."""
-    cube = dict(_cube())
-    cube["psf"] = cube["psf"].copy()
-    cube["psf"][0, 2, 0, 60, 60] = np.inf
+    """A cube with a plane that needs the reference runs that plane alone and
+    keeps the path "fast"; one whose every plane needs it declines as a
+    whole; a refused control raises the reference's error before anything
+    declines."""
+    cube = _edited_cube(psf=[((0, 2, 0, 60, 60), np.inf)])
+    every = _edited_cube(
+        psf=[((0, f, p, 60, 60), np.inf) for f in range(3) for p in range(2)]
+    )
     assert _traced(monkeypatch, tmp_path, "clean_cube", _cube(), **KERNEL) == (
         "fast",
         "fast",
         None,
     )
     assert _traced(monkeypatch, tmp_path, "clean_cube", cube, **KERNEL) == (
+        "fast",
+        "fast",
+        None,
+    )
+    assert _traced(monkeypatch, tmp_path, "clean_cube", every, **KERNEL) == (
         "fast",
         "declined",
         None,
