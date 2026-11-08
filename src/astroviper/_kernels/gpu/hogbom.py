@@ -4,9 +4,11 @@ GPU Hogbom minor cycle, selected by ``ASTROVIPER_KERNELS=hogbom=gpu``.
 ``clean_cube`` and ``clean_cube_many_threads`` take the arguments of the
 reference entries (``deconvolvers/hogbom``) and give their results bit for
 bit: the residual and model cubes (in place), the iterations, stop codes,
-flags, ``final_peak``, ``total_flux_cleaned`` and the iteration history. Bit
-for bit holds for every value that is not a NaN; a NaN result is a NaN in
-both, its sign and payload unspecified (as for ``hogbom=fast``).
+flags, ``final_peak``, ``total_flux_cleaned`` and the iteration history. NaNs
+too: an operation returns its NaN operand, quieted, or makes the default NaN,
+as the reference's SSE2 code does. Only an operation on two NaNs keeps the
+one that the reference compiler's operand order picks, so the sign and
+payload of such a NaN are not part of the contract (as for ``hogbom=fast``).
 
 On the GPU (``cuda/hogbom_exact.cu``) the planes run one after another: each
 is uploaded from the caller's arrays, cleaned by an exact CuPy raw kernel and
@@ -14,51 +16,60 @@ its residual and model are written back in place (only planes that ran an
 iteration), so the call holds one plane on the device and copies no cube on
 the host. The kernel scans and sums as the reference does (see its source)
 and runs the iterations in cooperative launches of about ``TARGET_MS`` each
-(a few at first), so that no launch keeps the GPU for long. Its grid barrier
-has a watchdog: a wait of more than ``SPIN_LIMIT`` spins aborts the launch.
-``processing_function_threads`` does not change the GPU's results; it keeps
-its meaning for the calls that run on the CPU.
+(fewer iterations at first), so that no launch keeps the GPU for long. Its
+grid barrier has a watchdog: a wait of more than ``SPIN_LIMIT`` spins aborts
+the launch. ``processing_function_threads`` does not change the GPU's
+results; it keeps its meaning for the calls that run on the CPU. Every call
+ends by freeing the cached blocks of CuPy's default memory pool (any other
+CuPy code's too), so that the device memory goes back between calls.
 
 Each call takes one path, reported to the kernel switch for its trace line:
 
 ``"gpu"``
-    The GPU ran the call.
+    The GPU ran the call. Its trace line also has ``init_s``, the seconds the
+    call spent on the first use of CUDA (the context, CuPy's import, the
+    kernels' compile or load; about 0 for a later call), ``device_s``, the
+    seconds of its work on the device (allocation, uploads, launches and
+    downloads), and ``versions``, those of the CUDA driver, runtime and NVRTC
+    (whose version keys CuPy's cache of the compiled kernels).
 ``"routed"``
-    The fast CPU kernel (``hogbom=fast``, bit for bit the same) ran it: planes
-    of fewer than ``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` pixels (default
-    ``DEFAULT_MIN_PIXELS``), on which the GPU does not win, and every call the
-    GPU entries do not take as given: an argument of another type than the
-    production callers pass (an array subclass, a scalar that is not a Python
-    or NumPy number, a clean box that is not a tuple), and the calls
-    ``hogbom=fast`` declines.
+    The fast CPU kernel (``hogbom=fast``, bit for bit the same) ran it: the
+    calls whose planes with a budget search fewer than
+    ``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` pixels each (the pixels of the clean
+    box inside the mask; default ``DEFAULT_MIN_PIXELS``), the calls whose
+    planes the GPU cannot clean in short launches (see ``_iteration_ms``),
+    whatever the floor, and every call the GPU entries do not take as given:
+    an argument of another type than the production callers pass (an array
+    subclass, a scalar that is not a Python or NumPy number, a clean box that
+    is not a tuple), and the calls ``hogbom=fast`` declines.
 ``"declined"``
     The reference ran it, because ``hogbom=fast`` declined it (every call that
     the reference binding would not run exactly as given, so that its
     conversions and errors stay the reference's: see
     ``astroviper._kernels.fast.hogbom``), or because the fast module is not
-    built.
+    built (logged once).
+
+The floor counts searched pixels because the fast kernel's iterations cost
+what a plane searches, the GPU's what it holds (every iteration subtracts the
+PSF over its footprint and scans the rows of the search box). In the WP9
+measurements the GPU won only on planes that search about DEFAULT_MIN_PIXELS
+pixels or more. The kernels plugin (``tests/kernels_plugin.py``) sets the
+floor to 0 for a ``hogbom=gpu`` session, so that the tests' planes run on the
+GPU.
 
 Errors are not retried on the CPU. ``RuntimeError``, raised before the call
 writes anything: CuPy or a CUDA device is missing (at the first call that
-needs them), or the call needs more device memory than is free or than
+needs them), the process was forked after its parent had opened the device,
+or the call needs more device memory than is free or than
 ``CUPY_GPU_MEMORY_LIMIT`` allows (see ``_runtime``; an invalid value of it
 raises ``ValueError``). ``RuntimeError`` too when a launch fails or the
 watchdog aborts it: the planes before that plane are cleaned and written,
 that plane and the later ones are as they were, and the device stays usable
-for the next call (the kernel ends normally).
-
-Speed, measured on one machine (an RTX 3090 and 12 cores, the WP9 report): a
-plane costs the GPU about the same whatever its mask, as every iteration
-subtracts the PSF over its whole footprint (0.05 ms per iteration at 256 x 256,
-0.35 at 2048 x 2048, 0.52-0.66 at 4000 x 4000), while the fast kernel's cost
-follows the pixels it searches. Without a mask the GPU was faster than the fast
-kernel at 6 threads from 1536 x 1536 pixels on (1.3-1.4 times, 8 times at
-3072 x 3072) and slower below (0.7 times at 1024 x 1024): hence
-DEFAULT_MIN_PIXELS. At 12 threads it crossed between 1536 and 1792 pixels a
-side. With a mask that leaves few pixels to search, the fast kernel won on
-every plane up to 3072 x 3072 (a disk of 9 % of the plane: the GPU took twice
-as long at 2048 x 2048); the floor does not see masks, so set
-ASTROVIPER_KERNELS_GPU_MIN_PIXELS higher to keep such planes on the CPU.
+for the next call (the kernel ends normally). Whatever a call raises once its
+kernels are loaded carries ``planes_written``, the number of planes it cleaned
+and wrote back, and a note that says so; the frames of its traceback are
+cleared of their variables, so that a kept exception does not keep the call's
+device memory.
 """
 
 import ctypes
@@ -68,6 +79,7 @@ import logging
 import operator
 import os
 import time
+import traceback
 from typing import NamedTuple
 
 import numpy as np
@@ -81,13 +93,14 @@ __all__ = [
     "GPU",
     "MIN_PIXELS_ENV",
     "ROUTED",
+    "check_environment",
     "clean_cube",
     "clean_cube_many_threads",
 ]
 
 #: The paths of a call (see the module docstring).
 GPU, ROUTED, DECLINED = "gpu", "routed", "declined"
-#: Planes of fewer pixels run on the CPU.
+#: Calls whose planes search fewer pixels run on the CPU.
 MIN_PIXELS_ENV = "ASTROVIPER_KERNELS_GPU_MIN_PIXELS"
 DEFAULT_MIN_PIXELS = 1536 * 1536
 #: The grid barrier's watchdog: a wait of more spins aborts the launch (about
@@ -99,6 +112,9 @@ SPIN_LIMIT = 1 << 20
 TARGET_MS = 25.0
 
 _logger = logging.getLogger("astroviper.kernels")
+#: The two sequential chains of an iteration, in ns a pixel (measured on an RTX 3090 and rounded up): a lane scans each
+#: row of a strip column by column (for each strip of 32 rows that a block takes), then one lane adds up the rows.
+_NS_PER_COLUMN, _NS_PER_ROW = 120.0, 45.0
 _FIRST_CHUNK = 4
 _CHUNK_MAX = 4096  # iterations per launch (the history and threshold buffers)
 _THREADS = 256  # threads per block of every kernel
@@ -110,6 +126,11 @@ _INT, _BOOL = np.dtype(np.intc), np.dtype(np.bool_)
 _FLOATS = {np.dtype(np.float32): "float", np.dtype(np.float64): "double"}
 _STOP_NONE, _STOP_DIVERGED = 0, 4
 _ENTRIES = {"clean_cube": 0, "clean_cube_many_threads": 1}  # ENTRY of the source
+#: The control words ``ctl``: the plane's state st_i in ``[0, _BARRIER)`` (S_STOP, S_COMPONENTS and S_REASON of the
+#: source's enum) and the grid barrier's count, generation and abort flag from ``_BARRIER`` on.
+_S_STOP, _S_COMPONENTS, _S_REASON = 3, 4, 5
+_BARRIER = 16
+_ABORT = _BARRIER + 2
 
 #: The reference's parameters, in order, with their defaults (the first three
 #: have none; the per-plane arrays' defaults are rejected by the reference).
@@ -164,8 +185,9 @@ def clean_cube_many_threads(*args, **kwargs):
 
 
 def min_pixels():
-    """``ASTROVIPER_KERNELS_GPU_MIN_PIXELS``: planes of fewer pixels run on the
-    CPU (default ``DEFAULT_MIN_PIXELS``; 0 runs every plane on the GPU)."""
+    """``ASTROVIPER_KERNELS_GPU_MIN_PIXELS``: calls whose planes search fewer
+    pixels run on the CPU (default ``DEFAULT_MIN_PIXELS``; 0 runs every call
+    on the GPU that it can clean in short launches)."""
     value = os.environ.get(MIN_PIXELS_ENV)
     if value is None:
         return DEFAULT_MIN_PIXELS
@@ -178,13 +200,69 @@ def min_pixels():
     return pixels
 
 
+def check_environment():
+    """The checks of ``python -m astroviper._kernels --check``, which touch no
+    device: the pixel floor and ``CUPY_GPU_MEMORY_LIMIT`` (``ValueError``) and
+    that CuPy is installed (``RuntimeError``). ``python -m
+    astroviper._kernels.gpu.prewarm`` also checks the device, NVRTC and the
+    kernels."""
+    min_pixels()
+    _runtime.check_environment()
+
+
 def _call(entry, args, kwargs):
     floor = min_pixels()
     call = _bind(entry, args, kwargs)
-    if call is None or call.ny * call.nx < floor:
+    if call is None or not _on_gpu(call, floor):
         return _on_cpu(entry, args, kwargs)
-    report_path("hogbom", GPU)
-    return _run(call)
+    stats = {}
+    try:
+        return _run(call, stats)
+    finally:
+        report_path(
+            "hogbom",
+            GPU,
+            init_s=stats.get("open_s", 0.0) + stats.get("module_s", 0.0),
+            device_s=stats.get("device_s"),
+            versions=stats.get("versions"),
+        )
+
+
+def _iteration_ms(ny, nx, strips_per_block=1):
+    """An iteration's time on the GPU, in ms: its two sequential chains (a
+    bound for planes whose mask or clean box leaves fewer pixels to scan)."""
+    return (strips_per_block * nx * _NS_PER_COLUMN + ny * _NS_PER_ROW) * 1e-6
+
+
+def _searched(call, enough):
+    """The most pixels a plane of the call with a budget searches (those of
+    the clean box inside its mask), counted until one has ``enough``."""
+    xbeg, xend, ybeg, yend = call.box
+    most = 0
+    for plane, index in enumerate(np.ndindex(call.residual.shape[:3])):
+        if call.max_iter[plane] <= 0:
+            continue
+        if call.mask is None:
+            return (xend - xbeg) * (yend - ybeg)
+        window = call.mask[index][ybeg:yend, xbeg:xend].view(np.uint8)
+        most = max(most, int(np.count_nonzero(window)))
+        if most >= enough:
+            break
+    return most
+
+
+def _on_gpu(call, floor):
+    """Whether the GPU runs the call: an iteration of its planes takes at most
+    TARGET_MS (``_iteration_ms``), and a plane with a budget searches
+    ``floor`` pixels or more."""
+    if _iteration_ms(call.ny, call.nx) > TARGET_MS:
+        return False
+    return floor == 0 or (
+        call.ny * call.nx >= floor and _searched(call, floor) >= floor
+    )
+
+
+_warned = False  # whether _on_cpu logged that the fast module is missing
 
 
 def _on_cpu(entry, args, kwargs):
@@ -203,9 +281,6 @@ def _on_cpu(entry, args, kwargs):
         return impl("hogbom", entry, "ref")(*args, **kwargs)
     report_path("hogbom", ROUTED)
     return function(*args, **kwargs)
-
-
-_warned = False  # whether _on_cpu logged that the fast module is missing
 
 
 # ---------------------------------------------------------------------------------------------- binding
@@ -410,11 +485,28 @@ def _bind(entry, args, kwargs):
 def _run(call, stats=None):
     """Clean the call's cube on the GPU and return the reference's results.
 
-    ``stats``, a dict, receives timings and every launch (for tests and
-    benchmarks)."""
-    device = _runtime.require_device()
+    ``stats``, a dict, receives timings and every launch (for the trace, tests
+    and benchmarks)."""
+    stats = {} if stats is None else stats
+    t0 = time.perf_counter()
+    try:
+        device = _runtime.require_device()
+    finally:
+        stats["open_s"] = time.perf_counter() - t0
     with device.lock, device.cp.cuda.Device(device.id), device.stream:
         return _Cleaner(device, call, stats).run()
+
+
+def _clear_frames(error):
+    """Clear the variables of the frames of ``error``'s traceback and of the
+    exceptions chained to it: they hold the call's device buffers, which its
+    memory pool could not free while a caller keeps the exception. The
+    tracebacks still print."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        traceback.clear_frames(error.__traceback__)
+        error = error.__cause__ or error.__context__
 
 
 def _launch(kernel, grid, args):
@@ -470,9 +562,12 @@ class _Cleaner:
     def __init__(self, device, call, stats):
         self.device, self.cp, self.call = device, device.cp, call
         self.stats = {} if stats is None else stats
-        self.stats.update(init_s=device.init_s, launches=[], planes=[])
+        self.stats.update(
+            init_s=device.init_s, versions=device.versions, launches=[], planes=[]
+        )
         self.dtype = call.dtype
         self.t = self.dtype.type
+        self.written = 0  # planes cleaned and written back (in C order)
 
     def run(self):
         cp, call = self.cp, self.call
@@ -489,14 +584,26 @@ class _Cleaner:
         try:
             self._allocate()
             return self._planes()
-        except cp.cuda.memory.OutOfMemoryError as e:
-            raise RuntimeError(f"hogbom=gpu: out of device memory: {e}") from e
-        except self.device.errors as e:
-            raise RuntimeError(f"hogbom=gpu: CUDA error: {e}") from e
+        except BaseException as e:
+            _clear_frames(e)  # a kept exception must not keep the buffers
+            error = e
+            if isinstance(e, cp.cuda.memory.OutOfMemoryError):
+                error = RuntimeError(f"hogbom=gpu: out of device memory: {e}")
+            elif isinstance(e, self.device.errors):
+                error = RuntimeError(f"hogbom=gpu: CUDA error: {e}")
+            error.planes_written = self.written
+            error.add_note(
+                f"hogbom=gpu: the call cleaned and wrote back {self.written} of its "
+                f"{call.max_iter.size} planes (in C order); the others are unchanged"
+            )
+            if error is e:
+                raise
+            raise error from e
         finally:
             self.__dict__.pop("buffers", None)
             self.device.pool.free_all_blocks()
             self.stats["call_s"] = time.perf_counter() - t0
+            self.stats["device_s"] = self.stats["call_s"] - self.stats["module_s"]
 
     def _allocate(self):
         """Every device buffer of the call, after checking that they fit."""
@@ -580,6 +687,7 @@ class _Cleaner:
             if call.max_iter[plane] > 0:  # else the plane is unchanged
                 b["residual"].get(out=residual)
                 b["model"].get(out=model)
+            self.written = plane + 1
             iterations[t, f, p], stop_code[t, f, p], history[plane] = (
                 done,
                 reason,
@@ -613,10 +721,9 @@ class _Cleaner:
         """Clean one plane on the device: (iterations, stop code, history)."""
         cp, call, b, t = self.cp, self.call, self.buffers, self.t
         i0, i1, j0, j1, searched = box
-        empty = np.zeros(0)
         if budget <= 0:  # the reference runs no iteration
             done = min(budget, 0) if call.entry == "clean_cube" else 0
-            return done, _STOP_NONE, (empty,) * 6
+            return done, _STOP_NONE, tuple(np.zeros(0) for _ in _HISTORY)
         stream = cp.cuda.get_current_stream()
         for name in ("ctl", "st_d"):
             cp.cuda.runtime.memsetAsync(b[name].data.ptr, 0, b[name].nbytes, stream.ptr)
@@ -629,14 +736,17 @@ class _Cleaner:
             i32(i0), i32(i1), i32(j0), i32(j1), i32(call.mask is not None), i32(call.box[0]), i32(call.box[2]),
             i32(budget), call.gain, t(threshold), b["factor"], i32(use_factor),
             i32(call.max_iter_divergence), np.float64(call.rms_factor), call.peak_factor,
-            b["row_key"], b["row_ix"], b["row_ss"], b["ctl"][:16], b["st_d"], i32(call.record),
-            b["h_peak"], b["h_ss"], b["h_l"], b["h_m"], b["h_flux"], b["ctl"][16:20].view(np.uint32),
-            np.uint32(SPIN_LIMIT),
+            b["row_key"], b["row_ix"], b["row_ss"], b["ctl"][:_BARRIER], b["st_d"], i32(call.record),
+            b["h_peak"], b["h_ss"], b["h_l"], b["h_m"], b["h_flux"],
+            b["ctl"][_BARRIER : _BARRIER + 4].view(np.uint32), np.uint32(SPIN_LIMIT),
         )  # fmt: skip
-        grid = min((ny + 31) // 32, self.device.max_blocks(self.chunk, _THREADS))
+        strips = (ny + 31) // 32
+        grid = min(strips, self.device.max_blocks(self.chunk, _THREADS))
+        # a first launch of a few iterations, fewer on planes of long iterations
+        first = TARGET_MS / _iteration_ms(ny, nx, -(-strips // grid))
         start, end = cp.cuda.Event(), cp.cuda.Event(block=True)
         parts = [[] for _ in range(5)]  # peak, l, m, flux, sum of squares
-        it, chunk, components = 0, _FIRST_CHUNK, 0
+        it, chunk, components = 0, max(1, min(_FIRST_CHUNK, int(first))), 0
         while True:
             it_end = min(it + chunk, budget + 1, it + _CHUNK_MAX)
             if use_factor and it < budget:
@@ -650,13 +760,13 @@ class _Cleaner:
             end.synchronize()
             ms = cp.cuda.get_elapsed_time(start, end)
             ctl = b["ctl"].get()
-            if ctl[18]:
+            if ctl[_ABORT]:
                 raise RuntimeError(
                     f"hogbom=gpu: the kernel's grid barrier waited more than {SPIN_LIMIT} spins and "
                     f"aborted plane {plane} (iterations {it}..{it_end - 1}); the planes before it are "
                     "cleaned, it and the later planes are unchanged"
                 )
-            stopped, done = bool(ctl[3]), int(ctl[4])
+            stopped, done = bool(ctl[_S_STOP]), int(ctl[_S_COMPONENTS])
             searches = (done + 1 if stopped else it_end) - it
             self.stats["launches"].append((plane, it, searches, ms))
             if call.record:
@@ -671,7 +781,7 @@ class _Cleaner:
             it = it_end
             chunk = int(min(2 * chunk, max(1.0, TARGET_MS * searches / max(ms, 1e-3))))
         if not call.record:
-            return done, int(ctl[5]), None
+            return done, int(ctl[_S_REASON]), None
         peak, l, m, flux, ss = (np.concatenate(p) for p in parts)
         with np.errstate(all="ignore"):
             rms = np.sqrt(ss / float(searched))
@@ -683,7 +793,7 @@ class _Cleaner:
             flux,
             np.zeros(done),
         )
-        return done, int(ctl[5]), record
+        return done, int(ctl[_S_REASON]), record
 
     def _summary(self, has_mask):
         """The binding's final_peak and total_flux_cleaned of the plane on the

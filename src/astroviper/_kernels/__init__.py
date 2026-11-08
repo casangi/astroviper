@@ -30,9 +30,11 @@ kernel      entries                           implementations
 
 With ``hogbom=fast`` a call may put several threads on one plane, where the
 reference ``clean_cube`` runs one per plane, and it never starts more threads
-than the CPUs it may run on. ``hogbom=gpu`` (CuPy, see ``_kernels.gpu``) runs
-planes of fewer than ``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` pixels with
-``hogbom=fast`` and keeps to ``CUPY_GPU_MEMORY_LIMIT`` on the device.
+than the CPUs it may run on. ``hogbom=gpu`` (CuPy, see ``_kernels.gpu.hogbom``)
+runs the calls whose planes search fewer than
+``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` pixels with ``hogbom=fast`` (the
+reference when that is not built), keeps to ``CUPY_GPU_MEMORY_LIMIT`` on the
+device, and a call that fails there may have cleaned its first planes.
 
 ``ASTROVIPER_KERNELS_TRACE=<dir>``
     Each wrapped call appends one JSON line to

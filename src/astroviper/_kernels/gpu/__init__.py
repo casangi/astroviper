@@ -15,5 +15,9 @@ and a call that needs it raises ``RuntimeError`` when it is missing. The
 sources are compiled by NVRTC at the first call (or loaded from CuPy's cache,
 ``CUPY_CACHE_DIR``): no CUDA toolkit is needed to build or install the
 package. Install CuPy with the ``gpu`` extra, ``pip install 'astroviper[gpu]'``
-(cupy-cuda13x with its NVRTC; Linux x86-64).
+(cupy-cuda13x with its NVRTC; Linux x86-64), only where the GPU is used: once
+CuPy can find its CUDA libraries (installed with it, or under ``CUDA_PATH``),
+every process that imports zarr, which imports CuPy, maps some of them, about
+160 MB of host memory per process (Dask workers included) whatever
+``ASTROVIPER_KERNELS`` selects.
 """

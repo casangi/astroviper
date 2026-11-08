@@ -13,7 +13,9 @@ not just the reference behind them. The plugin:
   session imports its modules in the same order as an unswitched one);
 * sets ``ASTROVIPER_KERNELS_TRACE`` to a fresh directory unless it is set, so
   that every hooked call, including those in Dask workers started by the
-  tests, writes a trace line;
+  tests, writes a trace line, and for ``hogbom=gpu``
+  ``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` to 0 unless it is set, so that the
+  GPU runs the tests' planes, which are all below its default floor;
 * attributes each trace record, by its start time, to the test file that was
   running (setup, call or teardown), and prints the calls per file, kernel,
   entry, impl, path and error;
@@ -40,6 +42,7 @@ import pytest
 
 ENV = "ASTROVIPER_KERNELS"
 TRACE_ENV = "ASTROVIPER_KERNELS_TRACE"
+GPU_FLOOR_ENV = "ASTROVIPER_KERNELS_GPU_MIN_PIXELS"
 
 _DA = "tests/unit/distributed_applications"
 _NT = "tests/unit/node_tasks"
@@ -315,6 +318,8 @@ def pytest_configure(config):
     selection = _explicit_selection(value)
     trace_dir = os.environ.get(TRACE_ENV) or tempfile.mkdtemp(prefix="kernels-trace-")
     os.environ[TRACE_ENV] = trace_dir
+    if selection.get("hogbom") == "gpu":
+        os.environ.setdefault(GPU_FLOOR_ENV, "0")
     config.pluginmanager.register(
         KernelsPlugin(selection, trace_dir), "kernels_plugin_state"
     )

@@ -234,7 +234,7 @@ def dispatch(kernel, function):
     return wrapper
 
 
-def report_path(kernel, path):
+def report_path(kernel, path, **fields):
     """Report the path that the running call of a hooked entry of ``kernel`` takes.
 
     For implementations with more than one path, such as ``dft=fast`` (``"S"``
@@ -247,9 +247,11 @@ def report_path(kernel, path):
     ``kernel``: the trace clears it before each call and restores the
     enclosing call's afterwards, so a report never reaches another call, a
     call of another kernel or another thread. Outside a traced call it has no
-    effect.
+    effect. ``fields`` (JSON values, such as a ``gpu`` call's ``device_s``)
+    join the trace line after the switch's own keys, which they cannot
+    replace; a later report of the same call replaces an earlier one.
     """
-    _reported.value = (kernel, path)
+    _reported.value = (kernel, path, fields)
 
 
 def _arrays(args, kwargs):
@@ -289,7 +291,9 @@ def _call_traced(trace_dir, kernel, entry, name, target, args, kwargs):
     finally:
         wall, cpu = time.perf_counter() - p0, _cpu_seconds() - cpu0
         reported, _reported.value = _reported.value, enclosing
-        path = reported[1] if reported and reported[0] == kernel else name
+        if not (reported and reported[0] == kernel):
+            reported = (kernel, name, {})
+        path, fields = reported[1:]
         try:
             arrays = _arrays(args, kwargs)
             with _lock:
@@ -314,6 +318,7 @@ def _call_traced(trace_dir, kernel, entry, name, target, args, kwargs):
                 "shapes": {k: list(a.shape) for k, a in arrays.items()},
                 "dtypes": {k: str(a.dtype) for k, a in arrays.items()},
             }
+            record |= {k: v for k, v in fields.items() if k not in record}
             line = json.dumps(record) + "\n"
             os.makedirs(trace_dir, exist_ok=True)
             path = os.path.join(trace_dir, f"kernels-{host}-{pid}.jsonl")

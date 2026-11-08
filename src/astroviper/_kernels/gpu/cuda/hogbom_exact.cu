@@ -10,7 +10,9 @@
 //    add or subtract, never fused (--fmad=false and explicit __d*_rn / PTX .rn), and no float operation flushes a
 //    subnormal to zero (CuPy compiles with -ftz=true, so float arithmetic and comparisons are PTX without .ftz, and
 //    the orders of |v| are compared as integers: the bits of a number >= 0 sort as its value, a NaN gets key 0 and so
-//    never wins, as v > m is false for it on the CPU).
+//    never wins, as v > m is false for it on the CPU);
+//  * a NaN result has SSE2's bits: the NaN operand, quieted (the first of two), or the default NaN for a NaN made from
+//    numbers. The double operations do that themselves; the float ones, which return 0x7fffffff, are corrected.
 //
 // hogbom_exact_chunk runs the iterations [it_begin, it_end) of one plane in one cooperative launch (all its blocks are
 // resident). Each iteration has two phases. In phase 1 every block, one strip of 32 rows at a time, subtracts the
@@ -41,27 +43,52 @@ enum { D_PV = 0, D_START_PEAK, D_MIN_SS };
 __device__ __forceinline__ double mul_rn(double a, double b) { return __dmul_rn(a, b); }
 __device__ __forceinline__ double add_rn(double a, double b) { return __dadd_rn(a, b); }
 __device__ __forceinline__ double sub_rn(double a, double b) { return __dsub_rn(a, b); }
+// The bits of a number, moved by PTX that NVVM cannot see into: NVRTC 13 turns integer tests of the bits into float
+// operations for compute_100 and later (abs.ftz.f32, setp.equ.ftz.f32, abs.f64), which flush subnormals under CuPy's
+// -ftz=true or leave the bits of a NaN unspecified.
+__device__ __forceinline__ unsigned int bits_of(float a) {
+    unsigned int u; asm("mov.b32 %0, %1;" : "=r"(u) : "f"(a)); return u; }
+__device__ __forceinline__ float of_bits(unsigned int u) {
+    float a; asm("mov.b32 %0, %1;" : "=f"(a) : "r"(u)); return a; }
+__device__ __forceinline__ u64 bits_of(double a) { u64 u; asm("mov.b64 %0, %1;" : "=l"(u) : "d"(a)); return u; }
+__device__ __forceinline__ double of_bits(u64 u) { double a; asm("mov.b64 %0, %1;" : "=d"(a) : "l"(u)); return a; }
+__device__ __forceinline__ bool nan_bits(unsigned int u) { return (u & 0x7fffffffu) > 0x7f800000u; }
+// c = a op b with SSE2's NaN: a NaN operand quieted (a before b), else the default NaN 0xffc00000 (inf - inf, 0 x inf).
+__device__ __forceinline__ float sse_nan(float a, float b, float c) {
+    if (!nan_bits(bits_of(c))) return c;
+    const unsigned int ua = bits_of(a), ub = bits_of(b);
+    return of_bits(nan_bits(ua) ? ua | 0x00400000u : nan_bits(ub) ? ub | 0x00400000u : 0xffc00000u); }
 __device__ __forceinline__ float mul_rn(float a, float b) {
-    float c; asm("mul.rn.f32 %0, %1, %2;" : "=f"(c) : "f"(a), "f"(b)); return c; }
+    float c; asm("mul.rn.f32 %0, %1, %2;" : "=f"(c) : "f"(a), "f"(b)); return sse_nan(a, b, c); }
 __device__ __forceinline__ float add_rn(float a, float b) {
-    float c; asm("add.rn.f32 %0, %1, %2;" : "=f"(c) : "f"(a), "f"(b)); return c; }
+    float c; asm("add.rn.f32 %0, %1, %2;" : "=f"(c) : "f"(a), "f"(b)); return sse_nan(a, b, c); }
 __device__ __forceinline__ float sub_rn(float a, float b) {
-    float c; asm("sub.rn.f32 %0, %1, %2;" : "=f"(c) : "f"(a), "f"(b)); return c; }
+    float c; asm("sub.rn.f32 %0, %1, %2;" : "=f"(c) : "f"(a), "f"(b)); return sse_nan(a, b, c); }
+// v - pv * w, the subtraction of a component. The float one checks only its result for a NaN, which is rare, and
+// gets SSE2's NaN out of line, so that the loop that subtracts the footprint stays short. The check still costs a
+// float plane whose iteration this loop dominates (a mask that leaves few pixels to scan) about 1/6 of its time (M).
+__device__ __forceinline__ double sub_mul_rn(double v, double pv, double w) { return sub_rn(v, mul_rn(pv, w)); }
+__device__ __noinline__ float sse_sub_mul_nan(float v, float pv, float w, float p, float c) {
+    return sse_nan(v, sse_nan(pv, w, p), c); }
+__device__ __forceinline__ float sub_mul_rn(float v, float pv, float w) {
+    float p, c;
+    asm("mul.rn.f32 %0, %1, %2;" : "=f"(p) : "f"(pv), "f"(w));
+    asm("sub.rn.f32 %0, %1, %2;" : "=f"(c) : "f"(v), "f"(p));
+    return nan_bits(bits_of(c)) ? sse_sub_mul_nan(v, pv, w, p, c) : c; }
 __device__ __forceinline__ double to_f64(double a) { return a; }
 __device__ __forceinline__ double to_f64(float a) { double c; asm("cvt.f64.f32 %0, %1;" : "=d"(c) : "f"(a)); return c; }
 template <typename T> __device__ __forceinline__ T from_f64(double a);  // exact for values that were T
 template <> __device__ __forceinline__ double from_f64<double>(double a) { return a; }
 template <> __device__ __forceinline__ float from_f64<float>(double a) {
     float c; asm("cvt.rn.f32.f64 %0, %1;" : "=f"(c) : "d"(a)); return c; }
-__device__ __forceinline__ double abs_t(double a) {
-    return __longlong_as_double(__double_as_longlong(a) & 0x7fffffffffffffffll); }
-__device__ __forceinline__ float abs_t(float a) { return __uint_as_float(__float_as_uint(a) & 0x7fffffffu); }
+__device__ __forceinline__ double abs_t(double a) { return of_bits(bits_of(a) & 0x7fffffffffffffffull); }
+__device__ __forceinline__ float abs_t(float a) { return of_bits(bits_of(a) & 0x7fffffffu); }
 __device__ __forceinline__ bool finite_t(double a) {
-    return (__double_as_longlong(a) & 0x7ff0000000000000ll) != 0x7ff0000000000000ll; }
-__device__ __forceinline__ bool finite_t(float a) { return (__float_as_uint(a) & 0x7f800000u) != 0x7f800000u; }
+    return (bits_of(a) & 0x7ff0000000000000ull) != 0x7ff0000000000000ull; }
+__device__ __forceinline__ bool finite_t(float a) { return (bits_of(a) & 0x7f800000u) != 0x7f800000u; }
 // Not +-0: nonzero, or NaN (|NaN| is NaN, and adding it is not a no-op).
-__device__ __forceinline__ bool nonzero_t(double a) { return (__double_as_longlong(a) & 0x7fffffffffffffffll) != 0; }
-__device__ __forceinline__ bool nonzero_t(float a) { return (__float_as_uint(a) & 0x7fffffffu) != 0; }
+__device__ __forceinline__ bool nonzero_t(double a) { return (bits_of(a) & 0x7fffffffffffffffull) != 0; }
+__device__ __forceinline__ bool nonzero_t(float a) { return (bits_of(a) & 0x7fffffffu) != 0; }
 __device__ __forceinline__ bool gt(double a, double b) { return a > b; }
 __device__ __forceinline__ bool lt(double a, double b) { return a < b; }
 __device__ __forceinline__ bool le(double a, double b) { return a <= b; }
@@ -76,12 +103,12 @@ __device__ __forceinline__ bool le(float a, float b) {
     return p != 0; }
 // The order key of a = |v|: its bits; a NaN gets 0.
 __device__ __forceinline__ u64 key_t(double a) {
-    const u64 k = (u64)__double_as_longlong(a); return k > 0x7ff0000000000000ull ? 0ull : k; }
+    const u64 k = bits_of(a); return k > 0x7ff0000000000000ull ? 0ull : k; }
 __device__ __forceinline__ u64 key_t(float a) {
-    const unsigned int k = __float_as_uint(a); return k > 0x7f800000u ? 0ull : (u64)k; }
+    const unsigned int k = bits_of(a); return k > 0x7f800000u ? 0ull : (u64)k; }
 template <typename T> __device__ __forceinline__ T from_key(u64 k);
-template <> __device__ __forceinline__ double from_key<double>(u64 k) { return __longlong_as_double((long long)k); }
-template <> __device__ __forceinline__ float from_key<float>(u64 k) { return __uint_as_float((unsigned int)k); }
+template <> __device__ __forceinline__ double from_key<double>(u64 k) { return of_bits(k); }
+template <> __device__ __forceinline__ float from_key<float>(u64 k) { return of_bits((unsigned int)k); }
 
 // ------------------------------------------------------------------------------------------------- grid barrier
 // For a kernel whose blocks are all resident (a cooperative launch). False when the kernel is aborting: a block that
@@ -163,7 +190,7 @@ __device__ void strip_exact(StripSmem<T, TW>& sm, T* __restrict__ r, const T* __
                                 v = r[idx];
                                 if (in_fp) {
                                     const T w = __ldg(psf + (i64)(p.pny / 2 + y - py) * p.pnx + (p.pnx / 2 + x - px));
-                                    v = sub_rn(v, mul_rn(pv, w));
+                                    v = sub_mul_rn(v, pv, w);
                                     r[idx] = v;
                                 }
                                 mk = (in_box && (!p.has_mask || __ldg(mask + idx))) ? 1 : 0;

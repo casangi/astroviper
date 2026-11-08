@@ -2,13 +2,17 @@
 ``python -m astroviper._kernels.gpu.prewarm``: get the GPU kernels ready ahead
 of the first timed call.
 
-Creates the CUDA context, compiles the kernels (or loads them from CuPy's
+Checks the environment as ``python -m astroviper._kernels --check`` does,
+creates the CUDA context, compiles the kernels (or loads them from CuPy's
 cache, ``CUPY_CACHE_DIR``) and runs each Hogbom entry on the GPU once for each
 image dtype, on a small cube, then prints the timings as one JSON line. Exits
 with status 1 and the reason on standard error when the GPU cannot run them
-(no CuPy, no device, an invalid ``CUPY_GPU_MEMORY_LIMIT``, a compile error).
-:func:`prewarm` does the same in the calling process (a Dask worker preload,
-say), which then pays none of it at its first call.
+(no CuPy, no device, no NVRTC, an invalid ``CUPY_GPU_MEMORY_LIMIT`` or
+``ASTROVIPER_KERNELS_GPU_MIN_PIXELS``, a compile error). :func:`prewarm` does
+the same in the calling process, which then pays none of it at its first
+call; as a Dask worker preload (``--preload astroviper._kernels.gpu.prewarm``,
+or ``DASK_DISTRIBUTED__WORKER__PRELOAD``) it prewarms each worker, and a worker
+that cannot use the GPU fails to start.
 """
 
 import argparse
@@ -48,6 +52,7 @@ def prewarm():
     """Initialize CUDA, compile the kernels and run them once; returns the
     timings (seconds) and the device, as a dict."""
     t0 = time.perf_counter()
+    hogbom.check_environment()
     device = _runtime.require_device()
     t1 = time.perf_counter()
     for entry in hogbom._ENTRIES:
@@ -64,6 +69,11 @@ def prewarm():
         "total_s": t2 - t0,
         "cupy_cache_dir": os.environ.get("CUPY_CACHE_DIR"),
     }
+
+
+def dask_setup(worker):
+    """Dask's hook of a worker preload: prewarm the worker's process."""
+    prewarm()
 
 
 def main(argv=None):
