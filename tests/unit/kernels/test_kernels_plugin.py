@@ -88,6 +88,16 @@ def test_hogbom_gpu_executes_on_path_gpu_only(path, executed):
     assert (missing == []) is executed
 
 
+@pytest.mark.parametrize(
+    "path, executed", [("gpu", True), ("routed", False), ("declined", False)]
+)
+def test_fft_gpu_executes_on_path_gpu_only(path, executed):
+    """A routed or declined fft=gpu call ran the reference, on the CPU."""
+    record = _record(15.0, impl="gpu", path=path, entry="ifft_uv_to_lm")
+    record["kernel"] = "fft"
+    assert kernels_plugin._executed(record, {"fft": "gpu"}) is executed
+
+
 def _dft(path, error=None):
     """A ``dft=fast`` record of the file running at t = 15."""
     record = {"kernel": "dft", "entry": "dft_predict", "impl": "fast", "path": path}
@@ -192,7 +202,7 @@ def test_session_fails_on_a_missing_or_foreign_call(tmp_path):
     assert plugin.missing == [f"{LISTED}: hogbom.clean_cube=ref"]
 
 
-@pytest.mark.parametrize("value", ["hogbom=fsat", "fft=ref", "hogbom=ref,dft=gpu"])
+@pytest.mark.parametrize("value", ["hogbom=fsat", "pol=ref", "hogbom=ref,dft=gpu"])
 def test_collection_rejects_an_invalid_selection(monkeypatch, tmp_path, value):
     monkeypatch.setenv(kernels_plugin.ENV, value)
     plugin = KernelsPlugin(kernels_plugin._explicit_selection(value), str(tmp_path))
@@ -207,25 +217,30 @@ def test_bare_defaults_are_refused(value):
 
 
 @pytest.mark.parametrize(
-    "value, floor, expected",
+    "value, name, floor, expected",
     [
-        ("hogbom=gpu", None, "0"),
-        ("hogbom=gpu", "4096", "4096"),
-        ("hogbom=fast", None, None),
+        ("hogbom=gpu", kernels_plugin.GPU_FLOOR_ENV, None, "0"),
+        ("hogbom=gpu", kernels_plugin.GPU_FLOOR_ENV, "4096", "4096"),
+        ("hogbom=fast", kernels_plugin.GPU_FLOOR_ENV, None, None),
+        ("hogbom=gpu", kernels_plugin.GPU_FFT_FLOOR_ENV, None, None),
+        ("fft=gpu", kernels_plugin.GPU_FFT_FLOOR_ENV, None, "0"),
+        ("fft=gpu", kernels_plugin.GPU_FFT_FLOOR_ENV, "4096", "4096"),
+        ("fft=ref", kernels_plugin.GPU_FFT_FLOOR_ENV, None, None),
+        ("fft=gpu", kernels_plugin.GPU_FLOOR_ENV, None, None),
     ],
 )
-def test_a_hogbom_gpu_session_runs_the_tests_planes_on_the_gpu(
-    monkeypatch, tmp_path, value, floor, expected
+def test_a_gpu_session_runs_the_tests_planes_on_the_gpu(
+    monkeypatch, tmp_path, value, name, floor, expected
 ):
-    """Its pixel floor is 0 unless set: the tests' planes are all below the
-    default floor, which would route every call to the CPU."""
-    name = kernels_plugin.GPU_FLOOR_ENV
+    """Its pixel floor (hogbom=gpu's, or fft=gpu's) is 0 unless set: the
+    tests' planes are mostly below the default floor, which would route their
+    calls to the CPU."""
     monkeypatch.setenv(kernels_plugin.ENV, value)
     monkeypatch.setenv(kernels_plugin.TRACE_ENV, str(tmp_path))
-    monkeypatch.setenv(name, "unset below")  # restored after the test
-    if floor is None:
-        monkeypatch.delenv(name)
-    else:
+    for variable in (kernels_plugin.GPU_FLOOR_ENV, kernels_plugin.GPU_FFT_FLOOR_ENV):
+        monkeypatch.setenv(variable, "unset below")  # restored after the test
+        monkeypatch.delenv(variable)
+    if floor is not None:
         monkeypatch.setenv(name, floor)
     manager = SimpleNamespace(register=lambda plugin, plugin_name: None)
     kernels_plugin.pytest_configure(SimpleNamespace(pluginmanager=manager))

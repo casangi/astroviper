@@ -9,6 +9,8 @@ refuses an import of a ``cupy*`` package whose importing frame is AstroVIPER
 code. A hooked process then checks its selection, imports every shim and the
 production modules that call them, and makes a hooked call. A positive
 control, an AstroVIPER-path ``import cupy`` made after zarr's, must be caught.
+The FFT module hooks its own functions: it is imported with the shims, and
+feather.py, which imports them by name, with the callers.
 """
 
 import importlib
@@ -20,13 +22,23 @@ from pathlib import Path
 import pytest
 
 from astroviper._kernels.gpu import _runtime
-from tests.unit.kernels.conftest import ALL_REF, SHIMS, TINY_HOGBOM
+from tests.unit.kernels.conftest import (
+    ALL_REF,
+    SELF_HOOKED,
+    SHIMS,
+    TINY_FFT,
+    TINY_HOGBOM,
+)
 
-#: Production modules that import the hooked shims.
+#: The hooked shims and modules.
+HOOKED = [shim for shim, _, _ in SHIMS.values()]
+HOOKED += [name for name, _, _ in SELF_HOOKED.values()]
+#: Production modules that import the hooked shims (or their entries).
 CALLERS = [
     "astroviper.processing_functions.imaging.deconvolution",
     "astroviper.processing_functions.imaging.direct_fourier_transform",
 ]
+CALLERS += [caller for _, _, callers in SELF_HOOKED.values() for caller in callers]
 
 BLOCKED = f"""
 import builtins, importlib, importlib.abc, importlib.util, json, os, sys
@@ -77,14 +89,16 @@ importlib.import_module = guarded_import_module
 from astroviper._kernels.__main__ import main
 
 checked = main(["--check"])  # 1 for a gpu selection without CuPy or its NVRTC
-for module in [shim for shim, _, _ in {SHIMS!r}.values()] + {CALLERS!r}:
+for module in {HOOKED!r} + {CALLERS!r}:
     importlib.import_module(module)
 {TINY_HOGBOM}
-try:
-    tiny_hogbom()
-    error = None
-except RuntimeError as e:  # a gpu call, without CuPy
-    error = str(e)
+{TINY_FFT}
+errors = {{}}
+for kernel, call in (("hogbom", tiny_hogbom), ("fft", tiny_fft)):
+    try:
+        call()
+    except RuntimeError as e:  # a gpu call, without CuPy
+        errors[kernel] = str(e)
 found = list(blocked)
 
 # Positive control, made a cached import: zarr has imported CuPy by now when it
@@ -98,7 +112,7 @@ try:
     caught = False
 except ModuleNotFoundError:
     caught = True
-print("RESULT", json.dumps({{"blocked": found, "cached": cached, "caught": caught, "error": error, "checked": checked}}))
+print("RESULT", json.dumps({{"blocked": found, "cached": cached, "caught": caught, "errors": errors, "checked": checked}}))
 """
 
 
@@ -133,8 +147,10 @@ FAST_ASP = pytest.param(
     ),
 )
 
-# A hogbom=gpu call of 8 x 8 pixels runs on the CPU (below the pixel floor).
+# A hogbom=gpu or fft=gpu call of 8 x 8 pixels runs on the CPU (below the
+# pixel floor).
 GPU_HOGBOM = "hogbom=gpu"
+GPU_FFT = "fft=gpu"
 #: Whether CuPy is installed (the control is then a cached import).
 CUPY = importlib.util.find_spec("cupy") is not None
 
@@ -150,30 +166,34 @@ def _gpu_check():
 
 
 @pytest.mark.parametrize(
-    "selection", ["ref", ALL_REF, FAST_DFT, FAST_HOGBOM, FAST_ASP, GPU_HOGBOM]
+    "selection",
+    ["ref", ALL_REF, FAST_DFT, FAST_HOGBOM, FAST_ASP, GPU_HOGBOM, GPU_FFT, "gpu"],
 )
 def test_hooked_process_never_imports_cupy(run_python, selection):
     out = run_python("-c", BLOCKED, ASTROVIPER_KERNELS=selection)
     result = json.loads(out.rpartition("RESULT ")[2])
-    assert result["blocked"] == [] and result["error"] is None
+    assert result["blocked"] == [] and result["errors"] == {}
     assert result["checked"] == (_gpu_check() if "gpu" in selection else 0)
     assert result["caught"] is True, "the blocker missed an AstroVIPER import"
     if CUPY:
         assert result["cached"] is True, "the control was not a cached import"
 
 
-def test_a_gpu_call_imports_cupy_in_the_gpu_runtime_only(run_python):
-    """The same process with its Hogbom call on the GPU: the one AstroVIPER
-    import of CuPy is the GPU runtime's, at that call, which then raises
-    RuntimeError (here because the import is refused)."""
-    out = run_python(
-        "-c",
-        BLOCKED,
-        ASTROVIPER_KERNELS=GPU_HOGBOM,
-        ASTROVIPER_KERNELS_GPU_MIN_PIXELS="0",
-    )
+@pytest.mark.parametrize(
+    "kernel, floor",
+    [
+        ("hogbom", "ASTROVIPER_KERNELS_GPU_MIN_PIXELS"),
+        ("fft", "ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS"),
+    ],
+)
+def test_a_gpu_call_imports_cupy_in_the_gpu_runtime_only(run_python, kernel, floor):
+    """The same process with its Hogbom or FFT calls on the GPU: the one
+    AstroVIPER import of CuPy is the GPU runtime's, at that call, which then
+    raises RuntimeError (here because the import is refused)."""
+    out = run_python("-c", BLOCKED, ASTROVIPER_KERNELS=f"{kernel}=gpu", **{floor: "0"})
     result = json.loads(out.rpartition("RESULT ")[2])
     runtime = "/astroviper/_kernels/gpu/_runtime.py:"
     assert result["blocked"] and all(runtime in b for b in result["blocked"])
-    assert result["error"].startswith("CuPy is not available")
+    assert list(result["errors"]) == [kernel]
+    assert result["errors"][kernel].startswith("CuPy is not available")
     assert result["checked"] == _gpu_check() and result["caught"] is True
