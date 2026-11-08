@@ -35,15 +35,35 @@ of its larger planes and at most 16,384 deferred subtractions of 32 bytes per
 plane in flight; it does not grow with the iterations. Each thread that holds
 small planes column by column has a copy of one plane, its mask and its PSF.
 
-Speed, measured on one machine (12 cores, 24 threads; the WP4 reports): calls
-of several small planes at 12 and 24 threads, and calls of larger planes, were
-faster than the reference (or about as fast, on small planes whose masks keep
-few pixels), with three exceptions. A call that does almost nothing (small
-planes that stop within a few iterations: tens of microseconds in all) took
-up to about 15 microseconds longer, the fixed cost of a call. Planes of 8 x 8
-pixels on one thread ran at 0.83 to 1.2 times the reference's speed (it
-varied from process to process). And narrow planes just over 65,536 pixels
-(1,400 x 48) ran at 0.88 to 1.1 times its speed.
+Speed, measured on one machine (12 cores, 24 threads; the WP4 reports):
+``clean_cube_many_threads`` was faster than the reference in every case
+measured, and ``clean_cube`` in most, among them calls of many small planes
+at 12 and 24 threads and calls of larger planes. ``clean_cube`` was slower on
+these:
+
+* Planes of one row. Six planes of 1 x 2,410 to 1 x 8,192 pixels ran at 0.60
+  to 0.73 times the reference's speed without a mask, and at 0.51 to 0.95
+  times with random masks, at 1, 12 and 24 threads. Planes of two rows ran at
+  0.73 to 1.5 times its speed; planes of four rows or more were faster.
+* Small planes with random masks. 24 planes of 3 x 48, with 5 to 50 % of
+  their pixels in the mask, ran at 0.81 to 0.90 times its speed (without a
+  mask, or with a stripe, at 1.16 to 1.62 times).
+* Tiny planes on one thread. Planes of 4 x 4 to 8 x 8 pixels ran at 0.65 to
+  1.2 times its speed (it varied from process to process).
+* Calls that do almost nothing, by the fixed cost of a call: up to about 15
+  microseconds longer for small planes that stop within a few iterations,
+  and about 75 microseconds longer for a plane of 65,536 x 1 pixels whose
+  mask stops it at once (311 against 235 microseconds).
+* Narrow planes just over 65,536 pixels (1,400 x 48) ran at 0.88 to 1.1 times
+  its speed.
+
+Narrow planes of 32,768 to 65,536 pixels (at most 64 columns) take one thread
+each, as small planes do, so one or two of them gain nothing from more
+threads. Both entries were still faster than the reference on them, but up to
+3.2 times slower than an earlier version, which put a crew of threads on each
+(one plane of 1,024 x 64 with a disk mask, at 12 or 24 threads: 27.4 ms,
+against 8.6 to 8.9 ms for the earlier version and 46 to 70 ms for the
+reference).
 
 Each call takes one path, reported to the kernel switch for its trace line:
 
