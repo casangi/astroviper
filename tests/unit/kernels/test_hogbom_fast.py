@@ -1933,16 +1933,39 @@ def test_planes_without_pixels_decline(entry):
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
-def test_a_keyword_that_cannot_be_encoded_raises(entry):
-    """The one error that is not the reference's (documented): a keyword whose
-    name is not valid UTF-8 (a lone surrogate) raises RuntimeError, where the
-    reference binding aborts the process while it formats its TypeError (so
-    the reference is not called here). Nothing is written."""
-    arguments = _arguments()
-    residual = arguments["residual_cube"].copy()
-    with pytest.raises(RuntimeError):
-        FAST[entry](**arguments, **{"\udc80": 1})
-    assert np.array_equal(_bits(arguments["residual_cube"]), _bits(residual))
+def test_an_unencodable_keyword_is_the_reference(entry, run_python):
+    """A keyword name that UTF-8 cannot encode (a lone surrogate) declines,
+    writing nothing (names are compared in place, by no conversion that could
+    raise), and the call is then the reference's. The reference binding
+    aborts on it (pybind11 converting the name for its TypeError), so each
+    outcome is that of a fresh interpreter, and the outcomes are compared
+    whole: exit status and standard error."""
+    code = (
+        "import sys\n"
+        "import numpy as np\n"
+        "from astroviper._kernels import impl\n"
+        "from astroviper._kernels.fast.hogbom import _hogbom_fast_ext as ext\n"
+        "residual = np.zeros((1, 1, 1, 8, 8))\n"
+        "residual[..., 4, 4] = 1.0\n"
+        "original = residual.copy()\n"
+        "arguments = {'residual_cube': residual, 'psf_cube': original.copy(),\n"
+        "             'model_cube': np.zeros_like(residual),\n"
+        "             'max_iter_per_cycle_updated': np.full((1, 1, 1), 5, np.int32),\n"
+        "             'threshold_per_cycle': np.zeros((1, 1, 1)), '\\udc80': 1}\n"
+        "if sys.argv[1] == 'fast':\n"
+        f"    result = ext.{entry}(**arguments)\n"
+        "    print(result, np.array_equal(residual, original), flush=True)\n"
+        f"impl('hogbom', '{entry}', sys.argv[1])(**arguments)\n"
+    )
+    quiet = {"PYTHONFAULTHANDLER": "", "PYTHONDEVMODE": ""}  # its frames differ
+    fast_run, ref_run = (
+        run_python("-c", code, name, check=False, **quiet) for name in ("fast", "ref")
+    )
+    assert fast_run.stdout == "None True\n" and ref_run.returncode != 0
+    assert (fast_run.returncode, fast_run.stderr) == (
+        ref_run.returncode,
+        ref_run.stderr,
+    )
 
 
 @pytest.mark.parametrize(

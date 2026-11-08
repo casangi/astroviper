@@ -55,9 +55,10 @@ Each call takes one path, reported to the kernel switch for its trace line:
     writes that shares memory with another argument, image planes without
     pixels) or that cannot allocate its buffers before its first write: the
     reference runs with the same arguments, so the result is the reference's,
-    bit for bit, and so is any exception. One error differs: a keyword whose
-    name cannot be encoded as UTF-8 raises ``RuntimeError``, where the
-    reference binding aborts the process.
+    bit for bit, and so is any exception. Names are compared in place, so a
+    keyword whose name cannot be encoded as UTF-8 declines too, and the
+    reference binding then aborts the process, as it does when called
+    directly.
 
 Misaligned arrays (such as Dask's deserialised ones) are read through aligned
 copies, as much memory again as those arrays, and the residual and model

@@ -8,7 +8,10 @@
 // binding would not run exactly as given, so that pybind11's conversions, the
 // defaults and every error message stay the reference's:
 //
-// * argument names, as pybind11 binds them to the reference's parameters;
+// * argument names, as pybind11 binds them to the reference's parameters,
+//   compared in place: a keyword whose name UTF-8 cannot encode (a lone
+//   surrogate) declines too, and the reference binding then aborts the
+//   process while it formats its TypeError, as when it is called directly;
 // * types: an array argument that is not an ndarray (the reference converts
 //   it), a clean_box that is not a tuple or whose four items do not convert
 //   to int, a scalar that pybind11 cannot convert;
@@ -19,10 +22,6 @@
 //   without pixels (which the reference reads out of bounds);
 // * a call that cannot allocate what it needs before its first write
 //   (std::bad_alloc, or NumPy's MemoryError for the result arrays).
-//
-// One error is not the reference's: a keyword whose name cannot be encoded
-// as UTF-8 (a lone surrogate) raises RuntimeError here, where the reference
-// binding aborts the process while it formats its TypeError.
 //
 // A misaligned residual, model or PSF, which the reference reads in place
 // (Dask can hand its workers arrays at any offset of the frames it received),
@@ -44,7 +43,6 @@
 #include <memory>
 #include <new>
 #include <optional>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -95,13 +93,17 @@ enum Parameter : std::size_t {
 using Bound = std::array<py::handle, kParameters.size()>;
 
 // The arguments matched to the parameters as pybind11 matches them, or false
-// where the reference's call would fail.
+// where the reference's call would fail. Names are compared in place, so that
+// matching allocates nothing and cannot raise (an unencodable name declines).
 bool match(const py::args& args, const py::kwargs& kwargs, Bound& bound) {
     if (args.size() > kParameters.size()) return false;
     for (std::size_t i = 0; i < args.size(); ++i) bound[i] = args[i].ptr();
     for (const auto& [key, value] : kwargs) {
-        const auto name = key.cast<std::string>();
-        const auto* found = std::find(kParameters.begin(), kParameters.end(), name);
+        const auto* found =
+            std::find_if(kParameters.begin(), kParameters.end(), [&](const char* name) {
+                return PyUnicode_Check(key.ptr()) &&
+                       PyUnicode_CompareWithASCIIString(key.ptr(), name) == 0;
+            });
         if (found == kParameters.end()) return false;
         py::handle& slot = bound[static_cast<std::size_t>(found - kParameters.begin())];
         if (slot) return false;  // given by position and by name
