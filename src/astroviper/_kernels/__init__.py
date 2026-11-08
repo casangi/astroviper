@@ -26,7 +26,14 @@ kernel      entries                           implementations
 ``hogbom``  ``clean_cube``,                   ``ref``, ``fast``, ``gpu``
             ``clean_cube_many_threads``
 ``asp``     ``clean``, ``clean_cube``         ``ref``, ``fast``
+``fft``     ``ifft_uv_to_lm``,                ``ref``, ``gpu``
+            ``fft_lm_to_uv``
 ==========  ================================  ===============
+
+The ``fft`` entries are the uv <-> lm transforms of
+``processing_functions/imaging/fft_normalize_anti_alias_gridder.py``, which
+hooks its own two functions: its callers there (the image, PSF and model
+transforms) and in ``feather.py`` call them by these names.
 
 With ``hogbom=fast`` a call may put several threads on one plane, where the
 reference ``clean_cube`` runs one per plane, and it never starts more threads
@@ -35,6 +42,11 @@ runs the calls whose planes search fewer than
 ``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` pixels with ``hogbom=fast`` (the
 reference when that is not built), keeps to ``CUPY_GPU_MEMORY_LIMIT`` on the
 device, and a call that fails there may have cleaned its first planes.
+``fft=gpu`` (CuPy's cuFFT, see ``_kernels.gpu.fft``) agrees with the reference
+to the rounding of an FFT, not bit for bit; it runs on the CPU, with the
+reference, the calls whose planes have fewer than
+``ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS`` pixels or that do not fit in
+``CUPY_GPU_MEMORY_LIMIT``.
 
 ``ASTROVIPER_KERNELS_TRACE=<dir>``
     Each wrapped call appends one JSON line to

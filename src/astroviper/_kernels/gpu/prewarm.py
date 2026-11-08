@@ -4,11 +4,15 @@ of the first timed call.
 
 Checks the environment as ``python -m astroviper._kernels --check`` does,
 creates the CUDA context, compiles the kernels (or loads them from CuPy's
-cache, ``CUPY_CACHE_DIR``) and runs each Hogbom entry on the GPU once for each
-image dtype, on a small cube, then prints the timings as one JSON line. Exits
-with status 1 and the reason on standard error when the GPU cannot run them
-(no CuPy, no device, no NVRTC, an invalid ``CUPY_GPU_MEMORY_LIMIT`` or
-``ASTROVIPER_KERNELS_GPU_MIN_PIXELS``, a compile error). :func:`prewarm` does
+cache, ``CUPY_CACHE_DIR``) of the GPU implementations that
+``ASTROVIPER_KERNELS`` selects (all of them when it selects none) and runs them
+once: each Hogbom entry for each image dtype, on a small cube, and each FFT
+entry for each complex dtype, on small planes of even and odd sizes (which
+loads cuFFT), then prints the timings as one JSON line. Exits with status 1
+and the reason on standard error when the GPU cannot run them (no CuPy, no
+device, no NVRTC, an invalid ``CUPY_GPU_MEMORY_LIMIT``,
+``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` or
+``ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS``, a compile error). :func:`prewarm` does
 the same in the calling process, which then pays none of it at its first
 call; as a Dask worker preload (``--preload astroviper._kernels.gpu.prewarm``,
 or ``DASK_DISTRIBUTED__WORKER__PRELOAD``) it prewarms each worker, and a worker
@@ -23,7 +27,11 @@ import time
 
 import numpy as np
 
-from astroviper._kernels.gpu import _runtime, hogbom
+from astroviper._kernels._switch import selected
+from astroviper._kernels.gpu import _runtime, fft, hogbom
+
+#: The GPU implementation of each kernel that has one.
+MODULES = {"hogbom": hogbom, "fft": fft}
 
 
 def _cube(dtype):
@@ -49,17 +57,27 @@ def _cube(dtype):
 
 
 def prewarm():
-    """Initialize CUDA, compile the kernels and run them once; returns the
-    timings (seconds) and the device, as a dict."""
+    """Initialize CUDA, compile the selected GPU kernels (see the module
+    docstring) and run them once; returns the timings (seconds), the kernels
+    and the device, as a dict."""
+    kernels = [k for k, name in selected().items() if name == "gpu"] or list(MODULES)
     t0 = time.perf_counter()
-    hogbom.check_environment()
+    for kernel in kernels:
+        MODULES[kernel].check_environment()
     device = _runtime.require_device()
     t1 = time.perf_counter()
-    for entry in hogbom._ENTRIES:
-        for dtype in (np.float32, np.float64):
-            hogbom._run(hogbom._bind(entry, (), _cube(dtype)))
+    if "hogbom" in kernels:
+        for entry in hogbom._ENTRIES:
+            for dtype in (np.float32, np.float64):
+                hogbom._run(hogbom._bind(entry, (), _cube(dtype)))
+    if "fft" in kernels:
+        for entry in fft._INPUT:
+            for dtype in (np.complex64, np.complex128):
+                for shape in ((64, 64), (63, 65)):
+                    fft._run(fft._bind(entry, (np.ones(shape, dtype),), {}))
     t2 = time.perf_counter()
     return {
+        "kernels": kernels,
         "device": device.name,
         "versions": device.versions,
         "init_s": device.init_s,

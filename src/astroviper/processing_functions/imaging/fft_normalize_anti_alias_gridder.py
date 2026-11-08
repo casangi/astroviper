@@ -1045,3 +1045,10 @@ def _fft_norm_image_planes(
         )
 
     return img_xds
+
+
+if __import__("os").environ.get("ASTROVIPER_KERNELS"):
+    from astroviper._kernels import dispatch as _dispatch
+
+    ifft_uv_to_lm = _dispatch("fft", ifft_uv_to_lm)
+    fft_lm_to_uv = _dispatch("fft", fft_lm_to_uv)

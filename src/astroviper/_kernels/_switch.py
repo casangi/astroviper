@@ -14,6 +14,7 @@ import resource
 import socket
 import threading
 import time
+import weakref
 from importlib import import_module
 from types import MappingProxyType
 
@@ -25,7 +26,7 @@ TRACE_ENV = "ASTROVIPER_KERNELS_TRACE"
 #: Every implementation name the grammar knows.
 IMPLEMENTATIONS = ("ref", "fast", "gpu", "ref1")
 #: Kernel names that are planned but not hooked yet; selecting one is an error.
-RESERVED = ("grid", "fft", "pol", "dft_image", "mtmfs", "vis", "ring", "psf_fit", "pb")
+RESERVED = ("grid", "pol", "dft_image", "mtmfs", "vis", "ring", "psf_fit", "pb")
 
 _IMAGING = "astroviper.processing_functions.imaging"
 
@@ -34,7 +35,12 @@ _ENTRIES = {
     "dft": ("dft_predict",),
     "hogbom": ("clean_cube", "clean_cube_many_threads"),
     "asp": ("clean", "clean_cube"),
+    "fft": ("ifft_uv_to_lm", "fft_lm_to_uv"),
 }
+#: Kernels whose reference entries are Python functions of the module that
+#: hooks them, which is then their shim (the others' shims are the packages of
+#: their reference extensions): when hooked, the module holds the wrappers.
+_SELF_HOOKED = ("fft",)
 
 #: Valid (kernel, implementation) pairs: the module that provides the kernel's
 #: entries under the same names and signatures. A static table, extended as
@@ -54,6 +60,10 @@ _REGISTRY = {
         "ref": f"{_IMAGING}.deconvolvers.aspclean._aspclean_ext",
         "fast": "astroviper._kernels.fast.aspclean",
     },
+    "fft": {
+        "ref": f"{_IMAGING}.fft_normalize_anti_alias_gridder",
+        "gpu": "astroviper._kernels.gpu.fft",
+    },
 }
 
 _logger = logging.getLogger("astroviper.kernels")
@@ -64,6 +74,7 @@ _logged = set()  # (kernel, impl) announced on the logger
 _traced = set()  # (kernel, entry, impl) that wrote a trace line
 _trace_failed = set()  # trace directories whose write failure was logged
 _reported = threading.local()  # .value = (kernel, path): see report_path()
+_wrappers = weakref.WeakSet()  # the wrappers that dispatch() made
 
 
 def _names(names):
@@ -177,8 +188,11 @@ def impl(kernel, entry, name):
             "'AstroVIPER: skipping' messages)",
             name=module_name,
         ) from e
+    function = getattr(module, entry)
+    if function in _wrappers:  # the hooked module of a _SELF_HOOKED kernel's "ref"
+        function = function.__wrapped__
     with _lock:
-        function = _resolved.setdefault(key, getattr(module, entry))
+        function = _resolved.setdefault(key, function)
         announce = (kernel, name) not in _logged
         _logged.add((kernel, name))
     if announce:
@@ -231,8 +245,12 @@ def dispatch(kernel, function):
 
     # The shim's names, so that pickling by reference (Dask) finds the wrapper
     # (a pybind11 entry's own __qualname__ is not an attribute path).
-    wrapper.__module__ = _REGISTRY[kernel]["ref"].rpartition(".")[0]
+    reference = _REGISTRY[kernel]["ref"]
+    wrapper.__module__ = (
+        reference if kernel in _SELF_HOOKED else reference.rpartition(".")[0]
+    )
     wrapper.__qualname__ = entry
+    _wrappers.add(wrapper)
     return wrapper
 
 
@@ -257,10 +275,14 @@ def report_path(kernel, path, **fields):
 
 
 def _arrays(args, kwargs):
-    """``{argument: array}`` for the array arguments (positional by index)."""
+    """``{argument: array}`` for the array arguments (positional by index), not
+    the classes among them (a NumPy scalar type, such as a ``complex_dtype``,
+    has ``shape`` and ``dtype`` attributes too)."""
     named = {str(i): a for i, a in enumerate(args)} | kwargs
     return {
-        k: a for k, a in named.items() if hasattr(a, "shape") and hasattr(a, "dtype")
+        k: a
+        for k, a in named.items()
+        if not isinstance(a, type) and hasattr(a, "shape") and hasattr(a, "dtype")
     }
 
 
