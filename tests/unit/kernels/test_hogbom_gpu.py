@@ -6,16 +6,18 @@ device. Planes of at most 1024 x 1024 pixels (the larger ones are checked on
 the DATA side). The oracle is the reference binding, compared as in
 ``test_hogbom_fast`` (whose cases and comparison are reused): bitwise on
 unsigned-integer views of everything a call returns or changes, NaN bits
-included, but in the NaN-payload test, where an operation on two NaNs keeps
-the one the reference compiler's operand order picks.
+included, except where an operation on two NaNs keeps the one that the
+reference compiler's operand order picks and its build is not the same in
+both entries and both dtypes (the NaN-payload tests).
 
 * Both entries against their own reference entries on the GPU (the pixel
   floor set to 0): WP4's random cubes and edge cases (masks, NaN and
   infinities, ties, -0.0, subnormal and huge values, float32 and float64, PSFs
   of one and of two image sizes, clamped clean boxes, edge gains, thresholds,
   speedups, budgets and divergence controls, accumulated models), NaNs of
-  both signs in the residual and the model, planes of up to 1024 x 1024, and
-  grids of fewer blocks than a plane's strips.
+  both signs in the residual and the model, two NaNs of other bits in one
+  operation, the sum of |model| over its gathers, planes of up to 1024 x 1024,
+  and grids of fewer blocks than a plane's strips.
 * Multi-plane cubes: per-plane budgets, thresholds and masks, a broadcast PSF,
   Stokes I active with V idle; the bits do not depend on the thread count.
 * Paths: calls whose planes search fewer pixels than the floor run
@@ -33,7 +35,8 @@ the one the reference compiler's operand order picks.
   first GPU call raises RuntimeError and routed calls still run; in a process
   forked during a GPU call the GPU call raises RuntimeError at once; a missing
   kernel source raises RuntimeError; ``--check`` and the prewarm validate the
-  variables (the subprocesses import this module from the repository root).
+  variables and find NVRTC and the CUDA headers (the subprocesses import this
+  module from the repository root).
 * The generated code: the PTX of the module, compiled as CuPy compiles it, has
   no fused or flushed operation, and the host's constants mirror the source's.
 * Resources: launches stay short, and host memory within the inputs + 10 %.
@@ -46,6 +49,7 @@ import os
 import re
 import socket
 import traceback
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -70,6 +74,7 @@ from tests.unit.kernels.test_hogbom_fast import (
     _mask,
     _misaligned,
     _outcome,
+    _psf,
     _random_case,
     _run,
 )
@@ -266,6 +271,103 @@ def test_nan_bits_are_the_references(gpu, entry, dtype):
     expected = _check(gpu, entry, case, threads=(1,))
     assert np.isnan(expected[1]).any()
     assert np.isnan(expected[2][0, 0]).any(axis=(1, 2)).all()  # each plane's model
+
+
+#: Two NaNs of other bits than each other: a signalling +A and a quiet -B.
+TWO_NANS = {
+    np.float32: (0x7FA0000A, 0xFFC0000B),
+    np.float64: (0x7FF400000000000A, 0xFFF800000000000B),
+}
+
+
+def _two_nan_cases(dtype):
+    """(name, case, site): the NaNs A and B meet in one operation of a plane
+    of 48 x 48, whose first component is at (27, 19); site(outcome) is the
+    operation's result. (33, 14) is in that component's footprint, outside the
+    box searched around it, and PSF pixel (30, 19) falls on it."""
+    a, b = TWO_NANS[dtype]
+    gain_a = np.uint64(TWO_NANS[np.float64][0]).view(np.float64)  # pv: A, quieted
+    psf = _psf(48, 48, seed=3)
+    box, far = np.zeros((48, 48), bool), np.zeros((48, 48), bool)
+    box[24:31, 16:23], far[36:44, 36:44] = True, True  # far: no peak, (0, 0) is it
+
+    def case(mask=box, niter=1, gain=0.1, peak=True):
+        data = 2.0 * np.roll(psf, (3, -5), (0, 1)) if peak else np.zeros((48, 48))
+        c = _case(48, 48, dtype, mask=mask, niter=niter, threshold=0.0 if peak else -1.0,
+                  gain=gain, divergence=False, data=data, psf=psf)  # fmt: skip
+        return c | {"psf": c["psf"].copy()}  # a plane's PSF cube is a read-only view
+
+    def residual(outcome):
+        return outcome[1][0, 0, 0, 33, 14]
+
+    def model(outcome):
+        return outcome[2][0, 0, 0, 0, 0]
+
+    def rms(outcome):
+        return outcome[0]["iteration_residual_rms"][0][0][0]
+
+    c = case()
+    _bits(c["residual"])[0, 0, 0, 33, 14], _bits(c["psf"])[0, 0, 0, 30, 19] = a, b
+    yield "v - pv w", c, residual
+    c = case(gain=gain_a)
+    _bits(c["psf"])[0, 0, 0, 30, 19] = b
+    yield "pv w", c, residual
+    c = case(gain=gain_a)
+    _bits(c["residual"])[0, 0, 0, 33, 14] = b
+    yield "v - pv w, pv NaN", c, residual
+    c = case(mask=far, peak=False)
+    _bits(c["residual"])[0, 0, 0, 0, 0], _bits(c["model"])[0, 0, 0, 0, 0] = b, a
+    yield "model + pv", c, model
+    c = case(mask=far, gain=gain_a, peak=False)
+    _bits(c["residual"])[0, 0, 0, 0, 0] = b
+    yield "gain x peak", c, model
+    for pair in ((a, b), (b, a)):
+        c = case(mask=None, niter=2)
+        _bits(c["residual"])[0, 0, 0, 27, [20, 21]] = pair
+        yield "a row", c, rms
+        c = case(mask=None, niter=2)
+        _bits(c["residual"])[0, 0, 0, [28, 29], 19] = pair
+        yield "rows", c, rms
+        c = case()
+        _bits(c["model"])[0, 0, 0, [1, 46], [1, 46]] = pair
+        yield "|model|", c, lambda outcome: outcome[0]["total_flux_cleaned"]
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_two_nans_make_a_nan_where_the_reference_has_one(gpu, entry, dtype):
+    """Two NaNs of other bits meet in the subtraction of a component, its
+    product with the PSF, the model update, gain x peak, a row's sum of
+    squares, the sum over rows and the sum of |model|. Every result is the
+    reference's, a NaN where it has one (which of the two it keeps is its
+    compiler's pick: see hogbom.py), and the bits of the NaNs that the kernel
+    picks as the reference's build does are its: the model update's, the
+    float32 subtraction's and product's, and the float64 sum of |model|."""
+    exact = {"model + pv"} | (
+        {"v - pv w", "pv w", "v - pv w, pv NaN"} if dtype == np.float32 else {"|model|"}
+    )
+    for name, case, site in _two_nan_cases(dtype):
+        expected, actual = _run(REFERENCE[entry], case), _run(GPU[entry], case)
+        assert np.isnan(site(expected)).all(), name
+        _assert_same(expected, actual, nan_bits=name in exact)
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_the_sum_of_the_model_adds_its_rounds_in_order(gpu, monkeypatch, entry):
+    """The |model| values gathered in rounds of 4096 (the least buffer) add up
+    as one sum in plane order, silently as the reference does: a signalling
+    NaN in the first round and a NaN at the start of the second included (the
+    reference's float64 build keeps the first)."""
+    monkeypatch.setattr(hogbom, "_GATHER_MAX", 1)
+    case = _case(128, 128, np.float64, mask="disk", niter=20, seed=95)
+    case["model"] = np.random.default_rng(95).normal(0.0, 1.0, case["model"].shape)
+    _check(gpu, entry, case, threads=(1,))
+    _bits(case["model"])[0, 0, 0, [0, 32], [100, 0]] = TWO_NANS[np.float64]
+    expected = _run(REFERENCE[entry], case)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        _assert_same(expected, _run(GPU[entry], case))
+    assert gpu == [entry] * 2 and np.isnan(expected[0]["total_flux_cleaned"]).all()
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
@@ -669,6 +771,29 @@ def test_the_check_and_the_prewarm_validate_the_gpu_environment(
     errors = [line for line in lines if line.startswith(prefixes)]
     assert len(errors) == 2 and all(map(str.startswith, errors, prefixes))
     assert all(message in line for line in errors)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("cupy") is None, reason="no CuPy")
+def test_the_check_and_the_prewarm_need_nvrtc_and_the_cuda_headers(monkeypatch, capsys):
+    """Where cuda.pathfinder finds no NVRTC, or no CUDA headers (as in an
+    environment that sees CuPy through a .pth file, without CUDA_PATH), CuPy
+    could compile no kernel: ``--check`` and the prewarm fail at once."""
+    pathfinder = pytest.importorskip("cuda.pathfinder")
+    monkeypatch.setenv(ENV, "hogbom=gpu")
+
+    def no_library(name):
+        raise pathfinder.DynamicLibNotFoundError(f"no {name}")
+
+    for name, patch in [
+        ("load_nvidia_dynamic_lib", no_library),
+        ("find_nvidia_header_directory", lambda name: None),
+    ]:
+        with monkeypatch.context() as patched:
+            patched.setattr(pathfinder, name, patch)
+            assert check_main(["--check"]) == 1 and prewarm.main([]) == 1
+        lines = capsys.readouterr().err.splitlines()
+        message = "CuPy cannot find NVRTC and the CUDA headers"
+        assert len([line for line in lines if message in line]) == 2, lines
 
 
 def test_the_dask_preload_hook_prewarms(device):

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from astroviper._kernels.gpu import _runtime
 from tests.unit.kernels.conftest import ALL_REF, SHIMS, TINY_HOGBOM
 
 #: Production modules that import the hooked shims.
@@ -75,7 +76,7 @@ importlib.import_module = guarded_import_module
 
 from astroviper._kernels.__main__ import main
 
-checked = main(["--check"])  # 1 for a gpu selection without CuPy
+checked = main(["--check"])  # 1 for a gpu selection without CuPy or its NVRTC
 for module in [shim for shim, _, _ in {SHIMS!r}.values()] + {CALLERS!r}:
     importlib.import_module(module)
 {TINY_HOGBOM}
@@ -134,8 +135,18 @@ FAST_ASP = pytest.param(
 
 # A hogbom=gpu call of 8 x 8 pixels runs on the CPU (below the pixel floor).
 GPU_HOGBOM = "hogbom=gpu"
-#: Whether CuPy is installed: --check refuses a gpu selection without it.
+#: Whether CuPy is installed (the control is then a cached import).
 CUPY = importlib.util.find_spec("cupy") is not None
+
+
+def _gpu_check():
+    """--check's status for a gpu selection: 1 without CuPy, or where CuPy
+    would find no NVRTC or CUDA headers."""
+    try:
+        _runtime.check_environment()
+    except (RuntimeError, ValueError):
+        return 1
+    return 0
 
 
 @pytest.mark.parametrize(
@@ -145,7 +156,7 @@ def test_hooked_process_never_imports_cupy(run_python, selection):
     out = run_python("-c", BLOCKED, ASTROVIPER_KERNELS=selection)
     result = json.loads(out.rpartition("RESULT ")[2])
     assert result["blocked"] == [] and result["error"] is None
-    assert result["checked"] == (0 if CUPY or "gpu" not in selection else 1)
+    assert result["checked"] == (_gpu_check() if "gpu" in selection else 0)
     assert result["caught"] is True, "the blocker missed an AstroVIPER import"
     if CUPY:
         assert result["cached"] is True, "the control was not a cached import"
@@ -165,4 +176,4 @@ def test_a_gpu_call_imports_cupy_in_the_gpu_runtime_only(run_python):
     runtime = "/astroviper/_kernels/gpu/_runtime.py:"
     assert result["blocked"] and all(runtime in b for b in result["blocked"])
     assert result["error"].startswith("CuPy is not available")
-    assert result["checked"] == (0 if CUPY else 1) and result["caught"] is True
+    assert result["checked"] == _gpu_check() and result["caught"] is True
