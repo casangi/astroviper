@@ -9,6 +9,7 @@ precision kept, the history. Through the 48 x 48 imaging cycle loop of
 ``test_max_cycles_auto``: the record ends with the stop test and keeps why the
 cycles ended, the residual written is the one the steps predict, the solve
 needs the PSF of twice the image size, the mask solved on is the mask written,
+the start rule starts the solve once the automatic mask has stopped growing,
 no model update means no solve, and the summary figure draws the steps.
 """
 
@@ -23,6 +24,8 @@ from astroviper.processing_functions.imaging.deconvolvers.least_squares import (
 from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_MAX_CYCLES,
     IMAGING_NO_PROGRESS,
+    IMAGING_STOP_DESCRIPTIONS,
+    IMAGING_ZERO_MASK,
     MODEL_UPDATE_ALGORITHM,
     MODEL_UPDATE_CONTINUE,
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,
@@ -324,6 +327,66 @@ def test_the_mask_solved_on_is_the_mask_written(monkeypatch):
     )
     assert len(solved_on) == 1
     assert np.array_equal(solved_on[0], image.MASK.values)
+
+
+def test_the_start_rule_waits_for_every_plane_with_a_mask():
+    from astroviper.processing_functions.imaging.image_cube_single_field import (
+        _auto_mask_settled,
+    )
+
+    pixels = [np.array(p) for p in ([100, 0], [150, 0], [151, 0], [152, 0])]
+    assert _auto_mask_settled(pixels, 0.1, 2)
+    assert not _auto_mask_settled(pixels[:3], 0.1, 2)
+    assert _auto_mask_settled(pixels[:3], 0.1, 1)
+    assert not _auto_mask_settled(pixels[1:3], 0.1, 2)
+    assert not _auto_mask_settled(pixels[2:3], 0.1, 1)
+    two = [np.array(p) for p in ([100, 100], [101, 150], [102, 151])]
+    assert not _auto_mask_settled(two, 0.1, 2)
+    assert _auto_mask_settled(two, 0.1, 1)
+    assert not _auto_mask_settled([np.zeros(2)] * 4, 0.1, 2)
+
+
+@pytest.mark.parametrize("start_updates", [None, 1])
+def test_the_start_rule_starts_the_solve_before_the_stop_test(start_updates):
+    rule = {"max_steps": 5, "start_growth": 1e-9}
+    if start_updates is not None:
+        rule["start_updates"] = start_updates
+    _, _, record = _run(
+        {**CYCLES, "max_cycles": 20},
+        auto_mask_params={},
+        least_squares_params=rule,
+    )
+    fields = next(fields for key, fields in record.data.items() if key.pol == 0)
+    updates = start_updates or 2
+    n_clean = len(fields["iter_done"]) - 2
+    assert (np.asarray(fields["iteration_component_scale"][-2]) == -2).all()
+    masks = fields["masksum"]
+
+    def held(k):
+        return len(set(masks[k - updates : k + 1])) == 1
+
+    assert held(n_clean)
+    assert not any(held(k) for k in range(updates, n_clean))
+    assert fields["stop_code"].imaging == 0
+    assert fields["stop_description"] == (
+        f"Automatic mask grew by less than 1e-09 per mask update, {updates} in a row"
+    )
+    empty = next(fields for key, fields in record.data.items() if key.pol == 1)
+    assert empty["stop_code"].imaging == IMAGING_ZERO_MASK
+    assert empty["stop_description"] == IMAGING_STOP_DESCRIPTIONS[IMAGING_ZERO_MASK]
+
+
+def test_the_stop_test_still_starts_the_solve_when_the_rule_does_not_hold():
+    _, _, record = _run(
+        CYCLES,
+        auto_mask_params={},
+        least_squares_params={"max_steps": 5, "start_growth": 1e-9, "start_updates": 5},
+    )
+    fields = next(fields for key, fields in record.data.items() if key.pol == 0)
+    assert len(fields["iter_done"]) == CYCLES["max_cycles"] + 2
+    assert (np.asarray(fields["iteration_component_scale"][-2]) == -2).all()
+    assert fields["stop_code"].imaging == IMAGING_MAX_CYCLES
+    assert fields["stop_description"] == IMAGING_STOP_DESCRIPTIONS[IMAGING_MAX_CYCLES]
 
 
 @pytest.mark.parametrize("controls", [{"max_cycles": 0}, {"max_iter": 0}])

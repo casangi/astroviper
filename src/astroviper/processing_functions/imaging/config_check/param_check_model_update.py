@@ -79,6 +79,14 @@ def check_model_update(config, *, mode, require_complete=False):
             raise ValueError(
                 "least_squares_params needs a clean_mask or auto_mask_params."
             )
+        # Only the automatic mask is counted; start_growth would go unused.
+        if (
+            "start_growth" in config["least_squares_params"]
+            and config.get("auto_mask_params") is None
+        ):
+            raise ValueError(
+                "least_squares_params start_growth needs auto_mask_params."
+            )
         if (config.get("gridding_kernel_params") or {}).get("type") == "dft":
             raise ValueError("least_squares_params needs a gridded image.")
 

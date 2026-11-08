@@ -56,7 +56,10 @@ def check_least_squares_params(value):
         The parameters of the least-squares solve.
     """
     require_mapping("least_squares_params", value)
-    unknown = sorted(set(value) - {"max_steps", "smooth_fwhm_pixels"})
+    unknown = sorted(
+        set(value)
+        - {"max_steps", "smooth_fwhm_pixels", "start_growth", "start_updates"}
+    )
     if unknown:
         raise ValueError(f"Unknown least_squares_params keys: {unknown}.")
     if "max_steps" not in value:
@@ -69,6 +72,14 @@ def check_least_squares_params(value):
             positive=True,
             scalar=True,
         )
+    if "start_growth" in value:
+        require_finite_real(
+            "start_growth", value["start_growth"], positive=True, scalar=True
+        )
+    if "start_updates" in value:
+        if "start_growth" not in value:
+            raise ValueError("least_squares_params start_updates needs start_growth.")
+        require_integer("start_updates", value["start_updates"], minimum=1)
 
 
 # -----------------------------------------------------------------------------

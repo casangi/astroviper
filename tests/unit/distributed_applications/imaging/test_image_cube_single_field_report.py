@@ -249,3 +249,24 @@ def test_the_least_squares_solve_through_the_driver(processing_set, tmp_path):
     for fields in result["deconvolution"].data.values():
         assert len(fields["iter_done"]) == CYCLE_CONTROL_PARAMS["max_cycles"] + 2
         assert fields["iter_done"][-1] == 0
+
+
+def test_the_report_gives_the_start_rule_of_planes_left_at_stop_code_0(
+    processing_set, tmp_path
+):
+    # The defaults make no mask of this sparse PSF's point source.
+    result = _image(
+        processing_set,
+        str(tmp_path / "cube.img.zarr"),
+        auto_mask_params={
+            "sidelobe_threshold": 0.5,
+            "noise_threshold": 1.0,
+            "min_beam_fraction": 0.0,
+        },
+        least_squares_params={"max_steps": 5, "start_growth": 0.1, "start_updates": 1},
+        report="html",
+    )
+    assert (
+        "Planes that end at stop code 0: Automatic mask grew by less than 0.1 per "
+        "mask update, 1 in a row." in _text(result["report"])
+    )

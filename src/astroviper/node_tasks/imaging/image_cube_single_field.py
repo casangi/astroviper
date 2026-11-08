@@ -1053,11 +1053,12 @@ def image_cube_single_field(
     least_squares_params : dict or None, optional
         Least-squares solve of the sky model inside the clean mask, a
         prototype. ``None`` makes no solve. A dict adds one last imaging cycle
-        once the stop test has ended the others: its model update solves
-        ``M P M d = M R`` by conjugate residual, with ``M`` the clean mask of
-        the plane, ``P`` the PSF of twice the image size and ``R`` the
-        residual, and adds ``d`` to the model. ``max_cycles`` sets how many
-        CLEAN model updates come first, and they must have finished the mask.
+        once the stop test has ended the others, or once ``start_growth``
+        holds: its model update solves ``M P M d = M R`` by conjugate
+        residual, with ``M`` the clean mask of the plane, ``P`` the PSF of
+        twice the image size and ``R`` the residual, and adds ``d`` to the
+        model. Otherwise ``max_cycles`` sets how many CLEAN model updates come
+        first, and they must have finished the mask.
         Needs ``clean_mask`` or ``auto_mask_params``, and no ``clean_box``.
         The model keeps no sign and nothing limits what is fitted inside the
         mask, noise included. With ``record_iteration_history`` each step is
@@ -1072,6 +1073,14 @@ def image_cube_single_field(
           the model increment is made of, within the mask, so that the solve
           fits only structure that wide. For images whose residual is at the
           noise, where an unsmoothed solve fits noise within a few steps.
+        - ``start_growth`` (optional) : Needs ``auto_mask_params``. The solve
+          starts once the mask of every plane that has one has grown by less
+          than this fraction of its pixels in each of the last
+          ``start_updates`` mask updates. Planes still going keep imaging stop
+          code 0, with the rule as their stop description. Tried with 0.1 on
+          simulated Cygnus A only.
+        - ``start_updates`` (2) : Mask updates in a row that ``start_growth``
+          needs; a mask can pause for one update and then grow again.
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
     skunk_works : bool, optional

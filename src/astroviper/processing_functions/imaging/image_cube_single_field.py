@@ -493,6 +493,35 @@ def imaging_preparation_single_field(
     return controller, img_xds, return_df, combined_imaging_dict, T_setup
 
 
+def _auto_mask_settled(mask_pixels, start_growth, start_updates):
+    """Whether the automatic mask meets the start rule of the least-squares solve.
+
+    Parameters
+    ----------
+    mask_pixels : list of numpy.ndarray
+        Mask pixels of every plane after each mask update, oldest first.
+    start_growth : float
+        Growth, as a fraction of the pixels before an update, below which an
+        update counts.
+    start_updates : int
+        Updates in a row that must each grow by less than ``start_growth``.
+
+    Returns
+    -------
+    bool
+        True when every plane with a mask grew by less than ``start_growth`` in
+        each of the last ``start_updates`` updates.
+    """
+    import numpy as np
+
+    if len(mask_pixels) <= start_updates:
+        return False
+    recent = np.array(mask_pixels[-(start_updates + 1) :], dtype=float)
+    has_mask = recent[-1] > 0
+    growth = np.diff(recent, axis=0) / np.maximum(recent[:-1], 1.0)
+    return bool(has_mask.any() and (growth[:, has_mask] < start_growth).all())
+
+
 @shares_param_docs
 def image_cube_single_field(
     ps_xdt,
@@ -1004,11 +1033,12 @@ def image_cube_single_field(
     least_squares_params : dict or None, optional
         Least-squares solve of the sky model inside the clean mask, a
         prototype. ``None`` makes no solve. A dict adds one last imaging cycle
-        once the stop test has ended the others: its model update solves
-        ``M P M d = M R`` by conjugate residual, with ``M`` the clean mask of
-        the plane, ``P`` the PSF of twice the image size and ``R`` the
-        residual, and adds ``d`` to the model. ``max_cycles`` sets how many
-        CLEAN model updates come first, and they must have finished the mask.
+        once the stop test has ended the others, or once ``start_growth``
+        holds: its model update solves ``M P M d = M R`` by conjugate
+        residual, with ``M`` the clean mask of the plane, ``P`` the PSF of
+        twice the image size and ``R`` the residual, and adds ``d`` to the
+        model. Otherwise ``max_cycles`` sets how many CLEAN model updates come
+        first, and they must have finished the mask.
         Needs ``clean_mask`` or ``auto_mask_params``, and no ``clean_box``.
         The model keeps no sign and nothing limits what is fitted inside the
         mask, noise included. With ``record_iteration_history`` each step is
@@ -1023,6 +1053,14 @@ def image_cube_single_field(
           the model increment is made of, within the mask, so that the solve
           fits only structure that wide. For images whose residual is at the
           noise, where an unsmoothed solve fits noise within a few steps.
+        - ``start_growth`` (optional) : Needs ``auto_mask_params``. The solve
+          starts once the mask of every plane that has one has grown by less
+          than this fraction of its pixels in each of the last
+          ``start_updates`` mask updates. Planes still going keep imaging stop
+          code 0, with the rule as their stop description. Tried with 0.1 on
+          simulated Cygnus A only.
+        - ``start_updates`` (2) : Mask updates in a row that ``start_growth``
+          needs; a mask can pause for one update and then grow again.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     input_checked : bool, optional
@@ -1182,6 +1220,7 @@ def image_cube_single_field(
     model_exists = False
     least_squares_done = False
     stop_test_before_solve = None
+    mask_pixels = []
     n_cycles = 0
     while True:
         # ---- Residual-update phase ----
@@ -1205,6 +1244,7 @@ def image_cube_single_field(
         accumulate_timing(timing, residual_return_df)
         if not model_exists:
             install_clean_mask(img_xds, clean_mask)
+        start_rule_met = False
         if auto_mask_params is not None and not least_squares_done:
             start = time.time()
             threshold_reached = None
@@ -1221,6 +1261,17 @@ def image_cube_single_field(
                 input_checked=True,
             )
             timing["T_auto_mask"] += time.time() - start
+            if (
+                least_squares_params is not None
+                and "start_growth" in least_squares_params
+            ):
+                mask = img_xds[img_xds.attrs["data_groups"]["residual"]["mask"]]
+                mask_pixels.append(np.count_nonzero(mask.values, axis=(-2, -1)))
+                start_rule_met = _auto_mask_settled(
+                    mask_pixels,
+                    least_squares_params["start_growth"],
+                    least_squares_params.get("start_updates", 2),
+                )
 
         from astroviper.processing_functions.imaging.config_check._common import (
             CUBE_SINGLE_FIELD,
@@ -1282,11 +1333,21 @@ def image_cube_single_field(
         # cycle, whose residual update makes the residual written.
         least_squares_now = (
             least_squares_params is not None
-            and stopcode.imaging != 0
+            and (stopcode.imaging != 0 or start_rule_met)
             and model_exists
             and not least_squares_done
         )
         if least_squares_now:
+            if stopcode.imaging == 0:
+                # The start rule ends the cycles of the planes still going.
+                stopdesc = (
+                    "Automatic mask grew by less than "
+                    f"{least_squares_params['start_growth']:g} per mask update, "
+                    f"{least_squares_params.get('start_updates', 2)} in a row"
+                )
+                for fields in residual_imaging_dict.data.values():
+                    if fields["stop_code"].imaging == 0:
+                        fields["stop_description"] = stopdesc
             stop_test_before_solve = residual_imaging_dict, stopdesc
 
         # ---- Model-update phase (cycle control + deconvolve + convergence) ----
