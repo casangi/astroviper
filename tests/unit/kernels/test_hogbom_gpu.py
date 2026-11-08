@@ -380,11 +380,13 @@ out = {}
 for n in (32, 256):
     case = _case(n, n, np.float64, planes=(1, 1, 2), niter=20, seed=63)
     reference = _run(hogbom.impl("hogbom", "clean_cube", "ref"), case)
+    residual, model = case["residual"].copy(), case["model"].copy()
     try:
-        result = _run(hogbom.clean_cube, case)
-        out[n] = all(np.array_equal(_bits(a), _bits(b)) for a, b in zip(reference[1:], result[1:]))
+        hogbom.clean_cube(residual, case["psf"], model, **case["kwargs"])
+        out[n] = all(np.array_equal(_bits(a), _bits(b)) for a, b in zip(reference[1:], (residual, model)))
     except (RuntimeError, ValueError) as e:
-        out[n] = f"{type(e).__name__}: {e}"
+        unchanged = np.array_equal(_bits(residual), _bits(case["residual"])) and not model.any()
+        out[n] = f"{type(e).__name__}: {e}" + ("" if unchanged else " (arrays written)")
 print("RESULT", json.dumps(out))
 """
 
@@ -402,6 +404,7 @@ def test_the_memory_limit_is_validated_and_kept(device, run_python, limit):
         PYTHONPATH=os.getcwd(),
     )
     result = json.loads(out.rpartition("RESULT ")[2])
+    assert not any("(arrays written)" in str(v) for v in result.values()), result
     if limit in ("4GiB", "-1", "101%", "", "50% "):
         message = f"ValueError: CUPY_GPU_MEMORY_LIMIT={limit!r}: expected a byte count"
         assert result["32"].startswith(message) and result["256"].startswith(message)
