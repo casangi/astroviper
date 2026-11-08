@@ -8,14 +8,17 @@ flags, ``final_peak``, ``total_flux_cleaned`` and the iteration history. NaNs
 too: an operation returns its NaN operand, quieted, or makes the default NaN,
 as the reference's SSE2 code does. Of two NaN operands of other bits, SSE2
 returns the one that its compiler put first, and the reference's build picks
-by site, entry and dtype (its sums of squares keep the earlier NaN, but for
-float32 the RMS after the last iteration of a plane that spends its budget
-keeps the later of two in a row, and ``total_flux_cleaned`` the later NaN;
-gain x peak keeps the peak's in ``clean_cube`` and the gain's in
-``clean_cube_many_threads``). So the sign and payload of a NaN made from two
-NaNs are not part of the contract (as for ``hogbom=fast``). The GPU keeps the
-reference's NaN in the model update and, for float32, in the subtraction of
-a component and its product with the PSF.
+by site, entry, dtype and position. Its sums over pixels keep the earlier of
+two NaNs, except two float32 sums, which keep the later one when it lies at
+an offset of 1 or 2 modulo 4 from the sum's first value, unless it is among
+the last n mod 4 of the sum's n values: ``total_flux_cleaned``, summed over
+the plane, and, with no mask, the RMS after the last iteration of a plane
+that spends its budget, summed by rows of the clean box (two NaNs in one
+row; offsets from the box's first column). Gain x peak keeps the peak's in
+``clean_cube`` and the gain's in ``clean_cube_many_threads``. So the sign and
+payload of a NaN made from two NaNs are not part of the contract (as for
+``hogbom=fast``). The GPU keeps the reference's NaN in the model update and,
+for float32, in the subtraction of a component and its product with the PSF.
 
 On the GPU (``cuda/hogbom_exact.cu``) the planes run one after another: each
 is uploaded from the caller's arrays, cleaned by an exact CuPy raw kernel and
