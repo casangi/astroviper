@@ -63,6 +63,39 @@ def test_asp_boundary_values_and_estimation_sentinels_are_preserved(
     assert controls == before
 
 
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+@pytest.mark.parametrize("value", [0, 0.0, 0.995, np.nextafter(1.0, 0.0)])
+def test_asp_min_mask_coverage_is_accepted_below_one(mode, value):
+    controls = {"asp_min_mask_coverage": value}
+    check_model_update(
+        {"deconvolver": "asp", "cycle_control_params": controls}, mode=mode
+    )
+    assert controls == {"asp_min_mask_coverage": value}
+
+
+@pytest.mark.parametrize("mode", [CUBE_SINGLE_FIELD, CONTINUUM_SINGLE_FIELD])
+@pytest.mark.parametrize(
+    "value,error",
+    [
+        (-0.1, ValueError),
+        (1.0, ValueError),
+        (1, ValueError),
+        (np.nan, ValueError),
+        (np.inf, ValueError),
+        (True, TypeError),
+        ("0.5", TypeError),
+        ([0.5], TypeError),
+        (None, TypeError),
+    ],
+)
+def test_asp_min_mask_coverage_outside_its_range_is_refused(mode, value, error):
+    controls = {"asp_min_mask_coverage": value}
+    with pytest.raises(error, match="asp_min_mask_coverage must"):
+        check_model_update(
+            {"deconvolver": "asp", "cycle_control_params": controls}, mode=mode
+        )
+
+
 @pytest.mark.parametrize("value", [True, "0.5", np.nan, np.inf])
 @pytest.mark.parametrize(
     "name",

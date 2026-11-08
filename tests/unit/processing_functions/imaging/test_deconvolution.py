@@ -1263,6 +1263,7 @@ class TestAspClean:
                 psf,
                 model,
                 {"gain": 0.1, "max_iter": 1, "asp_min_mask_coverage": 1.0},
+                input_checked=True,
             )
 
     def test_rejects_non_5d(self):

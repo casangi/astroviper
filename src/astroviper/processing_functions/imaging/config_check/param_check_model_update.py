@@ -244,6 +244,7 @@ def check_model_update(config, *, mode, require_complete=False):
         "asp_residual_component_switch_factor",
         "asp_residual_component_positive_only",
         "asp_no_change_tolerance",
+        "asp_min_mask_coverage",
         "asp_significance",
         "asp_significance_gain",
         "asp_fused_threshold",
@@ -458,6 +459,16 @@ def check_model_update(config, *, mode, require_complete=False):
         check_nonnegative(
             "asp_no_change_tolerance", controls["asp_no_change_tolerance"], scalar=True
         )
+
+    # --- Asp mask coverage ---
+    # The native search keeps a Gaussian scale only where its share of flux on
+    # the mask exceeds this value; a share cannot exceed 1, so 1 would keep none.
+    if "asp_min_mask_coverage" in controls:
+        coverage = require_finite_real(
+            "asp_min_mask_coverage", controls["asp_min_mask_coverage"], scalar=True
+        )
+        if not 0 <= coverage < 1:
+            raise ValueError("asp_min_mask_coverage must be at least 0 and below 1.")
 
     # --- Entropy stopping ---
     # Bin counts are positive integers; the SNR cutoff must be finite and positive.
