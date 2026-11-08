@@ -3,7 +3,7 @@
 
 Parses the variable, imports the module of every selected implementation, runs
 the module's own ``check_environment()`` where it has one (``hogbom=gpu``: its
-variables and CuPy; no device is touched) and, when
+variables, CuPy, NVRTC and the CUDA headers; no device is touched) and, when
 ``ASTROVIPER_KERNELS_TRACE`` is set, checks that its directory can be written,
 so that a typo, a missing module or an unwritable trace fails before a long
 run starts (a driver may import the hooked shims only late, in its workers).

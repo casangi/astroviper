@@ -6,9 +6,16 @@ reference entries (``deconvolvers/hogbom``) and give their results bit for
 bit: the residual and model cubes (in place), the iterations, stop codes,
 flags, ``final_peak``, ``total_flux_cleaned`` and the iteration history. NaNs
 too: an operation returns its NaN operand, quieted, or makes the default NaN,
-as the reference's SSE2 code does. Only an operation on two NaNs keeps the
-one that the reference compiler's operand order picks, so the sign and
-payload of such a NaN are not part of the contract (as for ``hogbom=fast``).
+as the reference's SSE2 code does. Of two NaN operands of other bits, SSE2
+returns the one that its compiler put first, and the reference's build picks
+by site, entry and dtype (its sums of squares keep the earlier NaN, but for
+float32 the RMS after the last iteration of a plane that spends its budget
+keeps the later of two in a row, and ``total_flux_cleaned`` the later NaN;
+gain x peak keeps the peak's in ``clean_cube`` and the gain's in
+``clean_cube_many_threads``). So the sign and payload of a NaN made from two
+NaNs are not part of the contract (as for ``hogbom=fast``). The GPU keeps the
+reference's NaN in the model update and, for float32, in the subtraction of
+a component and its product with the PSF.
 
 On the GPU (``cuda/hogbom_exact.cu``) the planes run one after another: each
 is uploaded from the caller's arrays, cleaned by an exact CuPy raw kernel and
@@ -202,10 +209,10 @@ def min_pixels():
 
 def check_environment():
     """The checks of ``python -m astroviper._kernels --check``, which touch no
-    device: the pixel floor and ``CUPY_GPU_MEMORY_LIMIT`` (``ValueError``) and
-    that CuPy is installed (``RuntimeError``). ``python -m
-    astroviper._kernels.gpu.prewarm`` also checks the device, NVRTC and the
-    kernels."""
+    device: the pixel floor and ``CUPY_GPU_MEMORY_LIMIT`` (``ValueError``), and
+    that CuPy is installed and can find NVRTC and the CUDA headers
+    (``RuntimeError``). ``python -m astroviper._kernels.gpu.prewarm`` also
+    checks the device and the kernels."""
     min_pixels()
     _runtime.check_environment()
 
@@ -837,8 +844,12 @@ class _Cleaner:
                     b["values"],
                 )
                 _launch(self.gather, last - first, args)
-                values = b["values"][:count].get()
-                values[0] += total  # total + |v0|, then the rest in order
-                total = np.cumsum(values, dtype=self.dtype)[-1]
+                # the sum so far, then each value added to it in order (a
+                # signalling NaN silently, as the reference adds it)
+                values = np.empty(count + 1, self.dtype)
+                values[0] = total
+                b["values"][:count].get(out=values[1:])
+                with np.errstate(invalid="ignore"):
+                    total = np.cumsum(values)[-1]
             first = last
         return final_peak, total

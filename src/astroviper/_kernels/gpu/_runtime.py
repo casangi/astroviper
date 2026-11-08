@@ -11,8 +11,9 @@ with the ``spawn`` or ``forkserver`` method instead).
 ``CUPY_GPU_MEMORY_LIMIT``
     The device memory that CuPy's memory pool may hold in this process: a byte
     count (such as ``6442450944``) or a percentage of the device's memory
-    (such as ``25%``), the two forms CuPy reads. Any other value, such as
-    ``4GiB``, raises ``ValueError`` at the first call that runs on the GPU.
+    (such as ``25%``), the two forms CuPy reads; ``0`` and ``0%`` set no
+    limit, as in CuPy. Any other value, such as ``4GiB``, raises
+    ``ValueError`` at the first call that runs on the GPU.
 ``CUPY_CACHE_DIR``
     Where CuPy keeps the compiled kernels (keyed by their source, the compile
     options and the NVRTC version). It defaults to the home directory; a
@@ -23,7 +24,9 @@ with the ``spawn`` or ``forkserver`` method instead).
     CuPy finds NVRTC and the CUDA headers with ``cuda.pathfinder``, in the
     interpreter's own site-packages (where the gpu extra installs them) or
     under ``CUDA_PATH``. An environment that sees CuPy through a ``.pth`` file
-    or ``PYTHONPATH`` needs ``CUDA_PATH``: the error names the directory.
+    or ``PYTHONPATH`` needs ``CUDA_PATH``, set before CuPy is first imported
+    (zarr imports it): :func:`check_environment`, and so ``--check``, fails
+    without it and names the directory.
 """
 
 import importlib.resources
@@ -181,13 +184,26 @@ _NO_CUPY = (
 
 def check_environment():
     """What the GPU kernels need that can be checked without importing CuPy or
-    touching the device: a valid ``CUPY_GPU_MEMORY_LIMIT`` (``ValueError``)
-    and an installed CuPy (``RuntimeError``)."""
+    touching the device: a valid ``CUPY_GPU_MEMORY_LIMIT`` (``ValueError``),
+    an installed CuPy, and NVRTC and the CUDA headers where CuPy's
+    ``cuda.pathfinder`` looks for them at the first compile (``RuntimeError``;
+    a CuPy without ``cuda.pathfinder`` finds them its own way)."""
     value = os.environ.get(LIMIT_ENV)
     if value is not None:
         parse_memory_limit(value)
-    if importlib.util.find_spec("cupy") is None:
+    spec = importlib.util.find_spec("cupy")
+    if spec is None:
         raise RuntimeError(_NO_CUPY + "no module named 'cupy'")
+    try:
+        from cuda import pathfinder
+    except ImportError:
+        return
+    try:
+        pathfinder.load_nvidia_dynamic_lib("nvrtc")
+    except pathfinder.DynamicLibNotFoundError as e:
+        raise _no_toolkit(spec.origin, e) from e
+    if pathfinder.find_nvidia_header_directory("cudart") is None:
+        raise _no_toolkit(spec.origin, "cuda_runtime.h is not found")
 
 
 def require_device():
@@ -215,11 +231,23 @@ def require_device():
     return device
 
 
-def _wheel_cuda_path(cp):
-    """The CUDA root of the NVIDIA wheels beside the imported CuPy, if it holds
-    NVRTC."""
-    root = Path(cp.__file__).resolve().parents[1].joinpath(*_WHEEL_CUDA)
-    return root if (root / "lib" / "libnvrtc.so.13").is_file() else None
+def _no_toolkit(cupy_init, error):
+    """The ``RuntimeError`` for NVRTC or the CUDA headers not found, naming the
+    ``CUDA_PATH`` to set when the NVIDIA wheels lie beside CuPy
+    (``cupy_init``, its ``__init__.py``) and ``CUDA_PATH`` is unset."""
+    root = Path(cupy_init).resolve().parents[1].joinpath(*_WHEEL_CUDA)
+    hint = (
+        "; the NVIDIA wheels beside this CuPy hold them, but cuda.pathfinder "
+        f"searches only the interpreter's own site-packages: set CUDA_PATH={root}"
+        if not os.environ.get("CUDA_PATH")
+        and (root / "lib" / "libnvrtc.so.13").is_file()
+        else ""
+    )
+    return RuntimeError(
+        "CuPy cannot find NVRTC and the CUDA headers, which compile the GPU kernels "
+        "at their first use (the gpu extra installs them with cupy-cuda13x[ctk]; "
+        f"CuPy also finds them under CUDA_PATH){hint}: {error}"
+    )
 
 
 def _open():
@@ -243,18 +271,7 @@ def _open():
     try:
         nvrtc = cp.cuda.nvrtc.getVersion()
     except Exception as e:  # cuda.pathfinder's DynamicLibNotFoundError, or a CUDA error
-        root = None if os.environ.get("CUDA_PATH") else _wheel_cuda_path(cp)
-        hint = (
-            "; the NVIDIA wheels beside this CuPy hold it, but cuda.pathfinder "
-            f"searches only the interpreter's own site-packages: set CUDA_PATH={root}"
-            if root
-            else ""
-        )
-        raise RuntimeError(
-            "CuPy cannot load NVRTC, which compiles the GPU kernels at their first "
-            "use (the gpu extra installs it with cupy-cuda13x[ctk]; CuPy also finds "
-            f"it, and the CUDA headers, under CUDA_PATH){hint}: {e}"
-        ) from e
+        raise _no_toolkit(cp.__file__, e) from e
     try:
         with cp.cuda.Device():
             if limit is not None:
