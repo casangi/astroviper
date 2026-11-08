@@ -222,8 +222,9 @@ function(astroviper_add_fast_kernel_module)
             "round every floating-point operation as written with the flags of "
             "${_av_failed_where} (${_av_failed_flags}): fast/common/strict_fp.hpp refuses "
             "-ffast-math, -Ofast, -funsafe-math-optimizations, -fassociative-math, "
-            "-freciprocal-math, -fno-signed-zeros, -ffinite-math-only and excess "
-            "precision such as -mfpmath=387 (its error is check ${_av_failed} in ${_log})")
+            "-freciprocal-math, -fno-signed-zeros, -ffinite-math-only, "
+            "-fsingle-precision-constant and excess precision such as -mfpmath=387 (its "
+            "error is check ${_av_failed} in ${_log})")
         return()
     endif()
 

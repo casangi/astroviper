@@ -4,13 +4,13 @@
 // double operation rounded once, as written. The fast Hogbom and Asp give the
 // reference's bits, and the fast DFT's exact phases rest on error-free
 // transformations (Dekker's split and two-product); none of that holds under
-// reassociation, reciprocals, ignored signed zeros, assumed finite values or
-// excess precision. This header refuses (#error) the macros by which the
-// compiler announces them. Every translation unit of a fast module and every
-// fast module's compile probe includes it, and cmake/AstroviperKernels.cmake
-// compiles it alone first, with the flags of each configuration that is
-// built, so that such a toolchain skips the fast modules at configure time
-// instead of building inexact code.
+// reassociation, reciprocals, ignored signed zeros, assumed finite values,
+// excess precision or constants rounded to single precision. This header
+// refuses (#error, static_assert) what the compiler announces of them. Every
+// translation unit of a fast module and every fast module's compile probe
+// includes it, and cmake/AstroviperKernels.cmake compiles it alone first, with
+// the flags of each configuration that is built, so that such a toolchain
+// skips the fast modules at configure time instead of building inexact code.
 //
 // Contraction (a * b + c fused into one rounding) has no macro: the fast
 // modules are built only by the compilers that astroviper_cpp_flags gives
@@ -23,7 +23,8 @@
 // Neither covers options given straight to Clang's front end (-Xclang) or link
 // options: LDFLAGS=-mdaz-ftz links crtfastmath.o into every module, which then
 // sets flush-to-zero and denormals-are-zero in the thread that loads it.
-// Preprocessor checks only: an *_avx2.cpp unit may include it.
+// Preprocessor checks and a static_assert only: an *_avx2.cpp unit may
+// include it.
 
 #include <cfloat>  // FLT_EVAL_METHOD
 
@@ -45,3 +46,10 @@
 #if !defined(FLT_EVAL_METHOD) || FLT_EVAL_METHOD != 0
 #error "AstroVIPER fast kernels: FLT_EVAL_METHOD is not 0 (excess precision, as with -mfpmath=387); they need floating-point operations rounded as written"
 #endif
+
+// GCC announces -fsingle-precision-constant by no macro. Under it 2^27 + 1,
+// the splitter of the fast DFT's Dekker split, becomes 2^27.
+static_assert(134217729.0 > 134217728.0,
+              "AstroVIPER fast kernels: floating constants are rounded to single precision "
+              "(-fsingle-precision-constant); they need floating-point operations rounded as "
+              "written");

@@ -1,9 +1,9 @@
 """The floating-point guard of the fast modules (``fast/common/strict_fp.hpp``).
 
 The fast kernels need every float and double operation rounded once, as
-written. The header refuses (``#error``) the macros by which the compiler
-announces options that allow anything else, and every translation unit of a
-fast module and every fast module's compile probe includes it, so that such
+written. The header refuses (``#error``, ``static_assert``) what the compiler
+announces of options that allow anything else, and every translation unit of
+a fast module and every fast module's compile probe includes it, so that such
 options skip the fast modules at configure time
 (``cmake/AstroviperKernels.cmake``) instead of building inexact code. A tiny
 unit that includes the header is compiled here with each such option,
@@ -34,8 +34,8 @@ CXX = (
     or shutil.which("clang++")
 )
 
-#: Options that let the compiler round otherwise than as written, and the
-#: macro by which the header refuses each.
+#: Options that let the compiler round otherwise than as written, and what the
+#: header names when it refuses each (the macro, or the static_assert's words).
 UNSAFE = {
     "fast-math": (["-ffast-math"], "__FAST_MATH__"),
     "Ofast": (["-Ofast"], "__FAST_MATH__"),
@@ -54,10 +54,19 @@ UNSAFE = {
         ["-ffast-math", "-fno-finite-math-only"],
         "__ASSOCIATIVE_MATH__",
     ),
+    "single-precision-constant": (
+        ["-fsingle-precision-constant"],
+        "floating constants",
+    ),
     "x87": (["-mfpmath=387"], "FLT_EVAL_METHOD"),
 }
-#: The macros of ``UNSAFE`` that Clang does not define.
-NOT_IN_CLANG = {"__ASSOCIATIVE_MATH__", "__RECIPROCAL_MATH__", "__NO_SIGNED_ZEROS__"}
+#: The refusals of ``UNSAFE`` that the header cannot make with Clang, and why.
+NOT_IN_CLANG = {
+    "__ASSOCIATIVE_MATH__": "Clang defines no __ASSOCIATIVE_MATH__",
+    "__RECIPROCAL_MATH__": "Clang defines no __RECIPROCAL_MATH__",
+    "__NO_SIGNED_ZEROS__": "Clang defines no __NO_SIGNED_ZEROS__",
+    "floating constants": "Clang ignores -fsingle-precision-constant",
+}
 
 #: The options with which the fast modules are compiled after the flags they
 #: inherit, with Clang (cmake/AstroviperKernels.cmake).
@@ -128,17 +137,17 @@ def _clang():
 @needs_compiler
 @pytest.mark.parametrize("name", list(UNSAFE))
 def test_options_that_round_otherwise_are_refused(name, tmp_path):
-    flags, macro = UNSAFE[name]
-    if macro == "FLT_EVAL_METHOD":
+    flags, what = UNSAFE[name]
+    if what == "FLT_EVAL_METHOD":
         if platform.machine().lower() not in ("x86_64", "amd64", "i386", "i686"):
             pytest.skip("-mfpmath=387 is an x86 option")
         if _clang():
             pytest.skip("Clang refuses -mfpmath=387 itself where SSE is on")
-    if _clang() and macro in NOT_IN_CLANG:
-        pytest.skip(f"Clang defines no {macro}: strict_fp.hpp cannot see {flags}")
+    if _clang() and what in NOT_IN_CLANG:
+        pytest.skip(f"{NOT_IN_CLANG[what]}: strict_fp.hpp cannot see {flags}")
     done = _compile(flags, tmp_path)
     assert done.returncode != 0
-    assert f"AstroVIPER fast kernels: {macro} " in done.stderr, done.stderr
+    assert f"AstroVIPER fast kernels: {what} " in done.stderr, done.stderr
 
 
 @needs_compiler
