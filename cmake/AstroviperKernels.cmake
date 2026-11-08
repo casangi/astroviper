@@ -44,6 +44,24 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"
     set(_av_x86_64 ON)
 endif()
 
+# Sets _configs to the configurations that are built (each of
+# CMAKE_CONFIGURATION_TYPES with a multi-config generator, else
+# CMAKE_BUILD_TYPE) or, with no build type, to None, and _none to whether it
+# is None: the sources then get no per-configuration flags, and nor do the
+# checks (CMAKE_<LANG>_FLAGS_NONE is normally unset).
+macro(_av_configurations)
+    set(_none FALSE)
+    get_property(_multi GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_multi AND CMAKE_CONFIGURATION_TYPES)
+        set(_configs ${CMAKE_CONFIGURATION_TYPES})
+    elseif(CMAKE_BUILD_TYPE)
+        set(_configs "${CMAKE_BUILD_TYPE}")
+    else()
+        set(_configs None)
+        set(_none TRUE)
+    endif()
+endmacro()
+
 # check_cxx_source_compiles(<code> <var>) built as configuration Debug with
 # <flags> as its CMAKE_CXX_FLAGS_DEBUG, both set in this scope only. The test
 # project of try_compile has its generator's default configurations, not
@@ -89,18 +107,7 @@ endfunction()
 # or to "" if none does.
 # ---------------------------------------------------------------------------
 function(_av_fast_check prefix code key)
-    set(_none FALSE)
-    get_property(_multi GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-    if(_multi AND CMAKE_CONFIGURATION_TYPES)
-        set(_configs ${CMAKE_CONFIGURATION_TYPES})
-    elseif(CMAKE_BUILD_TYPE)
-        set(_configs "${CMAKE_BUILD_TYPE}")
-    else()
-        # No build type: the sources get no per-configuration flags, and nor
-        # does the check (CMAKE_CXX_FLAGS_NONE is normally unset).
-        set(_configs None)
-        set(_none TRUE)
-    endif()
+    _av_configurations()
     get_property(_options DIRECTORY PROPERTY COMPILE_OPTIONS)
     string(GENEX_STRIP "${_options};${ARGN}" _options)
     list(TRANSFORM _options REPLACE "^SHELL:" "")
@@ -124,6 +131,93 @@ function(_av_fast_check prefix code key)
             endif()
             string(STRIP "${CMAKE_CXX_FLAGS} ${_config_flags}" _flags)
             set(_av_failed_flags "${_flags}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    set(_av_failed "" PARENT_SCOPE)
+endfunction()
+
+# Sets <out> to whether Clang 17 or 18 links crtfastmath.o (when it finds one,
+# as in a GCC installation) with <flags>: when -Ofast is their last -O option,
+# or -ffast-math or -funsafe-math-optimizations comes after their last
+# -fno-fast-math and -fno-unsafe-math-optimizations
+# (ToolChain::isFastMathRuntimeAvailable).
+function(_av_crtfastmath flags out)
+    separate_arguments(_args NATIVE_COMMAND "${flags}")
+    set(_level "")
+    set(_fast_math FALSE)
+    foreach(_arg IN LISTS _args)
+        if(_arg MATCHES "^(-O([0-9]+|[sgz]|fast)?|--optimize(=.*)?)$")
+            set(_level "${_arg}")
+        elseif(_arg MATCHES "^-f(fast-math|unsafe-math-optimizations)$")
+            set(_fast_math TRUE)
+        elseif(_arg MATCHES "^-fno-(fast-math|unsafe-math-optimizations)$")
+            set(_fast_math FALSE)
+        endif()
+    endforeach()
+    if(_level STREQUAL "-Ofast" OR _fast_math)
+        set(${out} TRUE PARENT_SCOPE)
+    else()
+        set(${out} FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
+# _av_clang_fast_math_runtime()
+#
+# With the flags of _av_crtfastmath, Clang 17 and 18 link crtfastmath.o into a
+# shared object as into a program (on Linux, MinGW and Solaris; Clang 19 and
+# later into programs only, unless given -mdaz-ftz). Its constructor sets
+# flush-to-zero and denormals-are-zero in the thread that loads the module.
+# Every module's link line, reference or fast, has CMAKE_CXX_FLAGS, the
+# configuration's flags, CMAKE_MODULE_LINKER_FLAGS (LDFLAGS), the
+# configuration's module linker flags and the directory's link options, so
+# with such flags no fast module runs as written. The same test of a compile
+# line makes them compile as if crtfastmath.o were linked (on x86 Linux,
+# double operations under -fdenormal-fp-math=preserve-sign), which is the
+# default that -fno-fast-math restores, so the fast units' -fno-fast-math
+# cannot undo -Ofast (Linux::getDefaultDenormalModeForType and
+# RenderFloatingPointOptions). For each configuration that is built, tests the
+# link line and the fast units' compile line (CMAKE_CXX_FLAGS, the
+# configuration's flags, the directory's compile options, then
+# -fno-fast-math), each after the compiler's own arguments
+# (CMAKE_CXX_COMPILER_ARG1), on any platform. Sets _av_failed in the caller's
+# scope to "link" or "compile" for the first configuration that fails, with
+# _av_failed_where and _av_failed_flags, or to "" if none does. Options inside
+# generator expressions are not seen, nor are those of Clang's configuration
+# files.
+# ---------------------------------------------------------------------------
+function(_av_clang_fast_math_runtime)
+    _av_configurations()
+    foreach(_kind COMPILE LINK)
+        get_property(_options DIRECTORY PROPERTY ${_kind}_OPTIONS)
+        string(GENEX_STRIP "${_options}" _options)
+        list(TRANSFORM _options REPLACE "^SHELL:" "")
+        string(REPLACE ";" " " _${_kind}_options "${_options}")
+    endforeach()
+    foreach(_config IN LISTS _configs)
+        string(TOUPPER "${_config}" _upper)
+        set(_flags "${CMAKE_CXX_COMPILER_ARG1} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_upper}}")
+        set(_link "${_flags} ${CMAKE_MODULE_LINKER_FLAGS} ${CMAKE_MODULE_LINKER_FLAGS_${_upper}}")
+        string(REGEX REPLACE "  +" " " _link "${_link} ${_LINK_options}")
+        string(REGEX REPLACE "  +" " " _compile "${_flags} ${_COMPILE_options}")
+        string(STRIP "${_link}" _link)
+        string(STRIP "${_compile}" _compile)
+        _av_crtfastmath("${_link}" _on_link)
+        _av_crtfastmath("${_compile} -fno-fast-math" _on_compile)
+        if(_on_link OR _on_compile)
+            if(_on_link)
+                set(_av_failed link PARENT_SCOPE)
+                set(_av_failed_flags "${_link}" PARENT_SCOPE)
+            else()
+                set(_av_failed compile PARENT_SCOPE)
+                set(_av_failed_flags "${_compile}" PARENT_SCOPE)
+            endif()
+            if(_none)
+                set(_av_failed_where "an empty CMAKE_BUILD_TYPE" PARENT_SCOPE)
+            else()
+                set(_av_failed_where "configuration ${_config}" PARENT_SCOPE)
+            endif()
             return()
         endif()
     endforeach()
@@ -156,11 +250,13 @@ endfunction()
 #                 is skipped with a message, so a toolchain gap can never
 #                 break the reference wheel. Every fast module is skipped,
 #                 with one message, when the compiler is not given
-#                 -ffp-contract=off, or when it and the flags of a
+#                 -ffp-contract=off, when it and the flags of a
 #                 configuration that is built do not round every
 #                 floating-point operation as written
-#                 (fast/common/strict_fp.hpp). Both checks are compiled with
-#                 the flags the sources get (_av_fast_check).
+#                 (fast/common/strict_fp.hpp), or when the compiler is Clang
+#                 17 or 18 and those flags make it link crtfastmath.o
+#                 (_av_clang_fast_math_runtime). Both checks are compiled
+#                 with the flags the sources get (_av_fast_check).
 #   SOURCES       generic .cpp files (baseline ISA)
 #   AVX2_SOURCES  *_avx2.cpp files, compiled with -mavx2 and without LTO (so
 #                 the link-time optimiser cannot inline their AVX2 code into
@@ -215,6 +311,23 @@ function(astroviper_add_fast_kernel_module)
     set(_fp_options "")
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         set(_fp_options -fno-fast-math)
+    endif()
+
+    # -fno-fast-math cannot undo what Clang 17 and 18 do with some of these
+    # flags: link crtfastmath.o into every module, or compile as if they did
+    # (_av_clang_fast_math_runtime).
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19)
+        _av_clang_fast_math_runtime()
+        if(_av_failed)
+            _av_skip_fast_kernels("Clang ${CMAKE_CXX_COMPILER_VERSION} links crtfastmath.o, which "
+                "sets flush-to-zero and denormals-are-zero in the thread that loads a module, "
+                "into every module, or compiles as if it did, with the ${_av_failed} flags of "
+                "${_av_failed_where} (${_av_failed_flags}): Clang 17 and 18 do so when -Ofast "
+                "is their last -O option, and link it when -ffast-math or "
+                "-funsafe-math-optimizations comes after their last -fno-fast-math and "
+                "-fno-unsafe-math-optimizations")
+            return()
+        endif()
     endif()
 
     # The checks are built with the package's C++ standard (CMAKE_CXX_STANDARD),
