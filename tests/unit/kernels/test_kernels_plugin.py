@@ -1,6 +1,7 @@
 """Tests of the kernels pytest plugin's verdict, on synthetic trace records."""
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -203,3 +204,29 @@ def test_collection_rejects_an_invalid_selection(monkeypatch, tmp_path, value):
 def test_bare_defaults_are_refused(value):
     with pytest.raises(pytest.UsageError, match="explicit <kernel>=<impl>"):
         kernels_plugin._explicit_selection(value)
+
+
+@pytest.mark.parametrize(
+    "value, floor, expected",
+    [
+        ("hogbom=gpu", None, "0"),
+        ("hogbom=gpu", "4096", "4096"),
+        ("hogbom=fast", None, None),
+    ],
+)
+def test_a_hogbom_gpu_session_runs_the_tests_planes_on_the_gpu(
+    monkeypatch, tmp_path, value, floor, expected
+):
+    """Its pixel floor is 0 unless set: the tests' planes are all below the
+    default floor, which would route every call to the CPU."""
+    name = kernels_plugin.GPU_FLOOR_ENV
+    monkeypatch.setenv(kernels_plugin.ENV, value)
+    monkeypatch.setenv(kernels_plugin.TRACE_ENV, str(tmp_path))
+    monkeypatch.setenv(name, "unset below")  # restored after the test
+    if floor is None:
+        monkeypatch.delenv(name)
+    else:
+        monkeypatch.setenv(name, floor)
+    manager = SimpleNamespace(register=lambda plugin, plugin_name: None)
+    kernels_plugin.pytest_configure(SimpleNamespace(pluginmanager=manager))
+    assert os.environ.get(name) == expected

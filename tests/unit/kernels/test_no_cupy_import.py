@@ -75,7 +75,7 @@ importlib.import_module = guarded_import_module
 
 from astroviper._kernels.__main__ import main
 
-assert main(["--check"]) == 0
+checked = main(["--check"])  # 1 for a gpu selection without CuPy
 for module in [shim for shim, _, _ in {SHIMS!r}.values()] + {CALLERS!r}:
     importlib.import_module(module)
 {TINY_HOGBOM}
@@ -97,7 +97,7 @@ try:
     caught = False
 except ModuleNotFoundError:
     caught = True
-print("RESULT", json.dumps({{"blocked": found, "cached": cached, "caught": caught, "error": error}}))
+print("RESULT", json.dumps({{"blocked": found, "cached": cached, "caught": caught, "error": error, "checked": checked}}))
 """
 
 
@@ -134,6 +134,8 @@ FAST_ASP = pytest.param(
 
 # A hogbom=gpu call of 8 x 8 pixels runs on the CPU (below the pixel floor).
 GPU_HOGBOM = "hogbom=gpu"
+#: Whether CuPy is installed: --check refuses a gpu selection without it.
+CUPY = importlib.util.find_spec("cupy") is not None
 
 
 @pytest.mark.parametrize(
@@ -143,8 +145,9 @@ def test_hooked_process_never_imports_cupy(run_python, selection):
     out = run_python("-c", BLOCKED, ASTROVIPER_KERNELS=selection)
     result = json.loads(out.rpartition("RESULT ")[2])
     assert result["blocked"] == [] and result["error"] is None
+    assert result["checked"] == (0 if CUPY or "gpu" not in selection else 1)
     assert result["caught"] is True, "the blocker missed an AstroVIPER import"
-    if importlib.util.find_spec("cupy") is not None:
+    if CUPY:
         assert result["cached"] is True, "the control was not a cached import"
 
 
@@ -162,4 +165,4 @@ def test_a_gpu_call_imports_cupy_in_the_gpu_runtime_only(run_python):
     runtime = "/astroviper/_kernels/gpu/_runtime.py:"
     assert result["blocked"] and all(runtime in b for b in result["blocked"])
     assert result["error"].startswith("CuPy is not available")
-    assert result["caught"] is True
+    assert result["checked"] == (0 if CUPY else 1) and result["caught"] is True
