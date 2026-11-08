@@ -102,6 +102,8 @@ def test_reference_selections(value):
         ("fast,dft=ref", "ref", "fast", "fast"),
         ("asp=fast", "ref", "ref", "fast"),
         ("fast,asp=ref", "fast", "fast", "ref"),
+        ("gpu", "ref", "gpu", "ref"),
+        ("fast,hogbom=gpu", "fast", "gpu", "fast"),
     ],
 )
 def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom, asp):
@@ -121,7 +123,7 @@ def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom, 
             "'asp' has no implementation 'gpu'; its implementations: fast, ref",
         ),
         ("hogbom=ref1", "'hogbom' has no implementation 'ref1'"),
-        ("gpu", "no kernel implements 'gpu' yet"),
+        ("ref1", "no kernel implements 'ref1' yet"),
         ("dft=ref:avx2", "variants (':...') are not supported"),
         ("ref:x", "variants (':...') are not supported"),
         *[(f"{k}=ref", f"kernel {k!r} is reserved") for k in RESERVED],
@@ -155,7 +157,7 @@ def test_selection_is_read_only_and_cached():
 def test_registry_holds_the_reference_pairs():
     assert {k: set(v) for k, v in _switch._REGISTRY.items()} == {
         "dft": {"ref", "fast"},
-        "hogbom": {"ref", "fast"},
+        "hogbom": {"ref", "fast", "gpu"},
         "asp": {"ref", "fast"},
     }
     for kernel, (shim, ext, entries) in SHIMS.items():

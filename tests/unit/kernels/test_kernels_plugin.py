@@ -75,6 +75,18 @@ def test_dft_fast_executes_on_path_s_only(path, executed):
     assert (missing == [], foreign) == (executed, {})
 
 
+@pytest.mark.parametrize(
+    "path, executed", [("gpu", True), ("routed", False), ("declined", False)]
+)
+def test_hogbom_gpu_executes_on_path_gpu_only(path, executed):
+    """A routed or declined hogbom=gpu call ran on the CPU."""
+    record = _record(15.0, impl="gpu", path=path)
+    selection = {"hogbom": "gpu"}
+    assert kernels_plugin._executed(record, selection) is executed
+    _, missing, _ = summarize([record], selection, selection, INTERVALS, {LISTED})
+    assert (missing == []) is executed
+
+
 def _dft(path, error=None):
     """A ``dft=fast`` record of the file running at t = 15."""
     record = {"kernel": "dft", "entry": "dft_predict", "impl": "fast", "path": path}

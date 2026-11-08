@@ -145,8 +145,9 @@ def _records(trace_dir, since):
 #: (``astroviper._kernels._switch.report_path``); any other implementation
 #: executes on the path named after it. A ``dft=fast`` call that ``declined``
 #: ran the reference behind the fast entry's checks: parity evidence, not an
-#: execution of the fast kernel (path B joins ``"S"`` here when it lands).
-EXECUTED_PATHS = {("dft", "fast"): ("S",)}
+#: execution of the fast kernel (path B joins ``"S"`` here when it lands). A
+#: ``hogbom=gpu`` call that was ``routed`` or ``declined`` ran on the CPU.
+EXECUTED_PATHS = {("dft", "fast"): ("S",), ("hogbom", "gpu"): ("gpu",)}
 
 
 def _reached(record, selection):
