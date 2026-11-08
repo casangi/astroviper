@@ -45,7 +45,10 @@ _REGISTRY = {
         "._direct_fourier_transform_ext",
         "fast": "astroviper._kernels.fast.dft",
     },
-    "hogbom": {"ref": f"{_IMAGING}.deconvolvers.hogbom._hogbom_ext"},
+    "hogbom": {
+        "ref": f"{_IMAGING}.deconvolvers.hogbom._hogbom_ext",
+        "fast": "astroviper._kernels.fast.hogbom",
+    },
     "asp": {
         "ref": f"{_IMAGING}.deconvolvers.aspclean._aspclean_ext",
         "fast": "astroviper._kernels.fast.aspclean",

@@ -63,7 +63,10 @@ REFERENCE_MODULES = [
 ]
 
 #: The fast-kernel modules, relative to the ``astroviper`` package.
-FAST_MODULES = ["_kernels/fast/dft/_dft_fast_ext"]
+FAST_MODULES = [
+    "_kernels/fast/dft/_dft_fast_ext",
+    "_kernels/fast/hogbom/_hogbom_fast_ext",
+]
 #: The fast-kernel modules with no AVX2 unit (no AVX2 code at all).
 BASELINE_FAST_MODULES = ["_kernels/fast/aspclean/_aspclean_fast_ext"]
 

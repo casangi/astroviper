@@ -120,7 +120,7 @@ def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom, 
             "asp=gpu",
             "'asp' has no implementation 'gpu'; its implementations: fast, ref",
         ),
-        ("hogbom=fast", "'hogbom' has no implementation 'fast'"),
+        ("hogbom=ref1", "'hogbom' has no implementation 'ref1'"),
         ("gpu", "no kernel implements 'gpu' yet"),
         ("dft=ref:avx2", "variants (':...') are not supported"),
         ("ref:x", "variants (':...') are not supported"),
@@ -155,7 +155,7 @@ def test_selection_is_read_only_and_cached():
 def test_registry_holds_the_reference_pairs():
     assert {k: set(v) for k, v in _switch._REGISTRY.items()} == {
         "dft": {"ref", "fast"},
-        "hogbom": {"ref"},
+        "hogbom": {"ref", "fast"},
         "asp": {"ref", "fast"},
     }
     for kernel, (shim, ext, entries) in SHIMS.items():
