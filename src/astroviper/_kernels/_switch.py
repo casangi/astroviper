@@ -48,6 +48,7 @@ _REGISTRY = {
     "hogbom": {
         "ref": f"{_IMAGING}.deconvolvers.hogbom._hogbom_ext",
         "fast": "astroviper._kernels.fast.hogbom",
+        "gpu": "astroviper._kernels.gpu.hogbom",
     },
     "asp": {
         "ref": f"{_IMAGING}.deconvolvers.aspclean._aspclean_ext",

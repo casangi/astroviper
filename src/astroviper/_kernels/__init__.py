@@ -23,14 +23,16 @@ Hooked kernels and entries (implementations registered so far):
 kernel      entries                           implementations
 ==========  ================================  ===============
 ``dft``     ``dft_predict``                   ``ref``, ``fast``
-``hogbom``  ``clean_cube``,                   ``ref``, ``fast``
+``hogbom``  ``clean_cube``,                   ``ref``, ``fast``, ``gpu``
             ``clean_cube_many_threads``
 ``asp``     ``clean``, ``clean_cube``         ``ref``, ``fast``
 ==========  ================================  ===============
 
 With ``hogbom=fast`` a call may put several threads on one plane, where the
 reference ``clean_cube`` runs one per plane, and it never starts more threads
-than the CPUs it may run on.
+than the CPUs it may run on. ``hogbom=gpu`` (CuPy, see ``_kernels.gpu``) runs
+planes of fewer than ``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` pixels with
+``hogbom=fast`` and keeps to ``CUPY_GPU_MEMORY_LIMIT`` on the device.
 
 ``ASTROVIPER_KERNELS_TRACE=<dir>``
     Each wrapped call appends one JSON line to
