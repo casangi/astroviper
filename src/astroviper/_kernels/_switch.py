@@ -171,7 +171,9 @@ def impl(kernel, entry, name):
             raise
         raise ImportError(
             f"{kernel}={name}: module {module_name} is not available "
-            "(not built, or skipped by its compile probe)",
+            "(not built, or skipped at configure time for the compiler, its "
+            "floating-point flags or the module's compile probe; see the build's "
+            "'AstroVIPER: skipping' messages)",
             name=module_name,
         ) from e
     with _lock:

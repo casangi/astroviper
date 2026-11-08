@@ -390,7 +390,9 @@ def test_missing_extension_of_a_package_raises_import_error(fake_module, tmp_pat
         impl("hogbom", "clean_cube", "fast")
     assert str(caught.value) == (
         f"hogbom=fast: module {package} is not available "
-        "(not built, or skipped by its compile probe)"
+        "(not built, or skipped at configure time for the compiler, its "
+        "floating-point flags or the module's compile probe; see the build's "
+        "'AstroVIPER: skipping' messages)"
     )
     assert caught.value.__cause__.name == f"{package}._fast_ext"
 

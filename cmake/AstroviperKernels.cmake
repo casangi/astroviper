@@ -45,6 +45,82 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"
 endif()
 
 # ---------------------------------------------------------------------------
+# _av_fast_check(<prefix> <code> <key>)
+#
+# check_cxx_source_compiles(<code>) for each configuration that is built (each
+# of CMAKE_CONFIGURATION_TYPES with a multi-config generator, else
+# CMAKE_BUILD_TYPE, or none), with the caller's CMAKE_REQUIRED_* settings and
+# the flags that the fast sources get there, in their order: CMAKE_CXX_FLAGS,
+# CMAKE_CXX_FLAGS_<CONFIG> and the directory's compile options
+# (add_compile_options, also from a toolchain file, CMAKE_PROJECT_INCLUDE or a
+# superproject). Options inside generator expressions are not seen here, so
+# strict_fp.hpp's #error stops the build instead. Each verdict is cached as
+# <prefix>_<hash>, the hash taken over all that decides it (<code>, <key>, the
+# compiler, the CMAKE_REQUIRED_* settings and these flags), so a changed input
+# re-runs its check and an incremental build directory never keeps a stale
+# verdict. Sets _av_failed in the caller's scope to the cache variable of the
+# first configuration that fails, with _av_failed_where and _av_failed_flags,
+# or to "" if none does.
+# ---------------------------------------------------------------------------
+function(_av_fast_check prefix code key)
+    set(_none FALSE)
+    get_property(_multi GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_multi AND CMAKE_CONFIGURATION_TYPES)
+        set(_configs ${CMAKE_CONFIGURATION_TYPES})
+    elseif(CMAKE_BUILD_TYPE)
+        set(_configs "${CMAKE_BUILD_TYPE}")
+    else()
+        # No build type: the sources get no per-configuration flags, and nor
+        # does the check (CMAKE_CXX_FLAGS_NONE is normally unset).
+        set(_configs None)
+        set(_none TRUE)
+    endif()
+    get_property(_options DIRECTORY PROPERTY COMPILE_OPTIONS)
+    string(GENEX_STRIP "${_options}" _options)
+    list(TRANSFORM _options REPLACE "^SHELL:" "")
+    string(REPLACE ";" " " _options "${_options}")
+    foreach(_config IN LISTS _configs)
+        # try_compile builds CMAKE_TRY_COMPILE_CONFIGURATION with that
+        # configuration's CMAKE_CXX_FLAGS_<CONFIG>, both set in this scope only.
+        string(TOUPPER "${_config}" _upper)
+        set(CMAKE_TRY_COMPILE_CONFIGURATION "${_config}")
+        string(STRIP "${CMAKE_CXX_FLAGS_${_upper}} ${_options}" CMAKE_CXX_FLAGS_${_upper})
+        string(CONCAT _inputs "${code}|${key}|${CMAKE_REQUIRED_INCLUDES}|${CMAKE_REQUIRED_FLAGS}"
+            "|${CMAKE_REQUIRED_LINK_OPTIONS}|${CMAKE_REQUIRED_LIBRARIES}|${CMAKE_CXX_COMPILER}"
+            "|${CMAKE_CXX_COMPILER_VERSION}|${CMAKE_CXX_STANDARD}|${CMAKE_CXX_FLAGS}|${_config}"
+            "|${CMAKE_CXX_FLAGS_${_upper}}|${CMAKE_EXE_LINKER_FLAGS}")
+        string(SHA256 _hash "${_inputs}")
+        string(SUBSTRING "${_hash}" 0 16 _hash)
+        check_cxx_source_compiles("${code}" ${prefix}_${_hash})
+        if(NOT ${prefix}_${_hash})
+            set(_av_failed ${prefix}_${_hash} PARENT_SCOPE)
+            if(_none)
+                set(_av_failed_where "an empty CMAKE_BUILD_TYPE" PARENT_SCOPE)
+            else()
+                set(_av_failed_where "configuration ${_config}" PARENT_SCOPE)
+            endif()
+            string(STRIP "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_upper}}" _flags)
+            set(_av_failed_flags "${_flags}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    set(_av_failed "" PARENT_SCOPE)
+endfunction()
+
+# Says once per configure run, for each reason, that the fast kernels are
+# skipped and why.
+function(_av_skip_fast_kernels)
+    string(CONCAT _reason ${ARGN})
+    string(SHA256 _id "${_reason}")
+    get_property(_said GLOBAL PROPERTY _AV_FAST_SKIPPED_${_id})
+    if(NOT _said)
+        set_property(GLOBAL PROPERTY _AV_FAST_SKIPPED_${_id} TRUE)
+        message(STATUS "AstroVIPER: skipping the fast kernels: ${_reason}; "
+            "ASTROVIPER_KERNELS selections of them will raise ImportError")
+    endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
 # astroviper_add_fast_kernel_module(NAME <name> PROBE <file> SOURCES <src>...
 #                                   [AVX2_SOURCES <src>...]
 #                                   [INCLUDE_DIRS <dir>...])
@@ -55,10 +131,13 @@ endif()
 #                 features the module needs and including strict_fp.hpp, as
 #                 its sources do. If it does not compile and link, the module
 #                 is skipped with a message, so a toolchain gap can never
-#                 break the reference wheel. So is every fast module when the
-#                 compiler is not given -ffp-contract=off, or when it and its
-#                 flags do not round every floating-point operation as
-#                 written (fast/common/strict_fp.hpp).
+#                 break the reference wheel. Every fast module is skipped,
+#                 with one message, when the compiler is not given
+#                 -ffp-contract=off, or when it and the flags of a
+#                 configuration that is built do not round every
+#                 floating-point operation as written
+#                 (fast/common/strict_fp.hpp). Both checks are compiled with
+#                 the flags the sources get (_av_fast_check).
 #   SOURCES       generic .cpp files (baseline ISA)
 #   AVX2_SOURCES  *_avx2.cpp files, compiled with -mavx2 and without LTO (so
 #                 the link-time optimiser cannot inline their AVX2 code into
@@ -92,60 +171,42 @@ function(astroviper_add_fast_kernel_module)
     # only the compilers that astroviper_cpp_flags gives -ffp-contract=off
     # build the fast modules.
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
-        message(STATUS
-            "AstroVIPER: skipping fast kernel ${FK_NAME}: ${CMAKE_CXX_COMPILER_ID} is not "
-            "given -ffp-contract=off (cmake/AstroviperPybind.cmake gives it to GNU, Clang "
-            "and AppleClang only), so its floating-point operations could be contracted; "
-            "ASTROVIPER_KERNELS selections of it will raise ImportError")
+        _av_skip_fast_kernels("${CMAKE_CXX_COMPILER_ID} is not given -ffp-contract=off "
+            "(cmake/AstroviperPybind.cmake gives it to GNU, Clang and AppleClang only), so "
+            "its floating-point operations could be contracted")
         return()
     endif()
 
     # The checks are built with the package's C++ standard (CMAKE_CXX_STANDARD),
-    # standard library and threads, with the flags of the build type, which
-    # the sources are compiled with (try_compile takes Debug's otherwise), and
-    # with fast/common/ and then the module's include directories.
+    # standard library and threads, with the flags of the sources
+    # (_av_fast_check), and with fast/common/ and then the module's include
+    # directories. Editing strict_fp.hpp or the probe re-runs configure, and
+    # their content is part of the checks' keys.
     set(CMAKE_REQUIRED_LIBRARIES Threads::Threads)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         set(CMAKE_REQUIRED_FLAGS "-stdlib=libc++")
         set(CMAKE_REQUIRED_LINK_OPTIONS "-stdlib=libc++")
     endif()
-    if(CMAKE_BUILD_TYPE AND NOT CMAKE_TRY_COMPILE_CONFIGURATION)
-        set(CMAKE_TRY_COMPILE_CONFIGURATION "${CMAKE_BUILD_TYPE}")
-    endif()
     set(_common "${PROJECT_SOURCE_DIR}/src/astroviper/_kernels/fast/common")
     set(CMAKE_REQUIRED_INCLUDES "${_common}")
-    # The cached results are keyed on what decides them: the content of
-    # strict_fp.hpp (and of the probe), the include directories, the compiler
-    # and the flags try_compile builds with (CMAKE_CXX_FLAGS and the
-    # per-configuration ones). Editing either file re-runs configure, and a
-    # changed key re-runs its check, so an incremental build directory never
-    # keeps a stale verdict.
     set(_strict_file "${_common}/strict_fp.hpp")
     set(_probe_file "${CMAKE_CURRENT_SOURCE_DIR}/${FK_PROBE}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_strict_file}" "${_probe_file}")
     file(READ "${_strict_file}" _strict)
     file(READ "${_probe_file}" _probe)
-    string(CONCAT _toolchain "|${CMAKE_REQUIRED_FLAGS}"
-        "|${CMAKE_REQUIRED_LINK_OPTIONS}|${CMAKE_CXX_COMPILER}|${CMAKE_CXX_COMPILER_VERSION}"
-        "|${CMAKE_CXX_STANDARD}|${CMAKE_CXX_FLAGS}|${CMAKE_CXX_FLAGS_DEBUG}|${CMAKE_CXX_FLAGS_RELEASE}"
-        "|${CMAKE_CXX_FLAGS_RELWITHDEBINFO}|${CMAKE_CXX_FLAGS_MINSIZEREL}|${CMAKE_TRY_COMPILE_CONFIGURATION}")
+    set(_log "CMakeFiles/CMakeConfigureLog.yaml (CMakeError.log before CMake 3.26)")
 
     # The floating-point semantics first, shared by the fast modules, so that
     # flags that break them get their own message.
-    string(SHA256 _strict_key "${_strict}|${CMAKE_REQUIRED_INCLUDES}${_toolchain}")
-    string(SUBSTRING "${_strict_key}" 0 16 _strict_key)
-    set(_strict_result AV_FAST_STRICT_FP_${_strict_key})
-    check_cxx_source_compiles("#include \"strict_fp.hpp\"\nint main() { return 0; }\n"
-        ${_strict_result})
-    if(NOT ${_strict_result})
-        message(STATUS
-            "AstroVIPER: skipping fast kernel ${FK_NAME}: ${CMAKE_CXX_COMPILER_ID} "
-            "${CMAKE_CXX_COMPILER_VERSION} with these flags does not round every "
-            "floating-point operation as written (fast/common/strict_fp.hpp refuses "
+    _av_fast_check(AV_FAST_STRICT_FP "#include \"strict_fp.hpp\"\nint main() { return 0; }\n"
+        "${_strict}")
+    if(_av_failed)
+        _av_skip_fast_kernels("${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} does not "
+            "round every floating-point operation as written with the flags of "
+            "${_av_failed_where} (${_av_failed_flags}): fast/common/strict_fp.hpp refuses "
             "-ffast-math, -Ofast, -funsafe-math-optimizations, -fassociative-math, "
             "-freciprocal-math, -fno-signed-zeros, -ffinite-math-only and excess "
-            "precision such as -mfpmath=387); ASTROVIPER_KERNELS selections of it "
-            "will raise ImportError")
+            "precision such as -mfpmath=387 (its error is check ${_av_failed} in ${_log})")
         return()
     endif()
 
@@ -153,15 +214,13 @@ function(astroviper_add_fast_kernel_module)
         get_filename_component(_dir "${_dir}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
         list(APPEND CMAKE_REQUIRED_INCLUDES "${_dir}")
     endforeach()
-    string(SHA256 _probe_key "${_probe}|${_strict}|${CMAKE_REQUIRED_INCLUDES}${_toolchain}")
-    string(SUBSTRING "${_probe_key}" 0 16 _probe_key)
-    set(_probe_result AV_FAST_PROBE_${FK_NAME}_${_probe_key})
-    check_cxx_source_compiles("${_probe}" ${_probe_result})
-    if(NOT ${_probe_result})
+    _av_fast_check(AV_FAST_PROBE_${FK_NAME} "${_probe}" "${_strict}")
+    if(_av_failed)
         message(STATUS
-            "AstroVIPER: skipping fast kernel ${FK_NAME}: its compile probe "
-            "failed with ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}; "
-            "ASTROVIPER_KERNELS selections of it will raise ImportError")
+            "AstroVIPER: skipping fast kernel ${FK_NAME}: its compile probe failed with "
+            "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} and the flags of "
+            "${_av_failed_where} (${_av_failed_flags}; its error is check ${_av_failed} in "
+            "${_log}); ASTROVIPER_KERNELS selections of it will raise ImportError")
         return()
     endif()
 

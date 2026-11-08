@@ -13,11 +13,15 @@ Layout, one subdirectory per kernel::
     fast/<kernel>/src/             generic sources, plus *_avx2.cpp units
     fast/<kernel>/python/bindings.cpp
     fast/<kernel>/__init__.py      re-exports the entries of the extension
-    fast/common/                   headers every module may include (isa.hpp:
-                                   the instruction set chosen per process)
+    fast/common/                   headers shared by the modules: strict_fp.hpp,
+                                   which every unit and probe must include (the
+                                   floating-point guard), and isa.hpp (the
+                                   instruction set chosen per process)
 
 The modules are built only with ``ASTROVIPER_BUILD_FAST_KERNELS=ON`` (the
-default on Linux x86_64 with GCC >= 14 or Clang >= 17), and each one only if
-its compile probe passes (``cmake/AstroviperKernels.cmake``). Selecting a
-kernel whose module was not built raises ``ImportError`` at its first call.
+default on Linux x86_64 with GCC >= 14 or Clang >= 17), and only by GCC, Clang
+or Apple Clang with flags under which strict_fp.hpp compiles, that is flags
+that round every floating-point operation as written; each one also needs its
+compile probe to pass (``cmake/AstroviperKernels.cmake``). Selecting a kernel
+whose module was not built raises ``ImportError`` at its first call.
 """

@@ -8,8 +8,9 @@
 // excess precision. This header refuses (#error) the macros by which the
 // compiler announces them. Every translation unit of a fast module and every
 // fast module's compile probe includes it, and cmake/AstroviperKernels.cmake
-// compiles it alone first, so that such a toolchain skips the fast modules at
-// configure time instead of building inexact code.
+// compiles it alone first, with the flags of each configuration that is
+// built, so that such a toolchain skips the fast modules at configure time
+// instead of building inexact code.
 //
 // Contraction (a * b + c fused into one rounding) has no macro: the fast
 // modules are built only by the compilers that astroviper_cpp_flags gives
