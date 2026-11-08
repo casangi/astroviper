@@ -15,10 +15,15 @@
 // Contraction (a * b + c fused into one rounding) has no macro: the fast
 // modules are built only by the compilers that astroviper_cpp_flags gives
 // -ffp-contract=off (GNU, Clang and AppleClang; AstroviperPybind.cmake).
-// GCC defines each macro refused here; Clang defines only __FAST_MATH__
-// (-ffast-math) and __FINITE_MATH_ONLY__ of them, so its -fassociative-math,
-// -freciprocal-math, -fno-signed-zeros and -funsafe-math-optimizations pass
-// unseen. Preprocessor checks only: an *_avx2.cpp unit may include it.
+// GCC defines each macro refused here. Clang defines only __FAST_MATH__ (when
+// every part of -ffast-math is on) and __FINITE_MATH_ONLY__ of them, so with
+// Clang the fast modules are compiled with -fno-fast-math after the flags they
+// inherit, which turns -fassociative-math, -freciprocal-math,
+// -fno-signed-zeros, -fapprox-func, -fno-honor-nans and the like off again.
+// Neither covers options given straight to Clang's front end (-Xclang) or link
+// options: LDFLAGS=-mdaz-ftz links crtfastmath.o into every module, which then
+// sets flush-to-zero and denormals-are-zero in the thread that loads it.
+// Preprocessor checks only: an *_avx2.cpp unit may include it.
 
 #include <cfloat>  // FLT_EVAL_METHOD
 
