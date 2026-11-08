@@ -2488,13 +2488,13 @@ def residual_update_continuum_single_field(
         for two to four terms. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
-        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
-        pixels of the primary-beam support outside it than the image has
-        outside that support: Asp takes the noise from the median absolute
-        deviation of the pixels outside its mask, and MVC sets the residual to
-        0 outside the support. Without a clean mask that noise is 0, or after
-        the residual-shaped components that of their sidelobes there (a warning
-        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        (``asp_scale_significance``) needs a ``clean_mask`` or an automatic mask
+        that leaves more pixels of the primary-beam support outside it than the
+        image has outside that support: Asp takes the noise from the median
+        absolute deviation of the pixels outside its mask, and MVC sets the
+        residual to 0 outside the support. Without either that noise is 0, or
+        after the residual-shaped components that of their sidelobes there (a
+        warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
         synthesis) cleans the Taylor terms together and needs
         ``image_params["n_taylor_terms"]`` from 2 to 4. Other values are
         refused before anything is written, without substituting another algorithm
@@ -2963,6 +2963,148 @@ def _continuum_clean_support(
     )
 
 
+@shares_param_docs
+def make_auto_mask_continuum(
+    img_xds,
+    auto_mask_params,
+    auto_mask_state=None,
+    primary_beam_limit=0.0,
+    threshold_reached=None,
+    processing_function_threads=1,
+    image_data_group_in_name="residual",
+    image_data_group_out_name="residual",
+    *,
+    input_checked: bool = False,
+):
+    """Update the automatic clean mask from Taylor term zero of the residual.
+
+    Presents Taylor term zero to
+    :func:`~astroviper.processing_functions.image_analysis.make_auto_mask.make_auto_mask`
+    as a cube of one channel, with the clean beam and the largest sidelobe of
+    the Taylor term zero PSF, and installs the mask on every Taylor term.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Continuum image with the residual and its static products. ``MASK`` is
+        installed on it as the ``mask`` of the data group.
+    auto_mask_params : dict
+        The automatic mask parameters.
+    auto_mask_state : dict, optional
+        What this function returned after the preceding residual update;
+        ``None`` for the first.
+    primary_beam_limit : float, optional
+        Fraction of the peak primary beam below which no pixel is masked.
+    threshold_reached : numpy.ndarray, optional
+        ``(time, 1, polarization)`` bool, the planes whose preceding
+        ``threshold_per_cycle`` was the absolute ``threshold``.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    image_data_group_in_name : str, optional
+        Data group of the residual. Default ``"residual"``.
+    image_data_group_out_name : str, optional
+        Data group that gets the mask. Default ``"residual"``.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    Returns
+    -------
+    dict
+        ``"mask"``, ``(time, 1, polarization, l, m)`` bool, and
+        ``"planes_stopped"``, ``(time, 1, polarization)`` bool.
+    """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check._predicates import (
+            check_auto_mask_params,
+            check_primary_beam_limit,
+        )
+
+        check_auto_mask_params(auto_mask_params)
+        check_primary_beam_limit(primary_beam_limit)
+
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.image_analysis.make_auto_mask import (
+        make_auto_mask,
+    )
+    from astroviper.utils.data_group_tools import (
+        create_data_groups_in_and_out,
+        modify_data_groups_xds,
+    )
+
+    group, image_data_group_out = create_data_groups_in_and_out(
+        img_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified={"mask": "MASK"},
+        overwrite=True,
+    )
+    frequency = _continuum_frequency_coord(img_xds)
+    beam_role = "beam_fit_params_point_spread_function"
+    sidelobe_role = "max_sidelobe_point_spread_function"
+    cube_group = {
+        "sky": "SKY_RESIDUAL",
+        beam_role: group[beam_role],
+        sidelobe_role: group[sidelobe_role],
+    }
+    cube_xds = xr.Dataset(
+        {
+            "SKY_RESIDUAL": _continuum_plane_to_frequency(
+                img_xds, img_xds[group["sky"]], "taylor_term"
+            ),
+            group[beam_role]: img_xds[group[beam_role]].expand_dims(
+                frequency=frequency, axis=1
+            ),
+            group[sidelobe_role]: img_xds[group[sidelobe_role]].expand_dims(
+                frequency=frequency, axis=1
+            ),
+        }
+    )
+    primary_beam_name = group.get("primary_beam")
+    if primary_beam_name is not None:
+        cube_xds[primary_beam_name] = _continuum_plane_to_frequency(
+            img_xds, img_xds[primary_beam_name], "frequency"
+        )
+        cube_group["primary_beam"] = primary_beam_name
+    planes_stopped = None
+    if auto_mask_state is not None:
+        cube_xds["MASK"] = cube_xds["SKY_RESIDUAL"].copy(data=auto_mask_state["mask"])
+        cube_group["mask"] = "MASK"
+        planes_stopped = auto_mask_state["planes_stopped"]
+    cube_xds.attrs["data_groups"] = {image_data_group_in_name: cube_group}
+
+    planes_stopped = make_auto_mask(
+        cube_xds,
+        auto_mask_params,
+        primary_beam_limit=primary_beam_limit,
+        planes_stopped=planes_stopped,
+        threshold_reached=threshold_reached,
+        processing_function_threads=processing_function_threads,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_in_name,
+        input_checked=True,
+    )
+    mask = cube_xds["MASK"].values
+    sky = img_xds[group["sky"]]
+    img_xds[image_data_group_out["mask"]] = (
+        sky.dims,
+        np.broadcast_to(mask, sky.shape).copy(),
+        {"description": "Automatic deconvolution mask.", "type": "mask"},
+    )
+    modify_data_groups_xds(
+        img_xds,
+        image_data_group_out_name,
+        image_data_group_out,
+        description="Automatic deconvolution mask updated.",
+    )
+    return {"mask": mask, "planes_stopped": planes_stopped}
+
+
 def build_continuum_residual_imaging_dict(
     img_xds, image_data_group_in_name, cycle_control_params
 ):
@@ -3107,13 +3249,13 @@ def check_continuum_model_products(residual, psf, *, deconvolver, model=None):
         for two to four terms. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
-        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
-        pixels of the primary-beam support outside it than the image has
-        outside that support: Asp takes the noise from the median absolute
-        deviation of the pixels outside its mask, and MVC sets the residual to
-        0 outside the support. Without a clean mask that noise is 0, or after
-        the residual-shaped components that of their sidelobes there (a warning
-        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        (``asp_scale_significance``) needs a ``clean_mask`` or an automatic mask
+        that leaves more pixels of the primary-beam support outside it than the
+        image has outside that support: Asp takes the noise from the median
+        absolute deviation of the pixels outside its mask, and MVC sets the
+        residual to 0 outside the support. Without either that noise is 0, or
+        after the residual-shaped components that of their sidelobes there (a
+        warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
         synthesis) cleans the Taylor terms together and needs
         ``image_params["n_taylor_terms"]`` from 2 to 4. Other values are
         refused before anything is written, without substituting another algorithm
@@ -3568,13 +3710,13 @@ def model_update_mtmfs_single_field(
         for two to four terms. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
-        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
-        pixels of the primary-beam support outside it than the image has
-        outside that support: Asp takes the noise from the median absolute
-        deviation of the pixels outside its mask, and MVC sets the residual to
-        0 outside the support. Without a clean mask that noise is 0, or after
-        the residual-shaped components that of their sidelobes there (a warning
-        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        (``asp_scale_significance``) needs a ``clean_mask`` or an automatic mask
+        that leaves more pixels of the primary-beam support outside it than the
+        image has outside that support: Asp takes the noise from the median
+        absolute deviation of the pixels outside its mask, and MVC sets the
+        residual to 0 outside the support. Without either that noise is 0, or
+        after the residual-shaped components that of their sidelobes there (a
+        warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
         synthesis) cleans the Taylor terms together and needs
         ``image_params["n_taylor_terms"]`` from 2 to 4. Other values are
         refused before anything is written, without substituting another algorithm

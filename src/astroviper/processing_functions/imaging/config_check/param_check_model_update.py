@@ -9,6 +9,7 @@ from astroviper.processing_functions.imaging.config_check._common import (
     require_mapping,
 )
 from astroviper.processing_functions.imaging.config_check._predicates import (
+    check_auto_mask_params,
     check_primary_beam_limit,
     check_taylor_count,
 )
@@ -58,6 +59,14 @@ def check_model_update(config, *, mode, require_complete=False):
 
     deconvolver = config.get("deconvolver")
     image_params = require_mapping("image_params", config.get("image_params", {}))
+
+    # --- Automatic mask ---
+    # The two sources of a mask exclude each other, and a misspelled key must not
+    # leave a requested setting unused. Keys left out take make_auto_mask's defaults.
+    if config.get("auto_mask_params") is not None:
+        check_auto_mask_params(config["auto_mask_params"])
+        if config.get("clean_mask") is not None:
+            raise ValueError("clean_mask and auto_mask_params exclude each other.")
 
     # ========================================================================
     # 2. PSF fitting and helper inputs

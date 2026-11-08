@@ -112,19 +112,22 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
     "Floating-point precision for the primary beam. Defaults to\n``numpy.float64``."
 )
 
+_AUTO_MASK_DATA_GROUP_IN_DOC = 'Data group of the residual. Default ``"residual"``.'
+_AUTO_MASK_DATA_GROUP_OUT_DOC = 'Data group that gets the mask. Default ``"residual"``.'
+
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
     'threaded across planes) requires one Taylor term. Use ``"mtmfs"``\n'
     'for two to four terms. ``"asp"``\n'
     "(C++, adaptive scale pixel) cleans Taylor term zero only and needs\n"
     '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
-    "(``asp_scale_significance``) needs a ``clean_mask`` that leaves more\n"
-    "pixels of the primary-beam support outside it than the image has\n"
-    "outside that support: Asp takes the noise from the median absolute\n"
-    "deviation of the pixels outside its mask, and MVC sets the residual to\n"
-    "0 outside the support. Without a clean mask that noise is 0, or after\n"
-    "the residual-shaped components that of their sidelobes there (a warning\n"
-    'is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
+    "(``asp_scale_significance``) needs a ``clean_mask`` or an automatic mask\n"
+    "that leaves more pixels of the primary-beam support outside it than the\n"
+    "image has outside that support: Asp takes the noise from the median\n"
+    "absolute deviation of the pixels outside its mask, and MVC sets the\n"
+    "residual to 0 outside the support. Without either that noise is 0, or\n"
+    "after the residual-shaped components that of their sidelobes there (a\n"
+    'warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
     "synthesis) cleans the Taylor terms together and needs\n"
     '``image_params["n_taylor_terms"]`` from 2 to 4. Other values are\n'
     "refused before anything is written, without substituting another algorithm\n"
@@ -182,6 +185,14 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
     "resolve_continuum_primary_beam.image_params": (
         _CONTINUUM_PRIMARY_BEAM_RESOLUTION_PARAMS_DOC
     ),
+    "make_auto_mask.auto_mask_params": (
+        "Keys of :data:`AUTO_MASK_DEFAULTS`; those left out take these defaults."
+    ),
+    "make_auto_mask_continuum.auto_mask_params": "The automatic mask parameters.",
+    "make_auto_mask.image_data_group_in_name": _AUTO_MASK_DATA_GROUP_IN_DOC,
+    "make_auto_mask_continuum.image_data_group_in_name": _AUTO_MASK_DATA_GROUP_IN_DOC,
+    "make_auto_mask.image_data_group_out_name": _AUTO_MASK_DATA_GROUP_OUT_DOC,
+    "make_auto_mask_continuum.image_data_group_out_name": _AUTO_MASK_DATA_GROUP_OUT_DOC,
     "make_primary_beam_single_field.img_xds": _PRIMARY_BEAM_IMAGE_DATASET_DOC,
     "make_continuum_primary_beam_single_field.img_xds": (
         _PRIMARY_BEAM_IMAGE_DATASET_DOC
@@ -734,8 +745,64 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "residual plane that the model update cleans: in cube imaging in place\n"
         "of the primary-beam mask of ``primary_beam_limit``, in continuum\n"
         "imaging within it. Asp measures the noise of its significance test\n"
-        "(``asp_scale_significance``) outside the pixels it cleans. ``None``\n"
-        "keeps the primary-beam mask."
+        "(``asp_scale_significance``) outside the pixels it cleans. Without\n"
+        "``auto_mask_params``, ``None`` keeps the primary-beam mask."
+    ),
+    "auto_mask_params": (
+        "Automatic CLEAN mask (CASA ``usemask='auto-multithresh'``, Kepley et\n"
+        "al. 2020, PASP 132, 024505). ``None`` makes no automatic mask; a dict,\n"
+        "empty for the defaults, updates the mask of every plane from its\n"
+        "residual after every residual update, before the stop test. It is\n"
+        "refused together with ``clean_mask``. A mask never loses pixels and\n"
+        "holds none outside ``primary_beam_limit``; a plane with an empty mask\n"
+        "stops with stop code 7. A plane whose last two model updates did no\n"
+        "iteration gets stop code 4 when its mask grows onto pixels above the\n"
+        "threshold, and is cleaned again only if another plane keeps the imaging\n"
+        "cycles going. Continuum imaging makes the mask from Taylor term zero\n"
+        "and applies it to every term. *Differs from CASA*: the clean beam and\n"
+        "the largest PSF sidelobe are those of each plane, not of the whole\n"
+        "cube; a plane stops updating on its own, from its own\n"
+        "``threshold_per_cycle``, not with its channel or the peak of the cube;\n"
+        "``max_iter = 0`` makes a mask, ``niter=0`` none; and the mask written\n"
+        "includes the update after the last model update.\n"
+        "Keys, with the default and the CASA name in brackets:\n"
+        "\n"
+        "- ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts\n"
+        "  from the pixels above this times the largest PSF sidelobe times the\n"
+        "  peak residual (the sidelobe level) or, when larger,\n"
+        "  ``noise_threshold`` times the noise.\n"
+        "- ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is\n"
+        "  1.4826 times the median absolute deviation; every threshold is\n"
+        "  relative to the median of the noise sample.\n"
+        "- ``low_noise_threshold`` (1.5) [``lownoisethreshold``] : The mask grows\n"
+        "  through the pixels above this times the noise or, when larger, the\n"
+        "  sidelobe level.\n"
+        "- ``negative_threshold`` (0.0) [``negativethreshold``] : Above 0, the\n"
+        "  mask takes the pixels below minus this times the noise or, when\n"
+        "  lower, minus the sidelobe level.\n"
+        "- ``smooth_factor`` (1.0) [``smoothfactor``] : Every part of the mask is\n"
+        "  smoothed with the clean beam scaled by this.\n"
+        "- ``min_beam_fraction`` (0.3) [``minbeamfrac``] : Positive regions\n"
+        "  smaller than this fraction of the clean beam area are removed before\n"
+        "  smoothing; 0 keeps them. An unresolved source is removed whatever its\n"
+        "  signal to noise when ``sidelobe_threshold`` times the largest PSF\n"
+        "  sidelobe is above exp(-``min_beam_fraction``), and a warning is logged.\n"
+        "- ``cut_threshold`` (0.01) [``cutthreshold``] : A smoothed mask is cut\n"
+        "  at this fraction of its peak, in (0, 1).\n"
+        "- ``grow_iterations`` (75) [``growiterations``] : Largest number of\n"
+        "  binary dilation steps in one update, before smoothing; 0 does not\n"
+        "  grow it.\n"
+        "- ``grow_prune`` (``True``) [``dogrowprune``] : Remove small regions\n"
+        "  from the grown mask too.\n"
+        "- ``min_percent_change`` (-1.0) [``minpercentchange``] : At or above 0,\n"
+        "  a plane whose threshold is set by the noise stops updating its mask\n"
+        "  once the ``threshold_per_cycle`` of its model update is the absolute\n"
+        "  ``threshold`` and the mask then did not change or changed by less\n"
+        "  than this percentage. Whatever the value, such a plane stops updating\n"
+        "  when its mask is empty.\n"
+        "- ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every\n"
+        "  pixel inside ``primary_beam_limit``. ``False`` measures it outside the\n"
+        "  mask or, without a mask, on the pixels Chauvenet's criterion leaves."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.

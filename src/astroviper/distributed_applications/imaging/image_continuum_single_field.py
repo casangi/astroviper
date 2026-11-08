@@ -2569,6 +2569,7 @@ def image_continuum_single_field(
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json requires list/str (not nullable); never mutated
     field_name: str | None = None,
     clean_mask: str | None = None,
+    auto_mask_params: dict[str, Any] | None = None,
     image_data_variables_keep: list[str] = [  # noqa: B006 - param.json requires a list (not nullable); never mutated
         "sky_model",
         "sky_residual",
@@ -2620,8 +2621,9 @@ def image_continuum_single_field(
     Högbom does and requires ``image_params["n_taylor_terms"] = 1``; with
     more Taylor terms it raises ``ValueError`` before anything is written.
     In MVC the significance test of Asp (``asp_scale_significance``) needs a
-    suitable ``clean_mask`` (see ``deconvolver``). All verify refreshed
-    residuals before finalization. MT-MFS needs two to four Taylor terms.
+    suitable ``clean_mask`` or automatic mask (see ``deconvolver``). All verify
+    refreshed residuals before finalization. MT-MFS needs two to four Taylor
+    terms.
     Restoration is optional. ``cycle_acceleration`` optionally replaces each
     model increment by a conjugate gradient or Nesterov momentum step.
     Incompatible algorithm/order combinations raise without substitution.
@@ -2794,13 +2796,13 @@ def image_continuum_single_field(
         for two to four terms. ``"asp"``
         (C++, adaptive scale pixel) cleans Taylor term zero only and needs
         ``image_params["n_taylor_terms"] = 1``. In MVC its significance test
-        (``asp_scale_significance``) needs a ``clean_mask`` that leaves more
-        pixels of the primary-beam support outside it than the image has
-        outside that support: Asp takes the noise from the median absolute
-        deviation of the pixels outside its mask, and MVC sets the residual to
-        0 outside the support. Without a clean mask that noise is 0, or after
-        the residual-shaped components that of their sidelobes there (a warning
-        is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
+        (``asp_scale_significance``) needs a ``clean_mask`` or an automatic mask
+        that leaves more pixels of the primary-beam support outside it than the
+        image has outside that support: Asp takes the noise from the median
+        absolute deviation of the pixels outside its mask, and MVC sets the
+        residual to 0 outside the support. Without either that noise is 0, or
+        after the residual-shaped components that of their sidelobes there (a
+        warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency
         synthesis) cleans the Taylor terms together and needs
         ``image_params["n_taylor_terms"]`` from 2 to 4. Other values are
         refused before anything is written, without substituting another algorithm
@@ -3179,8 +3181,63 @@ def image_continuum_single_field(
         residual plane that the model update cleans: in cube imaging in place
         of the primary-beam mask of ``primary_beam_limit``, in continuum
         imaging within it. Asp measures the noise of its significance test
-        (``asp_scale_significance``) outside the pixels it cleans. ``None``
-        keeps the primary-beam mask.
+        (``asp_scale_significance``) outside the pixels it cleans. Without
+        ``auto_mask_params``, ``None`` keeps the primary-beam mask.
+    auto_mask_params : dict or None, optional
+        Automatic CLEAN mask (CASA ``usemask='auto-multithresh'``, Kepley et
+        al. 2020, PASP 132, 024505). ``None`` makes no automatic mask; a dict,
+        empty for the defaults, updates the mask of every plane from its
+        residual after every residual update, before the stop test. It is
+        refused together with ``clean_mask``. A mask never loses pixels and
+        holds none outside ``primary_beam_limit``; a plane with an empty mask
+        stops with stop code 7. A plane whose last two model updates did no
+        iteration gets stop code 4 when its mask grows onto pixels above the
+        threshold, and is cleaned again only if another plane keeps the imaging
+        cycles going. Continuum imaging makes the mask from Taylor term zero
+        and applies it to every term. *Differs from CASA*: the clean beam and
+        the largest PSF sidelobe are those of each plane, not of the whole
+        cube; a plane stops updating on its own, from its own
+        ``threshold_per_cycle``, not with its channel or the peak of the cube;
+        ``max_iter = 0`` makes a mask, ``niter=0`` none; and the mask written
+        includes the update after the last model update.
+        Keys, with the default and the CASA name in brackets:
+
+        - ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts
+          from the pixels above this times the largest PSF sidelobe times the
+          peak residual (the sidelobe level) or, when larger,
+          ``noise_threshold`` times the noise.
+        - ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is
+          1.4826 times the median absolute deviation; every threshold is
+          relative to the median of the noise sample.
+        - ``low_noise_threshold`` (1.5) [``lownoisethreshold``] : The mask grows
+          through the pixels above this times the noise or, when larger, the
+          sidelobe level.
+        - ``negative_threshold`` (0.0) [``negativethreshold``] : Above 0, the
+          mask takes the pixels below minus this times the noise or, when
+          lower, minus the sidelobe level.
+        - ``smooth_factor`` (1.0) [``smoothfactor``] : Every part of the mask is
+          smoothed with the clean beam scaled by this.
+        - ``min_beam_fraction`` (0.3) [``minbeamfrac``] : Positive regions
+          smaller than this fraction of the clean beam area are removed before
+          smoothing; 0 keeps them. An unresolved source is removed whatever its
+          signal to noise when ``sidelobe_threshold`` times the largest PSF
+          sidelobe is above exp(-``min_beam_fraction``), and a warning is logged.
+        - ``cut_threshold`` (0.01) [``cutthreshold``] : A smoothed mask is cut
+          at this fraction of its peak, in (0, 1).
+        - ``grow_iterations`` (75) [``growiterations``] : Largest number of
+          binary dilation steps in one update, before smoothing; 0 does not
+          grow it.
+        - ``grow_prune`` (``True``) [``dogrowprune``] : Remove small regions
+          from the grown mask too.
+        - ``min_percent_change`` (-1.0) [``minpercentchange``] : At or above 0,
+          a plane whose threshold is set by the noise stops updating its mask
+          once the ``threshold_per_cycle`` of its model update is the absolute
+          ``threshold`` and the mask then did not change or changed by less
+          than this percentage. Whatever the value, such a plane stops updating
+          when its mask is empty.
+        - ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every
+          pixel inside ``primary_beam_limit``. ``False`` measures it outside the
+          mask or, without a mask, on the pixels Chauvenet's criterion leaves.
     image_sharding : dict, optional
         Reserved for a future node-task finalization path. Continuum imaging
         currently raises ``NotImplementedError`` when this is supplied rather
@@ -4009,6 +4066,7 @@ def image_continuum_single_field(
                 "primary_beam_limit": primary_beam_limit,
                 "make_primary_beam_taylor": bool(restore),
                 "clean_mask": clean_mask_array,
+                "auto_mask_params": auto_mask_params,
                 "spectral_diagnostics": spectral_diagnostics,
                 "restore": restore,
                 "restoration_output": restoration_output,
@@ -4043,6 +4101,9 @@ def image_continuum_single_field(
                 )
                 append_input_params["deconvolution"] = last_cycle_return_dict[
                     "deconvolution"
+                ]
+                append_input_params["auto_mask_state"] = last_cycle_return_dict[
+                    "auto_mask_state"
                 ]
                 if continuum_mode == "mfs" and visibility_memory_mode == "in_memory":
                     if observed_visibility_grid_xds is None:

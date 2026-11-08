@@ -69,6 +69,7 @@ IMAGING_TIMING_PHASES = [
             ("fft (grid)", "T_fft_grid"),
         ],
     ),
+    ("AUTO MASK (summed over residual updates)", "T_auto_mask", []),
     ("STOP TEST (summed over residual updates)", "T_stop_test", []),
     (
         "MODEL UPDATE (summed over imaging cycles)",

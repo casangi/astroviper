@@ -1,5 +1,8 @@
 """Image-analysis processing functions."""
 
+from astroviper.processing_functions.image_analysis.make_auto_mask import (
+    make_auto_mask,
+)
 from astroviper.processing_functions.image_analysis.make_mask import make_mask
 from astroviper.processing_functions.image_analysis.moments import moments
 from astroviper.processing_functions.image_analysis.plane_statistics import (
@@ -47,6 +50,7 @@ __all__ = [
     "statistics_std",
     "statistics_sum",
     "statistics_sumsq",
+    "make_auto_mask",
     "make_mask",
     "moments",
     "calculate_plane_statistics",

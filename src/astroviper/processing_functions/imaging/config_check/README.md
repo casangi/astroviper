@@ -99,9 +99,13 @@ Numerical spectral and Hessian diagnostics use warning-level ToolVIPER log
 messages, so worker diagnostics follow the software stack's logging controls.
 
 The workflow checker also logs the MVC/Asp significance warning when significance
-is enabled without an explicit clean mask. The diagnostic runs at the unchecked
-entry boundary; checked downstream calls do not repeat it. Actual noise estimation
+is enabled without a clean mask or an automatic mask. The diagnostic runs at the
+unchecked entry boundary; checked downstream calls do not repeat it. Actual noise estimation
 remains part of deconvolution.
+
+The model-update checker owns `auto_mask_params`: known keys, values in range, and
+no `clean_mask` beside it. Keys left out take the defaults of `make_auto_mask`, which
+merges them without changing the caller's dictionary.
 
 ## Units and numerical policies
 

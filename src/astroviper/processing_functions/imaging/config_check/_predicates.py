@@ -5,8 +5,10 @@ predicates validate original values without converting or changing configuration
 """
 
 from astroviper.processing_functions.imaging.config_check._common import (
+    require_boolean,
     require_finite_real,
     require_integer,
+    require_mapping,
 )
 
 # -----------------------------------------------------------------------------
@@ -38,6 +40,66 @@ def check_briggs_robust(value):
     robust = require_finite_real("robust", value, scalar=True)
     if not -2 <= robust <= 2:
         raise ValueError("robust must be between -2 and 2.")
+
+
+# -----------------------------------------------------------------------------
+# Automatic mask
+# -----------------------------------------------------------------------------
+
+
+def check_auto_mask_params(value):
+    """Require known ``auto_mask_params`` keys with values in range.
+
+    Keys left out take the defaults of
+    :func:`~astroviper.processing_functions.image_analysis.make_auto_mask.make_auto_mask`.
+
+    Parameters
+    ----------
+    value : mapping
+        The automatic mask parameters.
+    """
+    from astroviper.processing_functions.image_analysis.make_auto_mask import (
+        AUTO_MASK_DEFAULTS,
+    )
+
+    require_mapping("auto_mask_params", value)
+    unknown = sorted(set(value) - set(AUTO_MASK_DEFAULTS))
+    if unknown:
+        raise ValueError(f"Unknown auto_mask_params keys: {unknown}.")
+
+    for key in ("grow_prune", "fast_noise"):
+        if key in value:
+            require_boolean(key, value[key])
+    if "grow_iterations" in value:
+        require_integer("grow_iterations", value["grow_iterations"])
+
+    # --- Numerical ranges ---
+    # smooth_factor scales the smoothing kernel, which needs a width. cut_threshold is a
+    # fraction of the smoothed peak: 0 keeps the whole reach of the kernel, 1 nothing.
+    if "min_percent_change" in value:
+        require_finite_real(
+            "min_percent_change", value["min_percent_change"], scalar=True
+        )
+    if "smooth_factor" in value:
+        require_finite_real(
+            "smooth_factor", value["smooth_factor"], positive=True, scalar=True
+        )
+    for key in (
+        "sidelobe_threshold",
+        "noise_threshold",
+        "low_noise_threshold",
+        "negative_threshold",
+        "min_beam_fraction",
+    ):
+        if key in value and require_finite_real(key, value[key], scalar=True) < 0:
+            raise ValueError(f"{key} must not be negative.")
+    if (
+        "cut_threshold" in value
+        and not 0
+        < require_finite_real("cut_threshold", value["cut_threshold"], scalar=True)
+        < 1
+    ):
+        raise ValueError("cut_threshold must lie in (0, 1).")
 
 
 # -----------------------------------------------------------------------------

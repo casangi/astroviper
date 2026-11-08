@@ -338,9 +338,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # ========================================================================
 
     # --- MVC Asp significance support ---
-    # MVC zeros the residual outside primary-beam support. Without an explicit
-    # clean mask, Asp's outside-mask noise estimate is zero or sees sidelobes,
-    # so its significance extension cannot use the intended noise reference.
+    # MVC zeros the residual outside primary-beam support. Without a clean mask
+    # or an automatic mask, Asp's outside-mask noise estimate is zero or sees
+    # sidelobes, so its significance extension cannot use the intended noise
+    # reference.
     # This is a diagnostic, not a prohibition of MVC Asp. Type-check the flag
     # before using it, including when this checker is called independently.
     if mode.imaging_kind == "continuum" and config.get("deconvolver") == "asp":
@@ -358,6 +359,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
             continuum_mode == "mvc"
             and significance
             and config.get("clean_mask") is None
+            and config.get("auto_mask_params") is None
         ):
             import toolviper.utils.logger as logger
 
@@ -367,9 +369,9 @@ def check_driver_workflow(config, *, mode, require_complete=False):
                 "residual to 0 outside the primary-beam support, where Asp then "
                 "measures the noise of its significance test, so that test measures "
                 "no noise, or after the residual-shaped components only their "
-                "sidelobes. Give a clean_mask that leaves more pixels of the "
-                "primary-beam support outside it than the image has outside that "
-                "support."
+                "sidelobes. Give a clean_mask or auto_mask_params that leaves more "
+                "pixels of the primary-beam support outside it than the image has "
+                "outside that support."
             )
 
     # --- Shared primary-beam limit ---
