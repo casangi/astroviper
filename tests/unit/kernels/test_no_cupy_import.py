@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from astroviper._kernels.gpu import _runtime
 from tests.unit.kernels.conftest import ALL_REF, SHIMS, TINY_HOGBOM
 
 #: Production modules that import the hooked shims.
@@ -75,11 +76,15 @@ importlib.import_module = guarded_import_module
 
 from astroviper._kernels.__main__ import main
 
-assert main(["--check"]) == 0
+checked = main(["--check"])  # 1 for a gpu selection without CuPy or its NVRTC
 for module in [shim for shim, _, _ in {SHIMS!r}.values()] + {CALLERS!r}:
     importlib.import_module(module)
 {TINY_HOGBOM}
-tiny_hogbom()
+try:
+    tiny_hogbom()
+    error = None
+except RuntimeError as e:  # a gpu call, without CuPy
+    error = str(e)
 found = list(blocked)
 
 # Positive control, made a cached import: zarr has imported CuPy by now when it
@@ -93,7 +98,7 @@ try:
     caught = False
 except ModuleNotFoundError:
     caught = True
-print("RESULT", json.dumps({{"blocked": found, "cached": cached, "caught": caught}}))
+print("RESULT", json.dumps({{"blocked": found, "cached": cached, "caught": caught, "error": error, "checked": checked}}))
 """
 
 
@@ -128,12 +133,47 @@ FAST_ASP = pytest.param(
     ),
 )
 
+# A hogbom=gpu call of 8 x 8 pixels runs on the CPU (below the pixel floor).
+GPU_HOGBOM = "hogbom=gpu"
+#: Whether CuPy is installed (the control is then a cached import).
+CUPY = importlib.util.find_spec("cupy") is not None
 
-@pytest.mark.parametrize("selection", ["ref", ALL_REF, FAST_DFT, FAST_HOGBOM, FAST_ASP])
+
+def _gpu_check():
+    """--check's status for a gpu selection: 1 without CuPy, or where CuPy
+    would find no NVRTC or CUDA headers."""
+    try:
+        _runtime.check_environment()
+    except (RuntimeError, ValueError):
+        return 1
+    return 0
+
+
+@pytest.mark.parametrize(
+    "selection", ["ref", ALL_REF, FAST_DFT, FAST_HOGBOM, FAST_ASP, GPU_HOGBOM]
+)
 def test_hooked_process_never_imports_cupy(run_python, selection):
     out = run_python("-c", BLOCKED, ASTROVIPER_KERNELS=selection)
     result = json.loads(out.rpartition("RESULT ")[2])
-    assert result["blocked"] == []
+    assert result["blocked"] == [] and result["error"] is None
+    assert result["checked"] == (_gpu_check() if "gpu" in selection else 0)
     assert result["caught"] is True, "the blocker missed an AstroVIPER import"
-    if importlib.util.find_spec("cupy") is not None:
+    if CUPY:
         assert result["cached"] is True, "the control was not a cached import"
+
+
+def test_a_gpu_call_imports_cupy_in_the_gpu_runtime_only(run_python):
+    """The same process with its Hogbom call on the GPU: the one AstroVIPER
+    import of CuPy is the GPU runtime's, at that call, which then raises
+    RuntimeError (here because the import is refused)."""
+    out = run_python(
+        "-c",
+        BLOCKED,
+        ASTROVIPER_KERNELS=GPU_HOGBOM,
+        ASTROVIPER_KERNELS_GPU_MIN_PIXELS="0",
+    )
+    result = json.loads(out.rpartition("RESULT ")[2])
+    runtime = "/astroviper/_kernels/gpu/_runtime.py:"
+    assert result["blocked"] and all(runtime in b for b in result["blocked"])
+    assert result["error"].startswith("CuPy is not available")
+    assert result["checked"] == _gpu_check() and result["caught"] is True

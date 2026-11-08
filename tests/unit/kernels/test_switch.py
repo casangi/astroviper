@@ -102,6 +102,8 @@ def test_reference_selections(value):
         ("fast,dft=ref", "ref", "fast", "fast"),
         ("asp=fast", "ref", "ref", "fast"),
         ("fast,asp=ref", "fast", "fast", "ref"),
+        ("gpu", "ref", "gpu", "ref"),
+        ("fast,hogbom=gpu", "fast", "gpu", "fast"),
     ],
 )
 def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom, asp):
@@ -121,7 +123,7 @@ def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom, 
             "'asp' has no implementation 'gpu'; its implementations: fast, ref",
         ),
         ("hogbom=ref1", "'hogbom' has no implementation 'ref1'"),
-        ("gpu", "no kernel implements 'gpu' yet"),
+        ("ref1", "no kernel implements 'ref1' yet"),
         ("dft=ref:avx2", "variants (':...') are not supported"),
         ("ref:x", "variants (':...') are not supported"),
         *[(f"{k}=ref", f"kernel {k!r} is reserved") for k in RESERVED],
@@ -155,7 +157,7 @@ def test_selection_is_read_only_and_cached():
 def test_registry_holds_the_reference_pairs():
     assert {k: set(v) for k, v in _switch._REGISTRY.items()} == {
         "dft": {"ref", "fast"},
-        "hogbom": {"ref", "fast"},
+        "hogbom": {"ref", "fast", "gpu"},
         "asp": {"ref", "fast"},
     }
     for kernel, (shim, ext, entries) in SHIMS.items():
@@ -256,15 +258,16 @@ def test_trace_lines(monkeypatch, tmp_path):
 
 def test_trace_records_the_reported_path(fake_module, monkeypatch, tmp_path):
     """A path an implementation reports names its own traced call only, not a
-    call of another thread, an enclosing call or a call of another kernel."""
+    call of another thread, an enclosing call or a call of another kernel; the
+    fields it reports join the line but replace none of its keys."""
     fake_module(
         "_kernels_fake_paths",
         """
         from astroviper._kernels._switch import report_path
 
-        def clean_cube(path=None, inner=None, fail=False, kernel="hogbom"):
+        def clean_cube(path=None, inner=None, fail=False, kernel="hogbom", **fields):
             if path:
-                report_path(kernel, path)
+                report_path(kernel, path, **fields)
             if inner:
                 inner(path="inner")
             if fail:
@@ -285,7 +288,8 @@ def test_trace_records_the_reported_path(fake_module, monkeypatch, tmp_path):
     with pytest.raises(RuntimeError):
         wrapper(path="declined", fail=True)
     wrapper(path="outer", inner=wrapper)
-    wrapper(path="S", kernel="dft")  # an untraced dft call's report inside it
+    wrapper(path="S", kernel="dft", device_s=1.0)  # an untraced dft call's report
+    wrapper(path="gpu", device_s=2.5, wall_s="kept")
     (path,) = (tmp_path / "trace").iterdir()
     records = [json.loads(line) for line in path.read_text().splitlines()]
     assert [(r["path"], r["error"]) for r in records] == [
@@ -295,7 +299,10 @@ def test_trace_records_the_reported_path(fake_module, monkeypatch, tmp_path):
         ("inner", None),
         ("outer", None),
         ("fast", None),
+        ("gpu", None),
     ]
+    assert [r.get("device_s") for r in records] == [None] * 6 + [2.5]
+    assert isinstance(records[-1]["wall_s"], float)
 
 
 def test_trace_records_a_raising_call(monkeypatch, tmp_path):

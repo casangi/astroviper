@@ -1,13 +1,15 @@
 """
 ``python -m astroviper._kernels --check``: validate ``ASTROVIPER_KERNELS``.
 
-Parses the variable, imports the module of every selected implementation and,
-when ``ASTROVIPER_KERNELS_TRACE`` is set, checks that its directory can be
-written, so that a typo, a missing module or an unwritable trace fails before
-a long run starts (a driver may import the hooked shims only late, in its
-workers). Exits with status 1 and the reason on standard error when the
-selection is not usable. Warns when the trace is set without a selection: the
-shims are then not hooked and write no trace.
+Parses the variable, imports the module of every selected implementation, runs
+the module's own ``check_environment()`` where it has one (``hogbom=gpu``: its
+variables, CuPy, NVRTC and the CUDA headers; no device is touched) and, when
+``ASTROVIPER_KERNELS_TRACE`` is set, checks that its directory can be written,
+so that a typo, a missing module or an unwritable trace fails before a long
+run starts (a driver may import the hooked shims only late, in its workers).
+Exits with status 1 and the reason on standard error when the selection is
+not usable. Warns when the trace is set without a selection: the shims are
+then not hooked and write no trace.
 """
 
 import argparse
@@ -15,7 +17,14 @@ import os
 import sys
 import tempfile
 
-from astroviper._kernels._switch import _ENTRIES, ENV, TRACE_ENV, impl, selected
+from astroviper._kernels._switch import (
+    _ENTRIES,
+    _REGISTRY,
+    ENV,
+    TRACE_ENV,
+    impl,
+    selected,
+)
 
 
 def _check_trace_dir(trace_dir):
@@ -42,9 +51,11 @@ def main(argv=None):
         for kernel, name in selection.items():
             for entry in _ENTRIES[kernel]:
                 impl(kernel, entry, name)
+            module = sys.modules[_REGISTRY[kernel][name]]
+            getattr(module, "check_environment", lambda: None)()
         if trace_dir:
             _check_trace_dir(trace_dir)
-    except (ValueError, ImportError, OSError) as e:
+    except (ValueError, ImportError, OSError, RuntimeError) as e:
         print(f"{ENV} check failed: {e}", file=sys.stderr)
         return 1
     if trace_dir and not value:

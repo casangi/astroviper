@@ -1418,7 +1418,7 @@ def test_no_thread_outlives_a_call_and_the_gil_is_released():
         mask="all",
         seed=52,
     )
-    before = _thread_count()
+    before, threads = _thread_count(), set(os.listdir("/proc/self/task"))
     seen, done = [], threading.Event()
 
     def sample():
@@ -1437,7 +1437,12 @@ def test_no_thread_outlives_a_call_and_the_gil_is_released():
     finally:
         sys.setswitchinterval(interval)
     assert max(seen) > before + 1, "no sample saw the call's threads"
-    assert _thread_count() == before
+    # A thread that has ended stays listed until the kernel releases it, a
+    # moment after its join returned: wait for that, not for a thread that runs.
+    deadline = time.monotonic() + 1.0
+    while set(os.listdir("/proc/self/task")) - threads and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert not set(os.listdir("/proc/self/task")) - threads
 
 
 def _cpu_seconds():
