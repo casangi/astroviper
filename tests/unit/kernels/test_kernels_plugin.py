@@ -117,7 +117,7 @@ def test_an_executed_call_in_the_listed_file_passes():
         _record(35.0),  # in another file
         _record(25.0),  # between tests
         _record(15.0, error="RuntimeError"),  # raised
-        _record(15.0, path="ref"),  # declined to the reference
+        _record(15.0, path="declined"),  # declined: the reference ran it
         _record(15.0, entry="clean_cube_many_threads"),  # another entry
     ],
     ids=["other-file", "between-tests", "raised", "declined", "other-entry"],

@@ -15,7 +15,10 @@ cannot escape the rules. Skipped off x86-64 and when ``objdump`` (binutils) is
 not installed.
 
 A fast module built for the baseline instruction set only
-(``BASELINE_FAST_MODULES``) follows the rules of the reference modules.
+(``BASELINE_FAST_MODULES``) follows the rules of the reference modules. The two
+lists of fast modules must be the modules that the tree declares
+(``_kernels/fast/*/CMakeLists.txt``), split by whether they have AVX2 units,
+so a fast module cannot escape the rules either.
 
 The fast modules (``FAST_MODULES``) have no fused multiply-add either. Their
 AVX2 code lives in ``*_avx2.cpp`` units built without LTO, which must define
@@ -30,8 +33,8 @@ type gives it (Debug: -Og, see cmake/AstroviperKernels.cmake) and checked the
 same way.
 
 A fast module that is not installed (a build with
-``ASTROVIPER_BUILD_FAST_KERNELS=OFF``, or one whose compile probe skipped it)
-skips its tests, unless ``ASTROVIPER_EXPECT_FAST_KERNELS`` is set (not empty
+``ASTROVIPER_BUILD_FAST_KERNELS=OFF``, or one whose configure-time checks
+skipped it) skips its tests, unless ``ASTROVIPER_EXPECT_FAST_KERNELS`` is set (not empty
 or ``0``), as a Linux x86-64 CI job should set it: then it fails them, so that
 a module silently lost from such a build is caught. A reference module must be
 installed.
@@ -162,6 +165,49 @@ def test_reference_module_list_is_complete():
         if suffix and path.is_file() and not relative.startswith("_kernels/"):
             found.add(relative.removesuffix(suffix))
     assert sorted(found) == sorted(REFERENCE_MODULES)
+
+
+def _declared_fast_modules():
+    """``{module: whether it has AVX2 units}`` for the fast modules of the
+    subdirectories that ``_kernels/fast/CMakeLists.txt`` adds, read from
+    their ``astroviper_add_fast_kernel_module`` calls."""
+    fast = Path(__file__).parents[3] / "src/astroviper/_kernels/fast"
+
+    def code(path):  # without CMake comments
+        return re.sub(r"#.*", "", path.read_text())
+
+    declared = {}
+    for name in re.findall(
+        r"add_subdirectory\(\s*(\w+)\s*\)", code(fast / "CMakeLists.txt")
+    ):
+        calls = re.findall(
+            r"astroviper_add_fast_kernel_module\(([^)]*)\)",
+            code(fast / name / "CMakeLists.txt"),
+        )
+        for arguments in calls:
+            module = re.search(r"\bNAME\s+(\w+)", arguments).group(1)
+            declared[f"_kernels/fast/{name}/{module}"] = (
+                "AVX2_SOURCES" in arguments.split()
+            )
+    return declared
+
+
+def test_fast_module_lists_are_complete():
+    """``FAST_MODULES`` are the declared fast modules with AVX2 units and
+    ``BASELINE_FAST_MODULES`` those without, and they are the packages of the
+    switch's fast implementations."""
+    from astroviper._kernels._switch import _REGISTRY
+
+    declared = _declared_fast_modules()
+    assert sorted(FAST_MODULES) == sorted(m for m, avx2 in declared.items() if avx2)
+    assert sorted(BASELINE_FAST_MODULES) == sorted(
+        m for m, avx2 in declared.items() if not avx2
+    )
+    packages = {impls["fast"] for impls in _REGISTRY.values() if "fast" in impls}
+    assert packages == {
+        "astroviper." + module.rpartition("/")[0].replace("/", ".")
+        for module in declared
+    }
 
 
 @pytest.mark.parametrize("relative", REFERENCE_MODULES, ids=lambda r: r.split("/")[-1])
