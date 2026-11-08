@@ -44,10 +44,36 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"
     set(_av_x86_64 ON)
 endif()
 
+# check_cxx_source_compiles(<code> <var>) built as configuration Debug with
+# <flags> as its CMAKE_CXX_FLAGS_DEBUG, both set in this scope only. The test
+# project of try_compile has its generator's default configurations, not
+# CMAKE_CONFIGURATION_TYPES (Ninja Multi-Config: Debug, Release and
+# RelWithDebInfo), so a check built as another configuration (MinSizeRel, or a
+# custom one) would fail for want of its build file; Debug is a default
+# configuration of every generator. A toolchain file that sets
+# CMAKE_CONFIGURATION_TYPES sets them in the test project too, perhaps without
+# Debug, so with a multi-config generator a failed check is built again as
+# <config> with the same flags, and <var> passes if that build does.
+function(_av_check_compiles code var flags config)
+    set(CMAKE_TRY_COMPILE_CONFIGURATION Debug)
+    set(CMAKE_CXX_FLAGS_DEBUG "${flags}")
+    check_cxx_source_compiles("${code}" ${var})
+    get_property(_multi GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(NOT ${var} AND _multi AND NOT config STREQUAL "Debug")
+        string(TOUPPER "${config}" _upper)
+        set(CMAKE_TRY_COMPILE_CONFIGURATION "${config}")
+        set(CMAKE_CXX_FLAGS_${_upper} "${flags}")
+        check_cxx_source_compiles("${code}" ${var}_AS_${_upper})
+        if(${var}_AS_${_upper})
+            set(${var} 1 CACHE INTERNAL "Test ${var}")
+        endif()
+    endif()
+endfunction()
+
 # ---------------------------------------------------------------------------
 # _av_fast_check(<prefix> <code> <key> [<option>...])
 #
-# check_cxx_source_compiles(<code>) for each configuration that is built (each
+# _av_check_compiles(<code>) for each configuration that is built (each
 # of CMAKE_CONFIGURATION_TYPES with a multi-config generator, else
 # CMAKE_BUILD_TYPE, or none), with the caller's CMAKE_REQUIRED_* settings and
 # the flags that the fast sources get there, in their order: CMAKE_CXX_FLAGS,
@@ -80,18 +106,15 @@ function(_av_fast_check prefix code key)
     list(TRANSFORM _options REPLACE "^SHELL:" "")
     string(REPLACE ";" " " _options "${_options}")
     foreach(_config IN LISTS _configs)
-        # try_compile builds CMAKE_TRY_COMPILE_CONFIGURATION with that
-        # configuration's CMAKE_CXX_FLAGS_<CONFIG>, both set in this scope only.
         string(TOUPPER "${_config}" _upper)
-        set(CMAKE_TRY_COMPILE_CONFIGURATION "${_config}")
-        string(STRIP "${CMAKE_CXX_FLAGS_${_upper}} ${_options}" CMAKE_CXX_FLAGS_${_upper})
+        string(STRIP "${CMAKE_CXX_FLAGS_${_upper}} ${_options}" _config_flags)
         string(CONCAT _inputs "${code}|${key}|${CMAKE_REQUIRED_INCLUDES}|${CMAKE_REQUIRED_FLAGS}"
             "|${CMAKE_REQUIRED_LINK_OPTIONS}|${CMAKE_REQUIRED_LIBRARIES}|${CMAKE_CXX_COMPILER}"
-            "|${CMAKE_CXX_COMPILER_VERSION}|${CMAKE_CXX_STANDARD}|${CMAKE_CXX_FLAGS}|${_config}"
-            "|${CMAKE_CXX_FLAGS_${_upper}}|${CMAKE_EXE_LINKER_FLAGS}")
+            "|${CMAKE_CXX_COMPILER_VERSION}|${CMAKE_CXX_STANDARD}|${CMAKE_CXX_FLAGS}"
+            "|${_config_flags}|${CMAKE_EXE_LINKER_FLAGS}")
         string(SHA256 _hash "${_inputs}")
         string(SUBSTRING "${_hash}" 0 16 _hash)
-        check_cxx_source_compiles("${code}" ${prefix}_${_hash})
+        _av_check_compiles("${code}" ${prefix}_${_hash} "${_config_flags}" "${_config}")
         if(NOT ${prefix}_${_hash})
             set(_av_failed ${prefix}_${_hash} PARENT_SCOPE)
             if(_none)
@@ -99,7 +122,7 @@ function(_av_fast_check prefix code key)
             else()
                 set(_av_failed_where "configuration ${_config}" PARENT_SCOPE)
             endif()
-            string(STRIP "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_upper}}" _flags)
+            string(STRIP "${CMAKE_CXX_FLAGS} ${_config_flags}" _flags)
             set(_av_failed_flags "${_flags}" PARENT_SCOPE)
             return()
         endif()
