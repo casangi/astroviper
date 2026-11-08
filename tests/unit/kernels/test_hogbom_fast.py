@@ -1317,6 +1317,7 @@ def test_the_avx2_unit_defines_no_weak_symbol_at_o0(tmp_path):
             "-O0",
             "-DAV_HAVE_AVX2=1",
             f"-I{module / 'include'}",
+            f"-I{module.parent / 'common'}",
             "-c",
             str(module / "src/hclean_fast_avx2.cpp"),
             "-o",

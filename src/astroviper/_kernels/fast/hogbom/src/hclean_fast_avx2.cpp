@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "hclean_fast_kernels.hpp"
+#include "strict_fp.hpp"
 
 #if defined(HCLEAN_FAST_AVX2)  // the build's AVX2 unit, on an x86-64 target
 

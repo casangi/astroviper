@@ -11,6 +11,7 @@
 #include <cmath>
 
 #include "dft_s_kernels.hpp"
+#include "strict_fp.hpp"
 
 namespace {
 

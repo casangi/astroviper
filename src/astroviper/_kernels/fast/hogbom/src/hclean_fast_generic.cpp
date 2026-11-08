@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include "hclean_fast_kernels.hpp"
+#include "strict_fp.hpp"
 
 namespace {
 

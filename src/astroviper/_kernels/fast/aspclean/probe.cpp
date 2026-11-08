@@ -1,9 +1,10 @@
 // Compile probe of the fast Asp module (cmake/AstroviperKernels.cmake): the
 // language and library features its sources use, POSIX mmap (its large
-// buffers), and pocketfft's SIMD lanes, which its transforms need (pocketfft
-// turns them off for compilers it does not know). The reference's include
-// directory is on the probe's path. The probe is compiled and linked, never
-// run: the value main returns only states what the calls are for.
+// buffers), pocketfft's SIMD lanes, which its transforms need (pocketfft
+// turns them off for compilers it does not know), and the floating-point
+// semantics they need (strict_fp.hpp, which they include). The reference's
+// include directory is on the probe's path. The probe is compiled and linked,
+// never run: the value main returns only states what the calls are for.
 #include <sys/mman.h>
 
 #include <atomic>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "pocketfft_hdronly.h"
+#include "strict_fp.hpp"
 
 #ifdef POCKETFFT_NO_VECTORS
 #error "pocketfft has no SIMD lanes with this compiler"

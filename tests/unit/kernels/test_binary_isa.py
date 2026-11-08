@@ -246,7 +246,8 @@ def test_avx2_units_define_no_weak_symbols_at_every_level(relative, level, tmp_p
     units = sorted(module.glob("src/*_avx2.cpp"))
     assert units, f"no AVX2 unit in {module}"
     flags = ["-std=c++23", "-fPIC", "-ffp-contract=off", "-mavx2", "-fno-lto", level]
-    flags += ["-DAV_HAVE_AVX2=1", f"-I{module / 'include'}"]
+    common = module.parent / "common"  # on every fast module's include path
+    flags += ["-DAV_HAVE_AVX2=1", f"-I{module / 'include'}", f"-I{common}"]
     for unit in units:
         target = tmp_path / f"{unit.stem}.o"
         subprocess.run(

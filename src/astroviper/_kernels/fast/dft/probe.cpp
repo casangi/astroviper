@@ -1,5 +1,6 @@
 // Compile probe of the fast dft_predict module (cmake/AstroviperKernels.cmake):
-// the language and library features its sources use.
+// the language and library features its sources use, and the floating-point
+// semantics they need (strict_fp.hpp, which they include).
 #include <array>
 #include <atomic>
 #include <bit>
@@ -12,6 +13,8 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include "strict_fp.hpp"
 
 int main() {
     std::atomic<std::int64_t> next{0};

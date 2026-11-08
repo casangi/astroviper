@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 #include "dft_fast.hpp"
+#include "strict_fp.hpp"
 
 namespace dft_fast {
 

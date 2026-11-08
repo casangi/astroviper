@@ -49,6 +49,7 @@
 #include "asp_fft.hpp"
 #include "asp_fft2.hpp"
 #include "asp_lbfgs.hpp"
+#include "strict_fp.hpp"
 
 namespace aspclean_fast {
 

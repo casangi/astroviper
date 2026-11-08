@@ -36,6 +36,7 @@
 
 #include "asp_clean_fast.hpp"
 #include "isa.hpp"
+#include "strict_fp.hpp"
 
 namespace py = pybind11;
 

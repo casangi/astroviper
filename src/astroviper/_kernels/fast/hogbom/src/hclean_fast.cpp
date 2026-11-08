@@ -25,6 +25,7 @@
 #endif
 
 #include "isa.hpp"
+#include "strict_fp.hpp"
 
 namespace hclean_fast {
 

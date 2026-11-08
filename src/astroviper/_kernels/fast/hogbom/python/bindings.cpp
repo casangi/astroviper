@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "hclean_fast.hpp"
+#include "strict_fp.hpp"
 
 namespace py = pybind11;
 
