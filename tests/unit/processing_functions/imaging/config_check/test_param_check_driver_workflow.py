@@ -65,7 +65,12 @@ def test_msv2_read_only_supported_path():
 @pytest.mark.parametrize("fault", ["missing", "repeated", "unknown", "taylor_basis"])
 @pytest.mark.parametrize("input_checked", [False, True])
 def test_drivers_validate_actual_partitions_before_graphs_or_writes(
-    monkeypatch, tmp_path, wideband_store, kind, fault, input_checked
+    monkeypatch,
+    tmp_path,
+    wideband_store,  # noqa: F811
+    kind,
+    fault,
+    input_checked,
 ):
     import importlib
 
@@ -117,21 +122,11 @@ def test_drivers_validate_actual_partitions_before_graphs_or_writes(
         if kind == "cube"
         else "astroviper.distributed_applications.imaging.image_continuum_single_field"
     )
-    if kind == "cube":
-        monkeypatch.setattr(
-            coordinate_utils,
-            "interpolate_data_coords_onto_parallel_coords",
-            lambda *args, **kwargs: corrupt_mapping(original(*args, **kwargs)),
-        )
-    else:
-        # Corrupt the final mapping after exact-frequency selection, so the
-        # test exercises the shared partition guard rather than an earlier one.
-        select = module._apply_exact_frequency_selection_to_continuum_mapping
-        monkeypatch.setattr(
-            module,
-            "_apply_exact_frequency_selection_to_continuum_mapping",
-            lambda *args, **kwargs: corrupt_mapping(select(*args, **kwargs)),
-        )
+    monkeypatch.setattr(
+        coordinate_utils,
+        "interpolate_data_coords_onto_parallel_coords",
+        lambda *args, **kwargs: corrupt_mapping(original(*args, **kwargs)),
+    )
     monkeypatch.setattr(
         "astroviper.node_tasks.imaging.config_check.preflight_imaging_inputs", forbidden
     )

@@ -402,7 +402,7 @@ def check_channel_partitions(mapping, processing_set, *, image_params, mode):
     image_params : mapping
         The common image frequency axis and, for continuum, Taylor basis.
     mode : ImagingMode
-        Cube uses nearest-channel assignment; continuum uses exact selection.
+        Imaging kind and field layout.
     """
 
     mode.require_supported()
@@ -414,7 +414,7 @@ def check_channel_partitions(mapping, processing_set, *, image_params, mode):
     counts = {}
     for name, child in processing_set.items():
         frequencies = np.asarray(child.frequency.values)
-        selected = selected_frequency_mask(frequencies, image_frequencies, mode=mode)
+        selected = selected_frequency_mask(frequencies, image_frequencies)
         expected[name] = selected
         counts[name] = np.zeros(len(frequencies), dtype=int)
 

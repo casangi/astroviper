@@ -6,15 +6,10 @@ import numpy as np
 def map_visibility_frequencies_to_image(
     visibility_frequencies,
     image_frequencies,
-    *,
-    matching="nearest",
-    rtol=1e-12,
-    atol=0.0,
-    input_checked=False,
 ):
     """Map each visibility channel onto its nearest image-frequency channel.
 
-    Nearest matching is
+    Nearest-channel assignment uses
     :func:`graphviper.graph_tools.coordinate_utils.map_to_nearest_coordinate`,
     the rule by which
     :func:`graphviper.graph_tools.coordinate_utils.interpolate_data_coords_onto_parallel_coords`
@@ -38,17 +33,6 @@ def map_visibility_frequencies_to_image(
         channel the widest visibility spacing is used instead, and when both
         axes have one channel any frequency maps onto that plane.
 
-    matching : {"nearest", "exact"}, default "nearest"
-        Use the shared nearest-channel assignment for cube and continuum imaging.
-        The optional "exact" policy requires a unique one-to-one match.
-    rtol, atol : float, optional
-        Relative and absolute tolerances for exact matching with ``np.isclose``.
-        Ignored for nearest matching. Defaults are 1e-12 and 0 Hz.
-
-    input_checked : bool, optional
-        Skip policy validation already performed by the calling layer.
-        Actual coordinate checks remain active.
-
     Returns
     -------
     numpy.ndarray
@@ -59,16 +43,8 @@ def map_visibility_frequencies_to_image(
     ValueError
         If either coordinate is not one-dimensional and finite, or if a
         visibility frequency lies more than half an image channel width from
-        every image channel centre, or exact matching is missing, ambiguous,
-        or not one-to-one. Also raised for an unknown matching policy.
+        every image channel centre.
     """
-    if not input_checked:
-        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
-            check_frequency_matching,
-        )
-
-        check_frequency_matching(matching)
-
     visibility_frequencies = np.asarray(visibility_frequencies, dtype=np.float64)
     image_frequencies = np.asarray(image_frequencies, dtype=np.float64)
 
@@ -80,30 +56,6 @@ def map_visibility_frequencies_to_image(
         np.isfinite(image_frequencies)
     ):
         raise ValueError("Visibility and image frequencies must be finite.")
-
-    if matching == "exact":
-        matches = np.isclose(
-            visibility_frequencies[:, np.newaxis],
-            image_frequencies[np.newaxis, :],
-            rtol=rtol,
-            atol=atol,
-        )
-        match_counts = matches.sum(axis=1)
-        if np.any(match_counts != 1):
-            raise ValueError(
-                "Each visibility frequency must match exactly one image frequency; "
-                f"visibility frequencies={visibility_frequencies}; "
-                f"image frequencies={image_frequencies}."
-            )
-
-        frequency_map = np.argmax(matches, axis=1).astype(np.int64)
-        if np.unique(frequency_map).size != visibility_frequencies.size:
-            raise ValueError(
-                "Visibility frequencies must map one-to-one onto image frequencies; "
-                f"visibility frequencies={visibility_frequencies}; "
-                f"image frequencies={image_frequencies}."
-            )
-        return frequency_map
 
     from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
 

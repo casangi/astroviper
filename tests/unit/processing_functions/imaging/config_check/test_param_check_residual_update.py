@@ -60,11 +60,6 @@ def test_continuum_mode_must_be_top_level():
         )
 
 
-def test_frequency_matching_public_spelling_rejected_early():
-    with pytest.raises(ValueError, match="frequency_matching"):
-        check_residual_update({"frequency_matching": "bad"}, mode=CUBE_SINGLE_FIELD)
-
-
 @pytest.mark.parametrize(
     "image,message",
     [

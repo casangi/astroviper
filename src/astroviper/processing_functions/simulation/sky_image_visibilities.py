@@ -97,9 +97,7 @@ def sky_image_visibilities(
     sky = sky_image["SKY"].transpose("time", "frequency", "polarization", "l", "m")
     stokes = [str(s) for s in sky.polarization.values]
     planes = sky.isel(time=0).values.astype(np.float64)
-    nearest = map_visibility_frequencies_to_image(
-        frequency, sky.frequency.values, input_checked=True
-    )
+    nearest = map_visibility_frequencies_to_image(frequency, sky.frequency.values)
     planes = planes[nearest]  # [n_frequency, n_stokes, n_l, n_m]
     if stokes == ["I"]:
         # The Stokes plane of the parallel hands that is not I is zero.

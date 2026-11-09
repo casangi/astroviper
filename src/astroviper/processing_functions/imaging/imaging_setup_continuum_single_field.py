@@ -174,7 +174,6 @@ def _mfs_channel_imaging_weight_sums(
         frequency_map = map_visibility_frequencies_to_image(
             weight.frequency.values,
             image_frequencies,
-            matching="nearest",
         )
         values = np.asarray(weight.values)
         if np.any(np.isinf(values)):
@@ -738,7 +737,6 @@ def imaging_setup_continuum_single_field(
             },
             overwrite=True,
             processing_function_threads=processing_function_threads,
-            frequency_matching="nearest",
             input_checked=True,
         )
 

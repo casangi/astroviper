@@ -50,9 +50,6 @@ from astroviper.processing_functions.imaging.residual_cycle_continuum_single_fie
 )
 from astroviper.processing_functions.imaging.restore import _divide_taylor_polynomials
 from astroviper.processing_functions.imaging.utils import Key
-from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-    map_visibility_frequencies_to_image,
-)
 from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
 from tests.utils.continuum_images import make_continuum_image
 
@@ -605,31 +602,6 @@ def test_mfs_taylor_division_excludes_zero_beam_at_zero_limit():
     assert (model_divided.values[..., 0, 0] == 0.0).all()
     assert (model_divided.values[..., 0, 1] == 0.0).all()
     assert np.isfinite(divided.values[..., 1, :]).all()
-
-
-@pytest.mark.parametrize(
-    ("visibility", "image", "expected"),
-    [
-        ([1.1e9, 1.3e9], [1.0e9, 1.1e9, 1.2e9, 1.3e9], [1, 3]),
-        ([1.0e9, 1.1e9], [1.0e9, 1.1e9], [0, 1]),
-    ],
-)
-def test_frequency_mapping_matches_unique_image_channels(visibility, image, expected):
-    """Full and subset channel selections map to their unique image planes."""
-    np.testing.assert_array_equal(
-        map_visibility_frequencies_to_image(visibility, image, matching="exact"),
-        expected,
-    )
-
-
-@pytest.mark.parametrize(
-    ("visibility", "image"),
-    [([1.4e9], [1.0e9, 1.1e9]), ([1.0e9], [1.0e9, 1.0e9])],
-)
-def test_frequency_mapping_rejects_missing_or_ambiguous_channels(visibility, image):
-    """Missing and duplicate image frequencies cannot define a unique map."""
-    with pytest.raises(ValueError, match="exactly one image frequency"):
-        map_visibility_frequencies_to_image(visibility, image, matching="exact")
 
 
 @pytest.mark.parametrize("frequency_shift", [0.0, 1.0e6])

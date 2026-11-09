@@ -135,7 +135,7 @@ def get_visibility_grid_single_field(
         )
 
         frequency_map = map_visibility_frequencies_to_image(
-            ms_xds.frequency.values, img_xds.frequency.values, input_checked=True
+            ms_xds.frequency.values, img_xds.frequency.values
         )
     else:  # continuum
         frequency_map = (np.zeros(n_chan)).astype(int)
