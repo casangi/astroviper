@@ -1410,18 +1410,9 @@ def combine_continuum_chunks(input_data, input_params):
     if not input_data:
         raise ValueError("combine_continuum_chunks received no inputs.")
 
-    # Extract the continuum_mode
-    continuum_mode = input_params.get("continuum_mode")
-
-    if continuum_mode is None:
-        continuum_mode = (
-            input_data[0]["image"]
-            .attrs.get(
-                "continuum_imaging",
-                {},
-            )
-            .get("continuum_mode", "mfs")
-        )
+    # Execution policy comes only from the reduce-stage parameters. Image
+    # metadata records how a product was formed; it does not select the path.
+    continuum_mode = input_params.get("continuum_mode", "mfs")
 
     static_variables = tuple(
         input_params.get(
@@ -2810,7 +2801,8 @@ def image_continuum_single_field(
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral

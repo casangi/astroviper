@@ -135,7 +135,8 @@ _CONTINUUM_DECONVOLVER_DOC = (
 )
 
 _CONTINUUM_MODE_DOC = (
-    'Continuum construction mode. ``"mfs"`` grids Taylor-weighted\n'
+    "Top-level workflow selection; do not place it inside ``image_params``.\n"
+    '``"mfs"`` grids Taylor-weighted\n'
     "visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe\n"
     "the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains\n"
     "both the intrinsic source spectral index and the primary-beam spectral\n"

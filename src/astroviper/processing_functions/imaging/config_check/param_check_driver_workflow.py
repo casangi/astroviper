@@ -270,6 +270,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     )
 
     image_params = require_mapping("image_params", config.get("image_params", {}))
+    if mode.imaging_kind == "continuum" and "continuum_mode" in image_params:
+        raise ValueError(
+            "continuum_mode must be supplied at the top level, not inside image_params."
+        )
     if output_format == "fits":
         check_fits_coordinates(image_params)
     check_kept_variables(
@@ -351,10 +355,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         require_mapping("cycle/deconvolution controls", controls)
         significance = controls.get("asp_scale_significance", True)
         require_boolean("asp_scale_significance", significance)
-        continuum_mode = config.get(
-            "continuum_mode",
-            config.get("image_params", {}).get("continuum_mode", "mfs"),
-        )
+        continuum_mode = config.get("continuum_mode", "mfs")
         if (
             continuum_mode == "mvc"
             and significance

@@ -109,7 +109,8 @@ def imaging_preparation_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
@@ -2430,7 +2431,8 @@ def residual_update_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral

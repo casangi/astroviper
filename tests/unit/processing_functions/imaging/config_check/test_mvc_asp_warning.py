@@ -86,14 +86,15 @@ def test_cube_asp_does_not_receive_an_mvc_warning(monkeypatch):
     warning.assert_not_called()
 
 
-def test_workflow_reads_mode_from_image_configuration(monkeypatch):
+def test_workflow_rejects_mode_in_image_configuration(monkeypatch):
     warning = Mock()
     monkeypatch.setattr("toolviper.utils.logger.warning", warning)
-    check_driver_workflow(
-        {"deconvolver": "asp", "image_params": {"continuum_mode": "mvc"}},
-        mode=CONTINUUM_SINGLE_FIELD,
-    )
-    warning.assert_called_once()
+    with pytest.raises(ValueError, match="must be supplied at the top level"):
+        check_driver_workflow(
+            {"deconvolver": "asp", "image_params": {"continuum_mode": "mvc"}},
+            mode=CONTINUUM_SINGLE_FIELD,
+        )
+    warning.assert_not_called()
 
 
 def test_public_driver_warns_once_before_opening_input(monkeypatch, tmp_path):

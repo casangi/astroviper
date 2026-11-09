@@ -51,6 +51,15 @@ def test_mvc_time_restriction_is_mode_specific():
     check_residual_update(config, mode=CONTINUUM_SINGLE_FIELD)
 
 
+def test_continuum_mode_must_be_top_level():
+    """Nested workflow selection is rejected instead of being silently ignored."""
+    with pytest.raises(ValueError, match="must be supplied at the top level"):
+        check_residual_update(
+            {"image_params": {"continuum_mode": "mvc"}},
+            mode=CONTINUUM_SINGLE_FIELD,
+        )
+
+
 def test_frequency_matching_public_spelling_rejected_early():
     with pytest.raises(ValueError, match="frequency_matching"):
         check_residual_update({"frequency_matching": "bad"}, mode=CUBE_SINGLE_FIELD)

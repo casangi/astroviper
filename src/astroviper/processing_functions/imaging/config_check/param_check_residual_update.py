@@ -96,6 +96,10 @@ def check_residual_update(config, *, mode, require_complete=False):
     # --- Required image coordinates ---
     # Full application calls need every coordinate before any output is created.
     image_params = require_mapping("image_params", config.get("image_params", {}))
+    if mode.imaging_kind == "continuum" and "continuum_mode" in image_params:
+        raise ValueError(
+            "continuum_mode must be supplied at the top level, not inside image_params."
+        )
     # Leaf gridders receive these same settings as separate keyword arguments.
     # A local view lets them reuse this validator without rewriting their inputs.
     image_params = {
@@ -157,9 +161,7 @@ def check_residual_update(config, *, mode, require_complete=False):
 
     # --- Continuum construction ---
     # Continuum residuals can be formed by either the MFS or MVC path.
-    continuum_mode = config.get(
-        "continuum_mode", image_params.get("continuum_mode", "mfs")
-    )
+    continuum_mode = config.get("continuum_mode", "mfs")
     if mode.imaging_kind == "continuum":
         from astroviper.processing_functions.imaging.config_check._common import (
             check_continuum_mode,
@@ -517,7 +519,7 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
     # --- Channel assignment ---
     # Use the production nearest-channel rule, preserving averaging/shifted axes.
     image = config.get("image_params", {})
-    continuum_mode = config.get("continuum_mode", image.get("continuum_mode", "mfs"))
+    continuum_mode = config.get("continuum_mode", "mfs")
     if "frequency_coords" in image and (
         mode.imaging_kind == "cube" or continuum_mode == "mvc"
     ):
