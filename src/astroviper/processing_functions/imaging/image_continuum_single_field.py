@@ -194,9 +194,9 @@ def imaging_preparation_continuum_single_field(
 
     make_primary_beam_taylor : bool, optional
         Collect the first-cycle inputs needed for primary-beam Taylor products.
-        Distributed MFS retains compact channel/correlation weight sums and fits
-        the beam only at final restoration. MVC keeps its final diagnostic
-        outside the iterative image and static cache.
+        Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,
+        fit the globally reduced beam in the first append node, and keep the
+        fitted diagnostic outside the iterative image and static cache.
 
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
@@ -2168,64 +2168,6 @@ def fit_mfs_primary_beam_taylor(contributions, primary_beam_limit=0.2):
     )
 
 
-def _fit_mfs_primary_beam_for_restoration(
-    img_xds, summary, image_params, primary_beam_limit
-):
-    """Build the MFS beam polynomial once from compact first-cycle weights.
-
-    Preserve each task's interpolation bound and correlation weights, then apply
-    the same polarization relabeling used by the original first-cycle fit.
-    """
-    import numpy as np
-    import xarray as xr
-
-    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
-        transform_polarization_basis,
-    )
-    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
-        _convert_primary_beam_to_reference_frequency,
-    )
-
-    fit_inputs = xr.Dataset(
-        coords={
-            "time": img_xds.time,
-            "frequency": summary.frequency,
-            "polarization": summary.polarization,
-            "l": img_xds.l,
-            "m": img_xds.m,
-        },
-        attrs={"data_groups": {"residual": {}}},
-    )
-    fit_inputs = _convert_primary_beam_to_reference_frequency(
-        fit_inputs,
-        image_params=image_params,
-        reference_frequency=float(image_params["reference_frequency"]),
-        n_taylor_terms=int(image_params["n_taylor_terms"]),
-        float_dtype=img_xds.PRIMARY_BEAM.dtype,
-        channel_imaging_weight_sums=summary.MFS_CHANNEL_IMAGING_WEIGHT_SUM,
-        channel_lookup_frequency_max=summary.MFS_BEAM_LOOKUP_FREQUENCY_MAX.values,
-    )
-    fitted = fit_mfs_primary_beam_taylor(
-        fit_inputs, primary_beam_limit=primary_beam_limit
-    )
-    beam_image = xr.Dataset(
-        {
-            "PRIMARY_BEAM_TAYLOR": fitted,
-            "PRIMARY_BEAM": fit_inputs.PRIMARY_BEAM_REFERENCE,
-        }
-    )
-    beam_image = transform_polarization_basis(
-        beam_image, new_polarization_basis="stokes", overwrite=True
-    )
-    if not np.array_equal(beam_image.polarization, img_xds.polarization):
-        raise ValueError(
-            "The deferred MFS beam fit does not match the restored polarizations."
-        )
-    return beam_image.PRIMARY_BEAM_TAYLOR.transpose(
-        "time", "taylor_term", "polarization", "l", "m"
-    )
-
-
 def fit_mvc_primary_beam_taylor(contributions):
     """Fit the frequency-dependent MVC primary beam in the Taylor basis.
 
@@ -2619,9 +2561,9 @@ def residual_update_continuum_single_field(
 
     make_primary_beam_taylor : bool, optional
         Collect the first-cycle inputs needed for primary-beam Taylor products.
-        Distributed MFS retains compact channel/correlation weight sums and fits
-        the beam only at final restoration. MVC keeps its final diagnostic
-        outside the iterative image and static cache.
+        Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,
+        fit the globally reduced beam in the first append node, and keep the
+        fitted diagnostic outside the iterative image and static cache.
 
     model_uv_xds : xarray.Dataset, optional
         Globally prepared Fourier-domain Taylor model used for degridding during

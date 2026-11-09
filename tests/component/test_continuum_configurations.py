@@ -484,7 +484,13 @@ def test_restoration_state_enters_only_the_final_graph(
             assert cache.MVC_RESIDUAL_BEAM_SUPPORTED.dtype == np.bool_
             assert "MVC_RESIDUAL_BEAM_CHANNEL_COUNT" not in cache
         if first and continuum_mode == "mfs" and restore:
-            assert set(result["restoration_xds"].sizes) == {"frequency", "polarization"}
+            assert set(result["restoration_xds"].sizes) == {
+                "time",
+                "taylor_term",
+                "polarization",
+                "l",
+                "m",
+            }
         cycles.append(first)
         return result, timing
 

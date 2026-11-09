@@ -1249,9 +1249,9 @@ def residual_update_continuum_single_field(
 
     make_primary_beam_taylor : bool, optional
         Collect the first-cycle inputs needed for primary-beam Taylor products.
-        Distributed MFS retains compact channel/correlation weight sums and fits
-        the beam only at final restoration. MVC keeps its final diagnostic
-        outside the iterative image and static cache.
+        Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,
+        fit the globally reduced beam in the first append node, and keep the
+        fitted diagnostic outside the iterative image and static cache.
 
     model_uv_xds : xarray.Dataset, optional
         Precomputed Taylor-domain model visibility grids used for degridding.
@@ -1631,15 +1631,6 @@ def residual_update_continuum_single_field(
         input_checked=True,
     )
 
-    mfs_primary_beam_weights = None
-    if continuum_mode == "mfs" and is_first_cycle and make_primary_beam_taylor:
-        summary_names = [
-            "MFS_CHANNEL_IMAGING_WEIGHT_SUM",
-            "MFS_BEAM_LOOKUP_FREQUENCY_MAX",
-        ]
-        mfs_primary_beam_weights = img_xds[summary_names].copy(deep=False)
-        img_xds = img_xds.drop_vars(summary_names)
-
     auto_weight_sums = None
     if is_first_cycle and calculate_auto_sensitivity:
         from astroviper.processing_functions.imaging.weight_statistics import (
@@ -1796,9 +1787,6 @@ def residual_update_continuum_single_field(
         "image": img_xds,
         "timing_node_tasks": timing_df,
     }
-
-    if mfs_primary_beam_weights is not None:
-        return_dict["mfs_primary_beam_weights"] = mfs_primary_beam_weights
 
     if auto_weight_sums is not None:
         return_dict["auto_weight_sums"] = auto_weight_sums
@@ -3469,15 +3457,28 @@ def continuum_cycle_append_node(
         fallback=input_params.get("pb_cache_mapping"),
     )
 
-    restoration_xds = input_data.pop("mfs_primary_beam_weights", None)
-    if is_first_cycle and input_params.get("continuum_mode", "mfs") == "mvc":
-        from astroviper.processing_functions.imaging.image_continuum_single_field import (
-            fit_mvc_primary_beam_taylor,
-        )
+    restoration_xds = None
+    if is_first_cycle:
+        continuum_mode = input_params.get("continuum_mode", "mfs")
+        if continuum_mode == "mfs" and input_params.get(
+            "make_primary_beam_taylor", False
+        ):
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                fit_mfs_primary_beam_taylor,
+            )
 
-        # This diagnostic is written only at finalization; never install it in
-        # the iterative image/static cache or send it into later cycle graphs.
-        restoration_xds = fit_mvc_primary_beam_taylor(input_data["image"]).to_dataset()
+            restoration_xds = fit_mfs_primary_beam_taylor(
+                input_data["image"],
+                primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
+            ).to_dataset()
+        elif continuum_mode == "mvc":
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                fit_mvc_primary_beam_taylor,
+            )
+
+            restoration_xds = fit_mvc_primary_beam_taylor(
+                input_data["image"]
+            ).to_dataset()
 
     (
         img_xds,
@@ -3769,23 +3770,12 @@ def continuum_finalize_node(
         from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
             transform_polarization_basis,
         )
-        from astroviper.processing_functions.imaging.image_continuum_single_field import (
-            _fit_mfs_primary_beam_for_restoration,
-        )
 
-        if "MFS_CHANNEL_IMAGING_WEIGHT_SUM" in restoration_xds:
-            primary_beam_taylor = _fit_mfs_primary_beam_for_restoration(
-                img_xds,
-                restoration_xds,
-                input_params["image_params"],
-                input_params.get("primary_beam_limit", 0.2),
-            )
-        else:
-            beam_image = restoration_xds.assign(PRIMARY_BEAM=static_xds.PRIMARY_BEAM)
-            beam_image = transform_polarization_basis(
-                beam_image, new_polarization_basis="stokes", overwrite=True
-            )
-            primary_beam_taylor = beam_image.PRIMARY_BEAM_TAYLOR
+        beam_image = restoration_xds.assign(PRIMARY_BEAM=static_xds.PRIMARY_BEAM)
+        beam_image = transform_polarization_basis(
+            beam_image, new_polarization_basis="stokes", overwrite=True
+        )
+        primary_beam_taylor = beam_image.PRIMARY_BEAM_TAYLOR
         img_xds["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
         residual_group_name = input_params.get("image_data_group_in_name", "residual")
         residual_group = dict(img_xds.attrs["data_groups"][residual_group_name])

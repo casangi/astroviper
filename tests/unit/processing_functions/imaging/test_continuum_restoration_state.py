@@ -7,13 +7,11 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
-    _fit_mfs_primary_beam_for_restoration,
     finalize_mvc_taylor_normal_equations,
     fit_mfs_primary_beam_taylor,
     make_mvc_taylor_normal_equation_contributions,
 )
 from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
-    _combine_mfs_primary_beam_weight_summaries,
     _convert_primary_beam_to_reference_frequency,
 )
 from tests.unit.processing_functions.imaging.test_continuum_contracts import _mvc_inputs
@@ -22,11 +20,9 @@ from tests.unit.processing_functions.imaging.test_continuum_contracts import _mv
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("beam_model", ["airy", "casa_airy"])
 @pytest.mark.parametrize("nterms", [2, 3, 4])
-def test_deferred_mfs_fit_matches_original_partition_local_projection(
-    dtype, beam_model, nterms
-):
-    # The chunks have different upper frequencies. Preserve their original
-    # lookup bounds, weights, and correlation order when fitting at the end.
+def test_reduced_mfs_fit_matches_partition_local_projection(dtype, beam_model, nterms):
+    # Each map task streams its local channels before the additive products are
+    # globally reduced and fitted in the first append node.
     frequency = np.asarray([0.8, 0.95, 1.1, 1.2, 1.3, 1.5, 1.7]) * 1e9
     params = {
         "image_size": [11, 9],
@@ -36,9 +32,12 @@ def test_deferred_mfs_fit_matches_original_partition_local_projection(
         "primary_beam_model": beam_model,
     }
     values = np.random.default_rng(42).uniform(0.2, 5, (len(frequency), 2))
-    images, summaries = [], []
-    for indices in ([0, 2, 4], [1, 3, 5, 6]):
+    partitions = ([0, 2, 4], [1, 3, 5, 6])
+    images = []
+    lookup_frequency_max = np.empty_like(frequency)
+    for indices in partitions:
         local_frequency = frequency[indices]
+        lookup_frequency_max[indices] = local_frequency.max()
         image = xr.Dataset(
             coords={
                 "time": [0, 1],
@@ -55,11 +54,6 @@ def test_deferred_mfs_fit_matches_original_partition_local_projection(
             coords={"frequency": local_frequency, "polarization": ["XX", "YY"]},
             name="MFS_CHANNEL_IMAGING_WEIGHT_SUM",
         )
-        summary = weights.to_dataset()
-        summary["MFS_BEAM_LOOKUP_FREQUENCY_MAX"] = weights.frequency.copy(
-            data=np.full(len(indices), local_frequency.max())
-        )
-        summaries.append(summary)
         images.append(
             _convert_primary_beam_to_reference_frequency(
                 image,
@@ -70,20 +64,36 @@ def test_deferred_mfs_fit_matches_original_partition_local_projection(
                 channel_imaging_weight_sums=weights,
             )
         )
+    global_image = xr.Dataset(
+        coords={
+            "time": [0, 1],
+            "frequency": frequency,
+            "polarization": ["XX", "YY"],
+            "l": np.arange(11),
+            "m": np.arange(9),
+        },
+        attrs={"data_groups": {"residual": {}}},
+    )
+    global_weights = xr.DataArray(
+        values,
+        dims=("frequency", "polarization"),
+        coords={"frequency": frequency, "polarization": ["XX", "YY"]},
+    )
+    previous_deferred_projection = _convert_primary_beam_to_reference_frequency(
+        global_image,
+        image_params=params,
+        reference_frequency=1e9,
+        n_taylor_terms=nterms,
+        float_dtype=dtype,
+        channel_imaging_weight_sums=global_weights,
+        channel_lookup_frequency_max=lookup_frequency_max,
+    )
     names = ["MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR", "MFS_PRIMARY_BEAM_FIT_MOMENTS"]
-    expected = fit_mfs_primary_beam_taylor(images[0][names] + images[1][names])
-    expected = expected.assign_coords(polarization=["I", "Q"])
-    image = xr.Dataset(
-        {
-            "PRIMARY_BEAM": images[0].PRIMARY_BEAM_REFERENCE.assign_coords(
-                polarization=["I", "Q"]
-            )
-        }
+    expected = fit_mfs_primary_beam_taylor(previous_deferred_projection[names])
+    actual = fit_mfs_primary_beam_taylor(
+        images[1][names] + images[0][names], primary_beam_limit=0.2
     )
-    actual = _fit_mfs_primary_beam_for_restoration(
-        image, _combine_mfs_primary_beam_weight_summaries(summaries), params, 0.2
-    )
-    np.testing.assert_allclose(actual, expected, rtol=2e-11, atol=1e-12, equal_nan=True)
+    xr.testing.assert_allclose(actual, expected, rtol=2e-11, atol=1e-12)
 
 
 def _global_mvc_contributions():
@@ -134,36 +144,6 @@ def test_cached_support_rejects_incompatible_mask(invalid):
     compact["MVC_RESIDUAL_BEAM_SUPPORTED"] = support
     with pytest.raises(error, match=message):
         finalize_mvc_taylor_normal_equations(compact)
-
-
-def test_beam_weight_summary_tree_reduction_preserves_ownership_and_lookup_bounds():
-    chunks = []
-    for frequencies in ([1.0, 1.4], [1.1, 1.5], [1.2, 1.6]):
-        chunks.append(
-            xr.Dataset(
-                {
-                    "MFS_CHANNEL_IMAGING_WEIGHT_SUM": (
-                        ("frequency", "polarization"),
-                        np.ones((2, 2)),
-                    ),
-                    "MFS_BEAM_LOOKUP_FREQUENCY_MAX": (
-                        "frequency",
-                        [max(frequencies)] * 2,
-                    ),
-                },
-                coords={"frequency": frequencies, "polarization": ["XX", "YY"]},
-            )
-        )
-    flat = _combine_mfs_primary_beam_weight_summaries(chunks)
-    tree = _combine_mfs_primary_beam_weight_summaries(
-        [_combine_mfs_primary_beam_weight_summaries(chunks[:2]), chunks[2]]
-    )
-    xr.testing.assert_identical(tree, flat)
-    np.testing.assert_array_equal(
-        tree.MFS_BEAM_LOOKUP_FREQUENCY_MAX, [1.4, 1.5, 1.6, 1.4, 1.5, 1.6]
-    )
-    with pytest.raises(ValueError, match="duplicate frequency ownership"):
-        _combine_mfs_primary_beam_weight_summaries([chunks[0], chunks[0]])
 
 
 def test_global_append_converts_counts_only_after_reduction(monkeypatch):

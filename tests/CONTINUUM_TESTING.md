@@ -246,11 +246,11 @@ not deployment-cluster performance guarantees.
 
 ## Final-only continuum state
 
-First-cycle MFS map tasks retain only channel/correlation imaging-weight sums
-and their original Airy interpolation bounds. The reducer concatenates these
-small summaries; finalization computes the streamed beam projection and Taylor
-fit once. Visibility data and channel beams are not read again. MVC's beam
-polynomial remains a final diagnostic and stays outside the iterative cache.
+First-cycle MFS map tasks stream their frequency channels into additive Taylor
+numerators and spectral moments. The reducer sums these products, and the first
+append node fits the beam polynomial, parallel to MVC. The fitted polynomial is
+held as restoration-only state and stays outside later iterative graphs and the
+static cache.
 
 The driver holds restoration-only state outside the imaging-cycle graphs.
 `static_xds` returns from the first append only. A separate finalization graph
@@ -262,5 +262,5 @@ MVC channel counts stay integer and additive through all reduce levels. The
 global append then stores `MVC_RESIDUAL_BEAM_SUPPORTED = count >= n_taylor_terms`
 as a Boolean array. Later cycles retain the exact same support, scalar fallback,
 and primary-beam exclusions while using one byte per pixel instead of eight.
-Dense/deferred beam-fit comparisons cover 2–4 Taylor terms, both Airy models,
+Dense/streamed beam-fit comparisons cover 2–4 Taylor terms, both Airy models,
 both precisions, multiple times/polarizations, and different frequency partitions.

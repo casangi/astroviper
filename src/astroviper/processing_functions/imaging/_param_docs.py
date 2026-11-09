@@ -160,9 +160,9 @@ _FIELD_NAME_DOC = (
 IMAGING_PARAM_DOCS = {
     "make_primary_beam_taylor": (
         "Collect the first-cycle inputs needed for primary-beam Taylor products.\n"
-        "Distributed MFS retains compact channel/correlation weight sums and fits\n"
-        "the beam only at final restoration. MVC keeps its final diagnostic\n"
-        "outside the iterative image and static cache."
+        "Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,\n"
+        "fit the globally reduced beam in the first append node, and keep the\n"
+        "fitted diagnostic outside the iterative image and static cache."
     ),
     "lookup_frequency_max": (
         "Upper frequency in Hz used to build the physical Airy interpolation\n"

@@ -1320,11 +1320,12 @@ def combine_continuum_chunks(input_data, input_params):
     None of those MVC products has a frequency dimension.
 
     MFS also carries ``PRIMARY_BEAM_REFERENCE`` with dimensions
-    ``(time, polarization, l, m)`` as a non-additive static product. First-cycle
-    results carry a separate compact ``mfs_primary_beam_weights`` dataset:
-    frequency/correlation weights and each task's Airy lookup bound. These are
-    concatenated by frequency for final restoration; no spatial MFS beam-fit
-    numerator or polynomial travels through the iterative graphs.
+    ``(time, polarization, l, m)`` as a non-additive static product. When
+    restoration is requested, first-cycle map tasks additionally form the
+    additive ``MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR`` and
+    ``MFS_PRIMARY_BEAM_FIT_MOMENTS``. The first append node fits their globally
+    reduced polynomial and keeps that final-only diagnostic outside subsequent
+    iterative graphs.
 
     All remaining dataset variables (for example metadata, coordinates, primary
     beam products, and other non-additive quantities) are copied from the first
@@ -1829,22 +1830,6 @@ def combine_continuum_chunks(input_data, input_params):
         "timing_node_tasks": combined_timing,
         "deconvolution": combined_deconvolution,
     }
-
-    beam_weight_summaries = [
-        result.get("mfs_primary_beam_weights") for result in input_data
-    ]
-    if any(summary is not None for summary in beam_weight_summaries):
-        if any(summary is None for summary in beam_weight_summaries):
-            raise ValueError(
-                "Every first-cycle MFS result must carry its beam-weight summary."
-            )
-        from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
-            _combine_mfs_primary_beam_weight_summaries,
-        )
-
-        return_dict["mfs_primary_beam_weights"] = (
-            _combine_mfs_primary_beam_weight_summaries(beam_weight_summaries)
-        )
 
     auto_weight_summaries = [result.get("auto_weight_sums") for result in input_data]
     if any(summary is not None for summary in auto_weight_summaries):
@@ -4037,6 +4022,14 @@ def image_continuum_single_field(
                         ("POINT_SPREAD_FUNCTION", "UV_SAMPLING_NORMALIZATION")
                         if is_first_cycle
                         else ()
+                    )
+                    + (
+                        (
+                            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                            "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+                        )
+                        if is_first_cycle and restore
+                        else ()
                     ),
                 }
             elif continuum_mode == "mfs":
@@ -4048,6 +4041,14 @@ def image_continuum_single_field(
                             "VISIBILITY_NORMALIZATION",
                             "UV_SAMPLING",
                             "UV_SAMPLING_NORMALIZATION",
+                        )
+                        + (
+                            (
+                                "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                                "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+                            )
+                            if restore
+                            else ()
                         ),
                     }
                 else:
