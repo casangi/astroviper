@@ -10,6 +10,7 @@ def map_visibility_frequencies_to_image(
     matching="nearest",
     rtol=1e-12,
     atol=0.0,
+    input_checked=False,
 ):
     """Map each visibility channel onto its nearest image-frequency channel.
 
@@ -44,6 +45,10 @@ def map_visibility_frequencies_to_image(
         Relative and absolute tolerances for exact matching with ``np.isclose``.
         Ignored for nearest matching. Defaults are 1e-12 and 0 Hz.
 
+    input_checked : bool, optional
+        Skip policy validation already performed by the calling layer.
+        Actual coordinate checks remain active.
+
     Returns
     -------
     numpy.ndarray
@@ -57,8 +62,12 @@ def map_visibility_frequencies_to_image(
         every image channel centre, or exact matching is missing, ambiguous,
         or not one-to-one. Also raised for an unknown matching policy.
     """
-    if matching not in ("nearest", "exact"):
-        raise ValueError("matching must be 'nearest' or 'exact'.")
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_frequency_matching,
+        )
+
+        check_frequency_matching(matching)
 
     visibility_frequencies = np.asarray(visibility_frequencies, dtype=np.float64)
     image_frequencies = np.asarray(image_frequencies, dtype=np.float64)

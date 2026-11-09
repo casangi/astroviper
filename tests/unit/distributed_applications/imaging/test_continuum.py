@@ -379,12 +379,32 @@ def _mfs_map_result(task_id, value=1.0):
     image.attrs["continuum_imaging"] = {
         "continuum_mode": "mfs",
         "n_taylor_terms": 2,
-        "reference_frequency_hz": 1.0e9,
+        "reference_frequency": 1.0e9,
     }
     return {
         "image": image,
         "timing_node_tasks": pd.DataFrame({"task_id": [task_id]}),
     }
+
+
+def test_automatic_sensitivity_reduction_is_associative_and_requires_every_partition():
+    leaves = [_mfs_map_result(index) for index in range(3)]
+    for index, leaf in enumerate(leaves):
+        leaf["auto_weight_sums"] = xr.Dataset(
+            {"sum_weight_imaging": ("correlation", [1.0 + index, 2.0 + index])},
+            coords={"correlation": ["XX", "YY"]},
+        )
+    params = {"continuum_mode": "mfs", "additive_variables": ()}
+    flat = combine_continuum_chunks(leaves, params)
+    partial = combine_continuum_chunks(leaves[:2], params)
+    tree = combine_continuum_chunks([partial, leaves[2]], params)
+    xr.testing.assert_identical(flat["auto_weight_sums"], tree["auto_weight_sums"])
+    np.testing.assert_array_equal(
+        flat["auto_weight_sums"].sum_weight_imaging, [6.0, 9.0]
+    )
+    leaves[2].pop("auto_weight_sums")
+    with pytest.raises(ValueError, match="weight sums are missing"):
+        combine_continuum_chunks(leaves, params)
 
 
 def test_mfs_reducer_retains_one_identical_static_primary_beam():
@@ -742,7 +762,7 @@ def _run_tw_hydra_continuum(
     continuum_mode,
     weighting,
     *,
-    deconvolver="hogbom",
+    deconvolver="mtmfs",
     mvc_model_update_approximation="local_beam_moments",
     cycle_control_params=None,
     image_param_overrides=None,
@@ -841,6 +861,50 @@ def _run_tw_hydra_continuum(
     return result, xr.open_zarr(output_store)
 
 
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_beam_metadata_rejection_precedes_weight_scan_and_output(
+    tmp_path, tw_hydra_store, monkeypatch, continuum_mode, existing_output
+):
+    """An unsupported inferred aperture must fail before expensive preflight."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    unsupported_antenna = xr.Dataset(
+        {"ANTENNA_DISH_DIAMETER": ("antenna_name", [15.0])},
+        attrs={"overall_telescope_name": "ALMA"},
+    )
+    monkeypatch.setattr(
+        type(processing_set.xr_ps),
+        "get_combined_antenna_xds",
+        lambda self: unsupported_antenna,
+    )
+
+    def unexpected_weight_scan(*args, **kwargs):
+        raise AssertionError("Weight preflight ran before the beam metadata check")
+
+    monkeypatch.setattr(
+        "astroviper.node_tasks.imaging.config_check.preflight_imaging_inputs",
+        unexpected_weight_scan,
+    )
+    output = tmp_path / "unsupported_beam.img.zarr"
+    if existing_output:
+        output.mkdir()
+        (output / "marker").write_text("keep existing output")
+    with pytest.raises(ValueError, match="12-m or 7-m"):
+        _run_tw_hydra_continuum(
+            tw_hydra_store,
+            output,
+            processing_set,
+            1,
+            continuum_mode,
+            {"weighting": "natural"},
+        )
+    if existing_output:
+        assert list(output.iterdir()) == [output / "marker"]
+        assert (output / "marker").read_text() == "keep existing output"
+    else:
+        assert not output.exists()
+
+
 def test_tw_hydra_mvc_local_beam_moments_are_frequency_partition_invariant(
     tmp_path,
     tw_hydra_store,
@@ -856,6 +920,7 @@ def test_tw_hydra_mvc_local_beam_moments_are_frequency_partition_invariant(
             n_chunks,
             "mvc",
             {"weighting": "natural", "weighting_scope": "local"},
+            deconvolver="mtmfs",
             mvc_model_update_approximation="local_beam_moments",
             cycle_control_params={
                 "max_iter": 2,
@@ -1200,7 +1265,7 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
     ("deconvolver", "error", "message"),
     [
         ("hogbom_many_threads", AssertionError, None),
-        ("asp", ValueError, "deconvolver='asp' cleans Taylor term zero"),
+        ("asp", ValueError, "Continuum asp requires n_taylor_terms=1"),
     ],
 )
 def test_tw_hydra_refused_deconvolvers_write_nothing(
@@ -1239,7 +1304,7 @@ def test_tw_hydra_refused_deconvolvers_write_nothing(
                 "weighting_scope": "global",
             },
             {"weight_memory_mode": "in_place"},
-            "Global weighting scope",
+            "briggs_abs requires weighting_scope='local'",
             id="briggs_abs-global",
         ),
         pytest.param(
@@ -1287,7 +1352,7 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
         pytest.param(
             lambda params: params.update(reference_frequency=0.0),
             ValueError,
-            "finite and positive",
+            "strictly positive",
             id="zero-reference-frequency",
         ),
         pytest.param(
@@ -1298,8 +1363,8 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
         ),
         pytest.param(
             lambda params: params.update(n_taylor_terms=0),
-            AssertionError,
-            None,
+            ValueError,
+            "n_taylor_terms must be positive",
             id="zero-n_taylor_terms",
         ),
         pytest.param(
@@ -2412,6 +2477,48 @@ def test_wideband_natural_and_absolute_briggs_weights_default_to_the_local_densi
     xr.testing.assert_equal(images["default"], images["local"])
 
 
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("weight_memory_mode", ["in_memory", "in_place"])
+@pytest.mark.parametrize("restore", [False, True])
+def test_natural_weighting_scopes_are_equivalent_without_global_density_graphs(
+    tmp_path, wideband_store, monkeypatch, continuum_mode, weight_memory_mode, restore
+):
+    from importlib import import_module
+
+    driver = import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+
+    def forbidden_global_density(*args, **kwargs):
+        raise AssertionError("Natural weighting must not prepare global weight density")
+
+    monkeypatch.setattr(
+        driver, "prepare_continuum_imaging_weights_global", forbidden_global_density
+    )
+    processing_set = open_processing_set(str(wideband_store))
+    images = {}
+    for scope in ("default", "local", "global"):
+        params = {"weighting": "natural"}
+        if scope != "default":
+            params["weighting_scope"] = scope
+        original = dict(params)
+        _, image = _run_tw_hydra_continuum(
+            wideband_store,
+            tmp_path / f"natural_{scope}.img.zarr",
+            processing_set,
+            2,
+            continuum_mode,
+            params,
+            restore=restore,
+            weight_memory_mode=weight_memory_mode,
+        )
+        images[scope] = image.load()
+        image.close()
+        assert params == original
+    xr.testing.assert_equal(images["default"], images["local"])
+    xr.testing.assert_equal(images["global"], images["local"])
+
+
 def test_tw_hydra_direct_max_iter_zero_dirty_image(tmp_path, tw_hydra_store):
     """The public continuum application accepts a genuine zero-iteration run."""
     processing_set = open_processing_set(str(tw_hydra_store))
@@ -2452,6 +2559,7 @@ def test_tw_hydra_supports_alternate_taylor_orders(
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
         image_param_overrides={"n_taylor_terms": n_taylor_terms},
+        deconvolver="hogbom" if n_taylor_terms == 1 else "mtmfs",
     )
 
     assert image.SKY_RESIDUAL.sizes["taylor_term"] == n_taylor_terms
@@ -2542,7 +2650,7 @@ def test_continuum_rejects_output_layout_options_until_final_node_writes(
     """Continuum fails fast instead of discarding a requested output layout."""
     output = tmp_path / "unsupported_layout.img.zarr"
     processing_set = open_processing_set(str(tw_hydra_store))
-    with pytest.raises(NotImplementedError, match="not supported"):
+    with pytest.raises(ValueError, match="not implemented"):
         _run_tw_hydra_continuum(
             tw_hydra_store,
             output,
@@ -2735,6 +2843,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         2,
         continuum_mode,
         {"weighting": "natural", "weighting_scope": "local"},
+        deconvolver="hogbom",
         visibility_memory_mode=visibility_memory_mode,
         restore=True,
         image_param_overrides={"polarization_coords": ["I", "Q"], "n_taylor_terms": 1},

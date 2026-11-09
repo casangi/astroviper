@@ -396,14 +396,26 @@ def test_primary_beam_params_numbers_equal_to_a_telescope_give_its_beam():
     "primary_beam_params, match",
     [
         ({"telescope": "gbt"}, "telescope"),
-        ({"dish_diameter": 12.0}, "unknown primary_beam_params"),
-        ({"effective_dish_diameter": 0.0}, "effective_dish_diameter > 0"),
-        ({"blockage_diameter": 11.0}, "blockage_diameter"),
-        ({"max_rad_1GHz": 0.0}, "max_rad_1GHz > 0"),
-        ({"telescope": "vla", "effective_dish_diameter": 25.0}, "do not apply"),
-        ({"telescope": "VLA", "blockage_diameter": 1.0}, "do not apply"),
-        ({"telescope": "vla", "max_rad_1GHz": 0.0}, "max_rad_1GHz > 0"),
-        ({"telescope": "vla", "max_rad_1GHz": None}, "max_rad_1GHz > 0"),
+        ({"dish_diameter": 12.0}, "Unknown primary_beam_params"),
+        ({"effective_dish_diameter": 0.0}, "dish diameter must be strictly positive"),
+        ({"blockage_diameter": 11.0}, "matching diameters"),
+        ({"max_rad_1GHz": 0.0}, "max_rad_1GHz must be strictly positive"),
+        (
+            {"telescope": "vla", "effective_dish_diameter": 25.0},
+            "do not accept dish/blockage overrides",
+        ),
+        (
+            {"telescope": "VLA", "blockage_diameter": 1.0},
+            "do not accept dish/blockage overrides",
+        ),
+        (
+            {"telescope": "vla", "max_rad_1GHz": 0.0},
+            "max_rad_1GHz must be strictly positive",
+        ),
+        (
+            {"telescope": "vla", "max_rad_1GHz": None},
+            "max_rad_1GHz must be strictly positive",
+        ),
     ],
 )
 def test_primary_beam_params_refused(primary_beam_params, match):
@@ -509,42 +521,50 @@ def _jones_image_model():
         (
             lambda: {"beam_model": airy_disk_model("alma"), "telescope": "alma"},
             ValueError,
-            "do not apply with beam_model",
+            "cannot be combined",
         ),
         (
             lambda: {"beam_model": _beam_model("EVLA_"), "max_rad_1GHz": 0.02},
             ValueError,
-            "do not apply with beam_model",
+            "cannot be combined",
         ),
-        (lambda: {"beam_model": _zernike_model()}, ValueError, "not supported"),
-        (lambda: {"beam_model": _jones_image_model()}, ValueError, "not supported"),
+        (
+            lambda: {"beam_model": _zernike_model()},
+            ValueError,
+            "analytic mapping or beam-polynomial dataset",
+        ),
+        (
+            lambda: {"beam_model": _jones_image_model()},
+            ValueError,
+            "analytic mapping or beam-polynomial dataset",
+        ),
         (lambda: {"beam_model": "alma"}, TypeError, "Unsupported beam model"),
         (
             lambda: {"beam_model": {**airy_disk_model("alma"), "dish_diameter": 0.0}},
             ValueError,
-            "dish_diameter > 0",
+            "dish diameter must be strictly positive",
         ),
         (
             lambda: {
                 "beam_model": {**airy_disk_model("alma"), "blockage_diameter": 12.0}
             },
             ValueError,
-            "blockage_diameter < dish_diameter",
+            "matching diameters",
         ),
         (
             lambda: {"beam_model": {**airy_disk_model("alma"), "func": "gaussian"}},
             ValueError,
-            "func 'casa_airy', 'airy' or 'none'",
+            "func must be 'airy', 'casa_airy', or 'none'",
         ),
         (
             lambda: {"beam_model": {**airy_disk_model("alma"), "max_rad_1GHz": 0.0}},
             ValueError,
-            "max_rad_1GHz > 0",
+            "max_rad_1GHz must be strictly positive",
         ),
         (
             lambda: {"beam_model": _beam_model("EVLA_").assign_attrs(max_rad_1GHz=0.0)},
             ValueError,
-            "max_rad_1GHz > 0",
+            "max_rad_1GHz must be strictly positive",
         ),
     ],
 )
@@ -555,7 +575,7 @@ def test_primary_beam_params_beam_model_refused(primary_beam_params, error, matc
 
 def test_primary_beam_of_a_zernike_model_refused():
     img_xds, image_params = _make_empty_residual_image()
-    with pytest.raises(ValueError, match="not supported"):
+    with pytest.raises(ValueError, match="analytic mapping or beam-polynomial dataset"):
         make_primary_beam_single_field(
             img_xds, image_params, beam_model=_zernike_model()
         )

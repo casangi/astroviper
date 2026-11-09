@@ -110,7 +110,8 @@ def test_streamed_beam_moments_match_dense_channel_sum(
     result = _convert_primary_beam_to_reference_frequency(
         image,
         image_params=params,
-        reference_frequency_hz=reference,
+        reference_frequency=reference,
+        n_taylor_terms=nterms,
         float_dtype=dtype,
         channel_imaging_weight_sums=weights,
     )

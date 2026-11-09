@@ -935,8 +935,25 @@ private:
         aspfft::irfft2_half(prod.data(), nx_, ny_, out.data(), fftThreads_.get());
     }
 
-    // setInitScaleMasks: per-scale masks = (mask (*) scale) thresholded, with a
-    // scale-dependent border zeroed. An absent mask is treated as all ones.
+    // Share of the flux of the Gaussian at (ci, cj) on the mask.
+    double maskCoverage(int ci, int cj, double sigma) const {
+        const std::vector<double> rx = gaussian_profile(nx_, ci, sigma, 0, nx_ - 1);
+        const std::vector<double> ry = gaussian_profile(ny_, cj, sigma, 0, ny_ - 1);
+        double onMask = 0.0;
+        for (int j = blc1_; j <= trc1_; ++j) {
+            double row = 0.0;
+            for (int i = blc0_; i <= trc0_; ++i)
+                row += maskMat_(i, j) * rx[static_cast<std::size_t>(i)];
+            onMask += ry[static_cast<std::size_t>(j)] * row;
+        }
+        return onMask / (std::accumulate(rx.begin(), rx.end(), 0.0) *
+                         std::accumulate(ry.begin(), ry.end(), 0.0));
+    }
+
+    // setInitScaleMasks: per-scale masks = the mask pixels where a Gaussian of
+    // that scale keeps asp_min_mask_coverage of its flux on the mask ((mask (*)
+    // scale) over the sum of the scale), with a scale-dependent border zeroed.
+    // An absent mask is treated as all ones.
     void setInitScaleMasks() {
         maskMat_ = Mat(nx_, ny_);
         double maxMask = -1e30;
@@ -961,10 +978,14 @@ private:
                 conv = maskMat_.d;  // mask (*) delta
             else
                 convolveInitScale(maskFT, s, conv);
+            const double scaleSum =
+                s == 0 ? 1.0 : initScaleXfrX_[s][0].real() * initScaleXfrY_[s][0].real();
+            const double least = s == 0 ? maskThreshold_ : options_.asp_min_mask_coverage;
             for (int j = 0; j < ny_; ++j)
                 for (int i = 0; i < nx_; ++i) {
                     double v = conv[static_cast<std::size_t>(j) * nx_ + i];
-                    if (maskThreshold_ > 0) v = (v > maskThreshold_) ? 1.0 : 0.0;
+                    if (maskThreshold_ > 0)
+                        v = (v / scaleSum > least && maskMat_(i, j) > maskThreshold_) ? 1.0 : 0.0;
                     initScaleMasks_[s](i, j) = v;
                 }
         }
@@ -1160,12 +1181,32 @@ private:
         timing_.n_fit_evaluations += fitReport.evaluations;
 
         double amp = x[0] * rescale;
-        double scale = x[1];
-        if (std::fabs(scale) < 0.4) {
+        double scale = std::fabs(x[1]);
+        // The fit can widen a Gaussian past the scale the search tested: cut
+        // it back; the amplitude that fits is where the gradient, linear in
+        // the amplitude, vanishes.
+        const double least = options_.asp_min_mask_coverage;
+        if (maskCoverage(posI, posJ, scale) < least) {
+            const double tested = initScaleSizes_[optimumScale];
+            double lo = tested < scale && maskCoverage(posI, posJ, tested) >= least ? tested : 0.0;
+            double hi = scale;
+            for (int step = 0; step < 12; ++step) {
+                const double mid = 0.5 * (lo + hi);
+                if (maskCoverage(posI, posJ, mid) < least)
+                    hi = mid;
+                else
+                    lo = mid;
+            }
+            scale = lo;
+            std::vector<double> gradAt0(2), gradAt1(2);
+            obj({0.0, scale}, gradAt0);
+            obj({1.0, scale}, gradAt1);
+            amp = gradAt0[0] / (gradAt0[0] - gradAt1[0]) * rescale;
+            timing_.t_fit += lap(clock);
+        }
+        if (scale < 0.4) {
             scale = 0.0;
             amp = dirtyAt(posOptI_, posOptJ_);  // avoid divergence from huge amp
-        } else {
-            scale = std::fabs(scale);
         }
 
         goodAspAmplitude_.push_back(amp);
@@ -1585,7 +1626,7 @@ double psf_gaussian_width(const double* psf, int nx, int ny) {
 namespace {
 
 void check_controls(double asp_psf_width, int asp_largest_scale, int asp_stop_point_mode,
-                    int asp_scale_normalization_method) {
+                    int asp_scale_normalization_method, double asp_min_mask_coverage) {
     if (asp_psf_width != -1.0 && !(std::isfinite(asp_psf_width) && asp_psf_width > 0.0))
         throw std::invalid_argument("asp_psf_width must be positive, or -1 to estimate it");
     if (asp_largest_scale < -1)
@@ -1595,6 +1636,8 @@ void check_controls(double asp_psf_width, int asp_largest_scale, int asp_stop_po
         throw std::invalid_argument("asp_stop_point_mode must be positive, or -1 to disable it");
     if (asp_scale_normalization_method != 1 && asp_scale_normalization_method != 2)
         throw std::invalid_argument("asp_scale_normalization_method must be 1 or 2");
+    if (!(asp_min_mask_coverage >= 0.0 && asp_min_mask_coverage < 1.0))
+        throw std::invalid_argument("asp_min_mask_coverage must be at least 0 and below 1");
 }
 
 template <typename T>
@@ -1640,7 +1683,7 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          const deconvolvers::DivergenceControl<double>& divergence,
                          int fft_threads, const AspOptions& options) {
     check_controls(asp_psf_width, asp_largest_scale, asp_stop_point_mode,
-                   asp_scale_normalization_method);
+                   asp_scale_normalization_method, options.asp_min_mask_coverage);
     return clean_plane<T>(residual, model, psf, mask, nx, ny, gain, threshold_per_cycle,
                           max_iter_per_cycle_updated, asp_fused_threshold, asp_psf_width,
                           asp_largest_scale, asp_stop_point_mode, asp_scale_normalization_method,
@@ -1659,7 +1702,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                    const deconvolvers::DivergenceControl<double>& divergence,
                    AspResult* results, const AspOptions& options) {
     check_controls(asp_psf_width, asp_largest_scale, asp_stop_point_mode,
-                   asp_scale_normalization_method);
+                   asp_scale_normalization_method, options.asp_min_mask_coverage);
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) return;
     const std::size_t plane = static_cast<std::size_t>(ny) * nx;

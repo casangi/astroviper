@@ -1034,7 +1034,7 @@ def image(work_dir, ps_store, image_params):
             n_mapping_parallelism={"frequency": N_TASKS},
             fft_backend="scipy",
             restore=True,
-            primary_beam_correction=True,
+            restoration_output="both",
             overwrite=True,
         )
     return image_store

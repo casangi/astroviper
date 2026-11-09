@@ -64,7 +64,8 @@ def test_deferred_mfs_fit_matches_original_partition_local_projection(
             _convert_primary_beam_to_reference_frequency(
                 image,
                 image_params=params,
-                reference_frequency_hz=1e9,
+                reference_frequency=1e9,
+                n_taylor_terms=nterms,
                 float_dtype=dtype,
                 channel_imaging_weight_sums=weights,
             )

@@ -265,20 +265,23 @@ def test_the_reduce_adds_the_taylor_images_of_the_map_tasks(
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
-        ({"continuum_mode": "mvc"}, "continuum_mode 'mvc' is not available"),
+        (
+            {"continuum_mode": "mvc"},
+            "DFT continuum imaging requires continuum_mode='mfs'",
+        ),
         (
             {"visibility_memory_mode": "in_memory"},
-            "visibility_memory_mode 'in_memory' is not available",
+            "DFT continuum imaging requires visibility_memory_mode='recompute'",
         ),
         (
             {"visibility_memory_mode": "in_place"},
-            "visibility_memory_mode 'in_place' is not available",
+            "DFT continuum imaging requires visibility_memory_mode='recompute'",
         ),
         ({"image_data_variables_keep": ["sky_residual", "visibility"]}, "uv grids"),
         ({"image_data_variables_keep": ["uv_sampling"]}, "uv grids"),
         (
             {"gridding_kernel_params": {"type": "dft", "support": 7}},
-            "do not apply to the type 'dft'",
+            "DFT accepts only gridding_kernel_params=",
         ),
     ],
     ids=["mvc", "in_memory", "in_place", "visibility", "uv_sampling", "support"],

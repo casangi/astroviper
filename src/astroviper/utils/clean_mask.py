@@ -65,8 +65,8 @@ def install_clean_mask(img_xds, clean_mask, image_data_group_name="residual"):
     KeyError
         If ``SKY_RESIDUAL`` or the data group is missing.
     ValueError
-        If ``SKY_RESIDUAL`` does not end in ``(l, m)`` or the mask has another
-        shape.
+        If ``SKY_RESIDUAL`` does not end in ``(l, m)``, the mask has another
+        shape, or the mask contains non-finite values.
     """
     if clean_mask is None:
         return
@@ -83,7 +83,12 @@ def install_clean_mask(img_xds, clean_mask, image_data_group_name="residual"):
     if residual.dims[-2:] != ("l", "m"):
         raise ValueError("SKY_RESIDUAL must end in the ('l', 'm') dimensions.")
 
-    mask_plane = np.asarray(clean_mask, dtype=bool)
+    # Validate before Boolean conversion: bool(NaN) would select the pixel
+    # and erase the invalid value before later product checks can see it.
+    mask_plane = np.asarray(clean_mask)
+    if not np.all(np.isfinite(mask_plane)):
+        raise ValueError("The clean mask contains non-finite values.")
+    mask_plane = np.asarray(mask_plane, dtype=bool)
     expected_shape = (residual.sizes["l"], residual.sizes["m"])
     if mask_plane.shape != expected_shape:
         raise ValueError(

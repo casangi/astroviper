@@ -172,20 +172,20 @@ KERNEL_GATES = {
 # The continuum imager's are the same.
 LIMITS = {
     ("coral", True): {
-        "flux error": 1e-3,  # 1.85e-4; 2.60e-5 to 1.91e-4
-        "peak flux error": 5e-4,  # 9.91e-5; 8.80e-6 to 1.92e-4
-        "max |F|": 1e-3,  # 5.17e-4; 5.22e-4 to 6.31e-4
-        "mean |F|": 1.6e-4,  # 1.24e-4; 1.17e-4 to 1.26e-4
-        "median |F|": 1.5e-4,  # 1.07e-4; 1.01e-4 to 1.10e-4
-        "rms F": 2e-4,  # 1.52e-4; 1.45e-4 to 1.56e-4
-        "residual rms in mask / sigma": 1.7,  # 1.55; 1.54 to 1.55
-        "residual MAD rms in mask / sigma": 2.0,  # 1.87; 1.81 to 1.88
-        "residual rms outside mask / sigma": 1.5,  # 1.33; 1.31 to 1.40
-        "residual MAD rms outside mask / sigma": 1.5,  # 1.33; 1.31 to 1.41
-        "residual |skew| in mask": 0.25,  # 0.0316; 0.0171 to 0.0768
-        "|model| outside mask / model flux": 8e-4,  # 5.56e-4; 4.63e-4 to 6.09e-4
-        "negative model flux / model flux": 0.01,  # 8.74e-3; 8.36e-3 to 8.67e-3
-        "iterations": 10000,  # 8024; 7978 to 8080
+        "flux error": 1e-3,  # 1.00e-4; 7.87e-6 to 2.48e-4
+        "peak flux error": 5e-4,  # 1.14e-4; 2.74e-5 to 2.10e-4
+        "max |F|": 1e-3,  # 4.53e-4; 5.03e-4 to 6.24e-4
+        "mean |F|": 1.6e-4,  # 1.16e-4; 1.10e-4 to 1.20e-4
+        "median |F|": 1.5e-4,  # 9.74e-5; 9.22e-5 to 1.03e-4
+        "rms F": 2e-4,  # 1.45e-4; 1.39e-4 to 1.49e-4
+        "residual rms in mask / sigma": 1.7,  # 1.54; 1.53 to 1.54
+        "residual MAD rms in mask / sigma": 2.0,  # 1.80; 1.79 to 1.83
+        "residual rms outside mask / sigma": 1.5,  # 1.31; 1.30 to 1.40
+        "residual MAD rms outside mask / sigma": 1.5,  # 1.32; 1.29 to 1.42
+        "residual |skew| in mask": 0.25,  # 0.153; 0.0709 to 0.145
+        "|model| outside mask / model flux": 1e-4,  # 6.60e-5; 6.45e-5 to 6.78e-5
+        "negative model flux / model flux": 0.01,  # 8.01e-3; 7.78e-3 to 7.98e-3
+        "iterations": 10000,  # 7958; 7848 to 7971
         "model updates": 11,  # 9; 8 to 9
     },
     ("coral", False): {
@@ -438,6 +438,7 @@ def run_image(
                 ["sky_restored_flat_noise"] if restore else []
             )
             result = image_continuum_single_field(
+                restoration_output="apparent",
                 image_params={
                     **image_params,
                     "n_taylor_terms": 1,

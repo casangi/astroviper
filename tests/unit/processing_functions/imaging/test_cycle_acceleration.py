@@ -1073,3 +1073,13 @@ def test_momentum_plain_step_planes_reset_only_their_plane():
     np.testing.assert_array_equal(step[:, :, 0], free[:, :, 0])
     np.testing.assert_array_equal(step[:, :, 1], increment[:, :, 1])
     np.testing.assert_array_equal(new_state.SKY_MODEL_MOMENTUM[:, :, 1], 0.0)
+
+
+@pytest.mark.parametrize("coefficient", [True, "0.5", float("nan"), -0.1, 1.0])
+def test_momentum_checks_configuration_before_accessing_arrays(coefficient):
+    from astroviper.processing_functions.imaging.cycle_acceleration import (
+        nesterov_momentum_model_step,
+    )
+
+    with pytest.raises(ValueError, match="momentum_coefficient"):
+        nesterov_momentum_model_step(None, None, momentum_coefficient=coefficient)

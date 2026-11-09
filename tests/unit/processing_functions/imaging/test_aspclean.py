@@ -409,6 +409,9 @@ class TestInPlaceContract:
             ("asp_stop_point_mode", -2),
             ("asp_scale_normalization_method", 0),
             ("asp_scale_normalization_method", 3),
+            ("asp_min_mask_coverage", -0.1),
+            ("asp_min_mask_coverage", 1.0),
+            ("asp_min_mask_coverage", np.nan),
         ],
     )
     def test_controls_take_only_their_documented_values(self, name, value, cube):
@@ -1178,8 +1181,8 @@ class TestRingCleaning:
         assert out["timing"]["n_residual_components"] > 10
         assert out["stop_code"] == 2  # the threshold
         assert out["peak_residual"] <= threshold
-        assert out["iterations_performed"] < 0.7 * asp["iterations_performed"]
-        np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.05)
+        assert out["iterations_performed"] < 0.8 * asp["iterations_performed"]
+        np.testing.assert_allclose(model.sum(), sky[mask > 0].sum(), rtol=0.05)
         # the residual update stays the exact linear convolution
         assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
             1e-9 * np.abs(dirty).max()
@@ -1294,7 +1297,7 @@ class TestRingCleaning:
         )
         assert (out["timing"]["n_residual_components"] == 0) is positive_only
         assert out["stop_code"] == 2  # the threshold
-        np.testing.assert_allclose(model.sum(), -sky.sum(), rtol=0.05)
+        np.testing.assert_allclose(model.sum(), -sky[mask > 0].sum(), rtol=0.05)
 
     def test_iteration_history(self):
         """One record per component of every kind, without changing the
@@ -1605,3 +1608,159 @@ class TestInitialScales:
         )
         assert out["timing"]["n_significance_components"] > 0
         assert model.sum() > 0.1 * sky.sum()
+
+
+def _mask_coverage(mask, i, j, sigma):
+    """Share of the flux of the Gaussian at pixel (i, j) on the mask."""
+    gaussian = _gauss(mask.shape[1], mask.shape[0], i, j, sigma)
+    return (gaussian * mask).sum() / gaussian.sum()
+
+
+class TestMaskCoverage:
+    """``asp_min_mask_coverage``: a Gaussian component is centred on the mask
+    and keeps this share of its flux on it, in the search and after the fit.
+    CASA tests ``mask (*) scale`` at 0.99 with scales that do not sum to 1,
+    which centres Gaussians outside the mask."""
+
+    @staticmethod
+    def _scene():
+        """Emission between two mask boxes, off the mask but inside its
+        bounding box, and a compact source in one box."""
+        n = 256
+        psf = _centered_psf(n, n, 2.0)
+        sky = _gauss(n, n, 125, 125, 15.0) + _gauss(n, n, 60, 60, 1.0, 0.5)
+        mask = np.zeros((n, n))
+        mask[40:80, 40:80] = 1.0
+        mask[170:210, 170:210] = 1.0
+        return psf, _linear_convolution(sky, psf), mask
+
+    @staticmethod
+    def _clean(psf, dirty, mask, max_iter=300, **kwargs):
+        resid = np.array(dirty, order="C")
+        model = np.zeros_like(resid)
+        out = aspclean.clean(
+            resid,
+            psf,
+            model,
+            mask=mask,
+            gain=0.3,
+            threshold_per_cycle=1e-3,
+            max_iter_per_cycle_updated=max_iter,
+            record_components=True,
+            **kwargs,
+        )
+        return out, resid, model
+
+    @staticmethod
+    def _gaussians(out):
+        components = out["components"]
+        return components[components[:, 2] > 0]
+
+    @pytest.mark.parametrize(
+        "kwargs,least",
+        [
+            ({}, 0.995),
+            ({"asp_min_mask_coverage": 0.5}, 0.5),
+            ({"asp_min_mask_coverage": 0.9}, 0.9),
+            ({"asp_min_mask_coverage": 0.99}, 0.99),
+            ({"asp_min_mask_coverage": 0.999}, 0.999),
+        ],
+    )
+    def test_gaussians_keep_their_share_on_the_mask(self, kwargs, least):
+        psf, dirty, mask = self._scene()
+        out, *_ = self._clean(psf, dirty, mask, **kwargs)
+        gaussians = self._gaussians(out)
+        assert len(gaussians) > 0
+        i, j = gaussians[:, :2].astype(int).T
+        assert mask[j, i].all()
+        assert min(_mask_coverage(mask, *row[:3]) for row in gaussians) >= least
+
+    def test_zero_asks_only_for_the_centre_on_the_mask(self):
+        psf, dirty, mask = self._scene()
+        out, *_ = self._clean(psf, dirty, mask, asp_min_mask_coverage=0.0)
+        gaussians = self._gaussians(out)
+        i, j = gaussians[:, :2].astype(int).T
+        assert mask[j, i].all()
+        assert min(_mask_coverage(mask, *row[:3]) for row in gaussians) < 0.5
+
+    def test_full_mask_leaves_every_scale(self):
+        """A scale wider than the image passes on a full mask: the share is
+        of the kernel the image holds."""
+        n = 128
+        psf = _centered_psf(n, n, 6.0)
+        dirty = _gauss(n, n, n // 2, n // 2, 45.0, 5.0)
+        full = np.ones_like(dirty)
+        out, _, model = self._clean(psf, dirty, full, 30, asp_min_mask_coverage=0.99)
+        assert self._gaussians(out)[0, 2] > 45.0
+        _, _, free = self._clean(psf, dirty, full, 30, asp_min_mask_coverage=0.0)
+        np.testing.assert_array_equal(model, free)
+
+    def test_mask_too_small_for_every_scale_leaves_points(self):
+        n = 128
+        psf = _centered_psf(n, n, 2.0)
+        dirty = _gauss(n, n, 64, 64, 3.0, 5.0)
+        mask = np.zeros_like(dirty)
+        mask[60:69, 60:69] = 1.0
+        out, resid, _ = self._clean(psf, dirty, mask)
+        assert out["timing"]["n_scale_components"] == 0
+        assert np.abs(resid[mask > 0]).max() < 0.1 * dirty.max()
+
+    def test_fit_is_cut_back_to_the_widest_gaussian_on_the_mask(self):
+        """The search tests a scale that fits the mask, the source is wider:
+        the Gaussian is the widest that keeps the share, with the amplitude of
+        the fit, the least squares of its PSF response on the fit's box."""
+        n, gain = 128, 0.3
+        psf = _centered_psf(n, n, 2.0)
+        dirty = _linear_convolution(_gauss(n, n, 64, 64, 15.0), psf)
+        mask = np.zeros_like(dirty)
+        mask[44:85, 44:85] = 1.0
+        out, *_ = self._clean(psf, dirty, mask, 1)
+        ((i, j, sigma, amplitude),) = out["components"]
+        assert _mask_coverage(mask, i, j, sigma) >= 0.995
+        assert _mask_coverage(mask, i, j, 1.01 * sigma) < 0.995
+
+        i0, i1, j0, j1 = (int(c + s * 2.5 * sigma) for c in (i, j) for s in (-1, 1))
+        box = (slice(j0, j1 + 1), slice(i0, i1 + 1))
+        aspen = np.zeros_like(dirty)
+        aspen[box] = _gauss(n, n, i, j, sigma)[box] / (np.sqrt(2 * np.pi) * sigma)
+        box = (slice(j0, j1), slice(i0, i1))
+        response = _linear_convolution(aspen, psf)[box]
+        fitted = (dirty[box] * response).sum() / (response**2).sum()
+        np.testing.assert_allclose(amplitude, gain * fitted, rtol=1e-9)
+
+    def test_cut_keeps_the_scale_the_search_passed(self):
+        """The share need not fall with the width: next to a hole in the mask
+        narrower Gaussians than the scale tested fall short too."""
+        n = 128
+        psf = _centered_psf(n, n, 2.0)
+        dirty = _linear_convolution(_gauss(n, n, 64, 64, 15.0), psf)
+        mask = np.zeros_like(dirty)
+        mask[44:85, 44:85] = 1.0
+        mask[64, 65] = 0.0
+        out, *_ = self._clean(psf, dirty, mask, 1)
+        ((i, j, sigma, _),) = out["components"]
+        assert sigma >= aspclean.psf_gaussian_width(psf)
+        assert _mask_coverage(mask, i, j, sigma) >= 0.995
+
+    def test_soft_mask_counts_the_same_in_the_search_and_after_the_fit(self):
+        """A fit at the scale tested is not cut for pixels the search counted."""
+        n = 128
+        psf = _centered_psf(n, n, 2.0)
+        dirty = _linear_convolution(_gauss(n, n, 64, 64, 4.7), psf)
+        mask = np.full_like(dirty, 0.5)
+        mask[59:70, 59:70] = 1.0
+        out, *_ = self._clean(psf, dirty, mask, 1, asp_min_mask_coverage=0.7)
+        assert out["components"][0, 2] > 4.5
+
+    def test_no_gaussian_keeps_the_share_a_point_does(self):
+        """Next to a hole in the mask the narrow fit loses its share to the
+        hole, and so does every narrower Gaussian."""
+        n = 128
+        psf = _centered_psf(n, n, 2.0)
+        dirty = _linear_convolution(_gauss(n, n, 64, 64, 1.2, 5.0), psf)
+        mask = np.ones_like(dirty)
+        out, *_ = self._clean(psf, dirty, mask, 1, asp_min_mask_coverage=0.99)
+        assert out["components"][0, 2] > 0
+        mask[64, 65] = 0.0
+        out, *_ = self._clean(psf, dirty, mask, 1, asp_min_mask_coverage=0.99)
+        np.testing.assert_array_equal(out["components"][0, :3], [64, 64, 0])

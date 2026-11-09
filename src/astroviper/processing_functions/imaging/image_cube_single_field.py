@@ -17,6 +17,8 @@ def imaging_preparation_single_field(
     gridding_kernel_params=None,
     primary_beam_params=None,
     task_id=0,
+    *,
+    input_checked: bool = False,
 ):
     """Run the once-per-chunk imaging setup before the imaging cycle loop.
 
@@ -42,11 +44,21 @@ def imaging_preparation_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -309,6 +321,8 @@ def imaging_preparation_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -387,6 +401,12 @@ def imaging_preparation_single_field(
         not azimuthally symmetric and depend on the parallactic angle.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     controller : CycleController
@@ -400,6 +420,14 @@ def imaging_preparation_single_field(
     T_setup : float
         Wall-clock time of the setup step (seconds).
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import toolviper.utils.logger as logger
@@ -458,6 +486,7 @@ def imaging_preparation_single_field(
         psf_fitting_method=psf_fitting_method,
         gridding_kernel_params=gridding_kernel_params,
         primary_beam_params=primary_beam_params,
+        input_checked=True,
     )
     T_setup = time.time() - start
 
@@ -479,12 +508,15 @@ def image_cube_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     restore=False,
-    primary_beam_correction=False,
+    restoration_output="apparent",
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
     clean_mask=None,
+    auto_mask_params=None,
     task_id=0,
+    *,
+    input_checked: bool = False,
 ):
     """Run the imaging cycle CLEAN loop for one single-field image chunk.
 
@@ -516,11 +548,21 @@ def image_cube_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -796,20 +838,22 @@ def image_cube_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     restore : bool, optional
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
-    primary_beam_correction : bool, optional
-        If ``True`` write the primary beam corrected restored sky to the
-        ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable. Cube imaging and
-        MVC divide the model and residual by their channel or common (power)
-        primary beam before restoration. MFS instead divides the apparent
-        Taylor polynomials by the fitted primary-beam Taylor polynomial.
-        Pixels below the zeroth-order primary-
-        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
-        ``restore``.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
+        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
+        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
+        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
+        Cube corrects the model and residual by the channel power primary beam
+        before convolution. MFS divides their Taylor polynomials; MVC divides
+        by its common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
+        selector only when ``restore=True``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -899,10 +943,71 @@ def image_cube_single_field(
         residual plane that the model update cleans: in cube imaging in place
         of the primary-beam mask of ``primary_beam_limit``, in continuum
         imaging within it. Asp measures the noise of its significance test
-        (``asp_scale_significance``) outside the pixels it cleans. ``None``
-        keeps the primary-beam mask.
+        (``asp_scale_significance``) outside the pixels it cleans. Without
+        ``auto_mask_params``, ``None`` keeps the primary-beam mask.
+    auto_mask_params : dict or None, optional
+        Automatic CLEAN mask (CASA ``usemask='auto-multithresh'``, Kepley et
+        al. 2020, PASP 132, 024505). ``None`` makes no automatic mask; a dict,
+        empty for the defaults, updates the mask of every plane from its
+        residual after every residual update, before the stop test. It is
+        refused together with ``clean_mask``. A mask never loses pixels and
+        holds none outside ``primary_beam_limit``; a plane with an empty mask
+        stops with stop code 7. A plane whose last two model updates did no
+        iteration gets stop code 4 when its mask grows onto pixels above the
+        threshold, and is cleaned again only if another plane keeps the imaging
+        cycles going. Continuum imaging makes the mask from Taylor term zero
+        and applies it to every term. *Differs from CASA*: the clean beam and
+        the largest PSF sidelobe are those of each plane, not of the whole
+        cube; a plane stops updating on its own, from its own
+        ``threshold_per_cycle``, not with its channel or the peak of the cube;
+        ``max_iter = 0`` makes a mask, ``niter=0`` none; and the mask written
+        includes the update after the last model update.
+        Keys, with the default and the CASA name in brackets:
+
+        - ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts
+          from the pixels above this times the largest PSF sidelobe times the
+          peak residual (the sidelobe level) or, when larger,
+          ``noise_threshold`` times the noise.
+        - ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is
+          1.4826 times the median absolute deviation; every threshold is
+          relative to the median of the noise sample.
+        - ``low_noise_threshold`` (1.5) [``lownoisethreshold``] : The mask grows
+          through the pixels above this times the noise or, when larger, the
+          sidelobe level.
+        - ``negative_threshold`` (0.0) [``negativethreshold``] : Above 0, the
+          mask takes the pixels below minus this times the noise or, when
+          lower, minus the sidelobe level.
+        - ``smooth_factor`` (1.0) [``smoothfactor``] : Every part of the mask is
+          smoothed with the clean beam scaled by this.
+        - ``min_beam_fraction`` (0.3) [``minbeamfrac``] : Positive regions
+          smaller than this fraction of the clean beam area are removed before
+          smoothing; 0 keeps them. An unresolved source is removed whatever its
+          signal to noise when ``sidelobe_threshold`` times the largest PSF
+          sidelobe is above exp(-``min_beam_fraction``), and a warning is logged.
+        - ``cut_threshold`` (0.01) [``cutthreshold``] : A smoothed mask is cut
+          at this fraction of its peak, in (0, 1).
+        - ``grow_iterations`` (75) [``growiterations``] : Largest number of
+          binary dilation steps in one update, before smoothing; 0 does not
+          grow it.
+        - ``grow_prune`` (``True``) [``dogrowprune``] : Remove small regions
+          from the grown mask too.
+        - ``min_percent_change`` (-1.0) [``minpercentchange``] : At or above 0,
+          a plane whose threshold is set by the noise stops updating its mask
+          once the ``threshold_per_cycle`` of its model update is the absolute
+          ``threshold`` and the mask then did not change or changed by less
+          than this percentage. Whatever the value, such a plane stops updating
+          when its mask is empty.
+        - ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every
+          pixel inside ``primary_beam_limit``. ``False`` measures it outside the
+          mask or, without a mask, on the pixels Chauvenet's criterion leaves.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -937,15 +1042,22 @@ def image_cube_single_field(
         predicted for the plane (the channel's limit is the largest of its
         planes').
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import numpy as np
     import pandas as pd
     import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.imaging.deconvolution import (
-        validate_exact_psf_subtraction,
-        validate_record_iteration_history,
+    from astroviper.processing_functions.image_analysis.make_auto_mask import (
+        make_auto_mask,
     )
     from astroviper.processing_functions.imaging.make_point_spread_function import (
         make_subtraction_point_spread_function_single_field,
@@ -969,13 +1081,7 @@ def image_cube_single_field(
 
     if image_data_variables_keep is None:
         image_data_variables_keep = []
-    # A record_iteration_history that is not a bool is refused before any
-    # imaging work is done.
-    validate_record_iteration_history(
-        deconvolver, cycle_control_params.get("record_iteration_history", False)
-    )
     exact_psf_subtraction = cycle_control_params.get("exact_psf_subtraction", False)
-    validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction)
     # The polarization basis of the imaging weights, which the preparation
     # turns to Stokes on img_xds.
     correlation_coords = img_xds.polarization.values.copy()
@@ -1005,6 +1111,7 @@ def image_cube_single_field(
         gridding_kernel_params=gridding_kernel_params,
         primary_beam_params=primary_beam_params,
         task_id=task_id,
+        input_checked=True,
     )
 
     # Per-chunk timing accumulator, grouped by pipeline phase. The preparation
@@ -1039,11 +1146,14 @@ def image_cube_single_field(
     # control and the convergence/merge bookkeeping run in this loop (not inside
     # a processing function), so they are timed inline.
     timing["T_residual_update"] = 0.0
+    timing["T_auto_mask"] = 0.0
     timing["T_stop_test"] = 0.0
     timing["T_model_update"] = 0.0
     timing["T_cycle_control"] = 0.0
     timing["T_convergence"] = 0.0
 
+    auto_mask_planes_stopped = None
+    threshold_per_cycle = None
     model_exists = False
     n_cycles = 0
     while True:
@@ -1061,12 +1171,49 @@ def image_cube_single_field(
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
             gridding_kernel_params=gridding_kernel_params,
+            input_checked=True,
         )
         t_residual_update = time.time() - start
         timing["T_residual_update"] += t_residual_update
         accumulate_timing(timing, residual_return_df)
         if not model_exists:
             install_clean_mask(img_xds, clean_mask)
+        if auto_mask_params is not None:
+            start = time.time()
+            threshold_reached = None
+            if threshold_per_cycle is not None:
+                threshold = np.asarray(cycle_control_params["threshold"], dtype=float)
+                threshold_reached = (threshold > 0) & (threshold_per_cycle <= threshold)
+            auto_mask_planes_stopped = make_auto_mask(
+                img_xds,
+                auto_mask_params,
+                primary_beam_limit=cycle_control_params.get("primary_beam_limit", 0.0),
+                planes_stopped=auto_mask_planes_stopped,
+                threshold_reached=threshold_reached,
+                processing_function_threads=processing_function_threads,
+                input_checked=True,
+            )
+            timing["T_auto_mask"] += time.time() - start
+
+        from astroviper.processing_functions.imaging.config_check._common import (
+            CUBE_SINGLE_FIELD,
+        )
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_model_products,
+        )
+
+        product_diagnostics = check_model_products(
+            img_xds,
+            {
+                "deconvolver": deconvolver,
+                "cycle_control_params": cycle_control_params,
+                "single_precision_image": single_precision_image,
+            },
+            mode=CUBE_SINGLE_FIELD,
+        )
+        img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
+            product_diagnostics
+        )
 
         # ---- Stop-test phase ----
         # Cycle control: the stop test on the residual this residual update
@@ -1143,6 +1290,7 @@ def image_cube_single_field(
                 processing_function_threads=processing_function_threads,
                 image_data_group_in_name="residual",
                 image_data_group_out_name="model",
+                input_checked=True,
             )
             record_cycle_time(imaging_dict, "t_model_update", time.time() - start)
             accumulate_timing(timing, model_update_return_df)
@@ -1228,7 +1376,6 @@ def image_cube_single_field(
     # restore may overwrite it. The deconvolver's primary_beam_limit is the
     # blanking cutoff when set, else the CASA pblimit default of 0.2.
     timing["T_correct_sky_by_primary_beam"] = 0.0
-    correct = primary_beam_correction and restore
     if restore:
         from astroviper.processing_functions.imaging.restore import restore_image
 
@@ -1242,7 +1389,8 @@ def image_cube_single_field(
             # written to the output store; let the restore reuse its buffer
             # instead of allocating a fresh restored cube.
             consume_model="sky_model" not in image_data_variables_keep,
-            primary_beam_correction=correct,
+            restoration_output=restoration_output,
+            input_checked=True,
             primary_beam_limit=(
                 cycle_control_params.get("primary_beam_limit", 0.0) or 0.2
             ),

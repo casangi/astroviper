@@ -305,3 +305,27 @@ def test_gridding_kernel_is_made_for_its_padding():
         "interpolation": "linear",
     }
     assert kernel.shape["fft_padding"] == FFT_PADDING == 1.2
+
+
+@pytest.mark.parametrize("value", [0, -1, np.nan, np.inf, True, "3", [3]])
+def test_sampling_rejects_malformed_original_argument(value):
+    with pytest.raises((TypeError, ValueError), match="pixels_per_beam"):
+        cell_size_from_beam(1.0, value)
+
+
+@pytest.mark.parametrize("value", [0, 1, np.nan, np.inf, True, "0.2", [0.2]])
+def test_beam_boundary_rejects_malformed_original_argument(value):
+    with pytest.raises((TypeError, ValueError), match="level"):
+        field_of_view(1e11, value)
+
+
+def test_checked_controls_skip_validation_but_measured_beam_checks_remain(monkeypatch):
+    from astroviper.processing_functions.imaging.config_check import (
+        param_check_residual_update as checks,
+    )
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("already checked sampling was validated again")
+
+    monkeypatch.setattr(checks, "check_pixels_per_beam", unexpected)
+    assert cell_size_from_beam(1.0, 5, input_checked=True) == 0.2

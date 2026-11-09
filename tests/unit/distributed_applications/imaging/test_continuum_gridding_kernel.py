@@ -129,6 +129,8 @@ def _continuum(
     image_params,
     gridding_kernel_params,
     continuum_mode="mfs",
+    *,
+    deconvolver="hogbom",
 ):
     with dask.config.set(scheduler="synchronous"):
         return distributed_applications.imaging.image_continuum_single_field(
@@ -138,6 +140,7 @@ def _continuum(
             imaging_weights_params={"weighting": "natural"},
             cycle_control_params=CONTROLS,
             continuum_mode=continuum_mode,
+            deconvolver=deconvolver,
             primary_beam_limit=0.0,
             image_data_variables_keep=KEEP,
             processing_set_data_group_name="base",
@@ -360,11 +363,11 @@ def _spy_kernels(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("continuum_mode", "store", "stokes", "n_taylor_terms"),
+    ("continuum_mode", "store", "stokes", "n_taylor_terms", "deconvolver"),
     [
-        ("mfs", "four", ["I", "Q", "U", "V"], 1),
-        ("mfs", "two_hands", ["I", "Q"], 2),
-        ("mvc", "two_hands", ["I", "Q"], 2),
+        ("mfs", "four", ["I", "Q", "U", "V"], 1, "hogbom"),
+        ("mfs", "two_hands", ["I", "Q"], 2, "mtmfs"),
+        ("mvc", "two_hands", ["I", "Q"], 2, "mtmfs"),
     ],
 )
 @pytest.mark.parametrize(
@@ -380,12 +383,17 @@ def test_every_continuum_stage_uses_the_requested_kernel(
     store,
     stokes,
     n_taylor_terms,
+    deconvolver,
     gridding_kernel_params,
 ):
     """The PSF, the gridding, the degridding of the model and every image
     correction (the residual and PSF transforms and the model transform before
     degridding) use the kernel of gridding_kernel_params, in MFS and MVC; the
-    type prolate_spheroidal_casa alone is CASA's kernel and sampling."""
+    type prolate_spheroidal_casa alone is CASA's kernel and sampling.
+
+    Two Taylor terms use MT-MFS; the single-term case uses Hogbom, so every
+    configuration reaches the gridding stages this test is meant to inspect.
+    """
     calls = _spy_kernels(monkeypatch)
     ps_store = processing_sets[store]
     _continuum(
@@ -394,6 +402,7 @@ def test_every_continuum_stage_uses_the_requested_kernel(
         _image_params(ps_store, stokes, n_taylor_terms),
         gridding_kernel_params,
         continuum_mode,
+        deconvolver=deconvolver,
     )
     expected = make_gridding_kernel(gridding_kernel_params, FFT_PADDING)
     assert {kind: len(made) > 0 for kind, made in calls.items()} == {

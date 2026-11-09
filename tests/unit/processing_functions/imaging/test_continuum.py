@@ -30,6 +30,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     fit_mvc_primary_beam_taylor,
     form_mfs_residual_grid_from_cache,
     form_residual_grid_from_cache,
+    make_auto_mask_continuum,
     make_mvc_taylor_normal_equation_contributions,
     prepare_model_uv_continuum_single_field,
     prepare_model_uv_mvc_single_field,
@@ -360,7 +361,7 @@ def test_primary_beam_correction_restores_every_taylor_term():
 
     result, _ = restore_continuum_image(
         image,
-        primary_beam_correction=True,
+        restoration_output="both",
         primary_beam_limit=0.2,
         continuum_mode="mvc",
     )
@@ -404,14 +405,12 @@ def test_corrected_only_continuum_restoration_matches_the_both_product_path():
 
     both, _ = restore_continuum_image(
         both_image,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         restoration_output="both",
         continuum_mode="mvc",
     )
     corrected_only, _ = restore_continuum_image(
         corrected_only_image,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         restoration_output="primary_beam_corrected",
         continuum_mode="mvc",
@@ -553,7 +552,6 @@ def test_mfs_restoration_divides_primary_beam_taylor_polynomial_before_restore()
 
     result, _ = restore_continuum_image(
         image,
-        primary_beam_correction=True,
         primary_beam_limit=0.2,
         restoration_output="both",
         continuum_mode="mfs",
@@ -1569,7 +1567,8 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency(
     result = _convert_primary_beam_to_reference_frequency(
         image,
         image_params=image_params,
-        reference_frequency_hz=1.5e9,
+        reference_frequency=1.5e9,
+        n_taylor_terms=2,
         float_dtype=np.float64,
         image_data_group_in_name="residual",
         make_primary_beam_taylor=make_primary_beam_taylor,
@@ -1588,7 +1587,7 @@ def test_mfs_primary_beam_is_evaluated_at_reference_frequency(
     assert ("MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR" in result) is (make_primary_beam_taylor)
     assert ("MFS_PRIMARY_BEAM_FIT_MOMENTS" in result) is make_primary_beam_taylor
     assert "PRIMARY_BEAM" not in result
-    assert result["PRIMARY_BEAM_REFERENCE"].attrs["reference_frequency_hz"] == 1.5e9
+    assert result["PRIMARY_BEAM_REFERENCE"].attrs["reference_frequency"] == 1.5e9
     if make_primary_beam_taylor:
         assert result.MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR.shape == (1, 2, 1, 8, 8)
         assert result.MFS_PRIMARY_BEAM_FIT_MOMENTS.shape == (1, 3, 1)
@@ -1673,8 +1672,9 @@ def test_mfs_primary_beam_taylor_inputs_reuse_channel_imaging_weights(monkeypatc
 
     result = _convert_primary_beam_to_reference_frequency(
         image,
-        image_params={"image_size": [1, 1], "n_taylor_terms": 2},
-        reference_frequency_hz=1.0e9,
+        image_params={"image_size": [1, 1]},
+        reference_frequency=1.0e9,
+        n_taylor_terms=2,
         float_dtype=np.float64,
         channel_imaging_weight_sums=spectral_weights,
     )
@@ -2022,15 +2022,27 @@ def test_residual_cycle_times_prediction_stages_once(
         "fft_padding": 1.2,
     }
 
+    kernel_params = {"type": "prolate_spheroidal_casa"}
+    prediction_calls = []
+
+    def fake_predict(*args, **kwargs):
+        assert kwargs["input_checked"] is True
+        prediction_calls.append(kwargs)
+
+    def fake_prepare_model(*args, **kwargs):
+        assert kwargs["input_checked"] is True
+        assert kwargs["gridding_kernel_params"] is kernel_params
+        return xr.Dataset()
+
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.residual_cycle_continuum_single_field."
         "make_visibility_model_continuum_single_field",
-        lambda *args, **kwargs: None,
+        fake_predict,
     )
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.image_continuum_single_field."
         "prepare_model_uv_mvc_single_field",
-        lambda *args, **kwargs: xr.Dataset(),
+        fake_prepare_model,
     )
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.residual_update."
@@ -2044,6 +2056,7 @@ def test_residual_cycle_times_prediction_stages_once(
     )
 
     def fake_grid(*args, **kwargs):
+        assert kwargs["input_checked"] is True
         return args[1], pd.DataFrame()
 
     monkeypatch.setattr(
@@ -2079,6 +2092,7 @@ def test_residual_cycle_times_prediction_stages_once(
         model_xds=xr.Dataset(),
         primary_beam_xds=xr.Dataset(),
         visibility_memory_mode=visibility_memory_mode,
+        gridding_kernel_params=kernel_params,
         observed_visibility_grid_xds=(
             xr.Dataset() if continuum_mode == "mvc" else None
         ),
@@ -2089,6 +2103,9 @@ def test_residual_cycle_times_prediction_stages_once(
         0.7 if visibility_memory_mode == "recompute" else 0.0
     )
     assert timing.T_grid.iloc[0] == pytest.approx(0.4)
+
+    assert len(prediction_calls) == (1 if continuum_mode == "mfs" else 0)
+    assert kernel_params == {"type": "prolate_spheroidal_casa"}
 
 
 def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
@@ -2339,3 +2356,150 @@ def test_mvc_clips_channel_beams_in_casa_taylor_products(clipped_pb):
     np.testing.assert_allclose(pb.squeeze(), 0.25)
     np.testing.assert_allclose(psf.squeeze(), 2.0)
     np.testing.assert_allclose(residual.squeeze(), 1.25)
+
+
+def _continuum_image_with_two_sources():
+    """Two Taylor terms and two polarizations, a source in Stokes I only."""
+    n = 64
+    pixel = 1e-6
+    i, j = np.mgrid[:n, :n]
+    source = 50.0 * np.exp(-4 * np.log(2) * ((i - 20) ** 2 + (j - 40) ** 2) / 36.0)
+    rng = np.random.default_rng(4)
+    residual = rng.normal(0.0, 1.0, (1, 2, 2, n, n))
+    residual[0, 0, 0] += source
+    residual[0, 1, 0] += 100.0 * source  # Taylor term one must not count
+    primary_beam = np.ones((1, 3, 2, n, n))
+    primary_beam[:, :, :, :, 56:] = 0.05
+    return xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                residual,
+            ),
+            "PRIMARY_BEAM": (
+                ("time", "frequency", "polarization", "l", "m"),
+                primary_beam,
+            ),
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization", "beam_param"),
+                np.broadcast_to([6 * pixel, 6 * pixel, 0.0], (1, 2, 3)),
+            ),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization"),
+                np.full((1, 2), 0.05),
+            ),
+        },
+        coords={
+            "time": [0.0],
+            "taylor_term": [0, 1],
+            "frequency": [1.0e9, 1.1e9, 1.2e9],
+            "polarization": ["I", "V"],
+            "l": np.arange(n) * pixel,
+            "m": np.arange(n) * pixel,
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "primary_beam": "PRIMARY_BEAM",
+                    "beam_fit_params_point_spread_function": (
+                        "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+                    ),
+                    "max_sidelobe_point_spread_function": (
+                        "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+                    ),
+                }
+            }
+        },
+    )
+
+
+def test_auto_mask_comes_from_taylor_term_zero_and_reaches_every_term():
+    image = _continuum_image_with_two_sources()
+    image.SKY_RESIDUAL.values[0, 1, 0] = np.roll(
+        image.SKY_RESIDUAL.values[0, 1, 0], 25, axis=0
+    )
+    state = make_auto_mask_continuum(image, {}, primary_beam_limit=0.2)
+
+    assert state["mask"].shape == (1, 1, 2, 64, 64)
+    assert state["planes_stopped"].shape == (1, 1, 2)
+    assert image.MASK.dims == image.SKY_RESIDUAL.dims
+    np.testing.assert_array_equal(image.MASK.values[0, 0], image.MASK.values[0, 1])
+    np.testing.assert_array_equal(image.MASK.values[0, 0], state["mask"][0, 0])
+    assert image.MASK.values[0, 0, 0, 20, 40]
+    assert not image.MASK.values[0, 0, 0, 45, 40]
+    assert 0 < image.MASK.values[0, 0, 0].sum() < 1500
+    assert not image.MASK.values[0, 0, 1].any()
+    assert state["planes_stopped"][0, 0, 1]
+    assert image.attrs["data_groups"]["residual"]["mask"] == "MASK"
+
+
+def test_auto_mask_checks_a_direct_call():
+    image = _continuum_image_with_two_sources()
+    with pytest.raises(ValueError, match="Unknown auto_mask_params keys"):
+        make_auto_mask_continuum(image, {"noise": 5.0})
+    with pytest.raises(ValueError, match="primary_beam_limit"):
+        make_auto_mask_continuum(image, {}, primary_beam_limit=2.0)
+
+
+def test_auto_mask_follows_the_data_groups():
+    image = _continuum_image_with_two_sources().rename({"SKY_RESIDUAL": "SKY"})
+    image.attrs["data_groups"]["residual"]["sky"] = "SKY"
+    make_auto_mask_continuum(
+        image, {}, primary_beam_limit=0.2, image_data_group_out_name="masked"
+    )
+    assert image.MASK.dims == image.SKY.dims
+    assert image.MASK.values[0, 1, 0, 20, 40]
+    assert image.attrs["data_groups"]["masked"]["mask"] == "MASK"
+
+
+def test_auto_mask_keeps_the_primary_beam_limit():
+    image = _continuum_image_with_two_sources()
+    image.SKY_RESIDUAL.values[0, 0, 0, 15:25, 58:62] = 500.0
+    make_auto_mask_continuum(image, {}, primary_beam_limit=0.2)
+    assert not image.MASK.values[0, 0, 0, :, 56:].any()
+    assert image.MASK.values[0, 0, 0, 20, 40]
+
+
+def test_auto_mask_state_carries_the_mask_to_the_next_update():
+    first = _continuum_image_with_two_sources()
+    state = make_auto_mask_continuum(first, {}, primary_beam_limit=0.2)
+    first_mask = state["mask"].copy()
+
+    second = _continuum_image_with_two_sources()
+    second.SKY_RESIDUAL.values[...] = np.random.default_rng(5).normal(
+        0.0, 1.0, second.SKY_RESIDUAL.shape
+    )
+    second.SKY_RESIDUAL.values[0, 0, 0, 22:52, 36:44] += 3.0  # a tail from the mask
+    second.SKY_RESIDUAL.values[0, 0, 1] = first.SKY_RESIDUAL.values[0, 0, 0]
+    updated = make_auto_mask_continuum(
+        second, {}, auto_mask_state=state, primary_beam_limit=0.2
+    )
+
+    assert updated["mask"][first_mask].all()
+    assert second.MASK.values[0, 1, 0, 20, 40]
+    assert not first_mask[0, 0, 0, 45, 40]
+    assert updated["mask"][0, 0, 0, 45, 40]
+    # Stokes V stopped at the first update, the mask stays empty
+    assert updated["planes_stopped"][0, 0, 1]
+    assert not updated["mask"][0, 0, 1].any()
+
+
+@pytest.mark.parametrize("reached, stopped", [(None, False), (True, True)])
+def test_auto_mask_passes_on_threshold_reached(reached, stopped):
+    params = {
+        "min_percent_change": 1.0,
+        "sidelobe_threshold": 1.0,
+        "grow_iterations": 0,
+    }
+    state = make_auto_mask_continuum(
+        _continuum_image_with_two_sources(), params, primary_beam_limit=0.2
+    )
+    updated = make_auto_mask_continuum(
+        _continuum_image_with_two_sources(),
+        params,
+        auto_mask_state=state,
+        primary_beam_limit=0.2,
+        threshold_reached=None if reached is None else np.full((1, 1, 2), reached),
+    )
+    assert updated["planes_stopped"][0, 0, 0] == stopped

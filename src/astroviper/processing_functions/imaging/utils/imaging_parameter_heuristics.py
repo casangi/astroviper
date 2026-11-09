@@ -32,6 +32,7 @@ from astroviper.processing_functions.imaging.utils.imaging_polarization import (
     CORRELATIONS,
     STOKES,
 )
+from astroviper.utils.param_docs import shares_param_docs
 
 SPEED_OF_LIGHT = 299792458.0
 # Assumed.
@@ -87,7 +88,12 @@ def primary_beam_telescope(telescope_name, dish_diameters=None):
     ValueError
         For an observatory without a primary beam model.
     """
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_telescope_prescription,
+    )
+
     name = str(telescope_name).strip().upper()
+    check_telescope_prescription(name)
     if name in ("ALMA", "ACA"):
         diameters = np.asarray(
             [] if dish_diameters is None else dish_diameters, dtype=float
@@ -102,10 +108,6 @@ def primary_beam_telescope(telescope_name, dish_diameters=None):
         return "vla"
     if name == "NGVLA":
         return "ngvla"
-    raise ValueError(
-        f"no primary beam model for telescope {telescope_name!r}; expected ALMA, "
-        "ACA, VLA, EVLA or ngVLA"
-    )
 
 
 def default_robust(telescope):
@@ -127,10 +129,11 @@ def default_robust(telescope):
     ValueError
         For a telescope without a pipeline value (pass ``robust``).
     """
-    if telescope not in DEFAULT_ROBUST:
-        raise ValueError(
-            f"no default robust for telescope {telescope!r}; pass robust explicitly"
-        )
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_telescope_prescription,
+    )
+
+    check_telescope_prescription(telescope, default_robust=True)
     return DEFAULT_ROBUST[telescope]
 
 
@@ -196,7 +199,10 @@ def stokes_for_correlations(correlations):
     )
 
 
-def primary_beam_radius(frequency, level, primary_beam_params=None, n_scan=4096):
+@shares_param_docs
+def primary_beam_radius(
+    frequency, level, primary_beam_params=None, n_scan=4096, *, input_checked=False
+):
     """Radius at which the imager's primary beam (power) falls to ``level``.
 
     The beam is the one the imager makes for ``primary_beam_params``
@@ -215,10 +221,40 @@ def primary_beam_radius(frequency, level, primary_beam_params=None, n_scan=4096)
     level : float
         Primary beam power level, in ``(0, 1)``.
     primary_beam_params : dict, optional
-        As ``primary_beam_params`` of the imager; ``None`` is ALMA 12 m (the
-        imager's default beam).
+        The primary beam of the imager, the power pattern that gives the clean
+        mask and the primary beam correction: ``telescope`` (``"alma"``,
+        ``"aca"`` or ``"ngvla"``, the textbook obscured Airy disk with the
+        diameters of :func:`~astroviper.utils.beam_models.airy_disk_model`, no
+        cut; ``"vla"``, the EVLA beam polynomial of CASA's ``PBMath1DEVLA``,
+        with the coefficients CASA picks for each channel (of its two 10052 MHz
+        rows, the first), at the exact radius and zero beyond 58 arcmin at
+        1 GHz, past the 5 percent power level its polynomials were fitted
+        to), ``effective_dish_diameter`` and
+        ``blockage_diameter`` (metres; refused for ``"vla"``) and
+        ``max_rad_1GHz`` (radians at 1 GHz, scaled as 1 / frequency, beyond
+        which the beam is zero; ``None`` is no cut for an Airy disk). Numbers
+        given with a telescope override that telescope's values;
+        no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
+        0.75 m, no cut). Or ``beam_model`` alone: an analytic dict
+        or a beam-polynomial dataset as ``simulate_processing_set`` takes it in
+        ``beam_models`` (``"vla"`` is
+        ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
+        of the voltage pattern the simulator applies for the model, computed by
+        the same function
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
+        models: ``airy_disk_model(telescope, func="casa_airy")`` and
+        ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
+        Zernike aperture models and Jones images are not supported: they are
+        not azimuthally symmetric and depend on the parallactic angle.
     n_scan : int, optional
         Samples of the scan.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
 
     Returns
     -------
@@ -240,8 +276,12 @@ def primary_beam_radius(frequency, level, primary_beam_params=None, n_scan=4096)
         symmetric_beam_response,
     )
 
-    if not 0.0 < level < 1.0:
-        raise ValueError(f"level must lie in (0, 1); got {level!r}")
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_beam_level,
+        )
+
+        check_beam_level(level)
     resolved = resolve_primary_beam_params(
         {"telescope": "alma"} if primary_beam_params is None else primary_beam_params
     )
@@ -275,7 +315,10 @@ def primary_beam_radius(frequency, level, primary_beam_params=None, n_scan=4096)
     return float(brentq(excess, radii[below[0] - 1], radii[below[0]]))
 
 
-def field_of_view(frequency_min, level, primary_beam_params=None):
+@shares_param_docs
+def field_of_view(
+    frequency_min, level, primary_beam_params=None, *, input_checked=False
+):
     """``FIELD_OF_VIEW_MARGIN`` times the diameter where the primary beam falls to ``level``.
 
     Parameters
@@ -285,7 +328,38 @@ def field_of_view(frequency_min, level, primary_beam_params=None):
     level : float
         Primary beam power level, in ``(0, 1)``.
     primary_beam_params : dict, optional
-        As ``primary_beam_params`` of the imager; ``None`` is ALMA 12 m.
+        The primary beam of the imager, the power pattern that gives the clean
+        mask and the primary beam correction: ``telescope`` (``"alma"``,
+        ``"aca"`` or ``"ngvla"``, the textbook obscured Airy disk with the
+        diameters of :func:`~astroviper.utils.beam_models.airy_disk_model`, no
+        cut; ``"vla"``, the EVLA beam polynomial of CASA's ``PBMath1DEVLA``,
+        with the coefficients CASA picks for each channel (of its two 10052 MHz
+        rows, the first), at the exact radius and zero beyond 58 arcmin at
+        1 GHz, past the 5 percent power level its polynomials were fitted
+        to), ``effective_dish_diameter`` and
+        ``blockage_diameter`` (metres; refused for ``"vla"``) and
+        ``max_rad_1GHz`` (radians at 1 GHz, scaled as 1 / frequency, beyond
+        which the beam is zero; ``None`` is no cut for an Airy disk). Numbers
+        given with a telescope override that telescope's values;
+        no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
+        0.75 m, no cut). Or ``beam_model`` alone: an analytic dict
+        or a beam-polynomial dataset as ``simulate_processing_set`` takes it in
+        ``beam_models`` (``"vla"`` is
+        ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
+        of the voltage pattern the simulator applies for the model, computed by
+        the same function
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
+        models: ``airy_disk_model(telescope, func="casa_airy")`` and
+        ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
+        Zernike aperture models and Jones images are not supported: they are
+        not azimuthally symmetric and depend on the parallactic angle.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
 
     Returns
     -------
@@ -300,7 +374,9 @@ def field_of_view(frequency_min, level, primary_beam_params=None):
     return (
         FIELD_OF_VIEW_MARGIN
         * 2.0
-        * primary_beam_radius(frequency_min, level, primary_beam_params)
+        * primary_beam_radius(
+            frequency_min, level, primary_beam_params, input_checked=input_checked
+        )
     )
 
 
@@ -369,7 +445,8 @@ def image_size_for_field_of_view(field_of_view, cell_size):
     )
 
 
-def cell_size_from_beam(minor_axis, pixels_per_beam):
+@shares_param_docs
+def cell_size_from_beam(minor_axis, pixels_per_beam, *, input_checked=False):
     """Cell that puts ``pixels_per_beam`` pixels across the fitted minor axis.
 
     Parameters
@@ -378,6 +455,12 @@ def cell_size_from_beam(minor_axis, pixels_per_beam):
         Minor axis of the fitted beam (radians).
     pixels_per_beam : float
         Pixels across the minor axis.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
 
     Returns
     -------
@@ -389,12 +472,17 @@ def cell_size_from_beam(minor_axis, pixels_per_beam):
     ValueError
         For a non positive ``pixels_per_beam``.
     """
-    if not pixels_per_beam > 0.0:
-        raise ValueError(f"pixels_per_beam must be positive; got {pixels_per_beam!r}")
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_pixels_per_beam,
+        )
+
+        check_pixels_per_beam(pixels_per_beam)
     return float(minor_axis) / float(pixels_per_beam)
 
 
-def cell_size_from_beam_fit(beam_fit_params, pixels_per_beam):
+@shares_param_docs
+def cell_size_from_beam_fit(beam_fit_params, pixels_per_beam, *, input_checked=False):
     """:func:`cell_size_from_beam` of the highest frequency channel with a valid fit.
 
     The minor axis is that of the Stokes I fit. A fully flagged channel has an
@@ -408,6 +496,12 @@ def cell_size_from_beam_fit(beam_fit_params, pixels_per_beam):
         ``frequency``, ``polarization`` and ``beam_params_label`` (radians).
     pixels_per_beam : float
         Pixels across the minor axis.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
 
     Returns
     -------
@@ -428,6 +522,7 @@ def cell_size_from_beam_fit(beam_fit_params, pixels_per_beam):
     return cell_size_from_beam(
         float(minor_axis[valid][np.argmax(minor.frequency.values[valid])]),
         pixels_per_beam,
+        input_checked=input_checked,
     )
 
 

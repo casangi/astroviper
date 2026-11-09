@@ -567,6 +567,17 @@ class TestImagingDictKeyBehavior(unittest.TestCase):
 class TestMergeImagingDicts(unittest.TestCase):
     """Test merging multiple ImagingDict objects."""
 
+    def test_invalid_strategy_rejected_before_inspecting_records(self):
+        left = ImagingDict()
+        left.add({"peakres": 1.0}, time=0, pol=0, chan=0)
+        right = ImagingDict()
+        right.add({"peakres": 0.5}, time=0, pol=0, chan=1)
+        for records in ([], [left], [left, right]):
+            with self.subTest(records=len(records)):
+                with self.assertRaisesRegex(ValueError, "Unknown merge_strategy"):
+                    merge_imaging_dicts(records, merge_strategy="invalid")
+        self.assertEqual(left.sel(time=0, pol=0, chan=0)["peakres"], [1.0])
+
     def setUp(self):
         """Create test ImagingDict objects."""
         self.rd1 = ImagingDict()
