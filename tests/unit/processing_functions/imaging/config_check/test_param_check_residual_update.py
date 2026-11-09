@@ -51,11 +51,6 @@ def test_mvc_time_restriction_is_mode_specific():
     check_residual_update(config, mode=CONTINUUM_SINGLE_FIELD)
 
 
-def test_frequency_matching_public_spelling_rejected_early():
-    with pytest.raises(ValueError, match="frequency_matching"):
-        check_residual_update({"frequency_matching": "bad"}, mode=CUBE_SINGLE_FIELD)
-
-
 @pytest.mark.parametrize(
     "image,message",
     [

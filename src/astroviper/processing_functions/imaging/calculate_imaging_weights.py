@@ -1002,7 +1002,6 @@ def calculate_imaging_weights(
     return_weight_density_grid: bool = False,
     processing_function_threads: int = 1,
     truncate_uv_cells: bool = False,
-    frequency_matching: str = "nearest",
     *,
     input_checked: bool = False,
 ) -> None | np.ndarray:
@@ -1057,11 +1056,6 @@ def calculate_imaging_weights(
         If True, assign shifted UV coordinates to density cells by integer
         truncation, matching CASA continuum weighting. If False, use the
         nearest-cell convention used by cube and continuum weighting.
-
-    frequency_matching : {"nearest", "exact"}, default "nearest"
-        Cube and continuum imaging assign visibility frequencies to the nearest image
-        channel. Exact matching can optionally enforce one-to-one
-        channel assignment. This policy is independent of UV-cell truncation.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -1225,8 +1219,6 @@ def calculate_imaging_weights(
         frequency_map = map_visibility_frequencies_to_image(
             freq_chan,
             img_xds.frequency.values,
-            matching=frequency_matching,
-            input_checked=True,
         )
 
         grid_imaging_weights(
@@ -1259,8 +1251,6 @@ def calculate_imaging_weights(
         frequency_map = map_visibility_frequencies_to_image(
             freq_chan,
             img_xds.frequency.values,
-            matching=frequency_matching,
-            input_checked=True,
         )
 
         imaging_weights = degrid_imaging_weights(

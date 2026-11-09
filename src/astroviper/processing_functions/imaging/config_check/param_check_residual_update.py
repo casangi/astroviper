@@ -149,12 +149,6 @@ def check_residual_update(config, *, mode, require_complete=False):
         ):
             raise TypeError("complex_dtype must be complex64 or complex128.")
 
-    # --- Direct frequency-mapping policy ---
-    # Helpers expose this policy; imaging drivers keep their existing choice.
-    for name in ("matching", "frequency_matching"):
-        if name in config:
-            check_frequency_matching(config[name], name=name)
-
     # --- Continuum construction ---
     # Continuum residuals can be formed by either the MFS or MVC path.
     continuum_mode = config.get(
@@ -529,12 +523,10 @@ def check_input_metadata(source, config, *, mode, measurement_set="input"):
         )
 
         frequencies = np.asarray(source.frequency.values)
-        selected = selected_frequency_mask(
-            frequencies, image["frequency_coords"], mode=mode
-        )
+        selected = selected_frequency_mask(frequencies, image["frequency_coords"])
         if np.any(selected):
             map_visibility_frequencies_to_image(
-                frequencies[selected], image["frequency_coords"], input_checked=True
+                frequencies[selected], image["frequency_coords"]
             )
 
 
@@ -1148,22 +1140,3 @@ def check_delphi_parameters(config):
         raise ValueError("Delphi weighting must be natural, uniform, or briggs.")
     if config.get("robust") is not None:
         check_briggs_robust(config["robust"])
-
-
-def check_frequency_matching(value, *, name="matching"):
-    """Require the shared cube/continuum frequency-assignment policy.
-
-    Parameters
-    ----------
-    value : {'nearest', 'exact'}
-        Requested frequency-assignment strategy.
-    name : str, optional
-        Parameter label included in errors.
-
-    Notes
-    -----
-    Checking this enum does not certify the coordinates: mapping still checks
-    dimensions, finiteness, coverage, and uniqueness against the actual data.
-    """
-    if value not in ("nearest", "exact"):
-        raise ValueError(f"{name} must be 'nearest' or 'exact'.")
