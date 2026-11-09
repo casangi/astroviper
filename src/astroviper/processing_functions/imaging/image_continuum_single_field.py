@@ -4500,6 +4500,29 @@ def _resolve_restoration_continuum_mode(img_xds, residual_da, continuum_mode):
     return continuum_mode
 
 
+def install_continuum_model(img_xds, model_xds):
+    """Install an independent accumulated model in a continuum image.
+
+    This final-state operation is shared by the restoration node and the
+    driver's no-restoration fast path. The deep copy keeps the returned image
+    independent of the separately retained model state.
+    """
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    if "SKY_MODEL" not in model_xds:
+        raise KeyError("model_xds does not contain 'SKY_MODEL'.")
+
+    img_xds = img_xds.drop_vars("SKY_MODEL", errors="ignore")
+    img_xds["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
+    modify_data_groups_xds(
+        img_xds,
+        data_group_out_name="model",
+        data_group_out={"sky": "SKY_MODEL"},
+        description="Accumulated continuum model installed in the final image.",
+    )
+    return img_xds
+
+
 @shares_param_docs
 def restore_continuum_image(
     img_xds,

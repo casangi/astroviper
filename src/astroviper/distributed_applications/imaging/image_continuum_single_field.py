@@ -107,6 +107,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
         "FINAL OUTPUT",
         None,
         [
+            ("install final model", "T_install_final_model"),
             ("write final continuum image", "T_write_final_image"),
             ("consolidate metadata", "T_consolidate_metadata"),
         ],
@@ -4372,40 +4373,57 @@ def image_continuum_single_field(
                 )
                 break
 
-        # Restoration is a separate, final-only graph. The verified residual
-        # already exists, so no additional residual update or visibility pass is
-        # needed. Send only the image/model/static state this node actually uses.
-        final_payload = {"image": final_return_dict["image"]}
-        final_params = {
-            "prepared_continuum_image": True,
-            # A prepared final image already contains PSF/beam-fit products.
-            # Only the correlation-basis common PB is needed to label the MVC
-            # diagnostic; do not send its large G/C preconditioner cache again.
-            "static_xds": static_xds[["PRIMARY_BEAM"]],
-            "restoration_xds": restoration_xds,
-            "model_xds": model_xds,
-            "image_params": image_params,
-            "continuum_mode": continuum_mode,
-            "deconvolver": deconvolver,
-            "restore": restore,
-            "restoration_output": restoration_output,
-            "primary_beam_limit": primary_beam_limit,
-            "processing_function_threads": processing_function_threads,
-        }
-        finalized, final_timings = compute_continuum_finalization_graph(
-            final_payload, final_params
-        )
-        final_return_dict.update(finalized)
-        _accumulate_graph_timings(timing_distributed_application, final_timings)
-        record = _graph_timing_record(
-            "restoration" if restore else "finalization",
-            {"timing_node_tasks": finalized["timing_finalization"]},
-            final_timings,
-            stage_kind="final",
-            includes_restoration=restore,
-        )
-        if record is not None:
-            timing_graphs.append(record)
+        if not restore and restoration_xds is None:
+            # MFS without restoration has no remaining image-domain science.
+            # Install the accumulated model locally and avoid transferring the
+            # complete image and model through an otherwise one-node graph.
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                install_continuum_model,
+            )
+
+            start = time.time()
+            final_return_dict["image"] = install_continuum_model(
+                final_return_dict["image"], model_xds
+            )
+            final_return_dict["model_xds"] = model_xds
+            final_return_dict["timing_restore"] = None
+            timing_distributed_application["T_install_final_model"] = (
+                time.time() - start
+            )
+        else:
+            # Restoration and final-only PB products run in one distributed node.
+            # Send only the image/model/static state this node actually uses.
+            final_payload = {"image": final_return_dict["image"]}
+            final_params = {
+                "prepared_continuum_image": True,
+                # A prepared final image already contains PSF/beam-fit products.
+                # Only the correlation-basis common PB is needed to label the MVC
+                # diagnostic; do not send its large G/C preconditioner cache again.
+                "static_xds": static_xds[["PRIMARY_BEAM"]],
+                "restoration_xds": restoration_xds,
+                "model_xds": model_xds,
+                "image_params": image_params,
+                "continuum_mode": continuum_mode,
+                "deconvolver": deconvolver,
+                "restore": restore,
+                "restoration_output": restoration_output,
+                "primary_beam_limit": primary_beam_limit,
+                "processing_function_threads": processing_function_threads,
+            }
+            finalized, final_timings = compute_continuum_finalization_graph(
+                final_payload, final_params
+            )
+            final_return_dict.update(finalized)
+            _accumulate_graph_timings(timing_distributed_application, final_timings)
+            record = _graph_timing_record(
+                "restoration" if restore else "finalization",
+                {"timing_node_tasks": finalized["timing_finalization"]},
+                final_timings,
+                stage_kind="final",
+                includes_restoration=restore,
+            )
+            if record is not None:
+                timing_graphs.append(record)
 
         # =============================================================
         # Assemble the final application result

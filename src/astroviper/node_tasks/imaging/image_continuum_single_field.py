@@ -3746,23 +3746,11 @@ def continuum_finalize_node(
         )
 
     model_xds = input_params["model_xds"]
-
-    if "SKY_MODEL" not in model_xds:
-        raise KeyError("model_xds does not contain 'SKY_MODEL'.")
-
-    if "SKY_MODEL" in img_xds:
-        img_xds = img_xds.drop_vars("SKY_MODEL")
-
-    img_xds["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
-
-    modify_data_groups_xds(
-        img_xds,
-        data_group_out_name="model",
-        data_group_out={
-            "sky": "SKY_MODEL",
-        },
-        description="Accumulated continuum model installed for final restoration.",
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        install_continuum_model,
     )
+
+    img_xds = install_continuum_model(img_xds, model_xds)
 
     beam_fit_start = time.time()
     restoration_xds = input_params.get("restoration_xds")

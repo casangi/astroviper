@@ -529,10 +529,11 @@ def test_restoration_state_enters_only_the_final_graph(
             processing_function_threads=1,
         )
     assert len(cycles) == result["n_cycles"] + 1
-    assert finals == [True]
+    assert finals == ([True] if restore or continuum_mode == "mvc" else [])
     assert ("PRIMARY_BEAM_TAYLOR" in result["image"]) is (
         restore or continuum_mode == "mvc"
     )
+    assert result["image"].attrs["data_groups"]["model"]["sky"] == "SKY_MODEL"
     assert "PRIMARY_BEAM_TAYLOR" not in result["static_xds"]
 
 

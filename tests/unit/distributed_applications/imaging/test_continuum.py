@@ -1797,12 +1797,20 @@ def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
     )
 
     assert result["n_cycles"] == 2
-    assert len(result["timing_graphs"]) == result["n_cycles"] + 2
+    expected_final_graphs = 1 if continuum_mode == "mvc" else 0
+    assert (
+        len(result["timing_graphs"]) == result["n_cycles"] + 1 + expected_final_graphs
+    )
     assert result["timing_graphs"][0]["stage"].startswith("imaging cycle 1")
-    assert result["timing_graphs"][-2]["stage"] == "final residual"
-    assert result["timing_graphs"][-1]["stage"] == "finalization"
-    assert result["timing_graphs"][-1]["stage_kind"] == "final"
-    assert result["timing_graphs"][-1]["includes_restoration"] is False
+    assert result["timing_graphs"][-1 - expected_final_graphs]["stage"] == (
+        "final residual"
+    )
+    if continuum_mode == "mvc":
+        assert result["timing_graphs"][-1]["stage"] == "finalization"
+        assert result["timing_graphs"][-1]["stage_kind"] == "final"
+        assert result["timing_graphs"][-1]["includes_restoration"] is False
+    else:
+        assert "T_install_final_model" in result["timing_distributed_application"]
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.SKY_MODEL.values).all()
