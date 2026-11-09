@@ -182,6 +182,7 @@ def airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
     numpy.ndarray
         Array of shape
         ``(n_dish, n_chan, n_pol, image_size[0], image_size[1])``.
+
     """
 
     import numpy as np
@@ -290,6 +291,12 @@ def airy_disk_rorder_v2(
         Array of shape
         ``(n_dish, n_chan, n_pol, image_size[0], image_size[1])``.
 
+    Raises
+    ------
+    ValueError
+        If ``lookup_frequency_max`` is not a finite scalar or is smaller than
+        any requested channel frequency.
+
     See Also
     --------
     airy_disk_rorder : Reference implementation evaluated on the full grid.
@@ -309,6 +316,19 @@ def airy_disk_rorder_v2(
 
     if dtype is None:
         dtype = np.float64
+
+    if lookup_frequency_max is not None:
+        lookup_frequency_max_array = np.asarray(lookup_frequency_max)
+        if lookup_frequency_max_array.ndim != 0 or not np.isfinite(
+            lookup_frequency_max_array
+        ):
+            raise ValueError("lookup_frequency_max must be a finite scalar.")
+        lookup_frequency_max = float(lookup_frequency_max_array)
+        if lookup_frequency_max < np.max(np.asarray(freq_chan)):
+            raise ValueError(
+                "lookup_frequency_max must be at least the maximum requested "
+                "channel frequency."
+            )
 
     c = scipy.constants.c  # 299792458
     k = ((2 * np.pi * freq_chan) / c).astype(dtype)

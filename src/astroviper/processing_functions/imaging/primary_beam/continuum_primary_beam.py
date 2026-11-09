@@ -293,7 +293,8 @@ def evaluate_primary_beam(
     ------
     ValueError
         If ``primary_beam_model`` was not resolved to ``"airy"`` or
-        ``"casa_airy"``.
+        ``"casa_airy"``, or if the physical Airy model receives an invalid
+        ``lookup_frequency_max``.
     KeyError
         If required image geometry or dish, blockage, or power parameters are
         absent.
