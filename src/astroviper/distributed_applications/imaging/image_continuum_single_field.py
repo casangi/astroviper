@@ -4409,10 +4409,11 @@ def image_continuum_single_field(
             _accumulate_graph_timings(timing_distributed_application, final_timings)
             record = _graph_timing_record(
                 "restoration" if restore else "finalization",
-                {"timing_node_tasks": finalized["timing_finalization"]},
+                {"timing_finalization": finalized["timing_finalization"]},
                 final_timings,
                 stage_kind="final",
                 includes_restoration=restore,
+                timing_key="timing_finalization",
             )
             if record is not None:
                 timing_graphs.append(record)
