@@ -22,7 +22,6 @@ from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _accumulate_graph_timings,
-    _apply_exact_frequency_selection_to_continuum_mapping,
     _combine_graph_timing_frames,
     _continuum_image_for_disk,
     _create_continuum_weight_cache_store,
@@ -77,24 +76,6 @@ def test_mapping_with_task_weights_requires_every_task_once():
         _mapping_with_task_weights(mappings, {0: {}})
 
 
-def _frequency_mapping(task_frequency_chunks, child_frequencies):
-    """Build a minimal GraphVIPER-shaped mapping and Processing Set."""
-    processing_set = xr.DataTree()
-    processing_set["child"] = xr.Dataset(
-        coords={"frequency": np.asarray(child_frequencies, dtype=float)}
-    )
-    mapping = {
-        task_id: {
-            "task_coords": {
-                "frequency": {"data": np.asarray(frequencies, dtype=float)}
-            },
-            "data_selection": {},
-        }
-        for task_id, frequencies in enumerate(task_frequency_chunks)
-    }
-    return mapping, processing_set
-
-
 def test_load_clean_mask_returns_contiguous_boolean_plane(tmp_path):
     """The public mask file is normalized to a C-contiguous Boolean plane."""
     mask_path = tmp_path / "clean_mask.npy"
@@ -130,57 +111,6 @@ def test_load_clean_mask_rejects_invalid_input(
 
     with pytest.raises(ValueError, match=message):
         load_clean_mask(mask_path, image_size)
-
-
-def test_exact_frequency_selection_reorders_a_nonmonotonic_child():
-    """Irregular integer indexers put a non-monotonic child in task order."""
-    mapping, processing_set = _frequency_mapping(
-        [[10.0, 11.0, 20.0], [21.0, 30.0, 31.0]],
-        [30.0, 31.0, 20.0, 21.0, 10.0, 11.0],
-    )
-
-    result = _apply_exact_frequency_selection_to_continuum_mapping(
-        mapping,
-        processing_set,
-    )
-
-    for task_id in result:
-        selector = result[task_id]["data_selection"]["child"]["frequency"]
-        assert isinstance(selector, np.ndarray)
-        selected = processing_set["child"].isel(frequency=selector).frequency.values
-        np.testing.assert_array_equal(
-            selected,
-            result[task_id]["task_coords"]["frequency"]["data"],
-        )
-
-
-def test_exact_frequency_selection_retains_lazy_contiguous_slices():
-    """Contiguous child indices remain slice indexers instead of arrays."""
-    mapping, processing_set = _frequency_mapping(
-        [[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]],
-        [30.0, 31.0, 20.0, 21.0, 10.0, 11.0],
-    )
-
-    result = _apply_exact_frequency_selection_to_continuum_mapping(
-        mapping,
-        processing_set,
-    )
-
-    selectors = [
-        result[task_id]["data_selection"]["child"]["frequency"] for task_id in result
-    ]
-    assert selectors == [slice(4, 6), slice(2, 4), slice(0, 2)]
-
-
-def test_exact_frequency_selection_rejects_unassigned_child_channels():
-    """The helper never silently drops a Processing Set frequency channel."""
-    mapping, processing_set = _frequency_mapping([[10.0]], [10.0, 20.0])
-
-    with pytest.raises(ValueError, match="not assigned exactly once"):
-        _apply_exact_frequency_selection_to_continuum_mapping(
-            mapping,
-            processing_set,
-        )
 
 
 @pytest.fixture(scope="module")
@@ -1373,14 +1303,6 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
             "must be an integer",
             id="non-integer-n_taylor_terms",
         ),
-        pytest.param(
-            lambda params: params.update(
-                frequency_coords=params["frequency_coords"][:2]
-            ),
-            ValueError,
-            "not assigned exactly once",
-            id="channel-subset",
-        ),
     ],
 )
 def test_tw_hydra_refused_image_params_write_nothing(
@@ -1407,6 +1329,28 @@ def test_tw_hydra_refused_image_params_write_nothing(
         )
     assert _store_snapshot(store) == files
     assert not output_store.exists()
+
+
+def test_tw_hydra_frequency_subset_uses_shared_cube_selection(tmp_path, tw_hydra_store):
+    """A continuum frequency subset is imaged through the shared cube mapping."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    image_params = _tw_hydra_image_params(processing_set)
+    image_params["frequency_coords"] = image_params["frequency_coords"][:2]
+
+    _, image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "frequency_subset.img.zarr",
+        processing_set,
+        2,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        image_params=image_params,
+        weight_memory_mode="in_place",
+    )
+
+    assert image.SKY_RESIDUAL.sizes["taylor_term"] == 2
+    assert np.isfinite(image.SKY_RESIDUAL.values).all()
+    assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])

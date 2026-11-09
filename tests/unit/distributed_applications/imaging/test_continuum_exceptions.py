@@ -5,7 +5,6 @@ import pytest
 import xarray as xr
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
-    _apply_exact_frequency_selection_to_continuum_mapping,
     combine_continuum_chunks,
 )
 
@@ -72,44 +71,3 @@ def test_reducer_rejects_duplicate_weight_and_beam_cache_ownership(kind):
         combine_continuum_chunks(
             leaves, {"continuum_mode": "mvc", "additive_variables": []}
         )
-
-
-@pytest.mark.parametrize(
-    "fault,message",
-    [
-        ("child_frequency", "no frequency"),
-        ("child_dimensions", "one-dimensional"),
-        ("task_frequency", "no frequency"),
-        ("task_dimensions", "one-dimensional"),
-        ("duplicate_child", "more than one channel"),
-        ("duplicate_task", "more than one channel"),
-        ("unmatched_task", "absent"),
-    ],
-)
-def test_partition_selection_rejects_ambiguous_or_incomplete_frequency_metadata(
-    fault, message
-):
-    child = xr.Dataset(coords={"frequency": [100.0, 110.0]})
-    mapping = {
-        0: {
-            "task_coords": {"frequency": {"data": [100.0, 110.0]}},
-            "data_selection": {},
-        }
-    }
-    if fault == "child_frequency":
-        child = xr.Dataset()
-    elif fault == "child_dimensions":
-        child = xr.Dataset(coords={"frequency": (("a", "b"), [[100.0, 110.0]])})
-    elif fault == "task_frequency":
-        mapping[0]["task_coords"] = {}
-    elif fault == "task_dimensions":
-        mapping[0]["task_coords"]["frequency"]["data"] = [[100.0, 110.0]]
-    elif fault == "duplicate_child":
-        child = child.assign_coords(frequency=[100.0, 100.0])
-    elif fault == "duplicate_task":
-        mapping[0]["task_coords"]["frequency"]["data"] = [100.0, 100.0]
-    else:
-        mapping[0]["task_coords"]["frequency"]["data"] = [90.0, 100.0, 110.0]
-    ps = xr.DataTree.from_dict({"child": child})
-    with pytest.raises(ValueError, match=message):
-        _apply_exact_frequency_selection_to_continuum_mapping(mapping, ps)

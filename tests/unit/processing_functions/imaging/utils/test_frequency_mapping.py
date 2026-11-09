@@ -13,7 +13,6 @@ Coverage:
 import unittest
 
 import numpy as np
-import pytest
 
 from astroviper.processing_functions.imaging.add_visibility_grid import (
     add_visibility_grid_single_field,
@@ -221,63 +220,5 @@ class TestCubePathsShareFrequencyMap(unittest.TestCase):
         )
 
 
-class TestExplicitContinuumMatching(unittest.TestCase):
-    def test_exact_reordered_subset(self):
-        np.testing.assert_array_equal(
-            map_visibility_frequencies_to_image(
-                [1.2e9, 1e9], [1e9, 1.1e9, 1.2e9], matching="exact"
-            ),
-            [2, 0],
-        )
-
-    def test_exact_rejects_shift_ambiguity_and_many_to_one(self):
-        for visibility, image in [
-            ([1.01e9], [1e9, 1.1e9]),
-            ([1e9], [1e9, 1e9]),
-            ([1e9, 1e9], [1e9, 1.1e9]),
-            ([1.7e9], [1e9]),
-        ]:
-            with self.subTest(visibility=visibility, image=image):
-                with self.assertRaises(ValueError):
-                    map_visibility_frequencies_to_image(
-                        visibility, image, matching="exact"
-                    )
-
-    def test_exact_tolerance(self):
-        np.testing.assert_array_equal(
-            map_visibility_frequencies_to_image(
-                [1e9 + 0.0001], [1e9], matching="exact"
-            ),
-            [0],
-        )
-
-    def test_unknown_policy_rejected(self):
-        with self.assertRaisesRegex(ValueError, "matching"):
-            map_visibility_frequencies_to_image([1e9], [1e9], matching="unknown")
-
-
 if __name__ == "__main__":
     unittest.main()
-
-
-def test_frequency_policy_validation_is_shared(monkeypatch):
-    from astroviper.processing_functions.imaging.config_check import (
-        param_check_residual_update,
-    )
-    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-        map_visibility_frequencies_to_image,
-    )
-
-    calls = []
-    original = param_check_residual_update.check_frequency_matching
-
-    def record(value, **kwargs):
-        calls.append(value)
-        return original(value, **kwargs)
-
-    monkeypatch.setattr(param_check_residual_update, "check_frequency_matching", record)
-    map_visibility_frequencies_to_image([1], [1], matching="exact")
-    map_visibility_frequencies_to_image([1], [1], matching="exact", input_checked=True)
-    assert calls == ["exact"]
-    with pytest.raises(ValueError, match="finite"):
-        map_visibility_frequencies_to_image([float("nan")], [1], input_checked=True)

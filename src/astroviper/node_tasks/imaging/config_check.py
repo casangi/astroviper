@@ -30,10 +30,8 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
     produced or loaded by the imaging tasks.
     """
     import numpy as np
+    from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
 
-    from astroviper.processing_functions.imaging.config_check._common import (
-        selected_frequency_mask,
-    )
     from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
         check_input_metadata,
         check_selected_fields,
@@ -64,20 +62,10 @@ def preflight_imaging_inputs(processing_set, config, *, mode):
         source = child.ds if hasattr(child, "ds") else child
         check_input_metadata(source, config, mode=mode, measurement_set=ms_name)
         frequencies = np.asarray(source.frequency.values)
+        image_channels = map_to_nearest_coordinate(frequencies, requested_frequencies)
+        indices = np.flatnonzero(image_channels >= 0)
         if mode.imaging_kind == "cube":
-            from graphviper.graph_tools.coordinate_utils import (
-                map_to_nearest_coordinate,
-            )
-
-            image_channels = map_to_nearest_coordinate(
-                frequencies, requested_frequencies
-            )
-            indices = np.flatnonzero(image_channels >= 0)
             output_channels.extend(image_channels[indices].tolist())
-        else:
-            indices = np.flatnonzero(
-                selected_frequency_mask(frequencies, requested_frequencies, mode=mode)
-            )
         if not indices.size:
             continue
         correlation_selection(source.polarization.values, correlation_coords, ms_name)

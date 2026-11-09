@@ -403,25 +403,21 @@ def test_later_plane_hessian_failure_precedes_every_clean_update():
     xr.testing.assert_identical(image, snapshot)
 
 
-def test_frequency_lookup_matches_dense_comparison_without_changing_coordinates():
+def test_frequency_lookup_uses_nearest_channels_without_changing_coordinates():
     from astroviper.processing_functions.imaging.config_check._common import (
         selected_frequency_mask,
     )
 
-    frequencies = np.array([1.2e9, 1e9, 1.1e9 + 1e-4, 1.3e9])
-    requested = np.array([1.1e9, 1e9, 1.1e9])
+    frequencies = np.array([0.96e9, 1.04e9, 1.16e9, 1.24e9, 1.26e9])
+    requested = np.array([1.0e9, 1.1e9, 1.2e9])
     original = requested.copy()
-    expected = np.isclose(
-        frequencies[:, None], requested[None, :], rtol=1e-12, atol=0
-    ).any(axis=1)
+    expected = np.array([True, True, True, True, False])
     np.testing.assert_array_equal(
-        selected_frequency_mask(frequencies, requested, mode=CONTINUUM_SINGLE_FIELD),
+        selected_frequency_mask(frequencies, requested),
         expected,
     )
     np.testing.assert_array_equal(requested, original)
-    assert not selected_frequency_mask(
-        frequencies, [], mode=CONTINUUM_SINGLE_FIELD
-    ).any()
+    assert not selected_frequency_mask(frequencies, []).any()
 
 
 def test_small_uncoupled_taylor_moment_does_not_warn_about_order_zero(

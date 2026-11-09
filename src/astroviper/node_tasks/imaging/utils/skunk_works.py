@@ -604,7 +604,7 @@ def load_processing_set_skunk_works(
         # kHz apart, so their frequencies never equal the image's exactly.
         try:
             frequency_map = map_visibility_frequencies_to_image(
-                child_frequency_values, task_frequency_values, input_checked=True
+                child_frequency_values, task_frequency_values
             )
         except ValueError as exc:
             raise ValueError(

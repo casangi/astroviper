@@ -193,8 +193,8 @@ def imaging_weighting_scope(params, *, mode):
     return "local"
 
 
-def selected_frequency_mask(frequencies, requested_frequencies, *, mode):
-    """Select source channels with the policy of the requested imaging mode.
+def selected_frequency_mask(frequencies, requested_frequencies):
+    """Select source channels assigned to requested image frequencies.
 
     Parameters
     ----------
@@ -202,8 +202,6 @@ def selected_frequency_mask(frequencies, requested_frequencies, *, mode):
         One-dimensional source channel coordinates in Hz.
     requested_frequencies : array-like
         Requested image or execution-block frequencies in Hz.
-    mode : ImagingMode
-        Cube nearest-channel selection or continuum matching within rtol=1e-12.
 
     Returns
     -------
@@ -212,9 +210,9 @@ def selected_frequency_mask(frequencies, requested_frequencies, *, mode):
 
     Notes
     -----
-    Cube imaging includes the nearest-channel half cells, allowing shifted
-    execution blocks and channel averaging. Continuum retains its exact
-    frequency selection. Neither policy changes the supplied coordinates.
+    Cube and continuum imaging use the same nearest-channel half cells, allowing
+    shifted execution blocks and channel averaging. The supplied coordinates are
+    not changed.
     """
     import numpy as np
 
@@ -222,20 +220,10 @@ def selected_frequency_mask(frequencies, requested_frequencies, *, mode):
     requested = np.asarray(requested_frequencies)
     if not frequencies.size or not requested.size:
         return np.zeros(frequencies.shape, dtype=bool)
-    if mode.imaging_kind == "cube":
-        from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
 
-        return map_to_nearest_coordinate(frequencies, requested) >= 0
+    from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
 
-    # Exact continuum selection uses a sorted lookup rather than a channel-pair
-    # matrix. Sorting this private array preserves the caller's coordinates.
-    requested = np.sort(requested)
-    position = np.searchsorted(requested, frequencies)
-    lower = requested[np.clip(position - 1, 0, requested.size - 1)]
-    upper = requested[np.clip(position, 0, requested.size - 1)]
-    return np.isclose(frequencies, lower, rtol=1e-12, atol=0) | np.isclose(
-        frequencies, upper, rtol=1e-12, atol=0
-    )
+    return map_to_nearest_coordinate(frequencies, requested) >= 0
 
 
 def check_continuum_mode(value):
