@@ -1800,15 +1800,23 @@ def finalize_mvc_taylor_normal_equations(
         # Apply the spatially varying preconditioner Abar C G^-1 to the
         # exact-gradient numerator u. Pixels with too few supported channels
         # retain only the scalar Taylor-zero solution.
+        taylor_dims = ("time", "taylor_term", "polarization", "l", "m")
+        moment_dims = (
+            "time",
+            "psf_taylor_order",
+            "polarization",
+            "l",
+            "m",
+        )
         pixel_dims = ("time", "polarization", "l", "m")
         numerator = contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].transpose(
-            *pixel_dims, "taylor_term"
+            *taylor_dims
         )
         n_taylor_terms = numerator.sizes["taylor_term"]
         hankel = np.add.outer(np.arange(n_taylor_terms), np.arange(n_taylor_terms))
         beam_squared = (
             contributions["MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM"]
-            .transpose(*pixel_dims, "psf_taylor_order")
+            .transpose(*moment_dims)
             .values
         )
         supported = valid_effective_pb.transpose(*pixel_dims).values
@@ -1830,24 +1838,33 @@ def finalize_mvc_taylor_normal_equations(
                 contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"] >= n_taylor_terms
             )
         determined = supported & channel_support.transpose(*pixel_dims).values
-        gram = beam_squared[..., hankel]
+        # Keep xarray and persistent NumPy products in canonical
+        # spectral-before-polarization order. Only these private solver views
+        # move the Taylor axes to the end as required by np.linalg.solve.
+        gram = np.moveaxis(beam_squared[:, hankel, ...], (1, 2), (-2, -1))
         gram[~determined] = np.eye(n_taylor_terms)
+        numerator_solver = np.moveaxis(numerator.values, 1, -1)
         coefficients = np.linalg.solve(
             gram,
-            np.where(determined[..., None], numerator.values, 0.0)[..., None],
+            np.where(determined[..., None], numerator_solver, 0.0)[..., None],
         )[..., 0]
-        flat = supported & ~determined & (beam_squared[..., 0] > 0.0)
-        coefficients[flat, 0] = numerator.values[flat, 0] / beam_squared[flat, 0]
+        flat = supported & ~determined & (beam_squared[:, 0] > 0.0)
+        np.divide(
+            numerator_solver[..., 0],
+            beam_squared[:, 0],
+            out=coefficients[..., 0],
+            where=flat,
+        )
         spectral_moments = (
             (contributions["MVC_RESIDUAL_WEIGHT_TAYLOR_SUM"] / residual_sum)
-            .transpose("time", "polarization", "psf_taylor_order")
-            .values[..., hankel]
+            .transpose("time", "psf_taylor_order", "polarization")
+            .values[:, hankel, :]
         )
         residual_taylor = xr.where(
             valid_effective_pb,
             effective_primary_beam
             * contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"].copy(
-                data=np.einsum("tpij,tplmj->tiplm", spectral_moments, coefficients)
+                data=np.einsum("tijp,tplmj->tiplm", spectral_moments, coefficients)
             ),
             0.0,
         )
@@ -2038,20 +2055,12 @@ def _fit_primary_beam_taylor(
 
     taylor_orders = np.arange(nterms)
     hankel = np.add.outer(taylor_orders, taylor_orders)
-    gram = np.asarray(
-        moments.transpose("time", "polarization", "psf_taylor_order").values[
-            ..., hankel
-        ],
-        dtype=np.float64,
-    )
-    rhs = np.asarray(
-        numerator.transpose("time", "polarization", "taylor_term", "l", "m").values,
-        dtype=np.float64,
-    )
+    gram = np.asarray(moments.values[:, hankel, :], dtype=np.float64)
+    rhs = np.asarray(numerator.values, dtype=np.float64)
     coefficients = np.empty_like(rhs)
     for time_index in range(rhs.shape[0]):
-        for polarization_index in range(rhs.shape[1]):
-            matrix = gram[time_index, polarization_index]
+        for polarization_index in range(rhs.shape[2]):
+            matrix = gram[time_index, :, :, polarization_index]
             if nterms == 1:
                 frequency_scale = 1.0
             else:
@@ -2082,7 +2091,7 @@ def _fit_primary_beam_taylor(
             with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
                 scaled_matrix = matrix / frequency_scale**hankel
                 scaled_rhs = (
-                    rhs[time_index, polarization_index].reshape(nterms, -1)
+                    rhs[time_index, :, polarization_index].reshape(nterms, -1)
                     / coefficient_scale[:, None]
                 )
             if not np.all(np.isfinite(scaled_matrix)) or not np.all(
@@ -2115,19 +2124,17 @@ def _fit_primary_beam_taylor(
                     "non-finite coefficients for "
                     f"time={time_index}, polarization={polarization_index}."
                 )
-            coefficients[time_index, polarization_index] = fitted_coefficients.reshape(
-                rhs.shape[2:]
+            coefficients[time_index, :, polarization_index] = (
+                fitted_coefficients.reshape(rhs.shape[3:])
             )
 
-    supported = np.isfinite(coefficients[:, :, 0]) & (
-        coefficients[:, :, 0] >= primary_beam_limit
+    supported = np.isfinite(coefficients[:, 0]) & (
+        coefficients[:, 0] >= primary_beam_limit
     )
-    coefficients = np.where(supported[:, :, None], coefficients, np.nan)
+    coefficients = np.where(supported[:, None], coefficients, np.nan)
     coefficients = coefficients.astype(numerator.dtype, copy=False)
 
-    result = numerator.copy(
-        data=coefficients.transpose(0, 2, 1, 3, 4),
-    )
+    result = numerator.copy(data=coefficients)
     result.name = "PRIMARY_BEAM_TAYLOR"
     result.attrs = {
         "description": (
