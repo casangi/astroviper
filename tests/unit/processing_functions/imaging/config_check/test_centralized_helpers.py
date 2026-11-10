@@ -120,15 +120,15 @@ def test_source_units_use_the_shared_metadata_check():
         check_input_metadata(source, {}, mode=CUBE_SINGLE_FIELD)
 
 
-def test_append_validates_legacy_nested_mode_before_product_access():
+def test_append_validates_top_level_mode_before_product_access():
     module = importlib.import_module(
         "astroviper.node_tasks.imaging.image_continuum_single_field"
     )
     params = {
+        "continuum_mode": "typo",
         "image_params": {
             "n_taylor_terms": 1,
             "reference_frequency": 1e9,
-            "continuum_mode": "typo",
         },
     }
     with pytest.raises(ValueError, match="continuum_mode"):

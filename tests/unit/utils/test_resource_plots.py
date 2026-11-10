@@ -142,6 +142,9 @@ def test_application_task_stream_plots_every_graph(tmp_path):
     graph_two["start_unixtime"] = graph_two["start_unixtime"].map(
         lambda value: value + 40
     )
+    finalization = _monitored_frame(n_tasks=1)
+    finalization["hostname"] = "worker"
+    finalization["start_unixtime"] += 80
     result = {
         "timing_graphs": [
             {
@@ -160,14 +163,24 @@ def test_application_task_stream_plots_every_graph(tmp_path):
                 "compute_end_unixtime": graph_two.start_unixtime.max() + 20,
                 "T_compute": 28.0,
             },
+            {
+                "stage": "restoration",
+                "stage_kind": "final",
+                "includes_restoration": True,
+                "timing_finalization": finalization,
+                "compute_start_unixtime": finalization.start_unixtime.min() - 1,
+                "compute_end_unixtime": finalization.start_unixtime.max() + 10,
+                "T_compute": 11.0,
+            },
         ]
     }
     output = tmp_path / "application_task_stream.png"
     figure = plot_application_task_stream(result, save_path=output)
     assert figure is not None
-    assert len(figure.axes) == 2
+    assert len(figure.axes) == 3
     assert "global weight density" in figure.axes[0].get_title(loc="left")
     assert "imaging cycle 1" in figure.axes[1].get_title(loc="left")
+    assert "restoration" in figure.axes[2].get_title(loc="left")
     assert "reduce / gather" in {text.get_text() for text in figure.axes[0].texts}
     assert "reduce + model update" in {text.get_text() for text in figure.axes[1].texts}
     assert output.exists()

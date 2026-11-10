@@ -685,8 +685,6 @@ def _install_static_continuum_products(
         "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
         "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
     ]
-    if "PRIMARY_BEAM_TAYLOR" in static_xds:
-        static_variable_names.append("PRIMARY_BEAM_TAYLOR")
 
     # Requested MFS sampling grids are static PSF products too. Ordinary
     # runs omit them, avoiding additional persistent grid-sized buffers.
@@ -750,8 +748,6 @@ def _install_static_continuum_products(
             ),
         }
     )
-    if "PRIMARY_BEAM_TAYLOR" in static_xds:
-        residual_group["primary_beam_taylor"] = "PRIMARY_BEAM_TAYLOR"
 
     if "UV_SAMPLING" in static_xds:
         from astroviper.utils.data_group_tools import modify_data_groups_xds
@@ -1059,7 +1055,8 @@ def residual_update_continuum_single_field(
     normalizes and inverse-transforms its exclusively owned channel grids,
     applies the channel primary-beam convention, and forms additive Taylor
     numerators locally. Polarization conversion, final global normalization,
-    the model update, and restoration remain append operations.
+    and the model update remain append operations; restoration runs once in
+    the finalization node.
 
     The MFS dataset typically contains
 
@@ -1077,7 +1074,8 @@ def residual_update_continuum_single_field(
     ``local_beam_moments``, the additive moments of the per-pixel spectral fit
     (``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``,
     ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``, ``MVC_RESIDUAL_BEAM_CHANNEL_COUNT``).
-    The append node caches those moments for later cycles. During the first
+    The global append caches those moments for later cycles, replacing the
+    channel counts with Boolean Taylor-order support. During the first
     imaging cycle the map task also returns the additive Taylor PSF numerator,
     PSF weight sum, weighted PB sum, PB Taylor numerator, and PB-fit weight
     moments.
@@ -1085,7 +1083,8 @@ def residual_update_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
@@ -1250,8 +1249,10 @@ def residual_update_continuum_single_field(
         Indicates whether this is the first imaging cycle.
 
     make_primary_beam_taylor : bool, optional
-        Whether MFS should form the additive primary-beam Taylor-fit
-        contributions needed by restoration. Default true.
+        Collect the first-cycle inputs needed for primary-beam Taylor products.
+        Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,
+        fit the globally reduced beam in the first append node, and keep the
+        fitted diagnostic outside the iterative image and static cache.
 
     model_uv_xds : xarray.Dataset, optional
         Precomputed Taylor-domain model visibility grids used for degridding.
@@ -2508,8 +2509,9 @@ def _prepare_continuum_image(
     global normalization and constructs the effective primary beam.
 
     MFS retains its direct Taylor-weighted PSF path.  MVC constructs its Taylor
-    PSFs from the channel PSF cube.  Both are fitted only during the first major
-    cycle; later cycles reinstall the cached static products.
+    PSFs from the channel PSF cube. Both restoring beams are fitted only during
+    the first imaging cycle; later cycles reinstall the cached static products.
+    Primary-beam Taylor polynomials are not installed in iterative images.
 
     Parameters
     ----------
@@ -2522,8 +2524,8 @@ def _prepare_continuum_image(
 
     initialize_static_products : bool
         If true, construct and cache the global PSF, restoring-beam fit, and
-        primary-beam products. This should be true only for the first major
-        cycle.
+        reference/common primary beam. This is true only for the first imaging
+        cycle. Globally reduced MVC counts become fixed-order Boolean support.
 
     input_checked : bool, optional
         Skip residual configuration checks performed by an upper layer.
@@ -2560,8 +2562,6 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         check_continuum_taylor_layout,
         finalize_mvc_taylor_normal_equations,
-        fit_mfs_primary_beam_taylor,
-        fit_mvc_primary_beam_taylor,
         point_spread_function_gaussian_fit_continuum,
     )
 
@@ -2575,10 +2575,7 @@ def _prepare_continuum_image(
     reference_frequency = config["reference_frequency"]
     image_data_group_name = config["image_data_group_in_name"]
 
-    continuum_mode = input_params.get(
-        "continuum_mode", image_params.get("continuum_mode", "mfs")
-    )
-    make_primary_beam_taylor = bool(input_params.get("make_primary_beam_taylor", True))
+    continuum_mode = input_params.get("continuum_mode", "mfs")
     mvc_model_update_approximation = input_params.get(
         "mvc_model_update_approximation",
         "local_beam_moments",
@@ -2642,17 +2639,22 @@ def _prepare_continuum_image(
                 "placeholder": False,
             }
         )
-        primary_beam_taylor = None
-        if initialize_static_products and make_primary_beam_taylor:
-            primary_beam_taylor = fit_mfs_primary_beam_taylor(
-                img_xds,
-                primary_beam_limit=float(input_params.get("primary_beam_limit", 0.2)),
-            )
 
     elif continuum_mode == "mvc":
-        primary_beam_taylor = None
-        if initialize_static_products:
-            primary_beam_taylor = fit_mvc_primary_beam_taylor(img_xds)
+        if (
+            initialize_static_products
+            and mvc_model_update_approximation == "local_beam_moments"
+        ):
+            # Counts must remain additive through every reduce level. Once the
+            # global reduction is complete, later cycles only need count >= N.
+            img_xds["MVC_RESIDUAL_BEAM_SUPPORTED"] = (
+                img_xds["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"] >= n_taylor_terms
+            )
+            img_xds["MVC_RESIDUAL_BEAM_SUPPORTED"].attrs = {
+                "n_taylor_terms": n_taylor_terms,
+                "description": "At least n_taylor_terms positive-weight channels above the PB cutoff.",
+            }
+            img_xds = img_xds.drop_vars("MVC_RESIDUAL_BEAM_CHANNEL_COUNT")
         effective_primary_beam = None
         if not initialize_static_products:
             if "static_xds" not in input_params:
@@ -2703,10 +2705,6 @@ def _prepare_continuum_image(
             img_xds.attrs["data_groups"][image_data_group_name][
                 "point_spread_function"
             ] = "POINT_SPREAD_FUNCTION"
-            img_xds["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
-            img_xds.attrs["data_groups"][image_data_group_name][
-                "primary_beam_taylor"
-            ] = "PRIMARY_BEAM_TAYLOR"
 
         # ----------------------------------------------------------
         # Construct the effective PB used only by the model update.
@@ -2851,11 +2849,6 @@ def _prepare_continuum_image(
                 reference_frequency=reference_frequency,
                 image_data_group_name=image_data_group_name,
             )
-            if make_primary_beam_taylor:
-                img_xds["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
-                img_xds.attrs["data_groups"][image_data_group_name][
-                    "primary_beam_taylor"
-                ] = "PRIMARY_BEAM_TAYLOR"
 
         elif continuum_mode == "mvc":
             # MVC already constructed PRIMARY_BEAM immediately after the
@@ -2891,8 +2884,6 @@ def _prepare_continuum_image(
             "POINT_SPREAD_FUNCTION",
             "PRIMARY_BEAM",
         )
-        if continuum_mode == "mvc" or make_primary_beam_taylor:
-            static_image_variable_names += ("PRIMARY_BEAM_TAYLOR",)
         static_image_variable_names += (
             "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
             "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
@@ -3383,10 +3374,11 @@ def continuum_cycle_append_node(
     5. updates the automatic mask with ``input_params["auto_mask_params"]``;
     6. checks convergence on the refreshed residual without consuming budgets;
     7. either updates the model and prepares its state for the next graph, or
-       finalizes the accumulated model using this same prepared residual.
+       returns the verified residual for the separate finalization graph.
 
-    The graph topology stays fixed: the append chooses the branch at runtime.
-    Optional restoration follows refreshed-residual stopping confirmation.
+    Restoration-only products and unchanged static state return only in cycle
+    one. Later cycle graphs receive only the static quantities used by imaging.
+    Finalization/restoration runs once after refreshed-residual stopping.
 
     The accumulated image-domain model and the optional Fourier-domain MFS model
     are returned to the distributed application as state objects. The application
@@ -3463,6 +3455,29 @@ def continuum_cycle_append_node(
         "pb_xds",
         fallback=input_params.get("pb_cache_mapping"),
     )
+
+    restoration_xds = None
+    if is_first_cycle:
+        continuum_mode = input_params.get("continuum_mode", "mfs")
+        if continuum_mode == "mfs" and input_params.get(
+            "make_primary_beam_taylor", False
+        ):
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                fit_mfs_primary_beam_taylor,
+            )
+
+            restoration_xds = fit_mfs_primary_beam_taylor(
+                input_data["image"],
+                primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
+            ).to_dataset()
+        elif continuum_mode == "mvc":
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                fit_mvc_primary_beam_taylor,
+            )
+
+            restoration_xds = fit_mvc_primary_beam_taylor(
+                input_data["image"]
+            ).to_dataset()
 
     (
         img_xds,
@@ -3635,16 +3650,13 @@ def continuum_cycle_append_node(
             observed_visibility_grid_mapping
         )
 
-    if return_dict.get("residual_converged", False):
-        finalize_params = dict(input_params)
-        finalize_params.update(
-            prepared_continuum_image=True, static_xds=static_xds, model_xds=model_xds
-        )
-        return_dict = continuum_finalize_node(
-            return_dict, finalize_params, input_checked=True
-        )
+    if is_first_cycle:
+        return_dict["static_xds"] = static_xds
+        if restoration_xds is not None:
+            return_dict["restoration_xds"] = restoration_xds
+    else:
+        return_dict.pop("static_xds", None)
 
-    return_dict["static_xds"] = static_xds
     return_dict["timing_psf_fit"] = (
         None if psf_fit_return_df is None else psf_fit_return_df.reset_index(drop=True)
     )
@@ -3683,8 +3695,9 @@ def continuum_finalize_node(
     Returns
     -------
     dict
-        Final in-memory image, model and static state, convergence metadata,
-        caches, and restoration/PSF timing records.
+        Final in-memory image and model, any supplied convergence metadata and
+        caches, and restoration timing records. Unchanged static state is not
+        returned.
     """
 
     checked = input_checked or input_params.get("input_checked", False)
@@ -3697,6 +3710,12 @@ def continuum_finalize_node(
 
         check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
         check_driver_workflow(input_params, mode=CONTINUUM_SINGLE_FIELD)
+
+    import time
+
+    import pandas as pd
+
+    finalization_start = time.time()
 
     from astroviper.utils.data_group_tools import modify_data_groups_xds
 
@@ -3726,23 +3745,36 @@ def continuum_finalize_node(
         )
 
     model_xds = input_params["model_xds"]
-
-    if "SKY_MODEL" not in model_xds:
-        raise KeyError("model_xds does not contain 'SKY_MODEL'.")
-
-    if "SKY_MODEL" in img_xds:
-        img_xds = img_xds.drop_vars("SKY_MODEL")
-
-    img_xds["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
-
-    modify_data_groups_xds(
-        img_xds,
-        data_group_out_name="model",
-        data_group_out={
-            "sky": "SKY_MODEL",
-        },
-        description="Accumulated continuum model installed for final restoration.",
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        install_continuum_model,
     )
+
+    img_xds = install_continuum_model(img_xds, model_xds)
+
+    beam_fit_start = time.time()
+    restoration_xds = input_params.get("restoration_xds")
+    if restoration_xds is not None:
+        from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+            transform_polarization_basis,
+        )
+
+        beam_image = restoration_xds.assign(PRIMARY_BEAM=static_xds.PRIMARY_BEAM)
+        beam_image = transform_polarization_basis(
+            beam_image, new_polarization_basis="stokes", overwrite=True
+        )
+        primary_beam_taylor = beam_image.PRIMARY_BEAM_TAYLOR
+        img_xds["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
+        residual_group_name = input_params.get("image_data_group_in_name", "residual")
+        residual_group = dict(img_xds.attrs["data_groups"][residual_group_name])
+        residual_group["primary_beam_taylor"] = "PRIMARY_BEAM_TAYLOR"
+        modify_data_groups_xds(
+            img_xds,
+            data_group_out_name=residual_group_name,
+            data_group_out=residual_group,
+            description="Primary-beam Taylor polynomial installed for final products.",
+        )
+
+    T_primary_beam_taylor = time.time() - beam_fit_start
 
     # restore
     if input_params.get("restore", False):
@@ -3779,12 +3811,20 @@ def continuum_finalize_node(
         input_data["timing_restore"] = None
 
     input_data["image"] = img_xds
-    input_data["static_xds"] = static_xds
+    input_data.pop("static_xds", None)
 
     # Preserve the final accumulated model as a separate driver-visible
     # state object as well as installing it in the output image.
     input_data["model_xds"] = model_xds
 
+    finalization_timing = pd.DataFrame(
+        {
+            "T_image_cube_task": [time.time() - finalization_start],
+            "T_primary_beam_taylor": [T_primary_beam_taylor],
+        }
+    )
+    _add_task_execution_metadata(finalization_timing, finalization_start)
+    input_data["timing_finalization"] = finalization_timing
     return _prepare_continuum_result_for_transfer(input_data)
 
 

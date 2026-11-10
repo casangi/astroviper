@@ -8,36 +8,39 @@ def graph_timing_record(
     *,
     stage_kind,
     includes_restoration=False,
+    timing_key="timing_node_tasks",
 ):
     """Package one graph's compact task stream without changing its result."""
     if stage_kind not in {"weighting", "imaging_cycle", "final"}:
         raise ValueError(f"Unknown graph timing stage kind {stage_kind!r}.")
-    timing_node_tasks = graph_result.get("timing_node_tasks")
-    if timing_node_tasks is None:
+    if timing_key not in {"timing_node_tasks", "timing_finalization"}:
+        raise ValueError(f"Unknown graph timing frame {timing_key!r}.")
+    timing_frame = graph_result.get(timing_key)
+    if timing_frame is None:
         return None
 
-    timing_node_tasks = timing_node_tasks.copy(deep=True)
-    if "T_image_cube_task" not in timing_node_tasks:
+    timing_frame = timing_frame.copy(deep=True)
+    if "T_image_cube_task" not in timing_frame:
         for total_column in (
             "T_weight_density_node",
             "T_imaging_weight_degrid_node",
         ):
-            if total_column in timing_node_tasks:
-                timing_node_tasks["T_image_cube_task"] = timing_node_tasks[total_column]
+            if total_column in timing_frame:
+                timing_frame["T_image_cube_task"] = timing_frame[total_column]
                 break
-    if "T_make_empty_image" not in timing_node_tasks:
-        timing_node_tasks["T_make_empty_image"] = 0.0
-    if "T_load" not in timing_node_tasks:
-        timing_node_tasks["T_load"] = 0.0
-    if "T_write" not in timing_node_tasks:
+    if "T_make_empty_image" not in timing_frame:
+        timing_frame["T_make_empty_image"] = 0.0
+    if "T_load" not in timing_frame:
+        timing_frame["T_load"] = 0.0
+    if "T_write" not in timing_frame:
         write_columns = [
-            column for column in timing_node_tasks if column.startswith("T_write_")
+            column for column in timing_frame if column.startswith("T_write_")
         ]
-        timing_node_tasks["T_write"] = (
-            timing_node_tasks[write_columns].sum(axis=1) if write_columns else 0.0
+        timing_frame["T_write"] = (
+            timing_frame[write_columns].sum(axis=1) if write_columns else 0.0
         )
 
-    timing_node_tasks = timing_node_tasks.drop(
+    timing_frame = timing_frame.drop(
         columns=[
             "time_seconds",
             "cpu_percent",
@@ -62,7 +65,7 @@ def graph_timing_record(
         "stage": stage,
         "stage_kind": stage_kind,
         "includes_restoration": bool(includes_restoration),
-        "timing_node_tasks": timing_node_tasks,
+        timing_key: timing_frame,
         "compute_start_unixtime": graph_timings.get("compute_start_unixtime"),
         "compute_end_unixtime": graph_timings.get("compute_end_unixtime"),
         "T_compute": compute_duration,

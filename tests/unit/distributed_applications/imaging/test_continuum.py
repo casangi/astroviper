@@ -545,19 +545,40 @@ def test_graph_timing_record_retains_model_update_timing():
     assert record["timing_model_update"] is not model_timing
 
 
+def test_graph_timing_record_keeps_finalization_out_of_map_tasks():
+    """The final node remains plottable without becoming a map-task row."""
+    finalization = pd.DataFrame({"T_image_cube_task": [4.0]})
+    record = _graph_timing_record(
+        "restoration",
+        {"timing_finalization": finalization},
+        {"T_compute_dask_graph": 5.0},
+        stage_kind="final",
+        includes_restoration=True,
+        timing_key="timing_finalization",
+    )
+
+    assert "timing_node_tasks" not in record
+    pd.testing.assert_frame_equal(
+        record["timing_finalization"][["T_image_cube_task"]], finalization
+    )
+
+
 def test_combine_graph_timing_frames_includes_every_graph():
     """Summary input contains tasks from weighting and every imaging cycle."""
     records = [
         {"timing_node_tasks": pd.DataFrame({"stage_value": [1.0, 2.0]})},
         {"timing_node_tasks": pd.DataFrame({"stage_value": [3.0]})},
         {"timing_model_update": pd.DataFrame({"T_model_update": [4.0]})},
+        {"timing_finalization": pd.DataFrame({"T_image_cube_task": [5.0]})},
     ]
 
     node_timing = _combine_graph_timing_frames(records, "timing_node_tasks")
     model_timing = _combine_graph_timing_frames(records, "timing_model_update")
+    final_timing = _combine_graph_timing_frames(records, "timing_finalization")
 
     assert node_timing.stage_value.tolist() == [1.0, 2.0, 3.0]
     assert model_timing.T_model_update.tolist() == [4.0]
+    assert final_timing.T_image_cube_task.tolist() == [5.0]
     assert _combine_graph_timing_frames([], "timing_node_tasks") is None
 
 
@@ -1741,11 +1762,22 @@ def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
     )
 
     assert result["n_cycles"] == 2
-    assert len(result["timing_graphs"]) == result["n_cycles"] + 1
+    expected_final_graphs = 1 if continuum_mode == "mvc" else 0
+    assert (
+        len(result["timing_graphs"]) == result["n_cycles"] + 1 + expected_final_graphs
+    )
     assert result["timing_graphs"][0]["stage"].startswith("imaging cycle 1")
-    assert result["timing_graphs"][-1]["stage"] == "final residual"
-    assert result["timing_graphs"][-1]["stage_kind"] == "final"
-    assert result["timing_graphs"][-1]["includes_restoration"] is False
+    assert result["timing_graphs"][-1 - expected_final_graphs]["stage"] == (
+        "final residual"
+    )
+    if continuum_mode == "mvc":
+        assert result["timing_graphs"][-1]["stage"] == "finalization"
+        assert result["timing_graphs"][-1]["stage_kind"] == "final"
+        assert result["timing_graphs"][-1]["includes_restoration"] is False
+        assert "timing_finalization" in result["timing_graphs"][-1]
+        assert "timing_node_tasks" not in result["timing_graphs"][-1]
+    else:
+        assert "T_install_final_model" in result["timing_distributed_application"]
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.SKY_MODEL.values).all()
@@ -2204,7 +2236,7 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     )
 
     assert result["n_cycles"] == 2
-    assert len(result["timing_graphs"]) == result["n_cycles"] + 3
+    assert len(result["timing_graphs"]) == result["n_cycles"] + 4
     assert [record["stage"] for record in result["timing_graphs"][:2]] == [
         "global weight density",
         "global weight degridding",
@@ -2213,7 +2245,8 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
         "weighting",
         "weighting",
     ]
-    assert result["timing_graphs"][-1]["stage"] == "final residual + restoration"
+    assert result["timing_graphs"][-2]["stage"] == "final residual"
+    assert result["timing_graphs"][-1]["stage"] == "restoration"
     assert result["timing_graphs"][-1]["stage_kind"] == "final"
     assert result["timing_graphs"][-1]["includes_restoration"] is True
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
@@ -2805,7 +2838,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         IMAGING_MAX_CYCLES if max_iter == 100 else IMAGING_MAX_ITER
     )
     assert result["controller"].cycles_done == result["n_cycles"] == expected_updates
-    assert len(result["timing_graphs"]) == expected_updates + 1
+    assert len(result["timing_graphs"]) == expected_updates + 2
     assert result["controller"].total_iter_done > 0
     assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8
     assert result["residual_statistics"].data

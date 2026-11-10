@@ -286,6 +286,49 @@ def test_airy_disk_rorder_versions_agree():
     np.testing.assert_allclose(pb_v1, pb_v2, atol=1e-4)
 
 
+@pytest.mark.parametrize("lookup_frequency_max", [[1.1e11], np.nan, np.inf])
+def test_airy_disk_rejects_non_scalar_or_non_finite_lookup_bound(
+    lookup_frequency_max,
+):
+    """A malformed public lookup bound must not reach interpolation."""
+    with pytest.raises(ValueError, match="must be a finite scalar"):
+        airy_disk_rorder_v2(
+            np.array([1.0e11, 1.1e11]),
+            ["I"],
+            {
+                "list_dish_diameters": np.array([10.7]),
+                "list_blockage_diameters": np.array([0.75]),
+                "ipower": 1,
+            },
+            {
+                "cell_size": np.array([-2.0, 2.0]) * ARCSEC,
+                "image_size": (8, 8),
+                "image_center": (4, 4),
+            },
+            lookup_frequency_max=lookup_frequency_max,
+        )
+
+
+def test_airy_disk_rejects_lookup_bound_below_requested_channel():
+    """A short lookup table must fail rather than clamp the physical beam."""
+    with pytest.raises(ValueError, match="at least the maximum requested"):
+        airy_disk_rorder_v2(
+            np.array([1.0e11, 1.1e11]),
+            ["I"],
+            {
+                "list_dish_diameters": np.array([10.7]),
+                "list_blockage_diameters": np.array([0.75]),
+                "ipower": 1,
+            },
+            {
+                "cell_size": np.array([-2.0, 2.0]) * ARCSEC,
+                "image_size": (8, 8),
+                "image_center": (4, 4),
+            },
+            lookup_frequency_max=1.05e11,
+        )
+
+
 def _primary_beam(
     primary_beam_params, frequency_coords=(1.0e9, 1.5e9), cell_arcsec=80.0
 ):

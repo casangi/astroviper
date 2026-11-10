@@ -219,6 +219,7 @@ def _convert_primary_beam_to_reference_frequency(
     image_data_group_in_name="residual",
     make_primary_beam_taylor=True,
     channel_imaging_weight_sums=None,
+    channel_lookup_frequency_max=None,
 ):
     """Build the static and polynomial primary-beam products needed by MFS.
 
@@ -232,10 +233,14 @@ def _convert_primary_beam_to_reference_frequency(
     post-flagging imaging-weight sums ``s_nu`` as the apparent sky. This is the
     CASA ``widebandpbcor`` weighted polynomial fit, with AstroViper deriving its
     ``weightlist`` directly from ``WEIGHT_IMAGING``. This task-local function
-    stores only additive polynomial-fit numerators and spectral moments; the
-    global append node solves the fit after all frequency partitions have been
-    reduced. No channel-sized beam cube is carried through the distributed
-    reduction. Runs without restoration skip that projection.
+    stores additive polynomial-fit numerators and spectral moments. Distributed
+    MFS performs this projection in each first-cycle map task, reduces those
+    additive products, and fits the polynomial in the first append node. Channel
+    beams are evaluated and accumulated one at a time; peak spatial working
+    memory therefore depends on Taylor order, not channel count. The Airy lookup
+    frequency bound is kept fixed across the task to
+    preserve the beam samples of the previous batched evaluation. Runs without
+    restoration skip that projection.
 
     ``n_taylor_terms`` and ``reference_frequency`` are the supplied Taylor basis
     already validated at the setup boundary. Do not infer a different order or
@@ -323,33 +328,66 @@ def _convert_primary_beam_to_reference_frequency(
                 "MFS channel imaging-weight sums must be finite and non-negative."
             )
 
-        channel_data = evaluate_primary_beam(
-            channel_frequencies,
-            img_xds.polarization.values,
-            pb_params,
-            pb_image_params,
-            dtype=float_dtype,
-        )[0]
-        channel_data = np.broadcast_to(
-            channel_data,
-            (img_xds.sizes["time"], *channel_data.shape),
-        )
         x_frequency = (channel_frequencies - reference_frequency) / (
             reference_frequency
         )
         n_moments = 2 * n_taylor_terms - 1
-        numerator = np.stack(
-            [
-                np.sum(
-                    channel_data
-                    * spectral_weights[None, :, :, None, None]
-                    * x_frequency[None, :, None, None, None] ** order,
-                    axis=1,
-                )
-                for order in range(n_taylor_terms)
-            ],
-            axis=1,
+
+        # Accumulate directly into Taylor images. Stream each channel's
+        # beam and reuse one float64 weighted plane across terms/polarizations,
+        # rather than allocating channel x polarization x l x m products.
+        numerator = np.zeros(
+            (
+                img_xds.sizes["time"],
+                n_taylor_terms,
+                img_xds.sizes["polarization"],
+                *pb_image_params["image_size"],
+            ),
+            dtype=np.float64,
         )
+        weighted_beam = np.empty(pb_image_params["image_size"], dtype=np.float64)
+        if channel_lookup_frequency_max is None:
+            channel_lookup_frequency_max = np.full(
+                channel_frequencies.shape, channel_frequencies.max()
+            )
+        else:
+            channel_lookup_frequency_max = np.asarray(
+                channel_lookup_frequency_max, dtype=np.float64
+            )
+            if (
+                channel_lookup_frequency_max.shape != channel_frequencies.shape
+                or not np.all(np.isfinite(channel_lookup_frequency_max))
+                or np.any(channel_lookup_frequency_max < channel_frequencies)
+            ):
+                raise ValueError(
+                    "MFS beam lookup bounds must cover their channel frequencies."
+                )
+        for channel, frequency in enumerate(channel_frequencies):
+            channel_data = evaluate_primary_beam(
+                np.asarray([frequency]),
+                img_xds.polarization.values,
+                pb_params,
+                pb_image_params,
+                dtype=float_dtype,
+                lookup_frequency_max=channel_lookup_frequency_max[channel],
+            )[0, 0]
+            for polarization in range(img_xds.sizes["polarization"]):
+                np.multiply(
+                    channel_data[polarization],
+                    spectral_weights[channel, polarization],
+                    out=weighted_beam,
+                    dtype=np.float64,
+                )
+                for order in range(n_taylor_terms):
+                    numerator[:, order, polarization] += weighted_beam
+                    if order + 1 < n_taylor_terms:
+                        weighted_beam *= x_frequency[channel]
+            # Release this view before evaluating the next channel's beam.
+            del channel_data
+        del weighted_beam
+
+        # These spectral moments have no spatial axes and remain small even
+        # for many channels. Keep their existing reduction and normalization.
         moments = np.stack(
             [
                 np.sum(
@@ -462,7 +500,8 @@ def imaging_setup_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
@@ -538,8 +577,10 @@ def imaging_setup_continuum_single_field(
     image_data_group_out_name : str, optional
         Name of the continuum image data group. Defaults to ``"residual"``.
     make_primary_beam_taylor : bool, optional
-        Whether MFS should evaluate the channel-dependent primary beam and form
-        the additive Taylor-fit contributions used by restoration. Default true.
+        Collect the first-cycle inputs needed for primary-beam Taylor products.
+        Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,
+        fit the globally reduced beam in the first append node, and keep the
+        fitted diagnostic outside the iterative image and static cache.
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -783,9 +824,7 @@ def imaging_setup_continuum_single_field(
         channel_imaging_weight_sums = None
         if make_primary_beam_taylor:
             channel_imaging_weight_sums = _mfs_channel_imaging_weight_sums(
-                ps_xdt,
-                img_xds,
-                processing_set_data_group_name,
+                ps_xdt, img_xds, processing_set_data_group_name
             )
         img_xds = _convert_primary_beam_to_reference_frequency(
             img_xds,

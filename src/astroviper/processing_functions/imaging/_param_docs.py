@@ -135,7 +135,8 @@ _CONTINUUM_DECONVOLVER_DOC = (
 )
 
 _CONTINUUM_MODE_DOC = (
-    'Continuum construction mode. ``"mfs"`` grids Taylor-weighted\n'
+    "Top-level workflow selection; do not place it inside ``image_params``.\n"
+    '``"mfs"`` grids Taylor-weighted\n'
     "visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe\n"
     "the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains\n"
     "both the intrinsic source spectral index and the primary-beam spectral\n"
@@ -158,6 +159,19 @@ _FIELD_NAME_DOC = (
 )
 
 IMAGING_PARAM_DOCS = {
+    "make_primary_beam_taylor": (
+        "Collect the first-cycle inputs needed for primary-beam Taylor products.\n"
+        "Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,\n"
+        "fit the globally reduced beam in the first append node, and keep the\n"
+        "fitted diagnostic outside the iterative image and static cache."
+    ),
+    "lookup_frequency_max": (
+        "Upper frequency in Hz used to build the physical Airy interpolation\n"
+        "table. Supply the maximum frequency of the complete task when evaluating\n"
+        "its channels separately, preserving the same beam samples as a batched\n"
+        "evaluation. None uses the maximum of freq_chan. The CASA Airy model\n"
+        "uses its own per-channel tables and does not need this bound."
+    ),
     "hessian_cache": (
         "Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.\n"
         "Reuse requires matching PSF contents, coordinates, precision, Taylor basis,\n"

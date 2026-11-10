@@ -790,6 +790,7 @@ def test_first_cycle_does_not_rewrite_loaded_global_weights(monkeypatch):
     )
     params = _weight_node_params()
     params.update(
+        make_primary_beam_taylor=False,
         image_store="image.zarr",
         weight_memory_mode="in_place",
         weight_cache_is_active=True,
@@ -831,6 +832,7 @@ def test_residual_update_node_passes_the_gridding_kernel_on(
     params = _weight_node_params()
     params["image_params"]["fft_padding"] = 1.2
     params.update(
+        make_primary_beam_taylor=False,
         image_store="image.zarr",
         weight_memory_mode="in_place",
         weight_cache_is_active=True,
@@ -2009,6 +2011,14 @@ def _acceleration_image(seed, scale=1.0):
     )
 
 
+def _stub_mvc_beam_diagnostic(monkeypatch):
+    monkeypatch.setattr(
+        continuum_processing,
+        "fit_mvc_primary_beam_taylor",
+        lambda image: xr.DataArray(0.0, name="PRIMARY_BEAM_TAYLOR"),
+    )
+
+
 def _run_accelerated_append(
     monkeypatch, input_params, seed=0, converged=False, scale=1.0
 ):
@@ -2016,6 +2026,7 @@ def _run_accelerated_append(
     with ``B z = z / 2``."""
     from astroviper.processing_functions.imaging.utils import CycleController
 
+    _stub_mvc_beam_diagnostic(monkeypatch)
     image = _acceleration_image(seed, scale)
     residual = image.SKY_RESIDUAL.copy(deep=True)
     controller = CycleController(max_iter=100)
@@ -2328,6 +2339,7 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
     ``record_model_update``: the check before it lets both planes continue;
     the model update brings Stokes I to 0.101 (threshold 0.1) and uses up
     Q's ``max_iter``. The controller keeps the codes of the check before."""
+    _stub_mvc_beam_diagnostic(monkeypatch)
     import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
     from astroviper.processing_functions.imaging.utils import (
         CycleController,
@@ -2445,6 +2457,7 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
     model accumulation, with a model update giving ``z = r / 4`` and
     ``B z = z / 2``: the conjugate gradient's first step is ``8 z = 2 r``,
     momentum's second step ``z + mu_2 v``."""
+    _stub_mvc_beam_diagnostic(monkeypatch)
     from astroviper.processing_functions.imaging.utils import (
         CycleController,
         StopCode,

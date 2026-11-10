@@ -34,7 +34,7 @@ from astroviper.utils.continuum_cache import (
 from astroviper.utils.continuum_cache import (
     MFS_VISIBILITY_GRID_CACHE_GROUP as _MFS_VISIBILITY_GRID_CACHE_GROUP,
 )
-from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
+from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_ADDITIVE_VARIABLES
 from astroviper.utils.continuum_cache import (
     MVC_VISIBILITY_GRID_CACHE_GROUP as _MVC_VISIBILITY_GRID_CACHE_GROUP,
 )
@@ -107,6 +107,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
         "FINAL OUTPUT",
         None,
         [
+            ("install final model", "T_install_final_model"),
             ("write final continuum image", "T_write_final_image"),
             ("consolidate metadata", "T_consolidate_metadata"),
         ],
@@ -827,6 +828,50 @@ def compute_continuum_graph(
     return graph_result, timings
 
 
+def compute_continuum_finalization_graph(input_data, input_params):
+    """Run one final node after residual convergence, without visibility I/O.
+
+    Restoration-only state enters this graph once. Intermediate imaging graphs
+    neither receive it nor return the unchanged static cache after cycle one.
+
+    Parameters
+    ----------
+    input_data : dict
+        Verified final image, without iterative cache payloads.
+    input_params : dict
+        Accumulated model, final beam-fit inputs, and restoration controls.
+
+    Returns
+    -------
+    result : dict
+        Finalized image, model, and node timing records.
+    timings : dict
+        Graph construction and execution timings.
+    """
+    import time
+
+    import dask
+
+    import astroviper.node_tasks as node_tasks
+
+    start = time.time()
+    task = dask.delayed(node_tasks.imaging.continuum_finalize_node, pure=False)(
+        input_data,
+        input_params,
+        input_checked=True,
+    )
+    timings = {
+        "T_create_map_reduce_append_graph": time.time() - start,
+        "T_generate_dask_graph": 0.0,
+    }
+    start = time.time()
+    timings["compute_start_unixtime"] = start
+    result = dask.compute(task)[0]
+    timings["compute_end_unixtime"] = time.time()
+    timings["T_compute_dask_graph"] = timings["compute_end_unixtime"] - start
+    return result, timings
+
+
 def prepare_continuum_imaging_weights_global(
     *,
     ps_xdt,
@@ -1271,15 +1316,17 @@ def combine_continuum_chunks(input_data, input_params):
     ``MVC_PRIMARY_BEAM_TAYLOR_NUMERATOR``, and
     ``MVC_PRIMARY_BEAM_FIT_WEIGHT_MOMENTS``. For ``local_beam_moments`` it also
     reduces the squared-beam moments, beam-free spectral moments, and valid
-    channel count in that first cycle. The append node caches these static
-    quantities, so later cycles neither recreate nor reduce their image-sized
-    arrays. None of these products has a frequency dimension.
+    channel count in that first cycle. After the complete reduction, the append
+    caches Boolean channel support together with the fixed spectral moments.
+    None of those MVC products has a frequency dimension.
 
     MFS also carries ``PRIMARY_BEAM_REFERENCE`` with dimensions
-    ``(time, polarization, l, m)`` as a non-additive static product. On the
-    first cycle it additively reduces ``MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR`` and
-    ``MFS_PRIMARY_BEAM_FIT_MOMENTS`` so the append node can fit the wideband PB
-    polynomial without reducing a channel-sized beam cube.
+    ``(time, polarization, l, m)`` as a non-additive static product. When
+    restoration is requested, first-cycle map tasks additionally form the
+    additive ``MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR`` and
+    ``MFS_PRIMARY_BEAM_FIT_MOMENTS``. The first append node fits their globally
+    reduced polynomial and keeps that final-only diagnostic outside subsequent
+    iterative graphs.
 
     All remaining dataset variables (for example metadata, coordinates, primary
     beam products, and other non-additive quantities) are copied from the first
@@ -1363,18 +1410,9 @@ def combine_continuum_chunks(input_data, input_params):
     if not input_data:
         raise ValueError("combine_continuum_chunks received no inputs.")
 
-    # Extract the continuum_mode
-    continuum_mode = input_params.get("continuum_mode")
-
-    if continuum_mode is None:
-        continuum_mode = (
-            input_data[0]["image"]
-            .attrs.get(
-                "continuum_imaging",
-                {},
-            )
-            .get("continuum_mode", "mfs")
-        )
+    # Execution policy comes only from the reduce-stage parameters. Image
+    # metadata records how a product was formed; it does not select the path.
+    continuum_mode = input_params.get("continuum_mode", "mfs")
 
     static_variables = tuple(
         input_params.get(
@@ -1785,14 +1823,14 @@ def combine_continuum_chunks(input_data, input_params):
         "deconvolution": combined_deconvolution,
     }
 
-    summaries = [result.get("auto_weight_sums") for result in input_data]
-    if any(summary is not None for summary in summaries):
-        if any(summary is None for summary in summaries):
+    auto_weight_summaries = [result.get("auto_weight_sums") for result in input_data]
+    if any(summary is not None for summary in auto_weight_summaries):
+        if any(summary is None for summary in auto_weight_summaries):
             raise ValueError(
                 "Automatic sensitivity weight sums are missing from a continuum partition."
             )
-        combined = summaries[0].copy(deep=True)
-        for summary in summaries[1:]:
+        combined = auto_weight_summaries[0].copy(deep=True)
+        for summary in auto_weight_summaries[1:]:
             first, second = xr.align(combined, summary, join="exact")
             combined = first + second
         return_dict["auto_weight_sums"] = combined
@@ -2601,7 +2639,8 @@ def image_continuum_single_field(
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
@@ -3682,6 +3721,7 @@ def image_continuum_single_field(
         # State carried between independently computed distributed graphs.
         is_first_cycle = True
         static_xds = None
+        restoration_xds = None
         model_xds = None
         model_uv_xds = None
         cycle_acceleration_state_xds = None
@@ -3822,14 +3862,6 @@ def image_continuum_single_field(
                 }
             elif continuum_mode == "mfs":
                 if is_first_cycle:
-                    primary_beam_fit_variables = (
-                        (
-                            "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
-                            "MFS_PRIMARY_BEAM_FIT_MOMENTS",
-                        )
-                        if restore
-                        else ()
-                    )
                     reduce_input_params = {
                         "continuum_mode": "mfs",
                         "additive_variables": (
@@ -3838,7 +3870,14 @@ def image_continuum_single_field(
                             "UV_SAMPLING",
                             "UV_SAMPLING_NORMALIZATION",
                         )
-                        + primary_beam_fit_variables,
+                        + (
+                            (
+                                "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                                "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+                            )
+                            if restore
+                            else ()
+                        ),
                     }
                 else:
                     reduce_input_params = {
@@ -3857,7 +3896,7 @@ def image_continuum_single_field(
                     is_first_cycle
                     and mvc_model_update_approximation == "local_beam_moments"
                 ):
-                    mvc_residual_additive_variables += MVC_LOCAL_BEAM_STATIC_VARIABLES
+                    mvc_residual_additive_variables += MVC_LOCAL_BEAM_ADDITIVE_VARIABLES
                 if is_first_cycle:
                     reduce_input_params = {
                         "continuum_mode": "mvc",
@@ -4002,9 +4041,7 @@ def image_continuum_single_field(
             )
             is_final_graph = bool(cycle_return_dict["residual_converged"])
             if is_final_graph:
-                graph_stage = (
-                    "final residual + restoration" if restore else "final residual"
-                )
+                graph_stage = "final residual"
             else:
                 graph_stage = f"imaging cycle {n_cycles} (residual + model update)"
             record = _graph_timing_record(
@@ -4012,7 +4049,7 @@ def image_continuum_single_field(
                 cycle_return_dict,
                 graph_timings,
                 stage_kind="final" if is_final_graph else "imaging_cycle",
-                includes_restoration=is_final_graph and restore,
+                includes_restoration=False,
             )
             if record is not None:
                 timing_graphs.append(record)
@@ -4031,7 +4068,8 @@ def image_continuum_single_field(
                     )
 
                 # PSF, PB and PSF sidelobe level are computed only in cycle one.
-                static_xds = cycle_return_dict["static_xds"]
+                static_xds = cycle_return_dict.pop("static_xds")
+                restoration_xds = cycle_return_dict.pop("restoration_xds", None)
 
                 if continuum_mode == "mfs" and visibility_memory_mode == "in_memory":
                     observed_visibility_grid_xds = cycle_return_dict.get(
@@ -4162,15 +4200,67 @@ def image_continuum_single_field(
                 )
                 break
 
+        if not restore and restoration_xds is None:
+            # MFS without restoration has no remaining image-domain science.
+            # Install the accumulated model locally and avoid transferring the
+            # complete image and model through an otherwise one-node graph.
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                install_continuum_model,
+            )
+
+            start = time.time()
+            final_return_dict["image"] = install_continuum_model(
+                final_return_dict["image"], model_xds
+            )
+            final_return_dict["model_xds"] = model_xds
+            final_return_dict["timing_restore"] = None
+            timing_distributed_application["T_install_final_model"] = (
+                time.time() - start
+            )
+        else:
+            # Restoration and final-only PB products run in one distributed node.
+            # Send only the image/model/static state this node actually uses.
+            final_payload = {"image": final_return_dict["image"]}
+            final_params = {
+                "prepared_continuum_image": True,
+                # A prepared final image already contains PSF/beam-fit products.
+                # Only the correlation-basis common PB is needed to label the MVC
+                # diagnostic; do not send its large G/C preconditioner cache again.
+                "static_xds": static_xds[["PRIMARY_BEAM"]],
+                "restoration_xds": restoration_xds,
+                "model_xds": model_xds,
+                "image_params": image_params,
+                "continuum_mode": continuum_mode,
+                "deconvolver": deconvolver,
+                "restore": restore,
+                "restoration_output": restoration_output,
+                "primary_beam_limit": primary_beam_limit,
+                "processing_function_threads": processing_function_threads,
+            }
+            finalized, final_timings = compute_continuum_finalization_graph(
+                final_payload, final_params
+            )
+            final_return_dict.update(finalized)
+            _accumulate_graph_timings(timing_distributed_application, final_timings)
+            record = _graph_timing_record(
+                "restoration" if restore else "finalization",
+                {"timing_finalization": finalized["timing_finalization"]},
+                final_timings,
+                stage_kind="final",
+                includes_restoration=restore,
+                timing_key="timing_finalization",
+            )
+            if record is not None:
+                timing_graphs.append(record)
+
         # =============================================================
         # Assemble the final application result
         # =============================================================
 
         return_dict = final_return_dict
 
-        # The final imaging-cycle graph computes the final residual/restored image,
-        # while the accumulated model comes from all preceding model updates.
-        return_dict["image"]["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
+        # Finalization has already installed an independent accumulated model
+        # and optional restored products; avoid another full model-sized copy.
 
         # Final append retains cumulative deconvolution history and reports the
         # stop code from the refreshed residual, without a fictitious model update.

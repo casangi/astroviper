@@ -109,7 +109,8 @@ def imaging_preparation_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
@@ -193,8 +194,10 @@ def imaging_preparation_continuum_single_field(
         Identifier of the parallel chunk being processed.
 
     make_primary_beam_taylor : bool, optional
-        Whether MFS should form the additive primary-beam Taylor-fit
-        contributions needed by restoration. Default true.
+        Collect the first-cycle inputs needed for primary-beam Taylor products.
+        Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,
+        fit the globally reduced beam in the first append node, and keep the
+        fitted diagnostic outside the iterative image and static cache.
 
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
@@ -1751,6 +1754,9 @@ def finalize_mvc_taylor_normal_equations(
     ----------
     contributions : xarray.Dataset
         Globally accumulated MVC residual, PSF, beam, and weight sums.
+        Channel support may be supplied as additive integer counts or as the
+        Boolean ``MVC_RESIDUAL_BEAM_SUPPORTED`` cache formed after global
+        reduction for this fixed Taylor order.
     effective_primary_beam : xarray.DataArray or None, optional
         Previously calculated common primary beam. When omitted, calculate it
         from the supplied PSF-weighted beam sums.
@@ -1806,12 +1812,24 @@ def finalize_mvc_taylor_normal_equations(
             .values
         )
         supported = valid_effective_pb.transpose(*pixel_dims).values
-        determined = supported & (
-            contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"]
-            .transpose(*pixel_dims)
-            .values
-            >= n_taylor_terms
-        )
+        if "MVC_RESIDUAL_BEAM_SUPPORTED" in contributions:
+            channel_support = contributions["MVC_RESIDUAL_BEAM_SUPPORTED"]
+            if channel_support.dtype != np.bool_:
+                raise TypeError("Cached MVC channel support must be Boolean.")
+            if (
+                channel_support.attrs.get("n_taylor_terms", n_taylor_terms)
+                != n_taylor_terms
+            ):
+                raise ValueError(
+                    "Cached MVC channel support uses a different Taylor order."
+                )
+        else:
+            # Raw map/reduce contributions still carry additive integer counts.
+            # Only the global append may replace them with this fixed-order mask.
+            channel_support = (
+                contributions["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"] >= n_taylor_terms
+            )
+        determined = supported & channel_support.transpose(*pixel_dims).values
         gram = beam_squared[..., hankel]
         gram[~determined] = np.eye(n_taylor_terms)
         coefficients = np.linalg.solve(
@@ -2413,7 +2431,8 @@ def residual_update_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
@@ -2543,8 +2562,10 @@ def residual_update_continuum_single_field(
         Indicates whether this is the first imaging cycle.
 
     make_primary_beam_taylor : bool, optional
-        Whether MFS should form the additive primary-beam Taylor-fit
-        contributions needed by restoration. Default true.
+        Collect the first-cycle inputs needed for primary-beam Taylor products.
+        Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,
+        fit the globally reduced beam in the first append node, and keep the
+        fitted diagnostic outside the iterative image and static cache.
 
     model_uv_xds : xarray.Dataset, optional
         Globally prepared Fourier-domain Taylor model used for degridding during
@@ -4479,6 +4500,29 @@ def _resolve_restoration_continuum_mode(img_xds, residual_da, continuum_mode):
             f"metadata {metadata_mode!r}."
         )
     return continuum_mode
+
+
+def install_continuum_model(img_xds, model_xds):
+    """Install an independent accumulated model in a continuum image.
+
+    This final-state operation is shared by the restoration node and the
+    driver's no-restoration fast path. The deep copy keeps the returned image
+    independent of the separately retained model state.
+    """
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    if "SKY_MODEL" not in model_xds:
+        raise KeyError("model_xds does not contain 'SKY_MODEL'.")
+
+    img_xds = img_xds.drop_vars("SKY_MODEL", errors="ignore")
+    img_xds["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
+    modify_data_groups_xds(
+        img_xds,
+        data_group_out_name="model",
+        data_group_out={"sky": "SKY_MODEL"},
+        description="Accumulated continuum model installed in the final image.",
+    )
+    return img_xds
 
 
 @shares_param_docs
