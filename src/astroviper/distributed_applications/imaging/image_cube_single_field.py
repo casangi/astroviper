@@ -640,7 +640,9 @@ def image_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
-        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
         The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
         models: ``airy_disk_model(telescope, func="casa_airy")`` and
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
@@ -845,7 +847,8 @@ def image_cube_single_field(
           of convergence statistics (global channel numbering).
         * ``"image_statistics"`` is ``{image_variable_key: xarray.Dataset}``
           (``"sky_residual"``, ``"sky_restored"``, ``"sky_model"``, ... --
-          whichever were in memory in the node tasks) of NaN-ignoring
+          whichever were in memory in the node tasks; not ``"sky_model"``
+          when ``max_iter`` or ``max_cycles`` is 0) of NaN-ignoring
           per-plane statistics over ``(l, m)``, each dataset with dims
           ``(time, frequency, polarization)`` covering the whole cube in
           frequency order and one variable per statistic (``mean``, ``median``,

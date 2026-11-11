@@ -977,7 +977,9 @@ def image_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
-        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
         The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
         models: ``airy_disk_model(telescope, func="casa_airy")`` and
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
@@ -1151,7 +1153,8 @@ def image_cube_single_field(
         * ``"image_statistics"`` : ``{image_variable_key: xarray.Dataset}`` of
           NaN-ignoring per-plane statistics of the image-domain variables
           present in memory (``sky_residual``, ``sky_restored``, ``sky_model``,
-          ...), computed over ``(l, m)`` *before* the chunk is written. Each
+          ...; not ``sky_model`` when ``max_iter`` or ``max_cycles`` is 0),
+          computed over ``(l, m)`` *before* the chunk is written. Each
           dataset has dims ``(time, frequency, polarization)`` for this chunk's
           frequencies and one variable per statistic (``mean``, ``median``,
           ``max``, ``min``, ``peak``, ``sum``, ``rms``, ``std``, ``mad_sigma``,
@@ -1308,6 +1311,7 @@ def image_cube_single_field(
     # handles full cubes -- looping over a dimension belongs here (AGENTS.md
     # section 3), never inside a processing function.
     from astroviper.processing_functions.image_analysis.plane_statistics import (
+        DEFAULT_STATISTICS_VARIABLES,
         calculate_plane_statistics,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -1336,6 +1340,15 @@ def image_cube_single_field(
     # none, so the fallback mask PRIMARY_BEAM > primary_beam_limit (the same
     # valid-sky cutoff the deconvolver would use) applies.
     primary_beam_limit = cycle_control_params.get("primary_beam_limit", 0.2)
+    # With max_iter=0 or max_cycles=0 no model update runs: SKY_MODEL is zero.
+    no_model_update = (
+        cycle_control_params["max_iter"] == 0 or cycle_control_params["max_cycles"] == 0
+    )
+    statistics_variables = tuple(
+        key
+        for key in DEFAULT_STATISTICS_VARIABLES
+        if not (no_model_update and key == "sky_model")
+    )
     frequency_maps = _visibility_to_image_frequency_maps(ps_xdt, img_xds)
     timing_frames = []
     imaging_dicts = []
@@ -1433,7 +1446,9 @@ def image_cube_single_field(
         # ``frequency``.
         start = time.time()
         statistics = calculate_plane_statistics(
-            chunk_xds, primary_beam_limit=primary_beam_limit
+            chunk_xds,
+            image_data_variables=statistics_variables,
+            primary_beam_limit=primary_beam_limit,
         )
         if report_statistics:
             _add_residual_entropy(statistics, chunk_xds, cycle_control_params)

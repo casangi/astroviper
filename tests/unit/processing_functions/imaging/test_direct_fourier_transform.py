@@ -230,8 +230,9 @@ def test_dirty_image_is_the_apparent_flux(simulated, field, w_term):
     out = _image(store, field, DFT)
     apparent = STOKES * out["primary_beam"][pixel]
     assert out["primary_beam"][pixel] < 0.95  # the primary beam is part of the test
+    # 1e-9: the imager's Airy beam is a radial table (AIRY_TABLE_STEP)
     np.testing.assert_allclose(
-        out["dirty"][:, pixel[0], pixel[1]], apparent, rtol=0, atol=1e-12
+        out["dirty"][:, pixel[0], pixel[1]], apparent, rtol=0, atol=1e-9
     )
     assert np.unravel_index(np.argmax(out["dirty"][0]), out["dirty"][0].shape) == pixel
     centre = tuple(size // 2 for size in out["psf"].shape[1:])
@@ -267,8 +268,9 @@ def test_the_image_carries_the_n_the_two_dimensional_gridder_does_not(simulated)
     dft = _image(store, "wide_100MHz", DFT)
     gridder = _image(store, "wide_100MHz", ES7)
     apparent = STOKES * dft["primary_beam"][pixel]
+    # 1e-9: the imager's Airy beam is a radial table (AIRY_TABLE_STEP)
     np.testing.assert_allclose(
-        dft["dirty"][:, pixel[0], pixel[1]], apparent, rtol=0, atol=1e-12
+        dft["dirty"][:, pixel[0], pixel[1]], apparent, rtol=0, atol=1e-9
     )
     np.testing.assert_allclose(
         gridder["dirty"][:, pixel[0], pixel[1]], apparent / n, rtol=0, atol=2e-5

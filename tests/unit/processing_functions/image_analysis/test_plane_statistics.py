@@ -112,6 +112,48 @@ def test_statistics_match_numpy_and_ignore_nans():
     )
 
 
+def test_median_and_mad_sigma_use_the_regular_subsample_of_a_large_plane():
+    from astroviper.processing_functions.image_analysis.image_statistics import (
+        MAD_SAMPLES,
+    )
+
+    n_lm = int(np.ceil(np.sqrt(MAD_SAMPLES))) + 100
+    step = int(np.ceil(np.sqrt(n_lm * n_lm / MAD_SAMPLES)))
+    assert step == 2
+    plane = np.random.default_rng(7).normal(size=(n_lm, n_lm))
+    mask = np.zeros((n_lm, n_lm), dtype=bool)
+    mask[: n_lm // 3] = True
+    img_xds = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (DIMS, plane[None, None, None]),
+            "MASK": (DIMS, mask[None, None, None]),
+        },
+        coords={
+            "time": [0.0],
+            "frequency": [1.0e9],
+            "polarization": ["I"],
+            "l": np.arange(n_lm),
+            "m": np.arange(n_lm),
+        },
+        attrs={"data_groups": {"residual": {"sky": "SKY_RESIDUAL", "mask": "MASK"}}},
+    )
+    ds = calculate_plane_statistics(img_xds)["sky_residual"].isel(
+        time=0, frequency=0, polarization=0
+    )
+    subsample = plane[::step, ::step]
+    for suffix, values, sample in (
+        ("", plane.ravel(), subsample.ravel()),
+        ("_masked", plane[mask], subsample[mask[::step, ::step]]),
+    ):
+        median = np.median(sample)
+        assert float(ds["median" + suffix]) == median
+        assert float(ds["mad_sigma" + suffix]) == 1.4826 * np.median(
+            np.abs(sample - median)
+        )
+        assert float(ds["max" + suffix]) == values.max()
+        assert float(ds["n_pixels" + suffix]) == values.size
+
+
 def test_no_mask_and_no_primary_beam_gives_nan_masked_statistics():
     img_xds = _make_image(with_mask=False)
     ds = calculate_plane_statistics(img_xds)["sky_residual"]
