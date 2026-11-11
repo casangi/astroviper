@@ -1864,9 +1864,11 @@ for coverage in (None, 0.0, 0.9, 0.999, 1.0, -0.1, float("nan")):
         residual = np.stack([dirty, -0.5 * dirty])[None, None].copy()
         model = np.zeros_like(residual)
         try:
+            # input_checked: the refused coverages reach the kernels, not config_check.
             result = asp_clean(residual, psf[None, None, None].copy(), model, params,
                                processing_function_threads=3,
-                               mask_cube=np.stack([mask, mask])[None, None])
+                               mask_cube=np.stack([mask, mask])[None, None],
+                               input_checked=True)
         except ValueError as e:
             out[f"{coverage}-{kernels}"] = ["ValueError", str(e)]
             continue
