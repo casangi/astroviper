@@ -37,9 +37,8 @@ def _inputs(frequencies):
     return ps, image
 
 
-@pytest.mark.parametrize("matching", ["nearest", "exact"])
 @pytest.mark.parametrize("truncate", [False, True])
-def test_weighting_preserves_reordered_subset_and_uv_policy(matching, truncate):
+def test_weighting_preserves_reordered_subset_and_uv_policy(truncate):
     ps, image = _inputs([1.2e9, 1.0e9])
     module = "astroviper.processing_functions.imaging.imaging_weighting"
     with (
@@ -57,7 +56,6 @@ def test_weighting_preserves_reordered_subset_and_uv_policy(matching, truncate):
             ps,
             image,
             {"weighting": "briggs", "robust": 0.5},
-            frequency_matching=matching,
             truncate_uv_cells=truncate,
         )
     for operation in (grid, degrid):
@@ -67,15 +65,26 @@ def test_weighting_preserves_reordered_subset_and_uv_policy(matching, truncate):
         assert operation.call_args.kwargs["truncate_uv_cells"] is truncate
 
 
-def test_exact_weighting_rejects_off_grid_frequency():
+def test_weighting_uses_nearest_frequency_map():
     ps, image = _inputs([1.21e9, 1.0e9])
-    with pytest.raises(ValueError):
+    module = "astroviper.processing_functions.imaging.imaging_weighting"
+    with (
+        patch(module + ".grid_imaging_weights.grid_imaging_weights") as grid,
+        patch(
+            module + ".grid_imaging_weights.degrid_imaging_weights",
+            return_value=np.ones((1, 1, 2, 1)),
+        ),
+        patch(
+            module + ".briggs_weighting.calculate_briggs_params",
+            return_value=np.zeros((2, 3, 1)),
+        ),
+    ):
         calculate_imaging_weights(
             ps,
             image,
             {"weighting": "briggs", "robust": 0.5},
-            frequency_matching="exact",
         )
+    np.testing.assert_array_equal(grid.call_args.kwargs["frequency_map"], [2, 0])
 
 
 def test_mvc_psf_accepts_shifted_frequency_with_cube_gridder():
@@ -228,7 +237,7 @@ def test_one_channel_continuum_weights_equal_cube_weights(monkeypatch, weighting
             setup(
                 ps,
                 image,
-                {"n_taylor_terms": 1, "reference_frequency": 1.0e9},
+                {"n_taylor_terms": 1, "reference_frequency": 1.0e9, "fft_padding": 1.2},
                 local,
                 processing_set_data_group_name="base",
             )

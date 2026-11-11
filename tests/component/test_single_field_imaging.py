@@ -259,7 +259,6 @@ _CONFIGS = {
         ],
         "single_precision_image": False,
         "extra_kwargs": {
-            "write_visibility_model_to_ps": True,
             "fft_backend": "scipy",
             "restore": True,
         },
@@ -318,7 +317,6 @@ _CONFIGS = {
         ],
         "single_precision_image": False,
         "extra_kwargs": {
-            "write_visibility_model_to_ps": True,
             "fft_backend": "scipy",
             "restore": True,
         },

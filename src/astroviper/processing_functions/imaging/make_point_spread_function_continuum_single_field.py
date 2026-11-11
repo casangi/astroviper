@@ -44,26 +44,15 @@ def _validate_mtmfs_parameters(
     image_params: dict,
 ) -> tuple[int, int, float]:
     """Return validated ``n_taylor_terms``, number of PSF terms, and reference frequency."""
-    if "n_taylor_terms" not in image_params:
-        raise KeyError("image_params must contain 'n_taylor_terms' for MT-MFS imaging.")
-    if "reference_frequency" not in image_params:
-        raise KeyError(
-            "image_params must contain one globally shared 'reference_frequency'."
-        )
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_continuum_basis,
+    )
 
+    check_continuum_basis(image_params)
     n_taylor_terms = int(image_params["n_taylor_terms"])
-    if n_taylor_terms < 1:
-        raise ValueError(
-            f"n_taylor_terms must be at least 1; received {n_taylor_terms}."
-        )
-
-    reference_frequency = float(image_params["reference_frequency"])
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be finite and positive; "
-            f"received {reference_frequency}."
-        )
-
+    reference_frequency = float(
+        np.asarray(image_params["reference_frequency"]).reshape(())
+    )
     return n_taylor_terms, 2 * n_taylor_terms - 1, reference_frequency
 
 
@@ -82,6 +71,7 @@ def add_uv_sampling_grid_continuum_single_field(
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
     complex_dtype=None,
+    input_checked: bool = False,
 ) -> None:
     """Accumulate Taylor-weighted UV-sampling grids for one measurement set.
 
@@ -138,21 +128,20 @@ def add_uv_sampling_grid_continuum_single_field(
     common normalization and avoids dividing odd Taylor orders by a signed sum
     that may be nearly zero.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
             "uv_sampling": "UV_SAMPLING",
             "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
         }
-
-    if n_psf_taylor_terms < 1:
-        raise ValueError(
-            f"n_psf_taylor_terms must be at least 1; received {n_psf_taylor_terms}."
-        )
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be finite and positive; "
-            f"received {reference_frequency}."
-        )
 
     if complex_dtype is None:
         complex_dtype = np.complex128
@@ -348,6 +337,7 @@ def make_point_spread_function_mvc_single_field(
     gridding_kernel_params=None,
     processing_function_threads=1,
     complex_dtype=None,
+    input_checked: bool = False,
 ):
     """Grid a frequency-resolved PSF cube for an MVC map partition.
 
@@ -367,7 +357,16 @@ def make_point_spread_function_mvc_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``
@@ -441,6 +440,12 @@ def make_point_spread_function_mvc_single_field(
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the UV-sampling grids.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -450,6 +455,14 @@ def make_point_spread_function_mvc_single_field(
         One-row timing dataframe for kernel creation, visibility filtering, and
         UV-sampling gridding.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         make_gridding_kernel,
     )
@@ -464,7 +477,8 @@ def make_point_spread_function_mvc_single_field(
     # Validate the shared cube nearest-channel policy before gridding.
     for ms_xdt in ps_xdt.values():
         map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values, img_xds.frequency.values, matching="nearest"
+            ms_xdt.frequency.values,
+            img_xds.frequency.values,
         )
 
     if complex_dtype is None:
@@ -528,6 +542,7 @@ def make_point_spread_function_continuum_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
+    input_checked: bool = False,
 ):
     """Build the MT-MFS Taylor UV-sampling stack for one continuum-imaging chunk.
 
@@ -558,7 +573,16 @@ def make_point_spread_function_continuum_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``
@@ -584,6 +608,8 @@ def make_point_spread_function_continuum_single_field(
     image_data_variables_keep : list of str or None, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -642,6 +668,12 @@ def make_point_spread_function_continuum_single_field(
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the UV-sampling grids.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -652,6 +684,14 @@ def make_point_spread_function_continuum_single_field(
         One-row timing frame with ``T_gcf``, ``T_vis_mask``,
         and ``T_uv_sampling_grid``.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         is_direct_fourier_transform,
         make_gridding_kernel,
@@ -674,8 +714,9 @@ def make_point_spread_function_continuum_single_field(
     if reference_frequency is not None:
         image_params["reference_frequency"] = float(reference_frequency)
 
-    _, n_psf_taylor_terms, reference_frequency = _validate_mtmfs_parameters(
-        image_params
+    n_psf_taylor_terms = 2 * image_params["n_taylor_terms"] - 1
+    reference_frequency = float(
+        np.asarray(image_params["reference_frequency"]).reshape(())
     )
 
     if is_direct_fourier_transform(gridding_kernel_params):
@@ -693,6 +734,7 @@ def make_point_spread_function_continuum_single_field(
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
 
     start = time.time()
@@ -725,6 +767,7 @@ def make_point_spread_function_continuum_single_field(
             fft_padding=image_params["fft_padding"],
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
         T_uv_sampling_grid += time.time() - start
 

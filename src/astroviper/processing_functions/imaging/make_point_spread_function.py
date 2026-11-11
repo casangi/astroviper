@@ -316,8 +316,7 @@ def add_uv_sampling_grid_single_field(
 
         n_imag_chan = img_xds.sizes["frequency"]
         frequency_map = map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values,
-            img_xds.frequency.values,
+            ms_xdt.frequency.values, img_xds.frequency.values
         )
     else:  # continuum
         n_imag_chan = 1  # Making only one continuum image.
@@ -447,7 +446,16 @@ def make_point_spread_function_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     ms_data_group_in_name : str, optional
         Measurement-set data group that supplies the weights/uvw used for the
         UV-sampling grid.  Default ``"base"``.
@@ -461,6 +469,8 @@ def make_point_spread_function_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -676,7 +686,16 @@ def make_subtraction_point_spread_function_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     correlation_coords : sequence of str
         The correlations of the imaging weights, in their order: the PSF
         planes, as the image-sized PSF has them before the transform to the

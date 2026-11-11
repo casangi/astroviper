@@ -22,10 +22,11 @@ processing = importlib.import_module(
 
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize(
-    "restore,primary_beam_correction", [(False, False), (True, False), (True, True)]
+    "restore,restoration_output",
+    [(False, "apparent"), (True, "apparent"), (True, "primary_beam_corrected")],
 )
 def test_finalization_prepares_only_when_needed_and_restores_once(
-    monkeypatch, prepared, restore, primary_beam_correction
+    monkeypatch, prepared, restore, restoration_output
 ):
     image = make_continuum_image()
     model = image[["SKY_MODEL"]].copy(deep=True)
@@ -55,7 +56,7 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
             "model_xds": model,
             "prepared_continuum_image": prepared,
             "restore": restore,
-            "primary_beam_correction": primary_beam_correction,
+            "restoration_output": restoration_output,
         },
     )
     assert calls == ([] if prepared else ["prepare"]) + (["restore"] if restore else [])
@@ -63,17 +64,13 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
     xr.testing.assert_identical(result["image"].SKY_MODEL, model.SKY_MODEL)
     assert not np.shares_memory(result["image"].SKY_MODEL, model.SKY_MODEL)
     if restore:
-        restoration_output = (
-            "primary_beam_corrected" if primary_beam_correction else "apparent"
-        )
         expected, _ = original_restore(
             make_continuum_image(),
-            primary_beam_correction=primary_beam_correction,
             restoration_output=restoration_output,
         )
         expected_name = (
             "SKY_RESTORED_FLAT_SKY"
-            if primary_beam_correction
+            if restoration_output == "primary_beam_corrected"
             else "SKY_RESTORED_FLAT_NOISE"
         )
         xr.testing.assert_allclose(
@@ -83,7 +80,7 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
         assert "SKY_RESTORED_FLAT_NOISE" not in result["image"]
         assert "SKY_RESTORED_FLAT_SKY" not in result["image"]
         assert result["timing_restore"] is None
-    if primary_beam_correction:
+    if restoration_output == "primary_beam_corrected":
         assert "SKY_RESTORED_FLAT_NOISE" not in result["image"]
         assert (
             result["image"].attrs["data_groups"]["restored"]["sky"]
@@ -110,7 +107,7 @@ def test_continuum_finalization_exposes_only_the_flat_sky(continuum_mode):
             "static_xds": xr.Dataset(),
             "model_xds": model,
             "restore": True,
-            "primary_beam_correction": True,
+            "restoration_output": "primary_beam_corrected",
             "continuum_mode": continuum_mode,
         },
     )
@@ -302,3 +299,26 @@ def test_weight_cache_activation_replacement_and_cleanup(
         assert name not in view
         assert ("weight_imaging" in view.attrs["data_groups"]["base"]) is interrupted
         np.testing.assert_array_equal(view["WEIGHT"][:], [1.0, 2.0])
+
+
+@pytest.mark.parametrize("node,params", [(None, {}), (lambda: None, None)])
+def test_graph_pair_rejected_before_graph_construction(node, params):
+    from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+        compute_continuum_graph,
+    )
+
+    with pytest.raises(ValueError, match="append_"):
+        compute_continuum_graph(
+            ps_xdt=None,
+            node_task_data_mapping=None,
+            cycle_input_params=None,
+            reduce_input_params=None,
+            disk_chunk_sizes=None,
+            processing_set_data_group_name=None,
+            monitor_resources_seconds=None,
+            task_priorities=None,
+            reduce_mode=None,
+            reduce_n_batch=None,
+            append_node=node,
+            append_input_params=params,
+        )

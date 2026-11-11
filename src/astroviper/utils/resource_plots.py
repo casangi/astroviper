@@ -580,7 +580,8 @@ def plot_application_task_stream(source, title=None, save_path=None):
     source : dict
         Continuum application result containing ``timing_graphs``. Each record
         supplies ``stage``, structured ``stage_kind``,
-        ``timing_node_tasks`` and compute-window anchors.
+        a ``timing_node_tasks`` or ``timing_finalization`` frame, and
+        compute-window anchors.
     title : str, optional
         Overall figure title.
     save_path : str, optional
@@ -608,6 +609,8 @@ def plot_application_task_stream(source, title=None, save_path=None):
     required = {"hostname", "start_unixtime", "T_image_cube_task"}
     for record in graph_records:
         tasks = record.get("timing_node_tasks")
+        if tasks is None:
+            tasks = record.get("timing_finalization")
         if not isinstance(tasks, pd.DataFrame) or tasks.empty:
             continue
         if not required.issubset(tasks.columns):

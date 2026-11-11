@@ -45,11 +45,6 @@ def test_append_rejects_invalid_reduction_envelopes(data, error, message):
         ({"image_params": {"n_taylor_terms": 0}}, ValueError, "positive"),
         ({"image_params": {"n_taylor_terms": 2}}, KeyError, "reference_frequency"),
         (
-            {"image_params": {"n_taylor_terms": 2, "reference_frequency_hz": 100.0}},
-            KeyError,
-            "'reference_frequency'",
-        ),
-        (
             {"image_params": {"n_taylor_terms": 2, "reference_frequency": np.nan}},
             ValueError,
             "finite",
@@ -71,10 +66,14 @@ def test_append_supports_reference_frequency_and_explicit_controls(
     single_precision,
 ):
     params = {
-        "image_params": {"n_taylor_terms": 3, "reference_frequency": 100.0},
+        "image_params": {
+            "n_taylor_terms": 3,
+            "reference_frequency": 100.0,
+            "fft_padding": 1.2,
+        },
         "single_precision_image": single_precision,
         "processing_function_threads": 2,
-        "fft_backend": "numpy",
+        "fft_backend": "scipy",
         "image_data_variables_keep": ["sky_model"],
         "image_data_group_in_name": "custom",
         "gridding_kernel_params": {"type": "least_misfit", "support": 9},

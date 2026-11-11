@@ -58,23 +58,22 @@ class TestParams:
     @pytest.mark.parametrize(
         "bad, match",
         [
-            ({"oversamplng": 10}, "unknown"),
-            ({"type": "boxcar"}, "not one of"),
-            ({"support": 6}, "odd integer"),
-            ({"support": 1, "type": "exponential_semicircle"}, "odd integer"),
-            ({"type": "prolate_spheroidal_casa", "support": 9}, "spans 7 grid points"),
-            # CASA's values fill only the keys left out
-            ({"type": "prolate_spheroidal_casa", "support": 5}, "spans 7 grid points"),
+            ({"oversamplng": 10}, "Unknown gridding_kernel_params"),
+            ({"type": "boxcar"}, "must be one of"),
+            ({"support": 6}, "support must be odd"),
+            ({"support": 1, "type": "exponential_semicircle"}, "support must be >= 3"),
+            ({"type": "prolate_spheroidal_casa", "support": 9}, "support=7"),
+            ({"type": "prolate_spheroidal_casa", "support": 5}, "support=7"),
             (
                 {"type": "prolate_spheroidal_casa", "oversampling": 0},
-                "positive integer",
+                "oversampling must be >= 1",
             ),
             (
                 {"type": "prolate_spheroidal_casa", "interpolation": "cubic"},
-                "not one of",
+                "interpolation must be",
             ),
-            ({"oversampling": 0}, "positive integer"),
-            ({"oversampling": 2.5}, "positive integer"),
+            ({"oversampling": 0}, "oversampling must be >= 1"),
+            ({"oversampling": 2.5}, "oversampling must be an integer"),
         ],
     )
     def test_refusals(self, bad, match):
@@ -121,13 +120,13 @@ class TestParams:
             {"oversampling": 100},
             {"interpolation": "nearest"},
         ):
-            with pytest.raises(ValueError, match="do not apply to the type 'dft'"):
+            with pytest.raises(ValueError, match="DFT accepts only"):
                 resolve_gridding_kernel_params({"type": "dft", **extra})
-            with pytest.raises(ValueError, match="do not apply to the type 'dft'"):
+            with pytest.raises(ValueError, match="DFT accepts only"):
                 is_direct_fourier_transform({"type": "dft", **extra})
         with pytest.raises(ValueError, match="has no gridding kernel"):
             make_gridding_kernel({"type": "dft"})
-        with pytest.raises(ValueError, match="'dft'"):  # listed among the types
+        with pytest.raises(ValueError, match="must be one of"):
             resolve_gridding_kernel_params({"type": "boxcar"})
 
 
@@ -158,7 +157,7 @@ class TestKernel:
         assert kernel.shape["shipped_table"] == "gcf_least_misfit_9_300_linear_p1.2.npy"
         solved = make_gridding_kernel({"oversampling": 100}, 1.2)
         assert "shipped_table" not in solved.shape
-        with pytest.raises(ValueError, match="pass fft_padding"):
+        with pytest.raises(ValueError, match="fft_padding >= 1.05"):
             make_gridding_kernel()
 
     def test_table_layout(self):
@@ -220,7 +219,7 @@ class TestInterpolation:
 
 
 def test_prolate_spheroidal_table_exists_for_support_7_only():
-    with pytest.raises(ValueError, match="spans 7 grid points"):
+    with pytest.raises(ValueError, match="support=7"):
         create_prolate_spheroidal_kernel_1D(100, 9)
     assert create_prolate_spheroidal_kernel_1D(100, 7).size == 400
 

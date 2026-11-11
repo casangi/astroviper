@@ -92,7 +92,7 @@ def _image(processing_set, image_store, **kwargs):
         "processing_set_data_group_name": "base",
         "single_precision_image": False,
         "restore": True,
-        "primary_beam_correction": True,
+        "restoration_output": "both",
         "n_mapping_parallelism": {"frequency": 2},
         "overwrite": True,
         **kwargs,
@@ -218,13 +218,13 @@ def test_report_after_the_run(processing_set, tmp_path):
         cycle_control_params={**CYCLE_CONTROL_PARAMS, "max_iter": 0, "max_cycles": 0},
         image_data_variables_keep=["sky_residual"],
         restore=False,
-        primary_beam_correction=False,
+        restoration_output="apparent",
     )
     path = image_cube_single_field_report(result, image_store, report="html")
     text = _text(path)
     assert "The point spread function was not kept" in text
     assert "No model: sky_model was not written." in text
-    assert "it needs restore=True and primary_beam_correction=True" in text
+    assert "it needs restore=True and restoration_output=" in text
     # the stop test of the dirty image is recorded; the entropy only with a report
     assert "Per channel: the cycle control stop code" in text
     assert "The final residual entropy is not a number for every plane" in text

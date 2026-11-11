@@ -42,3 +42,34 @@ pre-commit install          # installs ruff + nbstripout git hooks
   ```
   `scikit-build-core` caches in `build/{wheel_tag}/`; if a build behaves oddly,
   delete `build/` and reinstall. The -e creates an editable Python installation.
+
+## Imaging input validation
+
+The cube and continuum workflows share three independent configuration checks
+in `processing_functions/imaging/config_check`: residual settings, model-update
+settings, and driver/output settings. They reject invalid explicit choices,
+physical beam parameters, kernel recipes, control-array shapes, and unsupported
+output representations before execution, without modifying caller parameters.
+FITS output requires uniformly spaced channel centres; use Zarr for irregular
+frequency axes.
+
+Both Briggs weighting variants (`"briggs"` and `"briggs_abs"`) require an
+explicit finite `robust` value in `[-2, 2]`; no robustness default is inferred.
+For example, use `{"weighting": "briggs", "robust": 0.5}` when 0.5 is the
+intended weighting choice. Missing or invalid values fail validation before
+input reads, output creation, or graph execution.
+
+Input metadata and generated task boundaries are checked before output writes
+or graph execution when they become available. Continuum beam inference needs
+only antenna metadata and runs before the first output write. Spectral preflight
+uses selected frequency coordinates and equal sample weights, with a
+column-normalized float64 rank test. It reads no bulk weights, flags, UVW, or
+visibility arrays; its support and noise diagnostics are nominal equal-weight
+estimates. Kernel-design
+preflight reuses the production kernel cache. Direct entry points use
+`input_checked=False`; validated callers pass `True` through the stack. Configuration predicates live in the parameter-check package; legacy helpers
+reuse those predicates. Actual-product, cache-consistency, and native-buffer
+guards remain active even for checked calls. Both multifield modes remain explicitly unsupported.
+
+See [the configuration-check tutorial](docs/processing_functions_tutorials/imaging/demo_config_check.ipynb)
+for valid and invalid examples.

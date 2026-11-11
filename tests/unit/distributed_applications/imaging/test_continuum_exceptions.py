@@ -5,32 +5,12 @@ import pytest
 import xarray as xr
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
-    _apply_exact_frequency_selection_to_continuum_mapping,
-    _validate_continuum_output_keys,
     combine_continuum_chunks,
 )
 
 
 def _leaf():
     return {"image": xr.Dataset(), "timing_node_tasks": pd.DataFrame({"task_id": [0]})}
-
-
-@pytest.mark.parametrize(
-    ("legacy_key", "replacement"),
-    [
-        ("sky_restored", "sky_restored_flat_sky"),
-        ("sky_restored_primary_beam_corrected", "sky_restored_flat_sky"),
-    ],
-)
-def test_continuum_rejects_legacy_restored_output_keys(legacy_key, replacement):
-    """Removed continuum restore names fail with their explicit migration target."""
-    with pytest.raises(ValueError, match=replacement):
-        _validate_continuum_output_keys(["sky_residual", legacy_key])
-
-
-def test_continuum_accepts_current_restored_output_key():
-    """The flat-sky continuum restore key passes output validation."""
-    _validate_continuum_output_keys(["sky_residual", "sky_restored_flat_sky"])
 
 
 @pytest.mark.parametrize(
@@ -91,44 +71,3 @@ def test_reducer_rejects_duplicate_weight_and_beam_cache_ownership(kind):
         combine_continuum_chunks(
             leaves, {"continuum_mode": "mvc", "additive_variables": []}
         )
-
-
-@pytest.mark.parametrize(
-    "fault,message",
-    [
-        ("child_frequency", "no frequency"),
-        ("child_dimensions", "one-dimensional"),
-        ("task_frequency", "no frequency"),
-        ("task_dimensions", "one-dimensional"),
-        ("duplicate_child", "more than one channel"),
-        ("duplicate_task", "more than one channel"),
-        ("unmatched_task", "absent"),
-    ],
-)
-def test_partition_selection_rejects_ambiguous_or_incomplete_frequency_metadata(
-    fault, message
-):
-    child = xr.Dataset(coords={"frequency": [100.0, 110.0]})
-    mapping = {
-        0: {
-            "task_coords": {"frequency": {"data": [100.0, 110.0]}},
-            "data_selection": {},
-        }
-    }
-    if fault == "child_frequency":
-        child = xr.Dataset()
-    elif fault == "child_dimensions":
-        child = xr.Dataset(coords={"frequency": (("a", "b"), [[100.0, 110.0]])})
-    elif fault == "task_frequency":
-        mapping[0]["task_coords"] = {}
-    elif fault == "task_dimensions":
-        mapping[0]["task_coords"]["frequency"]["data"] = [[100.0, 110.0]]
-    elif fault == "duplicate_child":
-        child = child.assign_coords(frequency=[100.0, 100.0])
-    elif fault == "duplicate_task":
-        mapping[0]["task_coords"]["frequency"]["data"] = [100.0, 100.0]
-    else:
-        mapping[0]["task_coords"]["frequency"]["data"] = [90.0, 100.0, 110.0]
-    ps = xr.DataTree.from_dict({"child": child})
-    with pytest.raises(ValueError, match=message):
-        _apply_exact_frequency_selection_to_continuum_mapping(mapping, ps)

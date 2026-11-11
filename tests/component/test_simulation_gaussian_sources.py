@@ -163,7 +163,7 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path, monkeypatch):
         n_mapping_parallelism={"frequency": 1},
         overwrite=True,
         restore=True,
-        primary_beam_correction=True,
+        restoration_output="both",
     )
 
     assert diverged and not any(diverged)

@@ -64,16 +64,22 @@ def _run(
     cache_mode,
     reduce_mode,
     read_output=None,
+    *,
+    weighting="briggs",
+    mpi_cluster_setup=None,
+    cycle_overrides=None,
+    extra_outputs=(),
 ):
     with dask.config.set(scheduler="synchronous"):
         result = image_continuum_single_field(
+            mpi_cluster_setup=mpi_cluster_setup,
             ps_store=str(store),
             image_store=str(output),
             image_params=params,
             imaging_weights_params=dict(
-                weighting="briggs",
+                weighting=weighting,
                 robust=0.5,
-                weighting_scope=scope,
+                **({"weighting_scope": scope} if scope is not None else {}),
                 casa_weighting_implementation=casa,
             ),
             cycle_control_params=dict(
@@ -85,9 +91,10 @@ def _run(
                 psf_sidelobe_factor=1.5,
                 min_psf_fraction=0.05,
                 max_psf_fraction=0.8,
-            ),
+            )
+            | (cycle_overrides or {}),
             gridder="anti_alias",
-            deconvolver="hogbom",
+            deconvolver="mtmfs",
             continuum_mode=continuum_mode,
             restore=True,
             primary_beam_limit=0.2,
@@ -100,7 +107,8 @@ def _run(
                 "point_spread_function",
                 "primary_beam",
                 "beam_fit_params_point_spread_function",
-            ],
+            ]
+            + list(extra_outputs),
             single_precision_image=False,
             processing_function_threads=1,
             n_mapping_parallelism={"frequency": 3},
@@ -115,7 +123,53 @@ def _run(
         )
     with xr.open_zarr(output if read_output is None else read_output) as stored:
         image = stored.load()
+    spectral = image.attrs["input_validation"]["spectral_design"]
+    assert spectral["weight_assumption"] == "equal"
+    assert spectral["support_assumption"] == "selected_frequency_coordinates"
+    assert spectral["spectral_design_rank"] == params["n_taylor_terms"]
+    assert spectral["spectral_design_rank_precision"] == "float64"
+    assert "taylor_hessian_approximation" not in spectral
     return result, image
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("casa", [False, True])
+def test_natural_scopes_preserve_cleaned_and_restored_images(
+    tmp_path, continuum_input, monkeypatch, continuum_mode, casa
+):
+    from importlib import import_module
+
+    driver = import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+
+    def forbidden_global_density(*args, **kwargs):
+        raise AssertionError("Natural weighting must use the local execution path")
+
+    monkeypatch.setattr(
+        driver, "prepare_continuum_imaging_weights_global", forbidden_global_density
+    )
+    store, params, mask_path, _ = continuum_input
+    images = {}
+    for scope in (None, "local", "global"):
+        result, images[scope] = _run(
+            store,
+            params,
+            mask_path,
+            tmp_path / f"natural_{scope}.img.zarr",
+            continuum_mode,
+            scope,
+            casa,
+            "in_memory",
+            "tree",
+            weighting="natural",
+            mpi_cluster_setup={"max_workers": 2} if scope is not None else None,
+        )
+        assert result["n_cycles"] > 0
+        assert np.isfinite(images[scope].SKY_MODEL).all()
+        assert np.max(np.abs(images[scope].SKY_MODEL.values)) > 0
+    xr.testing.assert_equal(images[None], images["local"])
+    xr.testing.assert_equal(images["global"], images["local"])
 
 
 def _circular_clean_beam_convolution(plane, beam_parameters, cell_size):
@@ -137,7 +191,27 @@ def _circular_clean_beam_convolution(plane, beam_parameters, cell_size):
 def _assert_restoration_values(image, primary_beam_limit=0.2):
     """Check restoration, PB correction, and restored spectral products."""
     model = image.SKY_MODEL
-    residual = image.SKY_RESIDUAL
+    residual = image.SKY_RESIDUAL.copy(deep=True)
+    # MT-MFS stores normal-equation residuals. Independently solve the small
+    # PSF-centre Hankel system for every Taylor coefficient before applying PB
+    # correction; do not reuse the production principal-residual helper.
+    for time in range(image.sizes["time"]):
+        for polarization in range(image.sizes["polarization"]):
+            index = {"time": time, "polarization": polarization}
+            terms = (
+                image.SKY_RESIDUAL.isel(index).transpose("taylor_term", "l", "m").values
+            )
+            psf = (
+                image.POINT_SPREAD_FUNCTION.isel(index)
+                .transpose("psf_taylor_order", "l", "m")
+                .values
+            )
+            peak = np.unravel_index(np.argmax(np.abs(psf[0])), psf[0].shape)
+            orders = np.add.outer(np.arange(terms.shape[0]), np.arange(terms.shape[0]))
+            hessian = psf[:, peak[0], peak[1]][orders]
+            residual.data[time, :, polarization] = np.linalg.solve(
+                hessian, terms.reshape(terms.shape[0], -1)
+            ).reshape(terms.shape)
     primary_beam = image.PRIMARY_BEAM.isel(frequency=0, drop=True)
     primary_beam_taylor = image.PRIMARY_BEAM_TAYLOR
     continuum_mode = primary_beam_taylor.attrs["continuum_mode"]
@@ -375,3 +449,380 @@ def test_continuum_uses_writer_resolved_path(
     assert np.isfinite(image.SKY_RESIDUAL).all()
     assert "SKY_RESTORED_FLAT_SKY" in image
     assert not any("CACHE" in name or "MVC_" in name for name in image.data_vars)
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("max_cycles", [0, 2])
+@pytest.mark.parametrize("restore", [False, True])
+def test_restoration_state_enters_only_the_final_graph(
+    tmp_path, continuum_input, monkeypatch, continuum_mode, max_cycles, restore
+):
+    """Iteration payloads exclude beam polynomials and repeated static returns."""
+    from importlib import import_module
+
+    driver = import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+    cycle_graph = driver.compute_continuum_graph
+    final_graph = driver.compute_continuum_finalization_graph
+    cycles, finals = [], []
+
+    def inspect_cycle(**kwargs):
+        append_params = kwargs["append_input_params"]
+        assert "restoration_xds" not in append_params
+        if "static_xds" in append_params:
+            assert "PRIMARY_BEAM_TAYLOR" not in append_params["static_xds"]
+        result, timing = cycle_graph(**kwargs)
+        assert "PRIMARY_BEAM_TAYLOR" not in result["image"]
+        first = append_params["is_first_cycle"]
+        assert ("static_xds" in result) is first
+        assert ("restoration_xds" in result) is (
+            first and (restore or continuum_mode == "mvc")
+        )
+        if first and continuum_mode == "mvc":
+            cache = result["static_xds"]
+            assert cache.MVC_RESIDUAL_BEAM_SUPPORTED.dtype == np.bool_
+            assert "MVC_RESIDUAL_BEAM_CHANNEL_COUNT" not in cache
+        if first and continuum_mode == "mfs" and restore:
+            assert set(result["restoration_xds"].sizes) == {
+                "time",
+                "taylor_term",
+                "polarization",
+                "l",
+                "m",
+            }
+        cycles.append(first)
+        return result, timing
+
+    def inspect_final(data, params):
+        assert data.keys() == {"image"}
+        assert "PRIMARY_BEAM_TAYLOR" not in params["static_xds"]
+        finals.append(True)
+        return final_graph(data, params)
+
+    monkeypatch.setattr(driver, "compute_continuum_graph", inspect_cycle)
+    monkeypatch.setattr(driver, "compute_continuum_finalization_graph", inspect_final)
+    store, params, _, _ = continuum_input
+    with dask.config.set(scheduler="synchronous"):
+        result = image_continuum_single_field(
+            ps_store=str(store),
+            image_store=str(tmp_path / "final.img.zarr"),
+            image_params=params,
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params={
+                "max_iter": 4,
+                "max_cycles": max_cycles,
+                "max_iter_per_cycle": 2,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            continuum_mode=continuum_mode,
+            deconvolver="mtmfs",
+            restore=restore,
+            processing_set_data_group_name="base",
+            weight_memory_mode="in_memory",
+            n_mapping_parallelism={"frequency": 2},
+            single_precision_image=False,
+            processing_function_threads=1,
+        )
+    assert len(cycles) == result["n_cycles"] + 1
+    assert finals == ([True] if restore or continuum_mode == "mvc" else [])
+    assert ("PRIMARY_BEAM_TAYLOR" in result["image"]) is (
+        restore or continuum_mode == "mvc"
+    )
+    assert result["image"].attrs["data_groups"]["model"]["sky"] == "SKY_MODEL"
+    assert "PRIMARY_BEAM_TAYLOR" not in result["static_xds"]
+
+
+@pytest.mark.parametrize("n_taylor_terms", [1, 2, 3])
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize(
+    "restoration_output", ["apparent", "primary_beam_corrected", "both"]
+)
+def test_restoration_retains_only_available_spectral_products(
+    tmp_path, continuum_input, n_taylor_terms, continuum_mode, restoration_output
+):
+    """The driver writes each promised spectral product and allocates no absent one."""
+    store, params, _, _ = continuum_input
+    params = {**params, "n_taylor_terms": n_taylor_terms}
+    output = tmp_path / f"restored_{n_taylor_terms}_terms.img.zarr"
+    with dask.config.set(scheduler="synchronous"):
+        image_continuum_single_field(
+            ps_store=str(store),
+            image_store=str(output),
+            image_params=params,
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params={
+                "max_iter": 1,
+                "max_cycles": 0,
+                "threshold": 1e30,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            deconvolver="hogbom" if n_taylor_terms == 1 else "mtmfs",
+            restore=True,
+            continuum_mode=continuum_mode,
+            restoration_output=restoration_output,
+            processing_set_data_group_name="base",
+            n_mapping_parallelism={"frequency": 2},
+            weight_memory_mode="in_memory",
+            processing_function_threads=1,
+            single_precision_image=False,
+        )
+    with xr.open_zarr(output) as stored:
+        assert ("SKY_RESTORED_FLAT_SKY" in stored) is (
+            restoration_output in {"primary_beam_corrected", "both"}
+        )
+        assert ("SKY_RESTORED_FLAT_NOISE" in stored) is (
+            restoration_output in {"apparent", "both"}
+        )
+        assert ("ALPHA" in stored) is (n_taylor_terms >= 2)
+        assert ("ALPHA_ERROR" in stored) is (n_taylor_terms >= 2)
+        assert ("BETA" in stored) is (n_taylor_terms >= 3)
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("restore", [False, True])
+@pytest.mark.parametrize("n_taylor_terms", [2, 3, 4])
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_hogbom_multi_term_rejection_precedes_every_write(
+    tmp_path,
+    continuum_input,
+    monkeypatch,
+    continuum_mode,
+    restore,
+    n_taylor_terms,
+    existing_output,
+):
+    """H5 rejects before writing input weights, creating output, or overwriting it."""
+    from importlib import import_module
+
+    import astroviper.utils.io as image_io
+
+    store, params, _, _ = continuum_input
+    params = {**params, "n_taylor_terms": n_taylor_terms}
+    output = tmp_path / "refused.img.zarr"
+    if existing_output:
+        output.mkdir()
+        (output / "keep.bin").write_bytes(b"existing output must survive H5 rejection")
+
+    def snapshot(path):
+        return {
+            str(file.relative_to(path)): file.read_bytes()
+            for file in path.rglob("*")
+            if file.is_file()
+        }
+
+    input_before = snapshot(store)
+    output_before = snapshot(output)
+
+    def unexpected_output_write(*args, **kwargs):
+        pytest.fail("Imaging write reached before rejecting multi-term Hogbom")
+
+    monkeypatch.setattr(image_io, "write_zarr_image_store", unexpected_output_write)
+    node = import_module("astroviper.node_tasks.imaging.image_continuum_single_field")
+    monkeypatch.setattr(
+        node, "_write_continuum_weights_in_place", unexpected_output_write
+    )
+    with pytest.raises(ValueError, match="Continuum hogbom requires n_taylor_terms=1"):
+        image_continuum_single_field(
+            ps_store=str(store),
+            image_store=str(output),
+            image_params=params,
+            imaging_weights_params={
+                "weighting": "briggs",
+                "robust": 0.5,
+                "weighting_scope": "global",
+            },
+            cycle_control_params={
+                "max_iter": 1,
+                "max_cycles": 1,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            deconvolver="hogbom",
+            restore=restore,
+            continuum_mode=continuum_mode,
+            processing_set_data_group_name="base",
+            weight_memory_mode="in_place",
+            write_imaging_weights_to_ps=True,
+            overwrite=True,
+        )
+    assert snapshot(store) == input_before
+    assert snapshot(output) == output_before
+    assert output.exists() is existing_output
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_hessian_reuse_matches_fresh_checks_across_cycles(
+    tmp_path, continuum_input, monkeypatch, continuum_mode
+):
+    from importlib import import_module
+
+    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+
+    checks = import_module(
+        "astroviper.processing_functions.imaging.config_check.param_check_model_update"
+    )
+    original_hessian = mtmfs.hessian
+    hessian_calls = []
+
+    def count_hessians(*args, **kwargs):
+        hessian_calls.append(1)
+        return original_hessian(*args, **kwargs)
+
+    monkeypatch.setattr(mtmfs, "hessian", count_hessians)
+    original_check = checks.check_model_products
+    diagnostic_hessian_calls = []
+
+    def record_checks(*args, **kwargs):
+        before = len(hessian_calls)
+        result = original_check(*args, **kwargs)
+        diagnostic_hessian_calls.append(len(hessian_calls) - before)
+        return result
+
+    monkeypatch.setattr(checks, "check_model_products", record_checks)
+    store, params, mask_path, _ = continuum_input
+    cached_result, cached_image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "cached.img.zarr",
+        continuum_mode,
+        "local",
+        False,
+        "in_memory",
+        "tree",
+    )
+    assert cached_result["n_cycles"] >= 2
+    planes = cached_image.sizes["time"] * cached_image.sizes["polarization"]
+    assert sum(diagnostic_hessian_calls) == planes
+    assert len(diagnostic_hessian_calls) == cached_result["n_cycles"] + 1
+    assert "hessian_cache" not in cached_image.attrs
+
+    # Recompute every diagnostic on the reference run while keeping the same
+    # processing path and all numerical inputs.
+    def without_reuse(*args, **kwargs):
+        kwargs["hessian_cache"] = None
+        return record_checks(*args, **kwargs)
+
+    monkeypatch.setattr(checks, "check_model_products", without_reuse)
+    hessian_calls.clear()
+    diagnostic_hessian_calls.clear()
+    fresh_result, fresh_image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "fresh.img.zarr",
+        continuum_mode,
+        "local",
+        False,
+        "in_memory",
+        "tree",
+    )
+    assert sum(diagnostic_hessian_calls) >= fresh_result["n_cycles"] * planes
+    assert cached_result["n_cycles"] == fresh_result["n_cycles"]
+    xr.testing.assert_equal(cached_image, fresh_image)
+    assert (
+        cached_image.attrs["input_validation"] == fresh_image.attrs["input_validation"]
+    )
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("threshold", [0.0, 1e-3])
+@pytest.mark.parametrize("scope", ["local", "global"])
+def test_automatic_cycles_match_the_resolved_explicit_limit(
+    tmp_path, continuum_input, continuum_mode, threshold, scope
+):
+    store, params, mask_path, _ = continuum_input
+    automatic, auto_image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "auto.img.zarr",
+        continuum_mode,
+        scope,
+        False,
+        "in_memory",
+        "tree",
+        cycle_overrides={"max_cycles": "auto", "threshold": threshold},
+    )
+    # max_cycles counts down during execution; compare against the original
+    # prediction, recorded separately for every dirty-image plane.
+    limit = max(
+        (
+            value
+            for value in automatic["controller"].max_cycles_auto.values()
+            if value is not None
+        ),
+        default=1,
+    )
+    assert isinstance(limit, int) and limit > 0
+    assert any(
+        value is not None for value in automatic["controller"].max_cycles_auto.values()
+    )
+    explicit, explicit_image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "explicit.img.zarr",
+        continuum_mode,
+        scope,
+        False,
+        "in_memory",
+        "tree",
+        cycle_overrides={"max_cycles": limit, "threshold": threshold},
+    )
+    assert automatic["n_cycles"] == explicit["n_cycles"]
+    xr.testing.assert_equal(auto_image, explicit_image)
+
+
+@pytest.mark.parametrize("key", ["visibility", "uv_sampling"])
+def test_mfs_retains_requested_uv_products_after_cleaning(
+    tmp_path, continuum_input, key
+):
+    store, params, mask_path, _ = continuum_input
+    result, image = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "uv.img.zarr",
+        "mfs",
+        "global",
+        False,
+        "in_memory",
+        "tree",
+        extra_outputs=[key],
+    )
+    assert result["n_cycles"] >= 2
+    assert {"u", "v"} <= set(image[key.upper()].dims)
+    assert np.isfinite(image[key.upper()]).all()
+    assert np.any(image[key.upper()].values != 0)
+    _, reference = _run(
+        store,
+        params,
+        mask_path,
+        tmp_path / "reference.img.zarr",
+        "mfs",
+        "global",
+        False,
+        "in_memory",
+        "tree",
+    )
+    for name in (
+        "SKY_RESIDUAL",
+        "SKY_MODEL",
+        "POINT_SPREAD_FUNCTION",
+        "SKY_RESTORED_FLAT_SKY",
+    ):
+        xr.testing.assert_equal(image[name], reference[name])

@@ -5,57 +5,40 @@ import numpy as np
 from astroviper.utils.param_docs import shares_param_docs
 
 
-def _get_reference_frequency_hz(image_params):
+def _get_reference_frequency(image_params):
     """Return ``image_params["reference_frequency"]`` in Hz. Distributed
     callers must supply one common reference frequency before partitioning.
     """
-    if "reference_frequency" not in image_params:
-        raise KeyError(
-            "image_params must contain 'reference_frequency', the reference "
-            "frequency of the Taylor expansion in Hz."
-        )
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_reference_frequency,
+    )
 
-    # Permit a scalar xarray/numpy object while rejecting a vector.
-    reference_frequency = np.asarray(image_params["reference_frequency"])
-
-    if reference_frequency.size != 1:
-        raise ValueError(
-            "image_params['reference_frequency'] must be a scalar frequency "
-            "shared by all continuum map tasks."
-        )
-
-    reference_frequency_hz = float(reference_frequency.reshape(()))
-
-    if not np.isfinite(reference_frequency_hz) or reference_frequency_hz <= 0.0:
-        raise ValueError(
-            "The continuum reference frequency must be finite and positive."
-        )
-
-    return reference_frequency_hz
+    check_reference_frequency(
+        image_params["reference_frequency"], allow_one_element=True
+    )
+    return float(np.asarray(image_params["reference_frequency"]).reshape(()))
 
 
 def _validate_n_taylor_terms(n_taylor_terms):
     """Return ``n_taylor_terms``, a Python or NumPy integer of at least 1, as an int."""
-    if isinstance(n_taylor_terms, bool) or not isinstance(
-        n_taylor_terms, int | np.integer
-    ):
-        raise TypeError(
-            f"n_taylor_terms must be an integer; received {n_taylor_terms!r}."
-        )
-    if n_taylor_terms < 1:
-        raise ValueError(
-            f"n_taylor_terms must be at least 1; received {n_taylor_terms}."
-        )
+    from astroviper.processing_functions.imaging.config_check._common import (
+        require_integer,
+    )
+
+    require_integer("n_taylor_terms", n_taylor_terms, minimum=1)
     return int(n_taylor_terms)
 
 
 def _validate_continuum_parameters(image_params):
-    """Validate and return ``(n_taylor_terms, reference_frequency_hz)``."""
-    n_taylor_terms = _validate_n_taylor_terms(image_params["n_taylor_terms"])
+    """Validate and return ``(n_taylor_terms, reference_frequency)``."""
+    from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+        check_continuum_basis,
+    )
 
-    reference_frequency_hz = _get_reference_frequency_hz(image_params)
-
-    return n_taylor_terms, reference_frequency_hz
+    check_continuum_basis(image_params)
+    return int(image_params["n_taylor_terms"]), float(
+        np.asarray(image_params["reference_frequency"]).reshape(())
+    )
 
 
 def _imaging_weights_are_available(
@@ -92,14 +75,14 @@ def _attach_continuum_metadata(
     img_xds,
     *,
     n_taylor_terms,
-    reference_frequency_hz,
+    reference_frequency,
     continuum_mode,
 ):
     """Attach validated Taylor-expansion metadata to the image dataset."""
     img_xds.attrs["continuum_imaging"] = {
         "continuum_mode": continuum_mode,
         "n_taylor_terms": int(n_taylor_terms),
-        "reference_frequency_hz": float(reference_frequency_hz),
+        "reference_frequency": float(reference_frequency),
         "n_residual_taylor_terms": int(n_taylor_terms),
         "n_psf_taylor_terms": int(2 * n_taylor_terms - 1),
     }
@@ -191,7 +174,6 @@ def _mfs_channel_imaging_weight_sums(
         frequency_map = map_visibility_frequencies_to_image(
             weight.frequency.values,
             image_frequencies,
-            matching="nearest",
         )
         values = np.asarray(weight.values)
         if np.any(np.isinf(values)):
@@ -231,11 +213,13 @@ def _convert_primary_beam_to_reference_frequency(
     img_xds,
     *,
     image_params,
-    reference_frequency_hz,
+    reference_frequency,
+    n_taylor_terms,
     float_dtype,
     image_data_group_in_name="residual",
     make_primary_beam_taylor=True,
     channel_imaging_weight_sums=None,
+    channel_lookup_frequency_max=None,
 ):
     """Build the static and polynomial primary-beam products needed by MFS.
 
@@ -249,10 +233,18 @@ def _convert_primary_beam_to_reference_frequency(
     post-flagging imaging-weight sums ``s_nu`` as the apparent sky. This is the
     CASA ``widebandpbcor`` weighted polynomial fit, with AstroViper deriving its
     ``weightlist`` directly from ``WEIGHT_IMAGING``. This task-local function
-    stores only additive polynomial-fit numerators and spectral moments; the
-    global append node solves the fit after all frequency partitions have been
-    reduced. No channel-sized beam cube is carried through the distributed
-    reduction. Runs without restoration skip that projection.
+    stores additive polynomial-fit numerators and spectral moments. Distributed
+    MFS performs this projection in each first-cycle map task, reduces those
+    additive products, and fits the polynomial in the first append node. Channel
+    beams are evaluated and accumulated one at a time; peak spatial working
+    memory therefore depends on Taylor order, not channel count. The Airy lookup
+    frequency bound is kept fixed across the task to
+    preserve the beam samples of the previous batched evaluation. Runs without
+    restoration skip that projection.
+
+    ``n_taylor_terms`` and ``reference_frequency`` are the supplied Taylor basis
+    already validated at the setup boundary. Do not infer a different order or
+    repeat configuration validation while constructing these runtime products.
     """
     import numpy as np
     import xarray as xr
@@ -268,10 +260,7 @@ def _convert_primary_beam_to_reference_frequency(
 
     image_data_group = data_groups[image_data_group_in_name]
 
-    reference_frequency_hz = float(reference_frequency_hz)
-    if not np.isfinite(reference_frequency_hz) or reference_frequency_hz <= 0.0:
-        raise ValueError("reference_frequency_hz must be finite and positive.")
-
+    reference_frequency = float(reference_frequency)
     dish_diameters = image_params.get("list_dish_diameters")
     blockage_diameters = image_params.get("list_blockage_diameters")
     if dish_diameters is None:
@@ -294,10 +283,6 @@ def _convert_primary_beam_to_reference_frequency(
         if dim in img_xds.coords
     }
     if make_primary_beam_taylor:
-        n_taylor_terms = int(image_params.get("n_taylor_terms", 2))
-        if n_taylor_terms < 1:
-            raise ValueError("image_params['n_taylor_terms'] must be at least 1.")
-
         channel_frequencies = np.asarray(img_xds.frequency.values, dtype=np.float64)
         if channel_frequencies.ndim != 1 or channel_frequencies.size == 0:
             raise ValueError("MFS primary-beam fitting requires channel frequencies.")
@@ -343,33 +328,66 @@ def _convert_primary_beam_to_reference_frequency(
                 "MFS channel imaging-weight sums must be finite and non-negative."
             )
 
-        channel_data = evaluate_primary_beam(
-            channel_frequencies,
-            img_xds.polarization.values,
-            pb_params,
-            pb_image_params,
-            dtype=float_dtype,
-        )[0]
-        channel_data = np.broadcast_to(
-            channel_data,
-            (img_xds.sizes["time"], *channel_data.shape),
-        )
-        x_frequency = (channel_frequencies - reference_frequency_hz) / (
-            reference_frequency_hz
+        x_frequency = (channel_frequencies - reference_frequency) / (
+            reference_frequency
         )
         n_moments = 2 * n_taylor_terms - 1
-        numerator = np.stack(
-            [
-                np.sum(
-                    channel_data
-                    * spectral_weights[None, :, :, None, None]
-                    * x_frequency[None, :, None, None, None] ** order,
-                    axis=1,
-                )
-                for order in range(n_taylor_terms)
-            ],
-            axis=1,
+
+        # Accumulate directly into Taylor images. Stream each channel's
+        # beam and reuse one float64 weighted plane across terms/polarizations,
+        # rather than allocating channel x polarization x l x m products.
+        numerator = np.zeros(
+            (
+                img_xds.sizes["time"],
+                n_taylor_terms,
+                img_xds.sizes["polarization"],
+                *pb_image_params["image_size"],
+            ),
+            dtype=np.float64,
         )
+        weighted_beam = np.empty(pb_image_params["image_size"], dtype=np.float64)
+        if channel_lookup_frequency_max is None:
+            channel_lookup_frequency_max = np.full(
+                channel_frequencies.shape, channel_frequencies.max()
+            )
+        else:
+            channel_lookup_frequency_max = np.asarray(
+                channel_lookup_frequency_max, dtype=np.float64
+            )
+            if (
+                channel_lookup_frequency_max.shape != channel_frequencies.shape
+                or not np.all(np.isfinite(channel_lookup_frequency_max))
+                or np.any(channel_lookup_frequency_max < channel_frequencies)
+            ):
+                raise ValueError(
+                    "MFS beam lookup bounds must cover their channel frequencies."
+                )
+        for channel, frequency in enumerate(channel_frequencies):
+            channel_data = evaluate_primary_beam(
+                np.asarray([frequency]),
+                img_xds.polarization.values,
+                pb_params,
+                pb_image_params,
+                dtype=float_dtype,
+                lookup_frequency_max=channel_lookup_frequency_max[channel],
+            )[0, 0]
+            for polarization in range(img_xds.sizes["polarization"]):
+                np.multiply(
+                    channel_data[polarization],
+                    spectral_weights[channel, polarization],
+                    out=weighted_beam,
+                    dtype=np.float64,
+                )
+                for order in range(n_taylor_terms):
+                    numerator[:, order, polarization] += weighted_beam
+                    if order + 1 < n_taylor_terms:
+                        weighted_beam *= x_frequency[channel]
+            # Release this view before evaluating the next channel's beam.
+            del channel_data
+        del weighted_beam
+
+        # These spectral moments have no spatial axes and remain small even
+        # for many channels. Keep their existing reduction and normalization.
         moments = np.stack(
             [
                 np.sum(
@@ -395,7 +413,7 @@ def _convert_primary_beam_to_reference_frequency(
                 "description": (
                     "Additive imaging-weighted MFS primary-beam Taylor-fit numerator."
                 ),
-                "reference_frequency_hz": reference_frequency_hz,
+                "reference_frequency": reference_frequency,
                 "spectral_weighting": "post_flagging_imaging_weight_sum",
             },
         )
@@ -412,12 +430,12 @@ def _convert_primary_beam_to_reference_frequency(
                 "description": (
                     "Additive imaging-weighted MFS primary-beam Taylor-fit moments."
                 ),
-                "reference_frequency_hz": reference_frequency_hz,
+                "reference_frequency": reference_frequency,
                 "spectral_weighting": "post_flagging_imaging_weight_sum",
             },
         )
     reference_data = evaluate_primary_beam(
-        np.asarray([reference_frequency_hz]),
+        np.asarray([reference_frequency]),
         img_xds.polarization.values,
         pb_params,
         pb_image_params,
@@ -441,7 +459,7 @@ def _convert_primary_beam_to_reference_frequency(
             "method": "airy_disk",
             "continuum_mode": "mfs",
             "continuum_pb_order": 0,
-            "reference_frequency_hz": reference_frequency_hz,
+            "reference_frequency": reference_frequency,
             "frequency_interpretation": "direct_reference_frequency_evaluation",
         },
     )
@@ -468,6 +486,8 @@ def imaging_setup_continuum_single_field(
     image_data_group_out_name="residual",
     make_primary_beam_taylor=True,
     gridding_kernel_params=None,
+    *,
+    input_checked: bool = False,
 ):
     """Prepare static products for one continuum partition.
 
@@ -480,7 +500,8 @@ def imaging_setup_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
@@ -507,7 +528,16 @@ def imaging_setup_continuum_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``
@@ -520,8 +550,9 @@ def imaging_setup_continuum_single_field(
         beam prescription.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -541,11 +572,15 @@ def imaging_setup_continuum_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     image_data_group_out_name : str, optional
         Name of the continuum image data group. Defaults to ``"residual"``.
     make_primary_beam_taylor : bool, optional
-        Whether MFS should evaluate the channel-dependent primary beam and form
-        the additive Taylor-fit contributions used by restoration. Default true.
+        Collect the first-cycle inputs needed for primary-beam Taylor products.
+        Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,
+        fit the globally reduced beam in the first append node, and keep the
+        fitted diagnostic outside the iterative image and static cache.
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
         ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
@@ -596,6 +631,12 @@ def imaging_setup_continuum_single_field(
         ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
         gridders' that sum times the kernel's stencil sums.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -605,6 +646,14 @@ def imaging_setup_continuum_single_field(
         One-row timing dataframe summarizing the setup stage.
 
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import pandas as pd
     import toolviper.utils.logger as logger
 
@@ -628,14 +677,13 @@ def imaging_setup_continuum_single_field(
 
     ps_data_group_name = processing_set_data_group_name
 
-    n_taylor_terms, reference_frequency_hz = _validate_continuum_parameters(
-        image_params
-    )
+    n_taylor_terms = image_params["n_taylor_terms"]
+    reference_frequency = image_params["reference_frequency"]
 
     img_xds = _attach_continuum_metadata(
         img_xds,
         n_taylor_terms=n_taylor_terms,
-        reference_frequency_hz=reference_frequency_hz,
+        reference_frequency=reference_frequency,
         continuum_mode=continuum_mode,
     )
 
@@ -689,7 +737,7 @@ def imaging_setup_continuum_single_field(
             },
             overwrite=True,
             processing_function_threads=processing_function_threads,
-            frequency_matching="nearest",
+            input_checked=True,
         )
 
         weights_were_calculated = True
@@ -737,7 +785,7 @@ def imaging_setup_continuum_single_field(
             img_xds,
             image_params,
             n_taylor_terms=n_taylor_terms,
-            reference_frequency=reference_frequency_hz,
+            reference_frequency=reference_frequency,
             ms_data_group_in_name=ps_data_group_name,
             image_data_group_in_name=image_data_group_out_name,
             image_data_group_out_name=image_data_group_out_name,
@@ -746,6 +794,7 @@ def imaging_setup_continuum_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
     elif continuum_mode == "mvc":
         (
@@ -761,10 +810,7 @@ def imaging_setup_continuum_single_field(
             gridding_kernel_params=gridding_kernel_params,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
-        )
-    else:
-        raise ValueError(
-            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
+            input_checked=True,
         )
 
     T_make_point_spread_function = time.time() - start
@@ -778,14 +824,13 @@ def imaging_setup_continuum_single_field(
         channel_imaging_weight_sums = None
         if make_primary_beam_taylor:
             channel_imaging_weight_sums = _mfs_channel_imaging_weight_sums(
-                ps_xdt,
-                img_xds,
-                processing_set_data_group_name,
+                ps_xdt, img_xds, processing_set_data_group_name
             )
         img_xds = _convert_primary_beam_to_reference_frequency(
             img_xds,
             image_params=image_params,
-            reference_frequency_hz=reference_frequency_hz,
+            reference_frequency=reference_frequency,
+            n_taylor_terms=n_taylor_terms,
             float_dtype=float_dtype,
             image_data_group_in_name=image_data_group_out_name,
             make_primary_beam_taylor=make_primary_beam_taylor,
@@ -837,7 +882,7 @@ def imaging_setup_continuum_single_field(
             "T_psf_fit": [0.0],
             "n_taylor_terms": [n_taylor_terms],
             "n_psf_taylor_terms": [2 * n_taylor_terms - 1],
-            "reference_frequency_hz": [reference_frequency_hz],
+            "reference_frequency": [reference_frequency],
             "imaging_weights_calculated": [weights_were_calculated],
         }
     )

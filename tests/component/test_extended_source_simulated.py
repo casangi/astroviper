@@ -438,6 +438,7 @@ def run_image(
                 ["sky_restored_flat_noise"] if restore else []
             )
             result = image_continuum_single_field(
+                restoration_output="apparent",
                 image_params={
                     **image_params,
                     "n_taylor_terms": 1,
