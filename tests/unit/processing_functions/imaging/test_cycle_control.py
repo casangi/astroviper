@@ -1058,6 +1058,21 @@ class TestBuildResidualImagingDict(unittest.TestCase):
         }
         return img_xds
 
+    def test_max_cycles_zero_measures_only_what_the_stop_test_needs(self):
+        img_xds = self._make_img_xds(residual_peak=1.0, real_sidelobe=0.3)
+        key = Key(time=0, chan=0, pol=0)
+        skipped = build_residual_imaging_dict(
+            img_xds, "residual", {"gain": 0.1, "max_cycles": 0}
+        ).data[key]
+        measured = build_residual_imaging_dict(
+            img_xds, "residual", {"gain": 0.1, "max_cycles": 1}
+        ).data[key]
+        for field in ("peakres", "peakres_nomask", "masksum", "max_psf_sidelobe"):
+            self.assertEqual(skipped[field], measured[field])
+        for field in ("entropy", "residual_snr", *RESIDUAL_STATISTICS):
+            self.assertTrue(np.isnan(skipped[field]), field)
+        self.assertTrue(np.isfinite(measured["rms_in_mask"]))
+
     def test_max_psf_sidelobe_is_the_measured_value(self):
         real_sidelobe = 0.3
         img_xds = self._make_img_xds(residual_peak=1.0, real_sidelobe=real_sidelobe)

@@ -393,7 +393,9 @@ def imaging_preparation_single_field(
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
-        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
         The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
         models: ``airy_disk_model(telescope, func="casa_airy")`` and
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
@@ -928,7 +930,9 @@ def image_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
-        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
         The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
         models: ``airy_disk_model(telescope, func="casa_airy")`` and
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.

@@ -357,7 +357,9 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         '``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square\n'
         "of the voltage pattern the simulator applies for the model, computed by\n"
         "the same function\n"
-        "(:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).\n"
+        "(:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);\n"
+        'an Airy disk (``func="airy"``) the imager interpolates from a radial\n'
+        "table, within 1e-9 of it.\n"
         "The CASA variants, to compare with the ``.pb`` of ``tclean``, are such\n"
         'models: ``airy_disk_model(telescope, func="casa_airy")`` and\n'
         '``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.\n'

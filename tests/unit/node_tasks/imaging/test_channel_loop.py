@@ -241,6 +241,36 @@ def test_node_task_images_one_channel_at_a_time(tmp_path, fake_science):
     assert stats.sizes["frequency"] == 3
 
 
+@pytest.mark.parametrize(
+    "cycle_control_params, model_statistics",
+    [
+        ({"max_iter": 10, "max_cycles": 3}, True),
+        ({"max_iter": 0, "max_cycles": 3}, False),
+        ({"max_iter": 10, "max_cycles": 0}, False),
+    ],
+)
+def test_no_model_statistics_when_no_model_update_can_run(
+    tmp_path, fake_science, monkeypatch, cycle_control_params, model_statistics
+):
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+
+    def science_with_model(*args, **kwargs):
+        img_xds, timing, imaging_dict = fake_science(*args, **kwargs)
+        img_xds["SKY_MODEL"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
+        return img_xds, timing, imaging_dict
+
+    monkeypatch.setattr(pf_imaging, "image_cube_single_field", science_with_model)
+    result = image_cube_single_field(
+        **_task_inputs(tmp_path, cycle_control_params=cycle_control_params),
+        input_data=_fake_processing_set({"ms_a": VIS_FREQUENCIES}),
+    )
+    assert "sky_residual" in result["image_statistics"]
+    assert ("sky_model" in result["image_statistics"]) == model_statistics
+
+
 def test_imaging_dict_channels_shift_onto_global_numbers(tmp_path, fake_science):
     from astroviper.node_tasks.imaging.image_cube_single_field import (
         image_cube_single_field,

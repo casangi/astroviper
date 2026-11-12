@@ -14,7 +14,9 @@ and one-plane-at-a-time execution remain specific to this wrapper.
 # ``rms`` is ``sqrt(mean(x**2))``, ``std`` the standard deviation about the
 # mean, ``mad_sigma`` the median absolute deviation scaled to a Gaussian sigma
 # (``1.4826 * MAD`` -- a noise estimate robust to sources) and ``n_pixels``
-# the number of valid pixels that went into the statistics.
+# the number of valid pixels that went into the statistics. ``median`` and
+# ``mad_sigma`` are taken on the regular subsample of at most
+# ``image_statistics.MAD_SAMPLES`` pixels that the stop test's MAD uses.
 PLANE_STATISTIC_NAMES = (
     "mean",
     "median",
@@ -44,13 +46,17 @@ DEFAULT_STATISTICS_VARIABLES = (
 )
 
 
-def _plane_statistics_1d(values):
+def _plane_statistics_1d(values, median_samples):
     """Return the :data:`PLANE_STATISTIC_NAMES` values of one plane's valid pixels.
 
     Parameters
     ----------
     values : numpy.ndarray
         1-D float64 array of the plane's non-NaN pixels (after any masking).
+    median_samples : numpy.ndarray
+        1-D float64 array of the pixels of ``values`` in the regular
+        subsample; ``median`` and ``mad_sigma`` are taken on them, or on
+        ``values`` when the subsample holds none.
 
     Returns
     -------
@@ -64,7 +70,9 @@ def _plane_statistics_1d(values):
 
     summary = _array_statistics.summarize_samples(values, assume_valid=True)
     result = _array_statistics.finalize_summary(
-        summary, PLANE_STATISTIC_NAMES, samples=values
+        summary,
+        PLANE_STATISTIC_NAMES,
+        samples=median_samples if median_samples.size else values,
     )
     return [float(result[name]) for name in PLANE_STATISTIC_NAMES]
 
@@ -83,6 +91,10 @@ def calculate_plane_statistics(
     with the suffix ``_masked`` -- over the pixels where the mask variable is
     ``True`` (inside the clean/primary-beam mask). NaN pixels are ignored
     throughout. Each plane is processed on its own so no full-cube copy is made.
+    The ``median`` and ``mad_sigma`` of a plane of ``n`` pixels are taken on
+    every ``ceil(sqrt(n / MAD_SAMPLES))``-th pixel along ``l`` and ``m``
+    (:data:`~astroviper.processing_functions.image_analysis.image_statistics.MAD_SAMPLES`,
+    the subsample of the stop test's MAD), all pixels for ``n <= MAD_SAMPLES``.
 
     Parameters
     ----------
@@ -132,6 +144,9 @@ def calculate_plane_statistics(
     import numpy as np
     import xarray as xr
 
+    from astroviper.processing_functions.image_analysis.image_statistics import (
+        MAD_SAMPLES,
+    )
     from astroviper.utils.io import imaging_data_variables_and_dims_double_precision
 
     plane_dims_order = ("time", "frequency", "polarization")
@@ -177,17 +192,22 @@ def calculate_plane_statistics(
         data = img_xds[variable_name].transpose(*plane_dims, "l", "m").values
         n_time, n_freq, n_pol = data.shape[:3]
         out = np.full((len(stat_names), n_time, n_freq, n_pol), np.nan)
+        step = max(
+            1, int(np.ceil(np.sqrt(data.shape[-2] * data.shape[-1] / MAD_SAMPLES)))
+        )
 
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
                     plane = data[t, f, p]
                     valid = ~np.isnan(plane)
+                    sample = plane[::step, ::step]
+                    sample_valid = valid[::step, ::step]
                     # Flatten to float64 once; a single-precision image stays
                     # single on the dataset, only this plane's copy is promoted.
                     all_values = plane[valid].astype(np.float64, copy=False)
                     out[: len(PLANE_STATISTIC_NAMES), t, f, p] = _plane_statistics_1d(
-                        all_values
+                        all_values, sample[sample_valid].astype(np.float64, copy=False)
                     )
                     if mask_present:
                         mask_plane = (
@@ -198,8 +218,12 @@ def calculate_plane_statistics(
                         masked_values = plane[valid & mask_plane].astype(
                             np.float64, copy=False
                         )
+                        sample_masked = sample_valid & mask_plane[::step, ::step]
                         out[len(PLANE_STATISTIC_NAMES) :, t, f, p] = (
-                            _plane_statistics_1d(masked_values)
+                            _plane_statistics_1d(
+                                masked_values,
+                                sample[sample_masked].astype(np.float64, copy=False),
+                            )
                         )
         if not mask_present:
             out[
