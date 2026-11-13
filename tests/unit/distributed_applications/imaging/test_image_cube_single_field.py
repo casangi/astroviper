@@ -841,14 +841,14 @@ def threaded_dask():
         yield
 
 
-def _image_first_round(tmp_path):
-    """The dirty cube of the point source in two spectral windows of three
-    channels (the second 2 GHz above the first and three times brighter),
-    with find_continuum's first round: three node tasks of two channels (the
-    second straddles the windows), a chunk per channel, tiles of 32 px and
-    the primary beam below its limit in the corners."""
-    ps_store = _simulate_point_source(tmp_path, n_channels=3)
-    frequencies = _add_shifted_execution_block(ps_store, SECOND_WINDOW_OFFSET)
+def _image_first_round(tmp_path, n_channels=3, offset=SECOND_WINDOW_OFFSET):
+    """The dirty cube of the point source in two spectral windows of
+    ``n_channels`` channels (the second ``offset`` Hz above the first and
+    three times brighter), with find_continuum's first round: three node
+    tasks (the second straddles the windows), a chunk per channel, tiles of
+    32 px and the primary beam below its limit in the corners."""
+    ps_store = _simulate_point_source(tmp_path, n_channels=n_channels)
+    frequencies = _add_shifted_execution_block(ps_store, offset)
     return distributed_applications.imaging.image_cube_single_field(
         ps_store=ps_store,
         image_store=str(tmp_path / "cube.img.zarr"),
@@ -856,9 +856,7 @@ def _image_first_round(tmp_path):
             "image_size": [64, 64],
             "cell_size": np.array([-40.0, 40.0]) * np.pi / (180 * 3600),
             "phase_direction": PC,
-            "frequency_coords": np.concatenate(
-                [frequencies, frequencies + SECOND_WINDOW_OFFSET]
-            ),
+            "frequency_coords": np.concatenate([frequencies, frequencies + offset]),
             "polarization_coords": ["I", "V"],
             "time_coords": [0],
             "fft_padding": 1.2,
@@ -1066,3 +1064,79 @@ def test_find_continuum_first_round_refuses_fits(tmp_path):
             find_continuum_first_round=True,
         )
     assert os.listdir(tmp_path) == []
+
+
+def test_find_continuum_ultra_with_the_first_round_of_the_imager(
+    tmp_path, threaded_dask
+):
+    """find_continuum_ultra on each spectral window of the imager's cube finds
+    the same channels with the imager's first round as without it, reading
+    the cube once less where the window's moments are complete and never
+    reading the primary beam."""
+    # findContinuum returns nothing with fewer than 2 edge channels,
+    # round(0.19 x 7) = 1; 4 GHz keeps the windows apart.
+    n_channels = 8
+    result = _image_first_round(tmp_path, n_channels=n_channels, offset=4.0e9)
+    first_round = result["find_continuum_first_round"]
+    assert first_round["moments_complete"] == [True, True]
+    group = zarr.open_group(first_round["store"], mode="r+")
+    attributes = group.attrs["find_continuum_first_round"]
+
+    def find_continuum_ultra(window, name, first_round_reductions):
+        return distributed_applications.imaging.find_continuum_ultra(
+            input_image_store=str(tmp_path / "cube.img.zarr"),
+            atmospheric_transmission=np.full(n_channels, 0.92),
+            atmospheric_sky_temperature=np.full(n_channels, 27.0),
+            work_directory=str(tmp_path / name),
+            n_mapping_parallelism={"frequency": 2},
+            first_round_reductions=first_round_reductions,
+            thread_info={"n_threads": 4, "memory_per_thread": 4.0},
+            channel_range=window,
+        )
+
+    def assert_same_channels(result, expected):
+        for key in (
+            "channel_selection",
+            "aggregate_bandwidth",
+            "all_continuum",
+            "warnings",
+        ):
+            assert result[key] == expected[key], key
+        assert result["moment_difference_snr"] == pytest.approx(
+            expected["moment_difference_snr"], rel=1e-12
+        )
+
+    windows = [window["channel_range"] for window in attributes["windows"]]
+    computed = [
+        find_continuum_ultra(window, f"computed_{w}", None)
+        for w, window in enumerate(windows)
+    ]
+    stored = {
+        "source": "imager",
+        "store": first_round["store"],
+        "moments": "imager",
+        "moments_complete": True,
+        "imager": attributes["imager"],
+    }
+    for w, window in enumerate(windows):
+        imager = find_continuum_ultra(window, f"imager_{w}", first_round)
+        assert_same_channels(imager, computed[w])
+        assert computed[w]["cube_reads"]["PRIMARY_BEAM"] == 1
+        assert imager["cube_reads"] == {
+            "SKY_RESIDUAL": computed[w]["cube_reads"]["SKY_RESIDUAL"] - 1
+        }
+        assert not imager["passes"]["compute_first_round"].any()
+        assert imager["first_round"] == stored
+
+    # Without the imager's moments of a window, the first pass computes them.
+    group.attrs["find_continuum_first_round"] = dict(
+        attributes, moments_complete=[True, False]
+    )
+    recomputed = find_continuum_ultra(windows[1], "recomputed", first_round)
+    assert_same_channels(recomputed, computed[1])
+    assert recomputed["cube_reads"] == {
+        "SKY_RESIDUAL": computed[1]["cube_reads"]["SKY_RESIDUAL"]
+    }
+    assert recomputed["first_round"] == dict(
+        stored, moments="computed", moments_complete=False
+    )

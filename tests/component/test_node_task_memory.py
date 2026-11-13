@@ -1,4 +1,4 @@
-"""Component test: memory of the cube imaging node task.
+"""Component tests: node-task memory of cube imaging and find_continuum_ultra.
 
 The field has three channels and the distributed application maps it onto
 three node tasks of one channel each; image planes are 200 MB each and every
@@ -94,6 +94,15 @@ restore and primary beam correction on, the synchronous Dask scheduler so
 that the node tasks run in this process. Runtime (three node tasks) is
 about a minute and a quarter natively on Apple silicon and two and a half
 minutes under x86-64 emulation.
+
+find_continuum_ultra's tasks are checked at 2048 x 2048 against the memory
+its pass planner gives them (``ultra_task_memory_bytes``): a frequency task
+of the first pass without a first-round store, and the imager's first round
+of one chunk, each in a new process, as on a worker. The resident set peak
+of the process stays within 1.3 times the plan (on macOS the memory
+compressor can only lower it), and the traced peak of the frequency task
+does not grow from 16 to 64 channels per task. The measured values were
+taken on Apple silicon (macOS, Python 3.13).
 """
 
 from __future__ import annotations
@@ -105,6 +114,7 @@ import functools
 import gc
 import importlib
 import math
+import os
 import resource
 import sys
 import threading
@@ -1438,3 +1448,296 @@ def test_node_task_memory(tmp_path, monkeypatch):
     report = "\n".join(lines)
     print(report)
     assert not failures, "\n".join(failures) + "\n" + report
+
+
+# --- find_continuum_ultra ----------------------------------------------------
+#: Planes (px), their inner chunks (px) and the frequency shards (channels) of
+#: the cube of the find_continuum tasks.
+FIND_CONTINUUM_IMAGE_SIZE = 2048
+FIND_CONTINUUM_TILE = 512
+FIND_CONTINUUM_SHARD = 32
+FIND_CONTINUUM_VARIABLES = {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+#: The resident set of a task stays within this factor of
+#: ``ultra_task_memory_bytes``.
+FIND_CONTINUUM_RESIDENT_FACTOR = 1.3
+#: Float32 planes by which the traced peak of a frequency task of 64 channels
+#: may exceed that of a task of 16. Its per-channel rows add kilobytes; the
+#: peak also depends on how the read of the next batch overlaps the
+#: reductions of the current one (measured: -0.26 to +0.52 planes).
+FIND_CONTINUUM_GROWTH_BUDGET_PLANES = 1.0
+
+
+def resident_peak():
+    """Largest resident set size of this process so far (bytes)."""
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak if sys.platform == "darwin" else 1024 * peak
+
+
+def in_new_process(function, *args):
+    """``function(*args)`` in a new process, as a worker runs a node task."""
+    import concurrent.futures
+    import multiprocessing
+
+    with concurrent.futures.ProcessPoolExecutor(
+        1, mp_context=multiprocessing.get_context("spawn")
+    ) as executor:
+        return executor.submit(function, *args).result()
+
+
+def find_continuum_cube(directory, n_channels):
+    """Stokes I of a residual cube and of its primary beam, below 0.2 in the
+    corner chunks, written channel by channel by the sharded skunk_works
+    writer; returns the store path."""
+    import zarr
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.node_tasks.imaging.utils import (
+        write_result_chunk_to_disk_sharded_skunk_works,
+    )
+    from astroviper.utils.io import (
+        create_empty_data_variables_on_disk,
+        write_zarr_image_store,
+    )
+
+    n_pixels = FIND_CONTINUUM_IMAGE_SIZE
+    coords = make_empty_sky_image(
+        phase_center=[1.2, -0.4],
+        image_size=[n_pixels, n_pixels],
+        cell_size=[0.1 * ARCSEC, 0.1 * ARCSEC],
+        frequency_coords=230.0e9 + 0.5e6 * np.arange(n_channels),
+        pol_coords=["I"],
+        time_coords=[0.0],
+    )
+    store = write_zarr_image_store(coords, f"{directory}/find_continuum.img.zarr")
+    create_empty_data_variables_on_disk(
+        store,
+        ["sky_residual", "primary_beam"],
+        shape_dict=dict(coords.sizes),
+        parallel_coords={
+            "frequency": {"data_chunks": [[c] for c in range(n_channels)]}
+        },
+        compressor=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        double_precision=False,
+        data_variable_definitions="imaging",
+        image_chunking={
+            "polarization": 1,
+            "l": FIND_CONTINUUM_TILE,
+            "m": FIND_CONTINUUM_TILE,
+        },
+        image_sharding={"frequency": FIND_CONTINUUM_SHARD},
+    )
+    offsets = np.indices((n_pixels, n_pixels)) - (n_pixels - 1) / 2
+    primary_beam = np.exp(-np.square(offsets).sum(axis=0) / (2 * 400.0**2))
+    # Multiples of 2**-10 keep the store small (lz4 ratio 0.08 against 0.56).
+    primary_beam = (np.round(1024 * primary_beam) / 1024).astype(np.float32)
+    dims = ["time", "frequency", "polarization", "l", "m"]
+    chunk_xds = xr.Dataset(
+        {
+            name: (dims, plane[None, None, None])
+            for name, plane in (
+                ("SKY_RESIDUAL", primary_beam / 64),
+                ("PRIMARY_BEAM", primary_beam),
+            )
+        }
+    )
+    for channel in range(n_channels):
+        write_result_chunk_to_disk_sharded_skunk_works(
+            store,
+            ["sky_residual", "primary_beam"],
+            {"frequency": {"slice": slice(channel, channel + 1)}},
+            chunk_xds,
+        )
+    return store
+
+
+def ultra_first_pass(store, work_directory, n_channels):
+    """find_continuum_ultra's first pass over the first ``n_channels``
+    channels of ``store`` as one frequency task, in this process (synchronous
+    scheduler): the task's planned bytes, the peak of the memory traced
+    during the pass and the resident set peak of the process."""
+    from astroviper.distributed_applications.imaging.find_continuum.ultra_reductions import (
+        UltraReductions,
+    )
+    from astroviper.processing_functions.imaging.find_continuum import (
+        find_continuum_first_round_requests,
+        linear_frequency_axis,
+    )
+
+    frequency = xr.open_zarr(store, chunks=None).frequency
+    frequency_axis = linear_frequency_axis(frequency.values[:n_channels])
+    rest_frequency = float(frequency.attrs["rest_frequency"]["data"])
+    # The names findContinuum's requests give the cubes.
+    paths = {role: f"{work_directory}/cube.{role}" for role in FIND_CONTINUUM_VARIABLES}
+    ultra = UltraReductions(
+        {
+            paths[role]: {"variable": variable, "channel_offset": 0}
+            for role, variable in FIND_CONTINUUM_VARIABLES.items()
+        },
+        store,
+        FIND_CONTINUUM_VARIABLES,
+        0,
+        work_directory,
+        0.2,
+        None,
+        1,
+        16 * 2**30,
+        frequency_axis,
+        rest_frequency,
+        None,
+    )
+    # Moments 0 and 8 of the cube and its whole-cube statistics, which the
+    # first round answers: the pass reads the primary beam too.
+    requests = find_continuum_first_round_requests(
+        frequency_axis, rest_frequency, paths["sky"], paths["primary_beam"]
+    )[1:]
+    tracemalloc.start()
+    with dask.config.set(scheduler="synchronous"):
+        ultra.run_pass(requests, len(requests))
+    traced_peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    return ultra.passes[0]["task_memory_plan_bytes"], traced_peak, resident_peak()
+
+
+def first_round_chunk(work_directory, n_channels):
+    """find_continuum's first round of a chunk the imager holds, in this
+    process: ``n_channels`` channels of Stokes I and Q of the residual and
+    the primary beam, in two spectral windows, so that the registry holds
+    the moments of both. Returns the peak of the memory traced during the
+    first round and the resident set peak of the process."""
+    import uuid
+
+    from astroviper.distributed_applications.imaging.find_continuum.first_round import (
+        create_find_continuum_first_round_store,
+        find_continuum_first_round_partials_path,
+    )
+    from astroviper.node_tasks.imaging.find_continuum import (
+        find_continuum_first_round_chunk,
+    )
+    from astroviper.processing_functions.imaging.find_continuum import (
+        linear_frequency_axis,
+        moment_velocity_widths,
+    )
+
+    n_pixels, tile = FIND_CONTINUUM_IMAGE_SIZE, FIND_CONTINUUM_TILE
+    shape = (1, n_channels, 2, n_pixels, n_pixels)
+    rng = np.random.default_rng(1)
+    planes = {
+        "SKY_RESIDUAL": rng.standard_normal(shape, dtype=np.float32),
+        "PRIMARY_BEAM": rng.random(shape, dtype=np.float32),
+    }
+    dims = ["time", "frequency", "polarization", "l", "m"]
+    chunk_xds = xr.Dataset({name: (dims, cube) for name, cube in planes.items()})
+    frequency = 230.0e9 + 0.5e6 * np.arange(n_channels)
+    rest_frequency = 230.0e9
+    windows = [
+        {"channel_range": [start, stop], "frequency_axis": linear_frequency_axis(f)}
+        for start, stop, f in (
+            (0, 1, frequency[:1]),
+            (1, n_channels, frequency[1:]),
+        )
+    ]
+    store = f"{work_directory}/first_round.zarr"
+    value_dtypes = {"sky": "float32", "primary_beam": "float32"}
+    run_id = uuid.uuid4().hex
+    create_find_continuum_first_round_store(
+        first_round_store=store,
+        n_channels=n_channels,
+        image_shape=(n_pixels, n_pixels),
+        tile_shape=(tile, tile),
+        merge_tile_shape=(2 * tile, 2 * tile),
+        primary_beam_limit=0.2,
+        variables=FIND_CONTINUUM_VARIABLES,
+        polarization_index=0,
+        value_dtypes=value_dtypes,
+        run_id=run_id,
+        written_by="image_cube_single_field",
+        windows=windows,
+        rest_frequency=rest_frequency,
+    )
+    partials_directory = find_continuum_first_round_partials_path(store)
+    os.makedirs(partials_directory)
+    tracemalloc.start()
+    find_continuum_first_round_chunk(
+        chunk_xds,
+        slice(0, n_channels),
+        store,
+        FIND_CONTINUUM_VARIABLES,
+        0,
+        0.2,
+        (tile, tile),
+        value_dtypes,
+        run_id,
+        [
+            dict(
+                window,
+                velocity_widths=moment_velocity_widths(
+                    window["frequency_axis"], rest_frequency
+                ),
+            )
+            for window in windows
+        ],
+        partials_directory,
+        rest_frequency,
+    )
+    traced_peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    return traced_peak, resident_peak()
+
+
+def test_find_continuum_ultra_task_memory(tmp_path):
+    """One frequency task of find_continuum_ultra's first pass without a
+    first-round store (moments 0 and 8, and the first round from the primary
+    beam), run in a new process as on a worker: its resident set stays within
+    ``FIND_CONTINUUM_RESIDENT_FACTOR`` x the bytes the pass planned for it
+    (``ultra_task_memory_bytes``), and, as it streams planes in batches, its
+    traced peak does not grow from 16 to 64 channels per task."""
+    store = find_continuum_cube(tmp_path, 64)
+    runs = {
+        n_channels: in_new_process(
+            ultra_first_pass, store, f"{tmp_path}/work_{n_channels}", n_channels
+        )
+        for n_channels in (16, 64)
+    }
+    lines = [
+        f"{n_channels} channels: planned {planned / 2**30:.3f} GiB, resident "
+        f"set peak {resident / 2**30:.3f} GiB, traced peak {traced / MB:.1f} MB"
+        for n_channels, (planned, traced, resident) in runs.items()
+    ]
+    print("\n".join(lines))
+    for planned, _, resident in runs.values():
+        assert resident <= FIND_CONTINUUM_RESIDENT_FACTOR * planned, lines
+    growth = (runs[64][1] - runs[16][1]) / (4 * FIND_CONTINUUM_IMAGE_SIZE**2)
+    assert growth <= FIND_CONTINUUM_GROWTH_BUDGET_PLANES, (growth, lines)
+
+
+def test_find_continuum_first_round_chunk_memory(tmp_path):
+    """The imager's first round of one chunk of two channels in two spectral
+    windows, run in a new process: its resident set, the chunk's Stokes I
+    and Q included, stays within ``FIND_CONTINUUM_RESIDENT_FACTOR`` x
+    ``ultra_task_memory_bytes`` of a task holding as many float32 planes (two
+    batches of two planes of the residual and the primary beam) and the
+    moments of ``FIRST_ROUND_WINDOWS_IN_MEMORY`` windows."""
+    from astroviper.distributed_applications.imaging.find_continuum.ultra_reductions import (
+        ultra_task_memory_bytes,
+    )
+    from astroviper.node_tasks.imaging.find_continuum import (
+        FIRST_ROUND_WINDOWS_IN_MEMORY,
+    )
+
+    n_channels = 2
+    traced, resident = in_new_process(first_round_chunk, str(tmp_path), n_channels)
+    planned = ultra_task_memory_bytes(
+        FIND_CONTINUUM_IMAGE_SIZE,
+        FIND_CONTINUUM_IMAGE_SIZE,
+        n_channels,
+        12 * FIRST_ROUND_WINDOWS_IN_MEMORY,
+        0,
+        0.0,
+        True,
+    )
+    line = (
+        f"planned {planned / 2**30:.3f} GiB, resident set peak "
+        f"{resident / 2**30:.3f} GiB, traced peak {traced / MB:.1f} MB"
+    )
+    print(line)
+    assert resident <= FIND_CONTINUUM_RESIDENT_FACTOR * planned, line
