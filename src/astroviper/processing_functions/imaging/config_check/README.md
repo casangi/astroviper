@@ -436,13 +436,31 @@ a direct helper call still applies its own applicable checks.
 
 ## find_continuum
 
-`check_find_continuum_config` checks the channel binning and the frequency
-chunking before the image is opened; `check_find_continuum_inputs` checks the
-data group roles, the single time, the Stokes I plane and the length of the
-atmospheric spectra on the opened image without loading pixels. The driver
-keeps the work-directory check: findContinuum reuses the products of an
-earlier run that it finds there. `check_find_continuum_first_round` requires
-the Stokes I plane when `image_cube_single_field` makes the first round.
+`check_find_continuum_config` checks the channel binning, the frequency
+chunking, a first round made by `image_cube_single_field` (the path of its
+store, made with the same primary beam limit; the older in-memory results are
+refused), `thread_info` and `memory_budget_gb` before the image is opened.
+`check_find_continuum_channel_range` returns the `[start, stop)` channels that
+findContinuum sees and refuses a range whose frequencies are not linear,
+listing the linear channel ranges of the cube. It also runs without a range,
+so a cube of several spectral windows is refused instead of being analysed on
+a wrong frequency axis. `check_find_continuum_inputs` checks the data group
+roles (the sky, the primary beam and the beams of the point spread function,
+whose cube findContinuum does not read), the single time, the Stokes I plane
+and the length of the atmospheric spectra on the opened image without loading
+pixels. The driver keeps the work-directory check: findContinuum reuses the
+products of an earlier run that it finds there.
+
+`check_find_continuum_first_round` requires the Stokes I plane and a Zarr
+output (FITS is refused) when `image_cube_single_field` makes the first round.
+`check_find_continuum_first_round_store` refuses a first-round store that is
+missing, incomplete or of another version, that was made with another primary
+beam limit, Stokes I index or tile shape, or whose binding (the modification
+time of the cube's `zarr.json`, the digests of its coordinates and its shape)
+differs from the cube's: a rewritten cube needs a new first round.
+`check_find_continuum_ultra_task_memory` refuses a planned
+`find_continuum_ultra` node task that does not fit its memory budget with one
+requested reduction at one plane per batch.
 
 ## Runtime Taylor-Hessian reuse
 
