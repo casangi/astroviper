@@ -929,14 +929,25 @@ def _restore_image_arrays(
 
 def _restored_beam_variable(beam_da, restoring_beam):
     """``BEAM_FIT_PARAMS_SKY_RESTORED``: the target beam in every plane of the
-    PSF beam variable ``beam_da``, whose last dimension holds the parameters."""
-    restored = beam_da.copy(
-        data=np.broadcast_to(
+    PSF beam variable ``beam_da``, whose last dimension holds the parameters.
+    That dimension is ``beam_params_label``, labelled as xradio's
+    ``BeamFitParamsArray``, which its image writers require."""
+    parameters = beam_da.dims[-1]
+    return xr.DataArray(
+        np.broadcast_to(
             np.asarray(restoring_beam, dtype=np.float64), beam_da.shape
-        ).copy()
+        ).copy(),
+        dims=(*beam_da.dims[:-1], "beam_params_label"),
+        coords={
+            **{
+                name: coordinate
+                for name, coordinate in beam_da.coords.items()
+                if parameters not in coordinate.dims
+            },
+            "beam_params_label": ["major", "minor", "pa"],
+        },
+        attrs={"type": "beam_fit_params_sky", "units": "rad"},
     )
-    restored.attrs = {"type": "beam_fit_params_sky", "units": "rad"}
-    return restored
 
 
 @shares_param_docs

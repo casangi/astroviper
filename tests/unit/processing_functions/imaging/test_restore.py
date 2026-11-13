@@ -957,7 +957,10 @@ def test_restored_beam_variable_holds_the_target_in_every_plane():
     restored_beam = out.BEAM_FIT_PARAMS_SKY_RESTORED
     psf_beam = out.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION
     assert restored_beam.dtype == np.float64
-    assert restored_beam.dims == psf_beam.dims
+    # Labelled as xradio's BeamFitParamsArray, whose writers require it.
+    assert restored_beam.dims == (*psf_beam.dims[:-1], "beam_params_label")
+    assert restored_beam.beam_params_label.values.tolist() == ["major", "minor", "pa"]
+    xr.testing.assert_identical(restored_beam.frequency, psf_beam.frequency)
     np.testing.assert_array_equal(
         restored_beam.values, np.broadcast_to(TARGET, psf_beam.shape)
     )

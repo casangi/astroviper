@@ -863,7 +863,9 @@ def test_continuum_restored_beam_variable_holds_the_target():
         continuum_mode="mfs",
     )
     restored_beam = result.BEAM_FIT_PARAMS_SKY_RESTORED
-    assert restored_beam.dims == result.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.dims
+    psf_dims = result.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.dims
+    assert restored_beam.dims == (*psf_dims[:-1], "beam_params_label")
+    assert restored_beam.beam_params_label.values.tolist() == ["major", "minor", "pa"]
     assert restored_beam.dtype == np.float64
     np.testing.assert_array_equal(
         restored_beam, np.broadcast_to(TARGET_BEAM, restored_beam.shape)
