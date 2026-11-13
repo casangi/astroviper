@@ -1148,11 +1148,14 @@ def pop_first_round_moments(run_id, address, partials_directory):
     Returns
     -------
     dict
-        ``address``, ``process_pid``, ``placement_ok`` (the pop ran on
-        ``address``), ``counts`` (uint16 additions per channel; ``None`` when
-        the process holds no entry of the run), ``slots`` (``[[window, slot
-        name], ...]`` in the order saved) and ``slot_bytes``.
+        ``address``, ``placement_ok`` (the pop ran on ``address``), ``counts``
+        (uint16 additions per channel; ``None`` when the process holds no
+        entry of the run), ``slots`` (``[[window, slot name], ...]`` in the
+        order saved), ``slot_bytes``, ``start_unixtime``, ``end_unixtime``,
+        ``T_reduce_node`` and where the pop ran (``hostname``,
+        ``process_pid``, ``thread_native_id``, ``worker_name``).
     """
+    start_unixtime = time.time()
     try:
         from dask.distributed import get_worker
 
@@ -1164,13 +1167,17 @@ def pop_first_round_moments(run_id, address, partials_directory):
         if entry is not None:
             while entry["recent"]:
                 _flush_first_round_window(entry, entry["recent"][0], partials_directory)
+    end_unixtime = time.time()
     return {
         "address": address,
-        "process_pid": os.getpid(),
         "placement_ok": current == address,
         "counts": None if entry is None else entry["counts"],
         "slots": [] if entry is None else entry["slots"],
         "slot_bytes": 0 if entry is None else entry["slot_bytes"],
+        "start_unixtime": start_unixtime,
+        "end_unixtime": end_unixtime,
+        "T_reduce_node": end_unixtime - start_unixtime,
+        **_execution_identity(),
     }
 
 

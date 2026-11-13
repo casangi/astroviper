@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import threading
 
 import numpy as np
 import pytest
@@ -346,10 +347,13 @@ def test_drain_in_process(cube, tmp_path):
         "n_slots": 2,
         "address": None,
         "process_pid": os.getpid(),
+        "thread_native_id": threading.get_native_id(),
+        "worker_name": None,
         "placement_ok": True,
         "slot_bytes": result["slot_bytes"],
     }
     assert {key: records[0][key] for key in pop} == pop
+    assert records[0]["hostname"] and records[0]["T_reduce_node"] >= 0
     assert not {"counts", "slots"} & set(records[0])
     assert {record["stage"] for record in records[1:]} == {"first_round_merge"}
     assert [record["window"] for record in records[1:]] == [0] * 4 + [1] * 4
