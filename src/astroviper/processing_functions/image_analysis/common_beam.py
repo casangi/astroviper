@@ -81,8 +81,11 @@ def common_beam(beam_fit_params):
     Notes
     -----
     Given the same doubles in the same units and order, the result is that of casatools
-    6.7.6, except where CAS-14719 changed it. Inputs that differ by rounding (one ulp, or
-    float32 storage of the beams) can take a different number of growth steps.
+    6.7.6, except where CAS-14719 changed it, up to the rounding of sin, cos and acos, which
+    the port and casatools take from the platform's math library. Where an enclosing ellipse
+    touches a beam, one ulp of one of them, or of an input (float32 storage of the beams,
+    for example), can change the number of growth steps and so the result by a factor of
+    1.001: the math libraries of macOS and Linux give such different results for some sets.
 
     Examples
     --------
