@@ -269,31 +269,35 @@ def _build_primary_header(
 
 
 def _build_beams_extension_bytes(n_chan, n_pol):
-    """Serialized ``BEAMS`` binary-table extension (header + zero-filled rows).
+    """Serialized ``BEAMS`` binary-table extension (header + rows).
 
     One fixed-size row per (channel, polarization), channel-major, in CASA's
     multi-beam column order ``BMAJ, BMIN, BPA, CHAN, POL`` (radians). Beam
     values start as zero and are overwritten in place by the node tasks; the
-    ``CHAN``/``POL`` index columns are correct from the start.
+    ``CHAN``/``POL`` index columns are correct from the start, also in rows no
+    task writes.
     """
     from astropy.io import fits
 
-    n_rows = n_chan * n_pol
-    zeros = np.zeros(n_rows, dtype=np.float64)
+    # Big-endian, as the file holds them (astropy's in-memory table is not).
+    rows = np.zeros(
+        n_chan * n_pol,
+        dtype=[
+            ("BMAJ", ">f8"),
+            ("BMIN", ">f8"),
+            ("BPA", ">f8"),
+            ("CHAN", ">i4"),
+            ("POL", ">i4"),
+        ],
+    )
+    rows["CHAN"] = np.repeat(np.arange(n_chan), n_pol)
+    rows["POL"] = np.tile(np.arange(n_pol), n_chan)
     columns = [
-        fits.Column(name="BMAJ", format="D", unit="rad", array=zeros),
-        fits.Column(name="BMIN", format="D", unit="rad", array=zeros),
-        fits.Column(name="BPA", format="D", unit="rad", array=zeros),
-        fits.Column(
-            name="CHAN",
-            format="J",
-            array=np.repeat(np.arange(n_chan, dtype=np.int32), n_pol),
-        ),
-        fits.Column(
-            name="POL",
-            format="J",
-            array=np.tile(np.arange(n_pol, dtype=np.int32), n_chan),
-        ),
+        fits.Column(name="BMAJ", format="D", unit="rad", array=rows["BMAJ"]),
+        fits.Column(name="BMIN", format="D", unit="rad", array=rows["BMIN"]),
+        fits.Column(name="BPA", format="D", unit="rad", array=rows["BPA"]),
+        fits.Column(name="CHAN", format="J", array=rows["CHAN"]),
+        fits.Column(name="POL", format="J", array=rows["POL"]),
     ]
     hdu = fits.BinTableHDU.from_columns(columns, name="BEAMS")
     hdu.header["NCHAN"] = n_chan
@@ -304,7 +308,7 @@ def _build_beams_extension_bytes(n_chan, n_pol):
             f"writer assumes {_BEAMS_ROW_STRUCT.size} (BMAJ,BMIN,BPA,CHAN,POL)."
         )
     header_bytes = hdu.header.tostring().encode("ascii")
-    data_bytes = hdu.data.tobytes()
+    data_bytes = rows.tobytes()
     return (
         header_bytes
         + data_bytes

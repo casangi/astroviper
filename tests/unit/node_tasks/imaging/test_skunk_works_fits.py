@@ -261,6 +261,24 @@ def test_restoring_beam_labels_no_other_file(tmp_path):
         )
 
 
+def test_unwritten_beams_rows_hold_their_channel_and_polarization(tmp_path):
+    """Rows no task writes (a kept variable the run does not make, a skipped
+    task) hold zero beams with their CHAN and POL, so the file still opens."""
+    import xradio.image
+    from astropy.io import fits
+
+    store = str(tmp_path / "img.fits")
+    create_empty_fits_images(store, _empty_image(), KEEP)
+    path = os.path.join(store, "SKY_RESIDUAL.fits")
+    with fits.open(path) as hdulist:
+        beams = hdulist["BEAMS"].data
+        np.testing.assert_array_equal(beams["CHAN"], np.repeat(range(5), 2))
+        np.testing.assert_array_equal(beams["POL"], np.tile(range(2), 5))
+        assert not np.any([beams[column] for column in ("BMAJ", "BMIN", "BPA")])
+    xds = xradio.image.open_image({"sky_residual": path})
+    assert not xds["BEAM_FIT_PARAMS_SKY_RESIDUAL"].values.any()
+
+
 PSF_BEAM = "beam_fit_params_point_spread_function"
 RESTORED_BEAM = "beam_fit_params_sky_restored"
 RESIDUAL_BEAM = "beam_fit_params_sky_residual"
