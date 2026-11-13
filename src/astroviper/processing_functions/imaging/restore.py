@@ -1000,10 +1000,15 @@ def restore_image(
     as soon as it is transformed).  Per polarization at most two extra planes
     are live at once -- the model spectrum, multiplied by the beam in place,
     and the inverse-transform output, with the residual added into the restored
-    cube without a further temporary.  Planes whose model is entirely zero skip
-    the convolution (the restored plane is just the residual).  With
-    ``consume_model=True`` and apparent output, its cube allocation is avoided: the
-    model cube's buffer is reused and the model variable dropped.
+    cube without a further temporary.  Without ``restoring_beam``, planes whose
+    model is entirely zero skip the convolution (the restored plane is just the
+    residual).  With ``restoring_beam`` the target's clean beam is transformed
+    once per call, and every plane whose residual goes to the target costs one
+    more transform pair, its residual spectrum multiplied by the correcting
+    transform in blocks of rows, with at most three planes besides the outputs
+    live; a plane whose model is zero still takes its residual to the target.
+    With ``consume_model=True`` and apparent output, its cube allocation is
+    avoided: the model cube's buffer is reused and the model variable dropped.
 
     Parameters
     ----------
@@ -1108,8 +1113,10 @@ def restore_image(
     -----
     A square pixel grid (``|delta_l| == |delta_m|``) is assumed, as in the PSF
     Gaussian fit.  Frequencies whose beam-fit parameters are non-finite or
-    non-positive have no defined clean beam; their restored plane falls back to
-    the residual (the model cannot be restored without a beam).
+    non-positive have no defined clean beam; without ``restoring_beam`` their
+    restored plane falls back to the residual (the model cannot be restored
+    without a beam), with a target their model is restored with the target and
+    their residual added unconvolved and unscaled.
 
     With ``restoring_beam`` the residual is multiplied in the uv plane by
     ``H = (Omega_T / Omega_p) exp(-2 pi^2 f^T D f)``, with ``D`` the covariance
