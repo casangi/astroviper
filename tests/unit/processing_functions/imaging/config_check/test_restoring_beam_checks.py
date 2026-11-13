@@ -95,6 +95,15 @@ def test_axes_must_be_positive_with_major_not_below_minor(value):
         check_restoring_beam(value)
 
 
+@pytest.mark.parametrize("pa", [45.0, -4.0, np.nextafter(np.pi, 4.0)])
+def test_the_position_angle_must_be_in_radians(pa):
+    """tclean's ['1.5arcsec', '1.2arcsec', '45deg'] with only the axes in radians."""
+    for limit in (np.pi, -np.pi):
+        check_restoring_beam([BEAM[0], BEAM[1], limit])
+    with pytest.raises(ValueError, match=r"not in \[-pi, pi\]"):
+        check_restoring_beam([BEAM[0], BEAM[1], pa])
+
+
 @pytest.mark.parametrize(
     "value", [[True, True, False], ["1", "1", "0"], {"major": 1.0}]
 )

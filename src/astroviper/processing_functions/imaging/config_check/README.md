@@ -90,7 +90,8 @@ allocate an apparent restored cube. The selector controls intensity products;
 the separate spectral-product convention is described by the restoration API.
 
 `restoring_beam` is `None` (each plane keeps its own PSF fit) or a target
-`[major, minor, pa]` in radians with `major >= minor > 0`. A string, tclean's
+`[major, minor, pa]` in radians with `major >= minor > 0` and `|pa| <= pi` (a
+larger position angle is in degrees). A string, tclean's
 `'common'` among them, is refused with a pointer to `common_beam`. A target
 requires `restore=True`, and its major axis must be smaller than the image,
 `min(image_size) * min(|cell_size|)`: a larger one is arcseconds or degrees

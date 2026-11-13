@@ -180,7 +180,8 @@ def correcting_beam(beam_fit_params, restoring_beam):
         Beams ``(..., 3)``, ``[major, minor, pa]`` in radians: the PSF beams of a cube,
         for example.
     restoring_beam : array_like
-        The target ``[major, minor, pa]`` in radians, ``major >= minor > 0``.
+        The target ``[major, minor, pa]`` in radians, ``major >= minor > 0``,
+        ``|pa| <= pi``.
 
     Returns
     -------
@@ -196,10 +197,10 @@ def correcting_beam(beam_fit_params, restoring_beam):
     Raises
     ------
     ValueError
-        If ``restoring_beam`` is not ``[major, minor, pa]`` with ``major >= minor > 0``,
-        or if it does not contain a beam. The message names the planes (indices, and
-        frequencies for a DataArray), the beams and the factor by which both axes of the
-        target must grow to contain them.
+        If ``restoring_beam`` is not ``[major, minor, pa]`` with ``major >= minor > 0``
+        and ``|pa| <= pi``, or if it does not contain a beam. The message names the
+        planes (indices, and frequencies for a DataArray), the beams and the factor by
+        which both axes of the target must grow to contain them.
 
     See Also
     --------

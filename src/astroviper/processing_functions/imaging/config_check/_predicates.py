@@ -4,6 +4,8 @@ Callers decide when a rule applies and whether a value must be supplied. These
 predicates validate original values without converting or changing configuration.
 """
 
+import math
+
 from astroviper.processing_functions.imaging.config_check._common import (
     require_boolean,
     require_finite_real,
@@ -162,8 +164,8 @@ def check_restoring_beam(value):
     ----------
     value : sequence of float
         FWHM of the major and minor axes and the position angle, in radians,
-        as ``BEAM_FIT_PARAMS``, with ``major >= minor > 0``. The caller handles
-        ``None`` (no target).
+        as ``BEAM_FIT_PARAMS``, with ``major >= minor > 0`` and
+        ``|pa| <= pi``. The caller handles ``None`` (no target).
 
     Raises
     ------
@@ -171,7 +173,8 @@ def check_restoring_beam(value):
         The values are not real numbers.
     ValueError
         A string (tclean's ``'common'`` among them), not three values, a value
-        that is not finite, an axis that is not positive, or ``minor > major``.
+        that is not finite, an axis that is not positive, ``minor > major``, or
+        ``|pa| > pi`` (a position angle in degrees).
     """
     if isinstance(value, str):
         raise ValueError(
@@ -184,3 +187,9 @@ def check_restoring_beam(value):
         raise ValueError("restoring_beam must be [major, minor, pa] in radians.")
     if not beam[0] >= beam[1] > 0:
         raise ValueError("restoring_beam must have major >= minor > 0.")
+    # Both PSF fits and common_beam give |pa| < pi: a larger one is in degrees.
+    if not abs(beam[2]) <= math.pi:
+        raise ValueError(
+            f"restoring_beam position angle {beam[2]} is not in [-pi, pi]; give it "
+            "in radians."
+        )
