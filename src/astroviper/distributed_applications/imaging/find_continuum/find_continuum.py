@@ -363,6 +363,8 @@ def _find_continuum(
             "metadata": _cube_metadata(
                 lazy_xds, data_group["sky"], beam, telescope_name
             ),
+            "primary_beam": data_group["primary_beam"],
+            "primary_beam_limit": primary_beam_limit,
         }
     cubes[stem + ".residual"]["atmosphere"] = {
         "transmission": np.asarray(atmospheric_transmission, dtype=np.float64),
