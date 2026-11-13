@@ -6,6 +6,8 @@ predicates validate original values without converting or changing configuration
 
 import math
 
+import numpy as np
+
 from astroviper.processing_functions.imaging.config_check._common import (
     require_boolean,
     require_finite_real,
@@ -192,4 +194,28 @@ def check_restoring_beam(value):
         raise ValueError(
             f"restoring_beam position angle {beam[2]} is not in [-pi, pi]; give it "
             "in radians."
+        )
+
+
+def check_restoring_beam_within_image(restoring_beam, image_size, cell_size):
+    """Require the major axis of a target beam to be smaller than the image.
+
+    A larger one is arcseconds or degrees given as radians, or a common beam
+    inflated by a failed PSF fit.
+
+    Parameters
+    ----------
+    restoring_beam : sequence of float
+        A target that :func:`check_restoring_beam` accepts.
+    image_size : sequence of int
+        Pixels along ``l`` and ``m``.
+    cell_size : sequence of float
+        Cell sizes along ``l`` and ``m`` in radians; their signs are ignored.
+    """
+    major = np.asarray(restoring_beam)[0]
+    extent = np.min(image_size) * np.min(np.abs(cell_size))
+    if major >= extent:
+        raise ValueError(
+            f"The restoring_beam major axis ({major} rad) is not smaller "
+            f"than the image ({extent} rad); give the beam in radians."
         )

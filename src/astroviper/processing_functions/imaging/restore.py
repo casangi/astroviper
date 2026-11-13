@@ -1125,12 +1125,21 @@ def restore_image(
             check_primary_beam_limit,
             check_restoration_output,
             check_restoring_beam,
+            check_restoring_beam_within_image,
         )
 
         check_restoration_output(restoration_output)
         check_primary_beam_limit(primary_beam_limit)
         if restoring_beam is not None:
             check_restoring_beam(restoring_beam)
+            check_restoring_beam_within_image(
+                restoring_beam,
+                [img_xds.sizes["l"], img_xds.sizes["m"]],
+                [
+                    img_xds.l.values[1] - img_xds.l.values[0],
+                    img_xds.m.values[1] - img_xds.m.values[0],
+                ],
+            )
 
     make_apparent = restoration_output in ("apparent", "both")
     correct = restoration_output in ("primary_beam_corrected", "both")

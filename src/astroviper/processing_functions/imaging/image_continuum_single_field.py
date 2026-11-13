@@ -4672,6 +4672,19 @@ def restore_continuum_image(
         check_driver_workflow(
             {**locals(), "restore": True}, mode=CONTINUUM_SINGLE_FIELD
         )
+        if restoring_beam is not None:
+            from astroviper.processing_functions.imaging.config_check._predicates import (
+                check_restoring_beam_within_image,
+            )
+
+            check_restoring_beam_within_image(
+                restoring_beam,
+                [img_xds.sizes["l"], img_xds.sizes["m"]],
+                [
+                    img_xds.l.values[1] - img_xds.l.values[0],
+                    img_xds.m.values[1] - img_xds.m.values[0],
+                ],
+            )
 
     import time
 

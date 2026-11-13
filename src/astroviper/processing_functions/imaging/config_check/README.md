@@ -95,7 +95,9 @@ larger position angle is in degrees). A string, tclean's
 `'common'` among them, is refused with a pointer to `common_beam`. A target
 requires `restore=True`, and its major axis must be smaller than the image,
 `min(image_size) * min(|cell_size|)`: a larger one is arcseconds or degrees
-given as radians, or a common beam inflated by a failed PSF fit.
+given as radians, or a common beam inflated by a failed PSF fit. The drivers
+check it against `image_params`, and direct calls of `restore_image` and
+`restore_continuum_image` against the image they restore.
 `beam_fit_params_sky_restored` can be kept only with `restore=True` and a
 target. Whether the target contains a plane's PSF beam is known only after the
 PSF fit: the cube restore keeps such a plane's residual unscaled and warns, and

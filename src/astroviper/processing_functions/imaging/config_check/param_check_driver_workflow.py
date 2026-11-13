@@ -94,6 +94,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     if config.get("restoring_beam") is not None:
         from astroviper.processing_functions.imaging.config_check._predicates import (
             check_restoring_beam,
+            check_restoring_beam_within_image,
         )
 
         check_restoring_beam(config["restoring_beam"])
@@ -101,15 +102,11 @@ def check_driver_workflow(config, *, mode, require_complete=False):
             raise ValueError("restoring_beam requires restore=True.")
         image_params = require_mapping("image_params", config.get("image_params", {}))
         if "image_size" in image_params and "cell_size" in image_params:
-            major = np.asarray(config["restoring_beam"])[0]
-            extent = np.min(image_params["image_size"]) * np.min(
-                np.abs(image_params["cell_size"])
+            check_restoring_beam_within_image(
+                config["restoring_beam"],
+                image_params["image_size"],
+                image_params["cell_size"],
             )
-            if major >= extent:
-                raise ValueError(
-                    f"The restoring_beam major axis ({major} rad) is not smaller "
-                    f"than the image ({extent} rad); give the beam in radians."
-                )
 
     # ========================================================================
     # 2. Configuration structure and backend settings

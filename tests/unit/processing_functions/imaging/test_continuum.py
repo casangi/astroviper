@@ -873,6 +873,16 @@ def test_continuum_restored_beam_variable_holds_the_target():
     assert restored_group["beam_fit_params_sky"] == "BEAM_FIT_PARAMS_SKY_RESTORED"
 
 
+def test_continuum_restoring_beam_in_arcseconds_is_refused_on_a_direct_call():
+    """[1.2, 1.0, 0.5] meant as arcseconds, on 32 x 32 pixels of 1e-5 rad."""
+    with pytest.raises(ValueError, match="not smaller than the image"):
+        restore_continuum_image(
+            _continuum_target_image(np.float64),
+            restoring_beam=[1.2, 1.0, 0.5],
+            continuum_mode="mfs",
+        )
+
+
 @pytest.mark.parametrize("frequency_shift", [0.0, 1.0e6])
 def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(
     monkeypatch, frequency_shift

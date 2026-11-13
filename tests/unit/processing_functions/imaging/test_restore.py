@@ -975,3 +975,10 @@ def test_restored_beam_variable_holds_the_target_in_every_plane():
 def test_restoring_beam_is_checked_on_a_direct_call():
     with pytest.raises(ValueError, match="common_beam"):
         restore_image(_target_inputs(np.float32), restoring_beam="common")
+
+
+def test_restoring_beam_in_arcseconds_is_refused_on_a_direct_call():
+    """[1.2, 1.0, 0.5] meant as arcseconds, on 64 x 64 pixels of 1 mrad: the
+    target would contain every PSF beam and pass without a warning."""
+    with pytest.raises(ValueError, match=r"not smaller than the image \(0.064"):
+        restore_image(_target_inputs(np.float32), restoring_beam=[1.2, 1.0, 0.5])
