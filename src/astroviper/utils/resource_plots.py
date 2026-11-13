@@ -241,6 +241,23 @@ def _bin_increments(edges, offset, t_rel, cumulative):
     return np.diff(np.interp(edges - offset, t_rel, cumulative))
 
 
+def _display_bins(span, interval, period):
+    """Bin edges over the run [0, span]: about 600 bins of a whole number of
+    sample intervals. Once a bin would be longer than a quarter of the task
+    period it is a whole number of task periods instead, so the bin means do
+    not alias the workers' lockstep reads and write bursts. The last bin ends
+    at ``span``; one shorter than half a bin is merged into the bin before.
+    Returns (bin width, edges)."""
+    b = span / 600
+    if period > 0 and b > 0.25 * period:
+        b = period * max(1, round(b / period))
+    binw = interval * max(1, round(b / interval))
+    edges = np.append(np.arange(0.0, span, binw), span)
+    if len(edges) > 2 and edges[-1] - edges[-2] < 0.5 * binw:
+        edges = np.delete(edges, -2)
+    return binw, edges
+
+
 def _plot_task_series(
     df,
     column,
@@ -436,8 +453,9 @@ def plot_cluster_resource_usage(
     intervals; a line at the 1 s sample interval over a long run is a solid
     band of second-long bursts), taken from a cumulative series (CPU
     seconds, bytes, the time integral of RSS), so it conserves that
-    quantity. Every figure also shows the mean number of running tasks on a
-    right-hand axis.
+    quantity; once a bin would exceed a quarter of the task period it spans
+    whole task periods (:func:`_display_bins`). Every figure also shows the
+    mean number of running tasks in a strip below.
 
     Parameters
     ----------
@@ -480,9 +498,10 @@ def plot_cluster_resource_usage(
     rel_end = np.array([t[-1] for t in df["time_seconds"]], dtype=float)
     run_t0 = starts.min()
     span = (starts + rel_end).max() - run_t0
-    binw = interval * max(1, int(np.ceil(span / 600 / interval)))
-    edges = np.arange(0.0, span + binw, binw)
+    period = float(np.median([t[-1] - t[0] for t in df["time_seconds"]]))
+    binw, edges = _display_bins(span, interval, period)
     grid = 0.5 * (edges[:-1] + edges[1:])
+    width = np.diff(edges)
 
     have_io = "read_chars" in df.columns and not df["read_chars"].isna().all()
     acc = {
@@ -506,26 +525,31 @@ def plot_cluster_resource_usage(
                 c = np.asarray(row[col], dtype=float)
                 acc[key] += _bin_increments(edges, offset, t_rel, (c - c[0]) / 2**30)
     for key in acc:
-        acc[key] /= binw
+        acc[key] /= width
     n_running = acc.pop("running")
     bin_note = f" ({binw:g} s bin means)"
 
     def _figure(title, ylabel, curves, capacity=None):
-        fig, ax = plt.subplots(figsize=(11, 6))
+        fig, (ax, axr) = plt.subplots(
+            2, 1, figsize=(11, 7), sharex=True, height_ratios=(4, 1)
+        )
         for label, y, color in curves:
             ax.plot(grid, y, color=color, linewidth=1.5, label=label)
+        top = max(np.nanmax(y) for _, y, _ in curves)
         if capacity is not None:
             ax.axhline(capacity[1], color="gray", linestyle="--", label=capacity[0])
-        ax2 = ax.twinx()
-        ax2.plot(grid, n_running, color="lightgray", linewidth=1, zorder=0)
-        ax2.set_ylabel("Running tasks", color="gray")
-        ax.set_xlabel("Wall-clock time since first task start (s)")
+            top = max(top, capacity[1])
+        ax.set_ylim(0.0, 1.25 * top)  # headroom for the legend
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.grid(True, color="lightgray", alpha=0.5)
-        ax.set_zorder(ax2.get_zorder() + 1)
-        ax.patch.set_visible(False)
-        ax.legend(loc="upper right")
+        ax.legend(loc="upper right", ncol=2)
+        axr.plot(grid, n_running, color="dimgray", linewidth=1)
+        axr.set_ylim(0.0, 1.1 * n_running.max())
+        axr.set_ylabel("Running tasks")
+        axr.set_xlabel("Wall-clock time since first task start (s)")
+        for a in (ax, axr):
+            a.grid(True, color="lightgray", alpha=0.5)
+        fig.tight_layout()
         return ax
 
     axes = {}

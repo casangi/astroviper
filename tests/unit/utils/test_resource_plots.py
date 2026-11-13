@@ -86,11 +86,13 @@ def test_cluster_io_bin_means_conserve_bytes():
     df = _monitored_frame()
     axes = plot_cluster_resource_usage(df)
     lines = {line.get_label(): line for line in axes["io"].get_lines()}
-    x = lines["write"].get_xdata()
-    binw = x[1] - x[0]
+    edges = [0.0]  # from the bin centres; the last bin may be shorter
+    for centre in lines["write"].get_xdata():
+        edges.append(2 * centre - edges[-1])
+    width = np.diff(edges)
     for col in ("read_chars", "write_chars"):
         total_gib = sum(c[-1] - c[0] for c in df[col]) / 2**30
-        plotted = lines[col.split("_")[0]].get_ydata().sum() * binw
+        plotted = (lines[col.split("_")[0]].get_ydata() * width).sum()
         assert plotted == pytest.approx(total_gib, rel=1e-9)
 
 
