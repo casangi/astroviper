@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from astroviper.utils.resource_plots import (
+    _over_slots,
     _with_imaging_task_columns,
     plot_application_task_stream,
     plot_cluster_resource_usage,
@@ -138,63 +139,77 @@ def test_cluster_plots_skip_unmonitored(capsys):
     assert "no resource series" in capsys.readouterr().out
 
 
-def _two_slot_frame():
-    """Two worker slots, 1 s samples: slot 1 runs two 9 s tasks at 100 % CPU,
-    2 GiB and 1 MiB/s written, idle from 9 to 10 s; slot 2 runs one 19 s
-    task at 50 % CPU, 4 GiB and 2 MiB/s written."""
+def _slot_frame(tasks):
+    """One row per task (pid, worker name or None, start s, samples, cores,
+    GiB, MiB/s written; half that read), 1 s samples on one host."""
     rows = []
-    for pid, start, n, cores, gib, mib_s in (
-        (1, 0.0, 10, 1.0, 2.0, 1.0),
-        (1, 10.0, 10, 1.0, 2.0, 1.0),
-        (2, 0.0, 20, 0.5, 4.0, 2.0),
-    ):
+    for pid, worker, start, n, cores, gib, mib_s in tasks:
         t = np.arange(float(n))
-        rows.append(
-            {
-                "time_seconds": t.tolist(),
-                "cpu_seconds": (cores * t).tolist(),
-                "cpu_percent": [100.0 * cores] * n,
-                "memory_rss_bytes": [gib * 2**30] * n,
-                "read_chars": (3e9 + 0.5 * mib_s * 2**20 * t).tolist(),
-                "write_chars": (7e9 + mib_s * 2**20 * t).tolist(),
-                "sample_interval_seconds": 1.0,
-                "start_unixtime": 1.75e9 + start,
-                "hostname": "node",
-                "process_pid": pid,
-                "thread_native_id": 10 * pid,
-            }
-        )
+        row = {
+            "time_seconds": t.tolist(),
+            "cpu_seconds": (cores * t).tolist(),
+            "cpu_percent": [100.0 * cores] * n,
+            "memory_rss_bytes": [gib * 2**30] * n,
+            "read_chars": (3e9 + 0.5 * mib_s * 2**20 * t).tolist(),
+            "write_chars": (7e9 + mib_s * 2**20 * t).tolist(),
+            "sample_interval_seconds": 1.0,
+            "start_unixtime": 1.75e9 + start,
+            "hostname": "node",
+            "process_pid": pid,
+            "thread_native_id": 10 * pid,
+        }
+        if worker is not None:
+            row["worker_name"] = worker
+        rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _two_slot_frame():
+    """Two worker slots: slot 1 runs two 9 s tasks at 100 % CPU, 2 GiB and
+    1 MiB/s written, idle from 9 to 10 s; slot 2 runs one 19 s task at 50 %
+    CPU, 4 GiB and 2 MiB/s written."""
+    return _slot_frame(
+        [
+            (1, None, 0.0, 10, 1.0, 2.0, 1.0),
+            (1, None, 10.0, 10, 1.0, 2.0, 1.0),
+            (2, None, 0.0, 20, 0.5, 4.0, 2.0),
+        ]
+    )
 
 
 def _statistics(ax):
     return {line.get_label(): line.get_ydata() for line in ax.get_lines()}
 
 
+def test_over_slots():
+    stats = _over_slots(np.array([[1.0, np.nan], [2.0, np.nan], [9.0, np.nan]]))
+    for key, expected in (("peak", 9), ("mean", 4), ("median", 2), ("min", 1)):
+        np.testing.assert_allclose(stats[key], [expected, np.nan])
+
+
 def test_core_plots_statistics_over_the_slots(tmp_path):
     axes = plot_core_resource_usage(
-        _two_slot_frame(), memory_per_core_gib=8, save_prefix=str(tmp_path / "x_")
+        _two_slot_frame(), memory_per_slot_gib=8, save_prefix=str(tmp_path / "x_")
     )
     for name in ("cpu", "memory", "io"):
         assert (tmp_path / f"x_core_{name}.png").exists()
-    assert "2 worker slots" in axes["cpu"].get_title()
+    assert "(2 slots)" in axes["cpu"].get_title()
     x = axes["cpu"].get_lines()[0].get_xdata()
     gap = (x > 9) & (x < 10)  # slot 1 between its tasks
     assert gap.sum() == 1 and len(x) == 19
     cpu = _statistics(axes["cpu"])
-    np.testing.assert_allclose(cpu["peak (max over cores)"], np.where(gap, 50, 100))
+    np.testing.assert_allclose(cpu["peak (max over slots)"], np.where(gap, 50, 100))
     np.testing.assert_allclose(cpu["mean"], np.where(gap, 25, 75))
-    np.testing.assert_allclose(cpu["median"], np.where(gap, 25, 75))
     np.testing.assert_allclose(cpu["min"], np.where(gap, 0, 50))
     # memory only over the slots running a task: the idle slot is left out
     memory = _statistics(axes["memory"])
-    np.testing.assert_allclose(memory["peak (max over cores)"], 4.0)
+    np.testing.assert_allclose(memory["peak (max over slots)"], 4.0)
     np.testing.assert_allclose(memory["min"], np.where(gap, 4, 2))
     np.testing.assert_allclose(memory["mean"], np.where(gap, 4, 3))
-    assert "memory per core (8 GiB)" in memory
+    assert "memory per slot (8 GiB)" in memory
     write = _statistics(axes["io"])
     np.testing.assert_allclose(write["min"], np.where(gap, 0, 1))
-    np.testing.assert_allclose(write["peak (max over cores)"], 2.0)
+    np.testing.assert_allclose(write["peak (max over slots)"], 2.0)
     read = _statistics(axes["io"].figure.axes[1])
     np.testing.assert_allclose(read["mean"], np.where(gap, 0.5, 0.75))
 
@@ -202,7 +217,26 @@ def test_core_plots_statistics_over_the_slots(tmp_path):
 def test_core_slots_from_interval_packing():
     df = _two_slot_frame().drop(columns=["process_pid", "thread_native_id"])
     axes = plot_core_resource_usage(df)
-    assert "2 worker slots" in axes["cpu"].get_title()
+    assert "(2 slots)" in axes["cpu"].get_title()
+
+
+def test_core_slots_keep_a_restarted_worker():
+    """Worker w2's process is restarted at 10 s (new pid): still one slot."""
+    df = _slot_frame(
+        [
+            (1, "w1", 0.0, 10, 1.0, 2.0, 1.0),
+            (1, "w1", 10.0, 10, 1.0, 2.0, 1.0),
+            (2, "w2", 0.0, 10, 0.5, 4.0, 2.0),
+            (3, "w2", 10.0, 10, 0.5, 4.0, 2.0),
+        ]
+    )
+    axes = plot_core_resource_usage(df)
+    assert "(2 slots)" in axes["cpu"].get_title()
+    x = axes["cpu"].get_lines()[0].get_xdata()
+    gap = (x > 9) & (x < 10)  # both workers between their tasks
+    np.testing.assert_allclose(_statistics(axes["cpu"])["min"], np.where(gap, 0, 50))
+    by_pid = plot_core_resource_usage(df.drop(columns="worker_name"))
+    assert "(3 slots)" in by_pid["cpu"].get_title()
 
 
 def test_core_mean_times_slots_is_the_cluster_curve():
@@ -225,6 +259,16 @@ def test_core_plots_bin_seconds():
     x = axes["cpu"].get_lines()[0].get_xdata()
     np.testing.assert_allclose(x, [2.5, 7.5, 12.5, 17.0])  # 5 s bins, last 4 s
     assert "(5 s bin means)" in axes["cpu"].get_ylabel()
+    # slot 1 runs 4 s of the bin [5, 10): its memory is the mean over those 4 s
+    cpu, memory = _statistics(axes["cpu"]), _statistics(axes["memory"])
+    np.testing.assert_allclose(cpu["peak (max over slots)"], [100, 80, 100, 100])
+    np.testing.assert_allclose(cpu["mean"], [75, 65, 75, 75])
+    np.testing.assert_allclose(memory["min"], 2.0)
+    np.testing.assert_allclose(memory["mean"], 3.0)
+    # a width beyond half the run is capped there: two bins, not one
+    axes = plot_core_resource_usage(_two_slot_frame(), bin_seconds=100)
+    np.testing.assert_allclose(axes["cpu"].get_lines()[0].get_xdata(), [5.0, 14.5])
+    assert "(10 s bin means)" in axes["cpu"].get_ylabel()
 
 
 def test_core_plots_without_io_or_start(capsys):
@@ -232,6 +276,14 @@ def test_core_plots_without_io_or_start(capsys):
     assert axes["cpu"] is not None and axes["io"] is None
     assert plot_core_resource_usage(_monitored_frame(with_start=False)) is None
     assert "plot_core_resource_usage: no start_unixtime" in capsys.readouterr().out
+
+
+def test_wall_clock_plots_skip_tasks_without_start(capsys):
+    df = _two_slot_frame()
+    df.loc[1, "start_unixtime"] = np.nan
+    assert plot_core_resource_usage(df) is None
+    assert plot_cluster_resource_usage(df) is None
+    assert capsys.readouterr().out.count("1 of 3 tasks have no start_unixtime") == 2
 
 
 def test_rejects_wrong_source_type():
