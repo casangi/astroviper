@@ -2,8 +2,10 @@
 
 Runs the pipeline's findContinuum (vendored in ``findContinuum.py``) on a dirty
 cube in an xradio image store. findContinuum's CASA tasks and tools are those of
-:mod:`casa_image_tasks`; every reduction of the cube is its own map-reduce over
-frequency chunks, so the cube is read as often as the pipeline reads it.
+:mod:`casa_image_tasks`. In :func:`find_continuum` every reduction of the cube
+is its own map-reduce over frequency chunks, so the cube is read as often as
+the pipeline reads it; :func:`find_continuum_fused` gives the same results in
+fewer passes (:mod:`fused_reductions`).
 """
 
 import contextlib
@@ -15,6 +17,8 @@ import time
 import numpy as np
 import toolviper.utils.logger as logger
 import toolviper.utils.parameter
+
+from astroviper.utils.param_docs import shares_param_docs
 
 _PARAM_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -76,6 +80,7 @@ def _cube_metadata(lazy_xds, variable, beam_variable, telescope_name):
     }
 
 
+@shares_param_docs
 @toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
 def find_continuum(
     input_image_store: str,
@@ -155,6 +160,132 @@ def find_continuum(
     one call at a time; spectral windows run in parallel in separate
     processes.
     """
+    return _find_continuum(
+        input_image_store,
+        atmospheric_transmission,
+        atmospheric_sky_temperature,
+        work_directory,
+        image_data_group_in_name,
+        telescope_name,
+        single_continuum,
+        n_bin,
+        spectral_dynamic_range_bandwidth,
+        primary_beam_limit,
+        n_mapping_parallelism,
+        input_checked=input_checked,
+        fused=False,
+    )
+
+
+@shares_param_docs
+@toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
+def find_continuum_fused(
+    input_image_store: str,
+    atmospheric_transmission,
+    atmospheric_sky_temperature,
+    work_directory: str,
+    image_data_group_in_name: str = "residual",
+    telescope_name: str = "ALMA",
+    single_continuum: bool = False,
+    n_bin: int = 1,
+    spectral_dynamic_range_bandwidth: float | None = None,
+    primary_beam_limit: float | None = 0.2,
+    n_mapping_parallelism: dict | None = None,
+    *,
+    input_checked: bool = False,
+) -> dict:
+    """Find the continuum channels as :func:`find_continuum` does, in fewer passes.
+
+    findContinuum's reductions of the cube are answered by
+    :class:`~astroviper.distributed_applications.imaging.find_continuum.fused_reductions.FusedReductions`:
+    a pass over the image store also computes the reductions findContinuum
+    asks for next, as far as they are known by then, and later requests are
+    answered from them. The results are those of :func:`find_continuum`.
+
+    Parameters
+    ----------
+    input_image_store : str
+        xradio image store of the dirty cube (Stokes I is used).
+    atmospheric_transmission : list or numpy.ndarray
+        Atmospheric transmission at every channel (0 to 1), as CASA's
+        atmosphere model gives it for the observation.
+    atmospheric_sky_temperature : list or numpy.ndarray
+        Sky brightness temperature at every channel (K).
+    work_directory : str
+        Directory for findContinuum's plots, spectra and intermediate images.
+        It must not hold the products of an earlier run on a cube of the same
+        name: findContinuum would reuse them, as in the pipeline.
+    image_data_group_in_name : str, default "residual"
+        Image data group with the roles ``sky``, ``primary_beam``,
+        ``point_spread_function`` and ``beam_fit_params_point_spread_function``.
+    telescope_name : str, default "ALMA"
+        Telescope, as findContinuum reads it from a CASA image header.
+    single_continuum : bool, default False
+        The spectral window is a single-continuum setup [findContinuum
+        ``singleContinuum``].
+    n_bin : int, default 1
+        Channels to average in the mean spectrum [findContinuum ``nbin``].
+    spectral_dynamic_range_bandwidth : float, optional
+        The requested spectral dynamic range bandwidth (Hz) [findContinuum
+        ``spectralDynamicRangeBandWidth``].
+    primary_beam_limit : float, default 0.2
+        Pixels where the primary beam is below this level are masked in the
+        dirty cube and the primary beam, as in the cube ``hif_findcont`` makes
+        with ``tclean(pblimit=0.2)``; ``None`` reads the cubes as they are.
+    n_mapping_parallelism : dict, optional
+        ``{"frequency": n}``, the number of frequency chunks of every
+        map-reduce; one chunk if not given.
+    input_checked : bool, default False
+        Skip the configuration checks already done by the calling layer. The
+        checks of the opened image and of the work directory always run.
+
+    Returns
+    -------
+    dict
+        As :func:`find_continuum`.
+
+    Raises
+    ------
+    ValueError
+        As :func:`find_continuum`.
+
+    Notes
+    -----
+    As :func:`find_continuum`, a process runs one call at a time.
+    """
+    return _find_continuum(
+        input_image_store,
+        atmospheric_transmission,
+        atmospheric_sky_temperature,
+        work_directory,
+        image_data_group_in_name,
+        telescope_name,
+        single_continuum,
+        n_bin,
+        spectral_dynamic_range_bandwidth,
+        primary_beam_limit,
+        n_mapping_parallelism,
+        input_checked=input_checked,
+        fused=True,
+    )
+
+
+def _find_continuum(
+    input_image_store,
+    atmospheric_transmission,
+    atmospheric_sky_temperature,
+    work_directory,
+    image_data_group_in_name,
+    telescope_name,
+    single_continuum,
+    n_bin,
+    spectral_dynamic_range_bandwidth,
+    primary_beam_limit,
+    n_mapping_parallelism,
+    *,
+    input_checked,
+    fused,
+):
     import dask
     import matplotlib.pyplot as plt
     import pandas as pd
@@ -169,6 +300,9 @@ def find_continuum(
     from astroviper.distributed_applications.imaging.find_continuum import (
         casa_image_tasks,
         findContinuum,
+    )
+    from astroviper.distributed_applications.imaging.find_continuum.fused_reductions import (
+        FusedReductions,
     )
     from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
         check_find_continuum_config,
@@ -288,7 +422,12 @@ def find_continuum(
         with (
             contextlib.chdir(work_directory),
             contextlib.redirect_stdout(log_stream),
-            casa_image_tasks.cube_session(cubes, run_reductions),
+            casa_image_tasks.cube_session(
+                cubes,
+                FusedReductions(run_reductions, stem + ".residual", stem + ".pb")
+                if fused
+                else run_reductions,
+            ),
         ):
             result = findContinuum.findContinuum(
                 img=stem + ".residual",

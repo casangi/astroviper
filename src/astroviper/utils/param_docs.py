@@ -102,6 +102,7 @@ def _target_files():
     rel = [
         "distributed_applications/imaging/image_cube_single_field.py",
         "distributed_applications/imaging/feather.py",
+        "distributed_applications/imaging/find_continuum/find_continuum.py",
         "distributed_applications/imaging/image_cube_single_field_delphi.py",
         "distributed_applications/imaging/point_spread_function_cube_single_field.py",
         "node_tasks/imaging/point_spread_function_cube_single_field.py",

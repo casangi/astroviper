@@ -6,7 +6,10 @@ import numpy as np
 import pytest
 from xradio.image import write_image
 
-from astroviper.distributed_applications.imaging import find_continuum
+from astroviper.distributed_applications.imaging import (
+    find_continuum,
+    find_continuum_fused,
+)
 from astroviper.utils.data_group_tools import modify_data_groups_xds
 from tests.unit.processing_functions.imaging.find_continuum_test_utils import (
     LINE_SET,
@@ -23,10 +26,11 @@ COMPACT_LINE = dict(
 # Channel selection, all-continuum flag and moment difference SNR of CASA
 # 6.7.6's findContinuum (pipeline 2026.3.0.7) on the same cubes, with CASA's
 # atmosphere model. The windows have no atmospheric line, and a flat atmosphere
-# selects the same channels.
+# selects the same channels. Last, the passes that read the dirty cube in
+# find_continuum and in find_continuum_fused.
 CASA_RESULTS = {
-    "no_lines": (dict(lines=()), "9~464", True, 4.4041),
-    "line_set": (dict(lines=LINE_SET), "6~85;154~367;433~472", False, 6.2507),
+    "no_lines": (dict(lines=()), "9~464", True, 4.4041, (7, 3)),
+    "line_set": (dict(lines=LINE_SET), "6~85;154~367;433~472", False, 6.2507, (7, 3)),
     # The primary beam falls below 0.2 in the corners: masked there, as by
     # tclean's pblimit in the pipeline (and in the CASA reference).
     "small_beam": (
@@ -34,6 +38,7 @@ CASA_RESULTS = {
         "6~85;154~367;433~467",
         False,
         7.3877,
+        (7, 3),
     ),
     # The ripple of the bright line's channels amends the joint mask.
     "sidelobes": (
@@ -53,6 +58,7 @@ CASA_RESULTS = {
         "3~86;154~255;339~472",
         False,
         5.0069,
+        (8, 5),
     ),
 }
 
@@ -69,9 +75,10 @@ def _flat_atmosphere(n_channels):
     }
 
 
+@pytest.mark.parametrize("fused", [False, True], ids=["separate", "fused"])
 @pytest.mark.parametrize("case", CASA_RESULTS)
-def test_selection_matches_casa(case, tmp_path, monkeypatch):
-    kwargs, selection, all_continuum, snr = CASA_RESULTS[case]
+def test_selection_matches_casa(case, fused, tmp_path, monkeypatch):
+    kwargs, selection, all_continuum, snr, dirty_cube_reads = CASA_RESULTS[case]
     store = _write_cube(
         tmp_path / f"{case}.img.zarr", make_find_continuum_image_xds(**kwargs)
     )
@@ -80,7 +87,7 @@ def test_selection_matches_casa(case, tmp_path, monkeypatch):
     run_directory.mkdir()
     monkeypatch.chdir(run_directory)
 
-    result = find_continuum(
+    result = (find_continuum_fused if fused else find_continuum)(
         input_image_store=store,
         work_directory=work_directory,
         n_mapping_parallelism={"frequency": 3},
@@ -94,6 +101,7 @@ def test_selection_matches_casa(case, tmp_path, monkeypatch):
     assert os.path.isfile(result["plot"]) and os.path.isdir(result["joint_mask"])
     assert list(run_directory.iterdir()) == []
     assert set(result["cube_reads"]) == {"SKY_RESIDUAL", "PRIMARY_BEAM"}
+    assert result["cube_reads"]["SKY_RESIDUAL"] == dirty_cube_reads[fused]
     timing = result["timing_node_tasks"]
     assert len(timing) == 3 * result["n_cube_reductions"]
     assert sorted(set(timing["reduction"])) == list(range(result["n_cube_reductions"]))

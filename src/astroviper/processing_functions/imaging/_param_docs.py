@@ -158,6 +158,48 @@ _FIELD_NAME_DOC = (
     "not currently filter fields; prepare a single-field input Processing Set."
 )
 
+# The parameters of find_continuum and find_continuum_fused.
+_FIND_CONTINUUM_PARAM_DOCS = {
+    "input_image_store": "xradio image store of the dirty cube (Stokes I is used).",
+    "atmospheric_transmission": (
+        "Atmospheric transmission at every channel (0 to 1), as CASA's\n"
+        "atmosphere model gives it for the observation."
+    ),
+    "atmospheric_sky_temperature": "Sky brightness temperature at every channel (K).",
+    "work_directory": (
+        "Directory for findContinuum's plots, spectra and intermediate images.\n"
+        "It must not hold the products of an earlier run on a cube of the same\n"
+        "name: findContinuum would reuse them, as in the pipeline."
+    ),
+    "image_data_group_in_name": (
+        "Image data group with the roles ``sky``, ``primary_beam``,\n"
+        "``point_spread_function`` and ``beam_fit_params_point_spread_function``."
+    ),
+    "telescope_name": "Telescope, as findContinuum reads it from a CASA image header.",
+    "single_continuum": (
+        "The spectral window is a single-continuum setup [findContinuum\n"
+        "``singleContinuum``]."
+    ),
+    "n_bin": "Channels to average in the mean spectrum [findContinuum ``nbin``].",
+    "spectral_dynamic_range_bandwidth": (
+        "The requested spectral dynamic range bandwidth (Hz) [findContinuum\n"
+        "``spectralDynamicRangeBandWidth``]."
+    ),
+    "primary_beam_limit": (
+        "Pixels where the primary beam is below this level are masked in the\n"
+        "dirty cube and the primary beam, as in the cube ``hif_findcont`` makes\n"
+        "with ``tclean(pblimit=0.2)``; ``None`` reads the cubes as they are."
+    ),
+    "n_mapping_parallelism": (
+        '``{"frequency": n}``, the number of frequency chunks of every\n'
+        "map-reduce; one chunk if not given."
+    ),
+    "input_checked": (
+        "Skip the configuration checks already done by the calling layer. The\n"
+        "checks of the opened image and of the work directory always run."
+    ),
+}
+
 IMAGING_PARAM_DOCS = {
     "make_primary_beam_taylor": (
         "Collect the first-cycle inputs needed for primary-beam Taylor products.\n"
@@ -867,4 +909,9 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         'and ``"none"`` 33; the paper found models oscillating with constant\n'
         "coefficients of 0.7 to 0.9."
     ),
+    **{
+        f"{function}.{name}": description
+        for function in ("find_continuum", "find_continuum_fused")
+        for name, description in _FIND_CONTINUUM_PARAM_DOCS.items()
+    },
 }
