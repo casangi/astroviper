@@ -1090,9 +1090,10 @@ def restore_image(
         beam the target does not contain, or that has no PSF fit, keeps its
         residual unconvolved and unscaled, as ``tclean`` does, and is named in a
         warning. The continuum imager refuses a target that does not contain its
-        PSF beam before its imaging cycles. The beam is recorded as
-        ``BEAM_FIT_PARAMS_SKY_RESTORED``. For ``tclean``'s
-        ``restoringbeam='common'``, see
+        PSF beam, and any target when its PSF fit failed, right after that fit
+        in its first imaging cycle: the residual update has run, but no model
+        update. The beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        ``tclean``'s ``restoringbeam='common'``, see
         :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
     primary_beam_limit : float, optional
         Primary beam (power) cutoff below which the corrected image is blanked

@@ -2521,9 +2521,10 @@ def _prepare_continuum_image(
     input_params : dict
         Parameters supplied to the append node. Must contain ``image_params``.
         For later cycles, it must also contain ``static_xds``. A
-        ``restoring_beam`` that does not contain the fitted PSF beam raises
-        :class:`ValueError` right after the fit
-        (:func:`~astroviper.processing_functions.image_analysis.common_beam.correcting_beam`).
+        ``restoring_beam`` that does not contain the fitted PSF beam
+        (:func:`~astroviper.processing_functions.image_analysis.common_beam.correcting_beam`),
+        or any ``restoring_beam`` when the fit failed, raises
+        :class:`ValueError` right after the fit.
 
     initialize_static_products : bool
         If true, construct and cache the global PSF, restoring-beam fit, and
@@ -2844,17 +2845,28 @@ def _prepare_continuum_image(
             processing_function_threads=config["processing_function_threads"],
         )
 
-        # A target that does not contain the PSF beam is refused before the
-        # imaging cycles. The restore applies the beam of the first
+        # The restore takes the residual from the PSF beam to a target, so a
+        # failed fit or a target that does not contain the PSF beam is refused
+        # before any model update. The restore applies the beam of the first
         # polarization to every polarization.
         if input_params.get("restoring_beam") is not None:
             beam_name = img_xds.attrs["data_groups"][image_data_group_name][
                 "beam_fit_params_point_spread_function"
             ]
-            correcting_beam(
-                img_xds[beam_name].isel(polarization=[0]),
-                input_params["restoring_beam"],
-            )
+            beam = img_xds[beam_name].isel(polarization=[0])
+            values = np.asarray(beam.values, dtype=np.float64)
+            if not (
+                np.isfinite(values).all()
+                and (values[..., 0] > 0.0).all()
+                and (values[..., 1] > 0.0).all()
+            ):
+                raise ValueError(
+                    "The PSF fit failed (beam "
+                    f"{values.reshape(-1, 3).tolist()} rad): the restore needs "
+                    "the PSF beam to take the residual to restoring_beam "
+                    f"{list(map(float, input_params['restoring_beam']))} rad."
+                )
+            correcting_beam(beam, input_params["restoring_beam"])
 
         # ----------------------------------------------------------
         # Construct or validate the PB used by the model-update/static API.

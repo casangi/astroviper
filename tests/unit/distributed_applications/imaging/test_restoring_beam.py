@@ -223,7 +223,7 @@ def test_a_continuum_target_equal_to_the_psf_beam_restores_bit_for_bit(
     )
 
 
-def test_a_continuum_target_that_does_not_contain_the_psf_beam_is_refused_before_any_cycle(
+def test_a_continuum_target_that_does_not_contain_the_psf_beam_is_refused_before_any_model_update(
     processing_set, tmp_path, monkeypatch
 ):
     import astroviper.node_tasks.imaging.image_continuum_single_field as continuum_node

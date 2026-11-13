@@ -735,9 +735,10 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "beam the target does not contain, or that has no PSF fit, keeps its\n"
         "residual unconvolved and unscaled, as ``tclean`` does, and is named in a\n"
         "warning. The continuum imager refuses a target that does not contain its\n"
-        "PSF beam before its imaging cycles. The beam is recorded as\n"
-        "``BEAM_FIT_PARAMS_SKY_RESTORED``. For ``tclean``'s\n"
-        "``restoringbeam='common'``, see\n"
+        "PSF beam, and any target when its PSF fit failed, right after that fit\n"
+        "in its first imaging cycle: the residual update has run, but no model\n"
+        "update. The beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For\n"
+        "``tclean``'s ``restoringbeam='common'``, see\n"
         ":func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`."
     ),
     "psf_fitting_method": (

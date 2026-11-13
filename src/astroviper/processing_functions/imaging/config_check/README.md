@@ -99,9 +99,10 @@ given as radians, or a common beam inflated by a failed PSF fit. The drivers
 check it against `image_params`, and direct calls of `restore_image` and
 `restore_continuum_image` against the image they restore.
 `beam_fit_params_sky_restored` can be kept only with `restore=True` and a
-target. Whether the target contains a plane's PSF beam is known only after the
-PSF fit: the cube restore keeps such a plane's residual unscaled and warns, and
-the continuum append node refuses the target right after its PSF fit.
+target. Whether the target contains a plane's PSF beam, and whether that plane
+has a PSF fit, is known only after the PSF fit: the cube restore keeps the
+residual of such a plane unscaled and warns, and the continuum append node
+refuses the target right after its PSF fit.
 
 Output requests must match the selected workflow and restoration products.
 Restored images and spectral products require `restore=True`; alpha products

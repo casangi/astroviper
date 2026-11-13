@@ -181,15 +181,26 @@ def test_global_append_converts_counts_only_after_reduction(monkeypatch):
     assert reached == [True]
 
 
+FAILED_FIT = "PSF fit failed .* the restore needs the PSF beam to take the residual"
+
+
 @pytest.mark.parametrize(
-    "restoring_beam, refused",
-    [([5.0e-5, 3.5e-5, 0.6], False), ([5.0e-5, 1.5e-5, 0.3], True)],
+    "psf_beam, restoring_beam, refusal",
+    [
+        ([3.0e-5, 2.0e-5, 0.3], [5.0e-5, 3.5e-5, 0.6], None),
+        ([3.0e-5, 2.0e-5, 0.3], [5.0e-5, 1.5e-5, 0.3], "does not contain"),
+        ([np.nan, np.nan, np.nan], [5.0e-5, 3.5e-5, 0.6], FAILED_FIT),
+        ([0.0, 0.0, 0.0], [5.0e-5, 3.5e-5, 0.6], FAILED_FIT),
+        ([np.nan, np.nan, np.nan], None, None),
+    ],
 )
 def test_global_append_refuses_a_target_that_does_not_contain_the_psf_beam(
-    monkeypatch, restoring_beam, refused
+    monkeypatch, psf_beam, restoring_beam, refusal
 ):
-    """The first append node refuses the target right after the PSF fit, before
-    any imaging cycle; the step after the fit is a sentinel here."""
+    """The first append node refuses a target that does not contain the PSF
+    beam, and any target when the PSF fit failed, right after the fit, before
+    any model update; the step after the fit is a sentinel here. Without a
+    target a failed fit is not refused there."""
     node = importlib.import_module(
         "astroviper.node_tasks.imaging.image_continuum_single_field"
     )
@@ -203,7 +214,7 @@ def test_global_append_refuses_a_target_that_does_not_contain_the_psf_beam(
 
     def fit(img_xds, image_data_group_out_name, **kwargs):
         img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = xr.DataArray(
-            np.broadcast_to([3.0e-5, 2.0e-5, 0.3], (2, 1, 2, 3)),
+            np.broadcast_to(psf_beam, (2, 1, 2, 3)),
             dims=("time", "frequency", "polarization", "beam_params"),
         )
         img_xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = xr.DataArray(
@@ -223,10 +234,7 @@ def test_global_append_refuses_a_target_that_does_not_contain_the_psf_beam(
     monkeypatch.setattr(polarization, "transform_polarization_basis", after_the_fit)
     raw = _global_mvc_contributions()
     raw.attrs["data_groups"] = {"residual": {}}
-    with pytest.raises(
-        ValueError if refused else StopIteration,
-        match="does not contain" if refused else None,
-    ):
+    with pytest.raises(ValueError if refusal else StopIteration, match=refusal):
         node._prepare_continuum_image(
             raw,
             {
