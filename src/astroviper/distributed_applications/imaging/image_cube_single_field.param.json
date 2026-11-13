@@ -38,6 +38,7 @@
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
         "restoration_output": { "type": "string", "allowed": ["apparent", "primary_beam_corrected", "both"] },
+        "restoring_beam": { "type": ["list", "ndarray"], "nullable": true },
         "psf_fitting_method": { "type": "string", "allowed": ["astroviper", "casa"] },
         "gridding_kernel_params": { "type": ["dict"], "nullable": true },
         "primary_beam_params": { "type": ["dict"], "nullable": true },

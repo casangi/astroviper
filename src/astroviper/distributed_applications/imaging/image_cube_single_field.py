@@ -148,6 +148,7 @@ def image_cube_single_field(
     fft_backend="pyfftw",
     restore: bool = False,
     restoration_output: str = "apparent",
+    restoring_beam: list[float] | None = None,
     psf_fitting_method: str = "astroviper",
     gridding_kernel_params: dict[str, Any] | None = None,
     primary_beam_params: dict[str, Any] | None = None,
@@ -566,6 +567,21 @@ def image_cube_single_field(
         by its common power primary beam. Corrected pixels below
         ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
         selector only when ``restore=True``.
+    restoring_beam : list of float or None, optional
+        ``None`` restores each plane with its own PSF fit [CASA ``tclean``
+        ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
+        in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``) restores
+        every plane to that beam as ``tclean`` does since CASA 5.6 (CAS-12148):
+        the model is convolved with the unit-peak target beam, and the residual
+        with the Gaussian that takes the plane's PSF beam to the target, times
+        the ratio of the beam areas, so it is in Jy per target beam.
+        ``SKY_RESIDUAL`` is unchanged. A plane whose PSF beam the target does
+        not contain, or that has no PSF fit, keeps its residual unconvolved and
+        unscaled, as ``tclean`` does, and is named in a warning. The continuum
+        imager refuses a target that does not contain its PSF beam before its
+        imaging cycles. The beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``.
+        For ``tclean``'s ``restoringbeam='common'``, see
+        :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -873,14 +889,18 @@ def image_cube_single_field(
     The report's results section (see
     :func:`~astroviper.distributed_applications.imaging.image_cube_single_field_report.image_cube_single_field_report`):
     cross sections of the point spread function (Stokes I, centre channel)
-    with the fitted Gaussian, the maximum over frequency (``moments``) of the
-    residual, the model and the primary beam corrected restored image per
-    Stokes plane, the spectrum of the peak inside the clean mask, and per
-    channel the cycle control stop codes, the occurrences of the model update
-    stop codes, the iterations, the imaging cycles, the final residual entropy
-    and the residual RMS. With a report and a kept
+    with the fitted Gaussian; with a ``restoring_beam``, that beam, the axes
+    of the PSF fit of every channel against it and the channels whose
+    residual was left unconvolved and unscaled; the maximum over frequency
+    (``moments``) of the residual, the model and the primary beam corrected
+    restored image per Stokes plane, the spectrum of the peak inside the clean
+    mask, and per channel the cycle control stop codes, the occurrences of the
+    model update stop codes, the iterations, the imaging cycles, the final
+    residual entropy and the residual RMS. With a report and a kept
     ``point_spread_function``, ``beam_fit_params_point_spread_function`` is
-    kept too.
+    kept too. With ``restore=True`` and a ``restoring_beam``,
+    ``beam_fit_params_sky_restored`` and
+    ``beam_fit_params_point_spread_function`` are kept.
 
     The Zarr image store is created with :func:`xradio.image.write_image`.
     XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
@@ -972,6 +992,17 @@ def image_cube_single_field(
             image_data_variables_keep = list(image_data_variables_keep) + [
                 "sky_restored_primary_beam_corrected"
             ]
+    # A restore to a target records it, and the PSF beams show the planes it
+    # does not contain.
+    if restore and restoring_beam is not None:
+        image_data_variables_keep = list(image_data_variables_keep) + [
+            key
+            for key in (
+                "beam_fit_params_sky_restored",
+                "beam_fit_params_point_spread_function",
+            )
+            if key not in image_data_variables_keep
+        ]
     # The report draws the point spread function with its fitted Gaussian.
     if (
         report is not None
@@ -1122,6 +1153,9 @@ def image_cube_single_field(
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
     input_params["restoration_output"] = restoration_output
+    input_params["restoring_beam"] = (
+        None if restoring_beam is None else [float(value) for value in restoring_beam]
+    )
     input_params["psf_fitting_method"] = psf_fitting_method
     input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["primary_beam_params"] = primary_beam_params

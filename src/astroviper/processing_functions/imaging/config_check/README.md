@@ -6,7 +6,8 @@ A validator returns `None` on success and raises at the first invalid setting.
 Checks are grouped and described in their owning `param_check_*` module.
 
 Shared imaging rules live in `_predicates.py`: primary-beam cutoffs, Briggs
-robustness, and positive integer Taylor counts. The three parameter-check modules
+robustness, positive integer Taylor counts, the restoration selector and the
+restoring beam. The three parameter-check modules
 call these utilities independently. `_common.py` retains the basic type/numerical
 checks and imaging-mode definitions.
 
@@ -87,6 +88,17 @@ by the channel primary beam before convolution. MFS divides their Taylor
 polynomials, while MVC uses its common beam. Corrected-only output does not
 allocate an apparent restored cube. The selector controls intensity products;
 the separate spectral-product convention is described by the restoration API.
+
+`restoring_beam` is `None` (each plane keeps its own PSF fit) or a target
+`[major, minor, pa]` in radians with `major >= minor > 0`. A string, tclean's
+`'common'` among them, is refused with a pointer to `common_beam`. A target
+requires `restore=True`, and its major axis must be smaller than the image,
+`min(image_size) * min(|cell_size|)`: a larger one is arcseconds or degrees
+given as radians, or a common beam inflated by a failed PSF fit.
+`beam_fit_params_sky_restored` can be kept only with `restore=True` and a
+target. Whether the target contains a plane's PSF beam is known only after the
+PSF fit: the cube restore keeps such a plane's residual unscaled and warns, and
+the continuum append node refuses the target right after its PSF fit.
 
 Output requests must match the selected workflow and restoration products.
 Restored images and spectral products require `restore=True`; alpha products

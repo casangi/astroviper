@@ -2520,7 +2520,10 @@ def _prepare_continuum_image(
 
     input_params : dict
         Parameters supplied to the append node. Must contain ``image_params``.
-        For later cycles, it must also contain ``static_xds``.
+        For later cycles, it must also contain ``static_xds``. A
+        ``restoring_beam`` that does not contain the fitted PSF beam raises
+        :class:`ValueError` right after the fit
+        (:func:`~astroviper.processing_functions.image_analysis.common_beam.correcting_beam`).
 
     initialize_static_products : bool
         If true, construct and cache the global PSF, restoring-beam fit, and
@@ -2546,6 +2549,9 @@ def _prepare_continuum_image(
     """
     import numpy as np
 
+    from astroviper.processing_functions.image_analysis.common_beam import (
+        correcting_beam,
+    )
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
@@ -2837,6 +2843,18 @@ def _prepare_continuum_image(
             image_data_group_out_name=image_data_group_name,
             processing_function_threads=config["processing_function_threads"],
         )
+
+        # A target that does not contain the PSF beam is refused before the
+        # imaging cycles. The restore applies the beam of the first
+        # polarization to every polarization.
+        if input_params.get("restoring_beam") is not None:
+            beam_name = img_xds.attrs["data_groups"][image_data_group_name][
+                "beam_fit_params_point_spread_function"
+            ]
+            correcting_beam(
+                img_xds[beam_name].isel(polarization=[0]),
+                input_params["restoring_beam"],
+            )
 
         # ----------------------------------------------------------
         # Construct or validate the PB used by the model-update/static API.
@@ -3801,6 +3819,7 @@ def continuum_finalize_node(
             primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
             deconvolver=input_params.get("deconvolver", "hogbom"),
             restoration_output=restoration_output,
+            restoring_beam=input_params.get("restoring_beam"),
             continuum_mode=continuum_mode,
             input_checked=True,
         )

@@ -723,6 +723,22 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "``primary_beam_limit`` are blanked with NaN. Imaging workflows use this\n"
         "selector only when ``restore=True``."
     ),
+    "restoring_beam": (
+        "``None`` restores each plane with its own PSF fit [CASA ``tclean``\n"
+        "``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle\n"
+        "in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``) restores\n"
+        "every plane to that beam as ``tclean`` does since CASA 5.6 (CAS-12148):\n"
+        "the model is convolved with the unit-peak target beam, and the residual\n"
+        "with the Gaussian that takes the plane's PSF beam to the target, times\n"
+        "the ratio of the beam areas, so it is in Jy per target beam.\n"
+        "``SKY_RESIDUAL`` is unchanged. A plane whose PSF beam the target does\n"
+        "not contain, or that has no PSF fit, keeps its residual unconvolved and\n"
+        "unscaled, as ``tclean`` does, and is named in a warning. The continuum\n"
+        "imager refuses a target that does not contain its PSF beam before its\n"
+        "imaging cycles. The beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``.\n"
+        "For ``tclean``'s ``restoringbeam='common'``, see\n"
+        ":func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`."
+    ),
     "psf_fitting_method": (
         'Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or\n'
         '``"casa"``, the C++ port of CASA\'s ``StokesImageUtil::FitGaussianPSF``\n'
@@ -738,7 +754,9 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
         "Restoration automatically retains its selected restored Taylor\n"
         "products and the "
-        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.\n'
+        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``;\n'
+        'with a ``restoring_beam`` also ``"beam_fit_params_sky_restored"`` and\n'
+        '``"beam_fit_params_point_spread_function"``.\n'
         "Restored and spectral products require ``restore=True``. Alpha products\n"
         "require at least two Taylor terms; beta requires at least three.\n"
         "MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;\n"

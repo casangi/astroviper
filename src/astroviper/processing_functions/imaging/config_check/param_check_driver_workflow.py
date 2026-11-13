@@ -37,7 +37,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     TypeError
         If the primary-beam limit is not a real scalar.
     ValueError
-        If memory mode, backend, or output policy is invalid.
+        If memory mode, backend, output policy or restoring beam is invalid.
     NotImplementedError
         If multifield imaging is requested.
     """
@@ -86,6 +86,30 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         )
 
         check_primary_beam_limit(config["primary_beam_limit"])
+
+    # --- Restoring beam ---
+    # A target beam is used only by a restore. A major axis not smaller than
+    # the image is arcseconds or degrees given as radians, or a common beam
+    # inflated by a failed PSF fit.
+    if config.get("restoring_beam") is not None:
+        from astroviper.processing_functions.imaging.config_check._predicates import (
+            check_restoring_beam,
+        )
+
+        check_restoring_beam(config["restoring_beam"])
+        if "restore" in config and not config["restore"]:
+            raise ValueError("restoring_beam requires restore=True.")
+        image_params = require_mapping("image_params", config.get("image_params", {}))
+        if "image_size" in image_params and "cell_size" in image_params:
+            major = np.asarray(config["restoring_beam"])[0]
+            extent = np.min(image_params["image_size"]) * np.min(
+                np.abs(image_params["cell_size"])
+            )
+            if major >= extent:
+                raise ValueError(
+                    f"The restoring_beam major axis ({major} rad) is not smaller "
+                    f"than the image ({extent} rad); give the beam in radians."
+                )
 
     # ========================================================================
     # 2. Configuration structure and backend settings

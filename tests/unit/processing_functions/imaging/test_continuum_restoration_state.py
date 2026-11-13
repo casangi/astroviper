@@ -179,3 +179,61 @@ def test_global_append_converts_counts_only_after_reduction(monkeypatch):
             initialize_static_products=True,
         )
     assert reached == [True]
+
+
+@pytest.mark.parametrize(
+    "restoring_beam, refused",
+    [([5.0e-5, 3.5e-5, 0.6], False), ([5.0e-5, 1.5e-5, 0.3], True)],
+)
+def test_global_append_refuses_a_target_that_does_not_contain_the_psf_beam(
+    monkeypatch, restoring_beam, refused
+):
+    """The first append node refuses the target right after the PSF fit, before
+    any imaging cycle; the step after the fit is a sentinel here."""
+    node = importlib.import_module(
+        "astroviper.node_tasks.imaging.image_continuum_single_field"
+    )
+    processing = importlib.import_module(
+        "astroviper.processing_functions.imaging.image_continuum_single_field"
+    )
+    polarization = importlib.import_module(
+        "astroviper.processing_functions.image_analysis.transform_polarization_basis"
+    )
+    fitted = []
+
+    def fit(img_xds, image_data_group_out_name, **kwargs):
+        img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = xr.DataArray(
+            np.broadcast_to([3.0e-5, 2.0e-5, 0.3], (2, 1, 2, 3)),
+            dims=("time", "frequency", "polarization", "beam_params"),
+        )
+        img_xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = xr.DataArray(
+            np.zeros((2, 1, 2)), dims=("time", "frequency", "polarization")
+        )
+        img_xds.attrs["data_groups"][image_data_group_out_name].update(
+            beam_fit_params_point_spread_function="BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+            max_sidelobe_point_spread_function="MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+        )
+        fitted.append(True)
+        return img_xds, None
+
+    def after_the_fit(*args, **kwargs):
+        raise StopIteration
+
+    monkeypatch.setattr(processing, "point_spread_function_gaussian_fit_continuum", fit)
+    monkeypatch.setattr(polarization, "transform_polarization_basis", after_the_fit)
+    raw = _global_mvc_contributions()
+    raw.attrs["data_groups"] = {"residual": {}}
+    with pytest.raises(
+        ValueError if refused else StopIteration,
+        match="does not contain" if refused else None,
+    ):
+        node._prepare_continuum_image(
+            raw,
+            {
+                "continuum_mode": "mvc",
+                "image_params": {"n_taylor_terms": 2, "reference_frequency": 100.0},
+                "restoring_beam": restoring_beam,
+            },
+            initialize_static_products=True,
+        )
+    assert fitted == [True]
