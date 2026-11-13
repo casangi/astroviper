@@ -20,6 +20,10 @@ Four complementary views:
   position via ``start_unixtime`` and SUMMED over the tasks, as bin means:
   busy cores, total RSS, aggregate I/O rate. "What was the whole cluster
   doing at each moment of the run?"
+* :func:`plot_core_resource_usage` -- the same bins per worker slot (a core
+  when workers are single-threaded, one per core): the peak, mean, median
+  and minimum over the slots of CPU, RSS and the read/write rates. "How
+  evenly were the cores loaded?"
 * :func:`plot_task_stream` -- a Dask-dashboard-style per-worker-process
   timeline: one lane per worker slot, each task drawn as load / science /
   write segments, plus a running-task utilization panel, a printed
@@ -28,7 +32,7 @@ Four complementary views:
   creating/writing the empty image, opening the processing set, graph
   construction), compute and finalize (metadata consolidation) phases, so
   the timeline accounts for the entire ``image_cube_single_field`` call.
-  Unlike the two views above it needs only the
+  Unlike the three views above it needs only the
   wall-clock anchor ``start_unixtime`` (recorded by the node task itself),
   NOT the monitor's sampled series, so it works with
   ``monitor_resources_seconds=None``.
@@ -45,6 +49,7 @@ import pandas as pd
 __all__ = [
     "plot_task_resource_usage",
     "plot_cluster_resource_usage",
+    "plot_core_resource_usage",
     "plot_task_stream",
     "plot_application_task_stream",
     "assign_task_stream_lanes",
@@ -241,21 +246,91 @@ def _bin_increments(edges, offset, t_rel, cumulative):
     return np.diff(np.interp(edges - offset, t_rel, cumulative))
 
 
-def _display_bins(span, interval, period):
+def _display_bins(span, interval, period, bin_seconds=None):
     """Bin edges over the run [0, span]: about 600 bins of a whole number of
     sample intervals. Once a bin would be longer than a quarter of the task
     period it is a whole number of task periods instead, so the bin means do
-    not alias the workers' lockstep reads and write bursts. The last bin ends
-    at ``span``; one shorter than half a bin is merged into the bin before.
+    not alias the workers' lockstep reads and write bursts. ``bin_seconds``,
+    when given, replaces that choice, up to half the run so that there are
+    at least two bins. The last bin ends at ``span``; one shorter than half
+    a bin is merged into the bin before.
     Returns (bin width, edges)."""
-    b = span / 600
-    if period > 0 and b > 0.25 * period:
+    b = span / 600 if bin_seconds is None else min(bin_seconds, span / 2)
+    if bin_seconds is None and period > 0 and b > 0.25 * period:
         b = period * max(1, round(b / period))
     binw = interval * max(1, round(b / interval))
     edges = np.append(np.arange(0.0, span, binw), span)
     if len(edges) > 2 and edges[-1] - edges[-2] < 0.5 * binw:
         edges = np.delete(edges, -2)
     return binw, edges
+
+
+def _placed_on_wall_clock(df, caller):
+    """Whether the tasks' series can be placed on the run's wall clock; prints
+    why not."""
+    if "cpu_percent" not in df.columns:
+        print(
+            f"{caller}: no resource series recorded "
+            "(monitoring off or psutil missing); skipping."
+        )
+        return False
+    if "start_unixtime" not in df.columns or df["start_unixtime"].isna().all():
+        print(
+            f"{caller}: no start_unixtime column (recorded "
+            "with an older graphviper); tasks cannot be placed on the run's "
+            "wall clock -- use plot_task_resource_usage instead."
+        )
+        return False
+    n_missing = int(df["start_unixtime"].isna().sum())
+    if n_missing:
+        print(
+            f"{caller}: {n_missing} of {len(df)} tasks have no start_unixtime "
+            "and cannot be placed on the run's wall clock; skipping."
+        )
+        return False
+    return True
+
+
+def _binned_task_series(df, slot=None, bin_seconds=None):
+    """Bin sums of the tasks' cumulative series on the run's wall clock, on
+    the bins of :func:`_display_bins`.
+
+    Returns ``(binw, edges, sums)``. ``sums[key]`` has one row per slot
+    (task i adds to row ``slot[i]``; all tasks to row 0 when ``slot`` is
+    None) and holds the task-seconds (``running``), CPU seconds (``cpu``),
+    the time integral of RSS in GiB s (``rss``) and, when recorded, the GiB
+    read and written (``read``, ``write``) in each bin.
+    """
+    interval = float(df["sample_interval_seconds"].iloc[0])
+    starts = df["start_unixtime"].to_numpy(dtype=float)
+    rel_end = np.array([t[-1] for t in df["time_seconds"]], dtype=float)
+    run_t0 = starts.min()
+    span = (starts + rel_end).max() - run_t0
+    period = float(np.median([t[-1] - t[0] for t in df["time_seconds"]]))
+    binw, edges = _display_bins(span, interval, period, bin_seconds)
+    slot = np.zeros(len(df), dtype=int) if slot is None else np.asarray(slot)
+    io = {"read": "read_chars", "write": "write_chars"}
+    if "read_chars" not in df.columns or df["read_chars"].isna().all():
+        io = {}
+    sums = {
+        key: np.zeros((slot.max() + 1, len(edges) - 1))
+        for key in ("running", "cpu", "rss", *io)
+    }
+    for i, row in df.iterrows():
+        t_rel = np.asarray(row["time_seconds"], dtype=float)
+        offset = starts[i] - run_t0
+        s = slot[i]
+        sums["running"][s] += _bin_increments(edges, offset, t_rel, t_rel - t_rel[0])
+        cpu = _cpu_seconds(row)
+        sums["cpu"][s] += _bin_increments(edges, offset, t_rel, cpu - cpu[0])
+        rss = np.asarray(row["memory_rss_bytes"], dtype=float) / 2**30
+        sums["rss"][s] += _bin_increments(
+            edges, offset, t_rel, _time_integral(t_rel, rss)
+        )
+        for key, col in io.items():
+            c = np.asarray(row[col], dtype=float)
+            sums[key][s] += _bin_increments(edges, offset, t_rel, (c - c[0]) / 2**30)
+    return binw, edges, sums
 
 
 def _plot_task_series(
@@ -479,53 +554,13 @@ def plot_cluster_resource_usage(
     import matplotlib.pyplot as plt
 
     df = _as_timing_frame(source)
-    if "cpu_percent" not in df.columns:
-        print(
-            "plot_cluster_resource_usage: no resource series recorded "
-            "(monitoring off or psutil missing); skipping."
-        )
-        return None
-    if "start_unixtime" not in df.columns or df["start_unixtime"].isna().all():
-        print(
-            "plot_cluster_resource_usage: no start_unixtime column (recorded "
-            "with an older graphviper); tasks cannot be placed on the run's "
-            "wall clock -- use plot_task_resource_usage instead."
-        )
+    if not _placed_on_wall_clock(df, "plot_cluster_resource_usage"):
         return None
 
-    interval = float(df["sample_interval_seconds"].iloc[0])
-    starts = df["start_unixtime"].to_numpy(dtype=float)
-    rel_end = np.array([t[-1] for t in df["time_seconds"]], dtype=float)
-    run_t0 = starts.min()
-    span = (starts + rel_end).max() - run_t0
-    period = float(np.median([t[-1] - t[0] for t in df["time_seconds"]]))
-    binw, edges = _display_bins(span, interval, period)
+    binw, edges, sums = _binned_task_series(df)
     grid = 0.5 * (edges[:-1] + edges[1:])
-    width = np.diff(edges)
-
-    have_io = "read_chars" in df.columns and not df["read_chars"].isna().all()
-    acc = {
-        k: np.zeros_like(grid)
-        for k in ("cores", "rss", "read_rate", "write_rate", "running")
-    }
-
-    for i, row in df.iterrows():
-        t_rel = np.asarray(row["time_seconds"], dtype=float)
-        offset = starts[i] - run_t0
-        acc["running"] += _bin_increments(edges, offset, t_rel, t_rel - t_rel[0])
-        cpu = _cpu_seconds(row)
-        acc["cores"] += _bin_increments(edges, offset, t_rel, cpu - cpu[0])
-        rss = np.asarray(row["memory_rss_bytes"], dtype=float) / 2**30
-        acc["rss"] += _bin_increments(edges, offset, t_rel, _time_integral(t_rel, rss))
-        if have_io:
-            for col, key in (
-                ("read_chars", "read_rate"),
-                ("write_chars", "write_rate"),
-            ):
-                c = np.asarray(row[col], dtype=float)
-                acc[key] += _bin_increments(edges, offset, t_rel, (c - c[0]) / 2**30)
-    for key in acc:
-        acc[key] /= width
+    acc = {key: v[0] / np.diff(edges) for key, v in sums.items()}
+    have_io = "read" in acc
     n_running = acc.pop("running")
     bin_note = f" ({binw:g} s bin means)"
 
@@ -556,7 +591,7 @@ def plot_cluster_resource_usage(
     axes["cpu"] = _figure(
         "Cluster CPU usage over the run",
         "Busy cores" + bin_note,
-        [("busy cores", acc["cores"], "tab:blue")],
+        [("busy cores", acc["cpu"], "tab:blue")],
         capacity=(
             None
             if core_capacity is None
@@ -578,8 +613,8 @@ def plot_cluster_resource_usage(
             "Cluster I/O rate over the run (syscall-level, counts network filesystems)",
             "Aggregate I/O rate (GiB/s)" + bin_note,
             [
-                ("write", acc["write_rate"], "tab:orange"),
-                ("read", acc["read_rate"], "tab:blue"),
+                ("write", acc["write"], "tab:orange"),
+                ("read", acc["read"], "tab:blue"),
             ],
         )
     else:
@@ -590,6 +625,199 @@ def plot_cluster_resource_usage(
         for name, ax in axes.items():
             if ax is not None:
                 ax.figure.savefig(f"{save_prefix}cluster_{name}.png")
+    return axes
+
+
+# Statistics over the worker slots of plot_core_resource_usage: key, legend
+# label, line style, line width.
+_SLOT_STATISTICS = (
+    ("peak", "peak (max over slots)", "--", 1.0),
+    ("mean", "mean", "-", 2.0),
+    ("median", "median", "-.", 1.2),
+    ("min", "min", ":", 1.5),
+)
+
+
+def _over_slots(v):
+    """Peak, mean, median and minimum over the rows (worker slots) of ``v``
+    in each column, ignoring NaN; NaN in a column without values."""
+    ok = ~np.isnan(v).all(axis=0)
+    stats = {}
+    for key, f in (
+        ("peak", np.nanmax),
+        ("mean", np.nanmean),
+        ("median", np.nanmedian),
+        ("min", np.nanmin),
+    ):
+        stats[key] = np.full(v.shape[1], np.nan)
+        stats[key][ok] = f(v[:, ok], axis=0)
+    return stats
+
+
+def plot_core_resource_usage(
+    source, memory_per_slot_gib=None, bin_seconds=None, save_prefix=None
+):
+    """Per-core CPU / memory / I/O over the RUN's wall clock: the peak, mean,
+    median and minimum over the worker slots in each bin.
+
+    A worker slot runs one task at a time: a thread of a Dask worker, whose
+    tasks are packed into slots within the worker (a worker keeps its name
+    when its nanny restarts the process), else the recorded (host, process,
+    thread), else interval packing within each host
+    (:func:`assign_task_stream_lanes`). With single-threaded workers, one
+    per core, a slot is a core; the figures say worker slot because a slot
+    whose tasks run several threads uses several cores. Each slot's CPU
+    (all threads of its worker process, so OpenMP threads can take it above
+    100 %), resident memory and read/write rates are bin means, by default on
+    the bins of :func:`plot_cluster_resource_usage`; for CPU and I/O the mean
+    over the slots times the number of slots is the cluster total. A slot
+    between tasks counts as 0 % CPU and no I/O. Its memory is not monitored
+    then, so the memory statistics are over the slots that ran a task in the
+    bin, each averaged over its running time. Every figure also shows the
+    mean number of running tasks in a strip below.
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame
+        The application return dict, or its ``timing_node_tasks`` frame.
+        Needs the ``start_unixtime`` column of every task.
+    memory_per_slot_gib : float, optional
+        Memory available to one worker slot (GiB), e.g. the node's memory
+        over its worker slots; drawn as a dashed line.
+    bin_seconds : float, optional
+        Bin width, rounded to whole sample intervals and at most half the
+        run; by default the bins of :func:`plot_cluster_resource_usage`. A
+        slot's I/O comes in bursts (each task's reads and writes): in bins of
+        at least a task period the peak and minimum differ from the mean by
+        about one burst over the bin width; in narrower bins the minimum
+        drops towards 0 and the peak towards the rate of a single burst.
+    save_prefix : str, optional
+        If set, save ``<prefix>core_cpu/memory/io.png``.
+
+    Returns
+    -------
+    dict
+        ``{"cpu": ax, "memory": ax, "io": ax}`` (``io`` is the write panel,
+        with the read panel below it, or None when the I/O counters were not
+        recorded), or None when the tasks cannot be placed on the wall clock.
+    """
+    import matplotlib.pyplot as plt
+
+    df = _as_timing_frame(source)
+    if not _placed_on_wall_clock(df, "plot_core_resource_usage"):
+        return None
+
+    identity = ["hostname", "process_pid", "thread_native_id", "start_unixtime"]
+    lanes = df[[c for c in identity if c in df.columns]].assign(
+        T_image_cube_task=[t[-1] for t in df["time_seconds"]]
+    )
+    if "hostname" not in lanes.columns:
+        lanes["hostname"] = ""
+    if "worker_name" in df.columns and df["worker_name"].notna().all():
+        lanes["hostname"] = (
+            lanes["hostname"].astype(str) + "/" + df["worker_name"].astype(str)
+        )
+        lanes = lanes.drop(columns=["process_pid", "thread_native_id"], errors="ignore")
+    lanes, _, n_slots = assign_task_stream_lanes(lanes)
+    binw, edges, sums = _binned_task_series(df, lanes["row"].to_numpy(), bin_seconds)
+    grid = 0.5 * (edges[:-1] + edges[1:])
+    width = np.diff(edges)
+    running = sums["running"]
+    n_running = running.sum(axis=0) / width
+    bin_note = f" ({binw:g} s bin means)"
+
+    def _figure(title, panels):
+        fig, axs = plt.subplots(
+            len(panels) + 1,
+            1,
+            figsize=(11, 4 + 3 * len(panels)),
+            sharex=True,
+            height_ratios=(*[4] * len(panels), 1),
+        )
+        for ax, (v, color, ylabel, reference) in zip(axs, panels, strict=False):
+            stats = _over_slots(v)
+            ax.fill_between(
+                grid, stats["min"], stats["peak"], color=color, alpha=0.15, lw=0
+            )
+            for key, label, style, lw in _SLOT_STATISTICS:
+                ax.plot(grid, stats[key], color=color, ls=style, lw=lw, label=label)
+            top = np.nanmax(stats["peak"])
+            if reference is not None:
+                ax.axhline(reference[1], color="gray", ls="--", label=reference[0])
+                top = max(top, reference[1])
+            ax.set_ylim(0.0, 1.25 * top)  # headroom for the legend
+            ax.set_ylabel(ylabel)
+            ax.legend(loc="upper right", ncol=3)
+        axs[0].set_title(title)
+        axr = axs[-1]
+        axr.plot(grid, n_running, color="dimgray", linewidth=1)
+        axr.set_ylim(0.0, 1.1 * n_slots)
+        axr.set_ylabel("Running tasks")
+        axr.set_xlabel("Wall-clock time since first task start (s)")
+        for a in axs:
+            a.grid(True, color="lightgray", alpha=0.5)
+        fig.tight_layout()
+        return axs[0]
+
+    axes = {}
+    axes["cpu"] = _figure(
+        f"CPU usage per worker slot over the run ({n_slots} slots)",
+        [
+            (
+                100.0 * sums["cpu"] / width,
+                "tab:blue",
+                "CPU per worker slot (%)" + bin_note,
+                ("one core (100 %)", 100.0),
+            )
+        ],
+    )
+    rss = np.divide(
+        sums["rss"],
+        running,
+        out=np.full_like(running, np.nan),
+        where=running > 1e-6 * width,
+    )
+    axes["memory"] = _figure(
+        f"Memory usage per worker slot over the run ({n_slots} slots; "
+        "slots running a task)",
+        [
+            (
+                rss,
+                "tab:blue",
+                "Resident memory per worker slot (GiB)" + bin_note,
+                (
+                    None
+                    if memory_per_slot_gib is None
+                    else (
+                        f"memory per slot ({memory_per_slot_gib:g} GiB)",
+                        memory_per_slot_gib,
+                    )
+                ),
+            )
+        ],
+    )
+    if "read" in sums:
+        axes["io"] = _figure(
+            f"I/O rate per worker slot over the run ({n_slots} slots; "
+            "syscall-level, counts network filesystems)",
+            [
+                (
+                    1024.0 * sums[key] / width,
+                    color,
+                    f"{key.capitalize()} rate per worker slot (MiB/s)" + bin_note,
+                    None,
+                )
+                for key, color in (("write", "tab:orange"), ("read", "tab:blue"))
+            ],
+        )
+    else:
+        axes["io"] = None
+        print("(no read_chars/write_chars series; skipping the per-slot I/O plot)")
+
+    if save_prefix is not None:
+        for name, ax in axes.items():
+            if ax is not None:
+                ax.figure.savefig(f"{save_prefix}core_{name}.png")
     return axes
 
 
