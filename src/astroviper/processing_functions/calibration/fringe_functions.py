@@ -1,13 +1,15 @@
 import xarray as xr
 import numpy as np
-from typing import (Union, Mapping)
+from typing import Union, Mapping
 from xradio.measurement_set.measurement_set_xdt import MeasurementSetXdt
 from astroviper.distributed_applications.calibration.utils import power_of_two_grid
+
 
 def square_up_last_dimension(v):
     s = v.shape[:-1] + (2, 2)
     v2 = np.reshape(v, s)
     return v2
+
 
 class SingleFringeJones:
     def __init__(self, q):
@@ -28,13 +30,15 @@ class SingleFringeJones:
 
         # (time, antenna_name, frequency, polarization)
         phi0 = self.q.CALPARAM_PHASE.values
-        # phi0_shaped = np.expand_dims(phi0, (0, 1, 2, 3)) 
+        # phi0_shaped = np.expand_dims(phi0, (0, 1, 2, 3))
         tau = self.q.CALPARAM_DELAY.values
         r = self.q.CALPARAM_RATE.values
         # These are compatible with the shape (n_time, n_ant, n_freq, n_receptors)
         # Calculate phases:
         # FIXME this is driving me insane
-        phi = -1*(phi0 + 2*np.pi*tau * df_shaped + 2*np.pi*ref_freq*r * dt_shaped)
+        phi = -1 * (
+            phi0 + 2 * np.pi * tau * df_shaped + 2 * np.pi * ref_freq * r * dt_shaped
+        )
         # Shape: (n_time, n_ant, n_freq, n_pol)
         antenna_jones = np.exp(1j * phi, dtype=complex)
         return antenna_jones
@@ -77,12 +81,14 @@ class SingleFringeJones:
         left_indices, right_indices = [], []
         bl_found = []
         unfound1, unfound2 = set(), set()
-        for b, n1, n2 in zip(baseline_id, baseline_antenna1_name, baseline_antenna2_name):
+        for b, n1, n2 in zip(
+            baseline_id, baseline_antenna1_name, baseline_antenna2_name
+        ):
             a1 = ant_num_map.get(n1, -1)
             a2 = ant_num_map.get(n2, -1)
-            if a1<0 and n1 not in unfound1:
+            if a1 < 0 and n1 not in unfound1:
                 unfound1.add(n1)
-            elif a2<0 and n2 not in unfound2:
+            elif a2 < 0 and n2 not in unfound2:
                 unfound2.add(n1)
             else:
                 left_indices.append(a1)
@@ -93,7 +99,13 @@ class SingleFringeJones:
             print(f"No calibration entries for {', '.join(unfound)}")
         return np.array(bl_found), np.array(left_indices), np.array(right_indices)
 
-    def apply_cal(self, xds, *, vis_key_in:str='VISIBILITY', vis_key_out:str='VISIBILITY_CORRECTED'):
+    def apply_cal(
+        self,
+        xds,
+        *,
+        vis_key_in: str = "VISIBILITY",
+        vis_key_out: str = "VISIBILITY_CORRECTED",
+    ):
         if len(xds.time.values) == 0:
             return xds
         bl_found, left_indices, right_indices = self.get_ant_to_baseline_maps(xds)
@@ -111,7 +123,7 @@ class SingleFringeJones:
         v2 = v2.reshape(s3)
         coords = {
             "time": xds.time,
-            "baseline_id": bl_found, # Is this allowed?
+            "baseline_id": bl_found,  # Is this allowed?
             "frequency": xds.frequency,
             "polarization": xds.polarization,
         }

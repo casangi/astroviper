@@ -31,16 +31,16 @@ def make_empty_cal_xds(xds: MeasurementSetXdt):
             # FLAG table has the same coordinates as the other entries, which is good.
             # It does *not* correspond to a FLAG_ROW array in Casa6!
             "FLAG": xa.DataArray(coords=quantum_coords).astype(bool),
-            #"ref_antenna": xa.DataArray(coords=(quantum_coords["time"],)).astype(
+            # "ref_antenna": xa.DataArray(coords=(quantum_coords["time"],)).astype(
             #   np.dtype("<U2")
             # ),
         }
     )
-    q['CALPARAM_PHASE'][:] = np.nan
-    q['CALPARAM_DELAY'][:] = np.nan
-    q['CALPARAM_RATE'][:] = np.nan
-    q['SNR'][:] = np.nan
-    q['FLAG'][:] = False
+    q["CALPARAM_PHASE"][:] = np.nan
+    q["CALPARAM_DELAY"][:] = np.nan
+    q["CALPARAM_RATE"][:] = np.nan
+    q["SNR"][:] = np.nan
+    q["FLAG"][:] = False
     q.attrs["spectral_window_name"] = xds.frequency.spectral_window_name
     return q
 
@@ -48,6 +48,6 @@ def make_empty_cal_xds(xds: MeasurementSetXdt):
 def nan_count(j):
     return np.sum(np.isnan(j))
 
+
 def number_count(j):
     return np.sum(~np.isnan(j))
-
