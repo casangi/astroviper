@@ -13,6 +13,7 @@ They do not run the imaging graph (no data download); the end-to-end shape is
 validated in ``tests/stakeholder/test_single_field_imaging.py``.
 """
 
+import numpy as np
 import pandas as pd
 
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
@@ -218,31 +219,45 @@ def test_add_lazy_input_data_is_a_driver_timing_leaf():
     assert "0.250" in summary
 
 
-def test_combine_return_data_frames_merges_the_find_continuum_first_round():
-    """The node tasks' first rounds are merged; a missing one leaves none."""
+def test_combine_return_data_frames_concatenates_the_find_continuum_first_round():
+    """The node tasks' first-round rows are concatenated in input order and
+    their ``write_failed`` or-ed; a leaf without rows adds nothing, and
+    without any there are none."""
     leaves = [
-        _make_chunk_result(0, 1.0, 2.0, 4.0, chan=0),
-        _make_chunk_result(1, 3.0, 6.0, 10.0, chan=1),
+        _make_chunk_result(task_id, 1.0, 2.0, 4.0, chan=task_id) for task_id in range(3)
     ]
-    statistics = [
-        {"npts": 2.0, "sum": 1.0, "sumsq": 1.0, "min": 0.0, "max": 1.0},
-        {"npts": 3.0, "sum": 2.0, "sumsq": 4.0, "min": -1.0, "max": 2.0},
+    rows = [
+        {
+            "channels": np.array([4, 5], dtype=np.int32),
+            "statistics": np.arange(20, dtype=np.float64).reshape(2, 2, 5),
+            "tiles": np.array([True, False] * 4).reshape(2, 2, 1, 2),
+            "write_failed": False,
+        },
+        {
+            "channels": np.array([0], dtype=np.int32),
+            "statistics": np.full((1, 2, 5), -1.0),
+            "tiles": np.ones((1, 2, 1, 2), dtype=bool),
+            "write_failed": True,
+        },
     ]
-    for leaf, partial in zip(leaves, statistics, strict=True):
-        leaf["find_continuum_first_round"] = [partial]
-    merged = combine_return_data_frames(leaves, input_params={})
-    assert merged["find_continuum_first_round"] == [
-        {"npts": 5.0, "sum": 3.0, "sumsq": 5.0, "min": -1.0, "max": 2.0}
+    leaves[0]["find_continuum_first_round"] = rows[0]
+    leaves[2]["find_continuum_first_round"] = rows[1]
+    merged = combine_return_data_frames(leaves, input_params={})[
+        "find_continuum_first_round"
     ]
+    for key in ("channels", "statistics", "tiles"):
+        np.testing.assert_array_equal(
+            merged[key], np.concatenate([row[key] for row in rows])
+        )
+    assert merged["write_failed"] is True
 
-    leaves[1]["find_continuum_first_round"] = None
-    assert (
-        combine_return_data_frames(leaves, input_params={})[
-            "find_continuum_first_round"
-        ]
-        is None
-    )
-    del leaves[1]["find_continuum_first_round"]
+    del leaves[2]["find_continuum_first_round"]
+    merged = combine_return_data_frames(leaves, input_params={})[
+        "find_continuum_first_round"
+    ]
+    np.testing.assert_array_equal(merged["channels"], rows[0]["channels"])
+    assert merged["write_failed"] is False
+
     del leaves[0]["find_continuum_first_round"]
     assert "find_continuum_first_round" not in combine_return_data_frames(
         leaves, input_params={}
