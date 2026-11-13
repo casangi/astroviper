@@ -44,7 +44,10 @@ def graph_timing_record(
         columns=[
             "time_seconds",
             "cpu_percent",
+            "cpu_seconds",
             "memory_rss_bytes",
+            "read_bytes",
+            "write_bytes",
             "read_chars",
             "write_chars",
         ],

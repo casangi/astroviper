@@ -5,20 +5,21 @@ When a distributed application is run with ``monitor_resources_seconds`` set
 its ``return_dict["timing_node_tasks"]`` frame carries one sampled series per
 node task as list-valued columns: ``time_seconds`` (relative to the task's own
 start), ``cpu_percent`` (whole worker process incl. OpenMP threads, so >100%
-is normal), ``memory_rss_bytes``, the cumulative syscall-level I/O counters
-``read_chars`` / ``write_chars`` (Linux only; unlike ``read_bytes`` /
-``write_bytes`` these count network filesystems such as Lustre), the scalar
-``sample_interval_seconds`` and the wall-clock anchor ``start_unixtime``.
+is normal; newer graphviper also records the cumulative ``cpu_seconds``),
+``memory_rss_bytes``, the cumulative syscall-level I/O counters
+``read_chars`` / ``write_chars`` (Linux only; network filesystems such as
+Lustre included), the scalar ``sample_interval_seconds`` and the wall-clock
+anchor ``start_unixtime``.
 
 Four complementary views:
 
 * :func:`plot_task_resource_usage` -- tasks aligned at their OWN start
   (t=0 = task start): a subsample of individual task curves plus the average
-  over the tasks still running at each t. "What does a typical task do?"
+  over the tasks. "What does a typical task do?"
 * :func:`plot_cluster_resource_usage` -- tasks placed at their wall-clock
-  position via ``start_unixtime`` and SUMMED over the tasks running at each
-  moment: busy cores, total RSS, aggregate I/O rate. "What was the whole
-  cluster doing at each moment of the run?"
+  position via ``start_unixtime`` and SUMMED over the tasks, as bin means:
+  busy cores, total RSS, aggregate I/O rate. "What was the whole cluster
+  doing at each moment of the run?"
 * :func:`plot_task_stream` -- a Dask-dashboard-style per-worker-process
   timeline: one lane per worker slot, each task drawn as load / science /
   write segments, plus a running-task utilization panel, a printed
@@ -198,6 +199,65 @@ def _as_timing_frame(source):
     return source.reset_index(drop=True)
 
 
+def _cpu_seconds(row):
+    """Cumulative CPU seconds of a task's worker process at each sample.
+
+    From graphviper's ``cpu_seconds`` series when recorded. Older series only
+    have ``cpu_percent``, the average over each sample's interval, so
+    cpu_percent[k] * (t[k] - t[k-1]) rebuilds the increments; their sample 0
+    covered only the microseconds after psutil's baseline call (0 or up to
+    ~15,000 %) and is left out.
+    """
+    c = row.get("cpu_seconds")
+    if isinstance(c, (list, np.ndarray)):
+        return np.asarray(c, dtype=float)
+    t = np.asarray(row["time_seconds"], dtype=float)
+    pct = np.asarray(row["cpu_percent"], dtype=float)
+    return np.concatenate(([0.0], np.cumsum(pct[1:] / 100.0 * np.diff(t))))
+
+
+def _cpu_percent_series(t, c, interval):
+    """CPU % over each sample interval from the cumulative CPU seconds ``c``,
+    with graphviper's edge rule: a last interval shorter than half the sample
+    interval is merged into the one before, and sample 0, which has no
+    interval, repeats sample 1."""
+    if len(t) > 2 and t[-1] - t[-2] < 0.5 * interval:
+        t, c = np.delete(t, -2), np.delete(c, -2)
+    if len(t) < 2:
+        return t, np.zeros_like(t)
+    dt = np.diff(t)
+    pct = np.divide(100.0 * np.diff(c), dt, out=np.zeros_like(dt), where=dt > 0)
+    return t, np.concatenate((pct[:1], pct))
+
+
+def _time_integral(t, v):
+    """Cumulative trapezoid integral of ``v`` over ``t``, 0 at the first sample."""
+    return np.concatenate(([0.0], np.cumsum(0.5 * (v[1:] + v[:-1]) * np.diff(t))))
+
+
+def _bin_increments(edges, offset, t_rel, cumulative):
+    """Increase of a task's cumulative series within each bin of ``edges``
+    (run clock); 0 in bins before the task starts and after it ends."""
+    return np.diff(np.interp(edges - offset, t_rel, cumulative))
+
+
+def _display_bins(span, interval, period):
+    """Bin edges over the run [0, span]: about 600 bins of a whole number of
+    sample intervals. Once a bin would be longer than a quarter of the task
+    period it is a whole number of task periods instead, so the bin means do
+    not alias the workers' lockstep reads and write bursts. The last bin ends
+    at ``span``; one shorter than half a bin is merged into the bin before.
+    Returns (bin width, edges)."""
+    b = span / 600
+    if period > 0 and b > 0.25 * period:
+        b = period * max(1, round(b / period))
+    binw = interval * max(1, round(b / interval))
+    edges = np.append(np.arange(0.0, span, binw), span)
+    if len(edges) > 2 and edges[-1] - edges[-2] < 0.5 * binw:
+        edges = np.delete(edges, -2)
+    return binw, edges
+
+
 def _plot_task_series(
     df,
     column,
@@ -211,15 +271,20 @@ def _plot_task_series(
     subtract_first=False,
 ):
     """One task-aligned series: a subsample of tasks as faint lines plus the
-    average over ALL tasks (at each t, over the tasks still running at t).
+    average over the tasks.
 
     ``subtract_first`` rebases each task's series to its first sample -- needed
     for the I/O counters, which are cumulative over the WORKER PROCESS lifetime
-    (a task run late in a sweep starts far into its worker's counter).
+    (a task run late in a sweep starts far into its worker's counter). Such
+    cumulative series are averaged over ALL tasks at every time, a finished
+    task holding its total; instantaneous series (CPU%, RSS) are averaged over
+    the tasks still running, drawn only while at least 5 % of the tasks run.
+    ``cpu_percent`` is derived from the cumulative CPU seconds
+    (:func:`_cpu_seconds`), so the monitor's first and last samples over
+    near-zero intervals do not spike.
 
     The y-axis is clipped to the 99.5th percentile of the plotted values (or
-    the average's peak if larger): psutil's first cpu_percent samples over a
-    near-zero interval can spike absurdly and would flatten the whole plot.
+    the average's peak if larger).
     """
     import matplotlib.pyplot as plt
 
@@ -240,7 +305,11 @@ def _plot_task_series(
     first = True
     for i, row in df.iterrows():
         t = np.asarray(row["time_seconds"], dtype=float)
-        v = np.asarray(row[column], dtype=float) * scale
+        if column == "cpu_percent":
+            t, v = _cpu_percent_series(t, _cpu_seconds(row), interval)
+            v = v * scale
+        else:
+            v = np.asarray(row[column], dtype=float) * scale
         if subtract_first:
             v = v - v[0]
         if i in show:
@@ -254,16 +323,31 @@ def _plot_task_series(
             )
             shown_values.append(v)
             first = False
-        mask = grid <= t[-1]
-        total[mask] += np.interp(grid[mask], t, v)
-        count[mask] += 1
-    mean = np.divide(total, count, out=np.full_like(total, np.nan), where=count > 0)
+        if subtract_first:
+            total += np.interp(grid, t, v)
+            count += 1
+        else:
+            mask = grid <= t[-1]
+            total[mask] += np.interp(grid[mask], t, v)
+            count[mask] += 1
+    mean = np.divide(
+        total,
+        count,
+        out=np.full_like(total, np.nan),
+        where=count >= (1 if subtract_first else 0.05 * len(df)),
+    )
     ax.plot(
         grid,
         mean,
         color=color,
         linewidth=2.5,
-        label=f"{label_prefix}average over running tasks ({len(df)} tasks)",
+        label=(
+            f"{label_prefix}mean over all {len(df)} tasks "
+            "(finished tasks hold their total)"
+            if subtract_first
+            else f"{label_prefix}mean over the running tasks (of {len(df)}; "
+            "drawn while >= 5 % run)"
+        ),
     )
     top = 1.1 * float(
         max(np.nanpercentile(np.concatenate(shown_values), 99.5), np.nanmax(mean))
@@ -282,9 +366,11 @@ def _plot_task_series(
 def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
     """Task-aligned CPU / memory / I/O plots (one figure each).
 
-    Every task's clock starts at its own beginning; the bold curve is the
-    average over the tasks still running at each instant, so it is not diluted
-    by tasks that already finished.
+    Every task's clock starts at its own beginning. The bold CPU and memory
+    curves are the average over the tasks still running at each instant, so
+    they are not diluted by tasks that already finished; the bold I/O curves
+    average every task, a finished task holding its total, so they end at the
+    mean per-task volume.
 
     Parameters
     ----------
@@ -360,12 +446,16 @@ def plot_cluster_resource_usage(
     """Cluster-wide CPU / memory / I/O over the RUN's wall clock.
 
     Each task's series is placed at its actual wall-clock position using
-    ``start_unixtime`` and the quantities are SUMMED over the tasks running at
-    each instant: busy cores (sum of cpu_percent/100), total RSS of
-    task-running worker processes (idle workers are not counted), and the
-    aggregate read/write rate (GiB/s, from the per-task derivative of the
-    cumulative counters). Every figure also shows the number of concurrently
-    running tasks on a right-hand axis.
+    ``start_unixtime`` and the quantities are SUMMED over the tasks: busy
+    cores, total RSS of task-running worker processes (idle workers are not
+    counted), and the aggregate read/write rate (GiB/s). Every curve is a
+    mean over bins of about 1/600 of the run (a whole number of sample
+    intervals; a line at the 1 s sample interval over a long run is a solid
+    band of second-long bursts), taken from a cumulative series (CPU
+    seconds, bytes, the time integral of RSS), so it conserves that
+    quantity; once a bin would exceed a quarter of the task period it spans
+    whole task periods (:func:`_display_bins`). Every figure also shows the
+    mean number of running tasks in a strip below.
 
     Parameters
     ----------
@@ -407,56 +497,65 @@ def plot_cluster_resource_usage(
     starts = df["start_unixtime"].to_numpy(dtype=float)
     rel_end = np.array([t[-1] for t in df["time_seconds"]], dtype=float)
     run_t0 = starts.min()
-    grid = np.arange(0.0, (starts + rel_end).max() - run_t0 + interval, interval)
+    span = (starts + rel_end).max() - run_t0
+    period = float(np.median([t[-1] - t[0] for t in df["time_seconds"]]))
+    binw, edges = _display_bins(span, interval, period)
+    grid = 0.5 * (edges[:-1] + edges[1:])
+    width = np.diff(edges)
 
     have_io = "read_chars" in df.columns and not df["read_chars"].isna().all()
-    acc = {k: np.zeros_like(grid) for k in ("cores", "rss", "read_rate", "write_rate")}
-    n_running = np.zeros_like(grid)
+    acc = {
+        k: np.zeros_like(grid)
+        for k in ("cores", "rss", "read_rate", "write_rate", "running")
+    }
 
     for i, row in df.iterrows():
         t_rel = np.asarray(row["time_seconds"], dtype=float)
         offset = starts[i] - run_t0
-        mask = (grid >= offset) & (grid <= offset + t_rel[-1])
-        g = grid[mask] - offset
-        n_running[mask] += 1
-        acc["cores"][mask] += (
-            np.interp(g, t_rel, np.asarray(row["cpu_percent"], dtype=float)) / 100.0
-        )
-        acc["rss"][mask] += (
-            np.interp(g, t_rel, np.asarray(row["memory_rss_bytes"], dtype=float))
-            / 2**30
-        )
+        acc["running"] += _bin_increments(edges, offset, t_rel, t_rel - t_rel[0])
+        cpu = _cpu_seconds(row)
+        acc["cores"] += _bin_increments(edges, offset, t_rel, cpu - cpu[0])
+        rss = np.asarray(row["memory_rss_bytes"], dtype=float) / 2**30
+        acc["rss"] += _bin_increments(edges, offset, t_rel, _time_integral(t_rel, rss))
         if have_io:
             for col, key in (
                 ("read_chars", "read_rate"),
                 ("write_chars", "write_rate"),
             ):
                 c = np.asarray(row[col], dtype=float)
-                rate = np.gradient(c, t_rel) / 2**30 if len(c) > 1 else np.zeros(1)
-                acc[key][mask] += np.interp(g, t_rel, rate)
+                acc[key] += _bin_increments(edges, offset, t_rel, (c - c[0]) / 2**30)
+    for key in acc:
+        acc[key] /= width
+    n_running = acc.pop("running")
+    bin_note = f" ({binw:g} s bin means)"
 
     def _figure(title, ylabel, curves, capacity=None):
-        fig, ax = plt.subplots(figsize=(11, 6))
+        fig, (ax, axr) = plt.subplots(
+            2, 1, figsize=(11, 7), sharex=True, height_ratios=(4, 1)
+        )
         for label, y, color in curves:
             ax.plot(grid, y, color=color, linewidth=1.5, label=label)
+        top = max(np.nanmax(y) for _, y, _ in curves)
         if capacity is not None:
             ax.axhline(capacity[1], color="gray", linestyle="--", label=capacity[0])
-        ax2 = ax.twinx()
-        ax2.plot(grid, n_running, color="lightgray", linewidth=1, zorder=0)
-        ax2.set_ylabel("Running tasks", color="gray")
-        ax.set_xlabel("Wall-clock time since first task start (s)")
+            top = max(top, capacity[1])
+        ax.set_ylim(0.0, 1.25 * top)  # headroom for the legend
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.grid(True, color="lightgray", alpha=0.5)
-        ax.set_zorder(ax2.get_zorder() + 1)
-        ax.patch.set_visible(False)
-        ax.legend(loc="upper right")
+        ax.legend(loc="upper right", ncol=2)
+        axr.plot(grid, n_running, color="dimgray", linewidth=1)
+        axr.set_ylim(0.0, 1.1 * n_running.max())
+        axr.set_ylabel("Running tasks")
+        axr.set_xlabel("Wall-clock time since first task start (s)")
+        for a in (ax, axr):
+            a.grid(True, color="lightgray", alpha=0.5)
+        fig.tight_layout()
         return ax
 
     axes = {}
     axes["cpu"] = _figure(
         "Cluster CPU usage over the run",
-        "Busy cores (sum of task CPU% / 100)",
+        "Busy cores" + bin_note,
         [("busy cores", acc["cores"], "tab:blue")],
         capacity=(
             None
@@ -466,7 +565,7 @@ def plot_cluster_resource_usage(
     )
     axes["memory"] = _figure(
         "Cluster memory usage over the run (task-running workers only)",
-        "Total resident memory (GiB)",
+        "Total resident memory (GiB)" + bin_note,
         [("total RSS", acc["rss"], "tab:blue")],
         capacity=(
             None
@@ -477,10 +576,10 @@ def plot_cluster_resource_usage(
     if have_io:
         axes["io"] = _figure(
             "Cluster I/O rate over the run (syscall-level, counts network filesystems)",
-            "Aggregate I/O rate (GiB/s)",
+            "Aggregate I/O rate (GiB/s)" + bin_note,
             [
-                ("read", acc["read_rate"], "tab:blue"),
                 ("write", acc["write_rate"], "tab:orange"),
+                ("read", acc["read_rate"], "tab:blue"),
             ],
         )
     else:
