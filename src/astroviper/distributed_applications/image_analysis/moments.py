@@ -71,6 +71,7 @@ import os
 import time
 
 import numpy as np
+<<<<<<< Updated upstream
 import toolviper
 print(dir(toolviper))
 import toolviper.utils
@@ -78,6 +79,19 @@ import toolviper.utils.logger as logger
 from toolviper.utils import (
     validate
     )
+=======
+<<<<<<< Updated upstream
+import toolviper.utils.logger as logger
+import toolviper.utils.parameter
+=======
+import toolviper
+
+print(dir(toolviper))
+import toolviper.utils
+import toolviper.utils.logger as logger
+from toolviper.utils import validate
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
 import xarray as xr
 from numcodecs import Blosc
 
@@ -182,8 +196,17 @@ def _collect_dataframes(results, frames):
 
 
 @shares_param_docs
+<<<<<<< Updated upstream
 #@toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
 @toolviper.utils.validate(config_dir=_PARAM_CONFIG_DIR)
+=======
+<<<<<<< Updated upstream
+@toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
+=======
+# @toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
+@toolviper.utils.validate(config_dir=_PARAM_CONFIG_DIR)
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
 def moments(
     input_image_store: str,
     moments_image_store: str,

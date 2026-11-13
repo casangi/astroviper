@@ -420,7 +420,11 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         # Degrid: return the equalized data_weight unchanged so the caller's
         # tile(..., n_pol) produces an output of the correct shape.
         self.degrid_mock.side_effect = (
+<<<<<<< Updated upstream
             lambda grid, uvw, dw, briggs, freq, n_uv, dlm, processing_function_threads=1, frequency_map=None, *, truncate_uv_cells=False: (
+=======
+            lambda grid, uvw, dw, briggs, freq, n_uv, dlm, processing_function_threads=1, frequency_map=None: (
+>>>>>>> Stashed changes
                 dw
             )
         )

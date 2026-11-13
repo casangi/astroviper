@@ -4,7 +4,8 @@ import json
 import os
 from typing import Any
 
-import toolviper.utils.parameter
+import toolviper
+from toolviper.utils import validate
 import zarr
 from numcodecs import Blosc
 from xradio.image import make_empty_sky_image
@@ -111,8 +112,12 @@ def _apply_parameters_file(function):
 
 
 @shares_param_docs
+<<<<<<< Updated upstream
 @_apply_parameters_file
 @toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
+=======
+@toolviper.utils.validate(config_dir=_PARAM_CONFIG_DIR)
+>>>>>>> Stashed changes
 def image_cube_single_field(
     ps_store: str,
     image_store: str,

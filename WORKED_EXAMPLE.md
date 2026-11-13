@@ -15,17 +15,26 @@ return_dict = image_cube_single_field(
     image_store="twhya_clean.img.zarr",  # output image dataset (Zarr)
     image_params=image_params,  # image geometry + output coords
     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+<<<<<<< Updated upstream
     cycle_control_params={
+=======
+    iteration_control_params={
+>>>>>>> Stashed changes
         "max_iter": 300,
         "max_cycles": 3,
         "threshold": 0.001,
         "gain": 0.1,
+<<<<<<< Updated upstream
         "psf_sidelobe_factor": 1.5,
         "max_iter_per_cycle": -1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     },
     gridder="anti_alias",
+=======
+    },
+    gridder="prolate_spheroidal",
+>>>>>>> Stashed changes
     deconvolver="hogbom_many_threads",
     image_data_variables_keep=[
         "sky_residual",
