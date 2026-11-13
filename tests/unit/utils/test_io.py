@@ -39,6 +39,17 @@ class TestImageDataGroupsForKeptVariables:
         groups = image_data_groups_for_kept_variables(["sky_restored"])
         assert groups == {"restored": {"sky": "SKY_RESTORED"}}
 
+    def test_continuum_spectral_products_join_the_restored_group(self):
+        """Alpha, its error, and beta have stable public registry roles."""
+        groups = image_data_groups_for_kept_variables(["alpha", "alpha_error", "beta"])
+        assert groups == {
+            "restored": {
+                "alpha": "ALPHA",
+                "alpha_error": "ALPHA_ERROR",
+                "beta": "BETA",
+            }
+        }
+
     def test_variables_without_membership_are_skipped(self):
         # sky_dirty has no data-group membership; only sky_residual registers.
         groups = image_data_groups_for_kept_variables(["sky_dirty", "sky_residual"])
@@ -228,3 +239,114 @@ class TestWriteZarrImageStore:
         img_xds = object()
         assert write_zarr_image_store(img_xds, "cube.zarr", overwrite=True) == expected
         assert calls == [(img_xds, "cube.zarr", "zarr", True)]
+
+
+class TestImageOutputDestination:
+    @pytest.mark.parametrize(
+        "name",
+        ["cube", "cube.zarr", "cube.ps.zarr", "cube.IMG.ZARR", "cube.img.zarr.zarr"],
+    )
+    def test_matches_installed_writer_names(self, tmp_path, name):
+        from astroviper.utils.io import (
+            check_image_output_destination,
+            write_zarr_image_store,
+        )
+
+        requested = str(tmp_path / name)
+        written = write_zarr_image_store(
+            TestWriteZarrImageStore._image_xds(), requested
+        )
+        with pytest.raises(FileExistsError, match="overwrite=True"):
+            check_image_output_destination(requested)
+        assert (tmp_path / written).is_dir()
+
+    @pytest.mark.parametrize("format", ["zarr", "fits"])
+    @pytest.mark.parametrize("kind", ["file", "directory", "dangling_link"])
+    def test_read_only_for_every_existing_destination(self, tmp_path, format, kind):
+        import os
+
+        from astroviper.utils.io import check_image_output_destination
+
+        path = tmp_path / ("cube.img.zarr" if format == "zarr" else "cube.fits")
+        if kind == "file":
+            path.write_bytes(b"keep output")
+        elif kind == "directory":
+            path.mkdir()
+            (path / "marker").write_bytes(b"keep output")
+        else:
+            path.symlink_to(tmp_path / "absent")
+        before = path.lstat()
+        with pytest.raises(FileExistsError):
+            check_image_output_destination(path, output_image_format=format)
+        check_image_output_destination(path, overwrite=True, output_image_format=format)
+        assert path.lstat() == before
+        assert os.path.lexists(path)
+        if kind == "file":
+            assert path.read_bytes() == b"keep output"
+        elif kind == "directory":
+            assert list(path.iterdir()) == [path / "marker"]
+            assert (path / "marker").read_bytes() == b"keep output"
+
+    def test_legacy_writer_keeps_requested_name(self, tmp_path, monkeypatch):
+        from xradio.image import image as image_module
+
+        from astroviper.utils.io import check_image_output_destination
+
+        monkeypatch.delattr(image_module, "zarr_store_name", raising=False)
+        path = tmp_path / "legacy.zarr"
+        path.write_bytes(b"old output")
+        with pytest.raises(FileExistsError):
+            check_image_output_destination(path)
+        check_image_output_destination(tmp_path / "legacy.img.zarr")
+
+    def test_unresolved_name_is_not_a_collision(self, tmp_path):
+        from xradio.image import image as image_module
+
+        from astroviper.utils.io import check_image_output_destination
+
+        if not hasattr(image_module, "zarr_store_name"):
+            pytest.skip("XRADIO keeps the requested name")
+        path = tmp_path / "cube.zarr"
+        path.write_bytes(b"unrelated old store")
+        check_image_output_destination(path)
+        assert path.read_bytes() == b"unrelated old store"
+        assert not (tmp_path / "cube.img.zarr").exists()
+
+    def test_normalizes_trailing_separator_and_expands_home(
+        self, tmp_path, monkeypatch
+    ):
+        import os
+
+        from xradio.image import image as image_module
+
+        from astroviper.utils.io import check_image_output_destination
+
+        if not hasattr(image_module, "zarr_store_name"):
+            pytest.skip("XRADIO keeps the requested name")
+        real_expand = os.path.expanduser
+        monkeypatch.setattr(
+            os.path,
+            "expanduser",
+            lambda path: (
+                str(tmp_path / path[2:]) if path.startswith("~/") else real_expand(path)
+            ),
+        )
+        (tmp_path / "cube.img.zarr").mkdir()
+        with pytest.raises(FileExistsError):
+            check_image_output_destination("~/cube.zarr/")
+
+    def test_writer_still_refuses_a_destination_created_after_check(self, tmp_path):
+        from astroviper.utils.io import (
+            check_image_output_destination,
+            write_zarr_image_store,
+        )
+
+        path = tmp_path / "raced.img.zarr"
+        check_image_output_destination(path)
+        path.mkdir()
+        marker = path / "marker"
+        marker.write_bytes(b"keep concurrent output")
+        with pytest.raises(FileExistsError):
+            write_zarr_image_store(TestWriteZarrImageStore._image_xds(), str(path))
+        assert list(path.iterdir()) == [marker]
+        assert marker.read_bytes() == b"keep concurrent output"

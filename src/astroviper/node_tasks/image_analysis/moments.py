@@ -222,6 +222,7 @@ def moments(
     exclude_pixel_range=None,
     use_mask: bool = False,
     selection=None,
+    image_data_group_in_role: str = "sky",
     moments_data_variables=None,
     task_coords=None,
     data_selection=None,
@@ -305,6 +306,10 @@ def moments(
         AstroVIPER analogue of CASA's ``chans``/``stokes``/``box``.  Must not
         select along the parallel axis (chunking happens on the selected
         image).
+    image_data_group_in_role : str, default "sky"
+        Role of ``image_data_group_in_name`` whose data variable is collapsed,
+        e.g. ``"sky_primary_beam_corrected"`` of the imager's ``"restored"``
+        group.  Only the default ``"sky"`` falls back to ``"SKY"``.
     moments_data_variables : list of str, optional
         Lowercase keys of the moment variables to write
         (e.g. ``["sky_moment_integrated"]``).  Defaults to the keys implied
@@ -411,7 +416,7 @@ def moments(
         dimension_flags = chunk_flags
 
     sky_name, mask_name = resolve_moments_input_variables(
-        lazy_xds, image_data_group_in_name, use_mask
+        lazy_xds, image_data_group_in_name, use_mask, image_data_group_in_role
     )
     variables = [sky_name] + ([mask_name] if mask_name is not None else [])
     moment_names = normalize_moments(moments)

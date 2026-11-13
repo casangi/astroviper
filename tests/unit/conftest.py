@@ -5,8 +5,8 @@ conftest), so fixtures shared by several unit-test directories live here.
 
 * ``imageable_msv2``: a small generated Measurement Set v2 that the imaging can
   read, built once per session and only when a test requests it. It needs
-  XRADIO's ``xradio_msv2`` engine and python-casacore; without them the tests
-  that request it are skipped.
+  XRADIO's ``xradio_msv2`` engine and arcae; without them the tests that
+  request it are skipped.
 * ``imageable_msv2_ps``: the same Measurement Set converted to a processing set
   with XRADIO's converter (``partition_scheme=[]``, the engine's default).
 
@@ -60,8 +60,7 @@ def make_imageable_msv2(ms_path, seed=0):
         ``ms_path``.
     """
     import numpy as np
-    from casacore import tables
-    from casacore.tables.tableutil import makearrcoldesc
+    from arcae.lib.arrow_tables import Table
     from xradio.testing.measurement_set.msv2_io import gen_test_ms
 
     gen_test_ms(ms_path, vlbi_tables=False)
@@ -72,9 +71,13 @@ def make_imageable_msv2(ms_path, seed=0):
             np.complex64
         )
 
-    with tables.table(ms_path, readonly=False, ack=False) as main:
-        n_row = main.nrows()
-        n_channel, n_polarization = main.getcell("DATA", 0).shape
+    def rows(start, stop=None):
+        """arcae index of the rows ``start`` to ``stop - 1`` (one row by default)."""
+        return (slice(start, start + 1 if stop is None else stop),)
+
+    with Table.from_filename(ms_path, readonly=False) as main:
+        n_row = main.nrow()
+        n_channel, n_polarization = main.getcol("DATA", rows(0)).shape[1:]
         cell = (n_row, n_channel, n_polarization)
         main.putcol("DATA", random_visibilities(cell))
         main.putcol("FLAG", rng.random(cell) < 0.05)
@@ -84,17 +87,21 @@ def make_imageable_msv2(ms_path, seed=0):
         )
         main.putcol("UVW", rng.uniform(-300.0, 300.0, (n_row, 3)))
         main.addcols(
-            makearrcoldesc(
-                "CORRECTED_DATA",
-                0j,
-                ndim=2,
-                shape=[n_channel, n_polarization],
-                valuetype="complex",
-            ),
             {
-                "TYPE": "TiledShapeStMan",
-                "NAME": "CorrectedDataNarrowTiles",
-                "SPEC": {"DEFAULTTILESHAPE": [n_polarization, 4, 64]},
+                "CORRECTED_DATA": {
+                    "valueType": "complex",
+                    "ndim": 2,
+                    "shape": [n_channel, n_polarization],
+                    "_c_order": True,
+                }
+            },
+            {
+                "*1": {
+                    "TYPE": "TiledShapeStMan",
+                    "NAME": "CorrectedDataNarrowTiles",
+                    "SPEC": {"DEFAULTTILESHAPE": [n_polarization, 4, 64]},
+                    "COLUMNS": ["CORRECTED_DATA"],
+                }
             },
         )
         main.putcol("CORRECTED_DATA", random_visibilities(cell))
@@ -108,45 +115,55 @@ def make_imageable_msv2(ms_path, seed=0):
             "STATE_ID",
             "OBSERVATION_ID",
         ):
-            main.putcell(column, 1, main.getcell(column, 0))
-        for row in (5, 6, 7):
-            main.putcell("TIME", row, main.getcell("TIME", row) + 1000.0)
+            main.putcol(column, main.getcol(column, rows(0)), rows(1))
+        main.putcol("TIME", main.getcol("TIME", rows(5, 8)) + 1000.0, rows(5, 8))
 
     width = 1.0e6
     channels = np.arange(n_channel, dtype=np.float64)
-    with tables.table(
-        os.path.join(ms_path, "SPECTRAL_WINDOW"), readonly=False, ack=False
+    with Table.from_filename(
+        os.path.join(ms_path, "SPECTRAL_WINDOW"), readonly=False
     ) as spectral_window:
         for row, frequency in enumerate(
             [100e9 + width * channels, 101e9 - width * channels]
         ):
-            spectral_window.putcell("CHAN_FREQ", row, frequency)
-            spectral_window.putcell(
-                "CHAN_WIDTH", row, np.full(n_channel, width if row == 0 else -width)
+            spectral_window.putcol("CHAN_FREQ", frequency[np.newaxis], rows(row))
+            spectral_window.putcol(
+                "CHAN_WIDTH",
+                np.full((1, n_channel), width if row == 0 else -width),
+                rows(row),
             )
-            spectral_window.putcell("EFFECTIVE_BW", row, np.full(n_channel, width))
-            spectral_window.putcell("RESOLUTION", row, np.full(n_channel, width))
-            spectral_window.putcell("REF_FREQUENCY", row, frequency[0])
-            spectral_window.putcell("TOTAL_BANDWIDTH", row, width * n_channel)
-    with tables.table(
-        os.path.join(ms_path, "POLARIZATION"), readonly=False, ack=False
+            spectral_window.putcol(
+                "EFFECTIVE_BW", np.full((1, n_channel), width), rows(row)
+            )
+            spectral_window.putcol(
+                "RESOLUTION", np.full((1, n_channel), width), rows(row)
+            )
+            spectral_window.putcol("REF_FREQUENCY", frequency[:1], rows(row))
+            spectral_window.putcol(
+                "TOTAL_BANDWIDTH", np.array([width * n_channel]), rows(row)
+            )
+    with Table.from_filename(
+        os.path.join(ms_path, "POLARIZATION"), readonly=False
     ) as polarization:
-        for row in range(polarization.nrows()):
-            polarization.putcell("CORR_TYPE", row, np.array([9, 12], np.int32))
-            polarization.putcell(
-                "CORR_PRODUCT", row, np.array([[0, 0], [1, 1]], np.int32)
-            )
+        n_setup = polarization.nrow()
+        polarization.putcol(
+            "CORR_TYPE", np.tile(np.array([9, 12], np.int32), (n_setup, 1))
+        )
+        polarization.putcol(
+            "CORR_PRODUCT",
+            np.tile(np.array([[0, 0], [1, 1]], np.int32), (n_setup, 1, 1)),
+        )
     return ms_path
 
 
 def _skip_without_msv2_engine():
-    """Skip the requesting test without XRADIO's engine or python-casacore."""
+    """Skip the requesting test without XRADIO's engine or arcae."""
     from astroviper.node_tasks.imaging.utils import msv2_engine_available
 
     available, reason = msv2_engine_available()
     if not available:
         pytest.skip(reason)
-    pytest.importorskip("casacore.tables", reason="python-casacore not installed")
+    pytest.importorskip("arcae", reason="arcae not installed")
 
 
 @pytest.fixture(scope="session")

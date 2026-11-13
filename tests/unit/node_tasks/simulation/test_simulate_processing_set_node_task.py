@@ -70,12 +70,13 @@ def setup(tmp_path):
         point_source_flux=flux,
         point_source_ra_dec=src,
         phase_center_ra_dec=pc,
-        beam_models=[airy_disk_model("vla")],
+        beam_models=[airy_disk_model("vla_nvss")],
         beam_model_map=np.zeros(6, int),
         uvw_params={"auto_correlations": False},
         noise_params={"t_receiver": 50.0, "random_seed": 11},
         channel_width=1e8,
         integration_time=600.0,
+        antenna_dish_diameter=ant.ANTENNA_DISH_DIAMETER.values,
     )
     return ps_store, ms_path, tc, fc, mapping, params
 
@@ -103,9 +104,12 @@ def test_graph_mode_false_matches_processing_function(setup):
         params["phase_center_ra_dec"],
         params["beam_models"],
         params["beam_model_map"],
-        noise_params={"t_receiver": 50.0, "random_seed": 11 + 3},
+        noise_params={"t_receiver": 50.0, "random_seed": 11},
         channel_width=1e8,
         integration_time=600.0,
+        antenna_dish_diameter=params["antenna_dish_diameter"],
+        time_index_offset=t_sl.start,
+        frequency_index_offset=f_sl.start,
     )
     np.testing.assert_allclose(xds.VISIBILITY.values, ref.VISIBILITY.values)
     np.testing.assert_allclose(xds.UVW.values, ref.UVW.values)
@@ -126,7 +130,7 @@ def test_tasks_write_disjoint_regions_and_timing(setup):
             task_coords=task["task_coords"],
             data_selection={},
             task_id=task_id,
-        )
+        )["timing_node_tasks"]
         for task_id, task in mapping.items()
     ]
     for df in frames:
@@ -138,6 +142,11 @@ def test_tasks_write_disjoint_regions_and_timing(setup):
             "T_noise",
             "T_write",
             "T_simulate_task",
+            "start_unixtime",
+            "hostname",
+            "process_pid",
+            "thread_native_id",
+            "worker_name",
         } <= set(df)
     zarr.consolidate_metadata(ps_store)
     # the assembled processing set must pass the XRADIO MSv4 schema checker
@@ -147,8 +156,8 @@ def test_tasks_write_disjoint_regions_and_timing(setup):
     assert not np.isnan(ms.VISIBILITY.values).any()
     assert not np.isnan(ms.UVW.values).any()
     assert np.all(ms.WEIGHT.values > 0)
-    # full reference computed in one go (same per-task seeds -> noise differs, compare UVW and
-    # the noise-free part through a second noiseless run)
+    # full reference computed in one go: compare UVW and the noise-free part
+    # through a second noiseless run
     params_no_noise = {**params, "noise_params": None}
     for task_id, task in mapping.items():
         node_task(

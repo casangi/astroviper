@@ -1,26 +1,29 @@
-# .github/workflows/python-testing-linux.yml
+# .github/workflows/run-ipynb.yml
 # Test all notebooks.
+# Runs on pull requests and merges to main only (not on every branch push).
 name: ipynb Tests
 
 on:
-  push:
-    paths-ignore:
-      - '**.md'
-      - '**.rst'
   pull_request:
     paths-ignore:
       - '**.md'
       - '**.rst'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
 
   call-testing-linux:
-    # Pinned to the last working template. At 22215c6 (@main) a commented-out
-    # line inside the backslash-continued nbconvert command ends the
-    # continuation, so the job stops after the first notebook with
-    # "command not found" (exit 127). Return to @main once the template is fixed.
-    uses: nrao/gh-actions-templates-public/.github/workflows/run-ipynb-template.yml@86e00adecd19943005a5a8f56995decf772a0d9a
+    uses: nrao/gh-actions-templates-public/.github/workflows/run-ipynb-template.yml@main
     with:
+      python-version: "3.13"
       # astroviper's C++ extensions require C++23 (GCC >= 14).
       gcc-version: "14"
-    secrets: inherit

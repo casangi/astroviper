@@ -242,7 +242,7 @@ class TestHessian:
         for dtype in (np.float32, np.float64):
             psf = np.zeros((1, ny, nx), dtype=dtype)
             psf[0, ny // 2, nx // 2] = 1.0
-            measured = mtmfs.hessian(psf, scales=[scale])["hessian"][0, 0, 0]
+            measured = mtmfs.hessian(psf, scales=[0.0, scale])["hessian"][1, 0, 0]
             errors[dtype] = abs(measured - reference)
 
         assert errors[np.float64] < 1e-14
@@ -277,6 +277,16 @@ class TestHessian:
         psf[0, 8, 8] = -1.0
         with pytest.raises(
             RuntimeError, match=r"Invalid Taylor Hessian at scale index 0.*H\[0,0\]=-1"
+        ):
+            mtmfs.hessian(psf)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_positive_diagonal_indefinite_hessian_raises(self, dtype):
+        """A finite, nonsingular but non-positive-definite Hessian is invalid."""
+        psf = np.zeros((3, 16, 16), dtype=dtype)
+        psf[:, 8, 8] = [1.0, 2.0, 1.0]
+        with pytest.raises(
+            RuntimeError, match=r"Non-invertible Hessian.*Taylor pivot 1"
         ):
             mtmfs.hessian(psf)
 
@@ -332,6 +342,13 @@ class TestHessian:
 
 
 class TestMtclean:
+    def test_clean_exposes_cube_iteration_control_names(self):
+        doc = mtmfs.clean.__doc__
+        assert "max_iter_per_cycle_updated" in doc
+        assert "threshold_per_cycle" in doc
+        assert "max_iter_remaining" not in doc
+        assert "psf_fraction" not in doc
+
     @pytest.mark.parametrize(
         "name,nx,ny,nterms,scales,niter,gain",
         [
@@ -351,10 +368,9 @@ class TestMtclean:
             psf,
             model,
             scales=scales,
-            max_iter_remaining=niter,
+            max_iter_per_cycle_updated=niter,
             gain=gain,
-            threshold=1e-5,
-            psf_fraction=0.1,
+            threshold_per_cycle=1e-5,
         )
         assert 0 < out["iterations_performed"] <= niter
         for t in range(nterms):
@@ -367,6 +383,56 @@ class TestMtclean:
         assert out["peak_residual"] < np.max(np.abs(residual_in[0]))
         assert out["model_flux"] == pytest.approx(float(model[0].sum()), rel=1e-5)
 
+    def test_iteration_history(self):
+        """One record per component, without changing the clean: points and
+        scale components add up to the iterations, the Taylor-0 fluxes to the
+        model, and every scale is one of the effective scales."""
+        nterms, nx, ny = 2, 64, 64
+        psf = make_psf_stack(nterms, nx, ny, dtype=np.float64)
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        blob = np.exp(-((yy - 32) ** 2 + (xx - 30) ** 2) / (2 * 5.0**2))
+        dirty = _dirty_from_model(psf, np.stack([blob, 0.2 * blob]))
+        runs = {}
+        for record in (False, True):
+            residual, model = dirty.copy(), np.zeros_like(dirty)
+            out = mtmfs.clean(
+                residual,
+                psf,
+                model,
+                scales=[0, 4, 8],
+                max_iter_per_cycle_updated=60,
+                gain=0.2,
+                threshold_per_cycle=1e-5,
+                record_iteration_history=record,
+            )
+            runs[record] = out, residual, model
+        (off, residual_off, model_off), (out, residual, model) = runs[False], runs[True]
+        np.testing.assert_array_equal(residual, residual_off)
+        np.testing.assert_array_equal(model, model_off)
+        assert "iteration_component_flux" not in off
+        n = out["iterations_performed"]
+        assert out["n_point_components"] + out["n_scale_components"] == n
+        assert out["n_point_components"] > 0 and out["n_scale_components"] > 0
+        for field in (
+            "iteration_peak_residual",
+            "iteration_residual_rms",
+            "iteration_component_l",
+            "iteration_component_m",
+            "iteration_component_scale",
+            "iteration_component_flux",
+        ):
+            assert out[field].shape == (n,)
+            assert np.isfinite(out[field]).all()
+        np.testing.assert_allclose(
+            out["iteration_component_flux"].sum(), model[0].sum(), rtol=1e-9
+        )
+        assert set(out["iteration_component_scale"]) <= set(out["scales"])
+        assert (
+            np.count_nonzero(out["iteration_component_scale"] == 0)
+            == (out["n_point_components"])
+        )
+        assert np.all(out["iteration_residual_rms"] > 0)
+
     def test_float64_run_close_to_float32(self):
         nterms, nx, ny = 2, 64, 64
         res32 = make_dirty_stack(nterms, nx, ny, dtype=np.float32)
@@ -378,20 +444,18 @@ class TestMtclean:
             make_psf_stack(nterms, nx, ny, np.float32),
             mod32,
             scales=[0.0, 6.0],
-            max_iter_remaining=10,
+            max_iter_per_cycle_updated=10,
             gain=0.1,
-            threshold=1e-5,
-            psf_fraction=0.1,
+            threshold_per_cycle=1e-5,
         )
         o64 = mtmfs.clean(
             res64,
             make_psf_stack(nterms, nx, ny, np.float64),
             mod64,
             scales=[0.0, 6.0],
-            max_iter_remaining=10,
+            max_iter_per_cycle_updated=10,
             gain=0.1,
-            threshold=1e-5,
-            psf_fraction=0.1,
+            threshold_per_cycle=1e-5,
         )
         assert o32["iterations_performed"] == o64["iterations_performed"]
         np.testing.assert_allclose(mod32, mod64, rtol=1e-3, atol=1e-5)
@@ -404,24 +468,49 @@ class TestMtclean:
             residual,
             make_psf_stack(2, 64, 64),
             model,
-            max_iter_remaining=50,
+            max_iter_per_cycle_updated=50,
             gain=0.1,
-            threshold=100.0,
+            threshold_per_cycle=100.0,
         )
         assert out["iterations_performed"] == 0
         assert out["converged"]
         assert out["stop_code"] == mtmfs.STOP_THRESHOLD
         assert np.all(model == 0)
 
-    def test_negative_max_iter_remaining_raises(self):
+    def test_negative_max_iter_per_cycle_raises(self):
         residual = make_dirty_stack(1, 32, 32)
-        with pytest.raises(ValueError, match="max_iter_remaining must be >= 0"):
+        with pytest.raises(ValueError, match="max_iter_per_cycle_updated must be >= 0"):
             mtmfs.clean(
                 residual,
                 make_psf_stack(1, 32, 32),
                 np.zeros_like(residual),
-                max_iter_remaining=-1,
+                max_iter_per_cycle_updated=-1,
             )
+
+    def test_negative_threshold_per_cycle_raises(self):
+        residual = make_dirty_stack(1, 32, 32)
+        with pytest.raises(ValueError, match="threshold_per_cycle must be >= 0"):
+            mtmfs.clean(
+                residual,
+                make_psf_stack(1, 32, 32),
+                np.zeros_like(residual),
+                threshold_per_cycle=-1.0,
+            )
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_fixed_gain_above_one_raises_without_mutation(self, dtype):
+        residual = make_dirty_stack(1, 32, 32, dtype=dtype)
+        residual_in = residual.copy()
+        model = np.zeros_like(residual)
+        with pytest.raises(ValueError, match="fixed gain must be <= 1"):
+            mtmfs.clean(
+                residual,
+                make_psf_stack(1, 32, 32, dtype=dtype),
+                model,
+                gain=1.1,
+            )
+        np.testing.assert_array_equal(residual, residual_in)
+        assert not np.any(model)
 
     def test_converged_follows_engine_threshold_not_raw_peak(self):
         ny = nx = 48
@@ -433,7 +522,12 @@ class TestMtclean:
         residual[0, ny // 2, nx // 2] = 1.0
         model = np.zeros_like(residual)
         out = mtmfs.clean(
-            residual, psf, model, max_iter_remaining=50, gain=0.1, threshold=0.5
+            residual,
+            psf,
+            model,
+            max_iter_per_cycle_updated=50,
+            gain=0.1,
+            threshold_per_cycle=0.5,
         )
         assert out["iterations_performed"] == 0
         assert out["converged"]
@@ -466,7 +560,7 @@ class TestTcleanAnalogues:
         residual = _dirty_from_model(psf, true_model)
         residual_in = residual.copy()
         model = np.zeros_like(residual)
-        out = mtmfs.clean(residual, psf, model, max_iter_remaining=10, gain=0.1)
+        out = mtmfs.clean(residual, psf, model, max_iter_per_cycle_updated=10, gain=0.1)
         assert out["iterations_performed"] == 10
         assert out["peak_residual"] < np.max(np.abs(residual_in[0]))
         assert out["model_flux"] > 0
@@ -487,7 +581,12 @@ class TestTcleanAnalogues:
         total = 0
         for _cycle in range(10):
             out = mtmfs.clean(
-                residual, psf, model, max_iter_remaining=50, gain=0.1, threshold=1e-4
+                residual,
+                psf,
+                model,
+                max_iter_per_cycle_updated=50,
+                gain=0.1,
+                threshold_per_cycle=1e-4,
             )
             total += out["iterations_performed"]
             if out["converged"]:
@@ -507,7 +606,7 @@ class TestTcleanAnalogues:
         residual = _dirty_from_model(psf, true_model)
         residual_in = residual.copy()
         model = np.zeros_like(residual)
-        out = mtmfs.clean(residual, psf, model, max_iter_remaining=10, gain=0.1)
+        out = mtmfs.clean(residual, psf, model, max_iter_per_cycle_updated=10, gain=0.1)
         assert out["iterations_performed"] == 10
         assert out["peak_residual"] < residual_in[0].max()
         assert model[0, ny // 2, nx // 2] == pytest.approx(1.0 - 0.9**10, rel=1e-3)
@@ -532,7 +631,7 @@ class TestTcleanAnalogues:
             model,
             scales=[0, 20, 40, 100],
             small_scale_bias=0.9,
-            max_iter_remaining=10,
+            max_iter_per_cycle_updated=10,
             gain=0.1,
         )
         assert out["scales"] == [0.0, 20.0, 40.0, 100.0]
@@ -564,6 +663,17 @@ class TestTcleanAnalogues:
         with pytest.raises(ValueError):
             mtmfs.hessian(make_psf_stack(1, 64, 64), scales=[60])
 
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf, -1.0])
+    def test_invalid_scale_raises(self, bad):
+        with pytest.raises(
+            ValueError, match="scale sizes must be finite and non-negative"
+        ):
+            mtmfs.hessian(make_psf_stack(1, 64, 64), scales=[0.0, bad])
+
+    def test_explicit_scales_require_zero_as_smallest_effective_scale(self):
+        with pytest.raises(ValueError, match="must include 0 as the smallest scale"):
+            mtmfs.hessian(make_psf_stack(1, 64, 64), scales=[4.0, 8.0])
+
     def test_trailing_zero_is_sorted_not_divided(self):
         psf = make_psf_stack(1, 64, 64)
         residual = np.zeros((1, 64, 64), dtype=np.float32)
@@ -575,7 +685,7 @@ class TestTcleanAnalogues:
             model,
             scales=[5.0, 0.0],
             small_scale_bias=0.6,
-            max_iter_remaining=5,
+            max_iter_per_cycle_updated=5,
             gain=0.1,
         )
         assert out["scales"] == [0.0, 5.0]
@@ -593,7 +703,7 @@ class TestTcleanAnalogues:
         mask = np.zeros((ny, nx), dtype=np.float32)
         mask[6:19, 6:19] = 1.0
         out = mtmfs.clean(
-            residual, psf, model, mask=mask, max_iter_remaining=20, gain=0.1
+            residual, psf, model, mask=mask, max_iter_per_cycle_updated=20, gain=0.1
         )
         assert out["iterations_performed"] == 20
         assert np.all(model[0][mask == 0] == 0)
@@ -607,11 +717,21 @@ class TestTcleanAnalogues:
         model = np.zeros_like(residual)
         mask = np.zeros((ny, nx), dtype=np.float32)
         out = mtmfs.clean(
-            residual, psf, model, mask=mask, max_iter_remaining=3, gain=0.5
+            residual, psf, model, mask=mask, max_iter_per_cycle_updated=3, gain=0.5
         )
         assert out["iterations_performed"] == 0
-        assert out["stop_code"] == mtmfs.STOP_NOTHING_TO_CLEAN
+        assert out["stop_code"] == mtmfs.STOP_THRESHOLD
         assert out["converged"]
+        assert np.all(model == 0)
+
+    def test_no_iteration_limit_does_not_run(self):
+        ny = nx = 32
+        psf = make_psf_stack(1, nx, ny)
+        residual = np.ones((1, ny, nx), dtype=np.float32)
+        model = np.zeros_like(residual)
+        out = mtmfs.clean(residual, psf, model, max_iter_per_cycle_updated=0)
+        assert out["iterations_performed"] == 0
+        assert out["stop_code"] == mtmfs.STOP_NONE
         assert np.all(model == 0)
 
     def test_mask_none_is_accepted(self):
@@ -622,7 +742,7 @@ class TestTcleanAnalogues:
             make_psf_stack(1, 32, 32),
             model,
             mask=None,
-            max_iter_remaining=3,
+            max_iter_per_cycle_updated=3,
             gain=0.1,
         )
         assert out["iterations_performed"] == 3
@@ -641,7 +761,7 @@ class TestInPlaceContract:
             make_psf_stack(2, 48, 40),
             model,
             scales=[0.0, 4.0],
-            max_iter_remaining=5,
+            max_iter_per_cycle_updated=5,
         )
         assert residual.__array_interface__["data"][0] == r_ptr
         assert model.__array_interface__["data"][0] == m_ptr
@@ -655,7 +775,12 @@ class TestInPlaceContract:
         mask = np.ones(residual.shape[1:], dtype=residual.dtype)
         psf_before, mask_before = psf.copy(), mask.copy()
         mtmfs.clean(
-            residual, psf, model, mask=mask, scales=[0.0, 4.0], max_iter_remaining=5
+            residual,
+            psf,
+            model,
+            mask=mask,
+            scales=[0.0, 4.0],
+            max_iter_per_cycle_updated=5,
         )
         np.testing.assert_array_equal(psf, psf_before)
         np.testing.assert_array_equal(mask, mask_before)
@@ -670,7 +795,7 @@ class TestInPlaceContract:
             make_psf_stack(2, 48, 40),
             model,
             scales=[0.0, 4.0],
-            max_iter_remaining=5,
+            max_iter_per_cycle_updated=5,
         )
         delta = model - init
         assert np.any(delta != 0)
@@ -685,10 +810,20 @@ class TestInPlaceContract:
         residual = make_dirty_stack(2, 48, 40)
         model = np.zeros_like(residual)
         o1 = mtmfs.clean(
-            residual, psf, model, scales=[0.0, 4.0], max_iter_remaining=5, gain=0.1
+            residual,
+            psf,
+            model,
+            scales=[0.0, 4.0],
+            max_iter_per_cycle_updated=5,
+            gain=0.1,
         )
         o2 = mtmfs.clean(
-            residual, psf, model, scales=[0.0, 4.0], max_iter_remaining=5, gain=0.1
+            residual,
+            psf,
+            model,
+            scales=[0.0, 4.0],
+            max_iter_per_cycle_updated=5,
+            gain=0.1,
         )
         assert o1["iterations_performed"] == 5 and o2["iterations_performed"] == 5
         assert o2["peak_residual"] < o1["peak_residual"]
@@ -701,7 +836,7 @@ class TestInPlaceContract:
             residual,
             make_psf_stack(2, 48, 40, np.float64),
             model,
-            max_iter_remaining=5,
+            max_iter_per_cycle_updated=5,
             gain=0.1,
         )
         assert out["iterations_performed"] == 5
@@ -711,20 +846,23 @@ class TestInPlaceContract:
         residual = make_dirty_stack(2, 48, 40)
         model = np.zeros_like(residual)
         out = mtmfs.clean(
-            residual, make_psf_stack(2, 48, 40), model, max_iter_remaining=3
+            residual, make_psf_stack(2, 48, 40), model, max_iter_per_cycle_updated=3
         )
         assert {
             "iterations_performed",
             "peak_residual",
             "model_flux",
             "converged",
+            "diverged",
             "stop_code",
             "scales",
             "small_scale_bias",
             "psf_support",
             "hessian",
             "inverse_hessian",
+            "hessian_condition_number",
         } <= set(out)
+        assert {"iter_done", "peakres"}.isdisjoint(out)
         assert isinstance(out["iterations_performed"], int)
 
 
@@ -765,6 +903,40 @@ class TestArrayValidation:
         with pytest.raises(RuntimeError, match="C-contiguous"):
             mtmfs.clean(residual[:, :, ::2], make_psf_stack(2, 48, 40), model)
 
+    def test_taylor_strided_residual_updates_parent_without_copy(self):
+        dirty = make_dirty_stack(2, 48, 40)
+        psf = make_psf_stack(2, 48, 40)
+        expected_residual = dirty.copy()
+        expected_model = np.zeros_like(dirty)
+        expected = mtmfs.clean(
+            expected_residual,
+            psf,
+            expected_model,
+            max_iter_per_cycle_updated=1,
+            gain=0.1,
+        )
+
+        parent = np.zeros((1, 2, 2, 40, 48), dtype=np.float32)
+        parent[0, :, 1] = dirty
+        residual_view = parent[0, :, 1]
+        assert not residual_view.flags.c_contiguous
+        assert residual_view.strides[1:] == dirty.strides[1:]
+        model = np.zeros_like(dirty)
+
+        actual = mtmfs.clean(
+            residual_view,
+            psf,
+            model,
+            max_iter_per_cycle_updated=1,
+            gain=0.1,
+        )
+
+        np.testing.assert_array_equal(parent[0, :, 0], 0.0)
+        np.testing.assert_allclose(residual_view, expected_residual)
+        np.testing.assert_allclose(model, expected_model)
+        assert actual["iterations_performed"] == expected["iterations_performed"]
+        assert actual["peak_residual"] == pytest.approx(expected["peak_residual"])
+
     def test_readonly_arrays_raise(self):
         residual = make_dirty_stack(2, 48, 40)
         model = np.zeros_like(residual)
@@ -792,23 +964,30 @@ class TestArrayValidation:
         with pytest.raises(RuntimeError, match="3-D"):
             mtmfs.clean(residual[0], psf[0], model[0])
 
-    def test_equal_dtype_from_pickle_is_accepted(self):
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_equal_dtype_from_pickle_is_accepted(self, dtype):
         """An equal but non-builtin dtype object (pickle, Dask, Zarr) is used in place."""
         residual, psf, model, mask = pickle.loads(
             pickle.dumps(
                 (
-                    make_dirty_stack(2, 48, 40),
-                    make_psf_stack(2, 48, 40),
-                    np.zeros((2, 40, 48), dtype=np.float32),
-                    np.ones((40, 48), dtype=np.float32),
+                    make_dirty_stack(2, 48, 40, dtype=dtype),
+                    make_psf_stack(2, 48, 40, dtype=dtype),
+                    np.zeros((2, 40, 48), dtype=dtype),
+                    np.ones((40, 48), dtype=dtype),
                 )
             )
         )
+        residual_ptr = residual.__array_interface__["data"][0]
+        model_ptr = model.__array_interface__["data"][0]
         out = mtmfs.clean(residual, psf, model, mask=mask)
         assert out["iterations_performed"] > 0 and np.any(model)
+        assert residual.__array_interface__["data"][0] == residual_ptr
+        assert model.__array_interface__["data"][0] == model_ptr
         mtmfs.principal_solution(residual, mtmfs.hessian(psf)["inverse_hessian"][0])
         with pytest.raises(RuntimeError, match="float32 or float64"):
-            mtmfs.clean(residual.astype(">f4"), psf, model)
+            mtmfs.clean(
+                residual.astype(">f4" if dtype == np.float32 else ">f8"), psf, model
+            )
 
     def test_mask_validation(self):
         residual = make_dirty_stack(2, 48, 40)
@@ -824,31 +1003,75 @@ class TestArrayValidation:
             mtmfs.clean(residual, psf, model, mask=np.ones((40, 48)).tolist())
 
     @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
-    @pytest.mark.parametrize("target", ["residual", "psf", "mask"])
-    def test_non_finite_input_raises(self, bad, target):
-        residual = make_dirty_stack(2, 48, 40)
+    @pytest.mark.parametrize("target", ["residual", "model", "psf", "mask"])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_non_finite_input_raises(self, bad, target, dtype):
+        residual = make_dirty_stack(2, 48, 40, dtype=dtype)
         model = np.zeros_like(residual)
-        psf = make_psf_stack(2, 48, 40)
+        psf = make_psf_stack(2, 48, 40, dtype=dtype)
         mask = np.ones(residual.shape[1:], dtype=residual.dtype)
-        {"residual": residual[1], "psf": psf[2], "mask": mask}[target][0, 0] = bad
+        {"residual": residual[1], "model": model[1], "psf": psf[2], "mask": mask}[
+            target
+        ][0, 0] = bad
         residual_in = residual.copy()
+        model_in = model.copy()
         with pytest.raises(ValueError, match="must be finite"):
             mtmfs.clean(residual, psf, model, mask=mask)
-        np.testing.assert_array_equal(residual, residual_in)
-        assert not np.any(model)
+        np.testing.assert_equal(residual, residual_in)
+        np.testing.assert_equal(model, model_in)
         if target == "psf":
             with pytest.raises(ValueError, match="psf must be finite"):
                 mtmfs.hessian(psf)
 
-    def test_non_finite_mask_threshold_raises(self):
-        residual = make_dirty_stack(1, 32, 32)
-        with pytest.raises(ValueError, match="mask_threshold"):
+    @pytest.mark.parametrize(
+        "parameter", ["gain", "threshold_per_cycle", "mask_threshold"]
+    )
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_non_finite_clean_scalar_raises_without_mutation(
+        self, parameter, bad, dtype
+    ):
+        residual = make_dirty_stack(1, 32, 32, dtype=dtype)
+        residual_in = residual.copy()
+        model = np.zeros_like(residual)
+        with pytest.raises(ValueError, match=parameter):
             mtmfs.clean(
                 residual,
-                make_psf_stack(1, 32, 32),
-                np.zeros_like(residual),
-                mask_threshold=np.nan,
+                make_psf_stack(1, 32, 32, dtype=dtype),
+                model,
+                **{parameter: bad},
             )
+        np.testing.assert_array_equal(residual, residual_in)
+        assert not np.any(model)
+
+    @pytest.mark.parametrize("entrypoint", ["clean", "hessian"])
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+    def test_non_finite_small_scale_bias_raises(self, entrypoint, bad):
+        psf = make_psf_stack(1, 32, 32)
+        if entrypoint == "clean":
+            residual = make_dirty_stack(1, 32, 32)
+            with pytest.raises(ValueError, match="small_scale_bias"):
+                mtmfs.clean(
+                    residual, psf, np.zeros_like(residual), small_scale_bias=bad
+                )
+        else:
+            with pytest.raises(ValueError, match="small_scale_bias"):
+                mtmfs.hessian(psf, small_scale_bias=bad)
+
+    @pytest.mark.parametrize("target", ["residual", "inverse_hessian"])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_principal_solution_rejects_non_finite_input_without_mutation(
+        self, target, dtype
+    ):
+        residual = make_dirty_stack(2, 16, 16, dtype=dtype)
+        inverse_hessian = np.eye(2, dtype=np.float64)
+        {"residual": residual, "inverse_hessian": inverse_hessian}[target].flat[0] = (
+            np.nan
+        )
+        residual_in = residual.copy()
+        with pytest.raises(ValueError, match=f"{target} must be finite"):
+            mtmfs.principal_solution(residual, inverse_hessian)
+        np.testing.assert_equal(residual, residual_in)
 
     def test_same_buffer_for_residual_and_model_raises(self):
         residual = make_dirty_stack(2, 48, 40)
@@ -857,6 +1080,28 @@ class TestArrayValidation:
         buf = make_dirty_stack(3, 48, 40)
         with pytest.raises(RuntimeError, match="distinct"):
             mtmfs.clean(buf[0:2], make_psf_stack(2, 48, 40), buf[1:3])
+
+    @pytest.mark.parametrize(
+        "readonly_input,writable_input",
+        [
+            ("psf", "residual"),
+            ("psf", "model"),
+            ("mask", "residual"),
+            ("mask", "model"),
+        ],
+    )
+    def test_readonly_input_must_not_overlap_writable_output(
+        self, readonly_input, writable_input
+    ):
+        residual = make_dirty_stack(1, 32, 32)
+        model = np.zeros_like(residual)
+        psf = make_psf_stack(1, 32, 32)
+        writable = {"residual": residual, "model": model}[writable_input]
+        kwargs = {readonly_input: writable if readonly_input == "psf" else writable[0]}
+        if readonly_input == "psf":
+            psf = kwargs.pop("psf")
+        with pytest.raises(RuntimeError, match=f"must not overlap {readonly_input}"):
+            mtmfs.clean(residual, psf, model, **kwargs)
 
     def test_nterms_too_large_raises(self):
         residual = np.zeros((5, 8, 8), dtype=np.float32)
@@ -871,7 +1116,11 @@ class TestArrayValidation:
         r_before = residual.copy()
         view_m = model.view()
         mtmfs.clean(
-            residual, make_psf_stack(2, 48, 40), model, max_iter_remaining=3, gain=0.1
+            residual,
+            make_psf_stack(2, 48, 40),
+            model,
+            max_iter_per_cycle_updated=3,
+            gain=0.1,
         )
         assert not np.array_equal(residual, r_before)
         assert np.shares_memory(view_m, model) and np.any(view_m != 0)
@@ -941,7 +1190,7 @@ def test_parity_masked_point_source(shape, dtype, nterms, position):
     mask[pixel] = 1.0
 
     result = mtmfs.clean(
-        residual, psf, model, mask=mask, max_iter_remaining=5, gain=0.2
+        residual, psf, model, mask=mask, max_iter_per_cycle_updated=5, gain=0.2
     )
 
     assert result["iterations_performed"] == 5
@@ -973,7 +1222,7 @@ def test_parity_extended_source(shape, dtype, nterms):
     model = np.zeros_like(residual)
 
     result = mtmfs.clean(
-        residual, psf, model, scales=[0.0, 4.0], max_iter_remaining=5, gain=0.2
+        residual, psf, model, scales=[0.0, 4.0], max_iter_per_cycle_updated=5, gain=0.2
     )
 
     np.testing.assert_allclose(model, true_model * (1.0 - 0.8**5), atol=2e-6, rtol=2e-4)
@@ -992,8 +1241,10 @@ def test_parity_extended_source(shape, dtype, nterms):
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("gain", [0.0, -1.0])
-@pytest.mark.parametrize("threshold,niter", [(0.0, 6), (1e-4, 50)])
-def test_adaptive_gain_cleans_past_three_iterations(dtype, gain, threshold, niter):
+@pytest.mark.parametrize("threshold_per_cycle,niter", [(0.0, 6), (1e-4, 50)])
+def test_adaptive_gain_cleans_past_three_iterations(
+    dtype, gain, threshold_per_cycle, niter
+):
     """A decreasing peak must not be classified as divergence in adaptive mode."""
     psf = np.zeros((1, 32, 32), dtype=dtype)
     psf[0, 16, 16] = 1.0
@@ -1001,15 +1252,20 @@ def test_adaptive_gain_cleans_past_three_iterations(dtype, gain, threshold, nite
     model = np.zeros_like(residual)
 
     result = mtmfs.clean(
-        residual, psf, model, gain=gain, threshold=threshold, max_iter_remaining=niter
+        residual,
+        psf,
+        model,
+        gain=gain,
+        threshold_per_cycle=threshold_per_cycle,
+        max_iter_per_cycle_updated=niter,
     )
 
     assert result["iterations_performed"] > 3
     assert np.isfinite(residual).all() and np.isfinite(model).all()
-    if threshold:
+    if threshold_per_cycle:
         assert result["stop_code"] == mtmfs.STOP_THRESHOLD
         assert result["converged"]
-        assert result["peak_residual"] < threshold
+        assert result["peak_residual"] < threshold_per_cycle
     else:
         assert result["stop_code"] == mtmfs.STOP_MAX_ITER
         assert result["iterations_performed"] == niter
@@ -1028,7 +1284,12 @@ def test_adaptive_gain_already_below_threshold(dtype):
     original = residual.copy()
     model = np.zeros_like(residual)
     result = mtmfs.clean(
-        residual, psf, model, gain=0.0, threshold=0.1, max_iter_remaining=20
+        residual,
+        psf,
+        model,
+        gain=0.0,
+        threshold_per_cycle=0.1,
+        max_iter_per_cycle_updated=20,
     )
     assert result["iterations_performed"] == 0
     assert result["stop_code"] == mtmfs.STOP_THRESHOLD
@@ -1059,7 +1320,7 @@ def test_four_taylor_terms_supported_by_all_entry_points(dtype):
     np.testing.assert_allclose(principal, true_model, atol=2e-5)
 
     model = np.zeros_like(residual)
-    result = mtmfs.clean(residual, psf, model, max_iter_remaining=1, gain=1.0)
+    result = mtmfs.clean(residual, psf, model, max_iter_per_cycle_updated=1, gain=1.0)
     assert result["iterations_performed"] == 1
     np.testing.assert_allclose(model, true_model, atol=2e-5)
     np.testing.assert_allclose(residual, 0.0, atol=2e-6)
@@ -1095,7 +1356,12 @@ def test_first_component_matches_source_scale(scale):
     residual = _parity_dirty_from_model(psf, true_model)
     model = np.zeros_like(residual)
     mtmfs.clean(
-        residual, psf, model, scales=[0.0, 4.0, 8.0], max_iter_remaining=1, gain=0.1
+        residual,
+        psf,
+        model,
+        scales=[0.0, 4.0, 8.0],
+        max_iter_per_cycle_updated=1,
+        gain=0.1,
     )
     np.testing.assert_array_equal(model[0] != 0, true_model[0] != 0)
 
@@ -1114,7 +1380,7 @@ def test_small_scale_bias_changes_selected_scale(bias, count):
         model,
         scales=[0.0, 8.0],
         small_scale_bias=bias,
-        max_iter_remaining=1,
+        max_iter_per_cycle_updated=1,
         gain=0.1,
     )
     assert np.count_nonzero(model) == count
@@ -1139,7 +1405,7 @@ def test_mask_threshold_binarises_scale_masks(mask_threshold, peak, count):
         model,
         mask=mask,
         scales=[0.0, 2.0],
-        max_iter_remaining=1,
+        max_iter_per_cycle_updated=1,
         gain=0.1,
         mask_threshold=mask_threshold,
     )
@@ -1165,7 +1431,7 @@ def test_scale_components_avoid_image_border(centre, count):
         model,
         scales=[0.0, 4.0],
         small_scale_bias=-1.0,
-        max_iter_remaining=1,
+        max_iter_per_cycle_updated=1,
         gain=0.1,
     )
     assert np.count_nonzero(model) == count
@@ -1182,53 +1448,236 @@ def test_adaptive_gain_reports_divergence():
     residual = np.where((yy + xx) % 2 == 0, 1.0, -1.0) * box
     residual = np.ascontiguousarray(residual[None], dtype=np.float32)
     model = np.zeros_like(residual)
-    result = mtmfs.clean(residual, psf, model, gain=0.0, max_iter_remaining=200)
+    result = mtmfs.clean(residual, psf, model, gain=0.0, max_iter_per_cycle_updated=200)
     assert result["stop_code"] == mtmfs.STOP_DIVERGED
     assert not result["converged"]
     assert result["iterations_performed"] == 4
 
 
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_psf_fraction_caps_adaptive_gain(dtype):
-    """After three components the gain rises to min(0.75, 1 - psf_fraction, 0.6)."""
+def _negative_transfer_problem(dtype=np.float32):
+    """The PSF and checkerboard of test_adaptive_gain_reports_divergence, with
+    amplitudes spread by 20 percent so that no rounding decides a tie: every
+    component makes the residual grow."""
     psf = np.zeros((1, 32, 32), dtype=dtype)
     psf[0, 16, 16] = 1.0
-    residual = np.zeros_like(psf)
-    residual[0, 4, 4:28:4] = [1.0, 0.95, 0.9, 0.85, 0.8, 0.75]
+    psf[0, [15, 17, 16, 16], [16, 16, 15, 17]] = 0.9
+    yy, xx = np.indices((32, 32))
+    box = (abs(yy - 16) < 6) & (abs(xx - 16) < 6)
+    amplitude = 1.0 + 0.2 * _lcg_noise(32 * 32, 7).reshape(32, 32).astype(np.float64)
+    residual = np.where((yy + xx) % 2 == 0, 1.0, -1.0) * box * amplitude
+    return np.ascontiguousarray(residual[None], dtype=dtype), psf
+
+
+def test_divergence_test_is_off_by_default():
+    residual, psf = _negative_transfer_problem()
     model = np.zeros_like(residual)
-    mtmfs.clean(residual, psf, model, gain=0.0, psf_fraction=0.45, max_iter_remaining=4)
-    np.testing.assert_allclose(
-        model[0, 4, 4:28:4], [0.5, 0.475, 0.45, 0.55 * 0.85, 0.0, 0.0], rtol=1e-6
+    result = mtmfs.clean(residual, psf, model, gain=0.1, max_iter_per_cycle_updated=200)
+    # with a fixed gain nothing else stops the runaway
+    assert result["stop_code"] == mtmfs.STOP_MAX_ITER
+    assert result["iterations_performed"] == 200
+    assert not result["diverged"]
+    off_residual, _ = _negative_transfer_problem()
+    off_model = np.zeros_like(off_residual)
+    mtmfs.clean(
+        off_residual,
+        psf,
+        off_model,
+        gain=0.1,
+        max_iter_per_cycle_updated=200,
+        max_iter_divergence=-1,
     )
-    # A cap below 0.01 is reported as divergence at the first adaptive update.
-    residual[...] = 0
-    residual[0, 4, 4:20:4] = [1.0, 0.999, 0.998, 0.997]
+    np.testing.assert_array_equal(off_residual, residual)
+    np.testing.assert_array_equal(off_model, model)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(("gain", "iterations"), [(0.1, 4), (0.5, 2)])
+def test_divergence_test_stops_a_fixed_gain_runaway(dtype, gain, iterations):
+    """The divergence test shared with the other deconvolvers, with the factors
+    deconvolve() derives from the gain (_divergence_factors)."""
+    residual, psf = _negative_transfer_problem(dtype)
     result = mtmfs.clean(
         residual,
         psf,
         np.zeros_like(residual),
-        gain=0.0,
-        psf_fraction=0.995,
-        max_iter_remaining=10,
+        gain=gain,
+        max_iter_per_cycle_updated=200,
+        max_iter_divergence=1,
+        divergence_rms_factor=1 + gain / 10,
+        divergence_peak_factor=1 + gain,
     )
     assert result["stop_code"] == mtmfs.STOP_DIVERGED
-    assert result["iterations_performed"] == 3
+    assert result["diverged"]
+    assert not result["converged"]
+    assert result["iterations_performed"] == iterations
 
 
-def test_psf_fraction_stops_at_fraction_of_initial_peak():
-    psf = np.zeros((1, 32, 32), dtype=np.float32)
-    psf[0, 16, 16] = 1.0
-    residual = psf.copy()
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(("max_iter_divergence", "iterations"), [(1, 4), (3, 6)])
+def test_divergence_soft_limit_counts_consecutive_components(
+    dtype, max_iter_divergence, iterations
+):
+    residual, psf = _negative_transfer_problem(dtype)
     result = mtmfs.clean(
         residual,
         psf,
         np.zeros_like(residual),
         gain=0.1,
-        psf_fraction=0.5,
-        max_iter_remaining=50,
+        max_iter_per_cycle_updated=200,
+        max_iter_divergence=max_iter_divergence,
+        divergence_rms_factor=1.01,
+        divergence_peak_factor=1e9,
     )
-    assert result["stop_code"] == mtmfs.STOP_THRESHOLD
-    assert result["iterations_performed"] == 7  # 0.9**7 < 0.5 <= 0.9**6
+    assert result["stop_code"] == mtmfs.STOP_DIVERGED
+    assert result["iterations_performed"] == iterations
+
+
+def test_divergence_rms_is_taken_inside_the_mask():
+    # one pixel of the runaway is selected: its RMS does not grow
+    residual, psf = _negative_transfer_problem()
+    mask = np.zeros((32, 32), dtype=np.float32)
+    mask[16, 16] = 1.0
+    result = mtmfs.clean(
+        residual,
+        psf,
+        np.zeros_like(residual),
+        mask=mask,
+        gain=0.1,
+        max_iter_per_cycle_updated=200,
+        max_iter_divergence=1,
+        divergence_rms_factor=1.01,
+        divergence_peak_factor=1.1,
+    )
+    assert result["stop_code"] == mtmfs.STOP_MAX_ITER
+    assert result["iterations_performed"] == 200
+
+
+def test_divergence_at_the_first_check_places_nothing():
+    residual, psf = _negative_transfer_problem()
+    residual_in = residual.copy()
+    model = np.zeros_like(residual)
+    result = mtmfs.clean(
+        residual,
+        psf,
+        model,
+        gain=0.1,
+        max_iter_per_cycle_updated=200,
+        max_iter_divergence=1,
+        divergence_peak_factor=0.5,
+    )
+    assert result["stop_code"] == mtmfs.STOP_DIVERGED
+    assert result["iterations_performed"] == 0
+    assert not model.any()
+    np.testing.assert_array_equal(residual, residual_in)
+
+
+@pytest.mark.parametrize("nterms", [1, 2])
+def test_divergence_test_leaves_a_healthy_clean_unchanged(nterms):
+    psf = _tclean_like_psf(nterms, 100, 100)
+    true_model = np.zeros((nterms, 100, 100), dtype=np.float32)
+    true_model[0, 50, 50] = 1.0
+    if nterms == 2:
+        true_model[1, 50, 50] = -0.5
+    dirty = _dirty_from_model(psf, true_model)
+    runs = []
+    for kwargs in (
+        {},
+        {
+            "max_iter_divergence": 1,
+            "divergence_rms_factor": 1.01,
+            "divergence_peak_factor": 1.1,
+        },
+    ):
+        residual = dirty.copy()
+        model = np.zeros_like(residual)
+        result = mtmfs.clean(
+            residual,
+            psf,
+            model,
+            max_iter_per_cycle_updated=50,
+            gain=0.1,
+            threshold_per_cycle=1e-4,
+            **kwargs,
+        )
+        runs.append((result, residual, model))
+    (result, residual, model), (on, residual_on, model_on) = runs
+    assert not on["diverged"]
+    assert on["iterations_performed"] == result["iterations_performed"]
+    np.testing.assert_array_equal(residual_on, residual)
+    np.testing.assert_array_equal(model_on, model)
+
+
+def test_divergence_test_does_not_stop_a_multiscale_clean():
+    """Large-scale components change the residual inside the scale-0 mask
+    without tripping the test."""
+    psf = _tclean_like_psf(1, 200, 200)
+    yy, xx = np.mgrid[0:200, 0:200]
+    blob = 3.0 * np.exp(-((xx - 100) ** 2 + (yy - 100) ** 2) / (2.0 * 15.0**2))
+    residual = _dirty_from_model(psf, np.ascontiguousarray(blob[None], np.float32))
+    model = np.zeros_like(residual)
+    for _cycle in range(3):
+        result = mtmfs.clean(
+            residual,
+            psf,
+            model,
+            scales=[0, 20, 40, 100],
+            small_scale_bias=0.9,
+            max_iter_per_cycle_updated=100,
+            gain=0.1,
+            max_iter_divergence=1,
+            divergence_rms_factor=1.01,
+            divergence_peak_factor=1.1,
+        )
+        assert result["stop_code"] == mtmfs.STOP_MAX_ITER
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("nterms", [1, 2, 3])
+@pytest.mark.parametrize("first_sign", [-1, 1])
+def test_mask_box_keeps_holes_and_separated_candidates(dtype, nterms, first_sign):
+    """Search the mask box, including candidates outside the last update patch."""
+    shape = (64, 64)
+    psf = _parity_psf_stack(nterms, shape, dtype)
+    sky = np.zeros((nterms, *shape), dtype=dtype)
+    first, second = (8, 16), (48, 40)
+    sky[0, *first] = first_sign * 2.0
+    sky[0, *second] = -first_sign * 1.75
+    residual = _parity_dirty_from_model(psf, sky)
+    # Larger peaks in a hole and outside the box must never be selected.
+    residual[0, 24, 32] = 100.0
+    residual[0, 56, 56] = 200.0
+    mask = np.zeros(shape, dtype=dtype)
+    mask[first] = mask[second] = 1.0
+    original = residual.copy()
+    model = np.zeros_like(residual)
+
+    result = mtmfs.clean(
+        residual, psf, model, mask=mask, max_iter_per_cycle_updated=1, gain=1.0
+    )
+    assert result["iterations_performed"] == 1
+    assert model[0, *first] == pytest.approx(first_sign * 2.0, abs=2e-5)
+    assert np.count_nonzero(model[0]) == 1
+
+    # Continue in a fresh call: the other island is still a candidate.
+    result = mtmfs.clean(
+        residual, psf, model, mask=mask, max_iter_per_cycle_updated=1, gain=1.0
+    )
+    assert result["iterations_performed"] == 1
+    assert model[0, *second] == pytest.approx(-first_sign * 1.75, abs=2e-5)
+    assert np.count_nonzero(model[0]) == 2
+    np.testing.assert_allclose(
+        residual, original - _parity_dirty_from_model(psf, model), atol=2e-5
+    )
+
+    # Both islands must also be found within one model update, after its
+    # moving subtraction patch has been centred on the first island.
+    residual = original.copy()
+    together = np.zeros_like(residual)
+    result = mtmfs.clean(
+        residual, psf, together, mask=mask, max_iter_per_cycle_updated=2, gain=1.0
+    )
+    assert result["iterations_performed"] == 2
+    np.testing.assert_allclose(together, model, atol=2e-5)
 
 
 def test_large_scale_component_is_not_truncated():
@@ -1239,7 +1688,7 @@ def test_large_scale_component_is_not_truncated():
     residual = _parity_dirty_from_model(psf, kernel[None].astype(np.float32))
     model = np.zeros_like(residual)
     out = mtmfs.clean(
-        residual, psf, model, scales=[0.0, 60.0], max_iter_remaining=1, gain=0.1
+        residual, psf, model, scales=[0.0, 60.0], max_iter_per_cycle_updated=1, gain=0.1
     )
     assert out["psf_support"] == 200
     assert mtmfs.hessian(psf, scales=[0.0, 60.0])["psf_support"] == 200
@@ -1265,8 +1714,8 @@ def test_rectangular_patch_keeps_long_axis_sidelobes(shape):
         psf,
         model,
         gain=1.0,
-        threshold=1e-6,
-        max_iter_remaining=2,
+        threshold_per_cycle=1e-6,
+        max_iter_per_cycle_updated=2,
     )
 
     assert out["iterations_performed"] == 1
@@ -1282,7 +1731,11 @@ def test_clean_returns_hessians_of_effective_scales():
     psf = make_psf_stack(nterms, nx, ny)
     residual = make_dirty_stack(nterms, nx, ny)
     out = mtmfs.clean(
-        residual, psf, np.zeros_like(residual), scales=scales, max_iter_remaining=1
+        residual,
+        psf,
+        np.zeros_like(residual),
+        scales=scales,
+        max_iter_per_cycle_updated=1,
     )
     ref = mtmfs.hessian(psf, scales=scales)
     np.testing.assert_array_equal(out["hessian"], ref["hessian"])
@@ -1301,7 +1754,9 @@ def test_concurrent_calls_match_serial():
     def run(residual):
         residual = residual.copy()
         model = np.zeros_like(residual)
-        mtmfs.clean(residual, psf, model, scales=[0.0, 4.0], max_iter_remaining=20)
+        mtmfs.clean(
+            residual, psf, model, scales=[0.0, 4.0], max_iter_per_cycle_updated=20
+        )
         return residual, model
 
     serial = [run(r) for r in inputs]

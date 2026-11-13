@@ -52,9 +52,9 @@ def phase_shift_vis_ds(ms_xds, shift_params, sel_params):
     _sel_params = copy.deepcopy(sel_params)
     _shift_params = copy.deepcopy(shift_params)
 
-    assert check_shift_params(
-        _shift_params
-    ), "######### ERROR: shift_params checking failed"
+    assert check_shift_params(_shift_params), (
+        "######### ERROR: shift_params checking failed"
+    )
 
     data_group_in, data_group_out = check_sel_params(
         ms_xds,

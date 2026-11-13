@@ -55,9 +55,9 @@ def make_gridding_convolution_function(
     _gcf_params["pol"] = ms_xds.polarization.values
 
     assert check_gcf_params(_gcf_params), "######### ERROR: gcf_params checking failed"
-    assert check_grid_params(
-        _grid_params
-    ), "######### ERROR: grid_params checking failed"
+    assert check_grid_params(_grid_params), (
+        "######### ERROR: grid_params checking failed"
+    )
 
     _gcf_params["resize_conv_size"] = (_gcf_params["max_support"] + 1) * _gcf_params[
         "oversampling"
@@ -82,9 +82,9 @@ def make_gridding_convolution_function(
 
             pb_func = casa_airy_disk_rorder
         else:
-            assert (
-                False
-            ), "######### ERROR: Only airy and casa_airy function has been implemented"
+            assert False, (
+                "######### ERROR: Only airy and casa_airy function has been implemented"
+            )
 
         n_unique_ant = len(_gcf_params["list_dish_diameters"])
         cf_baseline_map, pb_ant_pairs = create_cf_baseline_map(
@@ -386,18 +386,18 @@ def calc_conv_size(sub_a_term, imsize, support_cut_level, oversampling, max_supp
     max_amplitude = abs_sub_a_term[max_indx]
     cut_level_amplitude = support_cut_level * max_amplitude
 
-    assert (
-        min_amplitude < cut_level_amplitude
-    ), "######### ERROR: support_cut_level too small or imsize too small."
+    assert min_amplitude < cut_level_amplitude, (
+        "######### ERROR: support_cut_level too small or imsize too small."
+    )
 
     # x axis support
     indx_x = imsize[0] // 2
     indx_y = imsize[1] // 2
     while sub_a_term[indx_x, indx_y] > cut_level_amplitude:
         indx_x = indx_x + 1
-        assert (
-            indx_x < imsize[0]
-        ), "######### ERROR: support_cut_level too small or imsize too small."
+        assert indx_x < imsize[0], (
+            "######### ERROR: support_cut_level too small or imsize too small."
+        )
     approx_conv_size_x = indx_x - imsize[0] // 2
     support_x = (int(0.5 + approx_conv_size_x / oversampling[0]) + 1) * 2 + 1
     # support_x = int((approx_conv_size_x/oversampling[0])-1)
@@ -408,9 +408,9 @@ def calc_conv_size(sub_a_term, imsize, support_cut_level, oversampling, max_supp
     indx_y = imsize[1] // 2
     while sub_a_term[indx_x, indx_y] > cut_level_amplitude:
         indx_y = indx_y + 1
-        assert (
-            indx_y < imsize[1]
-        ), "######### ERROR: support_cut_level too small or imsize too small."
+        assert indx_y < imsize[1], (
+            "######### ERROR: support_cut_level too small or imsize too small."
+        )
     approx_conv_size_y = indx_y - imsize[1] // 2
     support_y = (int(0.5 + approx_conv_size_y / oversampling[1]) + 1) * 2 + 1
     # approx_conv_size_y = (indx_y-imsize[1]//2)*2

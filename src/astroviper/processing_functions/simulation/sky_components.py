@@ -601,6 +601,52 @@ def stokes_sky_model_images(
     return out
 
 
+def total_stokes_flux(
+    components, polarization_basis, stokes, n_frequency, time_index=0
+):
+    """Total flux of a component list per channel and Stokes parameter, ``[n_frequency, n_stokes]`` in Jy.
+
+    The sum over the components of their fluxes, combined into Stokes
+    parameters as in :func:`stokes_sky_model_images` (the flux of the image
+    those make, without its pixelisation). No primary beam is applied.
+
+    Parameters
+    ----------
+    components : list of dict
+        Sky components (normalised or not; see :func:`normalize_sky_components`).
+    polarization_basis : str
+        ``"linear"`` or ``"circular"`` (:func:`polarization_basis_of`).
+    stokes : list of str
+        Stokes parameters, a subset of ``["I", "Q", "U", "V"]``.
+    n_frequency : int
+        Number of channels; frequency independent fluxes are broadcast.
+    time_index : int, optional
+        Which time of time dependent fluxes. Default 0.
+
+    Returns
+    -------
+    numpy.ndarray, [n_frequency, n_stokes]
+    """
+    table = _STOKES_FROM_CORRELATIONS[polarization_basis]
+    stokes = [str(label).upper() for label in stokes]
+    unknown = [label for label in stokes if label not in table]
+    if unknown:
+        raise ValueError(
+            f"unknown Stokes parameters {unknown}; expected a subset of I, Q, U, V."
+        )
+    total = np.zeros((n_frequency, len(stokes)), dtype=np.float64)
+    for component in normalize_sky_components(components):
+        flux = component["flux"]
+        flux = np.broadcast_to(
+            flux[time_index if flux.shape[0] > 1 else 0], (n_frequency, 4)
+        )
+        for k, label in enumerate(stokes):
+            total[:, k] += np.real(
+                sum(coefficient * flux[:, corr] for corr, coefficient in table[label])
+            )
+    return total
+
+
 def sky_components_from_arrays(kind, flux, ra_dec, shape=None, limb_darkening=None):
     """Convert the bulk ``<kind>_source_flux / _ra_dec / _shape`` arrays into component dicts.
 

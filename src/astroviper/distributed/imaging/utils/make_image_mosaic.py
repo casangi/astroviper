@@ -239,7 +239,6 @@ def make_image_mosaic(input_params):
                 input_params["image_file"],
             )
     else:
-
         return img_xds
 
     # mini_cube_name = os.path.join(input_params["image_file"], 'cube_chunk_' + str(input_params["task_id"]))

@@ -50,7 +50,7 @@ def _minimal_task_inputs(tmp_path):
     return dict(
         image_params=image_params,
         imaging_weights_params={"weighting": "natural"},
-        iteration_control_params={"max_iter": 0},
+        cycle_control_params={"max_iter": 0},
         task_coords=task_coords,
         data_selection=data_selection,
         image_store=str(tmp_path / "img.zarr"),
@@ -318,7 +318,7 @@ def test_changed_msv2_aborts_the_task(imageable_msv2, tmp_path, monkeypatch):
     application's step (open, graph mapping, ``add_lazy_input_data``) makes the
     node task raise XRADIO's ``MSv2ChangedError`` (on a copy of the generated
     Measurement Set)."""
-    from casacore import tables
+    from arcae.lib.arrow_tables import Table
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
         make_parallel_coord,
@@ -343,7 +343,7 @@ def test_changed_msv2_aborts_the_task(imageable_msv2, tmp_path, monkeypatch):
     add_lazy_input_data(ps_xdt, mapping, "base")
     task = pickle.loads(pickle.dumps(mapping[0]))
 
-    with tables.table(ms_path, readonly=False, ack=False) as main:
+    with Table.from_filename(ms_path, readonly=False) as main:
         main.addrows(1)
 
     inputs = _minimal_task_inputs(tmp_path)

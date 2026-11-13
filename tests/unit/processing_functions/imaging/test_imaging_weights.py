@@ -18,18 +18,61 @@ import unittest
 from unittest import mock
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.calculate_imaging_weights import (
     _equalize_parallel_hand_weights,
     calculate_imaging_weights,
+    grid_imaging_weight_density_continuum,
 )
 from astroviper.processing_functions.imaging.check_imaging_parameters import (
     check_imaging_weights_params,
 )
+from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+    degrid_imaging_weights,
+)
 
 _MS_DIMS = ("time", "baseline", "frequency", "polarization")
-_MOD_PATH = "astroviper.processing_functions.imaging.calculate_imaging_weights"
+_GRID_MOD_PATH = (
+    "astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights"
+)
+_BRIGGS_MOD_PATH = (
+    "astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting"
+)
+
+
+def test_degrid_imaging_weights_rejects_non_native_float_density_grid():
+    """The Python/C++ boundary rejects rather than converts non-native floats."""
+    density = np.zeros((1, 1, 4, 4), dtype=">f8")
+    density[0, 0, 2, 2] = 3.0
+
+    with pytest.raises(TypeError, match="native float32 or float64"):
+        degrid_imaging_weights(
+            density,
+            np.zeros((1, 1, 3), dtype=np.float64),
+            np.ones((1, 1, 1, 1), dtype=np.float64),
+            np.ones((2, 1, 1), dtype=np.float64),
+            np.asarray([1.0e9], dtype=np.float64),
+            np.asarray([4, 4], dtype=np.int64),
+            np.asarray([1.0e-5, 1.0e-5], dtype=np.float64),
+            processing_function_threads=1,
+        )
+
+
+def test_degrid_imaging_weights_rejects_non_float_density_grid():
+    """Density grids with integer storage fail before reaching the C++ kernel."""
+    with pytest.raises(TypeError, match="native float32 or float64"):
+        degrid_imaging_weights(
+            np.zeros((1, 1, 4, 4), dtype=np.int64),
+            np.zeros((1, 1, 3), dtype=np.float64),
+            np.ones((1, 1, 1, 1), dtype=np.float64),
+            np.ones((2, 1, 1), dtype=np.float64),
+            np.asarray([1.0e9], dtype=np.float64),
+            np.asarray([4, 4], dtype=np.int64),
+            np.asarray([1.0e-5, 1.0e-5], dtype=np.float64),
+            processing_function_threads=1,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +406,9 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         self.img_xds = _make_img_xds()
         # Patch the gridder, Briggs-factor, and degridder symbols as imported
         # into the calculate_imaging_weights module.
-        self.grid_patch = mock.patch(f"{_MOD_PATH}.grid_imaging_weights")
-        self.briggs_patch = mock.patch(f"{_MOD_PATH}.calculate_briggs_params")
-        self.degrid_patch = mock.patch(f"{_MOD_PATH}.degrid_imaging_weights")
+        self.grid_patch = mock.patch(f"{_GRID_MOD_PATH}.grid_imaging_weights")
+        self.briggs_patch = mock.patch(f"{_BRIGGS_MOD_PATH}.calculate_briggs_params")
+        self.degrid_patch = mock.patch(f"{_GRID_MOD_PATH}.degrid_imaging_weights")
 
         self.grid_mock = self.grid_patch.start()
         self.briggs_mock = self.briggs_patch.start()
@@ -377,21 +420,14 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         # Degrid: return the equalized data_weight unchanged so the caller's
         # tile(..., n_pol) produces an output of the correct shape.
         self.degrid_mock.side_effect = (
-            lambda grid,
-            uvw,
-            dw,
-            briggs,
-            freq,
-            n_uv,
-            dlm,
-            processing_function_threads=1,
-            frequency_map=None: (dw)
+            lambda grid, uvw, dw, briggs, freq, n_uv, dlm, processing_function_threads=1, frequency_map=None, *, truncate_uv_cells=False: (
+                dw
+            )
         )
         self.briggs_mock.return_value = np.zeros((2, 1, 1))
 
     def test_uniform_dispatches_to_briggs_with_robust_neg_2(self):
-        """``weighting="uniform"`` is rewritten to ``briggs`` with ``robust=-2.0``
-        before the Briggs-factor calculation runs."""
+        """The public uniform method reaches the kernel recipe unchanged."""
         ps_xdt = _make_ps_xdt()
         calculate_imaging_weights(
             ps_xdt,
@@ -401,8 +437,8 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
 
         self.briggs_mock.assert_called_once()
         params_arg = self.briggs_mock.call_args[0][2]
-        self.assertEqual(params_arg["weighting"], "briggs")
-        self.assertEqual(params_arg["robust"], -2.0)
+        self.assertEqual(params_arg["weighting"], "uniform")
+        self.assertNotIn("robust", params_arg)
 
     def test_briggs_default_casa_implementation_is_false(self):
         """The Briggs path does not crash when the caller omits
@@ -429,6 +465,19 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         self.assertEqual(self.grid_mock.call_count, 2)
         self.assertEqual(self.briggs_mock.call_count, 1)
         self.assertEqual(self.degrid_mock.call_count, 2)
+
+    def test_truncate_uv_cells_is_forwarded_to_grid_and_degrid(self):
+        """CASA continuum cell assignment reaches both C++ wrappers."""
+        ps_xdt = _make_ps_xdt()
+        calculate_imaging_weights(
+            ps_xdt,
+            self.img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            truncate_uv_cells=True,
+        )
+
+        self.assertTrue(self.grid_mock.call_args.kwargs["truncate_uv_cells"])
+        self.assertTrue(self.degrid_mock.call_args.kwargs["truncate_uv_cells"])
 
     def test_return_weight_density_grid_briggs(self):
         """With ``return_weight_density_grid=True`` on the Briggs path, the
@@ -459,18 +508,115 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         self.assertEqual(result.dtype, np.float32)
 
 
+class TestGridContinuumWeightDensity(unittest.TestCase):
+    """Frequency-partition handling in distributed global weighting."""
+
+    def setUp(self):
+        """Register the image accessor used to obtain cell sizes."""
+        import xradio.image.image_xds  # noqa: F401
+
+    def test_children_collapse_disjoint_frequency_subsets(self):
+        """Multiple MS children accumulate into one continuum density plane."""
+        image_frequencies = np.array([1.00e9, 1.05e9, 1.10e9, 1.15e9])
+        ps_xdt = xr.DataTree()
+        for name, indices in (
+            ("low", [0, 1]),
+            ("high", [2, 3]),
+        ):
+            dataset = _make_ms_ds(
+                n_baseline=1,
+                n_chan=len(indices),
+                weight_per_pol=[2.0, 6.0],
+            ).assign_coords(frequency=image_frequencies[indices])
+            dataset["UVW"].values[...] = 0.0
+            ps_xdt[name] = xr.DataTree(dataset=dataset)
+
+        image = _make_img_xds(n_chan=image_frequencies.size).assign_coords(
+            frequency=image_frequencies
+        )
+        result = grid_imaging_weight_density_continuum(
+            ps_xdt,
+            image,
+            {
+                "weighting": "briggs",
+                "robust": 0.5,
+                "casa_weighting_implementation": True,
+            },
+        )
+
+        np.testing.assert_array_equal(
+            result.frequency.values, [np.mean(image_frequencies)]
+        )
+        self.assertEqual(result.sizes["frequency"], 1)
+        self.assertTrue(result.attrs["continuum_frequency_collapsed"])
+        self.assertTrue(np.all(result.SUM_WEIGHT.values > 0.0))
+        self.assertGreater(np.count_nonzero(result.WEIGHT_DENSITY_GRID.values), 0)
+        self.assertEqual(result.attrs["n_processing_set_datasets_gridded"], 2)
+
+    def test_direct_continuum_plane_matches_channel_contribution_sum(self):
+        """Direct collapse equals the sum of independently gridded channels."""
+        ps_xdt = _make_ps_xdt(n_time=2, n_baseline=5, n_chan=3)
+        image = _make_img_xds(n_l=16, n_m=16, n_chan=3)
+
+        for casa_implementation in (False, True):
+            with self.subTest(casa_implementation=casa_implementation):
+                params = {
+                    "weighting": "briggs",
+                    "robust": 0.5,
+                    "casa_weighting_implementation": casa_implementation,
+                }
+                actual = grid_imaging_weight_density_continuum(
+                    ps_xdt,
+                    image,
+                    params,
+                )
+                channel_results = []
+                for channel in range(3):
+                    channel_ps = xr.DataTree.from_dict(
+                        {
+                            "ms_0": ps_xdt["ms_0"].dataset.isel(
+                                frequency=slice(channel, channel + 1)
+                            )
+                        }
+                    )
+                    channel_results.append(
+                        grid_imaging_weight_density_continuum(
+                            channel_ps,
+                            image,
+                            params,
+                        )
+                    )
+
+                self.assertEqual(actual.sizes["frequency"], 1)
+                self.assertTrue(actual.attrs["continuum_frequency_collapsed"])
+                self.assertEqual(actual.attrs["n_input_frequency_channels"], 3)
+                np.testing.assert_allclose(
+                    actual.WEIGHT_DENSITY_GRID,
+                    sum(
+                        result.WEIGHT_DENSITY_GRID.values for result in channel_results
+                    ),
+                    rtol=1.0e-14,
+                    atol=0.0,
+                )
+                np.testing.assert_allclose(
+                    actual.SUM_WEIGHT,
+                    sum(result.SUM_WEIGHT.values for result in channel_results),
+                    rtol=1.0e-14,
+                    atol=0.0,
+                )
+
+
 # ---------------------------------------------------------------------------
 # Parameter checker
 # ---------------------------------------------------------------------------
 class TestCheckImagingWeightsParams(unittest.TestCase):
     """Validation behaviour for ``check_imaging_weights_params``."""
 
-    def test_casa_implementation_defaults_to_false(self):
-        """When omitted, the checker writes ``casa_weighting_implementation=False``."""
+    def test_casa_implementation_default_does_not_change_config(self):
+        """Omitted defaults are read by consumers without changing the configuration."""
         params = {"weighting": "natural"}
         self.assertTrue(check_imaging_weights_params(params))
-        self.assertIn("casa_weighting_implementation", params)
-        self.assertFalse(params["casa_weighting_implementation"])
+        self.assertNotIn("casa_weighting_implementation", params)
 
     def test_casa_implementation_explicit_true_is_preserved(self):
         """An explicit ``True`` is not overwritten by the default."""
@@ -478,10 +624,31 @@ class TestCheckImagingWeightsParams(unittest.TestCase):
         self.assertTrue(check_imaging_weights_params(params))
         self.assertTrue(params["casa_weighting_implementation"])
 
+    def test_omitted_weighting_scope_is_not_inserted(self):
+        """The checker leaves an omitted scope out of the configuration."""
+        params = {"weighting": "briggs", "robust": 0.0}
+        self.assertTrue(check_imaging_weights_params(params))
+        self.assertNotIn("weighting_scope", params)
+
+    def test_natural_global_scope_is_preserved(self):
+        """Natural weighting does not rewrite its supplied scope."""
+        params = {"weighting": "natural", "weighting_scope": "global"}
+        self.assertTrue(check_imaging_weights_params(params))
+        self.assertEqual(params["weighting_scope"], "global")
+
+    def test_immutable_mapping_is_supported(self):
+        """The retained wrapper validates without requiring mutable parameters."""
+        from types import MappingProxyType
+
+        params = MappingProxyType({"weighting": "natural"})
+        self.assertTrue(check_imaging_weights_params(params))
+        self.assertEqual(dict(params), {"weighting": "natural"})
+
     def test_briggs_requires_robust_in_range(self):
         """``robust`` outside ``[-2, 2]`` fails the check."""
         params = {"weighting": "briggs", "robust": 5.0}
-        self.assertFalse(check_imaging_weights_params(params))
+        with self.assertRaises(ValueError):
+            check_imaging_weights_params(params)
 
     def test_uniform_is_accepted(self):
         """``weighting='uniform'`` is a valid input to the parameter checker

@@ -26,7 +26,8 @@ the same MSv4 names and data groups, and the same values, frequencies,
 correlations and baseline names. AstroVIPER has no MSv2 reader of its own.
 
 The engine is optional: it exists only in XRADIO releases that carry it and
-with a casacore backend (python-casacore or casatools).
+with XRADIO's casacore table backend (arcae from XRADIO 1.3.0,
+``pip install 'astroviper[casacore]'``).
 :func:`msv2_engine_available` tells whether it is there and
 :func:`require_msv2_engine` raises an ``ImportError`` that names what is
 missing. Module level imports only the standard library and the docstring
@@ -70,16 +71,6 @@ _BASELINE_NAME_CODES = {
 #: index (the sorted unique names of both coordinates).
 _ANTENNA_NAME_TABLE = "baseline_antenna_name_table"
 
-#: Arguments of ``open_msv2`` that the distributed application sets itself:
-#: they are refused in ``msv2_open_options`` (name -> what sets it).
-_RESERVED_OPEN_OPTIONS = {
-    "array_backend": (
-        'fixed to "xarray": lazily indexed arrays, so that a node task reads '
-        "only its own selection"
-    ),
-    "scan_intents": "pass the scan_intents parameter instead",
-}
-
 #: XRADIO's environment variable for the default partition-cache mode.
 _PARTITION_CACHE_ENV = "XRADIO_MSV2_PARTITION_CACHE"
 
@@ -89,8 +80,8 @@ def msv2_engine_available():
 
     The check is a feature probe, not a version comparison:
     :func:`xradio.measurement_set.open_msv2` is exported only by the XRADIO
-    releases that carry the engine, and only when a casacore backend
-    (python-casacore or casatools) is installed.
+    releases that carry the engine, and only when XRADIO's casacore table
+    backend (arcae from XRADIO 1.3.0) is installed.
 
     Returns
     -------
@@ -111,8 +102,8 @@ def msv2_engine_available():
         return True, ""
     return False, (
         "XRADIO has no xradio.measurement_set.open_msv2 (the xradio_msv2 "
-        "engine: an XRADIO release that carries it, with python-casacore or "
-        "casatools)"
+        "engine: an XRADIO release that carries it, with its casacore table "
+        "backend, arcae from XRADIO 1.3.0)"
     )
 
 
@@ -141,8 +132,8 @@ def require_msv2_engine():
         raise ImportError(
             "Imaging a Measurement Set v2 directly needs XRADIO's xradio_msv2 "
             f"engine, but {reason}. Install an XRADIO release with the engine "
-            "(XRADIO 1.2.4 and older do not have it) and python-casacore (pip "
-            "install 'astroviper[python_casacore]'), or convert the Measurement Set "
+            "(XRADIO 1.2.4 and older do not have it) and its arcae backend (pip "
+            "install 'astroviper[casacore]'), or convert the Measurement Set "
             "with xradio.measurement_set.convert_msv2_to_processing_set and "
             "image the processing set."
         )
@@ -206,14 +197,15 @@ def open_processing_set_skunk_works_msv2(
         If XRADIO's ``xradio_msv2`` engine is not available (see
         :func:`require_msv2_engine`).
     """
+    from astroviper.processing_functions.imaging.config_check import (
+        CUBE_SINGLE_FIELD,
+        check_driver_workflow,
+    )
+
+    check_driver_workflow(
+        {"msv2_open_options": msv2_open_options}, mode=CUBE_SINGLE_FIELD
+    )
     options = dict(msv2_open_options or {})
-    reserved = sorted(set(options) & set(_RESERVED_OPEN_OPTIONS))
-    if reserved:
-        raise ValueError(
-            f"msv2_open_options may not set {reserved}: "
-            + "; ".join(f"{name}: {_RESERVED_OPEN_OPTIONS[name]}" for name in reserved)
-            + "."
-        )
     open_msv2 = require_msv2_engine()
 
     defaults = {"with_pointing": False}

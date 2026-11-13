@@ -146,6 +146,47 @@ def local_tangent_plane_to_itrf(
     return np.stack([x, y, z], axis=-1)
 
 
+def itrf_to_local_tangent_plane(
+    itrf_xyz: np.ndarray, reference_itrf: np.ndarray
+) -> np.ndarray:
+    """Convert ITRF positions to local tangent-plane offsets (east, north, up; metres).
+
+    The exact inverse of :func:`local_tangent_plane_to_itrf`, about the same
+    WGS84 geodetic position of ``reference_itrf``.
+
+    Parameters
+    ----------
+    itrf_xyz : np.ndarray, [n, 3]
+    reference_itrf : np.ndarray, [3]
+
+    Returns
+    -------
+    np.ndarray, [n, 3]
+    """
+    from astropy.coordinates import EarthLocation
+
+    loc = EarthLocation.from_geocentric(*reference_itrf, unit="m")
+    lon = float(loc.lon.rad)
+    lat = float(loc.lat.rad)
+    alt = float(loc.height.value)
+
+    itrf_xyz = np.atleast_2d(np.asarray(itrf_xyz, dtype=np.float64))
+    x, y, z = itrf_xyz[:, 0], itrf_xyz[:, 1], itrf_xyz[:, 2]
+    sphi, cphi = np.sin(lat), np.cos(lat)
+    ae = np.arccos(_WGS84_B / _WGS84_A)
+    n = _WGS84_A / np.sqrt(1.0 - (np.sin(ae) * sphi) ** 2)
+    clmb, slmb = np.cos(lon), np.sin(lon)
+    locx = y * clmb - x * slmb
+    term = x * clmb + y * slmb
+    # term = (p + locz) cos(lat) - locy sin(lat) and
+    # z = (q + locz) sin(lat) + locy cos(lat), solved for locy and locz
+    p = n + alt
+    q = n * (_WGS84_B / _WGS84_A) ** 2 + alt
+    locz = term * cphi + z * sphi - p * cphi**2 - q * sphi**2
+    locy = z * cphi - term * sphi - (q - p) * sphi * cphi
+    return np.stack([locx, locy, locz], axis=-1)
+
+
 def make_antenna_xds(
     antenna_name: Sequence[str],
     antenna_position: np.ndarray,

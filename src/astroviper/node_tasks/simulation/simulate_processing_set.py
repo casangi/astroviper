@@ -41,6 +41,7 @@ def simulate_processing_set(
     noise_params: dict | None = None,
     channel_width: float | None = None,
     integration_time: float | None = None,
+    antenna_dish_diameter: np.ndarray | None = None,
     direction_frame: str = "icrs",
     processing_function_threads: int = 1,
     implementation: str = "cpp",
@@ -59,6 +60,8 @@ def simulate_processing_set(
     gaussian_ring_source_ra_dec: np.ndarray | None = None,
     gaussian_ring_source_shape: np.ndarray | None = None,
     sky_components: list | None = None,
+    sky_model_image: str | None = None,
+    sky_model_image_predict: dict | None = None,
 ):
     """Simulate the visibilities of one time/frequency chunk and write them to disk.
 
@@ -133,6 +136,23 @@ def simulate_processing_set(
         m_ring, crescent, annulus, exponential_disk, tapered_power_law,
         shapelet): ``{"kind", "flux", "ra_dec", <shape parameters>}`` as
         described in :mod:`~astroviper.processing_functions.simulation.sky_components`.
+    sky_model_image : str, optional
+        A sky image added to the components: an XRADIO image (the path of a
+        FITS, CASA or Zarr image for the distributed application and the node
+        task, the opened dataset for the processing function) with ``SKY`` in Jy
+        per pixel, Stokes ``I`` (or the two Stokes planes of the parallel hands,
+        or ``I, Q, U, V``) and ``l, m`` about the phase centre. Every channel
+        takes the image channel nearest in frequency. It is seen through the
+        power beam of the one beam model of every antenna, which must point at
+        the phase centre (``pointing_ra_dec`` None). It is not part of the sky
+        image written with ``sky_image_params``.
+    sky_model_image_predict : dict, optional
+        How ``sky_model_image`` is predicted: ``{"predict": "dft"}`` (default),
+        the exact direct Fourier transform over the non-zero pixels, the w term
+        included unless ``uvw_params["w_term"]`` is False; or
+        ``{"predict": "gridded", "gridding_kernel_params": ...,
+        "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
+        which has no w term and so needs ``uvw_params["w_term"]`` False.
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -151,7 +171,11 @@ def simulate_processing_set(
     pointing_ra_dec : np.ndarray, [n_time | 1, n_antenna | 1, 2], radians, optional
         Antenna pointing directions; ``None`` points every antenna at the phase centre.
     uvw_params : dict, optional
-        ``auto_correlations`` (bool, default False).  The uvw follow the
+        ``auto_correlations`` (bool, default False) and ``w_term`` (bool,
+        default True; ``False`` zeroes the ``w`` coordinate before the
+        visibilities are computed, the two dimensional approximation without
+        the ``w (n - 1)`` phase, so that an imager without w projection can be
+        tested against an exactly consistent sky).  The uvw follow the
         archival / VLBI convention adopted by MSv4:
         ``uvw = P(antenna1) - P(antenna2)`` (see
         :func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`).
@@ -159,11 +183,19 @@ def simulate_processing_set(
         Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual
         model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,
         ``spill_efficiency``, ``corr_efficiency``, ``quantization_efficiency``,
-        ``t_cmb`` and ``random_seed``; ``None`` disables noise (unit weights).
+        ``t_cmb`` and ``random_seed`` (the noise of a visibility depends only on
+        the seed and the indices of its time and channel, not on the chunking);
+        ``None`` disables noise (unit weights).
     channel_width : float, Hz, optional
         Channel width used for the noise level.
     integration_time : float, s, optional
         Integration time used for the noise level.
+    antenna_dish_diameter : np.ndarray, [n_antenna], metres, optional
+        Diameter of the main reflector of each antenna
+        (``antenna_xds.ANTENNA_DISH_DIAMETER``); it sets the effective area of the
+        noise model, ``ant_efficiency * pi * D1 * D2 / 4``.  Required when
+        ``noise_params`` is given; the beam models keep their own (effective)
+        ``dish_diameter``.
     direction_frame : str
         Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).
     processing_function_threads : int
@@ -187,10 +219,14 @@ def simulate_processing_set(
 
     Returns
     -------
-    pandas.DataFrame or xr.Dataset
-        One timing row (``task_id``, ``T_uvw``, ``T_beams``, ``T_visibilities``,
-        ``T_noise``, ``T_write``, ``T_simulate_task`` plus host/pid/thread
-        provenance) in graph mode; the chunk dataset when ``graph_mode=False``.
+    dict or xr.Dataset
+        In graph mode ``{"timing_node_tasks": pandas.DataFrame}``, one timing
+        row (``task_id``, ``T_uvw``, ``T_beams``, ``T_visibilities``,
+        ``T_noise``, ``T_write``, ``T_simulate_task``, the wall clock anchor
+        ``start_unixtime`` and the execution identity ``hostname``,
+        ``process_pid``, ``thread_native_id``, ``worker_name``, as the imaging
+        node task records them); a dict, so that graphviper's resource monitor
+        can attach its series. The chunk dataset when ``graph_mode=False``.
     """
     import threading
 
@@ -229,17 +265,13 @@ def simulate_processing_set(
         components_chunk = slice_sky_components(
             normalize_sky_components(sky_components), time_slice, frequency_slice
         )
+    model_image = None
+    if sky_model_image is not None:
+        from xradio.image import open_image
+
+        model_image = open_image(sky_model_image).load()
     phase_center_chunk = _slice_time_axis(phase_center_ra_dec, 0, time_slice)
     pointing_chunk = _slice_time_axis(pointing_ra_dec, 0, time_slice)
-
-    noise = None
-    if noise_params is not None:
-        noise = dict(noise_params)
-        base_seed = noise.get("random_seed")
-        # a distinct, reproducible stream per task
-        noise["random_seed"] = (
-            None if base_seed is None else int(base_seed) + int(task_id)
-        )
 
     logger.debug(
         f"simulate_processing_set task {task_id}: {len(time_chunk)} times x "
@@ -259,12 +291,15 @@ def simulate_processing_set(
         beam_params=beam_params,
         pointing_ra_dec=pointing_chunk,
         uvw_params=uvw_params,
-        noise_params=noise,
+        noise_params=noise_params,
         channel_width=channel_width,
         integration_time=integration_time,
+        antenna_dish_diameter=antenna_dish_diameter,
         direction_frame=direction_frame,
         processing_function_threads=processing_function_threads,
         implementation=implementation,
+        time_index_offset=time_slice.start or 0,
+        frequency_index_offset=frequency_slice.start or 0,
         gaussian_source_flux=gaussian_flux_chunk,
         gaussian_source_ra_dec=gaussian_source_chunk,
         gaussian_source_shape=gaussian_source_shape,
@@ -276,6 +311,8 @@ def simulate_processing_set(
         gaussian_ring_source_ra_dec=ring_source_chunk,
         gaussian_ring_source_shape=gaussian_ring_source_shape,
         sky_components=components_chunk,
+        sky_model_image=model_image,
+        sky_model_image_predict=sky_model_image_predict,
     )
     if not graph_mode:
         return xds
@@ -289,13 +326,22 @@ def simulate_processing_set(
     timing["T_write"] = _time.time() - start
     timing["T_simulate_task"] = _time.time() - task_start
 
+    # The Dask worker this task ran on (None outside a Dask worker, e.g. MPI).
+    try:
+        from distributed import get_worker
+
+        worker_name = str(get_worker().name)
+    except Exception:
+        worker_name = None
     row = {
         "task_id": task_id,
         "n_time": len(time_chunk),
         "n_frequency": len(frequency_chunk),
         **timing,
-        "host": socket.gethostname(),
-        "pid": os.getpid(),
-        "thread": threading.get_ident(),
+        "start_unixtime": task_start,
+        "hostname": socket.gethostname(),
+        "process_pid": os.getpid(),
+        "thread_native_id": threading.get_native_id(),
+        "worker_name": worker_name,
     }
-    return pd.DataFrame([row])
+    return {"timing_node_tasks": pd.DataFrame([row])}

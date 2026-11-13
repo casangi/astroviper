@@ -21,7 +21,7 @@ def make_undeconvolved_image_single_field(
 
     Drops auto-correlations and grids the visibilities (``VISIBILITY`` /
     ``VISIBILITY_NORMALIZATION``).  Together with the inverse FFT
-    (:func:`~astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder.ifft_norm_img_xds`)
+    (:func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.ifft_norm_img_xds`)
     this produces the undeconvolved (dirty/residual) image.  In the single-field
     imager the UV-sampling grid that becomes the PSF is built once, separately,
     by
@@ -39,9 +39,20 @@ def make_undeconvolved_image_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
-    cgk_1D : numpy.ndarray
-        1-D prolate-spheroidal gridding convolution kernel.
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
+    cgk_1D : GriddingKernel or numpy.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
+        or a bare table of CASA's prolate spheroidal kernel of support 7.
     model_exists : bool
         Accepted for call-site compatibility with the imaging cycle loop;
         currently unused (the UV-sampling/PSF grid is built once in

@@ -471,16 +471,14 @@ def mosaic_grid_jit(
                                         a_chan, a_pol
                                     ] + imaging_weight[
                                         i_time, i_baseline, i_chan, i_pol
-                                    ] * np.real(
-                                        norm
-                                    )
+                                    ] * np.real(norm)
                                 else:
-                                    sum_weight[a_chan, a_pol] = sum_weight[
-                                        a_chan, a_pol
-                                    ] + imaging_weight[
-                                        i_time, i_baseline, i_chan, i_pol
-                                    ] * np.real(
-                                        norm**2
+                                    sum_weight[a_chan, a_pol] = (
+                                        sum_weight[a_chan, a_pol]
+                                        + imaging_weight[
+                                            i_time, i_baseline, i_chan, i_pol
+                                        ]
+                                        * np.real(norm**2)
                                     )  # *np.real(norm**2)#* np.real(norm) #np.abs(norm**2) #**2 term is needed since the pb is in the image twice (one naturally and another from the gcf)
 
     return

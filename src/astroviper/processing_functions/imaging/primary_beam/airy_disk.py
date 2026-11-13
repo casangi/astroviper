@@ -19,7 +19,8 @@ antenna Jones responses (a baseline of identical antennas then responds with
 The simulation module :mod:`astroviper.processing_functions.simulation.antenna_beams`
 re-exports these functions; the imaging primary-beam step
 (:mod:`astroviper.processing_functions.imaging.primary_beam.make_primary_beam`)
-evaluates :func:`casa_airy_disk_response` with ``ipower=2``.
+evaluates them with ``ipower=2``: :func:`airy_disk_response` for the named
+telescope models, :func:`casa_airy_disk_response` for their CASA variant.
 """
 
 from __future__ import annotations

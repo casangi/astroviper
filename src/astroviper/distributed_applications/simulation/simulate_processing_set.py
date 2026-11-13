@@ -6,7 +6,9 @@ import os
 from typing import Any
 
 import numpy as np
-import toolviper.utils.parameter
+
+import toolviper
+from toolviper.utils import validate
 import xarray as xr
 from numcodecs import Blosc
 
@@ -38,19 +40,35 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 
 
 def combine_timing_data_frames(input_data, input_params):
-    """GraphVIPER reducer: concatenate the per-task timing DataFrames."""
+    """GraphVIPER reducer: concatenate the per-task timing DataFrames.
+
+    A node task returns ``{"timing_node_tasks": DataFrame}``; with
+    ``monitor_resources_seconds`` graphviper adds a ``"resource_usage"``
+    dict-of-series, which is folded into that task's one-row frame as
+    list-valued columns, as the imager does. A partially reduced input is a
+    DataFrame already.
+    """
     import pandas as pd
 
-    frames = [df for df in input_data if df is not None]
+    frames = []
+    for result in input_data:
+        if isinstance(result, dict):
+            timing = result["timing_node_tasks"]
+            usage = result.get("resource_usage")
+            if usage is not None:
+                timing = timing.copy()
+                for key, value in usage.items():
+                    timing[key] = [value] if isinstance(value, list) else value
+            frames.append(timing)
+        elif result is not None:
+            frames.append(result)
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
 
 
 @shares_param_docs
-@toolviper.utils.parameter.validate(
-    config_dir=_PARAM_CONFIG_DIR, add_data_type=xr.Dataset
-)
+@toolviper.utils.validate(config_dir=_PARAM_CONFIG_DIR, add_data_type=xr.Dataset)
 def simulate_processing_set(
     ps_store: str,
     antenna_xds: xr.Dataset,
@@ -61,6 +79,8 @@ def simulate_processing_set(
     beam_models: list,
     beam_model_map: np.ndarray | list,
     sky_components: list | None = None,
+    sky_model_image: str | None = None,
+    sky_model_image_predict: dict | None = None,
     point_source_flux: np.ndarray | list | None = None,
     point_source_ra_dec: np.ndarray | list | None = None,
     beam_params: dict | None = None,
@@ -92,6 +112,8 @@ def simulate_processing_set(
     mpi_cluster_setup: dict | None = None,
     thread_info: dict | None = None,
     check_schema: bool = True,
+    monitor_resources_seconds: float | None = None,
+    report: str | None = None,
 ) -> dict:
     """Simulate the visibilities of a sky of analytic components and write them as an MSv4 processing set.
 
@@ -112,7 +134,9 @@ def simulate_processing_set(
         :func:`astroviper.utils.telescope_layout.read_telescope_layout`.  Its
         ``overall_telescope_name`` selects the array reference position (uvw,
         parallactic angles) via
-        :func:`astroviper.utils.telescope_layout.observatory_position`.
+        :func:`astroviper.utils.telescope_layout.observatory_position`.  With
+        ``noise_params`` its ``ANTENNA_DISH_DIAMETER`` is required and sets the
+        collecting area.
     time_params : dict
         ``time_start`` (``"YYYY-MM-DDTHH:MM:SS.SSS"`` UTC), ``time_delta`` (s,
         integration time) and ``n_samples``.
@@ -128,6 +152,23 @@ def simulate_processing_set(
         m_ring, crescent, annulus, exponential_disk, tapered_power_law,
         shapelet): ``{"kind", "flux", "ra_dec", <shape parameters>}`` as
         described in :mod:`~astroviper.processing_functions.simulation.sky_components`.
+    sky_model_image : str, optional
+        A sky image added to the components: an XRADIO image (the path of a
+        FITS, CASA or Zarr image for the distributed application and the node
+        task, the opened dataset for the processing function) with ``SKY`` in Jy
+        per pixel, Stokes ``I`` (or the two Stokes planes of the parallel hands,
+        or ``I, Q, U, V``) and ``l, m`` about the phase centre. Every channel
+        takes the image channel nearest in frequency. It is seen through the
+        power beam of the one beam model of every antenna, which must point at
+        the phase centre (``pointing_ra_dec`` None). It is not part of the sky
+        image written with ``sky_image_params``.
+    sky_model_image_predict : dict, optional
+        How ``sky_model_image`` is predicted: ``{"predict": "dft"}`` (default),
+        the exact direct Fourier transform over the non-zero pixels, the w term
+        included unless ``uvw_params["w_term"]`` is False; or
+        ``{"predict": "gridded", "gridding_kernel_params": ...,
+        "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
+        which has no w term and so needs ``uvw_params["w_term"]`` False.
     point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy, optional
         Flux of every point source in the four instrumental correlations
         (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes
@@ -220,7 +261,11 @@ def simulate_processing_set(
     pointing_ra_dec : np.ndarray, [n_time | 1, n_antenna | 1, 2], radians, optional
         Antenna pointing directions; ``None`` points every antenna at the phase centre.
     uvw_params : dict, optional
-        ``auto_correlations`` (bool, default False).  The uvw follow the
+        ``auto_correlations`` (bool, default False) and ``w_term`` (bool,
+        default True; ``False`` zeroes the ``w`` coordinate before the
+        visibilities are computed, the two dimensional approximation without
+        the ``w (n - 1)`` phase, so that an imager without w projection can be
+        tested against an exactly consistent sky).  The uvw follow the
         archival / VLBI convention adopted by MSv4:
         ``uvw = P(antenna1) - P(antenna2)`` (see
         :func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`).
@@ -228,7 +273,9 @@ def simulate_processing_set(
         Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual
         model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,
         ``spill_efficiency``, ``corr_efficiency``, ``quantization_efficiency``,
-        ``t_cmb`` and ``random_seed``; ``None`` disables noise (unit weights).
+        ``t_cmb`` and ``random_seed`` (the noise of a visibility depends only on
+        the seed and the indices of its time and channel, not on the chunking);
+        ``None`` disables noise (unit weights).
     direction_frame : str
         Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).
     ms_name : str, optional
@@ -260,15 +307,52 @@ def simulate_processing_set(
         default from :func:`astroviper.utils.data_partitioning.get_thread_info`.
     check_schema : bool
         Validate the written processing set with ``xradio.schema.check.check_datatree``.
+    monitor_resources_seconds : float, optional
+        If set, sample each node task's worker-process CPU / memory / I/O usage
+        every this many seconds (graphviper's
+        :func:`~graphviper.graph_tools.map.monitor_node_task`) and carry the
+        series into ``"timing_node_tasks"`` as list-valued columns
+        (``time_seconds``, ``cpu_percent``, ``memory_rss_bytes`` and, on Linux,
+        ``read_bytes``/``write_bytes``/``read_chars``/``write_chars``) plus the
+        scalar ``sample_interval_seconds``. Per-task attribution is exact only
+        with one concurrent task per worker process. Requires ``psutil``.
+        ``None`` (default) disables monitoring.
+    report : str, optional
+        Make a report of the run: ``"html"`` (one self contained file) or
+        ``"pdf"``, written next to the output store as
+        ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
+        gives ``cube_report.html``), or ``"notebook"``, displayed in the
+        calling Jupyter notebook. The report has a processing section common
+        to all distributed applications (timing, task stream and, with
+        ``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a
+        results section of the application's own; the products it makes with
+        other distributed applications are kept in ``<name>_report_files``
+        next to the output store. It is made after the output is written: a
+        failure while making it is logged and leaves the results intact.
+        ``None`` (default): no report.
 
     Returns
     -------
     dict
         ``{"timing_node_tasks": pandas.DataFrame (one row per task),
         "timing_distributed_application": dict, "ps_store": str, "ms_name": str,
-        "sky_image_store": str or None}``; ``"sky_image_store"`` is the path of
-        the Zarr store the sky image was written to (``None`` without
-        ``sky_image_params``).
+        "sky_image_store": str or None, "report": str or None}``;
+        ``"sky_image_store"`` is the path of the Zarr store the sky image was
+        written to (``None`` without ``sky_image_params``) and ``"report"`` the
+        path of the report file written (``None`` without one, for
+        ``report="notebook"`` and when the report failed).
+
+    Notes
+    -----
+    The report's results section (see
+    :func:`~astroviper.distributed_applications.simulation.simulate_processing_set_report.simulate_processing_set_report`):
+    a summary of the array and the observation (shortest and longest
+    baseline), the natural weighting point source sensitivity per channel and
+    Stokes plane, the antenna positions, the uv coverage at the centre
+    frequency, cross sections of the point spread function (made with
+    :func:`~astroviper.distributed_applications.imaging.point_spread_function_cube_single_field.point_spread_function_cube_single_field`)
+    with its fitted Gaussian, and the image and spectrum of the sky
+    components themselves, per Stokes plane.
 
     See Also
     --------
@@ -363,6 +447,7 @@ def simulate_processing_set(
         pointing_ra_dec = np.asarray(pointing_ra_dec, dtype=np.float64)
     uvw_params = {
         "auto_correlations": False,
+        "w_term": True,
         **(uvw_params or {}),
     }
     beam_params = resolve_beam_params(beam_params)
@@ -397,6 +482,15 @@ def simulate_processing_set(
     )  # fmt: skip
 
     antenna_position = np.asarray(antenna_xds.ANTENNA_POSITION.values, dtype=np.float64)
+    antenna_dish_diameter = None
+    if noise_params is not None:
+        if "ANTENNA_DISH_DIAMETER" not in antenna_xds:
+            raise ValueError(
+                "noise_params needs antenna_xds.ANTENNA_DISH_DIAMETER (dish diameters, m)."
+            )
+        antenna_dish_diameter = np.asarray(
+            antenna_xds.ANTENNA_DISH_DIAMETER.values, dtype=np.float64
+        )
     telescope_name = str(antenna_xds.attrs.get("overall_telescope_name", "unknown"))
     site_position = observatory_position(telescope_name, antenna_position)
 
@@ -415,14 +509,30 @@ def simulate_processing_set(
                 kind, flux, ra_dec, shape, extra
             )
     all_components += sky_components
-    if not all_components:
+    if not all_components and sky_model_image is None:
         raise ValueError(
-            "no sources: give sky_components and/or point_source_flux / point_source_ra_dec."
+            "no sources: give sky_components, sky_model_image and/or "
+            "point_source_flux / point_source_ra_dec."
         )
+    _check_sky_model_image(
+        sky_model_image,
+        sky_model_image_predict,
+        uvw_params,
+        beam_model_map,
+        pointing_ra_dec,
+    )
     normalized_components = normalize_sky_components(
         all_components, n_time, n_frequency, direction_frame
     )
-    described = describe_sky_components(normalized_components)
+    described = ", ".join(
+        filter(
+            None,
+            [
+                describe_sky_components(normalized_components),
+                sky_model_image and "a sky image",
+            ],
+        )
+    )
     sky_image = _resolve_sky_image_params(
         sky_image_params, phase_center_ra_dec, polarization, n_time
     )
@@ -549,6 +659,8 @@ def simulate_processing_set(
         "gaussian_ring_source_ra_dec": gaussian_ring_source_ra_dec,
         "gaussian_ring_source_shape": gaussian_ring_source_shape,
         "sky_components": sky_components,
+        "sky_model_image": sky_model_image,
+        "sky_model_image_predict": sky_model_image_predict,
         "phase_center_ra_dec": phase_center_ra_dec,
         "beam_models": list(beam_models),
         "beam_model_map": beam_model_map,
@@ -558,6 +670,7 @@ def simulate_processing_set(
         "noise_params": noise_params,
         "channel_width": channel_width,
         "integration_time": integration_time,
+        "antenna_dish_diameter": antenna_dish_diameter,
         "direction_frame": direction_frame,
         "processing_function_threads": processing_function_threads,
         "implementation": implementation,
@@ -572,6 +685,7 @@ def simulate_processing_set(
         node_task=node_tasks.simulation.simulate_processing_set,
         input_params=input_params,
         in_memory_compute=False,
+        monitor_resources_seconds=monitor_resources_seconds,
     )
     viper_graph = reduce(viper_graph, combine_timing_data_frames, {}, mode="tree")
     timing_distributed_application["T_create_map_reduce_graph"] = _time.time() - start
@@ -582,18 +696,26 @@ def simulate_processing_set(
         timing_distributed_application["T_generate_dask_graph"] = 0.0
         start = _time.time()
         timing_node_tasks = processes_with_mpi(viper_graph, mpi_cluster_setup)
-        timing_distributed_application["T_compute_dask_graph"] = _time.time() - start
+        end = _time.time()
     elif compute_backend == "dask":
         start = _time.time()
         dask_graph = generate_dask_workflow(viper_graph)
         timing_distributed_application["T_generate_dask_graph"] = _time.time() - start
         start = _time.time()
         timing_node_tasks = dask.compute(dask_graph)[0]
-        timing_distributed_application["T_compute_dask_graph"] = _time.time() - start
+        end = _time.time()
     else:
         raise ValueError(
             f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
         )
+    timing_distributed_application["T_compute_dask_graph"] = end - start
+    # Absolute anchors of the compute call, which place the compute window on
+    # the wall clock of the tasks' start_unixtime (the task stream).
+    timing_distributed_application["compute_start_unixtime"] = start
+    timing_distributed_application["compute_end_unixtime"] = end
+    # A graph of one map task has no reduce node: its result is the node
+    # task's own dict.
+    timing_node_tasks = combine_timing_data_frames([timing_node_tasks], {})
 
     # --- finalize ----------------------------------------------------------------
     start = _time.time()
@@ -616,7 +738,12 @@ def simulate_processing_set(
         )
         timing_distributed_application["T_write_ms_v2"] = _time.time() - start
 
-    timing_distributed_application["T_total"] = _time.time() - application_start
+    application_end = _time.time()
+    timing_distributed_application["T_total"] = application_end - application_start
+    # Absolute anchors of the whole call, which place the driver's own steps on
+    # the wall clock of the task stream.
+    timing_distributed_application["application_start_unixtime"] = application_start
+    timing_distributed_application["application_end_unixtime"] = application_end
     logger.info(
         format_timing_summary(
             timing_distributed_application,
@@ -627,13 +754,34 @@ def simulate_processing_set(
     )
     if hasattr(timing_node_tasks, "sort_values") and "task_id" in timing_node_tasks:
         timing_node_tasks = timing_node_tasks.sort_values("task_id", ignore_index=True)
-    return {
+    result = {
         "timing_node_tasks": timing_node_tasks,
         "timing_distributed_application": timing_distributed_application,
         "ps_store": ps_store,
         "ms_name": ms_name,
         "sky_image_store": sky_image_store,
+        "report": None,
     }
+    if report is not None:
+        from astroviper.distributed_applications.simulation.simulate_processing_set_report import (
+            simulate_processing_set_report,
+        )
+        from astroviper.utils.report import make_report
+
+        result["report"] = make_report(
+            simulate_processing_set_report,
+            result,
+            ps_store=ps_store,
+            report=report,
+            sky_components=normalized_components,
+            noise_params=noise_params,
+            sky_image_params=sky_image,
+            processing_function_threads=processing_function_threads,
+            compute_backend=compute_backend,
+            mpi_cluster_setup=mpi_cluster_setup,
+            thread_info=thread_info,
+        )
+    return result
 
 
 _EXTENDED_SOURCE_SHAPE_COLUMNS = {"gaussian": 3, "disk": 3, "gaussian_ring": 4}
@@ -695,6 +843,43 @@ def _check_extended_source_shapes(
             )
         if np.any(shape[:, :2] < 0):
             raise ValueError("disk_source_shape diameters must be non-negative.")
+
+
+def _check_sky_model_image(
+    sky_model_image,
+    sky_model_image_predict,
+    uvw_params,
+    beam_model_map,
+    pointing_ra_dec,
+):
+    """Refuse a sky model image the node tasks cannot simulate, before anything is written."""
+    if sky_model_image is None:
+        return
+    from xradio.image import open_image
+
+    from astroviper.processing_functions.simulation.sky_image_visibilities import (
+        SKY_IMAGE_PREDICTIONS,
+    )
+
+    image = open_image(sky_model_image)
+    if "SKY" not in image:
+        raise ValueError(f"sky_model_image {sky_model_image} has no SKY data variable.")
+    predict = {"predict": "dft", **(sky_model_image_predict or {})}
+    if predict["predict"] not in SKY_IMAGE_PREDICTIONS:
+        raise ValueError(
+            f"sky_model_image_predict['predict'] must be one of {SKY_IMAGE_PREDICTIONS}; "
+            f"got {predict['predict']!r}."
+        )
+    if predict["predict"] == "gridded" and uvw_params["w_term"]:
+        raise ValueError(
+            'sky_model_image_predict "gridded" has no w term: simulate with '
+            'uvw_params={"w_term": False} or use "dft".'
+        )
+    if np.unique(np.asarray(beam_model_map)).size != 1 or pointing_ra_dec is not None:
+        raise NotImplementedError(
+            "a sky model image is simulated through one beam model shared by every "
+            "antenna, pointing at the phase centre."
+        )
 
 
 def _check_input_shapes(

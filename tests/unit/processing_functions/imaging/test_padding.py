@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
     add_padding,
     remove_padding,
 )

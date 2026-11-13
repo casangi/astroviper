@@ -455,7 +455,7 @@ class TestApplySelect:
     def test_full_image_box_selects_all_pixels(self) -> None:
         ny, nx = 32, 48
         da = make_image(ny, nx)
-        s = f"box[[0pix,0pix],[{nx-1}pix,{ny-1}pix]]"
+        s = f"box[[0pix,0pix],[{nx - 1}pix,{ny - 1}pix]]"
         m = select_mask(da, select=s)
         assert int(m.values.sum()) == ny * nx
 
@@ -626,7 +626,7 @@ class TestSmartSplitPairs:
         # 1) Annulus is a subset of the outer circle
         assert bool((m_ann & ~m_outer).values.any()) is False
         # 2) A strict ring (outer minus a slightly smaller inner) is contained in annulus
-        m_inner_grow = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r1+1}pix]")
+        m_inner_grow = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r1 + 1}pix]")
         m_ring_subset = m_outer & ~m_inner_grow
         assert bool((m_ring_subset & ~m_ann).values.any()) is False
 

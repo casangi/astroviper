@@ -65,7 +65,7 @@ def _simulate_point_source(tmp_path):
         point_source_flux=np.array([1.0, 0, 0, 1.0])[None, None, None, :],
         point_source_ra_dec=PC[None, None, :],
         phase_center_ra_dec=PC[None, :],
-        beam_models=[airy_disk_model("vla")],
+        beam_models=[airy_disk_model("vla_nvss")],
         beam_model_map=np.zeros(N_ANTENNA, int),
         n_time_chunks=1,
         n_frequency_chunks=2,
@@ -98,7 +98,7 @@ def test_image_store_name_without_img_zarr_extension(tmp_path):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 0,
             "max_cycles": 0,
             "threshold": 0.0,
@@ -129,6 +129,291 @@ def test_image_store_name_without_img_zarr_extension(tmp_path):
     timing = result["timing_distributed_application"]
     assert TIMING_KEYS <= set(timing)
     assert timing["T_add_lazy_input_data"] == 0.0
+
+
+def test_kept_variables_the_run_does_not_make_are_skipped(tmp_path):
+    """A dirty image run (``max_iter=0``) that keeps ``mask``, which only
+    deconvolution makes, writes every variable it does make: the mask is
+    skipped instead of failing the write of every channel."""
+    ps_store = _simulate_point_source(tmp_path)
+    ps_xdt = open_processing_set(ps_store)
+    result = distributed_applications.imaging.image_cube_single_field(
+        ps_store=ps_store,
+        image_store=str(tmp_path / "cube.img.zarr"),
+        image_params={
+            "image_size": [64, 64],
+            "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600),
+            "phase_direction": PC,
+            "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
+            "polarization_coords": ["I", "V"],
+            "time_coords": [0],
+            "fft_padding": 1.2,
+            "cpp_gridder": True,
+        },
+        instrument_polarization_basis="circular",
+        imaging_weights_params={"weighting": "natural"},
+        cycle_control_params={
+            "max_iter": 0,
+            "max_cycles": 0,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+        },
+        image_data_variables_keep=[
+            "sky_residual",
+            "sky_model",
+            "mask",
+            "point_spread_function",
+        ],
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        n_mapping_parallelism={"frequency": 2},
+    )
+    # No node task failed its write.
+    assert "task_failed_phase" not in result["timing_node_tasks"]
+    img = load_image(str(tmp_path / "cube.img.zarr"))
+    stokes_i = img.SKY_RESIDUAL.values[0, :, 0]  # [frequency, l, m]
+    np.testing.assert_allclose(np.nanmax(stokes_i, axis=(1, 2)), [1.0, 1.0], rtol=1e-3)
+    assert np.isfinite(img.POINT_SPREAD_FUNCTION.values).all()
+
+
+#: A threshold (Jy) above the 1 Jy/beam dirty peak of the point source.
+NO_UPDATE_THRESHOLD = 100.0
+
+
+def _image_restored(
+    ps_store,
+    image_store,
+    n_tasks,
+    clean_mask=None,
+    restoration_output="both",
+    **cycle_control_params,
+):
+    """The driver on the point source in ``n_tasks`` node tasks, restored and
+    primary beam corrected, keeping the model, the mask and the primary
+    beam."""
+    ps_xdt = open_processing_set(ps_store)
+    return distributed_applications.imaging.image_cube_single_field(
+        ps_store=ps_store,
+        image_store=image_store,
+        image_params={
+            "image_size": [64, 64],
+            "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600),
+            "phase_direction": PC,
+            "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
+            "polarization_coords": ["I", "V"],
+            "time_coords": [0],
+            "fft_padding": 1.2,
+        },
+        instrument_polarization_basis="circular",
+        imaging_weights_params={"weighting": "natural"},
+        cycle_control_params={
+            "max_iter": 40,
+            "max_cycles": 2,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": 20,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+            "primary_beam_limit": 0.2,
+            **cycle_control_params,
+        },
+        image_data_variables_keep=["sky_residual", "sky_model", "mask", "primary_beam"],
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        n_mapping_parallelism={"frequency": n_tasks},
+        restore=True,
+        restoration_output=restoration_output,
+        clean_mask=clean_mask,
+    )
+
+
+def _assert_restored_without_model_update(img, chan):
+    """Channel ``chan`` has a zero model, its residual as the restored image
+    and the residual divided by the primary beam as the primary beam corrected
+    one (NaN below the cutoff)."""
+    residual = img.SKY_RESIDUAL.values[:, chan]
+    primary_beam = img.PRIMARY_BEAM.values[:, chan]
+    corrected = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[:, chan]
+    inside = primary_beam >= 0.2
+    assert (img.SKY_MODEL.values[:, chan] == 0).all()
+    np.testing.assert_array_equal(img.SKY_RESTORED.values[:, chan], residual)
+    np.testing.assert_array_equal(
+        corrected[inside], residual[inside] / primary_beam[inside]
+    )
+    assert np.isnan(corrected[~inside]).all()
+
+
+@pytest.mark.parametrize(
+    "cycle_control_params, mask_source",
+    [
+        ({"max_iter": 0}, "PRIMARY_BEAM > 0.2"),
+        ({"max_cycles": 0}, "PRIMARY_BEAM > 0.2"),
+        ({"threshold": NO_UPDATE_THRESHOLD}, "MASK"),
+    ],
+    ids=["max_iter_0", "max_cycles_0", "threshold_above_the_peak"],
+)
+def test_channel_without_model_update_is_restored(
+    tmp_path, synchronous_dask, cycle_control_params, mask_source
+):
+    """A channel imaged in a node task of its own that makes no model update
+    (``max_iter`` 0, ``max_cycles`` 0, or a threshold above its dirty peak)
+    has a zero model and is restored to its residual, as in continuum
+    imaging. Its masked statistics use the mask a model update would have
+    made when one could run, else the primary beam fallback. Its model,
+    restored and primary beam corrected images used to keep the image
+    store's NaN fill value."""
+    ps_store = _simulate_point_source(tmp_path)
+    store = str(tmp_path / "cube.img.zarr")
+    result = _image_restored(ps_store, store, 2, **cycle_control_params)
+    _assert_imaged(result, 2)
+    statistics = result["image_statistics"]["sky_residual"]
+    assert statistics.attrs["mask_source"] == mask_source
+    img = load_image(store)
+    for chan in range(2):
+        _assert_restored_without_model_update(img, chan)
+
+
+@pytest.mark.parametrize("box_mask", [False, True], ids=["no_mask", "box_mask"])
+@pytest.mark.parametrize("without_update", [0, 1], ids=["first", "second"])
+def test_chunk_keeps_every_channel_when_one_makes_no_model_update(
+    tmp_path, synchronous_dask, without_update, box_mask
+):
+    """One node task of two channels, one of which makes no model update (its
+    threshold is above its dirty peak), with the primary beam mask or a clean
+    mask: both come out exactly as when each is imaged in a node task of its
+    own, the one without update with a zero model restored to its residual.
+    The chunk takes its variables from its first channel, so a first channel
+    without update lost the other's model and restored images (the image
+    store's NaN fill value), and a second one failed the task: "channel 1
+    result is missing variable 'SKY_MODEL' present for the chunk's first
+    channel" ('MASK' with the primary beam mask, which only the model update
+    made)."""
+    ps_store = _simulate_point_source(tmp_path)
+    clean_mask = None
+    if box_mask:
+        clean_mask = str(tmp_path / "mask.npy")
+        box = np.zeros((64, 64), dtype=bool)
+        box[24:40, 24:40] = True
+        np.save(clean_mask, box)
+    threshold = [[0.1, 0.1], [0.1, 0.1]]
+    threshold[without_update] = [NO_UPDATE_THRESHOLD] * 2
+    stores = {
+        n_tasks: str(tmp_path / f"{n_tasks}_tasks.img.zarr") for n_tasks in (1, 2)
+    }
+    for n_tasks, store in stores.items():
+        result = _image_restored(
+            ps_store, store, n_tasks, clean_mask=clean_mask, threshold=threshold
+        )
+        _assert_imaged(result, n_tasks)
+    _assert_images_equal(stores[1], stores[2])
+    img = load_image(stores[1])
+    _assert_restored_without_model_update(img, without_update)
+    assert img.SKY_MODEL.values[:, 1 - without_update].max() > 0.5
+
+
+#: Frequency offset (Hz) of the second execution block, of the order of those
+#: between ALMA execution blocks converted to LSRK (0.7 to 4.9 kHz on 488 kHz
+#: channels).
+EXECUTION_BLOCK_FREQUENCY_OFFSET = 5.0e3
+
+
+def _add_shifted_execution_block(ps_store, offset=EXECUTION_BLOCK_FREQUENCY_OFFSET):
+    """Copy the processing set's only MSv4 as a second execution block whose
+    channel centres are ``offset`` Hz higher and whose visibilities are three
+    times brighter, and consolidate the metadata. Equal weights give the
+    natural-weighted dirty image of both a peak of 2 Jy/beam (1 and 3 if one
+    block were left out). Returns the frequencies of the first block."""
+    import zarr
+
+    (ms_name,) = open_processing_set(ps_store).keys()
+    shifted_name = f"{ms_name}_shifted"
+    shutil.copytree(
+        os.path.join(ps_store, ms_name), os.path.join(ps_store, shifted_name)
+    )
+    frequency = zarr.open_array(os.path.join(ps_store, shifted_name, "frequency"))
+    frequencies = frequency[:]
+    frequency[:] = frequencies + offset
+    visibility = zarr.open_array(os.path.join(ps_store, shifted_name, "VISIBILITY"))
+    visibility[:] = 3.0 * visibility[:]
+    zarr.consolidate_metadata(ps_store)
+    shifted = open_processing_set(ps_store)
+    assert sorted(shifted.keys()) == sorted([ms_name, shifted_name])
+    np.testing.assert_array_equal(
+        shifted[shifted_name].frequency.values, frequencies + offset
+    )
+    return frequencies
+
+
+@pytest.mark.parametrize("n_tasks", [1, 2])
+@pytest.mark.parametrize("skunk_works", [True, False])
+def test_execution_blocks_with_offset_frequencies_are_all_imaged(
+    tmp_path, skunk_works, n_tasks
+):
+    """Two execution blocks whose channel centres differ by a few kHz, imaged
+    on the first one's frequencies in one node task or one per channel: every
+    task selects and images both (each channel maps onto its nearest image
+    channel), with the direct Zarr loader (``skunk_works=True``) as with the
+    standard one, and the two loaders give the same images. The direct loader
+    used to require every selected frequency to equal an image frequency to
+    1e-12, so it failed the load and, as a load failure is logged and
+    skipped, wrote no image at all; and graphviper's channel selection used
+    to drop the second block from the task of an end channel."""
+    ps_store = _simulate_point_source(tmp_path)
+    frequencies = _add_shifted_execution_block(ps_store)
+
+    def image(store_name, use_skunk_works):
+        return distributed_applications.imaging.image_cube_single_field(
+            ps_store=ps_store,
+            image_store=str(tmp_path / store_name),
+            image_params={
+                "image_size": [64, 64],
+                "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600),
+                "phase_direction": PC,
+                "frequency_coords": frequencies,
+                "polarization_coords": ["I", "V"],
+                "time_coords": [0],
+                "fft_padding": 1.2,
+            },
+            instrument_polarization_basis="circular",
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params={
+                "max_iter": 0,
+                "max_cycles": 0,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": -1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            image_data_variables_keep=["sky_residual", "point_spread_function"],
+            processing_set_data_group_name="base",
+            single_precision_image=False,
+            n_mapping_parallelism={"frequency": n_tasks},
+            skunk_works=use_skunk_works,
+        )
+
+    result = image("cube.img.zarr", skunk_works)
+    _assert_imaged(result, n_tasks=n_tasks)
+    img = load_image(str(tmp_path / "cube.img.zarr"))
+    # The natural-weighted dirty image of the source at the phase centre, 1 Jy
+    # in the first execution block and 3 Jy in the second, peaks at 2 Jy/beam
+    # in both channels only when both blocks are imaged in both.
+    stokes_i = img.SKY_RESIDUAL.values[0, :, 0]  # [frequency, l, m]
+    np.testing.assert_allclose(np.nanmax(stokes_i, axis=(1, 2)), [2.0, 2.0], rtol=1e-3)
+    assert np.isfinite(img.POINT_SPREAD_FUNCTION.values).all()
+
+    if skunk_works:
+        reference = image("standard.img.zarr", False)
+        _assert_imaged(reference, n_tasks=n_tasks)
+        _assert_images_equal(
+            str(tmp_path / "cube.img.zarr"), str(tmp_path / "standard.img.zarr")
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -163,7 +448,7 @@ def _image_cube(ps_store, image_store, frequency_coords, **overrides):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": max_iter,
             "max_cycles": 2 if max_iter else 0,
             "threshold": 0.0,
@@ -247,7 +532,9 @@ def test_msv2_without_the_engine(tmp_path, monkeypatch):
 )
 def test_msv2_refuses_writing_into_the_input(tmp_path, flag):
     ms_path = _measurement_set_like(tmp_path)
-    with pytest.raises(ValueError, match="never writes into its input"):
+    with pytest.raises(
+        ValueError, match="not implemented for the in-memory cube workflow"
+    ):
         _image_cube(ms_path, str(tmp_path / "cube.img.zarr"), [1e11], **{flag: True})
     _assert_nothing_written(tmp_path)
 
@@ -501,3 +788,23 @@ def test_msv2_run_does_not_write_the_measurement_set(
     _assert_imaged(result)
     assert _file_state(ms_path) == before
     assert not os.path.exists(os.path.join(ms_path, "XRADIO_PARTITIONS"))
+
+
+@pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both"])
+def test_cube_publishes_only_selected_restoration_products(
+    tmp_path, synchronous_dask, output
+):
+    ps_store = _simulate_point_source(tmp_path)
+    store = str(tmp_path / "selected.img.zarr")
+    _image_restored(ps_store, store, 1, restoration_output=output, max_iter=0)
+    image = load_image(store)
+    assert ("SKY_RESTORED" in image) == (output in ("apparent", "both"))
+    assert ("SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in image) == (
+        output in ("primary_beam_corrected", "both")
+    )
+    selected = (
+        "SKY_RESTORED"
+        if output == "apparent"
+        else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+    )
+    assert np.isfinite(image[selected]).any()

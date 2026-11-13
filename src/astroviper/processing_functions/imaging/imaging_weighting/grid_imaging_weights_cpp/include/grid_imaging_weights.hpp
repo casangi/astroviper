@@ -4,10 +4,13 @@
 
 namespace imaging_weighting {
 
-// Grid per-visibility data weights onto a UV grid (nearest-pixel scatter with
-// Hermitian-conjugate update), accumulating per-(channel, polarization) weight
-// sums. The kernel is deliberately SERIAL so the floating-point accumulation
-// order — and therefore the weight sums — are bit-reproducible across runs.
+// Grid per-visibility data weights onto a UV grid, accumulating
+// per-(channel, polarization) weight sums. Nearest-cell mode rounds the direct
+// and conjugate coordinates and requires both cells to be in bounds. CASA
+// continuum mode truncates the shifted coordinates, skips index 0 on either
+// axis, and accepts the direct and conjugate cells independently. The kernel is
+// deliberately SERIAL so the floating-point accumulation order — and therefore
+// the weight sums — are bit-reproducible across runs.
 //
 // grid            : (n_chan_g, n_pol_g, m_u, m_v)          GridT, updated in place
 // sum_weight      : (n_chan_g, n_pol_g)                    float64, updated in place
@@ -28,7 +31,7 @@ void grid_imaging_weights(
     const double* data_weights,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
-    double delta_l, double delta_m);
+    double delta_l, double delta_m, bool truncate_uv_cells);
 
 // Sample a UV imaging-weight grid at each visibility's (u, v) and apply the
 // Briggs/robust denominator briggs[0]*G + briggs[1]. Serial for the same
@@ -56,22 +59,22 @@ void degrid_imaging_weights(
     const double* data_weight,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol, int n_pol_out,
-    double delta_l, double delta_m);
+    double delta_l, double delta_m, bool truncate_uv_cells);
 
 extern template void grid_imaging_weights<float>(
     float*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double);
+    const double*, int, int, int, int, int, int, int, int, double, double, bool);
 extern template void grid_imaging_weights<double>(
     double*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double);
+    const double*, int, int, int, int, int, int, int, int, double, double, bool);
 
 extern template void degrid_imaging_weights<float>(
     double*, const float*, const double*, const double*, const double*,
     const int64_t*, const int64_t*, const double*,
-    int, int, int, int, int, int, int, int, int, double, double);
+    int, int, int, int, int, int, int, int, int, double, double, bool);
 extern template void degrid_imaging_weights<double>(
     double*, const double*, const double*, const double*, const double*,
     const int64_t*, const int64_t*, const double*,
-    int, int, int, int, int, int, int, int, int, double, double);
+    int, int, int, int, int, int, int, int, int, double, double, bool);
 
 }  // namespace imaging_weighting

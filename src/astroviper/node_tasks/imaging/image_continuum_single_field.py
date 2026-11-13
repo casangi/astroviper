@@ -1,0 +1,4274 @@
+from astroviper.utils.clean_mask import install_clean_mask
+from astroviper.utils.continuum_cache import (
+    CONTINUUM_WEIGHT_CACHE_GROUP as _CONTINUUM_WEIGHT_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    CONTINUUM_WEIGHT_CACHE_VARIABLE as _CONTINUUM_WEIGHT_CACHE_VARIABLE,
+)
+from astroviper.utils.continuum_cache import (
+    MFS_VISIBILITY_GRID_CACHE_GROUP as _MFS_VISIBILITY_GRID_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
+from astroviper.utils.continuum_cache import (
+    MVC_OBSERVED_NORMALIZATION_CACHE as _MVC_OBSERVED_NORMALIZATION_CACHE,
+)
+from astroviper.utils.continuum_cache import (
+    MVC_OBSERVED_VISIBILITY_CACHE as _MVC_OBSERVED_VISIBILITY_CACHE,
+)
+from astroviper.utils.continuum_cache import (
+    MVC_VISIBILITY_GRID_CACHE_GROUP as _MVC_VISIBILITY_GRID_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    WIDEBAND_PRIMARY_BEAM_CACHE_GROUP as _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP,
+)
+from astroviper.utils.continuum_cache import (
+    WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE as _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+)
+from astroviper.utils.param_docs import shares_param_docs
+from astroviper.utils.task_logging import (
+    write_task_kill_switch_log as _write_task_kill_switch_log,
+)
+
+###############################################################################
+# Generic helper functions
+###############################################################################
+
+
+def _prepare_continuum_result_for_transfer(result):
+    """Clear cached accessors before continuum datasets cross worker boundaries.
+
+    XRADIO accessors contain weak references that cannot be pickled. Walk
+    result containers and dataset attributes, including the nested weight,
+    primary-beam and visibility-grid caches. Only accessor caches are cleared;
+    arrays and scientific metadata stay in place. Accessors are recreated
+    lazily on the receiving worker. Repeated references are visited once.
+    """
+    import xarray as xr
+
+    from astroviper.utils.data_tree import clear_cached_accessors
+
+    seen = set()
+
+    def clear(value):
+        if not isinstance(value, xr.Dataset | dict | list | tuple):
+            return
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, xr.Dataset):
+            clear_cached_accessors(value)
+            clear(value.attrs)
+        elif isinstance(value, dict):
+            for child in value.values():
+                clear(child)
+        else:
+            for child in value:
+                clear(child)
+
+    clear(result)
+    return result
+
+
+def _single_leaf_cache_mapping(
+    input_data,
+    mapping_key,
+    leaf_key,
+    fallback=None,
+):
+    """Normalize an unreduced one-task cache to the reducer's mapping schema."""
+    mapping = input_data.get(mapping_key, fallback)
+    if mapping is not None or leaf_key not in input_data:
+        return mapping
+    if "task_id" not in input_data:
+        raise KeyError(
+            f"A single-leaf {leaf_key!r} result must also contain 'task_id'."
+        )
+    return {int(input_data["task_id"]): input_data[leaf_key]}
+
+
+def _weighting_drop_variables(data_group, node_name):
+    """Return the correlated-data variable omitted by a weighting node load."""
+    if not isinstance(data_group, dict) or "correlated_data" not in data_group:
+        raise ValueError(
+            f"{node_name} requires the resolved processing-set data_group mapping."
+        )
+    return [data_group["correlated_data"]]
+
+
+def _add_task_execution_metadata(timing_df, task_start):
+    """Add the common wall-clock and worker identity columns in place."""
+    import os
+    import socket
+    import threading
+
+    timing_df["start_unixtime"] = task_start
+    timing_df["hostname"] = socket.gethostname()
+    timing_df["process_pid"] = os.getpid()
+    timing_df["thread_native_id"] = threading.get_native_id()
+    try:
+        from distributed import get_worker
+
+        timing_df["worker_name"] = str(get_worker().name)
+    except Exception:
+        timing_df["worker_name"] = None
+
+
+def _stored_coordinate_indexer(stored_values, selected_values, dimension):
+    """Map a loaded coordinate onto its exact positions in the Zarr store."""
+    import numpy as np
+
+    stored_values = np.asarray(stored_values)
+    selected_values = np.asarray(selected_values)
+    if np.array_equal(stored_values, selected_values):
+        return slice(None)
+
+    if np.unique(stored_values).size != stored_values.size:
+        raise ValueError(f"Stored coordinate {dimension!r} contains duplicate values.")
+
+    positions = {
+        value.item() if hasattr(value, "item") else value: index
+        for index, value in enumerate(stored_values)
+    }
+    try:
+        indices = np.asarray(
+            [
+                positions[value.item() if hasattr(value, "item") else value]
+                for value in selected_values
+            ],
+            dtype=np.int64,
+        )
+    except KeyError as exc:
+        raise ValueError(
+            f"Selected coordinate {dimension!r} contains value {exc.args[0]!r} "
+            "that is absent from the in-place store."
+        ) from exc
+
+    return indices
+
+
+def _write_continuum_weights_in_place(ps_xdt, image_store):
+    """Write task-local imaging weights into the output-store cache."""
+    import numpy as np
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _CONTINUUM_WEIGHT_CACHE_GROUP not in root:
+        raise KeyError("The in-place continuum weight cache is not initialized.")
+    cache_root = root[_CONTINUUM_WEIGHT_CACHE_GROUP]
+    for ms_name, ms_xdt in ps_xdt.items():
+        data_groups = ms_xdt.ds.attrs.get("data_groups", {})
+        weight_name = next(
+            (
+                group.get("weight_imaging")
+                for group in data_groups.values()
+                if group.get("weight_imaging") in ms_xdt.ds
+            ),
+            None,
+        )
+        if weight_name is None:
+            raise RuntimeError(
+                f"No calculated imaging weights are available for {ms_name!r}."
+            )
+
+        weight = ms_xdt.ds[weight_name]
+        if ms_name not in cache_root:
+            raise KeyError(f"No in-place weight cache exists for {ms_name!r}.")
+        ms_cache = cache_root[ms_name]
+        if _CONTINUUM_WEIGHT_CACHE_VARIABLE not in ms_cache:
+            raise KeyError(
+                f"In-place weight array {_CONTINUUM_WEIGHT_CACHE_VARIABLE!r} "
+                f"has not been initialized for {ms_name!r}."
+            )
+
+        target = ms_cache[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
+        if target.metadata.zarr_format == 3:
+            dimensions = tuple(target.metadata.dimension_names)
+        else:
+            dimensions = tuple(target.attrs["_ARRAY_DIMENSIONS"])
+        if weight.dims != dimensions:
+            raise ValueError(
+                f"Calculated imaging-weight dimensions for {ms_name!r} are "
+                f"{weight.dims}; expected {dimensions}."
+            )
+
+        indexers = []
+        for dimension in dimensions:
+            if dimension not in weight.coords or dimension not in ms_cache:
+                raise KeyError(
+                    f"Coordinate {dimension!r} required to write in-place "
+                    f"weights for {ms_name!r} is missing."
+                )
+            indexers.append(
+                _stored_coordinate_indexer(
+                    ms_cache[dimension][:],
+                    weight.coords[dimension].values,
+                    dimension,
+                )
+            )
+
+        target.oindex[tuple(indexers)] = np.asarray(weight.values)
+
+
+def _load_continuum_weights_in_place(
+    ps_xdt,
+    image_store,
+    processing_set_data_group_name,
+):
+    """Load only this task's imaging-weight partition from the output cache."""
+    import numpy as np
+    import xarray as xr
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    if _CONTINUUM_WEIGHT_CACHE_GROUP not in root:
+        raise KeyError("The in-place continuum weight cache is missing.")
+    cache_root = root[_CONTINUUM_WEIGHT_CACHE_GROUP]
+    weight_datasets = {}
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        if ms_name not in cache_root:
+            raise KeyError(f"No cached imaging weights exist for {ms_name!r}.")
+        ms_cache = cache_root[ms_name]
+        target = ms_cache[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
+        dimensions = (
+            tuple(target.metadata.dimension_names)
+            if target.metadata.zarr_format == 3
+            else tuple(target.attrs["_ARRAY_DIMENSIONS"])
+        )
+        indexers = []
+        coordinates = {}
+        for dimension in dimensions:
+            if dimension not in ms_xdt.ds.coords or dimension not in ms_cache:
+                raise KeyError(
+                    f"Coordinate {dimension!r} required to load cached weights "
+                    f"for {ms_name!r} is missing."
+                )
+            selected = np.asarray(ms_xdt.ds.coords[dimension].values)
+            indexers.append(
+                _stored_coordinate_indexer(
+                    ms_cache[dimension][:],
+                    selected,
+                    dimension,
+                )
+            )
+            coordinates[dimension] = ms_xdt.ds.coords[dimension]
+
+        values = target.oindex[tuple(indexers)]
+        weight_datasets[ms_name] = xr.Dataset(
+            {
+                "WEIGHT_IMAGING": xr.DataArray(
+                    values,
+                    dims=dimensions,
+                    coords=coordinates,
+                    attrs=dict(target.attrs),
+                )
+            },
+            attrs={
+                "weight_imaging_name": "WEIGHT_IMAGING",
+                "processing_set_data_group_name": processing_set_data_group_name,
+            },
+        )
+
+    return _attach_imaging_weights_continuum(
+        ps_xdt,
+        weight_datasets,
+        processing_set_data_group_name=processing_set_data_group_name,
+        weight_imaging_name="WEIGHT_IMAGING",
+    )
+
+
+def _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id):
+    """Extract and validate one task's channel-dependent MVC primary beam."""
+    import numpy as np
+    import xarray as xr
+
+    image_data_groups = img_xds.attrs.get("data_groups", {})
+    if "residual" not in image_data_groups:
+        raise KeyError("MVC setup did not create the residual image data group.")
+    primary_beam_name = image_data_groups["residual"].get("primary_beam")
+    if primary_beam_name is None or primary_beam_name not in img_xds:
+        raise KeyError("The MVC residual data group has no primary beam.")
+
+    primary_beam = img_xds[primary_beam_name]
+    if "frequency" not in primary_beam.dims:
+        raise ValueError("The MVC primary beam must retain its frequency dimension.")
+    expected_frequency = np.asarray(task_coords["frequency"]["data"], dtype=np.float64)
+    actual_frequency = np.asarray(
+        primary_beam.coords["frequency"].values,
+        dtype=np.float64,
+    )
+    if not np.array_equal(actual_frequency, expected_frequency):
+        raise ValueError(
+            "The MVC primary-beam frequencies do not match the map-task frequencies."
+        )
+
+    return xr.Dataset(
+        {
+            primary_beam_name: xr.Variable(
+                dims=primary_beam.dims,
+                data=primary_beam.data,
+                attrs=primary_beam.attrs.copy(),
+            )
+        },
+        coords={
+            dim: primary_beam.coords[dim]
+            for dim in primary_beam.dims
+            if dim in primary_beam.coords
+        },
+        attrs={
+            "primary_beam_name": primary_beam_name,
+            "task_id": int(task_id),
+            "continuum_mode": "mvc",
+        },
+    )
+
+
+def _write_wideband_primary_beam_in_place(primary_beam_xds, image_store):
+    """Write one task's MVC primary beam into its disjoint cache channels."""
+    import numpy as np
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP not in root:
+        raise KeyError("The in-place MVC primary-beam cache has not been initialized.")
+    cache = root[_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP]
+    target = cache[_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE]
+    primary_beam_name = primary_beam_xds.attrs.get(
+        "primary_beam_name",
+        _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+    )
+    primary_beam = primary_beam_xds[primary_beam_name]
+    dimensions = (
+        tuple(target.metadata.dimension_names)
+        if target.metadata.zarr_format == 3
+        else tuple(target.attrs["_ARRAY_DIMENSIONS"])
+    )
+    if primary_beam.dims != dimensions:
+        raise ValueError(
+            f"MVC primary-beam dimensions are {primary_beam.dims}; "
+            f"expected {dimensions}."
+        )
+    frequency_indexer = _stored_coordinate_indexer(
+        cache["frequency"][:],
+        primary_beam.coords["frequency"].values,
+        "frequency",
+    )
+    target.oindex[
+        (
+            slice(None),
+            frequency_indexer,
+            slice(None),
+            slice(None),
+            slice(None),
+        )
+    ] = np.asarray(primary_beam.values)
+
+
+def _load_wideband_primary_beam_in_place(img_xds, image_store):
+    """Load only this task's MVC primary-beam channels from the image cache."""
+    import numpy as np
+    import xarray as xr
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    if _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP not in root:
+        raise KeyError("The in-place MVC primary-beam cache is missing.")
+    cache = root[_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP]
+    target = cache[_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE]
+    frequency_values = np.asarray(img_xds.coords["frequency"].values, dtype=np.float64)
+    frequency_indexer = _stored_coordinate_indexer(
+        cache["frequency"][:],
+        frequency_values,
+        "frequency",
+    )
+    data = target.oindex[
+        (
+            slice(None),
+            frequency_indexer,
+            slice(None),
+            slice(None),
+            slice(None),
+        )
+    ]
+    dimensions = ("time", "frequency", "polarization", "l", "m")
+    primary_beam = xr.DataArray(
+        data,
+        dims=dimensions,
+        coords={dim: img_xds.coords[dim] for dim in dimensions},
+        attrs=dict(target.attrs),
+        name=_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+    )
+    return xr.Dataset(
+        {_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE: primary_beam},
+        attrs={
+            "primary_beam_name": _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+            "continuum_mode": "mvc",
+        },
+    )
+
+
+def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store):
+    """Write the globally reduced observed MFS grid into its prepared cache."""
+    import xarray as xr
+    import zarr
+
+    if not isinstance(observed_grid_xds, xr.Dataset):
+        raise TypeError(
+            "observed_grid_xds must be an xarray.Dataset; received "
+            f"{type(observed_grid_xds).__name__}."
+        )
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _MFS_VISIBILITY_GRID_CACHE_GROUP not in root:
+        raise KeyError("The in-place MFS visibility-grid cache is not initialized.")
+
+    observed_grid_xds.to_zarr(
+        image_store,
+        group=_MFS_VISIBILITY_GRID_CACHE_GROUP,
+        mode="r+",
+        consolidated=False,
+    )
+
+
+def _load_mfs_visibility_grid_in_place(image_store):
+    """Load the globally reduced observed MFS Taylor grid from the image store."""
+    import xarray as xr
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    if _MFS_VISIBILITY_GRID_CACHE_GROUP not in root:
+        raise KeyError("The in-place MFS visibility-grid cache is missing.")
+
+    observed_grid_xds = xr.open_zarr(
+        image_store,
+        group=_MFS_VISIBILITY_GRID_CACHE_GROUP,
+        consolidated=False,
+    )
+    observed_grid_xds.load()
+    observed_grid_xds.close()
+    return observed_grid_xds
+
+
+def _extract_mvc_observed_visibility_grid(img_xds):
+    """Remove and return the first-cycle MVC observed UV-grid cache payload."""
+    import copy
+
+    required = (
+        _MVC_OBSERVED_VISIBILITY_CACHE,
+        _MVC_OBSERVED_NORMALIZATION_CACHE,
+    )
+    missing = [name for name in required if name not in img_xds]
+    if missing:
+        raise KeyError(
+            f"The first MVC map result is missing cache variables {missing}."
+        )
+
+    observed_grid_xds = img_xds[list(required)].rename(
+        {
+            _MVC_OBSERVED_VISIBILITY_CACHE: "VISIBILITY",
+            _MVC_OBSERVED_NORMALIZATION_CACHE: "VISIBILITY_NORMALIZATION",
+        }
+    )
+    # The processing function already made these buffers independent before its
+    # in-place IFFT, so transfer their ownership without copying them a second time.
+    observed_grid_xds.attrs = copy.deepcopy(img_xds.attrs)
+    observed_grid_xds.attrs.setdefault("data_groups", {}).setdefault(
+        "residual", {}
+    ).update(
+        {
+            "visibility": "VISIBILITY",
+            "visibility_normalization": "VISIBILITY_NORMALIZATION",
+        }
+    )
+    observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
+    img_xds = img_xds.drop_vars(required)
+    return img_xds, observed_grid_xds
+
+
+def _write_mvc_visibility_grid_in_place(observed_grid_xds, image_store):
+    """Write one task's disjoint MVC observed UV planes into the cache store."""
+    import numpy as np
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _MVC_VISIBILITY_GRID_CACHE_GROUP not in root:
+        raise KeyError("The in-place MVC visibility-grid cache is not initialized.")
+    cache = root[_MVC_VISIBILITY_GRID_CACHE_GROUP]
+    frequency_indexer = _stored_coordinate_indexer(
+        cache["frequency"][:],
+        observed_grid_xds.coords["frequency"].values,
+        "frequency",
+    )
+    cache["VISIBILITY"].oindex[
+        (slice(None), frequency_indexer, slice(None), slice(None), slice(None))
+    ] = np.asarray(observed_grid_xds["VISIBILITY"].values)
+    cache["VISIBILITY_NORMALIZATION"].oindex[
+        (slice(None), frequency_indexer, slice(None))
+    ] = np.asarray(observed_grid_xds["VISIBILITY_NORMALIZATION"].values)
+
+
+def _load_mvc_visibility_grid_in_place(img_xds, image_store):
+    """Load only this task's MVC observed UV planes from the image cache."""
+    import copy
+
+    import numpy as np
+    import xarray as xr
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    if _MVC_VISIBILITY_GRID_CACHE_GROUP not in root:
+        raise KeyError("The in-place MVC visibility-grid cache is missing.")
+    cache = root[_MVC_VISIBILITY_GRID_CACHE_GROUP]
+    frequency_values = np.asarray(img_xds.coords["frequency"].values, dtype=np.float64)
+    frequency_indexer = _stored_coordinate_indexer(
+        cache["frequency"][:], frequency_values, "frequency"
+    )
+    visibility = cache["VISIBILITY"].oindex[
+        (slice(None), frequency_indexer, slice(None), slice(None), slice(None))
+    ]
+    normalization = cache["VISIBILITY_NORMALIZATION"].oindex[
+        (slice(None), frequency_indexer, slice(None))
+    ]
+    observed_grid_xds = xr.Dataset(
+        {
+            "VISIBILITY": xr.DataArray(
+                visibility,
+                dims=("time", "frequency", "polarization", "u", "v"),
+                coords={
+                    "time": img_xds.coords["time"],
+                    "frequency": img_xds.coords["frequency"],
+                    "polarization": img_xds.coords["polarization"],
+                },
+            ),
+            "VISIBILITY_NORMALIZATION": xr.DataArray(
+                normalization,
+                dims=("time", "frequency", "polarization"),
+                coords={
+                    "time": img_xds.coords["time"],
+                    "frequency": img_xds.coords["frequency"],
+                    "polarization": img_xds.coords["polarization"],
+                },
+            ),
+        },
+        attrs=copy.deepcopy(img_xds.attrs),
+    )
+    observed_grid_xds.attrs.setdefault("data_groups", {}).setdefault(
+        "residual", {}
+    ).update(
+        {
+            "visibility": "VISIBILITY",
+            "visibility_normalization": "VISIBILITY_NORMALIZATION",
+        }
+    )
+    observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
+    return observed_grid_xds
+
+
+def _recompute_wideband_primary_beam(
+    img_xds,
+    image_params,
+    single_precision_image,
+    task_id,
+):
+    """Re-evaluate the analytic MVC primary beam for one task's channels."""
+    import copy
+
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam import (
+        make_continuum_primary_beam_single_field,
+    )
+
+    pb_img_xds = img_xds.copy(deep=False)
+    pb_img_xds.attrs = copy.deepcopy(img_xds.attrs)
+    pb_img_xds.attrs["type"] = "image_dataset"
+    pb_img_xds = pb_img_xds.xr_img.add_data_group(
+        new_data_group_name="residual",
+        new_data_group={
+            "description": "Task-local recomputed MVC primary beam.",
+        },
+    )
+    pb_img_xds, _ = make_continuum_primary_beam_single_field(
+        pb_img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+        list_dish_diameters=image_params.get("list_dish_diameters"),
+        list_blockage_diameters=image_params.get("list_blockage_diameters"),
+        ipower=image_params.get("primary_beam_ipower", 2),
+        float_dtype=(np.float32 if single_precision_image else np.float64),
+    )
+    return _extract_mvc_primary_beam_xds(
+        pb_img_xds,
+        {"frequency": {"data": img_xds.coords["frequency"].values}},
+        task_id,
+    )
+
+
+def _unwrap_continuum_reduce_result(input_data, node_name):
+    """Return the dictionary produced by the continuum reduce stage."""
+    if isinstance(input_data, list | tuple):
+        if len(input_data) != 1:
+            raise ValueError(
+                f"{node_name} expects exactly one reduced input, "
+                f"but received {len(input_data)}."
+            )
+        input_data = input_data[0]
+
+    if not isinstance(input_data, dict):
+        raise TypeError(
+            f"{node_name} expects the dictionary returned by the reduce "
+            f"stage, not {type(input_data).__name__}."
+        )
+
+    if "image" not in input_data:
+        raise KeyError(
+            f"The continuum reduce result supplied to {node_name} "
+            "does not contain 'image'."
+        )
+
+    return input_data
+
+
+def _resolve_continuum_append_configuration(input_params, *, input_checked=False):
+    """Resolve residual-preparation settings without changing caller inputs."""
+    import numpy as np
+
+    image_params = input_params["image_params"]
+
+    if not (input_checked or input_params.get("input_checked", False)):
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        # The append entry owns model/workflow checks. This helper prepares
+        # residual products, so validate only its residual configuration once.
+        check_residual_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
+    n_taylor_terms = image_params["n_taylor_terms"]
+    reference_frequency = image_params["reference_frequency"]
+    single_precision_image = input_params.get("single_precision_image", True)
+
+    return {
+        "image_params": image_params,
+        "n_taylor_terms": n_taylor_terms,
+        "n_psf_taylor_terms": 2 * n_taylor_terms - 1,
+        "reference_frequency": reference_frequency,
+        "complex_dtype": (np.complex64 if single_precision_image else np.complex128),
+        "processing_function_threads": int(
+            input_params.get("processing_function_threads", 1)
+        ),
+        "fft_backend": input_params.get("fft_backend", "pyfftw"),
+        "image_data_variables_keep": input_params.get(
+            "image_data_variables_keep",
+            [],
+        ),
+        "image_data_group_in_name": input_params.get(
+            "image_data_group_in_name",
+            "residual",
+        ),
+        "gridding_kernel_params": input_params.get("gridding_kernel_params"),
+    }
+
+
+def _install_static_continuum_products(
+    img_xds,
+    static_xds,
+    image_data_group_name="residual",
+):
+    """Install cached PSF, PB, and beam-fit products into a residual image."""
+    import xarray as xr
+
+    static_variable_names = [
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+        "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+        "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+    ]
+
+    # Requested MFS sampling grids are static PSF products too. Ordinary
+    # runs omit them, avoiding additional persistent grid-sized buffers.
+    sampling_products = ("UV_SAMPLING", "UV_SAMPLING_NORMALIZATION")
+    present_sampling = [name for name in sampling_products if name in static_xds]
+    if present_sampling and len(present_sampling) != len(sampling_products):
+        raise KeyError(
+            "Static MFS sampling grid and normalization must be supplied together."
+        )
+    static_variable_names.extend(present_sampling)
+
+    for name in static_variable_names:
+        if name not in static_xds:
+            raise KeyError(f"static_xds does not contain {name!r}.")
+
+        if name not in img_xds:
+            source = static_xds[name]
+
+            if "frequency" in source.dims and "frequency" in img_xds.dims:
+                frequency_users = [
+                    variable_name
+                    for variable_name, variable in img_xds.data_vars.items()
+                    if "frequency" in variable.dims
+                ]
+
+                if frequency_users:
+                    raise ValueError(
+                        "Cannot replace the chunk frequency coordinate while "
+                        f"variables still use it: {frequency_users}."
+                    )
+
+                img_xds = img_xds.drop_dims("frequency")
+
+            source_coords = {
+                dim: source.coords[dim]
+                for dim in source.dims
+                if dim in source.coords and dim not in img_xds.coords
+            }
+
+            if source_coords:
+                img_xds = img_xds.assign_coords(source_coords)
+
+            img_xds[name] = xr.Variable(
+                source.dims,
+                source.data.copy(),
+                attrs=source.attrs.copy(),
+            )
+
+    data_groups = img_xds.attrs.setdefault("data_groups", {})
+    residual_group = data_groups.setdefault(image_data_group_name, {})
+
+    residual_group.update(
+        {
+            "point_spread_function": "POINT_SPREAD_FUNCTION",
+            "primary_beam": "PRIMARY_BEAM",
+            "beam_fit_params_point_spread_function": (
+                "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+            ),
+            "max_sidelobe_point_spread_function": (
+                "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+            ),
+        }
+    )
+
+    if "UV_SAMPLING" in static_xds:
+        from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+        modify_data_groups_xds(
+            img_xds,
+            data_group_out_name=image_data_group_name,
+            data_group_out={
+                **residual_group,
+                "uv_sampling": "UV_SAMPLING",
+                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
+            },
+            description="Reinstalled requested static MFS sampling grid.",
+        )
+
+    return img_xds
+
+
+def _attach_imaging_weights_continuum(
+    ps_xdt,
+    weight_datasets,
+    processing_set_data_group_name="corrected",
+    weight_imaging_name="WEIGHT_IMAGING",
+):
+    """Attach cached imaging weights to a loaded processing-set chunk.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Freshly loaded processing-set chunk.
+
+    weight_datasets : dict
+        Mapping from processing-set child name to an xarray Dataset containing
+        ``weight_imaging_name``.
+
+    processing_set_data_group_name : str, optional
+        Processing-set data group receiving the logical
+        ``"weight_imaging"`` registration.
+
+    weight_imaging_name : str, optional
+        Fallback name of the cached imaging-weight variable. Each cached
+        dataset's ``weight_imaging_name`` attribute takes precedence.
+
+    Returns
+    -------
+    xarray.DataTree
+        Processing-set chunk with cached imaging weights attached.
+    """
+    attached = 0
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        if ms_name not in weight_datasets:
+            raise KeyError(
+                f"No cached imaging weights were found for processing-set "
+                f"child {ms_name!r}. Available children are "
+                f"{list(weight_datasets)}."
+            )
+
+        weight_xds = weight_datasets[ms_name]
+        cached_weight_name = weight_xds.attrs.get(
+            "weight_imaging_name",
+            weight_imaging_name,
+        )
+
+        if cached_weight_name not in weight_xds:
+            raise KeyError(
+                f"Cached dataset for {ms_name!r} does not contain "
+                f"{cached_weight_name!r}."
+            )
+
+        weight_da = weight_xds[cached_weight_name]
+
+        if (
+            weight_da.dims
+            != ms_xdt[
+                ms_xdt.attrs["data_groups"][processing_set_data_group_name]["weight"]
+            ].dims
+        ):
+            raise ValueError(
+                f"Cached imaging weights for {ms_name!r} have dimensions "
+                f"{weight_da.dims}, which do not match the visibility-weight "
+                "dimensions."
+            )
+
+        for dim, size in weight_da.sizes.items():
+            if dim not in ms_xdt.sizes:
+                raise ValueError(
+                    f"Cached imaging weights for {ms_name!r} contain unknown "
+                    f"dimension {dim!r}."
+                )
+
+            if ms_xdt.sizes[dim] != size:
+                raise ValueError(
+                    f"Cached imaging weights for {ms_name!r} have size "
+                    f"{size} along {dim!r}; the loaded processing-set chunk "
+                    f"has size {ms_xdt.sizes[dim]}."
+                )
+
+        # Use a direct Variable assignment to avoid coordinate alignment.
+        ms_xdt[cached_weight_name] = weight_da.variable.copy(deep=False)
+
+        data_groups = ms_xdt.attrs.setdefault("data_groups", {})
+
+        if processing_set_data_group_name not in data_groups:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} does not contain data group "
+                f"{processing_set_data_group_name!r}."
+            )
+
+        data_groups[processing_set_data_group_name]["weight_imaging"] = (
+            cached_weight_name
+        )
+
+        attached += 1
+
+    if attached == 0:
+        raise RuntimeError(
+            "No imaging-weight datasets were attached to the processing-set chunk."
+        )
+
+    return ps_xdt
+
+
+def _unregister_imaging_weights_continuum(
+    ps_xdt,
+    processing_set_data_group_name="corrected",
+):
+    """Remove the imaging-weight registration from a loaded processing-set chunk.
+
+    Imaging weights that an earlier run kept or left registered in the
+    Processing Set, or that another tool wrote, were not made with this run's
+    ``imaging_weights_params``. Without their registration the setup of the
+    first imaging cycle calculates the imaging weights.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Freshly loaded processing-set chunk.
+
+    processing_set_data_group_name : str, optional
+        Processing-set data group whose ``"weight_imaging"`` registration is
+        removed.
+
+    Returns
+    -------
+    xarray.DataTree
+        Processing-set chunk whose data group registers no imaging weights.
+    """
+    import toolviper.utils.logger as logger
+
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        data_group = ms_xdt.attrs["data_groups"][processing_set_data_group_name]
+
+        if "weight_imaging" in data_group:
+            logger.debug(
+                f"Not using the imaging weights {data_group['weight_imaging']!r} "
+                f"registered in {ms_name!r}; they are calculated."
+            )
+            modify_data_groups_xds(
+                ms_xdt.ds,
+                data_group_out_name=processing_set_data_group_name,
+                data_group_out={
+                    role: name
+                    for role, name in data_group.items()
+                    if role != "weight_imaging"
+                },
+                description="Imaging weights not prepared by this run unregistered.",
+            )
+
+    return ps_xdt
+
+
+def _finalize_reference_primary_beam(
+    img_xds,
+    *,
+    reference_frequency,
+    image_data_group_name="residual",
+):
+    """Install the static MFS primary beam evaluated at reference frequency."""
+    import numpy as np
+
+    reference_name = "PRIMARY_BEAM_REFERENCE"
+    if reference_name not in img_xds:
+        raise KeyError(f"MFS image is missing {reference_name!r}.")
+    primary_beam = img_xds[reference_name]
+
+    # The globally reduced continuum products use Taylor dimensions, not
+    # the chunk-local frequency dimension. Remove the stale frequency
+    # coordinate before creating the effective one-channel PB.
+    if "frequency" in img_xds.dims:
+        variables_with_frequency = [
+            name
+            for name, data_array in img_xds.data_vars.items()
+            if "frequency" in data_array.dims
+        ]
+
+        if variables_with_frequency:
+            raise ValueError(
+                "Cannot replace the chunk-local frequency dimension because "
+                "these variables still depend on it: "
+                f"{variables_with_frequency}."
+            )
+
+        img_xds = img_xds.drop_dims(
+            "frequency",
+            errors="ignore",
+        )
+
+    primary_beam = primary_beam.expand_dims(
+        frequency=np.asarray(
+            [float(reference_frequency)],
+            dtype=np.float64,
+        ),
+        axis=1,
+    )
+
+    primary_beam.attrs = img_xds[reference_name].attrs.copy()
+    primary_beam.attrs.update(
+        {
+            "description": (
+                "Continuum zeroth-order primary beam evaluated directly "
+                "at the MT-MFS reference frequency."
+            ),
+            "type": "primary_beam",
+            "continuum_pb_order": 0,
+            "effective_frequency_hz": float(reference_frequency),
+            "effective_frequency_interpretation": "direct_evaluation",
+        }
+    )
+
+    img_xds["PRIMARY_BEAM"] = primary_beam
+
+    data_groups = img_xds.attrs.setdefault("data_groups", {})
+    image_data_group = data_groups.setdefault(
+        image_data_group_name,
+        {},
+    )
+
+    image_data_group["primary_beam"] = "PRIMARY_BEAM"
+    image_data_group.pop("primary_beam_reference", None)
+
+    img_xds = img_xds.drop_vars(
+        [reference_name],
+        errors="ignore",
+    )
+
+    return img_xds
+
+
+###############################################################################
+# Node task level functionality related to the residual update
+###############################################################################
+
+
+@shares_param_docs
+def residual_update_continuum_single_field(
+    image_params,
+    imaging_weights_params,
+    task_coords,
+    data_selection,
+    image_store,
+    input_data_store,
+    continuum_mode="mfs",
+    model_xds=None,
+    processing_set_data_group_name="corrected",
+    instrument_polarization_basis="linear",
+    single_precision_image=True,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    image_data_variables_keep=None,
+    memory_mode="in_memory",
+    weight_memory_mode="in_place",
+    visibility_memory_mode="recompute",
+    wideband_primary_beam_memory_mode="recompute",
+    skunk_works=False,
+    data_group=None,
+    is_first_cycle=True,
+    make_primary_beam_taylor=True,
+    model_uv_xds=None,
+    task_id=0,
+    primary_beam_limit=0.2,
+    mvc_model_update_approximation="local_beam_moments",
+    input_data=None,
+    task_time_kill_switch_seconds=None,
+    weight_cache_mapping=None,
+    weight_datasets=None,
+    weight_cache_is_active=False,
+    primary_beam_xds=None,
+    observed_visibility_grid_xds=None,
+    gridding_kernel_params=None,
+    *,
+    input_checked: bool = False,
+    calculate_auto_sensitivity: bool = False,
+):
+    """Compute one frequency chunk's continuum products in memory.
+
+    This node task constructs the per-chunk image dataset, loads the corresponding
+    visibility partition, and calls the continuum residual processing function.
+
+    This node can write temporary weight, visibility-grid, and PB caches;
+    final image publication occurs in the append node.
+    MFS returns chunk-local UV-domain products for numerical reduction. MVC
+    normalizes and inverse-transforms its exclusively owned channel grids,
+    applies the channel primary-beam convention, and forms additive Taylor
+    numerators locally. Polarization conversion, final global normalization,
+    and the model update remain append operations; restoration runs once in
+    the finalization node.
+
+    The MFS dataset typically contains
+
+    - ``VISIBILITY``;
+    - ``VISIBILITY_NORMALIZATION``;
+    - ``UV_SAMPLING``;
+    - ``UV_SAMPLING_NORMALIZATION``;
+
+    or, with the direct Fourier transform (``gridding_kernel_params={"type":
+    "dft"}``), the unnormalised Taylor images ``SKY_RESIDUAL`` and
+    ``POINT_SPREAD_FUNCTION`` in place of the two grids.
+
+    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR``,
+    ``MVC_RESIDUAL_WEIGHT_SUM`` and, in the first imaging cycle for
+    ``local_beam_moments``, the additive moments of the per-pixel spectral fit
+    (``MVC_RESIDUAL_BEAM_SQUARED_TAYLOR_SUM``,
+    ``MVC_RESIDUAL_WEIGHT_TAYLOR_SUM``, ``MVC_RESIDUAL_BEAM_CHANNEL_COUNT``).
+    The global append caches those moments for later cycles, replacing the
+    channel counts with Boolean Taylor-order support. During the first
+    imaging cycle the map task also returns the additive Taylor PSF numerator,
+    PSF weight sum, weighted PB sum, PB Taylor numerator, and PB-fit weight
+    moments.
+
+    Parameters
+    ----------
+    continuum_mode : {"mfs", "mvc"}
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
+        visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
+        the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
+        both the intrinsic source spectral index and the primary-beam spectral
+        index. Wideband primary-beam correction fits the beam in the same Taylor
+        basis and divides the apparent-sky polynomial by the beam polynomial
+        before restoration, removing that contribution from corrected spectral
+        products.
+        ``"mvc"`` forms
+        channel images and common-beam Taylor equations, and predicts
+        ``M_nu * A_nu / Abar``. Its ``SKY_MODEL`` coefficients therefore describe
+        the intrinsic spectrum under the common-beam convention, so
+        ``tt1 / tt0`` excludes the primary-beam spectral index. These conventions
+        match CASA's standard-gridder MT-MFS and MVC behavior. MVC images the two
+        parallel hands only; ``["I", "Q", "U", "V"]`` is refused.
+    model_xds : xarray.Dataset, optional
+        Accumulated image-domain Taylor model used for MVC prediction.
+    weight_cache_mapping : dict, optional
+        Legacy all-task prepared imaging-weight mapping. New graph callers
+        attach only this task's weights through ``weight_datasets``.
+    weight_datasets : dict, optional
+        Prepared imaging weights for this map task only, supplied through
+        ``node_task_data_mapping`` to avoid copying every task's weights into
+        every map-node parameter dictionary.
+    weight_cache_is_active : bool, optional
+        ``True`` when this run's in-place imaging weights are already
+        registered in the Processing Set (global weighting with
+        ``weight_memory_mode="in_place"``); the first imaging cycle then uses
+        them. Otherwise it uses ``weight_cache_mapping`` or calculates the
+        imaging weights: weights that an earlier run or another tool
+        registered are not used.
+    primary_beam_xds : xarray.Dataset, optional
+        Cached primary beam for this MVC partition.
+    observed_visibility_grid_xds : xarray.Dataset, optional
+        Task-local cached observed visibility grid used by later residual-update
+        cycles. The distributed application supplies this only for in-memory MVC
+        caching; other modes and first cycles leave it unset.
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+
+    imaging_weights_params : dict
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
+
+    task_coords : dict
+        Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
+        this chunk's parallel coordinate values (``"data"``) and its
+        ``"slice"`` into the full output array (for cube imaging the
+        parallel dim is ``frequency``).
+
+    data_selection : dict
+        Visibility selection injected by GraphViper.
+
+    image_store : str
+        Path/URL of the on-disk Zarr image cube.
+
+    input_data_store : str
+        Processing-set store used when ``input_data`` is not supplied.
+
+    processing_set_data_group_name : str, optional
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+
+    instrument_polarization_basis : str, optional
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
+
+    single_precision_image : bool, optional
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
+
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+
+    fft_backend : str, optional
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+
+    image_data_variables_keep : list of str, optional
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
+
+    memory_mode : str, optional
+        Currently only ``"in_memory"`` is supported.
+
+    weight_memory_mode : {"in_memory", "in_place"}, optional
+        Storage policy for calculated continuum imaging weights.
+        ``"in_memory"``
+        returns task-local weights to the driver and embeds them in subsequent
+        graphs. ``"in_place"`` writes each task's weights into a temporary group
+        in the output image store and reloads only the required partition during
+        each imaging cycle. It is the default because it bounds scheduler and
+        worker memory without modifying the input Processing Set. The temporary
+        group is removed when the run ends, also after an error. A completed cache
+        is copied into the input only when ``write_imaging_weights_to_ps=True``.
+        This option remains separate from ``memory_mode`` for now; the policies
+        may be unified later.
+
+    visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
+        Continuum residual-update storage policy for observed visibility grids.
+        ``"in_memory"`` retains the first-cycle grid in driver memory, while
+        ``"in_place"`` stores it temporarily in the image Zarr store. Later
+        cycles grid only the predicted-model contribution and subtract it from
+        the cached observed grid. ``"recompute"`` instead reloads the original
+        observed visibilities and grids their visibility-domain residual every
+        cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
+        map task's exclusively owned frequency-resolved UV planes.
+
+    wideband_primary_beam_memory_mode : {"in_memory", "in_place", "recompute"}, optional
+        MVC-only storage policy for the frequency-dependent primary beam.
+        ``"in_place"`` stores it temporarily in the image Zarr store and reads
+        only task-local channels. The default ``"recompute"`` regenerates the
+        analytic beam inside every later map, and ``"in_memory"`` retains it at
+        the driver but passes each map only its local beam. The setting is ignored
+        for MFS.
+
+    skunk_works : bool, optional
+        Use the experimental direct-Zarr loading path.
+
+    data_group : dict, optional
+        Role-to-variable mapping used by the skunk-works loader.
+
+    is_first_cycle : bool, optional
+        Indicates whether this is the first imaging cycle.
+
+    make_primary_beam_taylor : bool, optional
+        Collect the first-cycle inputs needed for primary-beam Taylor products.
+        Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,
+        fit the globally reduced beam in the first append node, and keep the
+        fitted diagnostic outside the iterative image and static cache.
+
+    model_uv_xds : xarray.Dataset, optional
+        Precomputed Taylor-domain model visibility grids used for degridding.
+        Ignored during the first imaging cycle.
+
+    task_id : int, optional
+        Identifier of the parallel chunk being processed.
+
+    primary_beam_limit : float, optional
+        Channel primary-beam cutoff used for MVC map-local Taylor products.
+
+    mvc_model_update_approximation : {"channel_psf", "local_beam_moments"}, optional
+        MVC approximation used to construct the Taylor residuals and PSFs.
+        The default ``"local_beam_moments"`` is the least-squares-consistent
+        operator used by the main MVC path.
+        ``"channel_psf"`` retains the frequency-dependent channel PSFs while
+        approximating the channel-to-common-beam ratio as one and is retained
+        as the CASA-comparison option. On wide bands at low effective primary-
+        beam response it can satisfy the Taylor-zero stopping threshold while
+        silently biasing compact-source flux and spectral index.
+        ``"local_beam_moments"`` retains local frequency-dependent primary-beam
+        moments while approximating the channel PSFs by a common response. The
+        setting is ignored by MFS.
+
+    input_data : dict, optional
+        Preloaded visibility data for this chunk.
+
+    task_time_kill_switch_seconds : float, optional
+        Abort the distributed calculation if this task exceeds the specified wall
+        time.
+
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    calculate_auto_sensitivity : bool, optional
+        On the first cycle, return additive weight statistics for automatic
+        cycle limits with zero threshold. Uses loaded weights, not visibility
+        or UVW data; no driver preflight scan is performed.
+
+    Returns
+    -------
+    dict
+        Dictionary containing
+
+        ``"image"``
+            MFS Taylor UV products or additive MVC Taylor contributions.
+
+        ``"timing_node_tasks"``
+            One-row dataframe summarizing task timing information."""
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
+    import time
+
+    import numpy as np
+    import toolviper.utils.logger as logger
+    import xarray as xr
+    from toolviper.utils.memory_management import get_rss_gb
+    from xradio.image import make_empty_sky_image
+
+    import astroviper.processing_functions as pf
+    from astroviper.processing_functions.imaging.utils import (
+        CONTINUUM_IMAGING_TIMING_PHASES,
+        IMAGING_TIMING_TOTAL_KEY,
+    )
+    from astroviper.utils.timing import print_timing_summary
+
+    # =============================================================
+    # Initialization
+    # =============================================================
+
+    task_start = time.time()
+
+    logger.debug(
+        "Memory usage at start of residual_update_continuum_single_field: "
+        + str(get_rss_gb())
+        + " GB"
+    )
+
+    if image_data_variables_keep is None:
+        image_data_variables_keep = [
+            "sky_model",
+            "sky_residual",
+            "point_spread_function",
+            "primary_beam",
+        ]
+
+    # Build the empty image in the correlation basis expected by the gridder.
+    # The requested Stokes planes fix the correlations (the ones the driver
+    # selected for this task's data).
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
+    )
+
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
+
+    start = time.time()
+
+    img_xds = make_empty_sky_image(
+        phase_center=image_params["phase_direction"],
+        image_size=image_params["image_size"],
+        cell_size=image_params["cell_size"],
+        frequency_coords=task_coords["frequency"]["data"],
+        pol_coords=correlation_pol_coords,
+        time_coords=image_params["time_coords"],
+        spectral_reference=image_params.get("spectral_reference", "lsrk"),
+        do_sky_coords=False,
+    )
+
+    T_make_empty_image = time.time() - start
+
+    # Load this map task's visibility partition.
+    start = time.time()
+
+    omit_observed_visibility = (
+        visibility_memory_mode in ("in_memory", "in_place") and not is_first_cycle
+    )
+
+    if input_data is not None:
+        # The optional GraphViper data-loading layer has already performed the
+        # task-level sub-selection.
+        ps_xdt = input_data
+
+    elif skunk_works:
+        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
+
+        ps_xdt = load_processing_set_skunk_works(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group=data_group,
+            processing_set_data_group_name=processing_set_data_group_name,
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=instrument_polarization_basis,
+            processing_function_threads=processing_function_threads,
+            load_correlated_data=not omit_observed_visibility,
+        )
+
+    else:
+        from xradio.measurement_set.load_processing_set import load_processing_set
+
+        drop_variables = None
+        if omit_observed_visibility:
+            if not isinstance(data_group, dict) or "correlated_data" not in data_group:
+                raise ValueError(
+                    "Cached-grid loading requires the resolved processing-set "
+                    "data_group mapping."
+                )
+            drop_variables = [data_group["correlated_data"]]
+
+        ps_xdt = load_processing_set(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group_name=processing_set_data_group_name,
+            drop_variables=drop_variables,
+            load_sub_datasets=False,
+        )
+
+    T_load = time.time() - start
+
+    # =============================================================
+    # Load Imaging Cache
+    # =============================================================
+
+    if weight_datasets is not None:
+        ps_xdt = _attach_imaging_weights_continuum(
+            ps_xdt,
+            weight_datasets,
+            processing_set_data_group_name=(processing_set_data_group_name),
+            weight_imaging_name="WEIGHT_IMAGING",
+        )
+
+    elif weight_cache_mapping is not None:
+        task_id = int(task_id)
+
+        if task_id not in weight_cache_mapping:
+            raise KeyError(f"No cached imaging weights were found for task {task_id}.")
+
+        ps_xdt = _attach_imaging_weights_continuum(
+            ps_xdt,
+            weight_cache_mapping[task_id],
+            processing_set_data_group_name=(processing_set_data_group_name),
+            weight_imaging_name="WEIGHT_IMAGING",
+        )
+
+    elif weight_cache_is_active:
+        ps_xdt = _load_continuum_weights_in_place(
+            ps_xdt,
+            image_store,
+            processing_set_data_group_name,
+        )
+
+    elif is_first_cycle and not weight_cache_is_active:
+        # This run has not prepared imaging weights, so setup calculates them.
+        ps_xdt = _unregister_imaging_weights_continuum(
+            ps_xdt,
+            processing_set_data_group_name=(processing_set_data_group_name),
+        )
+
+    # =============================================================
+    # Resolve the task-local MVC primary beam
+    # =============================================================
+
+    if continuum_mode == "mvc" and not is_first_cycle:
+        task_id = int(task_id)
+
+        if wideband_primary_beam_memory_mode == "in_place":
+            primary_beam_xds = _load_wideband_primary_beam_in_place(
+                img_xds,
+                image_store,
+            )
+        elif wideband_primary_beam_memory_mode == "recompute":
+            primary_beam_xds = _recompute_wideband_primary_beam(
+                img_xds,
+                image_params,
+                single_precision_image,
+                task_id,
+            )
+        elif primary_beam_xds is None:
+            raise ValueError(
+                "Later MVC imaging cycles with "
+                "wideband_primary_beam_memory_mode='in_memory' require a task-local "
+                "primary_beam_xds."
+            )
+
+        if not isinstance(primary_beam_xds, xr.Dataset):
+            raise TypeError(
+                "The cached MVC primary beam for task "
+                f"{task_id} must be an xarray.Dataset; received "
+                f"{type(primary_beam_xds).__name__}."
+            )
+
+        primary_beam_name = primary_beam_xds.attrs.get(
+            "primary_beam_name",
+            "PRIMARY_BEAM",
+        )
+
+        if primary_beam_name not in primary_beam_xds:
+            raise KeyError(
+                "The cached MVC primary-beam dataset for task "
+                f"{task_id} does not contain "
+                f"{primary_beam_name!r}."
+            )
+
+        primary_beam = primary_beam_xds[primary_beam_name]
+
+        if "frequency" not in primary_beam.dims:
+            raise ValueError(
+                "The cached MVC primary beam must contain a frequency dimension."
+            )
+
+        expected_frequency = np.asarray(
+            task_coords["frequency"]["data"],
+            dtype=np.float64,
+        )
+
+        actual_frequency = np.asarray(
+            primary_beam.coords["frequency"].values,
+            dtype=np.float64,
+        )
+
+        if not np.array_equal(
+            actual_frequency,
+            expected_frequency,
+        ):
+            raise ValueError(
+                "The cached MVC primary-beam frequencies do not "
+                "match the frequencies assigned to this map task: "
+                f"cached={actual_frequency}, "
+                f"task={expected_frequency}."
+            )
+
+        if visibility_memory_mode == "in_place":
+            observed_visibility_grid_xds = _load_mvc_visibility_grid_in_place(
+                img_xds,
+                image_store,
+            )
+        elif (
+            visibility_memory_mode == "in_memory"
+            and observed_visibility_grid_xds is None
+        ):
+            raise ValueError(
+                "Later MVC imaging cycles with visibility_memory_mode='in_memory' "
+                "require a task-local observed_visibility_grid_xds."
+            )
+
+    # =============================================================
+    # Run processing function
+    # =============================================================
+
+    # Run the continuum processing function.
+    img_xds, timing_df = pf.imaging.residual_update_continuum_single_field(
+        ps_xdt,
+        img_xds,
+        image_params,
+        imaging_weights_params,
+        processing_set_data_group_name=(processing_set_data_group_name),
+        instrument_polarization_basis=(instrument_polarization_basis),
+        single_precision_image=single_precision_image,
+        processing_function_threads=(processing_function_threads),
+        fft_backend=fft_backend,
+        image_data_variables_keep=(image_data_variables_keep),
+        visibility_memory_mode=visibility_memory_mode,
+        observed_visibility_grid_xds=observed_visibility_grid_xds,
+        is_first_cycle=is_first_cycle,
+        make_primary_beam_taylor=make_primary_beam_taylor,
+        model_uv_xds=model_uv_xds,
+        model_xds=model_xds,
+        primary_beam_xds=primary_beam_xds,
+        continuum_mode=continuum_mode,
+        task_id=task_id,
+        primary_beam_limit=primary_beam_limit,
+        mvc_model_update_approximation=mvc_model_update_approximation,
+        gridding_kernel_params=gridding_kernel_params,
+        input_checked=True,
+    )
+
+    auto_weight_sums = None
+    if is_first_cycle and calculate_auto_sensitivity:
+        from astroviper.processing_functions.imaging.weight_statistics import (
+            continuum_correlation_weight_sums,
+        )
+
+        auto_weight_sums = continuum_correlation_weight_sums(
+            ps_xdt, processing_set_data_group_name
+        )
+
+    # Retain the task-local frequency-dependent PB for MVC
+    pb_xds = None
+    mvc_observed_visibility_grid_xds = None
+
+    if (
+        continuum_mode == "mvc"
+        and is_first_cycle
+        and wideband_primary_beam_memory_mode in ("in_memory", "in_place")
+    ):
+        pb_xds = _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id)
+        if wideband_primary_beam_memory_mode == "in_place":
+            _write_wideband_primary_beam_in_place(pb_xds, image_store)
+            pb_xds = None
+
+    if continuum_mode == "mvc":
+        if is_first_cycle and visibility_memory_mode != "recompute":
+            img_xds, mvc_observed_visibility_grid_xds = (
+                _extract_mvc_observed_visibility_grid(img_xds)
+            )
+            if visibility_memory_mode == "in_place":
+                _write_mvc_visibility_grid_in_place(
+                    mvc_observed_visibility_grid_xds,
+                    image_store,
+                )
+                mvc_observed_visibility_grid_xds = None
+
+        # Taylor numerators and normalization sums have already been formed by
+        # this map task.  Keep the channel PB only in pb_xds for later model
+        # prediction and do not send any frequency-sized image through reduce.
+        frequency_variables = [
+            name
+            for name, data_array in img_xds.data_vars.items()
+            if "frequency" in data_array.dims
+        ]
+        img_xds = img_xds.drop_vars(frequency_variables, errors="ignore")
+        if "frequency" in img_xds.dims:
+            img_xds = img_xds.drop_dims("frequency", errors="ignore")
+
+    # Preserve the first-cycle imaging weights for reuse by later imaging cycles.
+    # They may have been loaded from the processing set or calculated in setup.
+    return_weight_datasets = {}
+
+    T_write_imaging_weights = 0.0
+    imaging_weights_calculated = bool(
+        is_first_cycle
+        and "imaging_weights_calculated" in timing_df
+        and timing_df["imaging_weights_calculated"].iloc[0]
+    )
+    if imaging_weights_calculated:
+        import xarray as xr
+
+        for ms_name, ms_xds in ps_xdt.items():
+            data_group = ms_xds.attrs["data_groups"][processing_set_data_group_name]
+
+            weight_name = data_group.get("weight_imaging")
+
+            if weight_name is None or weight_name not in ms_xds:
+                raise RuntimeError(
+                    f"No imaging weights were available for {ms_name!r} "
+                    "after first-cycle setup."
+                )
+
+            weight_da = ms_xds[weight_name]
+
+            return_weight_datasets[ms_name] = xr.Dataset(
+                {
+                    weight_name: xr.Variable(
+                        dims=weight_da.dims,
+                        data=weight_da.data,
+                        attrs=weight_da.attrs.copy(),
+                    )
+                },
+                attrs={
+                    "weight_imaging_name": weight_name,
+                    "processing_set_data_group_name": (processing_set_data_group_name),
+                    "task_id": int(task_id),
+                },
+            )
+
+        if weight_memory_mode == "in_place":
+            start = time.time()
+            _write_continuum_weights_in_place(ps_xdt, image_store)
+            T_write_imaging_weights = time.time() - start
+            return_weight_datasets = {}
+
+    # No output image writing is performed here. The Taylor products stay in
+    # memory and flow directly into the GraphViper reduction stage.
+
+    # Visibility data are no longer needed once the local Taylor products have
+    # been constructed. Keep img_xds alive because it is the map-task output.
+    ps_xdt = None
+
+    logger.debug(
+        "Memory usage after residual_update_continuum_single_field: "
+        + str(get_rss_gb())
+        + " GB"
+    )
+
+    task_total_time = time.time() - task_start
+
+    timing_df["T_make_empty_image"] = T_make_empty_image
+    timing_df["T_load"] = T_load
+    timing_df["T_write_imaging_weights"] = T_write_imaging_weights
+    timing_df["T_write"] = T_write_imaging_weights
+
+    # Keep this column for compatibility with the existing timing schema while
+    # making it explicit that no writing occurred.
+    timing_df["T_image_cube_task"] = task_total_time
+
+    _add_task_execution_metadata(timing_df, task_start)
+    hostname = timing_df["hostname"].iloc[0]
+
+    if (
+        task_time_kill_switch_seconds is not None
+        and task_total_time > task_time_kill_switch_seconds
+    ):
+        log_path = _write_task_kill_switch_log(
+            timing_df,
+            task_total_time,
+            task_time_kill_switch_seconds,
+            image_store,
+            task_id,
+            hostname,
+        )
+
+        message = (
+            f"task_time_kill_switch tripped: task {task_id} on {hostname} took "
+            f"{task_total_time:.1f}s > "
+            f"{task_time_kill_switch_seconds}s threshold. "
+            f"Aborting the run. Timing log written to: {log_path}"
+        )
+
+        logger.error(message)
+        raise RuntimeError(message)
+
+    print_timing_summary(
+        timing_df,
+        CONTINUUM_IMAGING_TIMING_PHASES,
+        total_key=IMAGING_TIMING_TOTAL_KEY,
+        printer=logger.debug,
+    )
+
+    return_dict = {
+        "image": img_xds,
+        "timing_node_tasks": timing_df,
+    }
+
+    if auto_weight_sums is not None:
+        return_dict["auto_weight_sums"] = auto_weight_sums
+
+    # Return weights computed locally in the first imaging cycle to the driver.
+    if return_weight_datasets:
+        return_dict["task_id"] = int(task_id)
+        return_dict["weight_datasets"] = return_weight_datasets
+
+    # Return primary beams per channel if present
+    if pb_xds is not None:
+        return_dict["task_id"] = int(task_id)
+        return_dict["pb_xds"] = pb_xds
+
+    if mvc_observed_visibility_grid_xds is not None:
+        return_dict["task_id"] = int(task_id)
+        return_dict["observed_visibility_grid_xds"] = mvc_observed_visibility_grid_xds
+
+    return _prepare_continuum_result_for_transfer(return_dict)
+
+
+@shares_param_docs
+def grid_imaging_weight_density_continuum_node(
+    image_params,
+    imaging_weights_params,
+    task_coords,
+    data_selection,
+    input_data_store,
+    processing_set_data_group_name="corrected",
+    instrument_polarization_basis="linear",
+    single_precision_gridding=False,
+    processing_function_threads=1,
+    skunk_works=False,
+    data_group=None,
+    input_data=None,
+    task_id=0,
+    *,
+    input_checked: bool = False,
+):
+    """Grid one visibility partition's contribution to the global weight density.
+
+    This node task implements the map stage of the distributed continuum
+    imaging-weight calculation. It loads one processing-set partition, creates
+    the corresponding local image geometry, and calls
+    ``grid_imaging_weight_density_continuum`` to produce the partition-local
+    weight-density grid and sum-of-weight contribution.
+
+    The node does not calculate Briggs factors, degrid imaging weights, or
+    create ``WEIGHT_IMAGING``. Those operations occur only after all local
+    density contributions have been combined by the GraphViper reduce stage.
+
+    Parameters
+    ----------
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+    imaging_weights_params : dict
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
+    task_coords : dict
+        Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
+        this chunk's parallel coordinate values (``"data"``) and its
+        ``"slice"`` into the full output array (for cube imaging the
+        parallel dim is ``frequency``).
+    data_selection : dict
+        Selection passed to the Processing Set loader.
+    input_data_store : str
+        Path or URL of the input Processing Set.
+    processing_set_data_group_name : str, optional
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+    instrument_polarization_basis : {"linear", "circular"}, optional
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
+    single_precision_gridding : bool, optional
+        Use single-precision density-grid storage when true.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    skunk_works : bool, optional
+        Use the experimental direct Measurement Set loader.
+    data_group : dict or None, optional
+        Resolved data-group role mapping. Its correlated-data variable is
+        omitted from ordinary loads because global density gridding uses only
+        UVW, weights, and flags. It also configures the experimental loader.
+    input_data : xarray.DataTree or mapping or None, optional
+        Preloaded Processing Set partition; when supplied, skip disk loading.
+    task_id : int, optional
+        Identifier of the parallel chunk being processed.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    Returns
+    -------
+    dict
+        Dictionary containing
+
+        ``"weight_density"``
+            An :class:`xarray.Dataset` containing
+            ``WEIGHT_DENSITY_GRID`` and ``SUM_WEIGHT``.
+
+        ``"timing_node_tasks"``
+            One-row timing dataframe for this map task.
+
+        ``"task_id"``
+            Integer task identifier.
+    """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_weight_density_method,
+        )
+
+        check_weight_density_method(imaging_weights_params)
+        check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
+    import time
+
+    import pandas as pd
+    import toolviper.utils.logger as logger
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        grid_imaging_weight_density_continuum,
+    )
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
+    )
+
+    task_id = int(task_id)
+    task_start = time.time()
+
+    # ------------------------------------------------------------------
+    # Load this task's visibility partition.
+    # ------------------------------------------------------------------
+    start = time.time()
+
+    if input_data is not None:
+        # GraphViper or another caller already loaded and selected the
+        # processing-set partition.
+        ps_xdt = input_data
+
+    elif skunk_works:
+        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
+
+        ps_xdt = load_processing_set_skunk_works(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group=data_group,
+            processing_set_data_group_name=(processing_set_data_group_name),
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=(instrument_polarization_basis),
+            processing_function_threads=(processing_function_threads),
+            load_correlated_data=False,
+        )
+
+    else:
+        from xradio.measurement_set.load_processing_set import load_processing_set
+
+        ps_xdt = load_processing_set(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group_name=processing_set_data_group_name,
+            drop_variables=_weighting_drop_variables(
+                data_group, "grid_imaging_weight_density_continuum_node"
+            ),
+            load_sub_datasets=False,
+        )
+
+    T_load = time.time() - start
+
+    # ------------------------------------------------------------------
+    # Construct the local image geometry used by the density gridder.
+    # ------------------------------------------------------------------
+    if "frequency" not in task_coords:
+        raise KeyError(
+            "grid_imaging_weight_density_continuum_node requires "
+            "task_coords['frequency']."
+        )
+
+    if "data" not in task_coords["frequency"]:
+        raise KeyError(
+            "task_coords['frequency'] must contain the local frequency "
+            "coordinate under the key 'data'."
+        )
+
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
+
+    start = time.time()
+
+    img_xds = make_empty_sky_image(
+        phase_center=image_params["phase_direction"],
+        image_size=image_params["image_size"],
+        cell_size=image_params["cell_size"],
+        frequency_coords=task_coords["frequency"]["data"],
+        pol_coords=correlation_pol_coords,
+        time_coords=image_params["time_coords"],
+        do_sky_coords=False,
+    )
+
+    # Required by the xradio image accessor used to retrieve the image
+    # cell size.
+    img_xds.attrs["type"] = "image_dataset"
+
+    T_make_empty_image = time.time() - start
+
+    # ------------------------------------------------------------------
+    # Grid the partition-local density contribution.
+    # ------------------------------------------------------------------
+    start = time.time()
+
+    weight_density_xds = grid_imaging_weight_density_continuum(
+        ps_xdt,
+        img_xds,
+        imaging_weights_params,
+        ms_data_group_in_name=processing_set_data_group_name,
+        single_precision_gridding=single_precision_gridding,
+        processing_function_threads=processing_function_threads,
+        input_checked=True,
+    )
+
+    T_grid_weight_density = time.time() - start
+
+    # ------------------------------------------------------------------
+    # Validate the map-task output before returning it to the reducer.
+    # ------------------------------------------------------------------
+    required_variables = (
+        "WEIGHT_DENSITY_GRID",
+        "SUM_WEIGHT",
+    )
+
+    missing_variables = [
+        name for name in required_variables if name not in weight_density_xds
+    ]
+
+    if missing_variables:
+        raise RuntimeError(
+            "The weight-density processing function did not create all "
+            f"required products. Missing: {missing_variables}."
+        )
+
+    if "frequency" not in weight_density_xds.coords:
+        raise RuntimeError(
+            "The partition-local weight-density result does not contain "
+            "a frequency coordinate."
+        )
+
+    task_total_time = time.time() - task_start
+
+    timing_df = pd.DataFrame(
+        {
+            "task_id": [task_id],
+            "T_load": [T_load],
+            "T_make_empty_image": [T_make_empty_image],
+            "T_grid_weight_density": [T_grid_weight_density],
+            "T_weight_density_node": [task_total_time],
+            "n_frequency_channels": [
+                weight_density_xds.attrs.get(
+                    "n_input_frequency_channels",
+                    weight_density_xds.sizes.get("frequency", 0),
+                )
+            ],
+            "n_weight_density_planes": [weight_density_xds.sizes.get("frequency", 0)],
+        }
+    )
+    _add_task_execution_metadata(timing_df, task_start)
+
+    logger.debug(
+        "Finished continuum weight-density task "
+        f"{task_id}: "
+        f"{weight_density_xds.sizes.get('frequency', 0)} channels, "
+        f"{task_total_time:.3f} s."
+    )
+
+    # The visibility partition is not needed after its density
+    # contribution has been constructed.
+    ps_xdt = None
+    img_xds = None
+
+    return _prepare_continuum_result_for_transfer(
+        {
+            "task_id": task_id,
+            "weight_density": weight_density_xds,
+            "timing_node_tasks": timing_df,
+        }
+    )
+
+
+@shares_param_docs
+def degrid_imaging_weights_continuum_node(
+    image_params,
+    imaging_weights_params,
+    global_weighting_xds,
+    task_coords,
+    data_selection,
+    input_data_store,
+    image_store,
+    processing_set_data_group_name="corrected",
+    instrument_polarization_basis="linear",
+    processing_function_threads=1,
+    weight_memory_mode="in_place",
+    skunk_works=False,
+    data_group=None,
+    input_data=None,
+    task_id=0,
+    *,
+    input_checked: bool = False,
+):
+    """Create final imaging weights for one visibility partition.
+
+    This node implements the map stage of the second distributed continuum
+    weighting graph. It loads one processing-set partition, selects the
+    corresponding planes from the globally reduced weight-density products,
+    degrids the global Briggs weighting solution onto the local visibility
+    samples, and either returns the weights or writes them to the temporary
+    output-image cache according to ``weight_memory_mode``, together with
+    timing metadata.
+
+    No density gridding or Briggs-factor calculation is performed here.
+
+    Parameters
+    ----------
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
+        Continuum imaging also requires ``frequency_coords``,
+        ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
+        ``spectral_reference``
+        sets the spectral frame (default ``"lsrk"``). ``primary_beam_model``
+        selects ``auto``, ``airy`` or ``casa_airy``; ``list_dish_diameters`` and
+        ``list_blockage_diameters`` are arrays in metres,
+        ``primary_beam_max_radius_1ghz`` is a radius in radians at 1 GHz, and
+        ``primary_beam_ipower`` is the exponent applied to the voltage pattern
+        (default 2, the power beam). These primary-beam keys override the inferred
+        beam prescription.
+    imaging_weights_params : dict
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
+    global_weighting_xds : xarray.Dataset
+        Reduced continuum density grid and global Briggs factors.
+    task_coords : dict
+        Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
+        this chunk's parallel coordinate values (``"data"``) and its
+        ``"slice"`` into the full output array (for cube imaging the
+        parallel dim is ``frequency``).
+    data_selection : dict
+        Selection passed to the Processing Set loader.
+    input_data_store : str
+        Path or URL of the input Processing Set.
+    image_store : str
+        Path/URL of the on-disk Zarr image cube.
+    processing_set_data_group_name : str, optional
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+    instrument_polarization_basis : {"linear", "circular"}, optional
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    weight_memory_mode : {"in_memory", "in_place"}, optional
+        Storage policy for calculated continuum imaging weights.
+        ``"in_memory"``
+        returns task-local weights to the driver and embeds them in subsequent
+        graphs. ``"in_place"`` writes each task's weights into a temporary group
+        in the output image store and reloads only the required partition during
+        each imaging cycle. It is the default because it bounds scheduler and
+        worker memory without modifying the input Processing Set. The temporary
+        group is removed when the run ends, also after an error. A completed cache
+        is copied into the input only when ``write_imaging_weights_to_ps=True``.
+        This option remains separate from ``memory_mode`` for now; the policies
+        may be unified later.
+    skunk_works : bool, optional
+        Use the experimental direct Measurement Set loader.
+    data_group : dict or None, optional
+        Resolved data-group role mapping. Its correlated-data variable is
+        omitted from ordinary loads because weight degridding uses only UVW,
+        weights, and flags. It also configures the experimental loader.
+    input_data : xarray.DataTree or mapping or None, optional
+        Preloaded Processing Set partition; when supplied, skip disk loading.
+    task_id : int, optional
+        Identifier of the parallel chunk being processed.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    Returns
+    -------
+    dict
+        Task identifier, task-local weight datasets or disk-cache references,
+        and one-row node timing metadata.
+    """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_weight_density_method,
+        )
+
+        check_weight_density_method(imaging_weights_params)
+        check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
+    import time
+
+    import pandas as pd
+    import toolviper.utils.logger as logger
+    import xarray as xr
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        degrid_imaging_weights_continuum,
+    )
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
+    )
+
+    task_id = int(task_id)
+    task_start = time.time()
+
+    if not isinstance(global_weighting_xds, xr.Dataset):
+        raise TypeError(
+            "global_weighting_xds must be an xarray.Dataset; received "
+            f"{type(global_weighting_xds).__name__}."
+        )
+
+    # -------------------------------------------------------------
+    # Load this task's visibility partition.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    if input_data is not None:
+        ps_xdt = input_data
+
+    elif skunk_works:
+        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
+
+        ps_xdt = load_processing_set_skunk_works(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group=data_group,
+            processing_set_data_group_name=(processing_set_data_group_name),
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=(instrument_polarization_basis),
+            processing_function_threads=(processing_function_threads),
+            load_correlated_data=False,
+        )
+
+    else:
+        from xradio.measurement_set.load_processing_set import load_processing_set
+
+        ps_xdt = load_processing_set(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group_name=processing_set_data_group_name,
+            drop_variables=_weighting_drop_variables(
+                data_group, "degrid_imaging_weights_continuum_node"
+            ),
+            load_sub_datasets=False,
+        )
+
+    T_load = time.time() - start
+
+    # -------------------------------------------------------------
+    # Construct the local image geometry needed by the degridder.
+    # -------------------------------------------------------------
+    if "frequency" not in task_coords:
+        raise KeyError(
+            "degrid_imaging_weights_continuum_node requires task_coords['frequency']."
+        )
+
+    if "data" not in task_coords["frequency"]:
+        raise KeyError(
+            "task_coords['frequency'] must contain the local channel "
+            "coordinate under 'data'."
+        )
+
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
+
+    start = time.time()
+
+    img_xds = make_empty_sky_image(
+        phase_center=image_params["phase_direction"],
+        image_size=image_params["image_size"],
+        cell_size=image_params["cell_size"],
+        frequency_coords=task_coords["frequency"]["data"],
+        pol_coords=correlation_pol_coords,
+        time_coords=image_params["time_coords"],
+        do_sky_coords=False,
+    )
+    img_xds.attrs["type"] = "image_dataset"
+
+    T_make_empty_image = time.time() - start
+
+    # -------------------------------------------------------------
+    # Degrid the global weighting products.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    ps_xdt = degrid_imaging_weights_continuum(
+        ps_xdt,
+        img_xds,
+        global_weighting_xds,
+        imaging_weights_params,
+        ms_data_group_in_name=processing_set_data_group_name,
+        ms_data_group_out_name=processing_set_data_group_name,
+        ms_data_group_out_modified={
+            "weight_imaging": "WEIGHT_IMAGING",
+        },
+        overwrite=True,
+        processing_function_threads=processing_function_threads,
+        input_checked=True,
+    )
+
+    T_degrid_imaging_weights = time.time() - start
+
+    # -------------------------------------------------------------
+    # Extract only the task-local imaging-weight arrays.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    weight_datasets = {}
+
+    for ms_name, ms_xds in ps_xdt.items():
+        data_groups = ms_xds.attrs.get("data_groups", {})
+
+        if processing_set_data_group_name not in data_groups:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} does not contain "
+                f"data group {processing_set_data_group_name!r}."
+            )
+
+        data_group = data_groups[processing_set_data_group_name]
+        weight_name = data_group.get("weight_imaging")
+
+        if weight_name is None:
+            raise KeyError(
+                f"The degridding stage did not register "
+                f"'weight_imaging' for child {ms_name!r}."
+            )
+
+        if weight_name not in ms_xds:
+            raise KeyError(
+                f"The registered imaging-weight variable "
+                f"{weight_name!r} is absent from child {ms_name!r}."
+            )
+
+        weight_da = ms_xds[weight_name]
+
+        # Create an independent lightweight dataset containing only the
+        # per-visibility imaging weights. The visibility partition itself
+        # must not remain reachable from the map result.
+        weight_datasets[ms_name] = xr.Dataset(
+            {
+                weight_name: xr.Variable(
+                    dims=weight_da.dims,
+                    data=weight_da.data,
+                    attrs=weight_da.attrs.copy(),
+                )
+            },
+            attrs={
+                "weight_imaging_name": weight_name,
+                "processing_set_data_group_name": (processing_set_data_group_name),
+                "task_id": task_id,
+            },
+        )
+
+    if not weight_datasets:
+        raise RuntimeError(
+            f"No imaging-weight datasets were produced for task {task_id}."
+        )
+
+    T_extract_imaging_weights = time.time() - start
+    T_write_imaging_weights = 0.0
+    n_processing_set_children = len(weight_datasets)
+
+    if weight_memory_mode == "in_place":
+        start = time.time()
+        _write_continuum_weights_in_place(ps_xdt, image_store)
+        T_write_imaging_weights = time.time() - start
+        weight_datasets = {}
+
+    task_total_time = time.time() - task_start
+
+    timing_df = pd.DataFrame(
+        {
+            "task_id": [task_id],
+            "T_load": [T_load],
+            "T_make_empty_image": [T_make_empty_image],
+            "T_degrid_imaging_weights": [T_degrid_imaging_weights],
+            "T_extract_imaging_weights": [T_extract_imaging_weights],
+            "T_write_imaging_weights": [T_write_imaging_weights],
+            "T_imaging_weight_degrid_node": [task_total_time],
+            "n_frequency_channels": [img_xds.sizes.get("frequency", 0)],
+            "n_processing_set_children": [n_processing_set_children],
+        }
+    )
+    _add_task_execution_metadata(timing_df, task_start)
+
+    logger.debug(
+        "Finished continuum imaging-weight degrid task "
+        f"{task_id}: {n_processing_set_children} processing-set children, "
+        f"{task_total_time:.3f} s."
+    )
+
+    ps_xdt = None
+    img_xds = None
+
+    return _prepare_continuum_result_for_transfer(
+        {
+            "task_id": task_id,
+            "weight_datasets": weight_datasets,
+            "timing_node_tasks": timing_df,
+        }
+    )
+
+
+###############################################################################
+# Node task level functionality related to the append node
+###############################################################################
+
+
+def _prepare_continuum_image(
+    img_xds,
+    input_params,
+    *,
+    initialize_static_products,
+    input_checked=False,
+):
+    """Convert globally reduced MFS or MVC products to image-domain products.
+
+    For ``continuum_mode='mfs'``, the reduced visibility grids already represent
+    Taylor residual terms. They are inverse Fourier-transformed directly into
+    ``SKY_RESIDUAL(taylor_term)``. With the direct Fourier transform
+    (``gridding_kernel_params={"type": "dft"}``) the reduced residual and PSF
+    are already Taylor images and are only divided by their normalization.
+
+    For ``continuum_mode='mvc'``, map tasks have already normalized and inverse
+    Fourier-transformed their exclusively owned channels, applied the channel
+    primary-beam convention, and constructed additive Taylor numerators. The
+    reducer sums those compact products; this function performs only their
+    global normalization and constructs the effective primary beam.
+
+    MFS retains its direct Taylor-weighted PSF path.  MVC constructs its Taylor
+    PSFs from the channel PSF cube. Both restoring beams are fitted only during
+    the first imaging cycle; later cycles reinstall the cached static products.
+    Primary-beam Taylor polynomials are not installed in iterative images.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Globally reduced image dataset produced by the distributed reduce stage.
+
+    input_params : dict
+        Parameters supplied to the append node. Must contain ``image_params``.
+        For later cycles, it must also contain ``static_xds``.
+
+    initialize_static_products : bool
+        If true, construct and cache the global PSF, restoring-beam fit, and
+        reference/common primary beam. This is true only for the first imaging
+        cycle. Globally reduced MVC counts become fixed-order Boolean support.
+
+    input_checked : bool, optional
+        Skip residual configuration checks performed by an upper layer.
+        The input_params dictionary flag is also honored. Product checks
+        on the reduced image remain active.
+
+    Returns
+    -------
+    img_xds : xarray.Dataset
+        Image-domain dataset containing Taylor residuals and static products.
+
+    static_xds : xarray.Dataset
+        Cached PSF, primary beam, beam-fit parameters, and maximum sidelobe.
+
+    psf_fit_return_df : pandas.DataFrame or None
+        PSF Gaussian-fit timing information. It is non-null only when static
+        products are initialized.
+    """
+    import numpy as np
+
+    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.direct_fourier_transform import (
+        normalize_dft_image,
+    )
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
+        ifft_norm_img_xds,
+    )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        is_direct_fourier_transform,
+        make_gridding_kernel,
+    )
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        check_continuum_taylor_layout,
+        finalize_mvc_taylor_normal_equations,
+        point_spread_function_gaussian_fit_continuum,
+    )
+
+    config = _resolve_continuum_append_configuration(
+        input_params, input_checked=input_checked
+    )
+
+    image_params = config["image_params"]
+    n_taylor_terms = config["n_taylor_terms"]
+    n_psf_taylor_terms = config["n_psf_taylor_terms"]
+    reference_frequency = config["reference_frequency"]
+    image_data_group_name = config["image_data_group_in_name"]
+
+    continuum_mode = input_params.get("continuum_mode", "mfs")
+    mvc_model_update_approximation = input_params.get(
+        "mvc_model_update_approximation",
+        "local_beam_moments",
+    )
+
+    # MFS still reduces Taylor-weighted UV grids and therefore performs its
+    # inverse FFT globally. MVC map tasks already returned Taylor products.
+    # With the direct Fourier transform the MFS map tasks returned the sums of
+    # the Taylor images themselves, which are only normalised here.
+    residual_output_name = "SKY_RESIDUAL"
+    direct_fourier_transform = is_direct_fourier_transform(
+        config["gridding_kernel_params"]
+    )
+
+    if continuum_mode == "mfs" and direct_fourier_transform:
+        normalize_dft_image(img_xds, image_data_group_name, uv_sampling=False)
+    elif continuum_mode == "mfs":
+        gridding_kernel = make_gridding_kernel(
+            config["gridding_kernel_params"], image_params["fft_padding"]
+        )
+        img_xds = ifft_norm_img_xds(
+            img_xds,
+            image_params=image_params,
+            image_data_group_in_name=image_data_group_name,
+            image_data_group_out_name=image_data_group_name,
+            image_data_group_out_modified={
+                "sky": residual_output_name,
+            },
+            image_data_variables_keep=config["image_data_variables_keep"],
+            processing_function_threads=config["processing_function_threads"],
+            fft_backend=config["fft_backend"],
+            complex_dtype=config["complex_dtype"],
+            gridding_kernel=gridding_kernel,
+        )
+
+    if continuum_mode == "mfs" and residual_output_name not in img_xds:
+        raise RuntimeError(
+            f"The global residual inverse FFT did not create {residual_output_name!r}."
+        )
+
+    # ------------------------------------------------------------------
+    # Direct MFS: the inverse-FFT result is already a Taylor stack.
+    # Store validated scalar values as Python numbers for Zarr serialization.
+    # ------------------------------------------------------------------
+    if continuum_mode == "mfs":
+        residual = img_xds["SKY_RESIDUAL"]
+
+        check_continuum_taylor_layout(
+            residual,
+            name="SKY_RESIDUAL",
+            term_dimension="taylor_term",
+            expected_count=n_taylor_terms,
+        )
+
+        residual.attrs.update(
+            {
+                "description": "Continuum residual Taylor products.",
+                "continuum_mode": "mfs",
+                "n_taylor_terms": int(n_taylor_terms),
+                "reference_frequency": float(reference_frequency),
+                "placeholder": False,
+            }
+        )
+
+    elif continuum_mode == "mvc":
+        if (
+            initialize_static_products
+            and mvc_model_update_approximation == "local_beam_moments"
+        ):
+            # Counts must remain additive through every reduce level. Once the
+            # global reduction is complete, later cycles only need count >= N.
+            img_xds["MVC_RESIDUAL_BEAM_SUPPORTED"] = (
+                img_xds["MVC_RESIDUAL_BEAM_CHANNEL_COUNT"] >= n_taylor_terms
+            )
+            img_xds["MVC_RESIDUAL_BEAM_SUPPORTED"].attrs = {
+                "n_taylor_terms": n_taylor_terms,
+                "description": "At least n_taylor_terms positive-weight channels above the PB cutoff.",
+            }
+            img_xds = img_xds.drop_vars("MVC_RESIDUAL_BEAM_CHANNEL_COUNT")
+        effective_primary_beam = None
+        if not initialize_static_products:
+            if "static_xds" not in input_params:
+                raise KeyError(
+                    "static_xds must be supplied when static products are "
+                    "not initialized in this node."
+                )
+            static_xds = input_params["static_xds"]
+            static_primary_beam = static_xds["PRIMARY_BEAM"]
+            effective_primary_beam = static_primary_beam.isel(
+                frequency=0,
+                drop=True,
+            ).transpose("time", "polarization", "l", "m")
+
+            if mvc_model_update_approximation == "local_beam_moments":
+                missing = [
+                    name
+                    for name in MVC_LOCAL_BEAM_STATIC_VARIABLES
+                    if name not in static_xds
+                ]
+                if missing:
+                    raise KeyError(
+                        f"The cached MVC local-beam state is missing {missing}."
+                    )
+                for name in MVC_LOCAL_BEAM_STATIC_VARIABLES:
+                    # Reattach shallow views of the first-cycle global moments;
+                    # finalization reads but does not modify their backing arrays.
+                    img_xds[name] = static_xds[name].copy(deep=False)
+
+        (
+            residual_taylor,
+            psf_taylor,
+            effective_primary_beam,
+        ) = finalize_mvc_taylor_normal_equations(
+            img_xds,
+            effective_primary_beam=effective_primary_beam,
+        )
+
+        img_xds["SKY_RESIDUAL"] = residual_taylor
+        img_xds.attrs["data_groups"][image_data_group_name]["sky"] = "SKY_RESIDUAL"
+
+        if initialize_static_products:
+            if psf_taylor is None:
+                raise RuntimeError(
+                    "The first MVC reduction did not contain Taylor PSF contributions."
+                )
+            img_xds["POINT_SPREAD_FUNCTION"] = psf_taylor
+            img_xds.attrs["data_groups"][image_data_group_name][
+                "point_spread_function"
+            ] = "POINT_SPREAD_FUNCTION"
+
+        # ----------------------------------------------------------
+        # Construct the effective PB used only by the model update.
+        # ----------------------------------------------------------
+
+        contribution_variables = [
+            name for name in img_xds.data_vars if name.startswith("MVC_")
+        ]
+        if initialize_static_products:
+            contribution_variables = [
+                name
+                for name in contribution_variables
+                if name not in MVC_LOCAL_BEAM_STATIC_VARIABLES
+            ]
+        img_xds = img_xds.drop_vars(contribution_variables, errors="ignore")
+
+        # ----------------------------------------------------------
+        # Recreate the weighted common PB as a singleton-frequency image.
+        # ----------------------------------------------------------
+
+        if "time" in effective_primary_beam.dims:
+            frequency_axis = effective_primary_beam.dims.index("time") + 1
+        else:
+            frequency_axis = 0
+
+        effective_primary_beam = effective_primary_beam.expand_dims(
+            frequency=np.asarray(
+                [reference_frequency],
+                dtype=np.float64,
+            ),
+            axis=frequency_axis,
+        )
+
+        effective_primary_beam.attrs.update(
+            {
+                "description": "Effective MVC primary beam",
+                "type": "primary_beam",
+                "continuum_mode": "mvc",
+                "primary_beam_usage": "common_taylor_convention",
+                "method": "airy_disk",
+            }
+        )
+
+        if "frequency" in img_xds.dims:
+            frequency_users = [
+                variable_name
+                for variable_name, variable in img_xds.data_vars.items()
+                if "frequency" in variable.dims
+            ]
+            if frequency_users:
+                raise ValueError(
+                    "Cannot install the effective MVC primary beam while "
+                    f"variables still use the chunk frequency: {frequency_users}."
+                )
+            img_xds = img_xds.drop_dims("frequency")
+
+        img_xds["PRIMARY_BEAM"] = effective_primary_beam
+
+        residual_group = img_xds.attrs.setdefault(
+            "data_groups",
+            {},
+        ).setdefault(
+            image_data_group_name,
+            {},
+        )
+
+        residual_group["primary_beam"] = "PRIMARY_BEAM"
+
+    psf_fit_return_df = None
+
+    # ------------------------------------------------------------------
+    # First imaging cycle: form and cache global static products.
+    # ------------------------------------------------------------------
+
+    if initialize_static_products:
+        if continuum_mode == "mfs" and direct_fourier_transform:
+            normalize_dft_image(img_xds, image_data_group_name, uv_sampling=True)
+        elif continuum_mode == "mfs":
+            img_xds = ifft_norm_img_xds(
+                img_xds,
+                image_params=image_params,
+                image_data_group_in_name=image_data_group_name,
+                image_data_group_out_name=image_data_group_name,
+                image_data_group_out_modified={
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                },
+                image_data_variables_keep=config["image_data_variables_keep"],
+                processing_function_threads=config["processing_function_threads"],
+                fft_backend=config["fft_backend"],
+                complex_dtype=config["complex_dtype"],
+                gridding_kernel=gridding_kernel,
+            )
+
+        # register name of data group
+        psf_name = img_xds.attrs["data_groups"][image_data_group_name][
+            "point_spread_function"
+        ]
+
+        if psf_name not in img_xds:
+            raise RuntimeError(
+                f"The global PSF inverse FFT did not create {psf_name!r}."
+            )
+
+        psf = img_xds[psf_name]
+
+        check_continuum_taylor_layout(
+            psf,
+            name=psf_name,
+            term_dimension="psf_taylor_order",
+            expected_count=n_psf_taylor_terms,
+        )
+
+        # Update attributes
+        img_xds[psf_name].attrs.update(
+            {
+                "type": "point_spread_function",
+                "n_taylor_terms": int(n_taylor_terms),
+                "n_psf_taylor_terms": int(n_psf_taylor_terms),
+                "reference_frequency": float(reference_frequency),
+            }
+        )
+
+        # Fit point spread function
+        (
+            img_xds,
+            psf_fit_return_df,
+        ) = point_spread_function_gaussian_fit_continuum(
+            img_xds,
+            image_data_group_in_name=image_data_group_name,
+            image_data_group_out_name=image_data_group_name,
+            processing_function_threads=config["processing_function_threads"],
+        )
+
+        # ----------------------------------------------------------
+        # Construct or validate the PB used by the model-update/static API.
+        # ----------------------------------------------------------
+
+        if continuum_mode == "mfs":
+            # Install the static PB evaluated at the Taylor reference frequency.
+            img_xds = _finalize_reference_primary_beam(
+                img_xds,
+                reference_frequency=reference_frequency,
+                image_data_group_name=image_data_group_name,
+            )
+
+        elif continuum_mode == "mvc":
+            # MVC already constructed PRIMARY_BEAM immediately after the
+            # frequency-cube-to-Taylor conversion.
+            if "PRIMARY_BEAM" not in img_xds:
+                raise RuntimeError(
+                    "MVC image preparation did not construct PRIMARY_BEAM."
+                )
+
+            primary_beam = img_xds["PRIMARY_BEAM"]
+
+            expected_dims = (
+                "time",
+                "frequency",
+                "polarization",
+                "l",
+                "m",
+            )
+
+            if primary_beam.dims != expected_dims:
+                raise ValueError(
+                    "MVC PRIMARY_BEAM has unexpected dimensions: "
+                    f"{primary_beam.dims}; expected {expected_dims}."
+                )
+
+            if primary_beam.sizes["frequency"] != 1:
+                raise ValueError(
+                    "MVC PRIMARY_BEAM must have exactly one effective frequency plane."
+                )
+
+        # Static variables shared with the model-update controls.
+        static_image_variable_names = (
+            "POINT_SPREAD_FUNCTION",
+            "PRIMARY_BEAM",
+        )
+        static_image_variable_names += (
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+        )
+        if continuum_mode == "mfs" and "uv_sampling" in input_params.get(
+            "image_data_variables_keep", ()
+        ):
+            static_image_variable_names += ("UV_SAMPLING", "UV_SAMPLING_NORMALIZATION")
+        static_variable_names = static_image_variable_names
+        if (
+            continuum_mode == "mvc"
+            and mvc_model_update_approximation == "local_beam_moments"
+        ):
+            static_variable_names += MVC_LOCAL_BEAM_STATIC_VARIABLES
+
+        missing = [name for name in static_variable_names if name not in img_xds]
+
+        if missing:
+            raise KeyError(
+                "The first continuum global node could "
+                "not construct all static products. "
+                f"Missing: {missing}."
+            )
+
+        # Keep the correlation-basis cache independent: img_xds is converted
+        # to Stokes below, while later residual updates reinstall this cache
+        # and perform that conversion exactly once per cycle.
+        static_xds = img_xds[list(static_image_variable_names)].copy(deep=True)
+        for name in static_variable_names[len(static_image_variable_names) :]:
+            # The contribution arrays are dropped from img_xds before its
+            # polarization conversion, so the cache can retain them without a
+            # second image-sized allocation.
+            static_xds[name] = img_xds[name].copy(deep=False)
+        static_xds.attrs = dict(img_xds.attrs)
+        img_xds = img_xds.drop_vars(
+            [
+                "MFS_PRIMARY_BEAM_TAYLOR_NUMERATOR",
+                "MFS_PRIMARY_BEAM_FIT_MOMENTS",
+                *MVC_LOCAL_BEAM_STATIC_VARIABLES,
+            ],
+            errors="ignore",
+        )
+
+    # ------------------------------------------------------------------
+    # Later imaging cycles: reinstall static products.
+    # ------------------------------------------------------------------
+
+    else:
+        # At later iterations, static_xds needs to be present already
+        if "static_xds" not in input_params:
+            raise KeyError(
+                "static_xds must be supplied when static products are "
+                "not initialized in this node."
+            )
+
+        static_xds = input_params["static_xds"]
+
+        # Write static variables into img_xds
+        img_xds = _install_static_continuum_products(
+            img_xds,
+            static_xds,
+            image_data_group_name=image_data_group_name,
+        )
+
+    # This transformation is performed exactly once, after the global
+    # inverse FFT. The map/reduce products must remain in correlation basis.
+    img_xds = transform_polarization_basis(
+        img_xds,
+        new_polarization_basis="stokes",
+        overwrite=True,
+    )
+
+    # transform_polarization_basis may place polarization after the spatial
+    # dimensions. Restore the canonical layouts required by cycle control,
+    # masking, deconvolution, and restoration.
+    canonical_dimension_orders = {
+        "SKY_RESIDUAL": (
+            "time",
+            "taylor_term",
+            "polarization",
+            "l",
+            "m",
+        ),
+        "POINT_SPREAD_FUNCTION": (
+            "time",
+            "psf_taylor_order",
+            "polarization",
+            "l",
+            "m",
+        ),
+        "PRIMARY_BEAM": (
+            "time",
+            "frequency",
+            "polarization",
+            "l",
+            "m",
+        ),
+        "PRIMARY_BEAM_TAYLOR": (
+            "time",
+            "taylor_term",
+            "polarization",
+            "l",
+            "m",
+        ),
+        "SKY_MODEL": (
+            "time",
+            "taylor_term",
+            "polarization",
+            "l",
+            "m",
+        ),
+    }
+
+    for variable_name, expected_dims in canonical_dimension_orders.items():
+        if variable_name not in img_xds:
+            continue
+
+        data_array = img_xds[variable_name]
+
+        if set(data_array.dims) != set(expected_dims):
+            raise ValueError(
+                f"{variable_name!r} has dimensions "
+                f"{data_array.dims}; expected the dimension set "
+                f"{expected_dims}."
+            )
+
+        img_xds[variable_name] = data_array.transpose(*expected_dims)
+
+    return img_xds, static_xds, psf_fit_return_df
+
+
+def _prepare_post_update_continuum_model_state(
+    model_update_xds, input_params, previous_model_xds=None, *, input_checked=False
+):
+    """Accumulate the model and prepare MFS Fourier state inside the append node.
+
+    The distributed application supplies the previous image-domain model as
+    append input and only forwards the two state objects returned here. All
+    numerical accumulation, polarization conversion, and Fourier preparation
+    are delegated to processing functions.
+
+    Parameters
+    ----------
+    model_update_xds : xarray.Dataset
+        Image dataset produced by the current model-update cycle. Its
+        ``SKY_MODEL`` is the model, to which the model update added its
+        components in place, or with ``previous_model_xds`` the accelerated
+        step to add to that model.
+    input_params : dict
+        Append-node configuration. Later cycles must provide ``model_xds``.
+    previous_model_xds : xarray.Dataset, optional
+        The model the accelerated step is added to.
+    input_checked : bool, optional
+        Pass the append node's checked configuration to Fourier preparation.
+
+    Returns
+    -------
+    model_xds : xarray.Dataset
+        Fully accumulated image-domain Taylor model.
+    model_uv_xds : xarray.Dataset or None
+        Fourier-domain MFS Taylor model, or ``None`` for MVC.
+    """
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        accumulate_continuum_model,
+        prepare_model_uv_continuum_single_field,
+    )
+
+    is_first_cycle = bool(input_params.get("is_first_cycle", True))
+
+    if not is_first_cycle and input_params.get("model_xds") is None:
+        raise KeyError(
+            "Later continuum append nodes require input_params['model_xds']."
+        )
+
+    continuum_mode = input_params.get("continuum_mode", "mfs")
+    model_xds = accumulate_continuum_model(
+        model_update_xds,
+        previous_model_xds=previous_model_xds,
+        continuum_mode=continuum_mode,
+        input_checked=input_checked or input_params.get("input_checked", False),
+    )
+
+    if continuum_mode == "mfs":
+        model_uv_xds = prepare_model_uv_continuum_single_field(
+            model_xds,
+            image_params=input_params["image_params"],
+            instrument_polarization_basis=input_params.get(
+                "instrument_polarization_basis",
+                "linear",
+            ),
+            single_precision_image=input_params.get(
+                "single_precision_image",
+                True,
+            ),
+            processing_function_threads=input_params.get(
+                "processing_function_threads",
+                1,
+            ),
+            fft_backend=input_params.get("fft_backend", "pyfftw"),
+            gridding_kernel_params=input_params.get("gridding_kernel_params"),
+            input_checked=input_checked or input_params.get("input_checked", False),
+        )
+    elif continuum_mode == "mvc":
+        model_uv_xds = None
+
+    return model_xds, model_uv_xds
+
+
+def _stop_codes_after_model_update(controller, deconvolution):
+    """Imaging stop codes of the residual each plane's model update ended with.
+
+    The cycle controller decides on the residual of the next residual update
+    and only books a model update (``record_model_update``), so after the
+    model update its ``stop_code_imaging`` still holds the codes of the check
+    before it. The plain-step planes are chosen before the next residual
+    exists, so the controller's stop test is made, on a copy, on the
+    deconvolver's own residual: the latest ``peakres`` and ``masksum`` in
+    ``deconvolution``, with the budgets and the no progress and divergence
+    runs the model update has booked. The entropy is not followed, as that
+    test belongs to the residual of a residual update. Neither ``controller``
+    nor ``deconvolution`` changes. Returns a ``(time, polarization)`` array.
+    """
+    import copy
+
+    probe = copy.deepcopy(controller)
+    probe.entropy_stop = False
+    probe.check_convergence(copy.deepcopy(deconvolution))
+    return probe.stop_code_imaging[:, 0, :]
+
+
+def _accelerate_continuum_model_increment(
+    model_update_xds,
+    residual_before_model_update,
+    controller,
+    deconvolution,
+    input_params,
+):
+    """Replace the model of the model update by the accelerated model step.
+
+    The model update added its components to the previous model
+    (``input_params["model_xds"]``, none in the first imaging cycle) in place;
+    its increment is its model minus that model, positionally.
+    The plain increment is taken where the controller's stop test, made on
+    the residual the model update ended with
+    (:func:`_stop_codes_after_model_update`), would stop a plane: by the
+    conjugate gradient on planes whose residual is below the global
+    threshold (within ``threshold_tolerance``), by Nesterov momentum on every
+    plane with a stop code. Both take it on planes whose residual entropy
+    the entropy stop follows. Returns the image dataset with the step as
+    ``SKY_MODEL`` and the acceleration state for the next imaging cycle.
+    """
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.cycle_acceleration import (
+        conjugate_gradient_model_step,
+        nesterov_momentum_model_step,
+    )
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        IMAGING_CONTINUE,
+        IMAGING_THRESHOLD,
+    )
+
+    stop_codes = xr.DataArray(
+        _stop_codes_after_model_update(controller, deconvolution),
+        dims=("time", "polarization"),
+    )
+    entropy_followed = np.isfinite(controller.max_entropy[:, 0, :])
+    state_xds = input_params.get("cycle_acceleration_state_xds")
+    model_increment = model_update_xds["SKY_MODEL"]
+    previous_model_xds = input_params.get("model_xds")
+    if previous_model_xds is not None:
+        previous_model = previous_model_xds["SKY_MODEL"]
+        model_increment = model_increment.copy(
+            data=model_increment.values
+            - previous_model.transpose(*model_increment.dims).values
+        )
+    if input_params["cycle_acceleration"] == "conjugate_gradient":
+        residual_name = model_update_xds.attrs["data_groups"][
+            input_params.get("image_data_group_in_name", "residual")
+        ]["sky"]
+        model_step, state_xds = conjugate_gradient_model_step(
+            residual_before_model_update,
+            model_update_xds[residual_name],
+            model_increment,
+            plain_step_planes=(stop_codes == IMAGING_THRESHOLD) | entropy_followed,
+            cycle_acceleration_state_xds=state_xds,
+        )
+    elif input_params["cycle_acceleration"] == "nesterov_momentum":
+        model_step, state_xds = nesterov_momentum_model_step(
+            residual_before_model_update,
+            model_increment,
+            plain_step_planes=(stop_codes != IMAGING_CONTINUE) | entropy_followed,
+            cycle_acceleration_state_xds=state_xds,
+            momentum_coefficient=input_params["momentum_coefficient"],
+            input_checked=input_params.get("input_checked", False),
+        )
+    else:
+        raise ValueError(
+            "cycle_acceleration must be 'none', 'conjugate_gradient' or "
+            f"'nesterov_momentum'; received {input_params['cycle_acceleration']!r}."
+        )
+    return model_update_xds.assign(SKY_MODEL=model_step), state_xds
+
+
+def _book_accelerated_model_flux(deconvolve_dict, model_step, previous_model_xds):
+    """Book the flux of the accelerated model step in the convergence record.
+
+    The model update books ``model_flux`` as the flux of the model it made.
+    The acceleration adds another step to the previous model instead, so the
+    latest ``model_flux`` of each plane is set to its latest
+    ``start_model_flux`` (the flux of the previous model) plus the
+    Taylor-term-zero flux of ``model_step``: the flux of the model the next
+    model update starts from. The latest ``model_flux_positive``
+    and ``model_flux_negative`` become those of that model, the previous
+    model (``None`` in the first imaging cycle) plus ``model_step``. Every
+    plane of a model update has an entry in ``deconvolve_dict``; entries
+    without ``model_flux`` or ``start_model_flux`` are left as they are.
+    """
+    import numpy as np
+
+    from astroviper.processing_functions.image_analysis.image_statistics import (
+        cube_flux_by_sign,
+    )
+
+    def taylor_term_zero(model):
+        if "taylor_term" in model.dims:
+            model = model.isel(taylor_term=0, drop=True)
+        return model.transpose("time", "polarization", "l", "m").values
+
+    model = taylor_term_zero(model_step)
+    step_flux = np.sum(model, axis=(-2, -1))
+    if previous_model_xds is not None:
+        model = model + taylor_term_zero(previous_model_xds["SKY_MODEL"])
+    model_flux_by_sign = cube_flux_by_sign(model)
+
+    for key, fields in deconvolve_dict.data.items():
+        model_flux = fields.get("model_flux")
+        start_model_flux = fields.get("start_model_flux")
+        if model_flux is None or start_model_flux is None:
+            continue
+        model_flux = model_flux if isinstance(model_flux, list) else [model_flux]
+        start_model_flux = (
+            start_model_flux
+            if isinstance(start_model_flux, list)
+            else [start_model_flux]
+        )
+        if not model_flux or not start_model_flux:
+            continue
+        fields["model_flux"] = model_flux[:-1] + [
+            float(start_model_flux[-1]) + float(step_flux[key.time, key.pol])
+        ]
+        for field, values in zip(
+            ("model_flux_positive", "model_flux_negative"),
+            model_flux_by_sign,
+            strict=True,
+        ):
+            if field in fields:
+                signed = fields[field]
+                signed = signed if isinstance(signed, list) else [signed]
+                fields[field] = signed[:-1] + [float(values[key.time, key.pol])]
+
+
+def _prepare_cached_mfs_residual_grid(input_data, input_params):
+    """Cache the first MFS observed grid or form a later residual grid.
+
+    Returns the newly captured observed-grid cache during the first cycle and
+    ``None`` otherwise. For later cycles the reduced model grid in
+    ``input_data["image"]`` is replaced by the observed-minus-model residual.
+    """
+    import copy
+
+    visibility_memory_mode = input_params.get(
+        "visibility_memory_mode",
+        "recompute",
+    )
+    if visibility_memory_mode == "recompute":
+        return None
+    if visibility_memory_mode not in ("in_memory", "in_place"):
+        raise ValueError(
+            "visibility_memory_mode must be 'in_memory', 'in_place', or "
+            f"'recompute'; received {visibility_memory_mode!r}."
+        )
+
+    continuum_mode = input_params.get("continuum_mode", "mfs")
+    if continuum_mode == "mvc":
+        # MVC caches are task-local and have already been applied before each
+        # map task's inverse FFT and Taylor construction.
+        return None
+    if continuum_mode != "mfs":
+        raise ValueError(
+            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
+        )
+
+    image_data_group_name = input_params.get(
+        "image_data_group_in_name",
+        "residual",
+    )
+    image_xds = input_data["image"]
+    is_first_cycle = bool(input_params.get("is_first_cycle", True))
+
+    if is_first_cycle:
+        data_groups = image_xds.attrs.get("data_groups", {})
+        if image_data_group_name not in data_groups:
+            raise KeyError(
+                "The first MFS reduction does not contain image data group "
+                f"{image_data_group_name!r}."
+            )
+        data_group = data_groups[image_data_group_name]
+        cache_names = [
+            data_group.get("visibility"),
+            data_group.get("visibility_normalization"),
+        ]
+        if any(name is None for name in cache_names):
+            raise KeyError(
+                "The first MFS reduction does not register both visibility and "
+                "visibility_normalization products."
+            )
+        missing = [name for name in cache_names if name not in image_xds]
+        if missing:
+            raise KeyError(
+                f"The first MFS reduction cannot cache missing variables {missing}."
+            )
+        observed_grid_xds = image_xds[cache_names].copy(deep=True)
+        observed_grid_xds.attrs = copy.deepcopy(image_xds.attrs)
+        observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
+        if visibility_memory_mode == "in_place":
+            image_store = input_params.get("image_store")
+            if not image_store:
+                raise KeyError(
+                    "In-place MFS visibility caching requires "
+                    "input_params['image_store']."
+                )
+            _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store)
+            return None
+        return observed_grid_xds
+
+    if visibility_memory_mode == "in_memory":
+        observed_grid_xds = input_params.get("observed_visibility_grid_xds")
+    else:
+        image_store = input_params.get("image_store")
+        if not image_store:
+            raise KeyError(
+                "In-place MFS visibility caching requires input_params['image_store']."
+            )
+        observed_grid_xds = _load_mfs_visibility_grid_in_place(image_store)
+
+    if observed_grid_xds is None:
+        raise KeyError("The cached observed-data MFS visibility grid is missing.")
+
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        form_mfs_residual_grid_from_cache,
+    )
+
+    input_data["image"] = form_mfs_residual_grid_from_cache(
+        observed_grid_xds,
+        image_xds,
+        image_data_group_in_observed=image_data_group_name,
+        image_data_group_in_model=image_data_group_name,
+    )
+    return None
+
+
+@shares_param_docs
+def continuum_cycle_append_node(
+    input_data,
+    input_params,
+    *,
+    input_checked: bool = False,
+):
+    """Prepare the reduced residual and choose model update or finalization.
+
+    This node is executed exactly once per outer cycle control after all frequency chunks
+    have been combined by the GraphViper reduce stage. Unlike the map node tasks,
+    which operate independently on individual frequency partitions, this node has
+    access to the globally accumulated continuum products.
+
+    The node performs the following steps:
+
+    1. inverse FFTs reduced MFS UV grids, or finalizes reduced MVC Taylor
+       contributions;
+    2. normalizes the residual image and PSF using the accumulated imaging-weight
+       products;
+    3. converts the image from the instrument correlation basis to the requested
+       Stokes basis;
+    4. installs the static continuum products (for example, the primary beam and
+       fitted restoring beam parameters);
+    5. updates the automatic mask with ``input_params["auto_mask_params"]``;
+    6. checks convergence on the refreshed residual without consuming budgets;
+    7. either updates the model and prepares its state for the next graph, or
+       returns the verified residual for the separate finalization graph.
+
+    Restoration-only products and unchanged static state return only in cycle
+    one. Later cycle graphs receive only the static quantities used by imaging.
+    Finalization/restoration runs once after refreshed-residual stopping.
+
+    The accumulated image-domain model and the optional Fourier-domain MFS model
+    are returned to the distributed application as state objects. The application
+    forwards them to the next graph without performing numerical model operations.
+
+    With ``input_params["cycle_acceleration"]`` set to ``"conjugate_gradient"`` or
+    ``"nesterov_momentum"``, the model increment is replaced by the accelerated
+    model step before accumulation, and the latest ``model_flux``,
+    ``model_flux_positive`` and ``model_flux_negative`` of each plane in the
+    convergence record describe the model after that step; its residual
+    statistics, component counts and iteration history describe the model
+    update's own increment and residual. The
+    state of that acceleration is read from
+    ``input_params["cycle_acceleration_state_xds"]`` and returned as
+    ``"cycle_acceleration_state_xds"`` in the same way.
+
+    This node performs no distributed processing. It operates on the single,
+    globally reduced continuum dataset produced by the GraphViper reduce stage.
+
+    Parameters
+    ----------
+    input_data : dict or list of dict
+        Reduced continuum graph result, optionally wrapped by GraphVIPER.
+    input_params : dict
+        Cycle state, image/deconvolution configuration, cached products, and
+        output-product policy supplied by the distributed driver.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    Returns
+    -------
+    dict
+        Updated continuum image, model state, static products, convergence
+        state, caches, and timing metadata for the next driver cycle.
+    """
+
+    if not (input_checked or input_params.get("input_checked", False)):
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_model_update,
+        )
+
+        check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
+        check_driver_workflow(input_params, mode=CONTINUUM_SINGLE_FIELD)
+
+    import time
+
+    input_data = _unwrap_continuum_reduce_result(
+        input_data,
+        "continuum_cycle_append_node",
+    )
+
+    is_first_cycle = bool(input_params.get("is_first_cycle", True))
+
+    observed_visibility_grid_xds = _prepare_cached_mfs_residual_grid(
+        input_data,
+        input_params,
+    )
+    observed_visibility_grid_mapping = _single_leaf_cache_mapping(
+        input_data,
+        "observed_visibility_grid_mapping",
+        "observed_visibility_grid_xds",
+    )
+
+    # prepare continuum image, this is doing 1.-4.
+    pb_cache_mapping = _single_leaf_cache_mapping(
+        input_data,
+        "pb_cache_mapping",
+        "pb_xds",
+        fallback=input_params.get("pb_cache_mapping"),
+    )
+
+    restoration_xds = None
+    if is_first_cycle:
+        continuum_mode = input_params.get("continuum_mode", "mfs")
+        if continuum_mode == "mfs" and input_params.get(
+            "make_primary_beam_taylor", False
+        ):
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                fit_mfs_primary_beam_taylor,
+            )
+
+            restoration_xds = fit_mfs_primary_beam_taylor(
+                input_data["image"],
+                primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
+            ).to_dataset()
+        elif continuum_mode == "mvc":
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                fit_mvc_primary_beam_taylor,
+            )
+
+            restoration_xds = fit_mvc_primary_beam_taylor(
+                input_data["image"]
+            ).to_dataset()
+
+    (
+        img_xds,
+        static_xds,
+        psf_fit_return_df,
+    ) = _prepare_continuum_image(
+        input_data["image"],
+        input_params,
+        initialize_static_products=is_first_cycle,
+        input_checked=input_checked or input_params.get("input_checked", False),
+    )
+
+    input_data["image"] = img_xds
+
+    install_clean_mask(
+        img_xds,
+        input_params.get("clean_mask"),
+        input_params.get("image_data_group_in_name", "residual"),
+    )
+
+    auto_mask_state = None
+    T_auto_mask = 0.0
+    if input_params.get("auto_mask_params") is not None:
+        import numpy as np
+
+        from astroviper.processing_functions.imaging.image_continuum_single_field import (
+            make_auto_mask_continuum,
+        )
+
+        start = time.time()
+        cycle_control_params = input_params["cycle_control_params"]
+        image_data_group_name = input_params.get("image_data_group_in_name", "residual")
+        previous_state = input_params.get("auto_mask_state")
+        threshold_reached = None
+        if previous_state is not None:
+            threshold = np.asarray(cycle_control_params["threshold"], dtype=float)
+            threshold_per_cycle = np.full(
+                previous_state["planes_stopped"].shape, np.inf
+            )
+            for key, fields in input_params["deconvolution"].data.items():
+                threshold_per_cycle[key.time, key.chan, key.pol] = fields[
+                    "threshold_per_cycle"
+                ][-1]
+            threshold_reached = (threshold > 0) & (threshold_per_cycle <= threshold)
+        auto_mask_state = make_auto_mask_continuum(
+            img_xds,
+            input_params["auto_mask_params"],
+            auto_mask_state=previous_state,
+            primary_beam_limit=input_params.get(
+                "primary_beam_limit",
+                cycle_control_params.get("primary_beam_limit", 0.0),
+            ),
+            threshold_reached=threshold_reached,
+            processing_function_threads=input_params.get(
+                "processing_function_threads", 1
+            ),
+            image_data_group_in_name=image_data_group_name,
+            image_data_group_out_name=image_data_group_name,
+            input_checked=True,
+        )
+        T_auto_mask = time.time() - start
+
+    model_update_input_params = dict(input_params)
+    model_update_input_params.pop("static_xds", None)
+
+    # A residual-update reduce has no deconvolution work of its own, but keeps
+    # the result schema stable by returning an empty ImagingDict. Do not let
+    # that placeholder hide the history supplied by the previous model update.
+    reduced_deconvolution = input_data.get("deconvolution")
+    previous_deconvolution = input_params.get("deconvolution")
+    if (
+        reduced_deconvolution is not None
+        and not reduced_deconvolution.data
+        and previous_deconvolution is not None
+        and previous_deconvolution.data
+    ):
+        input_data["deconvolution"] = previous_deconvolution
+
+    # Preserve imaging weights collected during the first imaging-cycle reduce.
+    weight_cache_mapping = _single_leaf_cache_mapping(
+        input_data,
+        "weight_cache_mapping",
+        "weight_datasets",
+    )
+
+    cycle_acceleration = input_params.get("cycle_acceleration", "none")
+    if cycle_acceleration != "none":
+        start = time.time()
+        residual_name = img_xds.attrs["data_groups"][
+            input_params.get("image_data_group_in_name", "residual")
+        ]["sky"]
+        # The model update can overwrite the residual in place.
+        residual_before_model_update = img_xds[residual_name].copy(deep=True)
+        T_cycle_acceleration = time.time() - start
+
+    # Run the model update.
+    return_dict = model_update_continuum_single_field(
+        input_data,
+        model_update_input_params,
+        input_checked=True,
+    )
+
+    # The model, or with cycle acceleration the step to add to the previous one.
+    model_update_xds = return_dict["image"]
+    previous_model_xds = None
+    if cycle_acceleration != "none":
+        start = time.time()
+        if not return_dict.get("residual_converged", False):
+            model_update_xds, return_dict["cycle_acceleration_state_xds"] = (
+                _accelerate_continuum_model_increment(
+                    model_update_xds,
+                    residual_before_model_update,
+                    return_dict["controller"],
+                    return_dict["deconvolution"],
+                    input_params,
+                )
+            )
+            previous_model_xds = input_params.get("model_xds")
+            if return_dict.get("deconvolution") is not None:
+                _book_accelerated_model_flux(
+                    return_dict["deconvolution"],
+                    model_update_xds["SKY_MODEL"],
+                    previous_model_xds,
+                )
+        del residual_before_model_update
+        T_cycle_acceleration += time.time() - start
+
+    # The append stage owns all numerical state preparation needed by the next
+    # residual-update graph. The distributed application only forwards these
+    # returned objects.
+    start = time.time()
+    if return_dict.get("residual_converged", False) and not is_first_cycle:
+        model_xds = input_params["model_xds"]
+        model_uv_xds = input_params.get("model_uv_xds")
+    else:
+        model_xds, model_uv_xds = _prepare_post_update_continuum_model_state(
+            model_update_xds,
+            input_params,
+            previous_model_xds=previous_model_xds,
+            input_checked=True,
+        )
+    T_prepare_model_state = time.time() - start
+
+    return_dict["model_xds"] = model_xds
+    return_dict["model_uv_xds"] = model_uv_xds
+    return_dict["auto_mask_state"] = auto_mask_state
+
+    timing_model_update = return_dict.get("timing_model_update")
+    if timing_model_update is not None:
+        timing_model_update["T_prepare_model_state"] = T_prepare_model_state
+        if auto_mask_state is not None:
+            timing_model_update["T_auto_mask"] = T_auto_mask
+        if cycle_acceleration != "none":
+            timing_model_update["T_cycle_acceleration"] = T_cycle_acceleration
+
+    # model_update_continuum_single_field constructs its own return dictionary,
+    # so explicitly carry the first-cycle imaging-weight cache through the
+    # append node to the distributed driver.
+    if weight_cache_mapping is not None:
+        return_dict["weight_cache_mapping"] = weight_cache_mapping
+
+    # do the same with the channelized primary beams, if present
+    if pb_cache_mapping is not None:
+        return_dict["pb_cache_mapping"] = pb_cache_mapping
+
+    if observed_visibility_grid_xds is not None:
+        return_dict["observed_visibility_grid_xds"] = observed_visibility_grid_xds
+    if observed_visibility_grid_mapping is not None:
+        return_dict["observed_visibility_grid_mapping"] = (
+            observed_visibility_grid_mapping
+        )
+
+    if is_first_cycle:
+        return_dict["static_xds"] = static_xds
+        if restoration_xds is not None:
+            return_dict["restoration_xds"] = restoration_xds
+    else:
+        return_dict.pop("static_xds", None)
+
+    return_dict["timing_psf_fit"] = (
+        None if psf_fit_return_df is None else psf_fit_return_df.reset_index(drop=True)
+    )
+
+    return _prepare_continuum_result_for_transfer(return_dict)
+
+
+@shares_param_docs
+def continuum_finalize_node(
+    input_data,
+    input_params,
+    *,
+    input_checked: bool = False,
+):
+    """Finalize continuum products and optionally restore the model.
+
+    Reuse the verified residual when ``prepared_continuum_image=True``.
+    Otherwise prepare reduced MFS UV grids or MVC Taylor contributions first.
+    Reuse static products and remove unrequested intermediates; do not perform
+    another model update, change iteration budgets, or write the image store.
+
+    Parameters
+    ----------
+    input_data : dict or list of dict
+        Reduced or already prepared continuum graph result.
+    input_params : dict
+        Static products, accumulated model, restoration options, cache state,
+        and output-product policy supplied by the distributed driver.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    Returns
+    -------
+    dict
+        Final in-memory image and model, any supplied convergence metadata and
+        caches, and restoration timing records. Unchanged static state is not
+        returned.
+    """
+
+    checked = input_checked or input_params.get("input_checked", False)
+    if not checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_model_update,
+        )
+
+        check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
+        check_driver_workflow(input_params, mode=CONTINUUM_SINGLE_FIELD)
+
+    import time
+
+    import pandas as pd
+
+    finalization_start = time.time()
+
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    input_data = _unwrap_continuum_reduce_result(
+        input_data,
+        "continuum_finalize_node",
+    )
+
+    # sanity check whether products from previous cycles are present
+    if "static_xds" not in input_params:
+        raise KeyError("continuum_finalize_node requires input_params['static_xds'].")
+
+    if "model_xds" not in input_params:
+        raise KeyError("continuum_finalize_node requires input_params['model_xds'].")
+
+    if input_params.get("prepared_continuum_image", False):
+        img_xds = input_data["image"]
+        static_xds = input_params["static_xds"]
+    else:
+        _prepare_cached_mfs_residual_grid(input_data, input_params)
+
+        img_xds, static_xds, _ = _prepare_continuum_image(
+            input_data["image"],
+            input_params,
+            initialize_static_products=False,
+            input_checked=checked,
+        )
+
+    model_xds = input_params["model_xds"]
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        install_continuum_model,
+    )
+
+    img_xds = install_continuum_model(img_xds, model_xds)
+
+    beam_fit_start = time.time()
+    restoration_xds = input_params.get("restoration_xds")
+    if restoration_xds is not None:
+        from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+            transform_polarization_basis,
+        )
+
+        beam_image = restoration_xds.assign(PRIMARY_BEAM=static_xds.PRIMARY_BEAM)
+        beam_image = transform_polarization_basis(
+            beam_image, new_polarization_basis="stokes", overwrite=True
+        )
+        primary_beam_taylor = beam_image.PRIMARY_BEAM_TAYLOR
+        img_xds["PRIMARY_BEAM_TAYLOR"] = primary_beam_taylor
+        residual_group_name = input_params.get("image_data_group_in_name", "residual")
+        residual_group = dict(img_xds.attrs["data_groups"][residual_group_name])
+        residual_group["primary_beam_taylor"] = "PRIMARY_BEAM_TAYLOR"
+        modify_data_groups_xds(
+            img_xds,
+            data_group_out_name=residual_group_name,
+            data_group_out=residual_group,
+            description="Primary-beam Taylor polynomial installed for final products.",
+        )
+
+    T_primary_beam_taylor = time.time() - beam_fit_start
+
+    # restore
+    if input_params.get("restore", False):
+        from astroviper.processing_functions.imaging.image_continuum_single_field import (
+            restore_continuum_image,
+        )
+
+        continuum_mode = input_params.get("continuum_mode", "mfs")
+        restoration_output = input_params.get("restoration_output", "apparent")
+        img_xds, restore_timing_df = restore_continuum_image(
+            img_xds,
+            image_data_group_in_residual_name=(
+                input_params.get(
+                    "image_data_group_in_name",
+                    "residual",
+                )
+            ),
+            image_data_group_in_model_name="model",
+            image_data_group_out_restore_name="restored",
+            processing_function_threads=input_params.get(
+                "processing_function_threads",
+                1,
+            ),
+            primary_beam_limit=input_params.get("primary_beam_limit", 0.2),
+            deconvolver=input_params.get("deconvolver", "hogbom"),
+            restoration_output=restoration_output,
+            continuum_mode=continuum_mode,
+            input_checked=True,
+        )
+
+        input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
+
+    else:
+        input_data["timing_restore"] = None
+
+    input_data["image"] = img_xds
+    input_data.pop("static_xds", None)
+
+    # Preserve the final accumulated model as a separate driver-visible
+    # state object as well as installing it in the output image.
+    input_data["model_xds"] = model_xds
+
+    finalization_timing = pd.DataFrame(
+        {
+            "T_image_cube_task": [time.time() - finalization_start],
+            "T_primary_beam_taylor": [T_primary_beam_taylor],
+        }
+    )
+    _add_task_execution_metadata(finalization_timing, finalization_start)
+    input_data["timing_finalization"] = finalization_timing
+    return _prepare_continuum_result_for_transfer(input_data)
+
+
+@shares_param_docs
+def model_update_continuum_single_field(
+    input_data,
+    input_params,
+    *,
+    input_checked: bool = False,
+):
+    """Run one continuum model-update node entirely in memory.
+
+    This node is intended for the GraphViper append stage following the global
+    reduce operation. It receives the globally accumulated continuum image
+    products, determines the model-update parameters using the iteration
+    controller, executes one continuum model-update step, and returns the updated
+    image dataset in memory.
+
+    No image or processing-set data are read from or written to disk.
+
+    reduce output dictionary
+    │
+    ├── input_data["image"]
+    └── input_data["timing_node_tasks"]
+            │
+            ▼
+    model_update_continuum_single_field
+            │
+            ├── updates the cycle controller
+            ├── determines the model-update parameters
+            ├── calls model_update_mtmfs_single_field
+            ├── updates the continuum sky model
+            └── updates convergence information
+            │
+            ▼
+    updated result dictionary remains in memory
+
+    Parameters
+    ----------
+    input_data : dict
+        Output of the preceding GraphViper reduce stage. It must contain
+
+        ``input_data["image"]``
+            Globally reduced continuum image dataset.
+
+        It may additionally contain
+
+        ``input_data["timing_node_tasks"]``
+            Timing information accumulated during the distributed map/reduce
+            stages.
+
+    input_params : dict
+        Append-node configuration. Expected entries are
+
+        ``cycle_control_params``
+            Global CLEAN cycle control parameters.
+
+        Optional entries are
+
+        ``deconvolver``
+            Deconvolver name. Defaults to ``"hogbom"``.
+
+        ``processing_function_threads``
+            Number of threads passed to the model-update processing function.
+
+        ``is_first_cycle``
+            Whether this is the first imaging cycle. Defaults to ``True``.
+
+        ``controller``
+            Existing :class:`CycleController`. If omitted, a new controller is
+            constructed from ``cycle_control_params``.
+
+        ``image_data_group_in_name``
+            Residual image data-group name. Defaults to ``"residual"``.
+
+        ``image_data_group_out_name``
+            Model image data-group name. Defaults to ``"model"``.
+
+        ``cycle_acceleration``
+            With ``"conjugate_gradient"``, Högbom and Asp write their updated
+            residual back into the image. Defaults to ``"none"``.
+
+        ``model_xds``
+            The model of the preceding imaging cycle. The model update adds
+            its components to a copy of it, as the cube's adds them to its
+            model; without it the model starts from zero.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
+    Returns
+    -------
+    dict
+        Dictionary containing
+
+        ``"image"``
+            Updated continuum image dataset containing the new sky model.
+
+        ``"timing_node_tasks"``
+            Timing dataframe including the model-update stage.
+
+        ``"controller"``
+            Updated cycle controller.
+
+        ``"residual_converged"``
+            True only when refreshed residual statistics confirm a stop,
+            including exhausted budgets. A model-update stop is provisional.
+    """
+    if not (input_checked or input_params.get("input_checked", False)):
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_model_update,
+        )
+
+        check_model_update(input_params, mode=CONTINUUM_SINGLE_FIELD)
+        check_driver_workflow(input_params, mode=CONTINUUM_SINGLE_FIELD)
+
+    import time
+
+    import pandas as pd
+    import toolviper.utils.logger as logger
+
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        build_continuum_residual_imaging_dict,
+        model_update_mtmfs_single_field,
+    )
+    from astroviper.processing_functions.imaging.utils import (
+        ImagingDict,
+        copy_residual_statistics,
+        get_per_cycle_limits,
+        make_continuum_cycle_controller,
+        merge_imaging_dicts,
+        record_cycle_time,
+    )
+
+    node_start = time.time()
+
+    # GraphViper append normally supplies the preceding graph result directly.
+    # Accept a singleton list as well, in case the append execution wrapper
+    # retains the reduce-style list convention.
+    if isinstance(input_data, list | tuple):
+        if len(input_data) != 1:
+            raise ValueError(
+                "The continuum model-update append node expects exactly one "
+                f"reduced input, but received {len(input_data)}."
+            )
+        input_data = input_data[0]
+
+    # Sanity checks
+    if not isinstance(input_data, dict):
+        raise TypeError(
+            "input_data must be the dictionary returned by the continuum "
+            f"reduce stage, not {type(input_data).__name__}."
+        )
+
+    if "image" not in input_data:
+        raise KeyError(
+            "The continuum reduce result does not contain the required 'image' entry."
+        )
+
+    if "cycle_control_params" not in input_params:
+        raise KeyError("input_params must contain 'cycle_control_params'.")
+
+    # Prepare control parameters
+    img_xds = input_data["image"]
+    # Stopping statistics and model updates must use the same clean support.
+    # Resolve the public beam cutoff once into a local control view; measuring
+    # residuals outside that support can keep cleaning running on pixels the
+    # model update cannot address. Preserve the caller's original configuration.
+    cycle_control_params = {
+        **input_params["cycle_control_params"],
+        "primary_beam_limit": input_params.get(
+            "primary_beam_limit",
+            input_params["cycle_control_params"].get("primary_beam_limit", 0.0),
+        ),
+    }
+    deconvolver = input_params.get("deconvolver", "hogbom")
+    processing_function_threads = input_params.get(
+        "processing_function_threads",
+        1,
+    )
+    is_first_cycle = input_params.get("is_first_cycle", True)
+
+    image_data_group_in_name = input_params.get(
+        "image_data_group_in_name",
+        "residual",
+    )
+    image_data_group_out_name = input_params.get(
+        "image_data_group_out_name",
+        "model",
+    )
+
+    # This state is separate from input_checked and from persisted diagnostics.
+    hessian_cache = dict(input_params.get("hessian_cache") or {})
+    if "spectral_diagnostics" in input_params:
+        img_xds.attrs.setdefault("input_validation", {})["spectral_design"] = (
+            input_params["spectral_diagnostics"]
+        )
+
+    # -------------------------------------------------------------
+    # Obtain the cycle controller.
+    # -------------------------------------------------------------
+    controller = input_params.get("controller")
+    if controller is None:
+        controller = make_continuum_cycle_controller(cycle_control_params)
+
+    # A fresh map/reduce graph does not contain the preceding append node's
+    # convergence history. Accept that persistent state through input_params so
+    # later cycle controls retain the measured peak and PSF sidelobe.
+    combined_deconvolve_dict = input_data.get(
+        "deconvolution",
+        input_params.get("deconvolution"),
+    )
+
+    if combined_deconvolve_dict is None:
+        combined_deconvolve_dict = ImagingDict()
+
+    timing = {
+        "T_cycle_control": 0.0,
+        "T_model_update": 0.0,
+        "T_convergence": 0.0,
+    }
+
+    # The refreshed residual verifies the current accumulated model. This
+    # check consumes neither iterations nor a model-update cycle; a threshold
+    # stop reported by the preceding model update may be revoked here.
+    start = time.time()
+    controller.ensure_planes(img_xds.sizes["time"], 1, img_xds.sizes["polarization"])
+    residual_imaging_dict = build_continuum_residual_imaging_dict(
+        img_xds, image_data_group_in_name, cycle_control_params
+    )
+    # The residual update of this cycle ran in the map tasks before this one:
+    # its time is that of the longest of them.
+    residual_timing = input_data.get("timing_node_tasks")
+    if residual_timing is not None and "T_image_cube_task" in residual_timing:
+        record_cycle_time(
+            residual_imaging_dict,
+            "t_residual_update",
+            residual_timing["T_image_cube_task"].max(),
+        )
+    # MVC's minor-cycle Hessian is approximate. Compare successive exact,
+    # visibility-refreshed Taylor-zero residuals and stop a runaway before
+    # another model update. Asp is excluded because a healthy scale change can
+    # transiently raise its peak; its own scale-aware safeguards remain active.
+    if input_params.get("continuum_mode", "mfs") == "mvc" and deconvolver != "asp":
+        diverged = controller.check_refreshed_residual_divergence(residual_imaging_dict)
+        if diverged:
+            details = ", ".join(
+                f"(time={idx[0]}, polarization={idx[2]}): {previous:.6g} -> "
+                f"{current:.6g}"
+                for idx, previous, current in diverged
+            )
+            logger.warning(
+                "MVC stopped because the exact refreshed Taylor-term-zero "
+                "residual peak grew by more than a factor of 3 in one imaging "
+                f"cycle ({details}). This is a divergence safeguard, not a "
+                "converged solution; the resulting image is not scientifically "
+                "usable."
+            )
+    if controller.max_cycles == "auto":
+        import numpy as np
+
+        from astroviper.processing_functions.imaging.weight_statistics import (
+            continuum_sensitivity,
+        )
+
+        sensitivity = None
+        if any(
+            controller._plane_threshold(pol) <= 0
+            for pol in range(img_xds.sizes["polarization"])
+        ):
+            if "auto_weight_sums" not in input_data:
+                raise KeyError(
+                    "Automatic continuum cycle limits with zero threshold require reduced auto_weight_sums."
+                )
+            sensitivity = np.broadcast_to(
+                continuum_sensitivity(
+                    input_data["auto_weight_sums"], img_xds.polarization.values
+                ),
+                (img_xds.sizes["time"], 1, img_xds.sizes["polarization"]),
+            )
+        controller.resolve_max_cycles(residual_imaging_dict, sensitivity=sensitivity)
+
+    stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
+    if stopcode.imaging != 0:
+        # No processing-function update follows convergence. Validate the
+        # actual final products here, with the same content-verified cache.
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+        )
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_model_products,
+        )
+
+        img_xds.attrs.setdefault("input_validation", {})["model_products"] = (
+            check_model_products(
+                img_xds,
+                input_params,
+                mode=CONTINUUM_SINGLE_FIELD,
+                image_data_group_in_name=image_data_group_in_name,
+                image_data_group_out_name=image_data_group_out_name,
+                hessian_cache=hessian_cache,
+            )
+        )
+        import xarray as xr
+
+        from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+        img_xds["SKY_MODEL"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
+        modify_data_groups_xds(
+            img_xds,
+            data_group_out_name=image_data_group_out_name,
+            data_group_out={"sky": "SKY_MODEL"},
+            description="Zero model increment after refreshed residual verification.",
+        )
+        timing["T_convergence"] = time.time() - start
+        timing["T_model_update_node_task"] = time.time() - node_start
+        return _prepare_continuum_result_for_transfer(
+            {
+                "image": img_xds,
+                "timing_node_tasks": input_data.get("timing_node_tasks"),
+                "timing_model_update": pd.DataFrame(
+                    {key: [value] for key, value in timing.items()}
+                ),
+                "deconvolution": combined_deconvolve_dict,
+                "controller": controller,
+                "stopcode": stopcode,
+                "stopdesc": stopdesc,
+                "residual_statistics": residual_imaging_dict,
+                "residual_converged": True,
+                "is_first_cycle": False,
+                "hessian_cache": hessian_cache,
+            }
+        )
+
+    # Reuse the shared controls with fresh statistics on every cycle, rather
+    # than using the preceding approximate model-update residual history.
+    max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
+        controller, residual_imaging_dict
+    )
+
+    timing["T_cycle_control"] = time.time() - start
+
+    deconvolve_params = {
+        **cycle_control_params,
+        "max_iter_per_cycle_updated": max_iter_per_cycle_updated,
+        "threshold_per_cycle": threshold_per_cycle,
+    }
+
+    # -------------------------------------------------------------
+    # Run the model-update processing function.
+    #
+    # img_xds is already in memory and is modified in place. The model
+    # update adds its components to a copy of the previous model, as the
+    # cube's adds them to its model.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    previous_model_xds = input_params.get("model_xds")
+    if previous_model_xds is not None:
+        residual = img_xds["SKY_RESIDUAL"]
+        previous_model = previous_model_xds["SKY_MODEL"].transpose(*residual.dims)
+        model = residual.copy(data=previous_model.values.copy())
+        model.attrs = previous_model.attrs.copy()
+        img_xds["SKY_MODEL"] = model
+
+    (
+        deconvolve_dict,
+        model_update_return_df,
+    ) = model_update_mtmfs_single_field(
+        img_xds,
+        deconvolver,
+        deconvolve_params,
+        is_first_cycle=is_first_cycle,
+        processing_function_threads=processing_function_threads,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        write_back_deconvolver_residual=(
+            input_params.get("cycle_acceleration", "none") == "conjugate_gradient"
+        ),
+        input_checked=True,
+        product_config=input_params,
+        hessian_cache=hessian_cache,
+    )
+    copy_residual_statistics(deconvolve_dict, residual_imaging_dict)
+
+    timing["T_model_update"] = time.time() - start
+    record_cycle_time(deconvolve_dict, "t_model_update", timing["T_model_update"])
+
+    # -------------------------------------------------------------
+    # Update convergence bookkeeping.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    # The model update decides nothing: its iterations, its stop code and the
+    # no progress and divergence runs are booked for the stop test on the next
+    # refreshed residual. stopcode and stopdesc stay those of the check above.
+    controller.update_counts(deconvolve_dict)
+    controller.record_model_update(deconvolve_dict)
+
+    combined_deconvolve_dict = merge_imaging_dicts(
+        [
+            combined_deconvolve_dict,
+            deconvolve_dict,
+        ]
+    )
+
+    timing["T_convergence"] = time.time() - start
+    timing["T_model_update_node_task"] = time.time() - node_start
+
+    logger.debug(
+        "Continuum model update finished with "
+        f"major stop code {stopcode.imaging}: {stopdesc}"
+    )
+
+    node_timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})
+
+    if model_update_return_df is not None:
+        node_timing_df = pd.concat(
+            [
+                node_timing_df.reset_index(drop=True),
+                model_update_return_df.reset_index(drop=True),
+            ],
+            axis=1,
+        )
+
+    # Preserve the map/reduce timing separately rather than mixing rows from
+    # different types of node task.
+    return _prepare_continuum_result_for_transfer(
+        {
+            "image": img_xds,
+            "timing_node_tasks": input_data.get("timing_node_tasks"),
+            "timing_model_update": node_timing_df,
+            "deconvolution": combined_deconvolve_dict,
+            "residual_converged": False,
+            "residual_statistics": residual_imaging_dict,
+            "controller": controller,
+            "stopcode": stopcode,
+            "stopdesc": stopdesc,
+            "is_first_cycle": False,
+            "hessian_cache": hessian_cache,
+        }
+    )

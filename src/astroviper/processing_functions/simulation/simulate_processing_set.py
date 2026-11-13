@@ -8,7 +8,6 @@ import numpy as np
 import xarray as xr
 
 from astroviper.processing_functions.simulation.antenna_beams import (
-    dish_diameters_of_beam_models,
     evaluate_beam_models,
     pack_beam_models,
     resolve_beam_params,
@@ -26,6 +25,59 @@ from astroviper.utils.measurement_set_tools import (
     polarization_index,
 )
 from astroviper.utils.param_docs import shares_param_docs
+
+
+def _sky_image_visibilities(
+    sky_image,
+    sky_image_predict,
+    uvw,
+    frequency,
+    polarization,
+    packed_models,
+    beam_model_map,
+    pointing_ra_dec,
+    w_term,
+    processing_function_threads,
+):
+    """Visibilities of ``sky_image`` through the one beam of every antenna."""
+    from astroviper.processing_functions.simulation.antenna_beams import (
+        symmetric_beam_response,
+    )
+    from astroviper.processing_functions.simulation.sky_image_visibilities import (
+        sky_image_visibilities,
+    )
+
+    predict = {"predict": "dft", **(sky_image_predict or {})}
+    if predict["predict"] == "gridded" and w_term:
+        raise ValueError(
+            'sky_model_image_predict "gridded" has no w term: simulate with '
+            'uvw_params={"w_term": False} or use "dft".'
+        )
+    models = np.unique(beam_model_map)
+    if models.size != 1 or pointing_ra_dec is not None:
+        raise NotImplementedError(
+            "a sky image is simulated through one beam model shared by every "
+            "antenna, pointing at the phase centre."
+        )
+    l, m = np.meshgrid(sky_image.l.values, sky_image.m.values, indexing="ij")
+    primary_beam = symmetric_beam_response(
+        packed_models[int(models[0])],
+        l[None],
+        m[None],
+        frequency[:, None, None],
+        ipower=2,
+    )
+    return sky_image_visibilities(
+        sky_image,
+        uvw,
+        frequency,
+        polarization,
+        primary_beam=primary_beam,
+        predict=predict["predict"],
+        gridding_kernel_params=predict.get("gridding_kernel_params"),
+        fft_padding=predict.get("fft_padding", 1.2),
+        processing_function_threads=processing_function_threads,
+    )
 
 
 @shares_param_docs
@@ -46,10 +98,13 @@ def simulate_processing_set(
     noise_params: dict | None = None,
     channel_width: float | None = None,
     integration_time: float | None = None,
+    antenna_dish_diameter: np.ndarray | None = None,
     direction_frame: str = "icrs",
     processing_function_threads: int = 1,
     implementation: str = "cpp",
     random_seed: int | None = None,
+    time_index_offset: int = 0,
+    frequency_index_offset: int = 0,
     gaussian_source_flux: np.ndarray | None = None,
     gaussian_source_ra_dec: np.ndarray | None = None,
     gaussian_source_shape: np.ndarray | None = None,
@@ -61,6 +116,8 @@ def simulate_processing_set(
     gaussian_ring_source_ra_dec: np.ndarray | None = None,
     gaussian_ring_source_shape: np.ndarray | None = None,
     sky_components: list | None = None,
+    sky_model_image: xr.Dataset | None = None,
+    sky_model_image_predict: dict | None = None,
 ) -> tuple[xr.Dataset, dict]:
     """Simulate the visibilities of a sky of analytic components for a block of times and channels.
 
@@ -153,7 +210,11 @@ def simulate_processing_set(
     pointing_ra_dec : np.ndarray, [n_time | 1, n_antenna | 1, 2], radians, optional
         Antenna pointing directions; ``None`` points every antenna at the phase centre.
     uvw_params : dict, optional
-        ``auto_correlations`` (bool, default False).  The uvw follow the
+        ``auto_correlations`` (bool, default False) and ``w_term`` (bool,
+        default True; ``False`` zeroes the ``w`` coordinate before the
+        visibilities are computed, the two dimensional approximation without
+        the ``w (n - 1)`` phase, so that an imager without w projection can be
+        tested against an exactly consistent sky).  The uvw follow the
         archival / VLBI convention adopted by MSv4:
         ``uvw = P(antenna1) - P(antenna2)`` (see
         :func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`).
@@ -161,11 +222,19 @@ def simulate_processing_set(
         Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual
         model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,
         ``spill_efficiency``, ``corr_efficiency``, ``quantization_efficiency``,
-        ``t_cmb`` and ``random_seed``; ``None`` disables noise (unit weights).
+        ``t_cmb`` and ``random_seed`` (the noise of a visibility depends only on
+        the seed and the indices of its time and channel, not on the chunking);
+        ``None`` disables noise (unit weights).
     channel_width : float, Hz, optional
         Channel width used for the noise level; defaults to the channel spacing.
     integration_time : float, s, optional
         Integration time used for the noise level; defaults to the time spacing.
+    antenna_dish_diameter : np.ndarray, [n_antenna], metres, optional
+        Diameter of the main reflector of each antenna
+        (``antenna_xds.ANTENNA_DISH_DIAMETER``); it sets the effective area of the
+        noise model, ``ant_efficiency * pi * D1 * D2 / 4``.  Required when
+        ``noise_params`` is given; the beam models keep their own (effective)
+        ``dish_diameter``.
     direction_frame : str
         Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).
     processing_function_threads : int
@@ -175,8 +244,30 @@ def simulate_processing_set(
         Visibility kernel implementation: ``"cpp"`` (multithreaded C++, default) or
         ``"numpy"`` (vectorised NumPy reference).
     random_seed : int, optional
-        Overrides ``noise_params["random_seed"]`` (used by node tasks to derive a
-        seed per task).
+        Overrides ``noise_params["random_seed"]``.
+    time_index_offset, frequency_index_offset : int
+        Indices of ``time[0]`` and ``frequency[0]`` in the full time and
+        frequency axes of the simulation (default 0).  They key the noise of
+        each time and channel (see
+        :func:`~astroviper.processing_functions.simulation.calculate_noise.calculate_noise`),
+        so a block simulated on its own gets the noise it has in the whole.
+    sky_model_image : xarray.Dataset, optional
+        A sky image added to the components: an XRADIO image (the path of a
+        FITS, CASA or Zarr image for the distributed application and the node
+        task, the opened dataset for the processing function) with ``SKY`` in Jy
+        per pixel, Stokes ``I`` (or the two Stokes planes of the parallel hands,
+        or ``I, Q, U, V``) and ``l, m`` about the phase centre. Every channel
+        takes the image channel nearest in frequency. It is seen through the
+        power beam of the one beam model of every antenna, which must point at
+        the phase centre (``pointing_ra_dec`` None). It is not part of the sky
+        image written with ``sky_image_params``.
+    sky_model_image_predict : dict, optional
+        How ``sky_model_image`` is predicted: ``{"predict": "dft"}`` (default),
+        the exact direct Fourier transform over the non-zero pixels, the w term
+        included unless ``uvw_params["w_term"]`` is False; or
+        ``{"predict": "gridded", "gridding_kernel_params": ...,
+        "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
+        which has no w term and so needs ``uvw_params["w_term"]`` False.
 
     Returns
     -------
@@ -187,7 +278,8 @@ def simulate_processing_set(
         ``polarization``, ``baseline_id``, ``baseline_antenna1_id``/``2_id`` and
         ``parallactic_angle``.
     timing : dict
-        ``T_uvw``, ``T_beams``, ``T_visibilities``, ``T_noise`` in seconds.
+        ``T_uvw``, ``T_beams``, ``T_visibilities``, ``T_sky_image`` (with a sky
+        model image), ``T_noise`` in seconds.
     """
     time = np.asarray(time)
     frequency = np.asarray(frequency, dtype=np.float64)
@@ -199,6 +291,7 @@ def simulate_processing_set(
     params = resolve_beam_params(beam_params)
     uvw_params = {
         "auto_correlations": False,
+        "w_term": True,
         **(uvw_params or {}),
     }
     noise = resolve_noise_params(noise_params)
@@ -213,6 +306,8 @@ def simulate_processing_set(
         auto_correlations=uvw_params["auto_correlations"],
         direction_frame=direction_frame,
     )
+    if not uvw_params["w_term"]:
+        uvw[..., 2] = 0.0
     timing["T_uvw"] = _time.time() - start
 
     start = _time.time()
@@ -259,6 +354,22 @@ def simulate_processing_set(
     )
     timing["T_visibilities"] = _time.time() - start
 
+    if sky_model_image is not None:
+        start = _time.time()
+        visibility = visibility + _sky_image_visibilities(
+            sky_model_image,
+            sky_model_image_predict,
+            uvw,
+            frequency,
+            polarization,
+            packed_models,
+            beam_model_map,
+            pointing_ra_dec,
+            uvw_params["w_term"],
+            processing_function_threads,
+        )
+        timing["T_sky_image"] = _time.time() - start
+
     start = _time.time()
     if noise is not None:
         if channel_width is None:
@@ -282,11 +393,12 @@ def simulate_processing_set(
             raise ValueError(
                 "channel_width and integration_time are required for the noise model."
             )
-        dish_diameter = dish_diameters_of_beam_models(beam_models)[beam_model_map]
+        if antenna_dish_diameter is None:
+            raise ValueError("antenna_dish_diameter is required for the noise model.")
         seed = random_seed if random_seed is not None else noise.get("random_seed")
         noise_values, weight, _ = calculate_noise(
             visibility.shape,
-            dish_diameter,
+            antenna_dish_diameter,
             antenna1,
             antenna2,
             channel_width,
@@ -294,6 +406,8 @@ def simulate_processing_set(
             noise,
             auto_correlations=uvw_params["auto_correlations"],
             random_seed=seed,
+            time_index_offset=time_index_offset,
+            frequency_index_offset=frequency_index_offset,
         )
         visibility = visibility + noise_values
     else:

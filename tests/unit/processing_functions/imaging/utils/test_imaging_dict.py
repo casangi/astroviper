@@ -1,10 +1,10 @@
 """Unit tests for the ImagingDict -> DataFrame flattening."""
 
+from astroviper.processing_functions.imaging.utils.cycle_control import StopCode
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     ImagingDict,
     imaging_dict_to_dataframe,
 )
-from astroviper.processing_functions.imaging.utils.iteration_control import StopCode
 
 
 def _make_imaging_dict():

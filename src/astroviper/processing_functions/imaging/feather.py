@@ -14,7 +14,7 @@ import xarray as xr
 from astropy import units as u
 from xradio.image import make_empty_aperture_image
 
-from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
     fft_lm_to_uv,
     ifft_uv_to_lm,
 )

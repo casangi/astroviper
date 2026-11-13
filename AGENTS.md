@@ -95,7 +95,7 @@ Notebooks must stay **output-stripped** (`nbstripout`) and
   widget only re-render it. When a cell is purely an interactive explorer, a
   static fallback (e.g. a small multi-panel montage) is the most robust choice for
   the executed copy — see
-  `processing_functions_tutorials/imaging/demo_prolate_spheroidal_grid.ipynb`.
+  `processing_functions_tutorials/imaging/demo_anti_alias_grid.ipynb`.
 - Always execute notebooks with a **per-cell timeout** so a genuinely stuck cell
   fails loudly instead of hanging the whole run.
 - **Heavy notebooks are slow, not hung.** Run the notebook suite **sequentially**
@@ -133,8 +133,9 @@ the future.
 1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
    over data chunks via `graphviper...map`, reduces results
    (`graphviper...reduce`), then `generate_dask_workflow` + `dask.compute`. This
-   is the *only* layer that knows about Dask, chunking, and clusters. It also
-   creates the (empty) on-disk output structures that node tasks write into.
+   owns Dask execution, chunking, and clusters. The centralized imaging
+   validation module is the explicit exception described below. This layer
+   also creates the (empty) on-disk output structures that node tasks write into.
 2. **`node_tasks/`** — The functions that get delayed in `distributed_applications/`.
    They may load chunks of input data, write chunks of output data, and call
    `processing_functions`. The structures they write into are created by
@@ -161,15 +162,37 @@ the future.
    data groups) and `utils/io.py` (Zarr variable definitions + chunk writers).
    The io.py will eventually move to XRADIO.
 
+**Configuration-validation exception:**
+`processing_functions/imaging/config_check/` deliberately serves all layers.
+It may validate backend and MPI options, append-node arguments, task mappings,
+and channel-partition coverage, and import GraphVIPER helpers needed to apply
+the workflow's coordinate-selection rules. These checks stay centralized here
+even though they understand graph configuration and structure. This exception
+permits validation only: graph construction, scheduling, and execution remain
+in `distributed_applications/`; input/output data I/O remains outside the
+validation module. Other processing functions retain the normal layer rules.
+
 ### Public API surface
 Each layer/subdomain re-exports its entry points via `__init__.py`. The imaging
 entry point is exposed at all three layers as `image_cube_single_field`, the
 simulation entry point as `simulate_processing_set`:
 ```python
 import astroviper.distributed_applications as distributed_applications
+
 distributed_applications.imaging.image_cube_single_field(...)
 distributed_applications.simulation.simulate_processing_set(...)
 ```
+
+### Reports of the distributed applications
+A distributed application takes `report=None | "html" | "pdf" | "notebook"` and,
+once its output is written, makes a report through `utils.report.make_report`
+(a failing report is logged and never costs the run its results). Every report
+starts with the common processing section (`utils.report.add_processing_section`:
+timing, task stream, cluster resources); the application's results section lives
+next to it (`<application>_report.py`), built with `utils.report.Report` and the
+pyplot-free figures of `utils/report_plots.py`. For the task stream and the
+resource monitor, a node task records `start_unixtime` and its execution identity
+(`hostname`, `process_pid`, `thread_native_id`, `worker_name`) and returns a dict.
 
 ### The `simulation` subdomain (port of SIRIUS)
 `simulate_processing_set` is a **pure generator**: there is no input processing
@@ -181,28 +204,70 @@ documented in `SIRIUS_PORT_PLAN.md` at the repo root; keep that file current
 when the simulator changes.
 
 ### Imaging implementation notes
-The Airy voltage patterns in
-`processing_functions/imaging/primary_beam/airy_disk.py` are shared by the
-imaging primary beam (`ipower=2`, the CASA power-pattern definition) and the
-simulation antenna beams. The Adaptive Scale Pixel
+The imaging primary beam (`ipower=2`, the CASA power-pattern definition) and
+the simulator's analytic and beam-polynomial antenna beams are evaluated by one
+function, `processing_functions/simulation/antenna_beams.py::symmetric_beam_response`
+(the C++ visibility kernel reproduces it): the obscured Airy disks of
+`processing_functions/imaging/primary_beam/airy_disk.py` (textbook by default,
+CASA's `PBMath1DAiry` with `func="casa_airy"`) and the EVLA beam polynomial,
+zero beyond `max_rad_1GHz` when the model has one. The Adaptive Scale Pixel
 deconvolver (`processing_functions/imaging/deconvolvers/aspclean/`, a port of
 CASA's `AspMatrixCleaner`) does its FFTs with the vendored
 `include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
-kept verbatim with its licence block); its per-Aspen L-BFGS follows ALGLIB's
-scaled-variable conventions and is exposed for tests as
-`aspclean.lbfgs_minimize`. Two documented departures from CASA live in
-`src/asp_clean.cpp`: separable Aspen spectra with paired inverse transforms
-(same numbers, ~8x fewer FFTs) and a unit-consistent "diverging" guard. The
+kept verbatim with its licence block); its per-Aspen L-BFGS
+(`include/asp_lbfgs.hpp`) reproduces ALGLIB's `minlbfgs` as CASA and LibRA
+call it (unpreconditioned, the scale only in the stopping tests, More-Thuente
+line search; written independently, as ALGLIB is GPL) and is exposed for
+tests as `aspclean.lbfgs_minimize`. Documented departures from CASA live in
+`src/asp_clean.cpp`: exact linear convolutions in the residual update and the
+Aspen fit (CASA's circular ones wrap the response of a component near an edge
+around to the opposite edge), separable spectra with real (half spectrum)
+transforms, no transform for point components, no end of the model
+update after a Hogbom run (CASA's, kept as
+`cycle_control_params["asp_stop_after_hogbom_run"]`), no "diverging" guard
+(`AspMatrixCleaner` "5. Diverging" of CASA and LibRA), and Gaussian components
+held on the mask by their share of flux (`asp_min_mask_coverage`), where CASA
+tests `mask (*) scale` with scales that do not sum to 1. Beyond CASA, the
+imager's Asp starts each model update with components shaped by the residual
+(Ma, Zhang & Zhang 2026) and cleans smoothed residual that is significant at
+its scale below the threshold (`asp_residual_components`,
+`asp_scale_significance`, on by default; the kernel options are `AspOptions`
+in `include/asp_clean.hpp`, off by default there).
+Like Hogbom and MTMFS it takes the divergence test shared by the
+deconvolvers (`deconvolvers/include/plane_stop_test.hpp`); `asp_clean()`
+gives it the RMS limit at `(1 + gain)` times the lowest RMS and no peak
+limit, as Asp's least-squares components can raise the peak of a healthy
+residual. Compare Asp with LibRA's copy (ARDG-NRAO/LibRA); its pixel shift
+fix is not needed, because these convolutions are centred on odd and even
+axes. The
 PSF beam fit is switchable
 (`psf_fitting_method="astroviper" | "casa"`); `"casa"` is a C++ port of CASA's
 `StokesImageUtil::FitGaussianPSF` (CAS-13022,
 `processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces
 `tclean`'s restoring beam exactly on the same PSF.
 
+**PSF of twice the image size.** The PSF that `exact_psf_subtraction`
+subtracts (cube Hogbom only; Asp and continuum imaging refuse the option)
+has twice the `l` and `m` extents of `img_xds`, so it cannot share its
+coordinates and is kept outside `img_xds` and its data groups, as a NumPy
+cube `(nt, nf, np, 2 n_l, 2 n_m)`.
+`make_subtraction_point_spread_function_single_field` makes it once per
+channel, in the correlation basis, from the `WEIGHT_IMAGING` of the setup (not
+recomputed: Briggs weights depend on the uv cell, which the larger grid
+halves); with imaging weights equal in every correlation, as the imager's
+are, it is made once, for the first correlation on one uv grid, and copied to
+the others. It reaches `deconvolve` as
+`deconvolve_params["subtraction_psf_cube"]`. It is used only for the
+subtraction: the beam fit, `max_psf_sidelobe` and the restore keep the
+image-sized PSF.
+
 **Polarization.** The residual update grids and degrids in the instrument
 (correlation) basis and the model update deconvolves in the Stokes basis;
 `transform_polarization_basis` converts the image dataset at the boundary
-between the two. Two modes are supported, fixed by
+between the two, except the cube's model, as a round trip to the correlations
+and back rounds: its uv grid is made from its Stokes planes, combined into the
+correlations as they are padded (`fft_norm_img_xds`'s
+`new_polarization_basis`). Two modes are supported, fixed by
 `image_params["polarization_coords"]`
 (`processing_functions/imaging/utils/imaging_polarization.py`): the two parallel
 hands give `["I", "Q"]` (linear feeds) or `["I", "V"]` (circular feeds), and
@@ -288,22 +353,46 @@ overwriting. It is a dict stored at `xds.attrs["data_groups"]` and here is an MS
 
 ```python
 ms_xds.attrs["data_groups"] = {
-  "base":    {"correlated_data": "VISIBILITY",           "flag": "FLAG", "weight": "WEIGHT",         "uvw": "UVW"},
-  "imaging": {"correlated_data": "VISIBILITY_CORRECTED", "flag": "FLAG", "weight": "WEIGHT_IMAGING", "uvw": "UVW"},
-  "model": {"correlated_data": "VISIBILITY_MODEL", "uvw": "UVW"},
-  "calibrated": {"correlated_data": "VISIBILITY_CORRECTED", "flag": "FLAG_CORRECTED", "weight": "WEIGHT_CORRECTED", "uvw": "UVW"}
+    "base": {
+        "correlated_data": "VISIBILITY",
+        "flag": "FLAG",
+        "weight": "WEIGHT",
+        "uvw": "UVW",
+    },
+    "imaging": {
+        "correlated_data": "VISIBILITY_CORRECTED",
+        "flag": "FLAG",
+        "weight": "WEIGHT_IMAGING",
+        "uvw": "UVW",
+    },
+    "model": {"correlated_data": "VISIBILITY_MODEL", "uvw": "UVW"},
+    "calibrated": {
+        "correlated_data": "VISIBILITY_CORRECTED",
+        "flag": "FLAG_CORRECTED",
+        "weight": "WEIGHT_CORRECTED",
+        "uvw": "UVW",
+    },
 }
 ```
 
 Here is an image example (image-side roles):
 ```python
 img_xds.attrs["data_groups"] = {
-  "residual": {"sky": "SKY_RESIDUAL", "point_spread_function": "POINT_SPREAD_FUNCTION",
-               "primary_beam": "PRIMARY_BEAM", "mask": "MASK", "beam_fit_params_point_spread_function":"BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"},
-  "model":    {"sky": "SKY_MODEL", "mask": "MASK"},
-  "restored": {"sky": "SKY_RESTORED","point_spread_function": "POINT_SPREAD_FUNCTION",
-               "primary_beam": "PRIMARY_BEAM", "mask": "MASK",
-               "beam_fit_params_point_spread_function":"BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"},
+    "residual": {
+        "sky": "SKY_RESIDUAL",
+        "point_spread_function": "POINT_SPREAD_FUNCTION",
+        "primary_beam": "PRIMARY_BEAM",
+        "mask": "MASK",
+        "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    },
+    "model": {"sky": "SKY_MODEL", "mask": "MASK"},
+    "restored": {
+        "sky": "SKY_RESTORED",
+        "point_spread_function": "POINT_SPREAD_FUNCTION",
+        "primary_beam": "PRIMARY_BEAM",
+        "mask": "MASK",
+        "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    },
 }
 ```
 
@@ -325,7 +414,8 @@ used everywhere in imaging:
 
 ```python
 from astroviper.utils.data_group_tools import (
-    create_data_groups_in_and_out, modify_data_groups_xds,
+    create_data_groups_in_and_out,
+    modify_data_groups_xds,
 )
 
 # 1) Resolve in/out groups (validates input exists; guards against accidental
@@ -393,16 +483,19 @@ read/write Python-owned NumPy buffers in place. No unnecessary copies are ever
 made.** Concretely, the bindings (`.../python/bindings.cpp`) follow these rules —
 match them in any new kernel:
 
-1. **Arrays: typed without `forcecast`.** Declared as
-   `py::array_t<T, py::array::c_style>` (e.g. `complex128`, `float64`,
-   `int64`). With no `forcecast`, a wrong dtype/layout raises immediately
-   instead of silently allocating a converted copy. **Never add `forcecast` to a
+1. **Arrays: explicit zero-copy validation.** Read-only inputs may use
+   `py::array_t<T, py::array::c_style>` when the corresponding argument is
+   declared with `.noconvert()`. Writable arrays use untyped `py::array` plus
+   explicit dtype, layout and writeability checks, preventing pybind11 from
+   silently allocating a converted temporary. **Never add `forcecast` to a
    large array.**
 2. **Explicit checks before compute**: verify `ndim`/shape, require
    C-contiguity (`require_c_contiguous(...)` — tells the caller to use
    `np.ascontiguousarray()` if needed), and for outputs require writeability
    (raise if `info.readonly` / `!arr.writeable()` — message: "modified in
-   place").
+   place"). The MT-MFS residual is the documented exception: its spatial
+   planes must be contiguous, but its outer Taylor-term stride may exceed one
+   plane so a polarization slice can still be updated in place.
 3. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
    (residual/model cubes) are written through `mutable_data()` pointers; they
    are *not* returned. Repeated calls accumulate (e.g. summing over MSes).
@@ -482,8 +575,11 @@ per-variable nodes.
     `SKY_MODEL`).
   - **Functions / variables**: `snake_case`, **descriptive** (`image_size`, not
     `imsize`).
-  - **Classes**: `CamelCase` (`IterationController`, `ReturnDict`).
+  - **Classes**: `CamelCase` (`CycleController`, `ReturnDict`).
   - **Consistency**: Parameter names should be consistent throughout the stack.
+    One name per parameter and one spelling per value: no aliases, no case
+    folding. An unsupported value or combination is refused, never coerced or
+    replaced (e.g. by another deconvolver).
   - **CLEAN terminology**: an **imaging cycle** (or simply *cycle*) is one
     **residual update** followed by one **model update**; use exactly these
     three terms in code, docstrings, docs and notebooks, matching
@@ -491,7 +587,11 @@ per-variable nodes.
     and the `max_cycles` / `max_iter_per_cycle` / `threshold_per_cycle`
     parameters. Never call anything a major or minor cycle (major/minor axis
     of a Gaussian beam is fine). CASA parameter names may be cited in brackets
-    for orientation, e.g. `max_cycles` [CASA `nmajor`].
+    for orientation, e.g. `max_cycles` [CASA `nmajor`]. **Cycle control** is
+    the stop test between the residual update and the model update
+    (`CycleController`); **iteration control** is the stop test inside the
+    model update (the deconvolver kernels). A quantity keeps one name from the
+    cycle controller down to the kernel arguments.
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
   astroviper.processing_functions.imaging.residual_update import ...`). Relative
@@ -526,7 +626,9 @@ per-variable nodes.
 - **Logging**: use the **toolviper** logger, not `print`:
   ```python
   import toolviper.utils.logger as logger
-  logger.info(...); logger.debug(...)
+
+  logger.info(...)
+  logger.debug(...)
   ```
   The log level in node_tasks and processing_functions should always be debug or higher because there will be many instances of these functions.
 - **Performance**: vectorize with NumPy; if not feasible, use C++; verify with timing.
@@ -539,11 +641,39 @@ per-variable nodes.
   validates** (not in a central `config/` directory), and the decorator points
   the validator at the module's own directory, e.g.
   `validate(config_dir=os.path.dirname(os.path.abspath(__file__)))`. The schema
-  key is the function name. Validate **once, at the graph layer** — node tasks
-  and processing functions trust the already-checked `input_params`. For
-  internal/leaf-level checks reuse
-  `astroviper.utils.check_params.check_params` (type/range/allowed-value checks
-  with defaults) rather than ad-hoc validation.
+  key is the function name. JSON schemas check basic structure, types, and
+  allowed strings; numerical bounds and conditional relationships belong in
+  Python.
+  - **Validate at every callable layer:** distributed applications, node tasks,
+    and processing functions validate direct calls by default. Imaging entry
+    points use keyword-only `input_checked=False`. Import and call the applicable
+    configuration validators inside `if not input_checked`.
+  - **Skip repeated configuration validation:** after successful validation, an
+    upper layer passes `input_checked=True` down the stack; graph nodes also
+    carry it through `input_params`. This applies to distributed entry points
+    called from another validated workflow as well. Reuse the flag only for
+    unchanged configuration in the same imaging mode. Newly derived or changed
+    settings require their applicable checks before being marked checked.
+  - **Keep validation centralized and non-mutating:** imaging configuration
+    rules live in `processing_functions/imaging/config_check/`. The independent
+    residual-update, model-update, and driver-workflow validators share utility
+    predicates; they do not call one another. `check_config` orchestrates all
+    three. Drivers require complete configuration before I/O, output creation,
+    or graph construction; lower entry points check the settings they receive.
+    Raise on malformed configuration without inserting defaults, coercing
+    values, or substituting another configuration. Documented optional defaults
+    must not modify the caller's mapping. Do not add duplicate inline rules or
+    use the legacy default-inserting `check_params` helper for these checks.
+  - **Keep runtime validation active:** `input_checked` skips configuration
+    checks only. Checks on newly loaded data, derived products, numerical
+    results, and native array contracts remain active in their owning modules.
+    Metadata preflight must stay cheap: inspect coordinates, attributes, shapes,
+    and dtypes without reading bulk sample arrays or doing imaging work.
+  - **Design for all imaging modes:** each imaging validator distinguishes cube
+    and continuum, and single-field and multifield layouts. Multifield execution
+    is currently unsupported, but its rules belong in the same validation
+    architecture. Keep checks in clear logical blocks, with a description of
+    each check and motivation for numerical acceptance criteria.
 
 ---
 

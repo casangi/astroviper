@@ -101,15 +101,40 @@ def _target_files():
     root = pathlib.Path(__file__).resolve().parents[1]  # src/astroviper
     rel = [
         "distributed_applications/imaging/image_cube_single_field.py",
+        "distributed_applications/imaging/feather.py",
+        "distributed_applications/imaging/image_cube_single_field_delphi.py",
+        "distributed_applications/imaging/point_spread_function_cube_single_field.py",
+        "node_tasks/imaging/point_spread_function_cube_single_field.py",
+        "distributed_applications/imaging/image_continuum_single_field.py",
         "node_tasks/imaging/image_cube_single_field.py",
+        "node_tasks/imaging/image_continuum_single_field.py",
         "node_tasks/imaging/utils/skunk_works_msv2.py",
+        "processing_functions/image_analysis/make_auto_mask.py",
         "processing_functions/imaging/image_cube_single_field.py",
+        "processing_functions/imaging/restore.py",
         "processing_functions/imaging/calculate_imaging_weights.py",
+        "processing_functions/imaging/image_continuum_single_field.py",
+        "processing_functions/imaging/imaging_setup_continuum_single_field.py",
+        "processing_functions/imaging/make_point_spread_function_continuum_single_field.py",
+        "processing_functions/imaging/primary_beam/continuum_primary_beam.py",
+        "processing_functions/imaging/primary_beam/make_pb_symmetric.py",
+        "processing_functions/imaging/primary_beam/make_primary_beam.py",
+        "processing_functions/imaging/make_undeconvolved_image_continuum.py",
+        "processing_functions/imaging/make_undeconvolved_image_continuum_mvc.py",
+        "processing_functions/imaging/residual_cycle_continuum_single_field.py",
         "processing_functions/imaging/residual_update.py",
         "processing_functions/imaging/model_update.py",
+        "processing_functions/imaging/deconvolution.py",
+        "processing_functions/imaging/config_check/check_config.py",
+        "processing_functions/imaging/config_check/param_check_residual_update.py",
+        "processing_functions/imaging/config_check/param_check_model_update.py",
+        "processing_functions/imaging/config_check/param_check_driver_workflow.py",
         "processing_functions/imaging/make_point_spread_function.py",
         "processing_functions/imaging/make_undeconvolved_image.py",
         "processing_functions/imaging/degrid_visibility_grid.py",
+        "processing_functions/imaging/direct_fourier_transform.py",
+        "processing_functions/imaging/cycle_acceleration.py",
+        "processing_functions/imaging/utils/imaging_parameter_heuristics.py",
         "distributed_applications/image_analysis/moments.py",
         "node_tasks/image_analysis/moments.py",
         "processing_functions/image_analysis/moments.py",
@@ -264,7 +289,14 @@ def sync_param_docs(check=False):
                 return node
             if not isinstance(current, str):
                 return node
-            new_doc = _rewrite_docstring(current, registry)
+            # A "<function name>.<parameter name>" key gives the functions of
+            # that name their own description of the parameter.
+            function_prefix = node.name.value + "."
+            function_registry = dict(registry)
+            for key, description in registry.items():
+                if key.startswith(function_prefix):
+                    function_registry[key[len(function_prefix) :]] = description
+            new_doc = _rewrite_docstring(current, function_registry)
             if new_doc is None:
                 return node
             self.changed = True
