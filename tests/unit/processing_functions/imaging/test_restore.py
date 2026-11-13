@@ -975,6 +975,46 @@ def test_restored_beam_variable_holds_the_target_in_every_plane():
     assert "beam_fit_params_sky" not in out.attrs["data_groups"]["restored"]
 
 
+def test_restores_to_two_targets_keep_the_beam_of_each_group():
+    """A second restore into another group refuses to replace the beam the
+    first group records unless it is given its own variable or overwrite."""
+    xds = _target_inputs(np.float32)
+    wide = [TARGET[0] * 1.5, TARGET[1] * 1.5, TARGET[2]]
+    restore_image(
+        xds,
+        image_data_group_out_restore_name="restored_small",
+        image_data_group_out_modified={"sky": "SKY_RESTORED_SMALL"},
+        restoring_beam=TARGET,
+        overwrite=False,
+    )
+    with pytest.raises(AssertionError, match="BEAM_FIT_PARAMS_SKY_RESTORED"):
+        restore_image(
+            xds,
+            image_data_group_out_restore_name="restored_large",
+            image_data_group_out_modified={"sky": "SKY_RESTORED_LARGE"},
+            restoring_beam=wide,
+            overwrite=False,
+        )
+    restore_image(
+        xds,
+        image_data_group_out_restore_name="restored_large",
+        image_data_group_out_modified={
+            "sky": "SKY_RESTORED_LARGE",
+            "beam_fit_params_sky": "BEAM_FIT_PARAMS_SKY_RESTORED_LARGE",
+        },
+        restoring_beam=wide,
+        overwrite=False,
+    )
+    groups = xds.attrs["data_groups"]
+    for group, target in (("restored_small", TARGET), ("restored_large", wide)):
+        beam = xds[groups[group]["beam_fit_params_sky"]].values
+        np.testing.assert_array_equal(beam, np.broadcast_to(target, beam.shape))
+    assert (
+        groups["restored_large"]["beam_fit_params_sky"]
+        == "BEAM_FIT_PARAMS_SKY_RESTORED_LARGE"
+    )
+
+
 def test_restoring_beam_is_checked_on_a_direct_call():
     with pytest.raises(ValueError, match="common_beam"):
         restore_image(_target_inputs(np.float32), restoring_beam="common")

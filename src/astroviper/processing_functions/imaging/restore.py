@@ -1041,7 +1041,10 @@ def restore_image(
     image_data_group_out_modified : dict, optional
         Role overrides layered on top of the residual group to form the restored
         group.  Default ``{"sky": "SKY_RESTORED"}`` so the restored sky is stored
-        in the ``SKY_RESTORED`` data variable.
+        in the ``SKY_RESTORED`` data variable.  With ``restoring_beam`` the
+        restored beam goes to the variable of its ``"beam_fit_params_sky"``
+        entry, ``BEAM_FIT_PARAMS_SKY_RESTORED`` without one; like the restored
+        sky, an existing variable of that name is refused unless ``overwrite``.
     beam_fit_params_key : str, optional
         Role key in the residual data group holding the ``[major, minor, pa]``
         beam-fit parameters (FWHM major/minor and position angle, in radians),
@@ -1111,9 +1114,10 @@ def restore_image(
     -------
     img_xds : xarray.Dataset
         The input dataset with the restored sky variable added and the restored
-        data group registered. With ``restoring_beam`` it also holds
-        ``BEAM_FIT_PARAMS_SKY_RESTORED`` (the target in every plane, role
-        ``beam_fit_params_sky`` of the restored group).
+        data group registered. With ``restoring_beam`` it also holds the
+        restored beam, ``BEAM_FIT_PARAMS_SKY_RESTORED`` unless
+        ``image_data_group_out_modified`` names another variable (the target in
+        every plane, role ``beam_fit_params_sky`` of the restored group).
     return_df : pandas.DataFrame
         One-row timing frame with a ``T_restore`` column (wall-clock seconds of
         the clean-beam convolution), matching the other imaging processing
@@ -1166,6 +1170,12 @@ def restore_image(
             "sky": "SKY_RESTORED"
             if make_apparent
             else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        }
+    if restoring_beam is not None:
+        # The output-variable check of overwrite=False then covers the beam.
+        image_data_group_out_modified = {
+            "beam_fit_params_sky": "BEAM_FIT_PARAMS_SKY_RESTORED",
+            **image_data_group_out_modified,
         }
 
     # Resolve every required runtime product before building output metadata.
@@ -1249,10 +1259,9 @@ def restore_image(
     if restoring_beam is None:
         description = "Restored image: clean-beam-convolved model plus residual."
     else:
-        img_xds["BEAM_FIT_PARAMS_SKY_RESTORED"] = _restored_beam_variable(
+        img_xds[restored_group["beam_fit_params_sky"]] = _restored_beam_variable(
             img_xds[beam_name], restoring_beam
         )
-        restored_group["beam_fit_params_sky"] = "BEAM_FIT_PARAMS_SKY_RESTORED"
         description = (
             "Restored image: model convolved with the restoring beam "
             f"{list(map(float, restoring_beam))} rad plus residual taken to it."
