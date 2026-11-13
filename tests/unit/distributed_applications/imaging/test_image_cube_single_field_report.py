@@ -209,13 +209,18 @@ def test_report_of_a_run_with_a_restoring_beam(processing_set, tmp_path):
     """A 250" circle contains the PSF beam of channel 1 (213" x 189") but not
     that of channel 0 (290" x 106"): the restored image is labelled with it in
     every plane, and the report names channel 0 with the growth the circle
-    would need, the ratio of the major axes."""
+    would need, the ratio of the major axes. The report keeps the PSF beams
+    for it, although the point spread function is not kept."""
     import html
 
     image_store = str(tmp_path / "cube.img.zarr")
     restoring_beam = [250 * ARCSEC, 250 * ARCSEC, 0.0]
     result = _image(
-        processing_set, image_store, restoring_beam=restoring_beam, report="html"
+        processing_set,
+        image_store,
+        image_data_variables_keep=["sky_residual", "sky_model", "primary_beam"],
+        restoring_beam=restoring_beam,
+        report="html",
     )
     stored = xr.open_zarr(image_store)
     assert (

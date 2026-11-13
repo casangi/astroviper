@@ -1731,6 +1731,16 @@ def test_restoring_beam_casa_image_has_one_restoring_beam(common_beam_cube, tmp_
     )
 
 
+def test_restoring_beam_store_writes_to_casa(common_beam_cube, tmp_path):
+    """Without a report the PSF beams, zero in the flagged channel next to
+    valid ones, are not kept, so XRADIO writes the whole store to CASA."""
+    pytest.importorskip("arcae")
+    image = common_beam_cube["image"]
+    assert "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" not in image
+    paths = write_image(image, str(tmp_path / "cube.im"), out_format="casa")
+    assert any(path.endswith("restored.sky") for path in paths)
+
+
 def test_restoring_beam_fits_files_carry_the_target_as_their_beam(common_beam_cube):
     """Both restored FITS files carry the target as their header beam, as
     tclean writes a restored image, without a BEAMS table; XRADIO reads it for

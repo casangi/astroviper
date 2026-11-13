@@ -1,7 +1,7 @@
 """``restoring_beam`` of the imaging drivers: the beam variables kept, three
 floats in every task's parameters, a target equal to the PSF beam restoring bit
 for bit, and the continuum refusal of a target that does not contain its PSF
-beam before any imaging cycle."""
+beam before any model update."""
 
 import functools
 import importlib
@@ -135,8 +135,9 @@ def test_a_cube_target_equal_to_the_psf_beam_restores_bit_for_bit(
     processing_set, tmp_path, monkeypatch
 ):
     """Channel 0 is restored to its own PSF beam as without a target; the
-    target and the PSF beams are kept although the caller's list (left
-    unchanged) has neither, and every task gets the target as three floats."""
+    target is kept although the caller's list (left unchanged) does not have
+    it, the PSF beams not (only a report keeps them), and every task gets the
+    target as three floats."""
     reference = _image_cube(
         processing_set,
         tmp_path / "none.img.zarr",
@@ -169,8 +170,9 @@ def test_a_cube_target_equal_to_the_psf_beam_restores_bit_for_bit(
         np.testing.assert_array_equal(
             image[name].isel(channel).values, reference[name].isel(channel).values
         )
-    for name in ("SKY_RESIDUAL", "SKY_MODEL", "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"):
+    for name in ("SKY_RESIDUAL", "SKY_MODEL"):
         np.testing.assert_array_equal(image[name].values, reference[name].values)
+    assert "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" not in image
     restored_beam = image.BEAM_FIT_PARAMS_SKY_RESTORED.values
     assert restored_beam.shape == reference.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.shape
     np.testing.assert_array_equal(

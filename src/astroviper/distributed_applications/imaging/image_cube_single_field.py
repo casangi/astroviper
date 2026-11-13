@@ -901,10 +901,10 @@ def image_cube_single_field(
     mask, and per channel the cycle control stop codes, the occurrences of the
     model update stop codes, the iterations, the imaging cycles, the final
     residual entropy and the residual RMS. With a report and a kept
-    ``point_spread_function``, ``beam_fit_params_point_spread_function`` is
-    kept too. With ``restore=True`` and a ``restoring_beam``,
-    ``beam_fit_params_sky_restored`` and
-    ``beam_fit_params_point_spread_function`` are kept.
+    ``point_spread_function``, or a report and a ``restoring_beam``,
+    ``beam_fit_params_point_spread_function`` is kept too. With
+    ``restore=True`` and a ``restoring_beam``, ``beam_fit_params_sky_restored``
+    is kept.
 
     The Zarr image store is created with :func:`xradio.image.write_image`.
     XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
@@ -996,21 +996,25 @@ def image_cube_single_field(
             image_data_variables_keep = list(image_data_variables_keep) + [
                 "sky_restored_primary_beam_corrected"
             ]
-    # A restore to a target records it, and the PSF beams show the planes it
-    # does not contain.
-    if restore and restoring_beam is not None:
+    # A restore to a target records it.
+    if (
+        restore
+        and restoring_beam is not None
+        and "beam_fit_params_sky_restored" not in image_data_variables_keep
+    ):
         image_data_variables_keep = list(image_data_variables_keep) + [
-            key
-            for key in (
-                "beam_fit_params_sky_restored",
-                "beam_fit_params_point_spread_function",
-            )
-            if key not in image_data_variables_keep
+            "beam_fit_params_sky_restored"
         ]
-    # The report draws the point spread function with its fitted Gaussian.
+    # The report draws the point spread function with its fitted Gaussian, and
+    # the PSF beam of every channel against a restoring beam. Kept only for it:
+    # the zero beam of a flagged channel stops xradio's export to CASA, and
+    # CASA cannot read the BEAMS tables of FITS output.
     if (
         report is not None
-        and "point_spread_function" in image_data_variables_keep
+        and (
+            "point_spread_function" in image_data_variables_keep
+            or (restore and restoring_beam is not None)
+        )
         and "beam_fit_params_point_spread_function" not in image_data_variables_keep
     ):
         image_data_variables_keep = list(image_data_variables_keep) + [
