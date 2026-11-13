@@ -19,6 +19,10 @@ from astroviper.processing_functions.imaging.config_check.param_check_feather im
     check_feather_config,
     check_feather_inputs,
 )
+from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
+    check_find_continuum_config,
+    check_find_continuum_inputs,
+)
 from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
     check_model_update,
 )
@@ -33,6 +37,8 @@ __all__ = [
     "check_config",
     "check_feather_config",
     "check_feather_inputs",
+    "check_find_continuum_config",
+    "check_find_continuum_inputs",
     "check_driver_workflow",
     "check_model_update",
     "check_residual_update",

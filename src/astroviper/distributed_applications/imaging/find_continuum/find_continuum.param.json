@@ -1,0 +1,15 @@
+{
+  "find_continuum": {
+    "input_image_store": {"required": true, "type": ["str"]},
+    "atmospheric_transmission": {"required": true, "type": ["list", "ndarray"]},
+    "atmospheric_sky_temperature": {"required": true, "type": ["list", "ndarray"]},
+    "work_directory": {"required": true, "type": ["str"]},
+    "image_data_group_in_name": {"type": ["str"]},
+    "telescope_name": {"type": ["str"], "allowed": ["ALMA", "VLA"]},
+    "single_continuum": {"type": "boolean"},
+    "n_bin": {"type": ["int"]},
+    "spectral_dynamic_range_bandwidth": {"type": ["float"], "nullable": true},
+    "n_mapping_parallelism": {"type": ["dict"], "nullable": true},
+    "input_checked": {"type": "boolean"}
+  }
+}

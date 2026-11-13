@@ -123,6 +123,8 @@ target-version = "py311"
 # Stale files (candidates for deletion) -- not worth linting.
 extend-exclude = [
     "tests/component/untitled folder 2",
+    # Vendored from the ALMA pipeline; kept as close to its source as possible.
+    "src/astroviper/distributed_applications/imaging/find_continuum/findContinuum.py",
 ]
 
 [tool.ruff.lint]
@@ -142,6 +144,10 @@ ignore = ["E741"]
 # Tutorial notebooks introduce imports cell-by-cell as the narrative needs
 # them; that is deliberate style, not an error.
 "*.ipynb" = ["E402"]
+
+[tool.coverage.run]
+# Vendored from the ALMA pipeline; tested through find_continuum against CASA.
+omit = ["*/find_continuum/findContinuum.py"]
 
 [tool.pytest.ini_options]
 # Silence noisy, non-actionable zarr V3 warnings across the whole test suite.

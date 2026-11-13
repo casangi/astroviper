@@ -1,4 +1,8 @@
 from astroviper.node_tasks.imaging.feather import feather
+from astroviper.node_tasks.imaging.find_continuum import (
+    find_continuum_cube_reductions,
+    merge_find_continuum_cube_reductions,
+)
 from astroviper.node_tasks.imaging.image_continuum_single_field import (
     continuum_cycle_append_node,
     continuum_finalize_node,
@@ -24,4 +28,6 @@ __all__ = [
     "grid_imaging_weight_density_continuum_node",
     "degrid_imaging_weights_continuum_node",
     "feather",
+    "find_continuum_cube_reductions",
+    "merge_find_continuum_cube_reductions",
 ]
