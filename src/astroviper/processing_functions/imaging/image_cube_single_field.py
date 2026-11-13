@@ -495,6 +495,35 @@ def imaging_preparation_single_field(
     return controller, img_xds, return_df, combined_imaging_dict, T_setup
 
 
+def _auto_mask_settled(mask_pixels, start_growth, start_updates):
+    """Whether the automatic mask meets the start rule of the least-squares solve.
+
+    Parameters
+    ----------
+    mask_pixels : list of numpy.ndarray
+        Mask pixels of every plane after each mask update, oldest first.
+    start_growth : float
+        Growth, as a fraction of the pixels before an update, below which an
+        update counts.
+    start_updates : int
+        Updates in a row that must each grow by less than ``start_growth``.
+
+    Returns
+    -------
+    bool
+        True when every plane with a mask grew by less than ``start_growth`` in
+        each of the last ``start_updates`` updates.
+    """
+    import numpy as np
+
+    if len(mask_pixels) <= start_updates:
+        return False
+    recent = np.array(mask_pixels[-(start_updates + 1) :], dtype=float)
+    has_mask = recent[-1] > 0
+    growth = np.diff(recent, axis=0) / np.maximum(recent[:-1], 1.0)
+    return bool(has_mask.any() and (growth[:, has_mask] < start_growth).all())
+
+
 @shares_param_docs
 def image_cube_single_field(
     ps_xdt,
@@ -516,6 +545,7 @@ def image_cube_single_field(
     primary_beam_params=None,
     clean_mask=None,
     auto_mask_params=None,
+    least_squares_params=None,
     task_id=0,
     *,
     input_checked: bool = False,
@@ -1004,6 +1034,37 @@ def image_cube_single_field(
         - ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every
           pixel inside ``primary_beam_limit``. ``False`` measures it outside the
           mask or, without a mask, on the pixels Chauvenet's criterion leaves.
+    least_squares_params : dict or None, optional
+        Least-squares solve of the sky model inside the clean mask, a
+        prototype. ``None`` makes no solve. A dict adds one last imaging cycle
+        once the stop test has ended the others, or once ``start_growth``
+        holds: its model update solves ``M P M d = M R`` by conjugate
+        residual, with ``M`` the clean mask of the plane, ``P`` the PSF of
+        twice the image size and ``R`` the residual, and adds ``d`` to the
+        model. Otherwise ``max_cycles`` sets how many CLEAN model updates come
+        first, and they must have finished the mask.
+        Needs ``clean_mask`` or ``auto_mask_params``, and no ``clean_box``.
+        The model keeps no sign and nothing limits what is fitted inside the
+        mask, noise included. With ``record_iteration_history`` each step is
+        an entry with pixel -1 and scale -2.
+
+        - ``max_steps`` : Most steps per plane, each one FFT pair on the
+          bounding box of the mask. A plane stops earlier when the RMS of its
+          residual outside the mask, in that box, has fallen by less than 5
+          percent over 200 steps; a mask that fills its box, such as a
+          rectangle or the whole image, has no such stop.
+        - ``smooth_fwhm_pixels`` (optional) : FWHM, in pixels, of a Gaussian
+          the model increment is made of, within the mask, so that the solve
+          fits only structure that wide. For images whose residual is at the
+          noise, where an unsmoothed solve fits noise within a few steps.
+        - ``start_growth`` (optional) : Needs ``auto_mask_params``. The solve
+          starts once the mask of every plane that has one has grown by less
+          than this fraction of its pixels in each of the last
+          ``start_updates`` mask updates. Planes still going keep imaging stop
+          code 0, with the rule as their stop description. Tried with 0.1 on
+          simulated Cygnus A only.
+        - ``start_updates`` (2) : Mask updates in a row that ``start_growth``
+          needs; a mask can pause for one update and then grow again.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     input_checked : bool, optional
@@ -1021,9 +1082,9 @@ def image_cube_single_field(
     timing_df : pandas.DataFrame
         One-row frame with a ``T_*`` column per processing function plus
         ``task_id``, ``n_channels`` and ``n_cycles`` (the model updates).
-        With ``exact_psf_subtraction`` (and ``max_iter > 0``) it also holds
-        ``T_prep_subtraction_psf``, the time of the PSF of twice the image
-        size, which ``T_prep`` includes.
+        With ``exact_psf_subtraction`` or ``least_squares_params`` (and
+        ``max_iter > 0``) it also holds ``T_prep_subtraction_psf``, the time
+        of the PSF of twice the image size, which ``T_prep`` includes.
     combined_imaging_dict : ImagingDict
         Per-plane convergence statistics for this chunk: one entry per model
         update and a closing entry from the stop test that ended the loop
@@ -1127,10 +1188,12 @@ def image_cube_single_field(
     timing = {"T_prep": T_setup}
     accumulate_timing(timing, setup_return_df, phase="prep")
 
-    # exact_psf_subtraction: the PSF of twice the image size, made once and
-    # used by the model updates only for the subtraction.
+    # The PSF of twice the image size, made once, for exact_psf_subtraction
+    # and the least-squares solve.
     subtraction_psf_cube = None
-    if exact_psf_subtraction and cycle_control_params["max_iter"] > 0:
+    if (exact_psf_subtraction or least_squares_params is not None) and (
+        cycle_control_params["max_iter"] > 0
+    ):
         start = time.time()
         subtraction_psf_cube, _ = make_subtraction_point_spread_function_single_field(
             ps_xdt,
@@ -1159,6 +1222,9 @@ def image_cube_single_field(
     auto_mask_planes_stopped = None
     threshold_per_cycle = None
     model_exists = False
+    least_squares_done = False
+    stop_test_before_solve = None
+    mask_pixels = []
     n_cycles = 0
     while True:
         # ---- Residual-update phase ----
@@ -1182,7 +1248,8 @@ def image_cube_single_field(
         accumulate_timing(timing, residual_return_df)
         if not model_exists:
             install_clean_mask(img_xds, clean_mask)
-        if auto_mask_params is not None:
+        start_rule_met = False
+        if auto_mask_params is not None and not least_squares_done:
             start = time.time()
             threshold_reached = None
             if threshold_per_cycle is not None:
@@ -1198,6 +1265,17 @@ def image_cube_single_field(
                 input_checked=True,
             )
             timing["T_auto_mask"] += time.time() - start
+            if (
+                least_squares_params is not None
+                and "start_growth" in least_squares_params
+            ):
+                mask = img_xds[img_xds.attrs["data_groups"]["residual"]["mask"]]
+                mask_pixels.append(np.count_nonzero(mask.values, axis=(-2, -1)))
+                start_rule_met = _auto_mask_settled(
+                    mask_pixels,
+                    least_squares_params["start_growth"],
+                    least_squares_params.get("start_updates", 2),
+                )
 
         from astroviper.processing_functions.imaging.config_check._common import (
             CUBE_SINGLE_FIELD,
@@ -1244,11 +1322,41 @@ def image_cube_single_field(
             processing_set_data_group_name=processing_set_data_group_name,
         )
         stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
+        if least_squares_done:
+            # The solve leaves the reason the imaging cycles ended as it was.
+            stopped_planes, stopdesc = stop_test_before_solve
+            for key, fields in residual_imaging_dict.data.items():
+                stopped = stopped_planes.data[key]
+                fields["stop_code"] = fields["stop_code"]._replace(
+                    imaging=stopped["stop_code"].imaging
+                )
+                fields["stop_description"] = stopped["stop_description"]
         timing["T_stop_test"] += time.time() - start
+
+        # The least-squares solve is the model update of one last imaging
+        # cycle, whose residual update makes the residual written.
+        least_squares_now = (
+            least_squares_params is not None
+            and (stopcode.imaging != 0 or start_rule_met)
+            and model_exists
+            and not least_squares_done
+        )
+        if least_squares_now:
+            if stopcode.imaging == 0:
+                # The start rule ends the cycles of the planes still going.
+                stopdesc = (
+                    "Automatic mask grew by less than "
+                    f"{least_squares_params['start_growth']:g} per mask update, "
+                    f"{least_squares_params.get('start_updates', 2)} in a row"
+                )
+                for fields in residual_imaging_dict.data.values():
+                    if fields["stop_code"].imaging == 0:
+                        fields["stop_description"] = stopdesc
+            stop_test_before_solve = residual_imaging_dict, stopdesc
 
         # ---- Model-update phase (cycle control + deconvolve + convergence) ----
         model_phase_start = time.time()
-        if stopcode.imaging == 0:
+        if least_squares_now or (stopcode.imaging == 0 and not least_squares_done):
             logger.debug("Doing model update")
             # Size the controller's per-plane state to this cube so cycle
             # control (max_iter and threshold) is tracked independently for every
@@ -1281,6 +1389,8 @@ def image_cube_single_field(
             }
             if subtraction_psf_cube is not None:
                 deconvolve_params["subtraction_psf_cube"] = subtraction_psf_cube
+            if least_squares_now:
+                deconvolve_params["least_squares_params"] = least_squares_params
 
             start = time.time()
             (
@@ -1288,7 +1398,7 @@ def image_cube_single_field(
                 model_update_return_df,
             ) = model_update_cube_single_field(
                 img_xds,
-                deconvolver,
+                "least_squares" if least_squares_now else deconvolver,
                 deconvolve_params,
                 model_exists=model_exists,
                 processing_function_threads=processing_function_threads,
@@ -1322,7 +1432,8 @@ def image_cube_single_field(
         # convergence (everything done after each stop test).
         timing["T_model_update"] += time.time() - model_phase_start
 
-        if stopcode.imaging != 0:
+        least_squares_done = least_squares_done or least_squares_now
+        if imaging_dict is residual_imaging_dict:
             logger.debug(f"  *** CONVERGED: {stopdesc} ***")
             break
 

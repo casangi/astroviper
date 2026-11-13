@@ -45,11 +45,13 @@ STOKES_STYLES = {
 _GRID = {"color": "#d0d7de", "linewidth": 0.5}
 _INK = "#57606a"
 # The kinds of deconvolution component, each with its style: the iteration
-# history gives every component its scale (-1 a residual-shaped component of
-# Asp, 0 a point, above 0 an Asp Gaussian); the convergence record counts them
+# history gives every component its scale (-2 a step of the least-squares
+# solve, -1 a residual-shaped component of Asp, 0 a point, above 0 an Asp
+# Gaussian); the convergence record counts them
 # per model update, the components of Asp's significance stage (counted as
 # points or Asp Gaussians too) and its Hogbom runs as well.
 _COMPONENT_STYLES = {
+    "least-squares step": {"color": _COLORS[5], "marker": "."},
     "residual-shaped": {"color": _COLORS[4], "marker": "*"},
     "Asp Gaussian": {"color": _COLORS[2], "marker": "o"},
     "significance": {"color": _COLORS[1], "marker": "D"},
@@ -1002,8 +1004,10 @@ def _iteration_history_panels(figure, record, mask, true_flux, shape):
     counts = [np.size(v) for v in record["iteration_component_scale"][:n]]
     boundaries = np.cumsum(counts)[:-1]
     component = np.arange(scale.size)
-    kinds = np.where(
-        scale < 0, "residual-shaped", np.where(scale > 0, "Asp Gaussian", "point")
+    kinds = np.select(
+        [scale == -2, scale < 0, scale > 0],
+        ["least-squares step", "residual-shaped", "Asp Gaussian"],
+        "point",
     )
     present = [kind for kind in _COMPONENT_STYLES if np.any(kinds == kind)]
     # the most numerous kind first, so that the rarer ones are drawn on top
@@ -1049,7 +1053,10 @@ def _iteration_history_panels(figure, record, mask, true_flux, shape):
 
     ax = axes[3]
     by_kind(ax, scale)
-    ax.set_title("component scale (pixels; -1 residual-shaped)", fontsize=10)
+    ax.set_title(
+        "component scale (pixels; -1 residual-shaped, -2 least-squares step)",
+        fontsize=10,
+    )
 
     for ax in axes[:4]:
         ax.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))

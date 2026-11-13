@@ -353,6 +353,13 @@ def _add_deconvolution(document, return_dict):
         "counted), the total iterations, the imaging cycles, and the entropy and "
         "RMS of the final residual.",
     )
+    # least_squares_params start_growth ends planes that cycle control left at 0.
+    if "stop_code_imaging" in record and "stop_description" in record:
+        ended = record.loc[record["stop_code_imaging"] == 0, "stop_description"]
+        if len(ended):
+            document.note(
+                "Planes that end at stop code 0: " + "; ".join(ended.unique()) + "."
+            )
     if not has_model_update_codes:
         document.note("The deconvolver recorded no model update stop codes.")
     if not np.any(np.isfinite(entropy)):

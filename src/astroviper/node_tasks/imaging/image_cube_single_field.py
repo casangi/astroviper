@@ -531,6 +531,7 @@ def image_cube_single_field(
     primary_beam_params=None,
     clean_mask=None,
     auto_mask_params=None,
+    least_squares_params=None,
     memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
@@ -1051,6 +1052,37 @@ def image_cube_single_field(
         - ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every
           pixel inside ``primary_beam_limit``. ``False`` measures it outside the
           mask or, without a mask, on the pixels Chauvenet's criterion leaves.
+    least_squares_params : dict or None, optional
+        Least-squares solve of the sky model inside the clean mask, a
+        prototype. ``None`` makes no solve. A dict adds one last imaging cycle
+        once the stop test has ended the others, or once ``start_growth``
+        holds: its model update solves ``M P M d = M R`` by conjugate
+        residual, with ``M`` the clean mask of the plane, ``P`` the PSF of
+        twice the image size and ``R`` the residual, and adds ``d`` to the
+        model. Otherwise ``max_cycles`` sets how many CLEAN model updates come
+        first, and they must have finished the mask.
+        Needs ``clean_mask`` or ``auto_mask_params``, and no ``clean_box``.
+        The model keeps no sign and nothing limits what is fitted inside the
+        mask, noise included. With ``record_iteration_history`` each step is
+        an entry with pixel -1 and scale -2.
+
+        - ``max_steps`` : Most steps per plane, each one FFT pair on the
+          bounding box of the mask. A plane stops earlier when the RMS of its
+          residual outside the mask, in that box, has fallen by less than 5
+          percent over 200 steps; a mask that fills its box, such as a
+          rectangle or the whole image, has no such stop.
+        - ``smooth_fwhm_pixels`` (optional) : FWHM, in pixels, of a Gaussian
+          the model increment is made of, within the mask, so that the solve
+          fits only structure that wide. For images whose residual is at the
+          noise, where an unsmoothed solve fits noise within a few steps.
+        - ``start_growth`` (optional) : Needs ``auto_mask_params``. The solve
+          starts once the mask of every plane that has one has grown by less
+          than this fraction of its pixels in each of the last
+          ``start_updates`` mask updates. Planes still going keep imaging stop
+          code 0, with the rule as their stop description. Tried with 0.1 on
+          simulated Cygnus A only.
+        - ``start_updates`` (2) : Mask updates in a row that ``start_growth``
+          needs; a mask can pause for one update and then grow again.
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
     skunk_works : bool, optional
@@ -1399,6 +1431,7 @@ def image_cube_single_field(
             primary_beam_params=primary_beam_params,
             clean_mask=clean_mask,
             auto_mask_params=auto_mask_params,
+            least_squares_params=least_squares_params,
             task_id=task_id,
             input_checked=True,
         )
