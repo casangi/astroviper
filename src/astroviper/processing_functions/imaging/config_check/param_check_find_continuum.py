@@ -7,6 +7,7 @@ neither open files nor insert configuration defaults.
 import numpy as np
 
 from astroviper.processing_functions.imaging.config_check._common import (
+    require_finite_real,
     require_integer,
     require_mapping,
 )
@@ -24,17 +25,23 @@ FIND_CONTINUUM_ROLES = (
 # ========================================================================
 
 
-def check_find_continuum_config(n_bin, n_mapping_parallelism):
-    """Validate the channel binning and the frequency chunking.
+def check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism):
+    """Validate the channel binning, the primary beam limit and the frequency chunking.
 
     Parameters
     ----------
     n_bin : int
         Channels averaged in the mean spectrum, at least 1.
+    primary_beam_limit : float or None
+        In ``[0, 1)``, or ``None``.
     n_mapping_parallelism : mapping or None
         ``{"frequency": n}`` with at least one chunk, or ``None``.
     """
     require_integer("n_bin", n_bin, minimum=1)
+    if primary_beam_limit is not None:
+        require_finite_real("primary_beam_limit", primary_beam_limit, scalar=True)
+        if not 0.0 <= primary_beam_limit < 1.0:
+            raise ValueError("primary_beam_limit must be in [0, 1).")
     if n_mapping_parallelism is None:
         return
     require_mapping("n_mapping_parallelism", n_mapping_parallelism)

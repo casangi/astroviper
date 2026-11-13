@@ -17,26 +17,30 @@ N_CHANNELS = 6
 
 
 @pytest.mark.parametrize(
-    "n_bin, n_mapping_parallelism", [(1, None), (3, {"frequency": 4})]
+    "n_bin, primary_beam_limit, n_mapping_parallelism",
+    [(1, None, None), (3, 0.2, {"frequency": 4}), (1, 0, None)],
 )
-def test_valid_config(n_bin, n_mapping_parallelism):
-    check_find_continuum_config(n_bin, n_mapping_parallelism)
+def test_valid_config(n_bin, primary_beam_limit, n_mapping_parallelism):
+    check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism)
 
 
 @pytest.mark.parametrize(
-    "n_bin, n_mapping_parallelism, error",
+    "n_bin, primary_beam_limit, n_mapping_parallelism, error",
     [
-        (0, None, ValueError),
-        (1.5, None, TypeError),
-        (1, {"time": 2}, ValueError),
-        (1, {"frequency": 0}, ValueError),
-        (1, {"frequency": True}, TypeError),
-        (1, [("frequency", 2)], TypeError),
+        (0, None, None, ValueError),
+        (1.5, None, None, TypeError),
+        (1, 1.0, None, ValueError),
+        (1, -0.1, None, ValueError),
+        (1, "0.2", None, TypeError),
+        (1, None, {"time": 2}, ValueError),
+        (1, None, {"frequency": 0}, ValueError),
+        (1, None, {"frequency": True}, TypeError),
+        (1, None, [("frequency", 2)], TypeError),
     ],
 )
-def test_invalid_config(n_bin, n_mapping_parallelism, error):
+def test_invalid_config(n_bin, primary_beam_limit, n_mapping_parallelism, error):
     with pytest.raises(error):
-        check_find_continuum_config(n_bin, n_mapping_parallelism)
+        check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism)
 
 
 @pytest.fixture

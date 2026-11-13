@@ -27,6 +27,14 @@ COMPACT_LINE = dict(
 CASA_RESULTS = {
     "no_lines": (dict(lines=()), "9~464", True, 4.4041),
     "line_set": (dict(lines=LINE_SET), "6~85;154~367;433~472", False, 6.2507),
+    # The primary beam falls below 0.2 in the corners: masked there, as by
+    # tclean's pblimit in the pipeline (and in the CASA reference).
+    "small_beam": (
+        dict(lines=LINE_SET, primary_beam_fwhm_arcsec=8.0),
+        "6~85;154~367;433~467",
+        False,
+        7.3877,
+    ),
     # The ripple of the bright line's channels amends the joint mask.
     "sidelobes": (
         dict(

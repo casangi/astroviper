@@ -87,6 +87,7 @@ def find_continuum(
     single_continuum: bool = False,
     n_bin: int = 1,
     spectral_dynamic_range_bandwidth: float | None = None,
+    primary_beam_limit: float | None = 0.2,
     n_mapping_parallelism: dict | None = None,
     *,
     input_checked: bool = False,
@@ -119,6 +120,10 @@ def find_continuum(
     spectral_dynamic_range_bandwidth : float, optional
         The requested spectral dynamic range bandwidth (Hz) [findContinuum
         ``spectralDynamicRangeBandWidth``].
+    primary_beam_limit : float, default 0.2
+        Pixels where the primary beam is below this level are masked in the
+        dirty cube and the primary beam, as in the cube ``hif_findcont`` makes
+        with ``tclean(pblimit=0.2)``; ``None`` reads the cubes as they are.
     n_mapping_parallelism : dict, optional
         ``{"frequency": n}``, the number of frequency chunks of every
         map-reduce; one chunk if not given.
@@ -174,7 +179,7 @@ def find_continuum(
     )
 
     if not input_checked:
-        check_find_continuum_config(n_bin, n_mapping_parallelism)
+        check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism)
     # findContinuum runs in its work directory, as in the pipeline, and node
     # tasks may run elsewhere, so every path is made absolute.
     input_image_store = os.path.abspath(input_image_store)
@@ -230,6 +235,7 @@ def find_continuum(
         parallel_coords, {"img": index_xds}
     )
     timing, cube_reads = [], {}
+    primary_beam = data_group["primary_beam"]
 
     def run_reductions(requests):
         variables, image_paths = {}, {}
@@ -241,7 +247,10 @@ def find_continuum(
             for name in mask_cubes:
                 variables[name] = cubes[name]["variable"]
             image_paths.update({name: os.path.abspath(name) for name in small_images})
-        for variable in set(variables.values()):
+        read = set(variables.values())
+        if primary_beam_limit is not None:
+            read.add(primary_beam)
+        for variable in read:
             cube_reads[variable] = cube_reads.get(variable, 0) + 1
         viper_graph = map(
             input_data={"img": index_xds},
@@ -252,6 +261,8 @@ def find_continuum(
                 "variables": variables,
                 "image_paths": image_paths,
                 "requests": requests,
+                "primary_beam": primary_beam,
+                "primary_beam_limit": primary_beam_limit,
             },
             in_memory_compute=False,
         )

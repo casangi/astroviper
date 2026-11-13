@@ -341,7 +341,15 @@ def radio_velocity_km_s(frequency, rest_frequency):
     )
 
 
-def find_continuum_cube_reductions(img_xds, requests, variables, images, channel_index):
+def find_continuum_cube_reductions(
+    img_xds,
+    requests,
+    variables,
+    images,
+    channel_index,
+    primary_beam=None,
+    primary_beam_limit=None,
+):
     """Partial reductions of one chunk of channels of the dirty cube.
 
     Parameters
@@ -365,6 +373,13 @@ def find_continuum_cube_reductions(img_xds, requests, variables, images, channel
         CASA axis order ``(l, m, 1, 1)`` with masked pixels NaN.
     channel_index : numpy.ndarray
         Global channel index of every frequency of ``img_xds``.
+    primary_beam : str, optional
+        Data variable of ``img_xds`` holding the primary beam; needed with
+        ``primary_beam_limit``.
+    primary_beam_limit : float, optional
+        Pixels where the primary beam is below this level are masked in every
+        cube, as in the cubes ``tclean`` makes with ``pblimit``. ``None``
+        (default): the cubes as they are.
 
     Returns
     -------
@@ -383,6 +398,11 @@ def find_continuum_cube_reductions(img_xds, requests, variables, images, channel
         name: np.transpose(img_xds[variable].values[0], (2, 3, 1, 0)).astype(np.float64)
         for name, variable in variables.items()
     }
+    if primary_beam_limit is not None:
+        beam = np.transpose(img_xds[primary_beam].values[0], (2, 3, 1, 0))
+        outside = beam < primary_beam_limit
+        for cube in cubes.values():
+            cube[outside] = np.nan
     arrays = {**images, **cubes}
     channel_index = np.asarray(channel_index)
     partials = []

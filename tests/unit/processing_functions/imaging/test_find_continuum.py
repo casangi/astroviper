@@ -305,6 +305,29 @@ class TestCubeReductions:
         assert whole_cube["rms"] == pytest.approx(np.sqrt(np.mean(values**2)))
         assert np.isnan(whole_cube["median"]) and np.isnan(whole_cube["quartile"])
 
+    def test_primary_beam_limit_masks_every_cube(self):
+        img_xds = _image_xds()
+        cube, pb = _casa_order(img_xds, "SKY"), _casa_order(img_xds, "PB")
+        requests = [
+            {
+                "kind": "statistics",
+                "image": name,
+                "mask": "",
+                "channels": None,
+                "per_channel": False,
+            }
+            for name in ("cube", "pb")
+        ]
+        cube_statistics, pb_statistics = finalize_find_continuum_reductions(
+            find_continuum_cube_reductions(
+                img_xds, requests, VARIABLES, {}, np.arange(N_CHANNELS), "PB", 0.5
+            ),
+            requests,
+        )
+        inside = pb >= 0.5
+        assert cube_statistics["npts"] == (inside & np.isfinite(cube)).sum()
+        assert pb_statistics["min"] == pytest.approx(pb[inside].min())
+
     def test_empty_whole_cube_statistics(self):
         request = {
             "kind": "statistics",

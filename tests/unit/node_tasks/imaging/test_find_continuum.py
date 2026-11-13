@@ -125,6 +125,27 @@ def test_map_and_reduce_tasks_match_one_reduction(cube_store, tmp_path):
     } <= set(timing)
 
 
+def test_primary_beam_limit_reads_the_primary_beam(cube_store):
+    store, img_xds = cube_store
+    request = {
+        "kind": "statistics",
+        "image": "cube",
+        "mask": "",
+        "channels": None,
+        "per_channel": False,
+    }
+    output = find_continuum_cube_reductions(
+        store,
+        {"cube": "SKY_RESIDUAL"},
+        {},
+        [request],
+        primary_beam="PRIMARY_BEAM",
+        primary_beam_limit=0.9999,
+    )
+    beam = img_xds["PRIMARY_BEAM"].values
+    assert output["reductions"][0]["npts"] == (beam >= 0.9999).sum()
+
+
 def test_whole_store_without_selection(cube_store):
     store, _ = cube_store
     request = {

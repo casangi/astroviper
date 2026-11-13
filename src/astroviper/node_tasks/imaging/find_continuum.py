@@ -69,6 +69,8 @@ def find_continuum_cube_reductions(
     variables,
     image_paths,
     requests,
+    primary_beam=None,
+    primary_beam_limit=None,
     data_selection=None,
     task_id=None,
 ):
@@ -86,6 +88,12 @@ def find_continuum_cube_reductions(
         expressions write it) to its absolute path.
     requests : list of dict
         See :func:`astroviper.processing_functions.imaging.find_continuum.find_continuum_cube_reductions`.
+    primary_beam : str, optional
+        Data variable of the primary beam, read with the chunk when
+        ``primary_beam_limit`` is given.
+    primary_beam_limit : float, optional
+        Pixels where the primary beam is below this level are masked in every
+        cube. ``None`` (default): the cubes as they are.
     data_selection : dict, optional
         ``{"img": {"frequency": slice}}``, the chunk of this task.
     task_id : int, optional
@@ -112,12 +120,10 @@ def find_continuum_cube_reductions(
     start_unixtime = time.time()
     selection = (data_selection or {"img": {}})["img"]
     lazy_xds = xr.open_zarr(input_image_store, chunks=None)
-    img_xds = (
-        lazy_xds[sorted(set(variables.values()))]
-        .isel(selection)
-        .sel(polarization=["I"])
-        .load()
-    )
+    names = set(variables.values())
+    if primary_beam_limit is not None:
+        names.add(primary_beam)
+    img_xds = lazy_xds[sorted(names)].isel(selection).sel(polarization=["I"]).load()
     frequency_selection = selection.get("frequency", slice(None))
     channel_index = np.arange(lazy_xds.sizes["frequency"])[frequency_selection]
     images = {}
@@ -127,7 +133,15 @@ def find_continuum_cube_reductions(
     T_load = time.time() - start_unixtime
 
     start = time.time()
-    partials = reduce_chunk(img_xds, requests, variables, images, channel_index)
+    partials = reduce_chunk(
+        img_xds,
+        requests,
+        variables,
+        images,
+        channel_index,
+        primary_beam,
+        primary_beam_limit,
+    )
     T_reduce = time.time() - start
 
     try:
