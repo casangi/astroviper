@@ -165,10 +165,11 @@ def correcting_beam(beam_fit_params, restoring_beam):
     CAS-12148, eqs. 16-20, in covariance form, which also holds for equal and touching
     beams): restoring a plane to ``restoring_beam`` convolves its residual with this
     Gaussian and multiplies it by ``area_ratio``. The target must contain every beam,
-    ``D`` positive semidefinite; negative eigenvalues of ``D`` down to ``-1e-6`` times
-    the largest eigenvalue of ``S_p`` count as rounding and are set to zero. Memo 10's
-    test (eqs. 24-26) lacks the condition ``det D >= 0`` and accepts beams the target
-    does not contain.
+    ``D`` positive semidefinite; a negative eigenvalue of ``D`` down to ``-1e-6`` times
+    the variance of the beam along its eigenvector (the target narrower than the beam by
+    up to 5e-7 of the beam's width in that direction) counts as rounding and is set to
+    zero. Memo 10's test (eqs. 24-26) lacks the condition ``det D >= 0`` and accepts
+    beams the target does not contain.
 
     Parameters
     ----------
@@ -501,10 +502,29 @@ def _correcting_covariance(beam_fit_params, restoring_beam):
     point_spread_function = _beam_covariance(beams)
     difference = _beam_covariance(target) - point_spread_function
     smallest, largest = _eigenvalues(difference)
-    contained = fitted & (
-        smallest >= -_CONTAINMENT_TOLERANCE * _eigenvalues(point_spread_function)[1]
+    # Each eigenvalue of D against the variance of the beam along its eigenvector:
+    # (cos pa, sin pa) for the smaller, (sin pa, -cos pa) for the larger.
+    pa = _orientation(difference)
+    cos_pa, sin_pa = np.cos(pa), np.sin(pa)
+    ll, lm, mm = (
+        point_spread_function[..., 0, 0],
+        point_spread_function[..., 0, 1],
+        point_spread_function[..., 1, 1],
     )
-    clipped = _covariance(np.maximum(largest, 0.0), 0.0, _orientation(difference))
+    contained = (
+        fitted
+        & (
+            smallest
+            >= -_CONTAINMENT_TOLERANCE
+            * (ll * cos_pa * cos_pa + 2.0 * lm * cos_pa * sin_pa + mm * sin_pa * sin_pa)
+        )
+        & (
+            largest
+            >= -_CONTAINMENT_TOLERANCE
+            * (ll * sin_pa * sin_pa - 2.0 * lm * cos_pa * sin_pa + mm * cos_pa * cos_pa)
+        )
+    )
+    clipped = _covariance(np.maximum(largest, 0.0), 0.0, pa)
     covariance = np.where(
         contained[..., None, None],
         np.where((smallest < 0.0)[..., None, None], clipped, difference),

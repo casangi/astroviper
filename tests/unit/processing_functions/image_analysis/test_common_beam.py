@@ -408,8 +408,8 @@ def test_correcting_beam_of_equal_and_touching_beams():
 
 
 def test_correcting_beam_tolerates_float32_rounding_of_the_target():
-    """The float32 copy of a 10:1 beam is smaller along one direction, by 3.9e-8 of the
-    beam's largest variance, within the tolerance; a target 1e-4 smaller along one axis is
+    """The float32 copy of a 10:1 beam is smaller along one direction, by 7.8e-8 of the
+    beam's variance along it, within the tolerance; a target 1e-4 smaller along one axis is
     refused."""
     beam = radians([(10.0, 1.0, 80.0)])
     target = beam[0].astype(np.float32).astype(np.float64)
@@ -421,6 +421,24 @@ def test_correcting_beam_tolerates_float32_rounding_of_the_target():
         smaller[axis] *= 1.0 - 1e-4
         with pytest.raises(ValueError, match="does not contain"):
             correcting_beam(beam, smaller)
+
+
+@pytest.mark.parametrize("axis_ratio", [1.0, 10.0, 300.0, 1000.0])
+def test_containment_tolerance_does_not_grow_with_the_axis_ratio(axis_ratio):
+    """A target narrower than the beam along an axis by 4e-7 of its width is rounding, by
+    1e-6 it is not, at any axis ratio; also when the other axis is short by nearly the
+    tolerance. Measured against the beam's largest variance, the tolerance let a target
+    4.5% narrower than a 300:1 beam through."""
+    beam = radians([(30.0, 30.0 / axis_ratio, 20.0)])
+    for axis in (0, 1):
+        for shortfall, state in ((4e-7, "contained"), (1e-6, "not contained")):
+            target = beam[0].copy()
+            target[axis] *= 1.0 - shortfall
+            assert _correcting_covariance(beam, target)[2].tolist() == [state]
+    hidden = beam[0] * [1.0 - 4.9e-7, 1.0 - 4e-6, 1.0]
+    assert _correcting_covariance(beam, hidden)[2].tolist() == ["not contained"]
+    with pytest.raises(ValueError, match="does not contain"):
+        correcting_beam(beam, beam[0] * [1.0, 0.955, 1.0])
 
 
 def test_correcting_beam_equals_the_casa_deconvolver():
