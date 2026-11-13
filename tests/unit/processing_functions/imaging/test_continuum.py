@@ -885,6 +885,85 @@ def test_continuum_restoring_beam_in_arcseconds_is_refused_on_a_direct_call():
         )
 
 
+def _restore_memory_image(n, n_polarizations):
+    """One Taylor term of float32 n x n planes in every polarization, with a
+    primary beam that crosses the 0.2 cutoff."""
+    shape = (1, 1, n_polarizations, n, n)
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    offset = (np.arange(n) - n // 2) / (0.45 * n)
+    power = np.broadcast_to(
+        np.exp(-2.0 * (offset[:, None] ** 2 + offset[None, :] ** 2)), shape
+    ).astype(np.float32)
+    model = np.zeros(shape, dtype=np.float32)
+    model[..., n // 3, n // 2] = 1.0
+    residual = np.random.default_rng(3).standard_normal(shape, dtype=np.float32)
+    return xr.Dataset(
+        {
+            "SKY_MODEL": (dims, model),
+            "SKY_RESIDUAL": (dims, 0.01 * residual),
+            "PRIMARY_BEAM_TAYLOR": (dims, power),
+            "POINT_SPREAD_FUNCTION": (
+                ("time", "psf_taylor_order", "polarization", "l", "m"),
+                power.copy(),
+            ),
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization", "beam_params"),
+                np.broadcast_to([3.0e-5, 2.0e-5, 0.3], (1, n_polarizations, 3)),
+            ),
+        },
+        coords={
+            "time": [0.0],
+            "taylor_term": [0],
+            "psf_taylor_order": [0],
+            "polarization": ["I", "Q", "U", "V"][:n_polarizations],
+            "l": -1.0e-5 * (np.arange(n) - n // 2),
+            "m": 1.0e-5 * (np.arange(n) - n // 2),
+        },
+        attrs={
+            "continuum_imaging": {"continuum_mode": "mfs"},
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "primary_beam_taylor": "PRIMARY_BEAM_TAYLOR",
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                    "beam_fit_params_point_spread_function": (
+                        "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+                    ),
+                },
+                "model": {"sky": "SKY_MODEL"},
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
+def test_mfs_restore_to_a_target_holds_one_taylor_stack_more(output):
+    """Design section 6: R (*) K and then its Taylor-divided form are one stack
+    more than the restore without a target holds. Dividing R (*) K after the
+    apparent restore held two more for one Taylor term in two polarizations."""
+    import tracemalloc
+
+    n, n_polarizations = 256, 2
+    peaks = {}
+    for restoring_beam in (None, TARGET_BEAM):
+        image = _restore_memory_image(n, n_polarizations)
+        tracemalloc.start()
+        try:
+            restore_continuum_image(
+                image,
+                restoration_output=output,
+                restoring_beam=restoring_beam,
+                continuum_mode="mfs",
+                input_checked=True,
+            )
+            peaks[restoring_beam is None] = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+    plane = n * n * 4
+    stack = n_polarizations * plane
+    assert peaks[False] - peaks[True] <= stack + 0.25 * plane
+
+
 @pytest.mark.parametrize("frequency_shift", [0.0, 1.0e6])
 def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(
     monkeypatch, frequency_shift

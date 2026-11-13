@@ -4870,27 +4870,33 @@ def restore_continuum_image(
     if continuum_mode == "mfs" and needs_primary_beam:
         products = {}
         array_timing = {"apparent": 0.0, "primary_beam_corrected": 0.0}
-        apparent_residual = residual_ordered.values
         restore_beam = beam_taylor.values
         corrected_residual_da = intrinsic_residual_da
         if restoring_beam is not None:
             # H acts on the apparent residual terms before the Taylor division;
             # both restores then add R (*) K as it is, with the target beam.
+            # Dividing it before the apparent restore keeps one Taylor stack
+            # more than without a target live, not two.
             start = time.time()
-            apparent_residual = _correct_residual_arrays(
-                apparent_residual,
+            residual_to_beam = _correct_residual_arrays(
+                residual_ordered.values,
                 restore_beam,
                 restoring_beam,
                 pixel_size,
                 processing_function_threads,
             )
             array_timing["apparent"] = time.time() - start
+            corrected_residual_da = _divide_taylor_polynomials(
+                residual_ordered.copy(data=residual_to_beam),
+                mfs_primary_beam_taylor,
+                primary_beam_limit,
+            )
             restore_beam = np.broadcast_to(
                 np.asarray(restoring_beam, dtype=np.float64), restore_beam.shape
             )
         if restoration_output in {"apparent", "both"}:
             apparent_products, apparent_timing = _restore_image_arrays(
-                apparent_residual,
+                residual_ordered.values if restoring_beam is None else residual_to_beam,
                 model_ordered.values,
                 restore_beam,
                 pixel_size,
@@ -4903,12 +4909,7 @@ def restore_continuum_image(
             )
             array_timing["apparent"] += apparent_timing["apparent"]
         if restoring_beam is not None:
-            corrected_residual_da = _divide_taylor_polynomials(
-                residual_ordered.copy(data=apparent_residual),
-                mfs_primary_beam_taylor,
-                primary_beam_limit,
-            )
-            del apparent_residual
+            del residual_to_beam
 
         corrected_products, corrected_timing = _restore_image_arrays(
             corrected_residual_da.values,
