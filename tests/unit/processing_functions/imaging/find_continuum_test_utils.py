@@ -1,8 +1,16 @@
-"""Simulated dirty cubes for the find_continuum tests."""
+"""Simulated dirty cubes and reduction helpers for the find_continuum tests."""
+
+import re
 
 import numpy as np
 import xarray as xr
 from xradio.image import make_empty_sky_image
+
+from astroviper.processing_functions.imaging.find_continuum import (
+    PROFILE_LEVEL,
+    evaluate_lattice_expression,
+    split_lattice_conjuncts,
+)
 
 RAD_PER_ARCSEC = np.pi / (180.0 * 3600.0)
 FWHM_TO_SIGMA = 1.0 / np.sqrt(8.0 * np.log(2.0))
@@ -175,3 +183,88 @@ LINE_SET = (
         "size_fwhm_pixels": 4,
     },
 )
+
+
+def graphviper_tree(leaves, merge):
+    """GraphVIPER's binary tree reduce (``_tree_combine``): neighbours paired
+    level by level, an odd last node carried up, ``merge(left, right)``."""
+    level = list(leaves)
+    while len(level) > 1:
+        level = [
+            merge(level[i], level[i + 1]) if i + 1 < len(level) else level[i]
+            for i in range(0, len(level), 2)
+        ]
+    return level[0]
+
+
+def encode_streamed_requests(requests, images, map_shape, channel_offset=0):
+    """Encode requests for ``find_continuum_batch_reductions``.
+
+    Parameters
+    ----------
+    requests : list of dict
+        Requests of ``find_continuum_cube_reductions`` whose masks name the
+        cubes ``"sky"`` and ``"primary_beam"``.
+    images : dict
+        Two-dimensional images ``(l, m, 1, 1)``, masked pixels NaN.
+    map_shape : tuple of int
+        ``(l, m)``.
+    channel_offset : int, default 0
+        Added to the channels of the requests (the window's first channel).
+
+    Returns
+    -------
+    encoded : list of dict
+    two_d_masks : list of numpy.ndarray
+        The evaluated two-dimensional parts the encoded requests index.
+    """
+    encoded, two_d_masks = [], []
+    for request in requests:
+        item = {
+            key: request[key]
+            for key in (
+                "kind",
+                "image",
+                "moments",
+                "frequency_axis",
+                "rest_frequency",
+                "function",
+                "per_channel",
+            )
+            if key in request
+        }
+        item.update(
+            channels=None
+            if request["channels"] is None
+            else np.asarray(request["channels"], dtype=np.int32) + channel_offset,
+            two_d_mask=None,
+            cube_terms=[],
+            expression=None,
+            footprint=None,
+        )
+        if request["kind"] == "moments":
+            item["channel_offset"] = channel_offset
+        split = split_lattice_conjuncts(request["mask"], ("sky", "primary_beam"))
+        if split is None:
+            item["expression"] = request["mask"]
+            split = None, []
+        two_d, terms = split
+        if two_d is not None:
+            mask = evaluate_lattice_expression(two_d, images)
+            two_d_masks.append(
+                np.broadcast_to(np.asarray(mask, dtype=bool), (*map_shape, 1, 1))[
+                    ..., 0, 0
+                ].copy()
+            )
+            item["two_d_mask"] = len(two_d_masks) - 1
+        for term in terms:
+            nonzero = re.fullmatch(r'"(sky|primary_beam)"\s*!=\s*0', term)
+            level = re.fullmatch(r'"primary_beam"\s*>\s*(\S+)', term)
+            if nonzero:
+                item["cube_terms"].append(("nonzero", nonzero.group(1)))
+            elif level and float(level.group(1)) == PROFILE_LEVEL:
+                item["cube_terms"].append(("profile",))
+            else:
+                item["cube_terms"].append(("expression", term))
+        encoded.append(item)
+    return encoded, two_d_masks
