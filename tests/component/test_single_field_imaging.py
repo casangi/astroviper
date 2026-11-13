@@ -13,6 +13,10 @@ reference per base test, regenerated at double precision,
 (see ``_regenerate_truth_images``). The old CASA reference images are no longer
 used.
 
+The ``restoring_beam`` tests need no truth image: they simulate a cube of point
+sources with one fully flagged channel and restore it to the common beam of its
+own Stokes I PSF beams (CASA ``tclean``'s ``restoringbeam='common'``).
+
 The tests must be run from this directory so the relative ``*.zarr`` paths
 resolve.
 
@@ -43,10 +47,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import xarray as xr
+from scipy.optimize import least_squares
+from xradio.image import make_empty_sky_image, write_image
 from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
     image_cube_single_field,
+)
+from astroviper.distributed_applications.simulation import simulate_processing_set
+from astroviper.processing_functions.image_analysis import (
+    common_beam,
+    correcting_beam,
 )
 from astroviper.processing_functions.image_analysis.image_statistics import (
     RESIDUAL_STATISTICS,
@@ -64,6 +75,9 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     CYCLE_TIMING_FIELDS,
     MODEL_FLUX_SIGN_FIELDS,
 )
+from astroviper.utils.beam_models import airy_disk_model
+from astroviper.utils.coordinate_transforms import inverse_sin_project
+from astroviper.utils.telescope_layout import read_telescope_layout
 
 PS_STORE = "twhya_selfcal_lsrk_5chans.ps.zarr"
 
@@ -1466,6 +1480,275 @@ def test_single_field_imaging_multi_cycle_worst_case(plot_saver):
         tol=MULTI_CYCLE_WORST_CASE_RTOL,
         deep_clean=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# restoring_beam: a simulated cube restored to the common beam of its own
+# Stokes I PSF beams.
+# ---------------------------------------------------------------------------
+
+ARCSEC = np.pi / (180 * 3600)
+COMMON_BEAM_PHASE_CENTER = np.array([4.267, np.deg2rad(-23.0)])
+COMMON_BEAM_IMAGE_SIZE = [128, 128]
+# 5.0 to 5.6 pixels across the minor axes of the PSF beams
+COMMON_BEAM_CELL_SIZE = np.array([-0.64, 0.64]) * ARCSEC
+# Channels 4 GHz apart, so that the PSF beams shrink by 11 % across the band;
+# the second is fully flagged.
+COMMON_BEAM_FREQUENCY_PARAMS = {
+    "freq_start": 100e9,
+    "freq_delta": 4e9,
+    "n_channels": 4,
+    "channel_width": 2e6,
+    "spectral_window_name": "Band3",
+}
+COMMON_BEAM_FLAGGED_CHANNEL = 1
+# Unpolarized point sources on pixel centres: (l index, m index), flux in Jy.
+COMMON_BEAM_SOURCES = [((64, 64), 1.0), ((44, 80), 0.5), ((82, 46), 0.25)]
+# CLEAN to 1e-5 of the brightest source, so that the restored sources are the
+# restored model.
+COMMON_BEAM_CYCLE_CONTROL_PARAMS = {
+    "max_iter": 3000,
+    "max_cycles": 10,
+    "threshold": 1e-5,
+    "primary_beam_limit": 0.2,
+    "gain": 0.1,
+    "psf_sidelobe_factor": 1.5,
+    "max_iter_per_cycle": -1,
+    "min_psf_fraction": 0.05,
+    "max_psf_fraction": 0.8,
+}
+# A restored point source against its flux times the target: relative for the
+# peak and the axes, in radians for the position angle (measured: at most
+# 1.2e-5).
+COMMON_BEAM_FIT_TOLERANCE = 1e-3
+
+
+@pytest.fixture(scope="module")
+def common_beam_cube(tmp_path_factory):
+    """The cube restored (``restoration_output="both"``) to the common beam of
+    the Stokes I PSF beams of a first run, as in the recipe of
+    :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`,
+    into a Zarr store and into FITS files."""
+    import zarr
+
+    work_dir = tmp_path_factory.mktemp("common_beam")
+    ps_store = str(work_dir / "point_sources.ps.zarr")
+    grid = make_empty_sky_image(
+        COMMON_BEAM_PHASE_CENTER,
+        COMMON_BEAM_IMAGE_SIZE,
+        COMMON_BEAM_CELL_SIZE,
+        [COMMON_BEAM_FREQUENCY_PARAMS["freq_start"]],
+        ["I"],
+        [0.0],
+        do_sky_coords=False,
+    )
+    pixels = np.array([pixel for pixel, _ in COMMON_BEAM_SOURCES])
+    ra_dec = inverse_sin_project(
+        COMMON_BEAM_PHASE_CENTER,
+        np.stack([grid.l.values[pixels[:, 0]], grid.m.values[pixels[:, 1]]], axis=-1),
+    )
+    antenna_xds = read_telescope_layout("alma.cycle8.1")
+    with dask.config.set(scheduler="synchronous"):
+        ms_name = simulate_processing_set(
+            ps_store=ps_store,
+            antenna_xds=antenna_xds,
+            time_params={
+                "time_start": "2019-10-03T19:00:00.000",
+                "time_delta": 300.0,
+                "n_samples": 12,
+            },
+            frequency_params=COMMON_BEAM_FREQUENCY_PARAMS,
+            polarization=["XX", "YY"],
+            sky_components=[
+                {
+                    "kind": "point",
+                    "flux": np.array([flux, 0.0, 0.0, flux]),
+                    "ra_dec": direction,
+                    "name": f"source_{index}",
+                }
+                for index, (direction, (_, flux)) in enumerate(
+                    zip(ra_dec, COMMON_BEAM_SOURCES, strict=True)
+                )
+            ],
+            phase_center_ra_dec=COMMON_BEAM_PHASE_CENTER[None, :],
+            beam_models=[airy_disk_model("alma")],
+            beam_model_map=np.zeros(antenna_xds.sizes["antenna_name"], int),
+            n_time_chunks=1,
+            n_frequency_chunks=1,
+            overwrite=True,
+        )["ms_name"]
+    zarr.open_array(f"{ps_store}/{ms_name}/FLAG", mode="r+")[
+        :, :, COMMON_BEAM_FLAGGED_CHANNEL
+    ] = True
+    image_params = {
+        "image_size": COMMON_BEAM_IMAGE_SIZE,
+        "cell_size": COMMON_BEAM_CELL_SIZE,
+        "phase_direction": COMMON_BEAM_PHASE_CENTER,
+        "frequency_coords": open_processing_set(ps_store).xr_ps.get_freq_axis().values,
+        "polarization_coords": ["I", "Q"],
+        "time_coords": [0],
+        "fft_padding": 1.2,
+    }
+
+    def image(name, cycle_control_params, image_data_variables_keep, **kwargs):
+        image_store = str(work_dir / name)
+        with dask.config.set(scheduler="synchronous"):
+            image_cube_single_field(
+                ps_store=ps_store,
+                image_store=image_store,
+                image_params=image_params,
+                imaging_weights_params={"weighting": "natural"},
+                cycle_control_params=cycle_control_params,
+                image_data_variables_keep=image_data_variables_keep,
+                processing_set_data_group_name="base",
+                single_precision_image=False,
+                n_mapping_parallelism={"frequency": 1},
+                overwrite=True,
+                **kwargs,
+            )
+        return image_store
+
+    first = image(
+        "psf.img.zarr",
+        dict(COMMON_BEAM_CYCLE_CONTROL_PARAMS, max_cycles=0),
+        ["beam_fit_params_point_spread_function"],
+    )
+    beams = (
+        xr.open_zarr(first)
+        .BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.isel(polarization=[0])
+        .load()
+    )
+    target = common_beam(beams)
+    _, area_ratio = correcting_beam(beams, target)
+    restore = {"restore": True, "restoration_output": "both", "restoring_beam": target}
+    zarr_store = image(
+        "restored.img.zarr",
+        COMMON_BEAM_CYCLE_CONTROL_PARAMS,
+        ["primary_beam"],
+        **restore,
+    )
+    fits_store = image(
+        "restored_fits",
+        COMMON_BEAM_CYCLE_CONTROL_PARAMS,
+        ["primary_beam"],
+        skunk_works=True,
+        output_image_format="fits",
+        **restore,
+    )
+    return {
+        "target": target,
+        "area_ratio": area_ratio[0, :, 0],
+        "image": xr.open_zarr(zarr_store).load(),
+        "fits_store": fits_store,
+    }
+
+
+def _fit_point_source(plane, pixel, beam):
+    """Peak, axes (pixels) and position angle of the Gaussian, in the
+    ``BEAM_FIT_PARAMS`` convention (the major axis along ``(sin pa, -cos pa)``
+    in ``(l index, m index)``), fitted to the pixels within 1.5 major axes of
+    ``pixel``; the fit starts from ``beam`` (axes in pixels)."""
+    half = int(np.ceil(1.5 * beam[0]))
+    di, dj = np.mgrid[-half : half + 1, -half : half + 1]
+    box = plane[
+        pixel[0] - half : pixel[0] + half + 1, pixel[1] - half : pixel[1] + half + 1
+    ]
+    fwhm_factor = 2.0 * np.sqrt(2.0 * np.log(2.0))
+
+    def misfit(params):
+        peak, i0, j0, major, minor, pa = params
+        u = (di - i0) * np.sin(pa) - (dj - j0) * np.cos(pa)
+        v = (di - i0) * np.cos(pa) + (dj - j0) * np.sin(pa)
+        exponent = (u * fwhm_factor / major) ** 2 + (v * fwhm_factor / minor) ** 2
+        return (peak * np.exp(-0.5 * exponent) - box).ravel()
+
+    fit = least_squares(
+        misfit,
+        [box.max(), 0.0, 0.0, *beam],
+        x_scale="jac",
+        xtol=1e-12,
+        ftol=1e-12,
+        gtol=1e-12,
+    )
+    peak, _, _, major, minor, pa = fit.x
+    return peak, major, minor, pa
+
+
+def test_restoring_beam_restores_point_sources_to_the_common_beam(common_beam_cube):
+    """In both restored images every point source of every channel with data is
+    its flux (in ``SKY_RESTORED`` times the primary beam) times the target, and
+    ``BEAM_FIT_PARAMS_SKY_RESTORED`` holds the target in every plane, the flagged
+    channel's included."""
+    target = common_beam_cube["target"]
+    area_ratio = common_beam_cube["area_ratio"]
+    image = common_beam_cube["image"]
+    # the flagged channel has no PSF fit, and the target is larger than the PSF
+    # beam of another channel
+    assert np.isnan(area_ratio[COMMON_BEAM_FLAGGED_CHANNEL])
+    assert np.nanmax(area_ratio) > 1
+    cell = abs(COMMON_BEAM_CELL_SIZE[0])
+    beam = [target[0] / cell, target[1] / cell, target[2]]
+    for channel in range(image.sizes["frequency"]):
+        if channel == COMMON_BEAM_FLAGGED_CHANNEL:
+            continue
+        plane = {"time": 0, "frequency": channel, "polarization": 0}
+        primary_beam = image.PRIMARY_BEAM.isel(plane).values
+        for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
+            restored = image[name].isel(plane).values
+            for pixel, flux in COMMON_BEAM_SOURCES:
+                peak = flux * (primary_beam[pixel] if name == "SKY_RESTORED" else 1.0)
+                fitted = _fit_point_source(restored, pixel, beam)
+                where = f"{name}, channel {channel}, source at {pixel}"
+                np.testing.assert_allclose(
+                    fitted[:3],
+                    [peak, *beam[:2]],
+                    rtol=COMMON_BEAM_FIT_TOLERANCE,
+                    err_msg=where,
+                )
+                pa_difference = (fitted[3] - target[2] + np.pi / 2) % np.pi - np.pi / 2
+                assert abs(pa_difference) < COMMON_BEAM_FIT_TOLERANCE, where
+    restored_beam = image.BEAM_FIT_PARAMS_SKY_RESTORED.values
+    np.testing.assert_array_equal(
+        restored_beam, np.broadcast_to(target, restored_beam.shape)
+    )
+
+
+def test_restoring_beam_casa_image_has_one_restoring_beam(common_beam_cube, tmp_path):
+    """XRADIO writes the restored image of the cube with a flagged channel to a
+    CASA image with one restoring beam, the target."""
+    arcae = pytest.importorskip("arcae")
+    restored = common_beam_cube["image"].xr_img.sel(data_group_name="restored")
+    restored.xr_img.delete_data_variables(["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"])
+    (path,) = write_image(restored, str(tmp_path / "restored.im"), out_format="casa")
+    with arcae.table(path) as table:
+        imageinfo = table.getkeywords()["imageinfo"]
+    assert "perplanebeams" not in imageinfo
+    beam = imageinfo["restoringbeam"]
+    axes = ("major", "minor", "positionangle")
+    assert [beam[axis]["unit"] for axis in axes] == ["rad"] * 3
+    np.testing.assert_array_equal(
+        [beam[axis]["value"] for axis in axes], common_beam_cube["target"]
+    )
+
+
+def test_restoring_beam_fits_beams_tables_hold_the_target(common_beam_cube):
+    """The ``BEAMS`` tables of both restored FITS files hold the target in the
+    row of every plane, the flagged channel's included."""
+    from astropy.io import fits
+
+    columns = ("BMAJ", "BMIN", "BPA")
+    for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
+        path = os.path.join(common_beam_cube["fits_store"], f"{name}.fits")
+        with fits.open(path) as hdulist:
+            beams = hdulist["BEAMS"]
+            units = [beams.columns[column].unit for column in columns]
+            rows = np.stack([beams.data[column] for column in columns], axis=-1)
+        assert units == ["rad"] * 3, name
+        # a row for every (channel, Stokes I and Q) plane
+        assert rows.shape == (COMMON_BEAM_FREQUENCY_PARAMS["n_channels"] * 2, 3), name
+        np.testing.assert_array_equal(
+            rows, np.broadcast_to(common_beam_cube["target"], rows.shape), err_msg=name
+        )
 
 
 def _regenerate_truth_images():

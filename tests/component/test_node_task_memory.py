@@ -93,7 +93,9 @@ one point source, no noise, a few CLEAN iterations, two imaging cycles,
 restore and primary beam correction on, the synchronous Dask scheduler so
 that the node tasks run in this process. Runtime (three node tasks) is
 about a minute and a quarter natively on Apple silicon and two and a half
-minutes under x86-64 emulation.
+minutes under x86-64 emulation. The test runs twice: restoring every plane
+with its own PSF beam, and to a ``restoring_beam`` that contains the PSF beam
+of every plane, so that the restore also takes every residual plane to it.
 """
 
 from __future__ import annotations
@@ -119,6 +121,7 @@ import xarray as xr
 import astroviper.distributed_applications as distributed_applications
 import astroviper.node_tasks.imaging as node_tasks_imaging
 from astroviper.distributed_applications.imaging import image_cube_single_field
+from astroviper.processing_functions.image_analysis import correcting_beam
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.data_tree import release_data_tree
 from astroviper.utils.telescope_layout import read_telescope_layout
@@ -167,6 +170,9 @@ CYCLE_CONTROL_PARAMS = {
     "min_psf_fraction": 0.05,
     "max_psf_fraction": 0.8,
 }
+# Contains the PSF beam of every channel (at most 4.24" x 3.66"; checked after
+# the run), so that the restore takes every residual plane to it.
+RESTORING_BEAM = [6.0 * ARCSEC, 5.0 * ARCSEC, np.deg2rad(30.0)]
 
 # --- the phases and their budgets --------------------------------------------
 # Every entry names a function the node task calls (module, attribute) and
@@ -193,7 +199,11 @@ CYCLE_CONTROL_PARAMS = {
 #                                            calls add nothing
 #   restore_image                7.0 + 0.5   restored and primary beam
 #                                            corrected images of two planes
-#                                            each and the FFT convolution
+#                                            each and the FFT convolution;
+#                                            the same with a restoring beam
+#                                            (its clean beam, a spectrum and
+#                                            the residual taken to it; 7.00
+#                                            measured on macOS arm64 only)
 #   calculate_plane_statistics   3.2 + 0.5   plane statistics temporaries
 #   write_result_chunk           2.0 + 0.5   the Blosc output buffer of one
 #                                            variable (its two planes are one
@@ -240,8 +250,9 @@ PHASES = [
 # The whole node task: the peak of the traced memory above its value at the
 # start of the node task, the largest of (traced memory held at the start of
 # a phase + what the phase adds). Measured 17.83 to 17.84 planes, in the
-# restore (10.83 held + 7.00); the third residual update (17.47), the
-# statistics (12.26 + 3.22) and the write (12.26 + 2.00) stay below it.
+# restore (10.83 held + 7.00), with a restoring beam 17.83 (macOS arm64); the
+# third residual update (17.47), the statistics (12.26 + 3.22) and the write
+# (12.26 + 2.00) stay below it.
 TRACEMALLOC_BUDGET_PLANES = 18.0
 # --- release budgets ---------------------------------------------------------
 # Run 1, the whole call of the distributed application, garbage collector on
@@ -1001,7 +1012,7 @@ def image_params_of(ps_store):
     }
 
 
-def image(work_dir, ps_store, image_params):
+def image(work_dir, ps_store, image_params, restoring_beam):
     """Image the field the way the point source component test does, one
     node task per channel."""
     image_store = f"{work_dir}/memory.img.zarr"
@@ -1035,12 +1046,16 @@ def image(work_dir, ps_store, image_params):
             fft_backend="scipy",
             restore=True,
             restoration_output="both",
+            restoring_beam=restoring_beam,
             overwrite=True,
         )
     return image_store
 
 
-def test_node_task_memory(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "restoring_beam", [None, RESTORING_BEAM], ids=["psf_beam", "restoring_beam"]
+)
+def test_node_task_memory(tmp_path, monkeypatch, restoring_beam):
     pytest.importorskip("psutil")
     work_dir = str(tmp_path)
     ps_store = simulate(work_dir)
@@ -1069,7 +1084,7 @@ def test_node_task_memory(tmp_path, monkeypatch):
         # the application's other node tasks are recorded, not run
         imports.watch(monkeypatch)
         driver_start = monitor.state()
-        image_store = image(work_dir, ps_store, image_params)
+        image_store = image(work_dir, ps_store, image_params, restoring_beam)
         driver_left = monitor.state()
         assert len(captured) == N_TASKS, (
             f"{len(captured)} node tasks, expected {N_TASKS}"
@@ -1117,6 +1132,17 @@ def test_node_task_memory(tmp_path, monkeypatch):
     )
     assert plane_bytes >= MIN_PLANE_BYTES, plane_bytes
     assert img.SKY_RESIDUAL.dtype == np.float64
+    if restoring_beam is not None:
+        # every residual plane was taken to the restoring beam
+        _, area_ratio = correcting_beam(
+            img.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.isel(polarization=[0]),
+            restoring_beam,
+        )
+        assert (area_ratio > 1).all(), area_ratio
+        restored_beam = img.BEAM_FIT_PARAMS_SKY_RESTORED.values
+        np.testing.assert_array_equal(
+            restored_beam, np.broadcast_to(restoring_beam, restored_beam.shape)
+        )
 
     def planes(n_bytes):
         return n_bytes / plane_bytes
