@@ -16,7 +16,6 @@ import numpy as np
 from astroviper.processing_functions.image_analysis.make_auto_mask import (
     _chauvenet_sample,
 )
-from astroviper.processing_functions.image_analysis.moments import MomentsAccumulator
 
 SPEED_OF_LIGHT_KM_S = 299792.458
 # casacore's factor from the median absolute deviation to a Gaussian sigma.
@@ -255,28 +254,48 @@ def channel_statistics(values):
         The ``CHANNEL_STATISTICS`` keys; all NaN except ``npts`` when
         ``values`` is empty.
     """
-    values = np.asarray(values, dtype=np.float64)
+    values = np.array(values, dtype=np.float64)
     npts = values.size
     if npts == 0:
         return {key: (0.0 if key == "npts" else np.nan) for key in CHANNEL_STATISTICS}
-    median = np.median(values)
-    q1, q3 = np.percentile(values, [25.0, 75.0])
-    sumsq = float(np.dot(values, values))
-    return {
+    sums = {
         "npts": float(npts),
         "sum": float(values.sum()),
-        "sumsq": sumsq,
+        "sumsq": float(np.dot(values, values)),
         "mean": float(values.mean()),
         "sigma": float(values.std(ddof=1)) if npts > 1 else 0.0,
-        "rms": float(np.sqrt(sumsq / npts)),
         "min": float(values.min()),
         "max": float(values.max()),
+    }
+    # The order statistics of numpy.median and numpy.percentile (linear), from
+    # one partition of the copy at every index they read.
+    half = npts // 2
+    position_1, position_3 = 0.25 * (npts - 1), 0.75 * (npts - 1)
+    low_1, low_3 = int(position_1), int(position_3)
+    high_1, high_3 = min(low_1 + 1, npts - 1), min(low_3 + 1, npts - 1)
+    values.partition(sorted({max(half - 1, 0), half, low_1, high_1, low_3, high_3}))
+    median = values[half] if npts % 2 else (values[half - 1] + values[half]) / 2.0
+    q1 = _lerp(values[low_1], values[high_1], position_1 - low_1)
+    q3 = _lerp(values[low_3], values[high_3], position_3 - low_3)
+    np.subtract(values, median, out=values)
+    np.abs(values, out=values)
+    return {
+        **sums,
+        "rms": float(np.sqrt(sums["sumsq"] / npts)),
         "median": float(median),
-        "medabsdevmed": float(np.median(np.abs(values - median))),
+        "medabsdevmed": float(np.median(values, overwrite_input=True)),
         "q1": float(q1),
         "q3": float(q3),
         "quartile": float(q3 - q1),
     }
+
+
+def _lerp(low, high, fraction):
+    """numpy.percentile's linear interpolation between two order statistics."""
+    difference = high - low
+    if fraction >= 0.5:
+        return high - difference * (1 - fraction)
+    return low + difference * fraction
 
 
 def image_statistics(values, algorithm="classic", maxiter=-1):
@@ -341,6 +360,106 @@ def radio_velocity_km_s(frequency, rest_frequency):
     )
 
 
+class MomentMaps:
+    """CASA moments -1, 0, 8 and 10 of the planes added so far.
+
+    Only the maps the moments need are kept, allocated at the first plane: the
+    number of valid channels (moment -1) or a flag of contributing pixels,
+    float64 sums for moments -1 and 0, and the running maximum and minimum in
+    the cube's dtype, where they are exact. The finalized maps equal those of
+    :class:`~astroviper.processing_functions.image_analysis.moments.MomentsAccumulator`.
+
+    Parameters
+    ----------
+    moments : sequence of int
+        CASA moment numbers (-1, 0, 8, 10).
+    velocity : numpy.ndarray
+        Radio velocity of every channel of the cube (km/s); moment 0 sums the
+        planes times the channel widths in velocity.
+    shape : tuple of int
+        Map shape ``(l, m)``.
+    """
+
+    def __init__(self, moments, velocity, shape):
+        self.moments = tuple(moments)
+        velocity = np.asarray(velocity, dtype=np.float64)
+        self.widths = np.abs(np.gradient(velocity)) if velocity.size > 1 else np.ones(1)
+        self.shape = tuple(shape)
+        self.count = self.total = self.integrated = None
+        self.maximum = self.minimum = None
+
+    def add_plane(self, channel, plane, valid, scratch):
+        """Add the valid pixels of one plane of channel ``channel``; ``scratch``
+        is a float64 plane the call may overwrite."""
+        if self.count is None:
+            self.count = np.zeros(
+                self.shape, dtype=np.uint32 if -1 in self.moments else bool
+            )
+            if -1 in self.moments:
+                self.total = np.zeros(self.shape)
+            if 0 in self.moments:
+                self.integrated = np.zeros(self.shape)
+            if 8 in self.moments:
+                self.maximum = np.full(self.shape, -np.inf, dtype=plane.dtype)
+            if 10 in self.moments:
+                self.minimum = np.full(self.shape, np.inf, dtype=plane.dtype)
+        if self.count.dtype == bool:
+            np.logical_or(self.count, valid, out=self.count)
+        else:
+            self.count += valid
+        if self.total is not None:
+            np.add(self.total, plane, out=self.total, where=valid)
+        if self.integrated is not None:
+            np.multiply(plane, self.widths[channel], out=scratch, dtype=np.float64)
+            np.add(self.integrated, scratch, out=self.integrated, where=valid)
+        if self.maximum is not None:
+            np.maximum(self.maximum, plane, out=self.maximum, where=valid)
+        if self.minimum is not None:
+            np.minimum(self.minimum, plane, out=self.minimum, where=valid)
+
+    def merge(self, other):
+        """Fold ``other``'s maps (disjoint channels) into these, in place."""
+        if other.count is None:
+            return self
+        if self.count is None:
+            return other
+        if self.count.dtype == bool:
+            np.logical_or(self.count, other.count, out=self.count)
+        else:
+            self.count += other.count
+        for name, combine in (
+            ("total", np.add),
+            ("integrated", np.add),
+            ("maximum", np.maximum),
+            ("minimum", np.minimum),
+        ):
+            if getattr(self, name) is not None:
+                combine(
+                    getattr(self, name), getattr(other, name), out=getattr(self, name)
+                )
+        return self
+
+    def finalize(self):
+        """CASA moment number to its float64 map, NaN where no channel contributed."""
+        if self.count is None:
+            return {moment: np.full(self.shape, np.nan) for moment in self.moments}
+        empty = self.count == 0
+        maps = {}
+        with np.errstate(invalid="ignore", divide="ignore"):
+            for moment in self.moments:
+                if moment == -1:
+                    value = self.total / self.count
+                elif moment == 0:
+                    value = self.integrated.copy()
+                elif moment == 8:
+                    value = self.maximum.astype(np.float64)
+                else:
+                    value = self.minimum.astype(np.float64)
+                value[empty] = np.nan
+                maps[moment] = value
+        return maps
+
+
 def find_continuum_first_round_requests(
     n_channels, first_frequency, channel_width, rest_frequency, cube, primary_beam
 ):
@@ -398,8 +517,15 @@ def find_continuum_cube_reductions(
     channel_index,
     primary_beam=None,
     primary_beam_limit=None,
+    partials=None,
 ):
     """Partial reductions of one chunk of channels of the dirty cube.
+
+    The chunk is reduced one plane at a time: each cube a request needs is cast
+    to float64 and blanked below the primary beam limit once per plane, each
+    mask is evaluated once per plane (once per chunk when it refers to
+    two-dimensional images only), and moments keep only the maps they need
+    (:class:`MomentMaps`).
 
     Parameters
     ----------
@@ -429,11 +555,14 @@ def find_continuum_cube_reductions(
         Pixels where the primary beam is below this level are masked in every
         cube, as in the cubes ``tclean`` makes with ``pblimit``. ``None``
         (default): the cubes as they are.
+    partials : list, optional
+        Partial results of other channels for the same requests, to which this
+        chunk is added in place. ``None`` (default): new partial results.
 
     Returns
     -------
     list
-        One partial result per request: a ``MomentsAccumulator``, a dict of
+        One partial result per request: a :class:`MomentMaps`, a dict of
         per-channel values with their ``channels``, or a dict of mergeable sums.
 
     Raises
@@ -443,88 +572,129 @@ def find_continuum_cube_reductions(
     """
     if img_xds.sizes["time"] != 1 or img_xds.sizes["polarization"] != 1:
         raise ValueError("find_continuum reduces one time and one polarization plane")
-    cubes = {
-        name: np.transpose(img_xds[variable].values[0], (2, 3, 1, 0)).astype(np.float64)
+    shape = (img_xds.sizes["l"], img_xds.sizes["m"])
+    # (frequency, l, m) planes of every cube, in the dtype of the store.
+    raw = {
+        name: np.asarray(img_xds[variable].transpose(..., "l", "m").values)[0, :, 0]
         for name, variable in variables.items()
     }
+    beam = None
     if primary_beam_limit is not None:
-        beam = np.transpose(img_xds[primary_beam].values[0], (2, 3, 1, 0))
-        outside = beam < primary_beam_limit
-        for cube in cubes.values():
-            cube[outside] = np.nan
-    arrays = {**images, **cubes}
-    channel_index = np.asarray(channel_index)
-    partials = []
+        beam = np.asarray(img_xds[primary_beam].transpose(..., "l", "m").values)[
+            0, :, 0
+        ]
+    if partials is None:
+        partials = [_new_partial(request, shape) for request in requests]
+
+    def mask_of(expression, arrays):
+        result = evaluate_lattice_expression(expression, arrays)
+        return np.broadcast_to(np.asarray(result, dtype=bool), shape + (1, 1))[
+            ..., 0, 0
+        ]
+
+    # The cubes each request reads in a plane: its own and those its mask
+    # names. A mask of two-dimensional images only is evaluated once here.
+    cube_names, masks_2d = [], {}
     for request in requests:
-        cube = cubes[request["image"]]
-        selected = (
-            np.ones(channel_index.size, dtype=bool)
-            if request["channels"] is None
-            else np.isin(channel_index, request["channels"])
-        )
-        valid = np.isfinite(cube)
-        if request["mask"]:
-            valid &= np.broadcast_to(
-                np.asarray(
-                    evaluate_lattice_expression(request["mask"], arrays), dtype=bool
-                ),
-                cube.shape,
-            )
-        kind = request["kind"]
-        if kind == "moments":
-            accumulator = MomentsAccumulator(
-                [CASA_MOMENTS[moment] for moment in request["moments"]],
-                radio_velocity_km_s(request["frequency"], request["rest_frequency"]),
-                cube.shape[:2],
-            )
-            for position in np.flatnonzero(selected):
-                accumulator.add_plane(
-                    int(channel_index[position]),
-                    cube[:, :, 0, position],
-                    valid[:, :, 0, position],
+        mask_cubes = set(lattice_expression_names(request["mask"])) & raw.keys()
+        cube_names.append(mask_cubes | {request["image"]})
+        if request["mask"] and not mask_cubes:
+            masks_2d[request["mask"]] = mask_of(request["mask"], images)
+    channel_index = np.asarray(channel_index)
+    selections = [
+        None
+        if request["channels"] is None
+        else np.isin(channel_index, request["channels"])
+        for request in requests
+    ]
+    gathered = [[] for _ in requests]
+    scratch = np.empty(shape)
+    for position, channel in enumerate(channel_index.tolist()):
+        needed = [k for k, s in enumerate(selections) if s is None or s[position]]
+        if not needed:
+            continue
+        outside = None if beam is None else beam[position] < primary_beam_limit
+        planes = {}
+        for name in set().union(*(cube_names[k] for k in needed)):
+            planes[name] = raw[name][position].astype(np.float64)
+            if outside is not None:
+                planes[name][outside] = np.nan
+        finite = {name: np.isfinite(plane) for name, plane in planes.items()}
+        cube_masks = {}
+        for k in needed:
+            request, partial = requests[k], partials[k]
+            plane = planes[request["image"]]
+            valid = finite[request["image"]]
+            expression = request["mask"]
+            if expression in masks_2d:
+                valid = valid & masks_2d[expression]
+            elif expression:
+                if expression not in cube_masks:
+                    arrays = {
+                        **images,
+                        **{n: planes[n][:, :, None, None] for n in cube_names[k]},
+                    }
+                    cube_masks[expression] = mask_of(expression, arrays)
+                valid = valid & cube_masks[expression]
+            kind = request["kind"]
+            if kind == "moments":
+                partial.add_plane(
+                    channel, raw[request["image"]][position], valid, scratch
                 )
-            partials.append(accumulator)
-        elif kind == "profile":
-            positions = np.flatnonzero(selected)
-            partials.append(
-                {
-                    "channels": channel_index[positions],
-                    "values": np.array(
-                        [
-                            _profile_value(
-                                cube[..., p][valid[..., p]], request["function"]
-                            )
-                            for p in positions
-                        ]
-                    ),
-                }
-            )
-        elif kind == "statistics" and request["per_channel"]:
-            positions = np.flatnonzero(selected)
-            rows = [channel_statistics(cube[..., p][valid[..., p]]) for p in positions]
-            partials.append(
-                {
-                    "channels": channel_index[positions],
-                    "values": {
-                        key: np.array([row[key] for row in rows])
-                        for key in CHANNEL_STATISTICS
-                    },
-                }
-            )
-        elif kind == "statistics":
-            values = cube[..., selected][valid[..., selected]]
-            partials.append(
-                {
-                    "npts": float(values.size),
-                    "sum": float(values.sum()),
-                    "sumsq": float(np.dot(values, values)),
-                    "min": float(values.min()) if values.size else np.inf,
-                    "max": float(values.max()) if values.size else -np.inf,
-                }
+            elif kind == "profile":
+                gathered[k].append(_profile_value(plane[valid], request["function"]))
+            elif request["per_channel"]:
+                gathered[k].append(channel_statistics(plane[valid]))
+            else:
+                values = plane[valid]
+                partial["npts"] += float(values.size)
+                partial["sum"] += float(values.sum())
+                partial["sumsq"] += float(np.dot(values, values))
+                if values.size:
+                    partial["min"] = min(partial["min"], float(values.min()))
+                    partial["max"] = max(partial["max"], float(values.max()))
+    for k, request in enumerate(requests):
+        if request["kind"] == "moments" or (
+            request["kind"] == "statistics" and not request["per_channel"]
+        ):
+            continue
+        selected = (
+            channel_index if selections[k] is None else channel_index[selections[k]]
+        )
+        partials[k]["channels"] = np.concatenate([partials[k]["channels"], selected])
+        if request["kind"] == "profile":
+            partials[k]["values"] = np.concatenate(
+                [partials[k]["values"], np.asarray(gathered[k], dtype=np.float64)]
             )
         else:
-            raise ValueError(f"Unknown find_continuum reduction {kind!r}")
+            for key in CHANNEL_STATISTICS:
+                partials[k]["values"][key] = np.concatenate(
+                    [
+                        partials[k]["values"][key],
+                        np.array([row[key] for row in gathered[k]], dtype=np.float64),
+                    ]
+                )
     return partials
+
+
+def _new_partial(request, shape):
+    kind = request["kind"]
+    if kind == "moments":
+        return MomentMaps(
+            request["moments"],
+            radio_velocity_km_s(request["frequency"], request["rest_frequency"]),
+            shape,
+        )
+    if kind == "profile":
+        return {"channels": np.empty(0, dtype=int), "values": np.empty(0)}
+    if kind == "statistics" and request["per_channel"]:
+        return {
+            "channels": np.empty(0, dtype=int),
+            "values": {key: np.empty(0) for key in CHANNEL_STATISTICS},
+        }
+    if kind == "statistics":
+        return {"npts": 0.0, "sum": 0.0, "sumsq": 0.0, "min": np.inf, "max": -np.inf}
+    raise ValueError(f"Unknown find_continuum reduction {kind!r}")
 
 
 def merge_find_continuum_reductions(partials, other):
@@ -542,8 +712,8 @@ def merge_find_continuum_reductions(partials, other):
         The merged partial results (``partials`` is updated in place).
     """
     for index, (mine, theirs) in enumerate(zip(partials, other, strict=True)):
-        if isinstance(mine, MomentsAccumulator):
-            mine.merge(theirs)
+        if isinstance(mine, MomentMaps):
+            partials[index] = mine.merge(theirs)
         elif "channels" in mine:
             values = mine["values"]
             if isinstance(values, dict):
@@ -590,11 +760,9 @@ def finalize_find_continuum_reductions(partials, requests):
     """
     results = []
     for partial, request in zip(partials, requests, strict=True):
-        if isinstance(partial, MomentsAccumulator):
+        if isinstance(partial, MomentMaps):
             maps = partial.finalize()
-            results.append(
-                {moment: maps[CASA_MOMENTS[moment]] for moment in request["moments"]}
-            )
+            results.append({moment: maps[moment] for moment in request["moments"]})
         elif "channels" in partial:
             order = np.argsort(partial["channels"], kind="stable")
             values = partial["values"]

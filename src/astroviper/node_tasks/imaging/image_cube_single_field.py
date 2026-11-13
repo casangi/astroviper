@@ -1473,26 +1473,25 @@ def image_cube_single_field(
         if find_continuum_first_round_requests is not None:
             from astroviper.processing_functions.imaging.find_continuum import (
                 find_continuum_cube_reductions,
-                merge_find_continuum_reductions,
             )
 
             start = time.time()
             group = chunk_xds.attrs["data_groups"]["residual"]
             variables = {"sky": group["sky"], "primary_beam": group["primary_beam"]}
             channels = chunk_task_coords["frequency"]["slice"]
-            partial = find_continuum_cube_reductions(
-                chunk_xds[list(variables.values())].sel(polarization=["I"]),
+            # A slice (a view, not a copy) at the Stokes I plane.
+            stokes_i = list(chunk_xds.polarization.values).index("I")
+            first_round = find_continuum_cube_reductions(
+                chunk_xds[list(variables.values())].isel(
+                    polarization=slice(stokes_i, stokes_i + 1)
+                ),
                 find_continuum_first_round_requests,
                 variables,
                 {},
                 range(channels.start, channels.stop),
                 variables["primary_beam"],
                 primary_beam_limit,
-            )
-            first_round = (
-                partial
-                if first_round is None
-                else merge_find_continuum_reductions(first_round, partial)
+                first_round,
             )
             T_find_continuum_first_round += time.time() - start
 
