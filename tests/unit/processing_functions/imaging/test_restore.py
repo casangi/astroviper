@@ -825,6 +825,19 @@ def test_correcting_transform_takes_the_psf_beam_to_the_target():
     assert np.abs(wrong - expected).max() > 1e-2 * np.abs(expected).max()
 
 
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_correcting_transform_makes_no_subnormal_values(dtype):
+    """A correcting Gaussian of 40 x 30 px takes H down to exp(-1e4) at the
+    highest frequencies, below the smallest normal number of either dtype."""
+    covariance = _covariance_pixels(40.0, 30.0, 0.3)
+    spectrum = np.ones((256, 129), dtype=dtype)
+    _multiply_by_correcting_transform(spectrum, covariance, 1.5, 256)
+    magnitude = np.abs(spectrum)
+    tiny = np.finfo(dtype).tiny
+    assert not ((magnitude > 0) & (magnitude < tiny / np.finfo(dtype).eps ** 2)).any()
+    assert magnitude[0, 0] == np.float32(1.5) and (magnitude == 0).any()
+
+
 @pytest.mark.parametrize("output", ["apparent", "both"])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_point_source_in_the_residual_keeps_its_peak(output, dtype):

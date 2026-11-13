@@ -213,14 +213,16 @@ def _multiply_by_correcting_transform(spectrum, covariance_pixels, area_ratio, n
     spectrum in cycles per pixel (``fftfreq`` along ``l``, ``rfftfreq(nx)``
     along ``m``). The exponent is evaluated for 256 rows at a time in one
     float64 buffer and cast to the real dtype of the spectrum for the
-    multiplication.
+    multiplication. ``H`` below ``tiny / eps**2`` of that dtype is zero, so that
+    neither it nor its products with the spectrum are subnormal (slow on x86).
     """
     (c00, c01), (_, c11) = covariance_pixels
     f0 = scipy.fft.fftfreq(spectrum.shape[0])
     f1 = scipy.fft.rfftfreq(nx)
     cross = 2.0 * c01 * f1
     along_m = c11 * f1 * f1
-    real_dtype = np.finfo(spectrum.dtype).dtype
+    real = np.finfo(spectrum.dtype)
+    floor = np.log(real.tiny) - 2.0 * np.log(real.eps) - np.log(area_ratio)
     exponent = np.empty((min(256, f0.size), f1.size))
     for start in range(0, f0.size, 256):
         rows = f0[start : start + 256]
@@ -229,9 +231,10 @@ def _multiply_by_correcting_transform(spectrum, covariance_pixels, area_ratio, n
         block += along_m
         block += (c00 * rows * rows)[:, None]
         block *= -2.0 * np.pi**2
+        block[block < floor] = -np.inf
         np.exp(block, out=block)
         block *= area_ratio
-        spectrum[start : start + rows.size] *= block.astype(real_dtype, copy=False)
+        spectrum[start : start + rows.size] *= block.astype(real.dtype, copy=False)
 
 
 def _correcting_spectrum(residual_plane, covariance_pixels, area_ratio, workers):
