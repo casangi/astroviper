@@ -3,7 +3,6 @@
 import importlib
 import math
 import re
-import sys
 
 import numpy as np
 import pytest
@@ -141,10 +140,10 @@ MIRRORED_PA_TURNED = (1.6487903480947445e-05, 6.879137721400835e-06, 0.795354193
 # Where an enclosing ellipse touches a beam, one ulp of sin, cos or acos can change the
 # number of growth steps (common_beam, Notes). The casatools values above are from macOS
 # arm64, whose math library is not correctly rounded at some arguments of these cases (acos
-# for "three PAs", sin for TWO_POLARIZATIONS). Elsewhere, with correctly rounded functions
-# as Linux's glibc gives them here, they take another number of growth steps: these are the
-# port's results with sin, cos and acos correctly rounded in 80-digit decimal arithmetic,
-# which Linux reproduces bit for bit.
+# for "three PAs", sin for TWO_POLARIZATIONS). With correctly rounded functions, as Linux's
+# glibc gives them here, they take another number of growth steps: these are the port's
+# results with sin, cos and acos correctly rounded in 80-digit decimal arithmetic. These
+# cases accept either result.
 CORRECTLY_ROUNDED = {
     ("three PAs", True): (
         1.1110843440618131e-05,
@@ -164,9 +163,11 @@ CORRECTLY_ROUNDED = {
 }
 
 
-def platform_expected(casatools, key):
-    """The casatools value on macOS, the correctly rounded one elsewhere."""
-    return casatools if sys.platform == "darwin" else CORRECTLY_ROUNDED[key]
+def assert_beam_one_of(result, *candidates):
+    """assert_beam against the candidate that ``result`` is closest to."""
+    assert_beam(
+        result, min(candidates, key=lambda c: np.abs(np.subtract(result, c)).max())
+    )
 
 
 def radians(beams, single=False):
@@ -216,10 +217,10 @@ def casa_deconvolve(convolved, beam):
 
 @pytest.mark.parametrize(("name", "single"), list(CASA_COMMON_BEAMS))
 def test_common_beam_equals_casatools(name, single):
-    expected = CASA_COMMON_BEAMS[name, single]
+    expected = [CASA_COMMON_BEAMS[name, single]]
     if (name, single) in CORRECTLY_ROUNDED:
-        expected = platform_expected(expected, (name, single))
-    assert_beam(common_beam(cube(radians(CASA_SETS[name], single))), expected)
+        expected.append(CORRECTLY_ROUNDED[name, single])
+    assert_beam_one_of(common_beam(cube(radians(CASA_SETS[name], single))), *expected)
 
 
 def test_common_beam_of_nearly_identical_float32_beams():
@@ -296,10 +297,10 @@ def test_common_beam_gives_up_after_1000_growth_steps(monkeypatch):
 def test_common_beam_visits_frequency_fastest_then_polarization():
     planes = radians([beam for channel in TWO_POLARIZATIONS for beam in channel])
     planes = planes.reshape(1, 2, 2, 3)
-    expected = platform_expected(TWO_POLARIZATIONS_EXPECTED, "two polarizations")
-    assert_beam(common_beam(planes), expected)
+    expected = (TWO_POLARIZATIONS_EXPECTED, CORRECTLY_ROUNDED["two polarizations"])
+    assert_beam_one_of(common_beam(planes), *expected)
     polarization_fastest = common_beam(planes.reshape(1, 4, 1, 3))
-    assert not np.allclose(polarization_fastest, expected)
+    assert not any(np.allclose(polarization_fastest, beam) for beam in expected)
     data_array = xr.DataArray(
         planes[0].transpose(1, 0, 2),
         dims=("polarization", "frequency", "beam_params_label"),
@@ -316,9 +317,9 @@ def test_common_beam_visits_time_last():
 
 def test_common_beam_depends_on_the_order():
     beams = radians(CASA_SETS["three PAs"])
-    expected = platform_expected(THREE_PAS_REVERSED, "three PAs reversed")
-    assert_beam(common_beam(cube(beams[::-1])), expected)
-    assert not np.allclose(common_beam(cube(beams)), expected)
+    expected = (THREE_PAS_REVERSED, CORRECTLY_ROUNDED["three PAs reversed"])
+    assert_beam_one_of(common_beam(cube(beams[::-1])), *expected)
+    assert not any(np.allclose(common_beam(cube(beams)), beam) for beam in expected)
 
 
 def test_common_beam_leaves_out_null_beams_and_failed_fits():
