@@ -82,6 +82,48 @@ def test_cluster_plots_sum_over_running_tasks():
     assert np.nanmax(busy) > 2.6  # > one task's ~2.5 cores -> real summation
 
 
+def test_cluster_io_bin_means_conserve_bytes():
+    df = _monitored_frame()
+    axes = plot_cluster_resource_usage(df)
+    lines = {line.get_label(): line for line in axes["io"].get_lines()}
+    x = lines["write"].get_xdata()
+    binw = x[1] - x[0]
+    for col in ("read_chars", "write_chars"):
+        total_gib = sum(c[-1] - c[0] for c in df[col]) / 2**30
+        plotted = lines[col.split("_")[0]].get_ydata().sum() * binw
+        assert plotted == pytest.approx(total_gib, rel=1e-9)
+
+
+def test_cluster_cpu_ignores_the_first_sample_spike():
+    """graphviper <= 0.0.58 took the first cpu_percent sample microseconds
+    after psutil's baseline: 0 or up to ~15,000 %."""
+    df = _monitored_frame()
+    df.at[0, "cpu_percent"] = [15000.0] + df.at[0, "cpu_percent"][1:]
+    busy = plot_cluster_resource_usage(df)["cpu"].get_lines()[0].get_ydata()
+    assert np.nanmax(busy) <= 2.5 * len(df)  # every sample after the first <= 250 %
+
+
+def test_cpu_seconds_preferred_over_cpu_percent():
+    df = _monitored_frame(n_tasks=1)
+    t = np.asarray(df.at[0, "time_seconds"])
+    df["cpu_seconds"] = [(0.5 * t).tolist()]  # half a core throughout
+    df.at[0, "cpu_percent"] = [999.0] * len(t)
+    ax = plot_task_resource_usage(df)["cpu"]
+    mean = ax.get_lines()[-1].get_ydata()
+    assert np.nanmax(np.abs(mean - 50.0)) < 1e-9
+
+
+def test_task_io_mean_holds_finished_tasks():
+    df = _monitored_frame()
+    ax = plot_task_resource_usage(df)["io"]
+    write_mean = [
+        line for line in ax.get_lines() if line.get_label().startswith("write: mean")
+    ][0].get_ydata()
+    assert np.all(np.diff(write_mean) >= 0)
+    expected = np.mean([c[-1] - c[0] for c in df["write_chars"]]) / 2**30
+    assert write_mean[-1] == pytest.approx(expected, rel=1e-9)
+
+
 def test_cluster_plots_require_start_unixtime(capsys):
     assert plot_cluster_resource_usage(_monitored_frame(with_start=False)) is None
     assert "start_unixtime" in capsys.readouterr().out
