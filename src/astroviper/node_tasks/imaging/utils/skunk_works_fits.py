@@ -78,10 +78,12 @@ _BEAM_CARRYING_VARIABLES = frozenset(
         "sky_residual",
         "sky_model",
         "sky_restored",
+        "sky_restored_primary_beam_corrected",
         "sky_deconvolved",
         "point_spread_function",
     }
 )
+_RESTORED_VARIABLES = frozenset({"sky_restored", "sky_restored_primary_beam_corrected"})
 
 # Fixed BEAMS-table row layout written by create_empty_fits_images and assumed
 # by the row writer: BMAJ, BMIN, BPA as big-endian float64 then CHAN, POL as
@@ -90,6 +92,24 @@ _BEAMS_ROW_STRUCT = struct.Struct(">dddii")
 
 _FULL_DIMS_LM = ("time", "frequency", "polarization", "l", "m")
 _BEAM_PARAMS_DIMS = ("time", "frequency", "polarization", "beam_params_label")
+
+
+def _beams_table_variable(image_variable, beam_variables):
+    """The beam-fit-params variable whose rows fill the ``BEAMS`` table of
+    ``image_variable`` (``None`` for a file without one): the restoring beam
+    for a restored image when it is kept, else the clean beam (PSF fit), else
+    the first other beam-fit-params variable kept."""
+    if image_variable not in _BEAM_CARRYING_VARIABLES:
+        return None
+    if (
+        image_variable in _RESTORED_VARIABLES
+        and "beam_fit_params_sky_restored" in beam_variables
+    ):
+        return "beam_fit_params_sky_restored"
+    others = [dv for dv in beam_variables if dv != "beam_fit_params_sky_restored"]
+    if "beam_fit_params_point_spread_function" in others:
+        return "beam_fit_params_point_spread_function"
+    return others[0] if others else None
 
 
 def _pad_to_block(nbytes):
@@ -348,9 +368,10 @@ def create_empty_fits_images(
       reference direction, spectral frame, and observation date;
     * a sparse (``ftruncate``\\ d) primary data area sized for the full cube --
       no pixel data is materialised, so creation is metadata-cost only;
-    * when a beam-fit-params variable is kept, a zero-filled ``BEAMS``
-      binary-table extension (and ``CASAMBM = T``) on the beam-carrying
-      variables, whose fixed-size rows the node tasks later overwrite in place.
+    * a zero-filled ``BEAMS`` binary-table extension (and ``CASAMBM = T``) on
+      every variable a kept beam-fit-params variable labels
+      (:func:`_beams_table_variable`), whose fixed-size rows the node tasks
+      later overwrite in place.
 
     The concurrent write phase then creates no files and writes only disjoint
     byte ranges (:func:`write_result_chunk_to_fits_skunk_works`).
@@ -418,9 +439,7 @@ def create_empty_fits_images(
     paths = {}
     for key in image_variables:
         bunit, btype = _VARIABLE_FITS_UNITS.get(key, _DEFAULT_FITS_UNITS)
-        has_beams = (
-            beams_extension_bytes is not None and key in _BEAM_CARRYING_VARIABLES
-        )
+        has_beams = _beams_table_variable(key, beam_variables) is not None
         header = _build_primary_header(
             img_xds, bitpix, bunit, btype, telescope_name, has_beams
         )
@@ -603,9 +622,11 @@ def write_result_chunk_to_fits_skunk_works(
        FITS axis). Concurrent tasks touch disjoint byte ranges of the shared,
        pre-created files: no locking, no file creation.
 
-    A kept beam-fit-params variable is written as full ``BEAMS``-table rows
-    (values plus their ``CHAN``/``POL`` indices) into every kept image file
-    that carries a ``BEAMS`` extension.
+    Every kept image file that carries a ``BEAMS`` extension gets full table
+    rows (values plus their ``CHAN``/``POL`` indices) of the beam-fit-params
+    variable that :func:`_beams_table_variable` assigns to it: the restoring
+    beam for the restored images when it is kept, else the clean beam (PSF
+    fit).
 
     Parameters
     ----------
@@ -632,12 +653,6 @@ def write_result_chunk_to_fits_skunk_works(
     image_variables = [
         dv for dv in image_data_variables_keep if not dv.startswith("beam_fit_params")
     ]
-    # The clean beam (PSF fit) labels the BEAMS tables when several are kept.
-    beam_variable = (
-        "beam_fit_params_point_spread_function"
-        if "beam_fit_params_point_spread_function" in beam_variables
-        else (beam_variables[0] if beam_variables else None)
-    )
 
     # Phase 1: encode each image variable's chunk (optionally concurrent).
     if processing_function_threads <= 1 or len(image_variables) <= 1:
@@ -661,22 +676,25 @@ def write_result_chunk_to_fits_skunk_works(
 
     writes = [(path, offset, blob) for path, offset, blob, _structure in encoded]
 
-    # Beam rows go into every kept image file that carries a BEAMS extension.
-    if beam_variable is not None:
-        for path, _offset, _blob, structure in encoded:
-            beams = structure["beams"]
-            if beams is None:
-                continue
-            if beams["row_bytes"] != _BEAMS_ROW_STRUCT.size:
-                raise ValueError(
-                    f"{path}: BEAMS rows are {beams['row_bytes']} B; expected "
-                    f"{_BEAMS_ROW_STRUCT.size} (BMAJ,BMIN,BPA,CHAN,POL)."
-                )
-            rows = _encode_beam_rows(beam_variable, chan_start, img_xds)
-            offset = (
-                beams["data_start"] + chan_start * beams["n_pol"] * beams["row_bytes"]
+    # Beam rows go into every kept image file that carries a BEAMS extension,
+    # encoded once per beam variable.
+    rows = {}
+    for key, (path, _offset, _blob, structure) in zip(
+        image_variables, encoded, strict=True
+    ):
+        beams = structure["beams"]
+        beam_variable = _beams_table_variable(key, beam_variables)
+        if beams is None or beam_variable is None:
+            continue
+        if beams["row_bytes"] != _BEAMS_ROW_STRUCT.size:
+            raise ValueError(
+                f"{path}: BEAMS rows are {beams['row_bytes']} B; expected "
+                f"{_BEAMS_ROW_STRUCT.size} (BMAJ,BMIN,BPA,CHAN,POL)."
             )
-            writes.append((path, offset, rows))
+        if beam_variable not in rows:
+            rows[beam_variable] = _encode_beam_rows(beam_variable, chan_start, img_xds)
+        offset = beams["data_start"] + chan_start * beams["n_pol"] * beams["row_bytes"]
+        writes.append((path, offset, rows[beam_variable]))
 
     # Phase 2: write the blobs serially (one open file at a time for this task).
     for path, offset, blob in writes:
