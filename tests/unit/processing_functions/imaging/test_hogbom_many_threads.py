@@ -42,15 +42,20 @@ def _data(n=128, npol=2, seed=0):
     return resid, psf, mask
 
 
-def _params(npol, max_iter=30, thr=-1.0):
+def _params(npol, max_iter=30, thr=0.0):
+    # The residual of _data is white noise, which is no image this PSF could
+    # have made: every subtraction of the broad PSF raises its RMS, and the
+    # divergence test would stop the clean. It is switched off here, where the
+    # kernels are compared at a fixed number of iterations.
     return {
         "gain": 0.1,
         "max_iter": max_iter,
         "threshold": 0.0,
+        "max_iter_divergence": -1,
         "clean_box": (-1, -1, -1, -1),
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
-        "max_iter_per_cycle": np.full((1, 1, npol), max_iter, np.int32),
+        "max_iter_per_cycle_updated": np.full((1, 1, npol), max_iter, np.int32),
         "threshold_per_cycle": np.full((1, 1, npol), thr, np.float32),
     }
 
@@ -61,7 +66,7 @@ class TestHogbomManyThreads:
     def test_matches_cpp_iteration_limited(self, npol):
         resid, psf, mask = _data(npol=npol, seed=1)
         p = _params(
-            npol, max_iter=30, thr=-1.0
+            npol, max_iter=30, thr=0.0
         )  # threshold never triggers -> max_iter iters
         r1, m1 = resid.copy(), np.zeros_like(resid)
         r2, m2 = resid.copy(), np.zeros_like(resid)
@@ -87,7 +92,7 @@ class TestHogbomManyThreads:
         resid, psf, mask = _data(npol=2, seed=3)
         resid = resid.astype(np.float64)
         psf = psf.astype(np.float64)
-        p = _params(2, max_iter=20, thr=-1.0)
+        p = _params(2, max_iter=20, thr=0.0)
         p["threshold_per_cycle"] = p["threshold_per_cycle"].astype(np.float64)
         r2, m2 = resid.copy(), np.zeros_like(resid)
         o2 = hogbom_clean_many_threads(r2, psf, m2, copy.deepcopy(p), 8, mask)
@@ -100,7 +105,29 @@ class TestHogbomManyThreads:
         yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
         psf1 = np.exp(-((yy - n // 2) ** 2 + (xx - n // 2) ** 2) / (2 * (n / 16) ** 2))
         psf = psf1.astype(np.float32)[None, None, None]  # np_psf == 1
-        p = _params(2, max_iter=15, thr=-1.0)
+        p = _params(2, max_iter=15, thr=0.0)
         r2, m2 = resid.copy(), np.zeros_like(resid)
         o2 = hogbom_clean_many_threads(r2, psf, m2, copy.deepcopy(p), 8, mask)
         assert o2["iterations_performed"].shape == (1, 1, 2)
+
+    @pytest.mark.parametrize("npol", [1, 2])
+    def test_matches_cpp_with_a_psf_of_twice_the_image_size(self, npol):
+        """The PSF of twice the image size subtracts every component from the
+        whole image in both kernels, to the bit (tie-free data)."""
+        n = 64
+        resid, _, mask = _data(n=n, npol=npol, seed=5)
+        yy, xx = np.mgrid[0 : 2 * n, 0 : 2 * n].astype(np.float32)
+        psf2d = np.exp(-((yy - n) ** 2 + (xx - n) ** 2) / (2 * (n / 16) ** 2))
+        psf2d += 0.05 * np.cos(np.hypot(yy - n, xx - n) / 3.0)
+        psf2d /= psf2d[n, n]
+        psf = np.broadcast_to(psf2d.astype(np.float32), (1, 1, npol, 2 * n, 2 * n))
+        psf = psf.copy()
+        p = _params(npol, max_iter=30, thr=0.0)
+        r1, m1 = resid.copy(), np.zeros_like(resid)
+        r2, m2 = resid.copy(), np.zeros_like(resid)
+        o1 = hogbom_clean(r1, psf, m1, copy.deepcopy(p), 8, mask)
+        o2 = hogbom_clean_many_threads(r2, psf, m2, copy.deepcopy(p), 8, mask)
+        assert o1["iterations_performed"].tolist() == [[[30] * npol]]
+        assert np.array_equal(o1["iterations_performed"], o2["iterations_performed"])
+        assert np.array_equal(m1, m2)
+        assert np.array_equal(r1, r2)

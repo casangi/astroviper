@@ -231,7 +231,10 @@ def get_moments_data_variable_definitions(
 
 
 def resolve_moments_input_variables(
-    img_xds: xr.Dataset, image_data_group_in_name: str, use_mask: bool
+    img_xds: xr.Dataset,
+    image_data_group_in_name: str,
+    use_mask: bool,
+    image_data_group_in_role: str = "sky",
 ):
     """Resolve the sky (and optional mask) data-variable names from a data group.
 
@@ -247,6 +250,9 @@ def resolve_moments_input_variables(
     use_mask : bool
         If ``True``, also resolve the group's ``"mask"`` role (``None`` when
         the group defines no mask).
+    image_data_group_in_role : str, default "sky"
+        Role of the data group whose data variable is collapsed.  Only the
+        default ``"sky"`` has the ``"SKY"`` fallback.
 
     Returns
     -------
@@ -256,8 +262,9 @@ def resolve_moments_input_variables(
     Raises
     ------
     AssertionError
-        If the data group does not exist (when data groups are present) or the
-        resolved sky variable is not in the dataset.
+        If the data group does not exist (when data groups are present), a
+        role other than ``"sky"`` is not in the data group, or the resolved
+        sky variable is not in the dataset.
     """
     data_groups = img_xds.attrs.get("data_groups", {})
     if data_groups:
@@ -270,7 +277,18 @@ def resolve_moments_input_variables(
         data_group_in = data_groups[image_data_group_in_name]
     else:
         data_group_in = {}
-    sky_name = data_group_in.get("sky", "SKY")
+    if image_data_group_in_role == "sky":
+        sky_name = data_group_in.get("sky", "SKY")
+    else:
+        assert image_data_group_in_role in data_group_in, (
+            "Role "
+            + image_data_group_in_role
+            + " not found in image data group "
+            + image_data_group_in_name
+            + ": "
+            + str(list(data_group_in))
+        )
+        sky_name = data_group_in[image_data_group_in_role]
     assert sky_name in img_xds.data_vars, (
         "Sky data variable " + sky_name + " not found in image dataset."
     )

@@ -143,7 +143,9 @@ def calculate_data_chunking(
     -------
     dict
         Mapping of dimension name to the recommended number of chunks along
-        that dimension (e.g. ``{"frequency": 5}``).
+        that dimension (e.g. ``{"frequency": 5}``). Each count is between 1
+        and the size of its dimension, and the counts multiply to at least the
+        number of chunks the two constraints require.
 
     Raises
     ------
@@ -155,6 +157,15 @@ def calculate_data_chunking(
     import numpy as np
 
     n_total_dims = np.prod(np.array(list(chunking_dims_sizes.values())))
+    assert thread_info["memory_per_thread"] >= (
+        constant_memory + memory_singleton_chunk
+    ), (
+        "Not enough cluster memory per thread. Need at least "
+        + str(constant_memory + memory_singleton_chunk)
+        + " GiB but only "
+        + str(thread_info["memory_per_thread"])
+        + " GiB available."
+    )
 
     n_mem_chunks = int(
         np.ceil(
@@ -205,28 +216,73 @@ def calculate_data_chunking(
         n_chunks_dict = dict(zip([dims_names_arr[0]], [n_chunks], strict=False))
         return n_chunks_dict
     else:
-        factors = prime_factors(n_chunks)
+        # Place the prime factors of the target, largest first, on the axis with
+        # the longest chunks, preferring axes the new count divides evenly. An axis
+        # can take several factors but not more chunks than its size; if a factor
+        # fits on no axis, try the next target, up to one chunk per sample.
+        for n_target in range(n_chunks, n_total_dims + 1):
+            dims_n_chunks_arr = np.ones(len(dims_sizes_arr), dtype=int)
+            for factor in reversed(prime_factors(n_target)):
+                new_n_chunks_arr = dims_n_chunks_arr * factor
+                has_room = new_n_chunks_arr <= dims_sizes_arr
+                if not has_room.any():
+                    break
+                divides = dims_sizes_arr % new_n_chunks_arr == 0
+                chunk_lengths = np.where(
+                    divides if divides.any() else has_room,
+                    dims_sizes_arr / dims_n_chunks_arr,
+                    0,
+                )
+                dims_n_chunks_arr[np.argmax(chunk_lengths)] *= factor
+            if np.prod(dims_n_chunks_arr) == n_target:
+                break
+        else:
+            dims_n_chunks_arr = dims_sizes_arr
 
-        found_factors = False
-
-        while not found_factors:
-            if len(factors) > len(chunking_dims_sizes):
-                n_reduce = len(factors) - len(chunking_dims_sizes)
-
-                for i in range(n_reduce):
-                    if factors[0] * factors[-(i + 1)] < dims_sizes_arr[-(i + 1)]:
-                        new_factors = factors[1:]
-                        new_factors[-(i + 1)] = factors[0] * factors[-(i + 1)]
-                        factors = new_factors
-
-            elif len(factors) < len(chunking_dims_sizes):
-                while len(factors) < len(chunking_dims_sizes):
-                    n_chunks = n_chunks + 1
-                    factors = prime_factors(n_chunks)
-            else:
-                found_factors = True
-
-        # print(len(chunking_dims_sizes), len(factors), factors)
-
-        n_chunks_dict = dict(zip(dims_names_arr, factors, strict=False))
+        n_chunks_dict = dict(
+            zip(dims_names_arr, dims_n_chunks_arr.tolist(), strict=False)
+        )
         return n_chunks_dict
+
+
+def calculate_frequency_chunking(
+    n_frequency,
+    memory_per_frequency,
+    constant_memory,
+    n_chunks,
+    thread_info=None,
+    tasks_per_thread=4,
+):
+    """Choose frequency mapping parallelism from a shared memory model.
+
+    Parameters
+    ----------
+    n_frequency : int
+        Total number of input frequency channels.
+    memory_per_frequency : float
+        GiB whose allocation scales with the channels assigned to a task.
+    constant_memory : float
+        GiB allocated once per task, independent of its channel count.
+    n_chunks : int or None
+        Explicit task count, returned unchanged when supplied.
+    thread_info : dict or None
+        Thread count and memory per thread. Queried when omitted.
+    tasks_per_thread : int, optional
+        Target number of queued tasks per worker thread.
+
+    Returns
+    -------
+    int
+        Number of frequency chunks.
+    """
+    if n_chunks is not None:
+        return n_chunks
+    if thread_info is None:
+        thread_info = get_thread_info()
+    return calculate_data_chunking(
+        memory_per_frequency,
+        {"frequency": int(n_frequency)},
+        thread_info,
+        constant_memory=constant_memory,
+        tasks_per_thread=tasks_per_thread,
+    )["frequency"]

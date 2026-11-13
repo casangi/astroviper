@@ -18,7 +18,7 @@ repos:
         args: [--chars,"  "]
 
   - repo: https://github.com/asottile/pyupgrade
-    rev: v2.38.2
+    rev: v3.21.2
     hooks:
       - id: pyupgrade
         args:
@@ -31,7 +31,7 @@ repos:
         name: absolufy-imports
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.12.5
+    rev: v0.16.10
     hooks:
       - id: ruff-check        # linter + import sorting (see [tool.ruff.lint])
         args: [--fix]
@@ -51,7 +51,9 @@ repos:
       - id: imaging-param-docs
         name: imaging parameter docstring sync check
         entry: python src/astroviper/utils/param_docs.py check
-        language: system
+        language: python
+        additional_dependencies:
+          - libcst==1.8.5
         pass_filenames: false
         files: >-
           ^src/astroviper/(distributed_applications|node_tasks|processing_functions)/imaging/.*\.py$|^src/astroviper/utils/param_docs\.py$

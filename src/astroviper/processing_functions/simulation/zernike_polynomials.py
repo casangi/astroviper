@@ -1,12 +1,16 @@
 """Zernike polynomial basis used by the aperture-coefficient beam models.
 
 The 66 polynomials (radial orders ``n = 0 .. 10``) are written in expanded
-Cartesian form, in the exact order and normalisation used by the aperture
+Cartesian form, in the order and normalisation used by the aperture
 coefficient tables (Sekhar et al. 2022) shipped with AstroVIPER — ported
-verbatim from SIRIUS ``_zernike_polynomials.py``.  They are **not** the
-orthonormal Zernike polynomials (no ``sqrt(2 (n + 1))`` factors), so they must
-not be regenerated from a generic Zernike library without re-validating the
-coefficient tables.
+from SIRIUS ``_zernike_polynomials.py``.  They are the textbook Zernike
+polynomials ``R_n^|m|(rho) cos(m theta)`` (``m >= 0``) and
+``R_n^|m|(rho) sin(|m| theta)`` (``m < 0``) in OSA order, with ``x`` and ``y``
+in the roles of the Cartesian Y and X.  SIRIUS's polynomials 23, 39 and 53 had
+wrong terms; they are corrected here, and the shipped tables were converted
+exactly to the corrected polynomials (casangi/astroviper#362).  They are
+**not** the orthonormal Zernike polynomials (no ``sqrt(2 (n + 1))`` factors),
+and the tables depend on that normalisation.
 """
 
 from __future__ import annotations
@@ -80,11 +84,11 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     )  # m = -4 n = 6
     basis[23] = (
         12 * x * y
-        + 40 * (x**3) * y
+        - 40 * (x**3) * y
         - 40 * x * (y**3)
         + 30 * (x**5) * y
         + 60 * (x**3) * (y**3)
-        - 30 * x * (y**5)
+        + 30 * x * (y**5)
     )  # m = -2 n = 6
     basis[24] = (
         -1
@@ -219,7 +223,7 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         - 210 * (x**5) * y
         - 420 * (x**3) * (y**3)
         - 210 * x * (y**5)
-        - 112 * (x**7) * y
+        + 112 * (x**7) * y
         + 336 * (x**5) * (y**3)
         + 336 * (x**3) * (y**5)
         + 112 * x * (y**7)
@@ -281,7 +285,7 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     )  # m = 6 n = 8
     basis[44] = (
         x**8 - 28 * (x**6) * (y**2) + 70 * (x**4) * (y**4) - 28 * (x**2) * (y**6) + y**8
-    )  # m = 8 n = 9
+    )  # m = 8 n = 8
     basis[45] = (
         x**9
         - 36 * (x**7) * (y**2)
@@ -361,7 +365,7 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         + 756 * (y**5) * (x**4)
         + 504 * (y**3) * (x**6)
         + 126 * y * (x**8)
-    )  # m = -1 n = 9
+    )  # m = 1 n = 9
     basis[51] = (
         -20 * y**3
         + 60 * y * (x**2)
@@ -398,7 +402,7 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         + 9 * y**9
         - 180 * (y**7) * (x**2)
         + 126 * (y**5) * (x**4)
-        - 252 * (y**3) * (x**6)
+        + 252 * (y**3) * (x**6)
         - 63 * y * (x**8)
     )  # m = 7 n = 9
     basis[54] = (
@@ -574,16 +578,21 @@ def zernike_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def zernike_surface(
-    coefficients: np.ndarray, x: np.ndarray, y: np.ndarray
+    coefficients: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    indices: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Weighted sum ``sum_i c_i P_i(x, y)`` of the Zernike basis.
+    """Weighted sum ``sum_i c_i P_{indices[i]}(x, y)`` of the Zernike basis.
 
     Parameters
     ----------
-    coefficients : np.ndarray, [n_coefficients <= 66]
-        Real or complex coefficients; missing trailing terms are treated as zero.
+    coefficients : np.ndarray, [n_coefficients]
+        Real or complex coefficients; terms not indexed are treated as zero.
     x, y : np.ndarray
         Aperture coordinates normalised to the dish radius.
+    indices : np.ndarray, [n_coefficients], optional
+        Basis indices of the coefficients, each below 66; ``0, 1, ...`` by default.
 
     Returns
     -------
@@ -591,9 +600,10 @@ def zernike_surface(
         Complex if ``coefficients`` is complex.
     """
     coefficients = np.asarray(coefficients)
-    if coefficients.shape[0] > N_ZERNIKE_TERMS:
-        raise ValueError(
-            f"At most {N_ZERNIKE_TERMS} Zernike coefficients are supported."
-        )
-    basis = zernike_basis(x, y)[: coefficients.shape[0]]
+    indices = (
+        np.arange(coefficients.shape[0]) if indices is None else np.asarray(indices)
+    )
+    if indices.size and (indices.min() < 0 or indices.max() >= N_ZERNIKE_TERMS):
+        raise ValueError(f"Zernike indices must lie in 0 .. {N_ZERNIKE_TERMS - 1}.")
+    basis = zernike_basis(x, y)[indices]
     return np.tensordot(coefficients, basis, axes=(0, 0))

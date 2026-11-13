@@ -1,0 +1,94 @@
+{
+    "image_continuum_single_field": {
+        "input_checked": { "type": "boolean" },
+        "ps_store": { "required": true, "type": ["str"] },
+        "image_store": { "required": true, "type": ["str"] },
+        "image_params": {
+            "required": true,
+            "type": ["dict"],
+            "allow_unknown": true,
+            "schema": {
+                "n_taylor_terms": { "required": true },
+                "reference_frequency": {}
+            }
+        },
+        "imaging_weights_params": { "required": true, "type": ["dict"] },
+        "cycle_control_params": { "required": true, "type": ["dict"] },
+        "gridder": { "type": ["str"], "allowed": ["anti_alias"] },
+        "deconvolver": {
+            "type": ["str"],
+            "allowed": ["hogbom", "asp", "mtmfs"]
+        },
+        "primary_beam_limit": {"type": "float"},
+        "continuum_mode": {
+            "type": ["str"],
+            "allowed": ["mfs", "mvc"]
+        },
+        "mvc_model_update_approximation": {
+            "type": ["str"],
+            "allowed": ["channel_psf", "local_beam_moments"]
+        },
+        "instrument_polarization_basis": {
+            "type": ["str"],
+            "allowed": ["linear", "circular"]
+        },
+        "scan_intents": { "type": ["list", "str"] },
+        "field_name": { "type": ["str"], "nullable": true },
+        "clean_mask": { "type": ["str"], "nullable": true },
+        "auto_mask_params": { "type": ["dict"], "nullable": true },
+        "image_data_variables_keep": { "type": ["list"], "struct type": ["str"] },
+        "compressor": { "nullable": true },
+        "processing_set_data_group_name": { "type": ["str"] },
+        "single_precision_image": { "type": "boolean" },
+        "thread_info": { "type": ["dict"], "nullable": true },
+        "processing_function_threads": { "type": ["int"] },
+        "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
+        "overwrite": { "type": "boolean" },
+        "memory_mode": {
+            "type": ["str"],
+            "allowed": ["in_memory", "in_place", "cache"]
+        },
+        "weight_memory_mode": {
+            "type": ["str"],
+            "allowed": ["in_memory", "in_place"]
+        },
+        "visibility_memory_mode": {
+            "type": ["str"],
+            "allowed": ["in_memory", "in_place", "recompute"]
+        },
+        "wideband_primary_beam_memory_mode": {
+            "type": ["str"],
+            "allowed": ["in_place", "recompute", "in_memory"]
+        },
+        "cache_directory": { "type": ["str"], "nullable": true },
+        "write_visibility_model_to_ps": { "type": "boolean" },
+        "write_imaging_weights_to_ps": { "type": "boolean" },
+        "clear_cache": { "type": "boolean" },
+        "vizualize_graph": { "type": "boolean" },
+        "disk_chunk_sizes": { "type": ["dict", "str"], "nullable": true },
+        "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
+        "restore": { "type": "boolean" },
+        "restoration_output": {
+            "type": ["str"],
+            "allowed": ["apparent", "primary_beam_corrected", "both"]
+        },
+        "gridding_kernel_params": { "type": ["dict"], "nullable": true },
+        "skunk_works": { "type": "boolean" },
+        "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
+        "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
+        "reduce_mode": {
+            "type": ["str"],
+            "allowed": ["tree", "single_node", "tree_n"]
+        },
+        "reduce_n_batch": { "type": ["int"] },
+        "image_sharding": { "type": ["dict"], "nullable": true },
+        "image_chunking": { "type": ["dict"], "nullable": true },
+        "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true },
+        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true },
+        "cycle_acceleration": {
+            "type": ["str"],
+            "allowed": ["none", "conjugate_gradient", "nesterov_momentum"]
+        },
+        "momentum_coefficient": { "type": ["int", "float"] }
+    }
+}

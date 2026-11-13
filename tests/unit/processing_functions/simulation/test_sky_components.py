@@ -21,6 +21,7 @@ from astroviper.processing_functions.simulation.sky_components import (
     normalize_sky_component,
     slice_sky_components,
     stokes_sky_model_images,
+    total_stokes_flux,
 )
 from astroviper.utils.coordinate_transforms import inverse_sin_project, sin_project
 from astroviper.utils.telescope_layout import read_telescope_layout
@@ -456,3 +457,42 @@ class TestComplexCrossHandFluxes:
             [circular], l_axis, m_axis, PC[0], "circular", ["I", "Q", "U", "V"]
         )
         np.testing.assert_allclose(planes[:, 5, 11], self.STOKES, atol=1e-15)
+
+    def test_total_stokes_flux(self):
+        """The total flux per channel and Stokes parameter of the components,
+        the sum of the Stokes images they make without the pixelisation."""
+        i, q, u, v = self.STOKES
+        position = inverse_sin_project(PC[0], np.array([1e-4, -5e-5]))
+        linear = {"kind": "point", "flux": self.linear_flux(), "ra_dec": position}
+        # a frequency dependent unpolarised Gaussian: I = 1, 2, 3 Jy over 3 channels
+        gaussian = {
+            "kind": "gaussian",
+            "flux": [[1.0, 0, 0, 1.0], [2.0, 0, 0, 2.0], [3.0, 0, 0, 3.0]],
+            "ra_dec": PC[0],
+            "major": 5e-5,
+            "minor": 3e-5,
+            "pa": 0.4,
+        }
+        total = total_stokes_flux(
+            [linear, gaussian], "linear", ["I", "Q", "U", "V"], n_frequency=3
+        )
+        np.testing.assert_allclose(
+            total, [[i + 1, q, u, v], [i + 2, q, u, v], [i + 3, q, u, v]], atol=1e-12
+        )
+        # the Stokes images hold the same flux (the Gaussian is well inside them)
+        l_axis = (np.arange(64) - 32) * -1e-5
+        m_axis = (np.arange(64) - 32) * 1e-5
+        planes = stokes_sky_model_images(
+            [linear, gaussian], l_axis, m_axis, PC[0], "linear", ["I", "Q", "U", "V"],
+            frequency_index=1,
+        )  # fmt: skip
+        np.testing.assert_allclose(planes.sum(axis=(1, 2)), total[1], rtol=1e-6)
+        circular = {"kind": "point", "ra_dec": position,
+                    "flux": [i + v, q + 1j * u, q - 1j * u, i - v]}  # fmt: skip
+        np.testing.assert_allclose(
+            total_stokes_flux([circular], "circular", ["V", "I"], n_frequency=2),
+            [[v, i], [v, i]],
+            atol=1e-12,
+        )
+        with pytest.raises(ValueError, match="unknown Stokes"):
+            total_stokes_flux([circular], "circular", ["X"], n_frequency=1)

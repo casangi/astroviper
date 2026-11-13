@@ -21,6 +21,7 @@ import xarray as xr
 from astroviper.processing_functions.imaging.restore import (
     _elliptical_gaussian_kernel,
     _inverse_rfft2,
+    _restore_image_arrays,
     restore_image,
 )
 
@@ -414,7 +415,7 @@ class TestPrimaryBeamCorrectionInRestore:
             _make_restore_xds(beams=self.beams, residual=residual, model=model)
         )
         primary_beam = xds["PRIMARY_BEAM"].values
-        out, return_df = restore_image(xds, primary_beam_correction=True)
+        out, return_df = restore_image(xds, restoration_output="both")
         corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
         inside = primary_beam >= 0.2
         # the true sky convolved with the beam: the restored image of the
@@ -452,7 +453,7 @@ class TestPrimaryBeamCorrectionInRestore:
             _make_restore_xds(beams=self.beams, residual=residual, model=model)
         )
         primary_beam = xds["PRIMARY_BEAM"].values
-        out, _ = restore_image(xds, primary_beam_correction=True)
+        out, _ = restore_image(xds, restoration_output="both")
         corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
         divided = out["SKY_RESTORED"].values / primary_beam
         np.testing.assert_allclose(
@@ -469,20 +470,62 @@ class TestPrimaryBeamCorrectionInRestore:
                 beams=self.beams, residual=residual.copy(), model=model.copy()
             )
         )
-        reference = restore_image(xds, primary_beam_correction=True)[0]
+        reference = restore_image(xds, restoration_output="both")[0]
         xds = _with_primary_beam(
             _make_restore_xds(
                 beams=self.beams, residual=residual.copy(), model=model.copy()
             )
         )
-        consumed = restore_image(xds, consume_model=True, primary_beam_correction=True)[
-            0
-        ]
+        consumed = restore_image(xds, consume_model=True, restoration_output="both")[0]
         np.testing.assert_array_equal(
             consumed["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values,
             reference["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values,
         )
         assert "SKY_MODEL" not in consumed
+
+    def test_corrected_only_core_matches_cube_primary_beam_output(self):
+        """Selecting only the corrected core output preserves cube numerics."""
+        residual, model = self._inputs()
+        xds = _with_primary_beam(
+            _make_restore_xds(beams=self.beams, residual=residual, model=model)
+        )
+        reference = restore_image(xds, restoration_output="both")[0]
+
+        products, _ = _restore_image_arrays(
+            residual,
+            model,
+            xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values,
+            self.delta,
+            primary_beam=xds.PRIMARY_BEAM.values,
+            primary_beam_limit=0.2,
+            output="primary_beam_corrected",
+        )
+
+        assert set(products) == {"primary_beam_corrected"}
+        np.testing.assert_array_equal(
+            products["primary_beam_corrected"],
+            reference.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values,
+        )
+
+    def test_zero_limit_excludes_zero_and_nonfinite_primary_beam_pixels(self):
+        """A zero cutoff cannot feed zero-beam NaNs through the model FFT."""
+        residual, model = self._inputs()
+        xds = _with_primary_beam(
+            _make_restore_xds(beams=self.beams, residual=residual, model=model)
+        )
+        primary_beam = xds.PRIMARY_BEAM.values
+        primary_beam[..., 0, 0] = np.nan
+
+        out, _ = restore_image(
+            xds,
+            restoration_output="both",
+            primary_beam_limit=0.0,
+        )
+        corrected = out.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values
+        supported = np.isfinite(primary_beam) & (primary_beam > 0.0)
+
+        assert np.isfinite(corrected[supported]).all()
+        assert np.isnan(corrected[~supported]).all()
 
     def test_limit_dtype_and_missing_beam(self):
         residual, model = self._inputs(dtype=np.float64)
@@ -491,9 +534,7 @@ class TestPrimaryBeamCorrectionInRestore:
                 beams=self.beams, residual=residual, model=model, dtype=np.float64
             )
         )
-        out, _ = restore_image(
-            xds, primary_beam_correction=True, primary_beam_limit=0.6
-        )
+        out, _ = restore_image(xds, restoration_output="both", primary_beam_limit=0.6)
         corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
         assert corrected.dtype == np.float64
         assert np.isnan(corrected.values[xds["PRIMARY_BEAM"].values < 0.6]).all()
@@ -504,7 +545,7 @@ class TestPrimaryBeamCorrectionInRestore:
                 beams={(0, 0): (np.nan, np.nan, 0.0)}, residual=residual, model=model
             )
         )
-        out, _ = restore_image(xds, primary_beam_correction=True)
+        out, _ = restore_image(xds, restoration_output="both")
         primary_beam = xds["PRIMARY_BEAM"].values
         inside = primary_beam >= 0.2
         expected = (model + residual) / primary_beam
@@ -517,8 +558,8 @@ class TestPrimaryBeamCorrectionInRestore:
     def test_needs_the_primary_beam(self):
         residual, model = self._inputs()
         xds = _make_restore_xds(beams=self.beams, residual=residual, model=model)
-        with pytest.raises(AssertionError, match="primary_beam"):
-            restore_image(xds, primary_beam_correction=True)
+        with pytest.raises(KeyError, match="primary_beam"):
+            restore_image(xds, restoration_output="both")
 
 
 @pytest.mark.parametrize("workers", [1, 3])
@@ -551,3 +592,41 @@ def test_inverse_rfft2_is_irfft2_bit_for_bit(shape, dtype, workers):
     assert result.dtype == expected.dtype == dtype
     assert result.shape == expected.shape == shape
     assert result.tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both"])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("consume_model", [False, True])
+def test_cube_restoration_selector_matches_both_products(output, dtype, consume_model):
+    image = _make_restore_xds(ny=16, nx=16)
+    image["SKY_MODEL"][:] = 0
+    image["SKY_MODEL"].values[..., 8, 8] = 2
+    image["SKY_RESIDUAL"][:] = 0.1
+    image = image.astype(dtype)
+    image["PRIMARY_BEAM"] = xr.full_like(image.SKY_RESIDUAL, 0.5)
+    image.PRIMARY_BEAM.values[..., 0, :] = 0
+    image.attrs["data_groups"]["residual"]["primary_beam"] = "PRIMARY_BEAM"
+    reference, _ = restore_image(image.copy(deep=True), restoration_output="both")
+    model = image.SKY_MODEL.copy(deep=True)
+    result, _ = restore_image(
+        image, restoration_output=output, consume_model=consume_model
+    )
+    apparent = output in ("apparent", "both")
+    corrected = output in ("primary_beam_corrected", "both")
+    assert ("SKY_RESTORED" in result) == apparent
+    assert ("SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in result) == corrected
+    for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
+        if name in result:
+            np.testing.assert_array_equal(result[name], reference[name])
+            assert result[name].dtype == dtype
+    assert result.attrs["data_groups"]["restored"]["sky"] == (
+        "SKY_RESTORED" if apparent else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+    )
+    if not apparent or not consume_model:
+        xr.testing.assert_identical(result.SKY_MODEL, model)
+
+
+@pytest.mark.parametrize("output", [True, False, "unknown", None])
+def test_cube_restoration_rejects_invalid_selector_before_product_access(output):
+    with pytest.raises(ValueError, match="restoration_output"):
+        restore_image(None, restoration_output=output)

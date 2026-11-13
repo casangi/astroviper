@@ -29,6 +29,8 @@ def point_spread_function_gaussian_fit(
     interpolation_method: str = "splinef2d",
     processing_function_threads: int = 1,
     fitting_method: str = "astroviper",
+    *,
+    input_checked: bool = False,
 ):
     """
     fit 2D gaussian to psf
@@ -79,6 +81,10 @@ def point_spread_function_gaussian_fit(
         ``tclean``'s restoring beam), with ``cutoff`` as CASA ``psfcutoff``.
         The maximum-sidelobe computation is identical for both.
 
+    input_checked : bool, optional
+        Skip shared configuration checks when an upper layer already ran them.
+        The original fitter and product guards still execute.
+
     Returns
     -------
     xds : xarray.Dataset
@@ -107,30 +113,21 @@ def point_spread_function_gaussian_fit(
     - The maximum sidelobe level is a fraction of the PSF peak (dimensionless);
       it is ``0.0`` for an all-zero slice.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(
+            {**locals(), "psf_fitting_method": fitting_method}, mode=CUBE_SINGLE_FIELD
+        )
+
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
             "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
             "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         }
-
-    if not isinstance(npix_window, list | tuple | np.ndarray):
-        raise TypeError("npix_window must be a list, tuple, or numpy array")
-    if npix_window[0] <= 0 or npix_window[1] <= 0:
-        raise ValueError("npix_window must be positive")
-    if type(npix_window[0]) is not int or type(npix_window[1]) is not int:
-        raise TypeError("npix_window must be integers")
-    if npix_window[0] % 2 == 0 or npix_window[1] % 2 == 0:
-        raise ValueError(
-            "npix_window must be odd so the search window is centered on the peak"
-        )
-    if not isinstance(sampling, list | tuple | np.ndarray):
-        raise TypeError("sampling must be a list, tuple, or numpy array")
-    if sampling[0] <= 1 or sampling[1] <= 1:
-        raise ValueError("sampling must contain at least two points per axis")
-    if type(sampling[0]) is not int or type(sampling[1]) is not int:
-        raise TypeError("sampling must be integers")
-    if cutoff < 0:
-        raise ValueError("cutoff must be non-negative")
 
     image_data_group_in, image_data_group_out = create_data_groups_in_and_out(
         img_xds,
@@ -204,10 +201,7 @@ def point_spread_function_gaussian_fit(
             delta,
             interpolation_method,
             processing_function_threads=processing_function_threads,
-        )
-    else:
-        raise ValueError(
-            f"fitting_method must be 'astroviper' or 'casa', got {fitting_method!r}."
+            input_checked=True,
         )
     max_sidelobe = _max_sidelobe_after_gaussian_subtraction(
         img_xds[psf_name].values,
@@ -230,14 +224,14 @@ def point_spread_function_gaussian_fit(
         xr.DataArray(
             ellipse_params,
             dims=["time", "frequency", "polarization", "beam_params"],
-            attrs={"unit": "rad"},
+            attrs={"unit": "rad", "type": "point_spread_function_metadata"},
         )
     )
 
     img_xds[image_data_group_out["max_sidelobe_point_spread_function"]] = xr.DataArray(
         max_sidelobe,
         dims=["time", "frequency", "polarization"],
-        attrs={"unit": ""},
+        attrs={"unit": "", "type": "point_spread_function_metadata"},
     )
 
     modify_data_groups_xds(
@@ -416,7 +410,7 @@ def _extract_main_lobe_2d(npix_window, threshold, psf_2d):
     main_lobe_label = labels[peak_l, peak_m]
     main_lobe_only = np.where(labels == main_lobe_label, windowed_psf, 0)
 
-    # Cycle control depends on the largest sidelobe magnitude. A negative
+    # The per cycle threshold depends on the largest sidelobe magnitude. A negative
     # sidelobe is just as capable of destabilizing a model update as a positive
     # one, so do not discard it when estimating the safe cycle threshold.
     # In place, so that no third plane is made whether or not NumPy reuses the
@@ -513,6 +507,8 @@ def psf_gaussian_fit_core(
     delta,
     interpolation_method="linear",
     processing_function_threads: int = 1,
+    *,
+    input_checked=False,
 ):
     """
     core function to fit gaussian to psf
@@ -542,10 +538,17 @@ def psf_gaussian_fit_core(
         concurrently via a ``ThreadPoolExecutor``. Values ``<= 0`` fall
         back to ``os.cpu_count()``. Each slice writes to its own entry in
         the output, so results are independent of the thread count.
+    input_checked : bool, optional
+        Skip fitting-grid checks already performed by the calling layer.
+        Checks and handling of the actual PSF remain active.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_psf_fit_counts,
+        )
+
+        check_psf_fit_counts("sampling", sampling)
     sampling = np.asarray(sampling)
-    if np.any(sampling <= 1):
-        raise ValueError("sampling must contain at least two points per axis")
 
     ellipse_params = np.zeros(image_to_fit.shape[0:3] + (3,), dtype=np.float64)
     if np.all(np.isnan(image_to_fit)):

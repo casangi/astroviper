@@ -69,6 +69,25 @@ def test_overwrite_false_preserves_skipped_passthrough_variables():
     np.testing.assert_allclose(out["POINT_SPREAD_FUNCTION"].values, np.ones((2, 3, 3)))
 
 
+@pytest.mark.parametrize("basis", ["linear", "circular"])
+def test_psf_sidelobe_metadata_is_not_mixed_into_stokes(basis):
+    """PSF sidelobes remain equal for every Stokes plane after conversion."""
+    xds = _make_four_correlation_image(_correlations(STOKES, basis), basis)
+    xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = xr.DataArray(
+        np.full(4, 0.248),
+        dims=("polarization",),
+        attrs={"unit": "", "type": "point_spread_function_metadata"},
+    )
+
+    out = transform_polarization_basis(xds, "stokes")
+
+    assert list(out.polarization.values) == ["I", "Q", "U", "V"]
+    np.testing.assert_allclose(
+        out["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"].values,
+        np.full(4, 0.248),
+    )
+
+
 def test_overwrite_true_mutates_in_place():
     xds = _make_linear_image()
     out = transform_polarization_basis(xds, "stokes", overwrite=True)
@@ -157,8 +176,23 @@ def test_half_plane_images_give_the_stokes_parameters(basis):
         np.testing.assert_allclose(out["SKY"].values[plane], value, rtol=1e-14)
 
 
+def test_two_hands_leave_every_mask_on_its_plane():
+    """A mask that differs between the planes is no linear combination of them."""
+    xds = _make_linear_image()
+    mask = np.zeros((2, 3, 3), dtype=bool)
+    mask[0, 0, 0] = True
+    mask[1, 1, 1] = True
+    mask[:, 2, 2] = True
+    xds["MASK"] = (("polarization", "l", "m"), mask.copy())
+
+    out = transform_polarization_basis(xds, "stokes")
+
+    assert out["MASK"].dtype == bool
+    np.testing.assert_array_equal(out["MASK"].values, mask)
+
+
 def test_two_hands_are_transformed_in_place_and_stay_real():
-    """The two-hand conversion is real: same buffer, same data type, masks included."""
+    """The two-hand conversion is real: same buffer, same data type."""
     xds = _make_linear_image(xx=12.0, yy=8.0)
     xds["SKY"] = xds["SKY"].astype(np.float32)
     buffer = xds["SKY"].values

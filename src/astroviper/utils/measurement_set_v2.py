@@ -7,7 +7,8 @@ distributed applications use it to route an MSv2 ``ps_store``.
 Optional backend of the simulator (the SIRIUS ``write_to_ms`` equivalent):
 ``write_measurement_set_v2`` converts one simulated MSv4 into an MSv2 on disk
 using `arcae <https://github.com/ska-sa/arcae>`_ (an **optional** dependency;
-install with ``pip install arcae``).  ``arcae.Table.ms_from_descriptor`` builds
+install with ``pip install 'astroviper[casacore]'``).
+``arcae.Table.ms_from_descriptor`` builds
 the complete casacore Measurement Set skeleton -- the MAIN table plus every
 required subtable -- and the columns are then filled from the MSv4 datasets.
 
@@ -103,7 +104,8 @@ def _require_arcae():
     except ImportError as error:
         raise ImportError(
             "Writing a Measurement Set v2 requires the optional dependency "
-            "'arcae' (https://github.com/ska-sa/arcae): pip install arcae"
+            "'arcae' (https://github.com/ska-sa/arcae): pip install "
+            "'astroviper[casacore]'"
         ) from error
     return Table
 

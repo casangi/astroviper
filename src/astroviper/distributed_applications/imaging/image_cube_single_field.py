@@ -1,3 +1,6 @@
+import functools
+import inspect
+import json
 import os
 from typing import Any
 
@@ -32,6 +35,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             ("create empty data vars on disk", "T_create_empty_data_variables"),
             ("open processing set", "T_open_processing_set"),
             ("interpolate data coords", "T_interpolate_data_coords"),
+            ("input preflight", "T_input_preflight"),
             # Measurement Set v2 input only (0.0 for a processing set).
             ("add lazy input data", "T_add_lazy_input_data"),
             ("create map/reduce graph", "T_create_map_reduce_graph"),
@@ -44,16 +48,78 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
+# The image_params entries a parameters file holds as JSON lists and the imager
+# takes as arrays.
+_PARAMETERS_FILE_ARRAY_IMAGE_PARAMS = (
+    "cell_size",
+    "phase_direction",
+    "frequency_coords",
+)
+
+
+def read_parameters_file(parameters_file):
+    """The ``image_cube_single_field`` arguments of a parameters file.
+
+    Parameters
+    ----------
+    parameters_file : str
+        JSON file whose ``"image_cube_single_field"`` block maps argument
+        names to values, as
+        :func:`~astroviper.distributed_applications.imaging.image_cube_single_field_delphi.image_cube_single_field_delphi`
+        writes it.
+
+    Returns
+    -------
+    dict
+        The block, with the ``cell_size``, ``phase_direction`` and
+        ``frequency_coords`` of ``image_params`` as float arrays and without a
+        ``parameters_file`` entry.
+    """
+    import numpy as np
+
+    with open(parameters_file) as file:
+        arguments = dict(json.load(file)["image_cube_single_field"])
+    arguments.pop("parameters_file", None)
+    if isinstance(arguments.get("image_params"), dict):
+        image_params = dict(arguments["image_params"])
+        for key in _PARAMETERS_FILE_ARRAY_IMAGE_PARAMS:
+            if image_params.get(key) is not None:
+                image_params[key] = np.asarray(image_params[key], dtype=float)
+        arguments["image_params"] = image_params
+    return arguments
+
+
+def _apply_parameters_file(function):
+    """Fill the arguments of ``function`` that the caller leaves out from its ``parameters_file``.
+
+    The arguments the caller passes (by position or keyword) are found by
+    binding the call to the signature and win over the file; without a
+    ``parameters_file`` the call is forwarded unchanged.
+    """
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        arguments = signature.bind_partial(*args, **kwargs).arguments
+        if arguments.get("parameters_file") is None:
+            return function(*args, **kwargs)
+        return function(
+            **{**read_parameters_file(arguments["parameters_file"]), **arguments}
+        )
+
+    return wrapper
+
 
 @shares_param_docs
+@_apply_parameters_file
 @toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
 def image_cube_single_field(
     ps_store: str,
     image_store: str,
     image_params: dict[str, Any],
     imaging_weights_params: dict[str, Any],
-    iteration_control_params: dict[str, Any],
-    gridder="prolate_spheroidal",
+    cycle_control_params: dict[str, Any],
+    gridder="anti_alias",
     deconvolver="hogbom",
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] | None = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - None means every intent, so the default stays a list; never mutated
@@ -81,8 +147,12 @@ def image_cube_single_field(
     vizualize_graph: bool = False,
     fft_backend="pyfftw",
     restore: bool = False,
-    primary_beam_correction: bool = False,
+    restoration_output: str = "apparent",
     psf_fitting_method: str = "astroviper",
+    gridding_kernel_params: dict[str, Any] | None = None,
+    primary_beam_params: dict[str, Any] | None = None,
+    clean_mask: str | None = None,
+    auto_mask_params: dict[str, Any] | None = None,
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -93,6 +163,10 @@ def image_cube_single_field(
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
     msv2_open_options: dict[str, Any] | None = None,
+    report: str | None = None,
+    parameters_file: str | None = None,
+    *,
+    input_checked: bool = False,
 ):  # -> Tuple[xr.Dataset, ImagingDict]:
     """
     Create a spectral cube.
@@ -106,7 +180,7 @@ def image_cube_single_field(
         A Measurement Set v2 is imaged without converting it: the driver opens
         it with XRADIO's ``xradio_msv2`` engine
         (:func:`xradio.measurement_set.open_msv2`, in the XRADIO releases that
-        carry it, with python-casacore) and every node task reads only its own
+        carry it, with its arcae backend) and every node task reads only its own
         selection through the engine. The images equal those of its
         conversion (:func:`xradio.measurement_set.convert_msv2_to_processing_set`
         with the same ``partition_scheme``, see ``msv2_open_options``): the
@@ -130,23 +204,45 @@ def image_cube_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
-        Weighting scheme configuration: ``weighting`` (``"natural"`` or
-        ``"briggs"``) and the Briggs ``robust`` parameter.
-    iteration_control_params : dict
-        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+        Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
+        frequency channel or ``"global"`` for one density across all selected
+        channels in distributed continuum imaging. Natural weighting is
+        independent of this scope.
+    cycle_control_params : dict
+        CLEAN cycle controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual
         visibilities, grid and inverse FFT them into the residual image)
         followed by one **model update** (deconvolve the residual image into
         the sky model). Every limit and threshold is applied independently to
-        each ``(time, frequency, polarization)`` plane: a plane stops when it
-        meets its own criterion. The imaging cycle loop runs separately for
-        every frequency channel (the node task images one channel at a time),
-        so a channel's cycles continue until all of its (time, polarization)
-        planes have stopped, and a channel that has stopped does no further
-        residual updates while the others carry on. The CASA ``tclean``
-        equivalent is given in brackets. Keys:
+        each image plane: a plane stops when it meets its own criterion. Cube
+        imaging runs the cycle loop separately for every frequency channel
+        (one channel per node task); continuum imaging has one controller for
+        the Taylor stack after reduction across frequency partitions. **Cycle
+        control** is the stop test between the residual update and the model
+        update, which
+        decides whether a plane gets another cycle and sets the limits of its
+        next model update. It is made after every residual update, the first
+        included, on the residual that update has just made, never on the
+        residual a model update ends with, and the residual and restored
+        images written are those of the last residual update. **Iteration
+        control** is the stop test inside the model update, made by the
+        deconvolver at every iteration against those limits. The CASA
+        ``tclean`` equivalent is given in brackets.
+        Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
           iterations (flux components) per plane, summed over all cycles. A
@@ -155,18 +251,59 @@ def image_cube_single_field(
           ``niter`` is one budget for the whole image; here every plane gets
           the full value, and no budget is shared or split between planes.
         - ``max_cycles`` [CASA ``nmajor``] : Maximum number of cycles.
-          ``max_cycles = N`` performs ``N`` model updates; the dirty image is
-          made by the residual update of the first cycle, and a closing
-          residual update follows the last model update so that the written
-          residual reflects the final model. ``max_cycles = 0`` makes only the
-          dirty image; ``max_cycles = -1`` removes the limit. Counted per
-          frequency channel: a channel that converges early stops cycling while
-          the others continue.
+          ``max_cycles = N`` performs at most ``N`` model updates and
+          ``N + 1`` residual updates: the first makes the dirty image, and
+          every model update is followed by a residual update, whose residual
+          the stop test checks; the last one's residual is written.
+          ``max_cycles = 0`` makes only the dirty image; ``max_cycles = -1``
+          removes the limit. Cube imaging counts this per frequency channel;
+          continuum imaging counts it once for the reduced Taylor stack.
+          ``max_cycles = "auto"`` predicts the limit of an imaging unit from
+          its dirty image: every plane takes ``P0``, its peak
+          residual at the start of the first cycle (the ``peak_residual``
+          below), ``f``, its PSF fraction (below), and ``L``, its threshold or,
+          when that is 0, its theoretical point source sensitivity, worked out
+          from the imaging weights as the ``SENSITIVITY`` of
+          ``point_spread_function_cube_single_field``;
+          ``n = ceil(ln(P0 / L) / ln(1 / f))`` cycles (at least 1) bring the
+          peak down to ``L``, and the plane's limit is ``n + 3`` against a
+          threshold and ``3 * n`` against the sensitivity (``EXTRA_CYCLES``
+          and ``NOISY_CYCLE_SAFETY`` of
+          :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+          The sensitivity is the thermal noise of the plane when the weights
+          are absolute (``WEIGHT = 1 / sigma**2``). With unit weights, as a
+          simulation without noise writes them, it is not a noise level but
+          about 1 over the square root of the number of visibilities (natural
+          weighting; 1e-3 for a million) in the units of the data; the limit
+          grows only with ``ln(P0 / L)``, and on the same prediction ``3 * n``
+          cycles bring the peak down to ``P0 * (L / P0)**3``. The imaging unit's
+          ``max_cycles`` is the largest limit of its planes (at least 1; a
+          plane without a pixel in the clean mask, with a peak of 0 or without
+          data is left out) and then counts down like a number. Every plane
+          records its limit as ``max_cycles_auto`` in the returned convergence
+          record. Needs ``max_psf_fraction < 1``.
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
-          float in Jy. A plane stops when its peak residual inside the clean
-          mask falls to or below ``threshold``; the value is also a hard floor
-          on ``threshold_per_cycle``. ``threshold = 0`` disables the absolute
-          stop. *Differs from CASA*: a float in Jy only, no ``'1mJy'`` strings.
+          float in Jy, or a list of one float per Stokes plane in the order of
+          ``polarization_coords`` (the floors of the Stokes planes of noise free
+          data scale with their fluxes). The distributed application and the
+          node task also take a nested list of shape (n_frequency,
+          n_polarization), one row per image channel in the order of the image
+          frequency coordinate; each channel gets its row. A plane stops when the
+          peak of its residual inside the clean mask, as the latest residual
+          update made it, falls to or below its threshold times
+          ``1 + threshold_tolerance``; the threshold is
+          also a hard floor on ``threshold_per_cycle``. ``0`` disables the
+          absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``
+          strings.
+        - ``threshold_tolerance`` : Relative tolerance of the threshold stop,
+          a finite number ``>= 0``: a plane whose threshold is above 0 stops
+          with imaging stop code 2, and gets no iterations while other planes of
+          its channel go on, once the peak of its residual inside the clean mask
+          is at most ``threshold * (1 + threshold_tolerance)``; the model update
+          of a plane that goes on still cleans down to ``threshold_per_cycle``,
+          floored at the threshold itself. Default 0.02 (``THRESHOLD_TOLERANCE`` of
+          :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+          No CASA equivalent.
         - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
           per plane, as a multiple of the plane's robust residual rms
           (``1.4826 * MAD``). The effective threshold of a plane is
@@ -176,7 +313,10 @@ def image_cube_single_field(
         - ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary beam
           mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
           Pixels where the primary beam is below this fraction are excluded
-          from cleaning. A masking cutoff, distinct from ``threshold``.
+          from cleaning. A masking cutoff, distinct from ``threshold``. Cube
+          imaging reads this key (default 0). Continuum imaging instead takes
+          the top-level ``primary_beam_limit`` (default 0.2) and injects it into
+          cycle control so cleaning and PB correction use one cutoff.
         - ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the
           selected peak flux subtracted from the residual image at each
           deconvolution iteration (``0 < gain <= 1``).
@@ -198,6 +338,28 @@ def image_cube_single_field(
         - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
           same PSF fraction; it guarantees a minimum amount of cleaning per
           model update even when the PSF sidelobe level is high.
+        - ``max_iter_divergence`` : Divergence test of the model update.
+          Number of consecutive deconvolution iterations the RMS of
+          a plane's residual, taken over the clean mask, may be above
+          ``(1 + gain / 10)`` times the lowest RMS it has reached in the model
+          update before that model update is stopped as diverged. For Hogbom
+          a peak above ``(1 + gain)`` times the peak at the start of the
+          model update stops it at once. Asp, whose least-squares components
+          can raise the peak of a healthy residual, has no peak limit and
+          allows ``(1 + gain)`` times the lowest RMS instead. An infinite peak
+          always stops the model update. The next residual update then
+          recomputes the true residual, the stop test is made on it, and the
+          cycles go on (see ``max_cycles_divergence``). Default 1, the first
+          such iteration; ``-1`` disables the two limits.
+        - ``max_cycles_divergence`` : Divergence stop of the cycle control. A
+          plane whose last ``max_cycles_divergence`` model updates all ended
+          diverged (see ``max_iter_divergence``) gets no more iterations and
+          is stopped with imaging stop code 5 by the stop test after the next
+          residual update (unless a stop that takes precedence applies there:
+          an empty mask, ``max_iter`` spent, the threshold or the entropy
+          stop, codes 7, 1, 2 and 10), while the other planes of its channel
+          carry on.
+          Default ``-1``, off.
         - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
           its residual has passed its maximum. The entropy (Homan, Roth and
           Pushkarev 2024, AJ 167, 11) measures how much the residual looks
@@ -216,6 +378,79 @@ def image_cube_single_field(
           two image axes used for the entropy. Default 7.
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
+        - ``record_iteration_history`` : If ``True``, every model update
+          records, for every plane and every component it subtracts, the
+          signed peak of the residual inside the clean mask before the
+          component (the peak the threshold test sees; for MT-MFS that of
+          Taylor term zero, and for a residual-shaped component of Asp with
+          ``asp_residual_component_positive_only``, the default, the largest
+          positive residual), the RMS of that residual inside the clean mask
+          after it, the model flux after it, and the component: its pixel
+          along ``l`` and ``m``, its scale in pixels (0 for a point, -1 for an
+          Asp residual-shaped component) and its flux, to follow the
+          deconvolution in detail. The returned convergence record holds them
+          as ``iteration_peak_residual``, ``iteration_residual_rms``,
+          ``iteration_model_flux``, ``iteration_component_l``,
+          ``iteration_component_m``, ``iteration_component_scale`` and
+          ``iteration_component_flux``: per plane one array per cycle, with one
+          value per component of that cycle's model update (empty for a cycle
+          without one), so the record grows by seven float64 values per
+          component. Asp counts in ``iter_done`` the iteration that ends a
+          model update on one of its tests, which subtracts nothing. A
+          debugging and tuning tool for every deconvolver: the images are the
+          same to the bit with and without it, and the RMS comes from the sum
+          of squares the peak search makes anyway, so it costs no extra pass
+          over the image per component. Default ``False``. No CASA equivalent.
+        - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
+          subtracts the PSF of every component it finds from the whole residual
+          image, with a PSF of twice the image size made once per channel from
+          the same imaging weights, cell size and gridding kernel. With
+          ``False`` it subtracts the image-sized PSF, which reaches about
+          ``n/2`` pixels either side of the component along each axis
+          (``n`` the image size in pixels), so farther pixels keep the
+          sidelobes of the flux cleaned until the next residual update. The
+          beam fit, ``max_psf_sidelobe`` and the PSF written use the
+          image-sized PSF either way. Costs a second PSF per channel (four
+          times the pixels, kept through the channel's cycles) and a
+          subtraction over the whole image at every iteration. Hogbom
+          deconvolvers of cube imaging only: ``deconvolver="asp"`` and
+          continuum imaging raise ``ValueError``. Default ``False``. No CASA
+          equivalent.
+        - ``asp_stop_after_hogbom_run`` : If ``True``, an Asp model update ends
+          after each of its Hogbom runs (51 or 510 point components) unless
+          the RMS of the residual has fallen, by less than a factor 1.5, since
+          the model update started, as in CASA and LibRA. Their residual drifts
+          from the true one during a model update; the Asp residual of
+          AstroVIPER is the exact one, so with ``False`` the model update goes
+          on to its ``threshold_per_cycle``, its iteration limit or the
+          divergence test, which takes fewer imaging cycles. Asp only.
+          Default ``False``.
+        - ``asp_residual_components`` : If ``True``, each Asp model update
+          starts with components shaped by the residual (Ma, Zhang & Zhang
+          2026, A&A 713, A164) down to ``threshold_per_cycle``, and the Asp
+          iterations go on from there. They remove the ring residuals Asp
+          leaves on resolved emission in far fewer iterations, and take no
+          residual below ``threshold_per_cycle``. Further keys
+          (``asp_residual_component_*``) are described in
+          :func:`~astroviper.processing_functions.imaging.deconvolution.asp_clean`.
+          Asp only. Default ``True``. No CASA equivalent.
+        - ``asp_scale_significance`` : If ``True``, Asp measures the noise of
+          the residual smoothed with each of its initial scales and, once the
+          peak is below ``threshold_per_cycle``, goes on cleaning the most
+          significant smoothed residual while it is as significant as the
+          threshold is at the smallest scale. The noise is measured on the
+          pixels outside the clean mask, without the outermost row and column
+          of the image, sampling one in every ``max(1, npix // 400000)`` of
+          the ``npix`` pixels of the image (one in 2 at 1024 x 1024, one in 10
+          at 2048 x 2048). With fewer than 100 sampled pixels (a clean mask
+          that covers the image, for example), or a noise of 0 there (a
+          residual that is mostly 0 outside the mask), nothing is cleaned
+          below ``threshold_per_cycle``. Asp only. Default ``True``. No CASA
+          equivalent.
+
+        A plane whose model updates do no iteration any more (two in a row)
+        is stopped with the no progress stop code at the next stop test, so
+        an all-zero plane cannot keep its channel cycling.
 
         Derived per plane before each model update (not set by the caller):
         ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
@@ -223,13 +458,19 @@ def image_cube_single_field(
         peak residual down to which one model update cleans, and
         ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
         is the stopping threshold of that model update, where
-        ``peak_residual`` is the plane's peak residual inside the mask at the
-        start of the cycle. The deconvolver also receives the per-plane
-        ``max_iter_per_cycle``, ``min(max_iter_per_cycle, remaining max_iter)``.
+        ``peak_residual`` is the plane's peak residual inside the clean mask
+        after the residual update of the same cycle (the peak of the stop
+        test), and
+        ``max_iter_per_cycle_updated = min(max_iter_per_cycle,
+        max_iter_remaining)`` is the iteration limit of that model update (0
+        for a plane the entropy or divergence stop has ended), where
+        ``max_iter_remaining`` is what is left of ``max_iter``.
     gridder : str
-        The gridder to use. Default ``"prolate_spheroidal"`` (a prolate
-        spheroidal gridding convolution kernel with support 7x7 and oversampling
-        of 100).
+        The gridder to use. Default ``"anti_alias"``: convolutional gridding
+        with the anti-aliasing kernel of ``gridding_kernel_params`` (by default
+        the ``least_misfit`` kernel of support 9, oversampling 300 and linear
+        lookup), or with ``gridding_kernel_params={"type": "dft"}`` the exact
+        direct Fourier transform with the w term instead.
     deconvolver : str
         Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
@@ -248,7 +489,8 @@ def image_cube_single_field(
         Measurement Set v2 from CASA often lacks the default
         ``"OBSERVE_TARGET#ON_SOURCE"``).
     field_name : str
-        The field to image. If None, the first field in the processing set will be used
+        Reserved field-selection argument, retained for future support. It does
+        not currently filter fields; prepare a single-field input Processing Set.
     compressor : numcodecs compressor
         Compressor applied to each chunk of the on-disk image.
     processing_set_data_group_name : str
@@ -314,18 +556,164 @@ def image_cube_single_field(
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
-    primary_beam_correction : bool, optional
-        If ``True`` write the primary beam corrected restored sky to the
-        ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
-        by the (power) primary beam and convolved with the clean beam, plus
-        the residual divided by the primary beam; pixels below the primary
-        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
-        ``restore``.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
+        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
+        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
+        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
+        Cube corrects the model and residual by the channel power primary beam
+        before convolution. MFS divides their Taylor polynomials; MVC divides
+        by its common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
+        selector only when ``restore=True``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
         (the fit behind ``tclean``'s restoring beam).
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "least_misfit", "support": 9,
+        "oversampling": 300, "interpolation": "linear"}``, the kernel RADPS
+        Memo 13a selects for kernel errors of at most 0.1 sigma at a dynamic
+        range of 1e4 (its table for ``fft_padding`` 1.2 ships with the
+        package, other paddings solve it at run time); ``None`` is all
+        defaults. With the type ``"prolate_spheroidal_casa"`` missing keys
+        take CASA's values instead, so that type alone is CASA's kernel and
+        sampling, ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``, with Schwab's
+        analytic correction. A ``prolate_spheroidal``,
+        ``exponential_semicircle`` or ``least_misfit`` kernel whose image
+        plane correction falls below 1e-6 of its centre value at the edge of
+        the image kept (a support too large for the ``fft_padding``, e.g. 17
+        at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``. ``{"type": "dft"}`` (no other key) replaces
+        the gridding and the FFTs by the exact direct Fourier transform over the
+        unpadded image, w term included: with the phase
+        ``2 pi (u l + v m + w (n - 1))`` and ``n = sqrt(1 - l**2 - m**2)``, the
+        model visibilities are ``sum M exp(+i phase) / n`` over the model pixels
+        and the image is ``n sum W V exp(-i phase) / sum W`` over the samples,
+        the measurement equation of ``simulate_processing_set``. Its cost is
+        proportional to the samples times the image pixels (30 to 40 s per
+        residual update of 451,500 samples, four correlations and 160 x 160
+        pixels on one core), so give it several
+        ``processing_function_threads``; its results do not depend on their
+        number. Its ``VISIBILITY_NORMALIZATION`` and
+        ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
+        gridders' that sum times the kernel's stencil sums.
+    primary_beam_params : dict, optional
+        The primary beam of the imager, the power pattern that gives the clean
+        mask and the primary beam correction: ``telescope`` (``"alma"``,
+        ``"aca"`` or ``"ngvla"``, the textbook obscured Airy disk with the
+        diameters of :func:`~astroviper.utils.beam_models.airy_disk_model`, no
+        cut; ``"vla"``, the EVLA beam polynomial of CASA's ``PBMath1DEVLA``,
+        with the coefficients CASA picks for each channel (of its two 10052 MHz
+        rows, the first), at the exact radius and zero beyond 58 arcmin at
+        1 GHz, past the 5 percent power level its polynomials were fitted
+        to), ``effective_dish_diameter`` and
+        ``blockage_diameter`` (metres; refused for ``"vla"``) and
+        ``max_rad_1GHz`` (radians at 1 GHz, scaled as 1 / frequency, beyond
+        which the beam is zero; ``None`` is no cut for an Airy disk). Numbers
+        given with a telescope override that telescope's values;
+        no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
+        0.75 m, no cut). Or ``beam_model`` alone: an analytic dict
+        or a beam-polynomial dataset as ``simulate_processing_set`` takes it in
+        ``beam_models`` (``"vla"`` is
+        ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
+        of the voltage pattern the simulator applies for the model, computed by
+        the same function
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
+        The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
+        models: ``airy_disk_model(telescope, func="casa_airy")`` and
+        ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
+        Zernike aperture models and Jones images are not supported: they are
+        not azimuthally symmetric and depend on the parallactic angle.
+    clean_mask : str or None, optional
+        Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:
+        the path of a NumPy ``.npy`` file for the distributed applications and
+        the bool plane loaded from it
+        (:func:`~astroviper.utils.clean_mask.load_clean_mask`, finite values
+        greater than 0.5) for the layers below. It selects the pixels of every
+        residual plane that the model update cleans: in cube imaging in place
+        of the primary-beam mask of ``primary_beam_limit``, in continuum
+        imaging within it. Asp measures the noise of its significance test
+        (``asp_scale_significance``) outside the pixels it cleans. Without
+        ``auto_mask_params``, ``None`` keeps the primary-beam mask.
+    auto_mask_params : dict or None, optional
+        Automatic CLEAN mask (CASA ``usemask='auto-multithresh'``, Kepley et
+        al. 2020, PASP 132, 024505). ``None`` makes no automatic mask; a dict,
+        empty for the defaults, updates the mask of every plane from its
+        residual after every residual update, before the stop test. It is
+        refused together with ``clean_mask``. A mask never loses pixels and
+        holds none outside ``primary_beam_limit``; a plane with an empty mask
+        stops with stop code 7. A plane whose last two model updates did no
+        iteration gets stop code 4 when its mask grows onto pixels above the
+        threshold, and is cleaned again only if another plane keeps the imaging
+        cycles going. Continuum imaging makes the mask from Taylor term zero
+        and applies it to every term. *Differs from CASA*: the clean beam and
+        the largest PSF sidelobe are those of each plane, not of the whole
+        cube; a plane stops updating on its own, from its own
+        ``threshold_per_cycle``, not with its channel or the peak of the cube;
+        ``max_iter = 0`` makes a mask, ``niter=0`` none; and the mask written
+        includes the update after the last model update.
+        Keys, with the default and the CASA name in brackets:
+
+        - ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts
+          from the pixels above this times the largest PSF sidelobe times the
+          peak residual (the sidelobe level) or, when larger,
+          ``noise_threshold`` times the noise.
+        - ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is
+          1.4826 times the median absolute deviation; every threshold is
+          relative to the median of the noise sample.
+        - ``low_noise_threshold`` (1.5) [``lownoisethreshold``] : The mask grows
+          through the pixels above this times the noise or, when larger, the
+          sidelobe level.
+        - ``negative_threshold`` (0.0) [``negativethreshold``] : Above 0, the
+          mask takes the pixels below minus this times the noise or, when
+          lower, minus the sidelobe level.
+        - ``smooth_factor`` (1.0) [``smoothfactor``] : Every part of the mask is
+          smoothed with the clean beam scaled by this.
+        - ``min_beam_fraction`` (0.3) [``minbeamfrac``] : Positive regions
+          smaller than this fraction of the clean beam area are removed before
+          smoothing; 0 keeps them. An unresolved source is removed whatever its
+          signal to noise when ``sidelobe_threshold`` times the largest PSF
+          sidelobe is above exp(-``min_beam_fraction``), and a warning is logged.
+        - ``cut_threshold`` (0.01) [``cutthreshold``] : A smoothed mask is cut
+          at this fraction of its peak, in (0, 1).
+        - ``grow_iterations`` (75) [``growiterations``] : Largest number of
+          binary dilation steps in one update, before smoothing; 0 does not
+          grow it.
+        - ``grow_prune`` (``True``) [``dogrowprune``] : Remove small regions
+          from the grown mask too.
+        - ``min_percent_change`` (-1.0) [``minpercentchange``] : At or above 0,
+          a plane whose threshold is set by the noise stops updating its mask
+          once the ``threshold_per_cycle`` of its model update is the absolute
+          ``threshold`` and the mask then did not change or changed by less
+          than this percentage. Whatever the value, such a plane stops updating
+          when its mask is empty.
+        - ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every
+          pixel inside ``primary_beam_limit``. ``False`` measures it outside the
+          mask or, without a mask, on the pixels Chauvenet's criterion leaves.
     skunk_works : bool
         If ``True`` use the experimental performance I/O path in each node task:
         load only the data group's data variables straight from the Zarr chunk
@@ -416,10 +804,40 @@ def image_cube_single_field(
         ``array_backend`` and ``scan_intents`` are set by the driver and
         refused here (``ValueError``; pass the ``scan_intents`` parameter).
         ``None`` (default): the defaults.
+    report : str, optional
+        Make a report of the run: ``"html"`` (one self contained file) or
+        ``"pdf"``, written next to the output store as
+        ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
+        gives ``cube_report.html``), or ``"notebook"``, displayed in the
+        calling Jupyter notebook. The report has a processing section common
+        to all distributed applications (timing, task stream and, with
+        ``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a
+        results section of the application's own; the products it makes with
+        other distributed applications are kept in ``<name>_report_files``
+        next to the output store. It is made after the output is written: a
+        failure while making it is logged and leaves the results intact.
+        ``None`` (default): no report.
+    parameters_file : str, optional
+        JSON file whose ``"image_cube_single_field"`` block gives the
+        arguments, as
+        :func:`~astroviper.distributed_applications.imaging.image_cube_single_field_delphi.image_cube_single_field_delphi`
+        writes it (every argument but this one, so that
+        ``image_cube_single_field(parameters_file=...)`` reproduces its run).
+        An argument passed in the call replaces the file's value as a whole
+        (an ``image_params`` given replaces the file's ``image_params``).
+        ``None`` (default): every argument comes from the call.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
-        ``{"timing_node_tasks", "deconvolution", "timing_distributed_application"}``:
+        ``{"timing_node_tasks", "deconvolution", "image_statistics",
+        "timing_distributed_application", "report"}``:
 
         * ``"timing_node_tasks"`` is a :class:`pandas.DataFrame` with one row per
           frequency chunk and a ``T_*`` column per processing function (the
@@ -429,7 +847,8 @@ def image_cube_single_field(
           of convergence statistics (global channel numbering).
         * ``"image_statistics"`` is ``{image_variable_key: xarray.Dataset}``
           (``"sky_residual"``, ``"sky_restored"``, ``"sky_model"``, ... --
-          whichever were in memory in the node tasks) of NaN-ignoring
+          whichever were in memory in the node tasks; not ``"sky_model"``
+          when ``max_iter`` or ``max_cycles`` is 0) of NaN-ignoring
           per-plane statistics over ``(l, m)``, each dataset with dims
           ``(time, frequency, polarization)`` covering the whole cube in
           frequency order and one variable per statistic (``mean``, ``median``,
@@ -444,9 +863,25 @@ def image_cube_single_field(
           opening the input, building the graph, computing it, consolidating
           metadata; ``T_add_lazy_input_data`` is ``0.0`` for a processing set)
           plus the grand total ``T_total``.
+        * ``"report"`` is the path of the report file written (``None``
+          without one, for ``report="notebook"`` and when the report failed).
+          With a report the image statistics of the residual also hold
+          ``entropy``, the entropy of every plane's final residual.
 
     Notes
     -----
+    The report's results section (see
+    :func:`~astroviper.distributed_applications.imaging.image_cube_single_field_report.image_cube_single_field_report`):
+    cross sections of the point spread function (Stokes I, centre channel)
+    with the fitted Gaussian, the maximum over frequency (``moments``) of the
+    residual, the model and the primary beam corrected restored image per
+    Stokes plane, the spectrum of the peak inside the clean mask, and per
+    channel the cycle control stop codes, the occurrences of the model update
+    stop codes, the iterations, the imaging cycles, the final residual entropy
+    and the residual RMS. With a report and a kept
+    ``point_spread_function``, ``beam_fit_params_point_spread_function`` is
+    kept too.
+
     The Zarr image store is created with :func:`xradio.image.write_image`.
     XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
     give it to an ``image_store`` without it (``cube.zarr`` gives
@@ -465,6 +900,20 @@ def image_cube_single_field(
     using fewer, wider tasks is faster.
     """
 
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD, require_complete=True)
+
+    from astroviper.utils.io import check_image_output_destination
+
+    check_image_output_destination(
+        image_store, overwrite=overwrite, output_image_format=output_image_format
+    )
+
     import time
 
     import dask
@@ -482,11 +931,11 @@ def image_cube_single_field(
         correlation_selection,
         correlations_for_stokes,
     )
+    from astroviper.utils.clean_mask import load_clean_mask
     from astroviper.utils.data_group_tools import modify_data_groups_xds
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
-        validate_image_chunking_and_sharding,
         write_zarr_image_store,
     )
     from astroviper.utils.measurement_set_v2 import is_measurement_set_v2
@@ -494,77 +943,44 @@ def image_cube_single_field(
     if compressor is None:
         compressor = Blosc(cname="lz4", clevel=5)
 
-    assert memory_mode == "in_memory", (
-        "Currently only in_memory is supported for memory_mode is implemented."
-    )
-
-    # Sharded output is written by the concurrent direct-blob (skunk_works) writer;
-    # the standard write path cannot safely write partial shards concurrently, so
-    # creating sharded arrays without it would corrupt the output. Fail fast rather
-    # than silently create sharded arrays a non-concurrent writer will clobber.
-    if image_sharding and not skunk_works:
-        raise ValueError(
-            "image_sharding requires skunk_works=True (sharded output is "
-            "written by the concurrent direct-blob writer)."
-        )
-
-    # FITS output is written by the concurrent direct-pwrite (skunk_works) FITS
-    # writer into files pre-created by this driver; the standard write path has
-    # no FITS support, and Zarr sharding does not apply to FITS files.
-    if output_image_format == "fits":
-        if not skunk_works:
-            raise ValueError(
-                "output_image_format='fits' requires skunk_works=True (FITS "
-                "output is written by the concurrent direct-pwrite writer)."
-            )
-        if image_sharding:
-            raise ValueError(
-                "image_sharding does not apply to FITS output "
-                "(output_image_format='fits')."
-            )
-        if image_chunking:
-            raise ValueError(
-                "image_chunking does not apply to FITS output "
-                "(output_image_format='fits'): FITS files have no chunked "
-                "storage layout."
-            )
-
     # A Measurement Set v2 is read by the skunk-works node-task path only
     # (through XRADIO's xradio_msv2 engine); the production path loads Zarr
     # processing sets. Checked here, before anything is written.
     input_is_msv2 = is_measurement_set_v2(ps_store)
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_input_storage,
+    )
+
+    check_input_storage(locals(), input_is_msv2=input_is_msv2)
     if input_is_msv2:
-        if not skunk_works:
-            raise ValueError(
-                f"{ps_store} is a Measurement Set v2, which is imaged with "
-                "skunk_works=True only; or convert it with "
-                "xradio.measurement_set.convert_msv2_to_processing_set and image "
-                "the processing set."
-            )
-        if write_visibility_model_to_ps or write_imaging_weights_to_ps:
-            raise ValueError(
-                "write_visibility_model_to_ps and write_imaging_weights_to_ps "
-                f"must be False for a Measurement Set v2 ps_store ({ps_store}): "
-                "an imaging run never writes into its input Measurement Set."
-            )
         from astroviper.node_tasks.imaging.utils import require_msv2_engine
 
         require_msv2_engine()
 
-    if n_mapping_parallelism is not None:
-        _validate_n_mapping_parallelism(n_mapping_parallelism)
+    clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
-    if restore and "sky_restored" not in image_data_variables_keep:
+    if (
+        restore
+        and restoration_output in ("apparent", "both")
+        and "sky_restored" not in image_data_variables_keep
+    ):
         image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
-    if primary_beam_correction:
-        if not restore:
-            raise ValueError("primary_beam_correction requires restore=True.")
+    if restore and restoration_output in ("primary_beam_corrected", "both"):
         if "sky_restored_primary_beam_corrected" not in image_data_variables_keep:
             image_data_variables_keep = list(image_data_variables_keep) + [
                 "sky_restored_primary_beam_corrected"
             ]
+    # The report draws the point spread function with its fitted Gaussian.
+    if (
+        report is not None
+        and "point_spread_function" in image_data_variables_keep
+        and "beam_fit_params_point_spread_function" not in image_data_variables_keep
+    ):
+        image_data_variables_keep = list(image_data_variables_keep) + [
+            "beam_fit_params_point_spread_function"
+        ]
 
     # Every driver step is timed into ``timing_distributed_application``; the
     # individual per-step timing log messages are replaced by the formatted
@@ -578,7 +994,6 @@ def image_cube_single_field(
     correlation_coords = correlations_for_stokes(
         image_params["polarization_coords"], instrument_polarization_basis
     )
-
     # A Measurement Set v2 is opened and its data group checked before
     # anything is written, so that their errors (a refused msv2_open_options
     # key, no MSv4 left after scan_intents, a Measurement Set the engine
@@ -626,16 +1041,7 @@ def image_cube_single_field(
             "populated by its node tasks.",
         )
 
-    start = time.time()
-    if output_image_format == "zarr":
-        # The store written can differ from the image_store given (the
-        # ".img.zarr" extension of newer XRADIO versions); everything below
-        # uses the store written.
-        image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
-    # For FITS output the empty files (headers + sparse data areas) are created
-    # after the processing set is opened, so the TELESCOP keyword can be read
-    # from it.
-    timing_distributed_application["T_write_empty_image"] = time.time() - start
+    timing_distributed_application["T_write_empty_image"] = 0.0
 
     # Determine the mapping parallelism (the number of frequency chunks, one
     # node task per chunk). Cube imaging always maps over frequency, so the
@@ -650,6 +1056,10 @@ def image_cube_single_field(
             if n_mapping_parallelism is None
             else n_mapping_parallelism["frequency"],
             thread_info,
+            exact_psf_subtraction=cycle_control_params.get(
+                "exact_psf_subtraction", False
+            ),
+            fft_padding=image_params.get("fft_padding"),
         )
     )
 
@@ -663,36 +1073,30 @@ def image_cube_single_field(
         + str(len(parallel_coords["frequency"]["data_chunks"]))
     )
 
-    validate_image_chunking_and_sharding(
-        image_chunking, image_sharding, dict(img_xds.sizes), parallel_coords
+    # Check write alignment against the constructed image and automatic tasks.
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_output_layout,
+    )
+
+    check_output_layout(
+        locals(), parallel_coords=parallel_coords, image_shape=dict(img_xds.sizes)
     )
     timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
         time.time() - start
     )
 
-    # Add nan images (these will be overwritten with the actual image data but this ensures the coordinates and dtypes are correct and allows for lazy writing of the data)
-    # create_empty_data_varable_on_disk(zarr_store, dv_names, dims, shape, chunk, variable_dtype, compressor)
-    start = time.time()
-    if output_image_format == "zarr":
-        create_empty_data_variables_on_disk(
-            image_store,
-            image_data_variables_keep,
-            shape_dict=img_xds.sizes,
-            parallel_coords=parallel_coords,
-            compressor=compressor,
-            double_precision=not single_precision_image,
-            data_variable_definitions="imaging",
-            image_chunking=image_chunking,
-            image_sharding=image_sharding,
-        )
-    timing_distributed_application["T_create_empty_data_variables"] = (
-        time.time() - start
-    )
+    timing_distributed_application["T_create_empty_data_variables"] = 0.0
 
     zarr_meta = {}
 
     input_params = {}
-    input_params["image_params"] = image_params
+    # Cube nodes obtain their frequency slice from task_coords. Keep the full
+    # axis on the driver instead of copying it into every task's configuration.
+    input_params["image_params"] = {
+        name: value
+        for name, value in image_params.items()
+        if name != "frequency_coords"
+    }
     input_params["imaging_weights_params"] = imaging_weights_params
     input_params["zarr_meta"] = zarr_meta
     input_params["to_disk"] = True
@@ -701,6 +1105,7 @@ def image_cube_single_field(
     input_params["compressor"] = compressor
     input_params["image_store"] = image_store
     input_params["input_data_store"] = ps_store
+    input_params["input_checked"] = True
     input_params["processing_set_data_group_name"] = processing_set_data_group_name
     input_params["image_data_variables_keep"] = image_data_variables_keep
     input_params["memory_mode"] = memory_mode
@@ -709,20 +1114,25 @@ def image_cube_single_field(
     input_params["write_imaging_weights_to_ps"] = write_imaging_weights_to_ps
     input_params["clear_cache"] = clear_cache
     input_params["processing_function_threads"] = processing_function_threads
-    input_params["iteration_control_params"] = iteration_control_params
+    input_params["cycle_control_params"] = cycle_control_params
     input_params["gridder"] = gridder
     input_params["deconvolver"] = deconvolver
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
-    input_params["primary_beam_correction"] = primary_beam_correction
+    input_params["restoration_output"] = restoration_output
     input_params["psf_fitting_method"] = psf_fitting_method
+    input_params["gridding_kernel_params"] = gridding_kernel_params
+    input_params["primary_beam_params"] = primary_beam_params
+    input_params["clean_mask"] = clean_mask_array
+    input_params["auto_mask_params"] = auto_mask_params
     input_params["skunk_works"] = skunk_works
     input_params["image_chunking"] = image_chunking
     input_params["image_sharding"] = image_sharding
     input_params["output_image_format"] = output_image_format
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
+    input_params["report_statistics"] = report is not None
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
@@ -732,6 +1142,9 @@ def image_cube_single_field(
         start = time.time()
         ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
         timing_distributed_application["T_open_processing_set"] = time.time() - start
+
+    if len(ps_xdt) == 0:
+        raise ValueError("The Processing Set is empty after the requested selection.")
 
     # The skunk-works node-task I/O path reconstructs the processing set from the
     # data group's variables only, so it needs the resolved role->variable
@@ -743,32 +1156,6 @@ def image_cube_single_field(
         input_params["data_group"] = first_ms.ds.attrs["data_groups"][
             processing_set_data_group_name
         ]
-
-    # FITS output: pre-create one XRADIO-conformant FITS file per kept image
-    # variable (complete header + sparse full-cube data area + zero-filled
-    # BEAMS tables) so the node tasks only pwrite disjoint byte ranges. Done
-    # here -- after the processing set is open -- so TELESCOP can be read from
-    # it; timed into the same slot the Zarr path uses for its empty variables.
-    if output_image_format == "fits":
-        from astroviper.node_tasks.imaging.utils import create_empty_fits_images
-
-        start = time.time()
-        first_ms = next(iter(ps_xdt.values()))
-        telescope_name = (
-            first_ms.ds.attrs.get("observation_info", {}).get("telescope_name")
-            or "UNKNOWN"
-        )
-        create_empty_fits_images(
-            image_store,
-            img_xds,
-            image_data_variables_keep,
-            double_precision=not single_precision_image,
-            telescope_name=telescope_name,
-            overwrite=overwrite,
-        )
-        timing_distributed_application["T_create_empty_data_variables"] += (
-            time.time() - start
-        )
 
     start = time.time()
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
@@ -804,11 +1191,84 @@ def image_cube_single_field(
         )
         timing_distributed_application["T_add_lazy_input_data"] = time.time() - start
 
-    # frequency_coords is not used by node tasks (they use task_coords["frequency"]["data"])
-    # so remove it to avoid embedding the full frequency axis in every task in the graph.
-    input_params["image_params"] = {
-        k: v for k, v in image_params.items() if k != "frequency_coords"
-    }
+    from astroviper.node_tasks.imaging.config_check import preflight_imaging_inputs
+    from astroviper.processing_functions.imaging.config_check import CUBE_SINGLE_FIELD
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_channel_partitions,
+    )
+
+    check_channel_partitions(
+        node_task_data_mapping,
+        ps_xdt,
+        image_params=image_params,
+        mode=CUBE_SINGLE_FIELD,
+    )
+    preflight_start = time.time()
+    spectral_diagnostics = preflight_imaging_inputs(
+        ps_xdt, locals(), mode=CUBE_SINGLE_FIELD
+    )
+    timing_distributed_application["T_input_preflight"] = time.time() - preflight_start
+    img_xds.attrs["input_validation"] = spectral_diagnostics
+
+    start = time.time()
+    if output_image_format == "zarr":
+        # The store written can differ from the image_store given (the
+        # ".img.zarr" extension of newer XRADIO versions); everything below
+        # uses the store written.
+        image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
+    # For FITS output the empty files (headers + sparse data areas) are created
+    # after the processing set is opened, so the TELESCOP keyword can be read
+    # from it.
+    timing_distributed_application["T_write_empty_image"] = time.time() - start
+
+    # Add nan images (these will be overwritten with the actual image data but this ensures the coordinates and dtypes are correct and allows for lazy writing of the data)
+    # create_empty_data_varable_on_disk(zarr_store, dv_names, dims, shape, chunk, variable_dtype, compressor)
+    start = time.time()
+    if output_image_format == "zarr":
+        create_empty_data_variables_on_disk(
+            image_store,
+            image_data_variables_keep,
+            shape_dict=img_xds.sizes,
+            parallel_coords=parallel_coords,
+            compressor=compressor,
+            double_precision=not single_precision_image,
+            data_variable_definitions="imaging",
+            image_chunking=image_chunking,
+            image_sharding=image_sharding,
+        )
+    timing_distributed_application["T_create_empty_data_variables"] = (
+        time.time() - start
+    )
+
+    # FITS output: pre-create one XRADIO-conformant FITS file per kept image
+    # variable (complete header + sparse full-cube data area + zero-filled
+    # BEAMS tables) so the node tasks only pwrite disjoint byte ranges. Done
+    # here -- after the processing set is open -- so TELESCOP can be read from
+    # it; timed into the same slot the Zarr path uses for its empty variables.
+    if output_image_format == "fits":
+        from astroviper.node_tasks.imaging.utils import create_empty_fits_images
+
+        start = time.time()
+        first_ms = next(iter(ps_xdt.values()))
+        telescope_name = (
+            first_ms.ds.attrs.get("observation_info", {}).get("telescope_name")
+            or "UNKNOWN"
+        )
+        create_empty_fits_images(
+            image_store,
+            img_xds,
+            image_data_variables_keep,
+            double_precision=not single_precision_image,
+            telescope_name=telescope_name,
+            overwrite=overwrite,
+        )
+        timing_distributed_application["T_create_empty_data_variables"] += (
+            time.time() - start
+        )
+
+    input_params["image_store"] = image_store
+    # Preflight diagnostics belong to the output metadata and driver result;
+    # cube nodes do not consume them.
 
     # Sharded output: dispatch the tasks in shard-interleaved "waves" (each wave
     # touches every shard file once) so the concurrently running tasks write to
@@ -823,10 +1283,8 @@ def image_cube_single_field(
             image_store, image_data_variables_keep[0], node_task_data_mapping
         )
 
-    # Create Map Graph. The node task has an explicit, NumPy-documented,
-    # standalone signature; graphviper's map() adapts it to the single
-    # ``input_params`` dict calling convention automatically (forwarding only the
-    # keys the node task declares), so it can be passed directly.
+    # The node task has an explicit, NumPy-documented standalone signature;
+    # graphviper adapts the input_params dictionary to its declared arguments.
     start = time.time()
     viper_graph = map(
         input_data=ps_xdt,
@@ -934,9 +1392,14 @@ def image_cube_single_field(
         # Same absolute compute-call anchors as the MPI branch (see above).
         timing_distributed_application["compute_start_unixtime"] = start
         timing_distributed_application["compute_end_unixtime"] = end
-    else:
-        raise ValueError(
-            f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
+    # A graph of one map task has no reduce node: its result is the node
+    # task's own dict, whose monitor series are folded in here as the reduce
+    # folds them in.
+    imaging_dict["input_validation"] = spectral_diagnostics
+    usage = imaging_dict.pop("resource_usage", None)
+    if usage is not None:
+        imaging_dict["timing_node_tasks"] = _with_resource_usage(
+            imaging_dict["timing_node_tasks"], usage
         )
 
     # The processing set is not needed any more. Severing its parent<->child
@@ -952,7 +1415,12 @@ def image_cube_single_field(
         zarr.consolidate_metadata(image_store)
     timing_distributed_application["T_consolidate_metadata"] = time.time() - start
 
-    timing_distributed_application["T_total"] = time.time() - application_start
+    application_end = time.time()
+    timing_distributed_application["T_total"] = application_end - application_start
+    # Absolute anchors of the whole call, which place the driver's own steps on
+    # the wall clock of the task stream.
+    timing_distributed_application["application_start_unixtime"] = application_start
+    timing_distributed_application["application_end_unixtime"] = application_end
 
     # The reduce already produced ``{"timing_node_tasks", "deconvolution"}``; add
     # the driver-level timing so the full return dict carries timing for both the
@@ -996,7 +1464,33 @@ def image_cube_single_field(
         )
     )
 
+    imaging_dict["report"] = None
+    if report is not None:
+        from astroviper.distributed_applications.imaging.image_cube_single_field_report import (
+            image_cube_single_field_report,
+        )
+        from astroviper.utils.report import make_report
+
+        imaging_dict["report"] = make_report(
+            image_cube_single_field_report,
+            imaging_dict,
+            image_store=image_store,
+            report=report,
+            output_image_format=output_image_format,
+            image_data_variables_keep=image_data_variables_keep,
+            thread_info=thread_info,
+        )
     return imaging_dict
+
+
+def _with_resource_usage(timing, usage):
+    """A copy of a node task's one-row ``timing`` frame with the monitor's
+    ``usage`` series as columns: a list series becomes ONE cell of the single
+    row; scalars (``sample_interval_seconds``) broadcast."""
+    timing = timing.copy()
+    for key, value in usage.items():
+        timing[key] = [value] if isinstance(value, list) else value
+    return timing
 
 
 def combine_return_data_frames(input_data, input_params):
@@ -1042,7 +1536,7 @@ def combine_return_data_frames(input_data, input_params):
     from astroviper.processing_functions.image_analysis.plane_statistics import (
         concatenate_plane_statistics,
     )
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         merge_imaging_dicts,
     )
 
@@ -1066,11 +1560,7 @@ def combine_return_data_frames(input_data, input_params):
         # their series are already columns of a multi-row frame).
         usage = result.get("resource_usage")
         if usage is not None:
-            timing = timing.copy()
-            for key, value in usage.items():
-                # a list series becomes ONE cell of the single row; scalars
-                # (sample_interval_seconds) broadcast.
-                timing[key] = [value] if isinstance(value, list) else value
+            timing = _with_resource_usage(timing, usage)
         timing_frames.append(timing)
         imaging_dicts.append(result["deconvolution"])
         statistics_list.append(result.get("image_statistics", {}))
@@ -1127,25 +1617,26 @@ def _validate_n_mapping_parallelism(n_mapping_parallelism):
     ValueError
         On any other key, or a non-positive/non-integer chunk count.
     """
-    if set(n_mapping_parallelism) != {"frequency"}:
-        raise ValueError(
-            "n_mapping_parallelism must be a dict with the single key "
-            "'frequency' (cube imaging always maps over frequency), e.g. "
-            '{"frequency": 500}; got keys '
-            f"{sorted(n_mapping_parallelism)}."
+    from astroviper.processing_functions.imaging.config_check import (
+        CUBE_SINGLE_FIELD,
+        check_driver_workflow,
+    )
+
+    try:
+        check_driver_workflow(
+            {"n_mapping_parallelism": n_mapping_parallelism}, mode=CUBE_SINGLE_FIELD
         )
-    count = n_mapping_parallelism["frequency"]
-    if count is not None and (
-        isinstance(count, bool) or not isinstance(count, int) or count < 1
-    ):
-        raise ValueError(
-            "n_mapping_parallelism['frequency'] must be a positive int or "
-            f"None (auto), got {count!r}."
-        )
+    except TypeError as error:
+        raise ValueError(str(error)) from error
 
 
 def calculate_mapping_parallelism_for_cube_imaging(
-    img_xds, single_precision_image, n_frequency_chunks, thread_info
+    img_xds,
+    single_precision_image,
+    n_frequency_chunks,
+    thread_info,
+    exact_psf_subtraction=False,
+    fft_padding=None,
 ):
     """Determine the mapping parallelism (number of frequency chunks) for cube
     imaging.
@@ -1170,6 +1661,14 @@ def calculate_mapping_parallelism_for_cube_imaging(
     thread_info : dict or None
         Thread information as returned by :func:`get_thread_info`.
         If ``None``, thread information is queried automatically.
+    exact_psf_subtraction : bool, optional
+        ``cycle_control_params["exact_psf_subtraction"]``: a channel also
+        holds the PSF of twice the image size and, while it is made, the uv
+        grid of every polarization and four FFT planes on its padded grid.
+        Default ``False``.
+    fft_padding : float, optional
+        The ``fft_padding`` of ``image_params``, which sizes that grid. Needed
+        with ``exact_psf_subtraction``.
 
     Returns
     -------
@@ -1203,6 +1702,25 @@ def calculate_mapping_parallelism_for_cube_imaging(
                 3 * n_pixels_single_frequency * bytes_in_dtype["complex128"] / (1024**3)
                 + 3 * n_pixels_single_frequency * bytes_in_dtype["float64"] / (1024**3)
             )
+        if exact_psf_subtraction:
+            from astroviper.processing_functions.imaging.utils.fft_sizing import (
+                padded_grid_size,
+            )
+
+            float_bytes, complex_bytes = (
+                (bytes_in_dtype["float32"], bytes_in_dtype["complex64"])
+                if single_precision_image
+                else (bytes_in_dtype["float64"], bytes_in_dtype["complex128"])
+            )
+            n_u, n_v = padded_grid_size(
+                [2 * img_xds.sizes["l"], 2 * img_xds.sizes["m"]], fft_padding
+            )
+            n_grid = int(n_u) * int(n_v) * img_xds.sizes["time"]
+            subtraction_bytes = (
+                4 * n_pixels_single_frequency * float_bytes
+                + n_grid * (img_xds.sizes["polarization"] + 4) * complex_bytes
+            )
+            memory_singleton_chunk += fudge_factor * subtraction_bytes / (1024**3)
 
         logger.info(
             "Memory required for a single frequency channel: "
@@ -1213,21 +1731,16 @@ def calculate_mapping_parallelism_for_cube_imaging(
         chunking_dims_sizes = {
             "frequency": img_xds.sizes["frequency"]
         }  # Need to know how many frequency channels there are.
-        from astroviper.utils.data_partitioning import (
-            calculate_data_chunking,
-            get_thread_info,
-        )
+        from astroviper.utils.data_partitioning import calculate_frequency_chunking
 
-        if thread_info is None:
-            thread_info = get_thread_info()
-            logger.info("Thread info " + str(thread_info))
-        n_frequency_chunks = calculate_data_chunking(
+        n_frequency_chunks = calculate_frequency_chunking(
+            img_xds.sizes["frequency"],
             memory_singleton_chunk,
-            chunking_dims_sizes,
-            thread_info,
             constant_memory=0,
+            n_chunks=None,
+            thread_info=thread_info,
             tasks_per_thread=4,
-        )["frequency"]
+        )
         logger.info(
             "Auto-determined mapping parallelism (number of frequency "
             "chunks): "
