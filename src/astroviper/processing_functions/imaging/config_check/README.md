@@ -91,8 +91,10 @@ the separate spectral-product convention is described by the restoration API.
 
 `restoring_beam` is `None` (each plane keeps its own PSF fit) or a target
 `[major, minor, pa]` in radians with `major >= minor > 0` and `|pa| <= pi` (a
-larger position angle is in degrees). A string, tclean's
-`'common'` among them, is refused with a pointer to `common_beam`. A target
+larger position angle is in degrees). A string, tclean's `'common'` among them,
+is refused: at the drivers by their `param.json` schema, which names the
+accepted types, and below them by `check_restoring_beam`, with a pointer to
+`common_beam`. A target
 requires `restore=True`, and its major axis must be smaller than the image,
 `min(image_size) * min(|cell_size|)`: a larger one is arcseconds or degrees
 given as radians, or a common beam inflated by a failed PSF fit. The drivers
