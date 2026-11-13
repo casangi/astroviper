@@ -19,9 +19,14 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.restore import (
+    _clean_beam_kernel_ft,
+    _convolve_with_clean_beam,
+    _correct_residual_arrays,
     _elliptical_gaussian_kernel,
     _inverse_rfft2,
+    _multiply_by_correcting_transform,
     _restore_image_arrays,
+    primary_beam_corrected_plane,
     restore_image,
 )
 
@@ -630,3 +635,341 @@ def test_cube_restoration_selector_matches_both_products(output, dtype, consume_
 def test_cube_restoration_rejects_invalid_selector_before_product_access(output):
     with pytest.raises(ValueError, match="restoration_output"):
         restore_image(None, restoration_output=output)
+
+
+# ---------------------------------------------------------------------------
+# restoring_beam: every plane restored to one target beam
+# ---------------------------------------------------------------------------
+
+DELTA = 1.0e-3
+PSF_PIXELS = (8.0, 4.0, 0.3)
+TARGET_PIXELS = (10.0, 6.0, 0.7)
+TARGET = [TARGET_PIXELS[0] * DELTA, TARGET_PIXELS[1] * DELTA, TARGET_PIXELS[2]]
+OUTPUTS = ["apparent", "primary_beam_corrected", "both"]
+
+
+def _radians(beam_pixels):
+    return (beam_pixels[0] * DELTA, beam_pixels[1] * DELTA, beam_pixels[2])
+
+
+def _target_inputs(dtype, nf=1, beams=None, seed=11):
+    """Two polarizations of noise, off-centre point sources and a primary beam
+    that crosses its cutoff; every plane has the PSF beam ``PSF_PIXELS``."""
+    rng = np.random.default_rng(seed)
+    residual = (0.01 * rng.standard_normal((1, nf, 2, 64, 64))).astype(dtype)
+    model = np.zeros((1, nf, 2, 64, 64), dtype=dtype)
+    model[0, :, :, 20, 44] = 3.0
+    model[0, :, 1, 40, 25] = -1.5
+    if beams is None:
+        beams = {(0, f): _radians(PSF_PIXELS) for f in range(nf)}
+    return _with_primary_beam(
+        _make_restore_xds(
+            nf=nf, beams=beams, residual=residual, model=model, dtype=dtype
+        )
+    )
+
+
+def _pixel_size(xds):
+    """The pixel size ``restore_image`` takes from the ``l`` coordinate."""
+    return abs(float(xds.l.values[1] - xds.l.values[0]))
+
+
+def _covariance_pixels(major, minor, pa):
+    """Covariance (pixels^2) of a beam in pixels; the major axis lies along
+    ``(sin pa, -cos pa)`` in ``(l index, m index)``."""
+    sigma = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    e = np.array([np.sin(pa), -np.cos(pa)])
+    f = np.array([np.cos(pa), np.sin(pa)])
+    return (major * sigma) ** 2 * np.outer(e, e) + (minor * sigma) ** 2 * np.outer(f, f)
+
+
+def _correcting_transform(ny, nx, psf, target):
+    """H on the ``rfft2`` grid in float64, from beams in pixels."""
+    d = _covariance_pixels(*target) - _covariance_pixels(*psf)
+    f0 = np.fft.fftfreq(ny)[:, None]
+    f1 = np.fft.rfftfreq(nx)[None, :]
+    q = d[0, 0] * f0**2 + 2.0 * d[0, 1] * f0 * f1 + d[1, 1] * f1**2
+    ratio = (target[0] * target[1]) / (psf[0] * psf[1])
+    return ratio * np.exp(-2.0 * np.pi**2 * q)
+
+
+def _restored(xds, output, consume_model, restoring_beam):
+    out, _ = restore_image(
+        xds,
+        restoration_output=output,
+        consume_model=consume_model,
+        restoring_beam=restoring_beam,
+    )
+    return {
+        name: out[name].values
+        for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED")
+        if name in out
+    }
+
+
+@pytest.mark.parametrize("output", OUTPUTS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("consume_model", [False, True])
+def test_none_restores_each_plane_with_its_own_beam(output, dtype, consume_model):
+    """``restoring_beam=None`` is today's per-plane restore, bit for bit."""
+    beams = {(0, 0): _radians(PSF_PIXELS), (0, 1): (6.0e-3, 5.0e-3, 1.2)}
+    xds = _target_inputs(dtype, nf=2, beams=beams)
+    residual = xds.SKY_RESIDUAL.values.copy()
+    model = xds.SKY_MODEL.values.copy()
+    primary_beam = xds.PRIMARY_BEAM.values.copy()
+    pixel_size = _pixel_size(xds)
+    restored = _restored(xds, output, consume_model, None)
+    for f, q in np.ndindex(2, 2):
+        kernel_ft = _clean_beam_kernel_ft(beams[(0, f)], 64, 64, pixel_size, dtype, 1)
+        if output != "primary_beam_corrected":
+            expected = _convolve_with_clean_beam(model[0, f, q], kernel_ft, 1)
+            expected += residual[0, f, q]
+            np.testing.assert_array_equal(restored["SKY_RESTORED"][0, f, q], expected)
+        if output != "apparent":
+            expected = primary_beam_corrected_plane(
+                primary_beam[0, f, q],
+                0.2,
+                model[0, f, q],
+                residual[0, f, q],
+                kernel_ft=kernel_ft,
+            )
+            np.testing.assert_array_equal(
+                restored["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"][0, f, q], expected
+            )
+
+
+@pytest.mark.parametrize("output", OUTPUTS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("consume_model", [False, True])
+def test_target_equal_to_the_psf_beam_gives_the_none_result(
+    output, dtype, consume_model
+):
+    reference = _restored(_target_inputs(dtype, nf=2), output, consume_model, None)
+    xds = _target_inputs(dtype, nf=2)
+    residual = xds.SKY_RESIDUAL.copy(deep=True)
+    restored = _restored(xds, output, consume_model, list(_radians(PSF_PIXELS)))
+    assert restored.keys() == reference.keys()
+    for name, value in restored.items():
+        np.testing.assert_array_equal(value, reference[name])
+    xr.testing.assert_identical(xds.SKY_RESIDUAL, residual)
+
+
+@pytest.mark.parametrize("output", OUTPUTS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("consume_model", [False, True])
+def test_target_restore_matches_the_float64_construction(output, dtype, consume_model):
+    """The model convolved with the sampled target beam plus the residual
+    multiplied by H; the corrected plane is ``(M / P) * B_T + (R * K) / P``."""
+    xds = _target_inputs(dtype)
+    residual = xds.SKY_RESIDUAL.values.astype(np.float64)
+    model = xds.SKY_MODEL.values.astype(np.float64)
+    primary_beam = xds.PRIMARY_BEAM.values.astype(np.float64)
+    restored = _restored(xds, output, consume_model, TARGET)
+    kernel_ft = _clean_beam_kernel_ft(TARGET, 64, 64, _pixel_size(xds), np.float64, 1)
+    transform = _correcting_transform(64, 64, PSF_PIXELS, TARGET_PIXELS)
+    tolerance = 1e-6 if dtype == np.float32 else 1e-12
+    for q in range(2):
+        residual_to_beam = np.fft.irfft2(
+            np.fft.rfft2(residual[0, 0, q]) * transform, s=(64, 64)
+        )
+        expected = {
+            "SKY_RESTORED": np.fft.irfft2(
+                np.fft.rfft2(model[0, 0, q]) * kernel_ft, s=(64, 64)
+            )
+            + residual_to_beam
+        }
+        inside = primary_beam[0, 0, q] >= 0.2
+        divided = np.where(inside, model[0, 0, q] / primary_beam[0, 0, q], 0.0)
+        expected["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"] = np.fft.irfft2(
+            np.fft.rfft2(divided) * kernel_ft, s=(64, 64)
+        ) + np.where(inside, residual_to_beam / primary_beam[0, 0, q], np.nan)
+        for name, value in restored.items():
+            assert value.dtype == dtype
+            np.testing.assert_array_equal(
+                np.isnan(value[0, 0, q]), np.isnan(expected[name])
+            )
+            error = np.nanmax(np.abs(value[0, 0, q] - expected[name]))
+            assert error <= tolerance * np.nanmax(np.abs(expected[name]))
+
+
+def test_correcting_transform_takes_the_psf_beam_to_the_target():
+    """A sky made with the sampled PSF beam, times H, is the sky made with the
+    sampled target beam; the opposite sign of the cross term is not. 288 rows
+    span two row blocks, and the odd number of columns needs ``nx``."""
+    ny, nx = 288, 95
+    psf, target = (10.0, 6.0, 0.4), (14.0, 9.0, 0.9)
+    sky = np.zeros((ny, nx))
+    sky[100, 40], sky[200, 61], sky[31, 18] = 1.0, -0.5, 2.0
+
+    def made_with(beam):
+        kernel = _elliptical_gaussian_kernel(ny, nx, *beam, np.float64)
+        return np.fft.irfft2(
+            np.fft.rfft2(sky) * np.fft.rfft2(np.fft.ifftshift(kernel)), s=(ny, nx)
+        )
+
+    residual, expected = made_with(psf), made_with(target)
+    got = _correct_residual_arrays(
+        residual[None, None, None], np.array(psf)[None, None, None], target, 1.0
+    )[0, 0, 0]
+    assert np.abs(got - expected).max() <= 1e-12 * np.abs(expected).max()
+
+    flipped = (_covariance_pixels(*target) - _covariance_pixels(*psf)) * [
+        [1.0, -1.0],
+        [-1.0, 1.0],
+    ]
+    spectrum = np.fft.rfft2(residual)
+    _multiply_by_correcting_transform(
+        spectrum, flipped, (target[0] * target[1]) / (psf[0] * psf[1]), nx
+    )
+    wrong = np.fft.irfft2(spectrum, s=(ny, nx))
+    assert np.abs(wrong - expected).max() > 1e-2 * np.abs(expected).max()
+
+
+@pytest.mark.parametrize("output", ["apparent", "both"])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_point_source_in_the_residual_keeps_its_peak(output, dtype):
+    """CASA Memo 10, Fig. 2: with the target axes doubled a point source left
+    in the residual keeps its peak (Jy per target beam), not 0.25. The
+    primary beam is 1 at the source."""
+    residual = _elliptical_gaussian_kernel(64, 64, *PSF_PIXELS, dtype)
+    xds = _with_primary_beam(
+        _make_restore_xds(
+            npol=1,
+            beams={(0, 0): _radians(PSF_PIXELS)},
+            residual=residual[None, None, None].copy(),
+            model=np.zeros((1, 1, 1, 64, 64), dtype=dtype),
+            dtype=dtype,
+        )
+    )
+    doubled = [2 * PSF_PIXELS[0] * DELTA, 2 * PSF_PIXELS[1] * DELTA, PSF_PIXELS[2]]
+    restored = _restored(xds, output, False, doubled)
+    apparent = restored["SKY_RESTORED"]
+    assert np.unravel_index(np.argmax(apparent), apparent.shape) == (0, 0, 0, 32, 32)
+    for value in restored.values():
+        assert value[0, 0, 0, 32, 32] == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("output", OUTPUTS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("consume_model", [False, True])
+def test_a_nan_residual_pixel_is_the_only_nonfinite_pixel(output, dtype, consume_model):
+    xds = _target_inputs(dtype)
+    xds.SKY_RESIDUAL.values[0, 0, 0, 10, 50] = np.nan
+    inside = xds.PRIMARY_BEAM.values >= 0.2
+    restored = _restored(xds, output, consume_model, TARGET)
+    expected = np.zeros(inside.shape, dtype=bool)
+    expected[0, 0, 0, 10, 50] = True
+    for name, value in restored.items():
+        if name == "SKY_RESTORED":
+            np.testing.assert_array_equal(~np.isfinite(value), expected)
+        else:
+            np.testing.assert_array_equal(~np.isfinite(value) & inside, expected)
+            assert np.isnan(value[~inside]).all()
+
+
+@pytest.mark.parametrize("output", OUTPUTS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("consume_model", [False, True])
+def test_planes_not_contained_or_without_a_fit_keep_their_residual(
+    output, dtype, consume_model, monkeypatch
+):
+    """Their model is restored with the target and their residual added as it
+    is; one warning names them, with the growth factor."""
+    import toolviper.utils.logger as logger
+
+    messages = []
+    monkeypatch.setattr(logger, "warning", messages.append)
+    beams = {
+        (0, 0): _radians(PSF_PIXELS),
+        (0, 1): _radians((12.0, 4.0, TARGET_PIXELS[2])),
+        (0, 2): (np.nan, np.nan, np.nan),
+    }
+    xds = _target_inputs(dtype, nf=3, beams=beams)
+    residual = xds.SKY_RESIDUAL.values.copy()
+    model = xds.SKY_MODEL.values.copy()
+    primary_beam = xds.PRIMARY_BEAM.values.copy()
+    restored = _restored(xds, output, consume_model, TARGET)
+    kernel_ft = _clean_beam_kernel_ft(TARGET, 64, 64, _pixel_size(xds), dtype, 1)
+    for f, q in np.ndindex(3, 2):
+        if f == 0:
+            continue
+        if output != "primary_beam_corrected":
+            expected = _convolve_with_clean_beam(model[0, f, q], kernel_ft, 1)
+            expected += residual[0, f, q]
+            np.testing.assert_array_equal(restored["SKY_RESTORED"][0, f, q], expected)
+        if output != "apparent":
+            expected = primary_beam_corrected_plane(
+                primary_beam[0, f, q],
+                0.2,
+                model[0, f, q],
+                residual[0, f, q],
+                kernel_ft=kernel_ft,
+            )
+            np.testing.assert_array_equal(
+                restored["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"][0, f, q], expected
+            )
+    assert len(messages) == 1
+    assert "[((0, 1), 1.2" in messages[0]
+    assert "Without a PSF fit: [(0, 2)]" in messages[0]
+
+
+@pytest.mark.parametrize("output", OUTPUTS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_target_equal_within_the_tolerance_scales_the_residual(
+    output, dtype, monkeypatch
+):
+    """D is zero after clipping: H is the area ratio, applied without a
+    transform."""
+    import astroviper.processing_functions.imaging.restore as restore
+
+    def no_transform(*args):
+        raise AssertionError("the correcting transform was evaluated")
+
+    monkeypatch.setattr(restore, "_multiply_by_correcting_transform", no_transform)
+    major, minor, pa = _radians(PSF_PIXELS)
+    target = [major * (1 - 1e-9), minor * (1 - 1e-9), pa]
+    xds = _target_inputs(dtype)
+    residual = xds.SKY_RESIDUAL.values.copy()
+    model = xds.SKY_MODEL.values.copy()
+    restored = _restored(xds, output, False, target)
+    if output != "apparent":
+        assert np.isfinite(restored["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]).any()
+    if output != "primary_beam_corrected":
+        kernel_ft = _clean_beam_kernel_ft(target, 64, 64, _pixel_size(xds), dtype, 1)
+        ratio = dtype((target[0] * target[1]) / (major * minor))
+        for q in range(2):
+            expected = _convolve_with_clean_beam(model[0, 0, q], kernel_ft, 1)
+            expected += residual[0, 0, q] * ratio
+            np.testing.assert_array_equal(restored["SKY_RESTORED"][0, 0, q], expected)
+
+
+def test_restored_beam_variable_holds_the_target_in_every_plane():
+    beams = {
+        (0, 0): _radians(PSF_PIXELS),
+        (0, 1): (0.0, 0.0, 0.0),  # a flagged channel
+        (0, 2): (np.nan, np.nan, np.nan),  # a failed fit
+    }
+    xds = _target_inputs(np.float32, nf=3, beams=beams)
+    residual = xds.SKY_RESIDUAL.copy(deep=True)
+    out, _ = restore_image(xds, restoration_output="both", restoring_beam=TARGET)
+    restored_beam = out.BEAM_FIT_PARAMS_SKY_RESTORED
+    psf_beam = out.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION
+    assert restored_beam.dtype == np.float64
+    assert restored_beam.dims == psf_beam.dims
+    np.testing.assert_array_equal(
+        restored_beam.values, np.broadcast_to(TARGET, psf_beam.shape)
+    )
+    assert restored_beam.attrs == {"type": "beam_fit_params_sky", "units": "rad"}
+    restored_group = out.attrs["data_groups"]["restored"]
+    assert restored_group["beam_fit_params_sky"] == "BEAM_FIT_PARAMS_SKY_RESTORED"
+    assert "restoring beam" in restored_group["description"]
+    xr.testing.assert_identical(out.SKY_RESIDUAL, residual)
+
+    out, _ = restore_image(_target_inputs(np.float32), restoration_output="both")
+    assert "BEAM_FIT_PARAMS_SKY_RESTORED" not in out
+    assert "beam_fit_params_sky" not in out.attrs["data_groups"]["restored"]
+
+
+def test_restoring_beam_is_checked_on_a_direct_call():
+    with pytest.raises(ValueError, match="common_beam"):
+        restore_image(_target_inputs(np.float32), restoring_beam="common")
