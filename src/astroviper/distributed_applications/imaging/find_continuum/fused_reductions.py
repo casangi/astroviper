@@ -35,7 +35,7 @@ from astroviper.distributed_applications.imaging.find_continuum import (
     casa_image_tasks,
     findContinuum,
 )
-from astroviper.node_tasks.imaging.find_continuum import read_small_image
+from astroviper.node_tasks.imaging.find_continuum import small_image_attributes
 from astroviper.processing_functions.imaging.find_continuum import (
     CHANNEL_STATISTICS,
     find_continuum_first_round_requests,
@@ -48,11 +48,6 @@ def _frozen(value):
     if isinstance(value, (list, tuple)):
         return tuple(_frozen(item) for item in value)
     return value
-
-
-def _fingerprint(path):
-    values, mask, _ = read_small_image(path)
-    return path, hashlib.sha1(values.tobytes() + mask.tobytes()).hexdigest()
 
 
 def _find_continuum_locals():
@@ -91,6 +86,9 @@ class FusedReductions:
         self.cube = cube
         self.primary_beam = primary_beam
         self.cache = {}
+        # Content digest of every small image a key names, per path and write
+        # id: an image findContinuum writes again with the same pixels keeps it.
+        self.digests = {}
         self.selections = []
         self.captured = None
         self.first_round = first_round
@@ -131,7 +129,16 @@ class FusedReductions:
             for key, value in request.items()
             if key not in ("frequency", "rest_frequency")
         }
-        return _frozen(fields), tuple(_fingerprint(path) for path in small_images)
+        return _frozen(fields), tuple(self._fingerprint(path) for path in small_images)
+
+    def _fingerprint(self, path):
+        write_id, _ = small_image_attributes(path)
+        if (path, write_id) not in self.digests:
+            values, mask, _ = casa_image_tasks._read(path)
+            digest = hashlib.sha1(np.ascontiguousarray(values))
+            digest.update(np.ascontiguousarray(mask))
+            self.digests[path, write_id] = digest.hexdigest()
+        return path, self.digests[path, write_id]
 
     def _placeholder(self, request):
         shape = casa_image_tasks._cube(request["image"])["metadata"]["shape"]

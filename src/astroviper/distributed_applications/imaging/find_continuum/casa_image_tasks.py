@@ -11,6 +11,7 @@ provided: findContinuum takes the atmosphere from the caller and runs without
 a Measurement Set.
 """
 
+import collections
 import contextlib
 import os
 import re
@@ -21,6 +22,7 @@ from astropy import units
 
 from astroviper.node_tasks.imaging.find_continuum import (
     read_small_image,
+    small_image_attributes,
     write_small_image,
 )
 from astroviper.processing_functions.image_analysis.make_auto_mask import _prune
@@ -69,6 +71,7 @@ def cube_session(cubes, reduce):
         yield _session
     finally:
         _session = None
+        _small_images.clear()
 
 
 def _cube(path):
@@ -117,10 +120,41 @@ def parse_channel_selection(chans, nchan):
     return np.array(sorted({c for c in channels if 0 <= c < nchan}), dtype=int)
 
 
+# Small images this process read or wrote, keyed by path and write id
+# (findContinuum renames and removes them itself), least recently used first;
+# at most _SMALL_IMAGE_BYTES of arrays. The arrays are read-only.
+_SMALL_IMAGE_BYTES = 4 * 2**30
+_small_images = collections.OrderedDict()
+
+
+def _remember(path, write_id, values, mask, metadata):
+    values.flags.writeable = False
+    mask.flags.writeable = False
+    _small_images[path, write_id] = values, mask, metadata
+    _small_images.move_to_end((path, write_id))
+    while len(_small_images) > 1 and _SMALL_IMAGE_BYTES < sum(
+        values.nbytes + mask.nbytes for values, mask, _ in _small_images.values()
+    ):
+        _small_images.popitem(last=False)
+    return values, mask, metadata
+
+
 def _read(path):
     """Values (masked pixels NaN), mask and metadata of a small image."""
-    values, mask, metadata = read_small_image(path.rstrip("/"))
-    return values, mask, metadata
+    path = path.rstrip("/")
+    write_id, _ = small_image_attributes(path)
+    if (path, write_id) in _small_images:
+        _small_images.move_to_end((path, write_id))
+        return _small_images[path, write_id]
+    return _remember(path, write_id, *read_small_image(path))
+
+
+def _write(path, values, mask, metadata):
+    """Write a small image and keep it for the reads that follow."""
+    path = path.rstrip("/")
+    _remember(
+        path, write_small_image(path, values, mask, metadata), values, mask, metadata
+    )
 
 
 def _read_cube_channels(path, channels, spatial=(slice(None), slice(None))):
@@ -238,9 +272,7 @@ def immoments(
     for moment in moments:
         path = outfile + MOMENT_SUFFIXES[moment] if len(moments) > 1 else outfile
         values = maps[moment][:, :, None, None]
-        write_small_image(
-            path, values, np.isfinite(values), _small_image_metadata(metadata)
-        )
+        _write(path, values, np.isfinite(values), _small_image_metadata(metadata))
     return True
 
 
@@ -380,9 +412,7 @@ def immath(
             ),
             shape,
         )
-    write_small_image(
-        outfile, np.array(result), valid, _small_image_metadata(metadata, shape[3])
-    )
+    _write(outfile, np.array(result), valid, _small_image_metadata(metadata, shape[3]))
     return True
 
 
@@ -414,9 +444,7 @@ def imsubimage(imagename, outfile="", chans="", mask="", overwrite=False, **kwar
         )
     if os.path.exists(outfile) and not overwrite:
         raise FileExistsError(outfile)
-    write_small_image(
-        outfile, values, valid, _small_image_metadata(metadata, values.shape[3])
-    )
+    _write(outfile, values, valid, _small_image_metadata(metadata, values.shape[3]))
     return True
 
 
@@ -444,7 +472,7 @@ def makemask(
         combined = selected if combined is None else combined | selected
     if os.path.exists(output) and not overwrite:
         raise FileExistsError(output)
-    write_small_image(
+    _write(
         output,
         combined.astype(np.float64),
         np.ones(combined.shape, dtype=bool),
@@ -458,7 +486,11 @@ def imhead(imagename, mode="summary", hdkey="", **kwargs):
     if mode != "get" or hdkey != "object" or kwargs:
         raise NotImplementedError("imhead supports mode='get', hdkey='object' only")
     cube = _cube(imagename)
-    metadata = cube["metadata"] if cube is not None else _read(imagename)[2]
+    metadata = (
+        cube["metadata"]
+        if cube is not None
+        else small_image_attributes(imagename.rstrip("/"))[1]
+    )
     return metadata["object"]
 
 
@@ -476,7 +508,7 @@ def imcollapse(
     if os.path.exists(outfile) and not overwrite:
         raise FileExistsError(outfile)
     shape = list(result.shape)
-    write_small_image(outfile, result, np.isfinite(result), dict(metadata, shape=shape))
+    _write(outfile, result, np.isfinite(result), dict(metadata, shape=shape))
     return True
 
 
@@ -570,7 +602,11 @@ class iatool:
 
     def _metadata(self):
         cube = _cube(self.path)
-        return cube["metadata"] if cube is not None else _read(self.path)[2]
+        return (
+            cube["metadata"]
+            if cube is not None
+            else small_image_attributes(self.path.rstrip("/"))[1]
+        )
 
     def shape(self):
         return np.array(self._metadata()["shape"], dtype=int)
@@ -617,7 +653,7 @@ class iatool:
         if _cube(self.path) is not None:
             raise NotImplementedError("getregion of a whole cube is not supported")
         values, valid, _ = _read(self.path)
-        return valid if getmask else values
+        return (valid if getmask else values).copy()
 
     def getprofile(self, axis=3, function="mean", mask="", stretch=False, **kwargs):
         if kwargs or axis != 3:
@@ -672,7 +708,7 @@ class synthesismaskhandler:
             pruned[(slice(None), slice(None), *index)] = kept
             n_regions.append(scipy.ndimage.label(plane)[1])
             n_pruned.append(n_regions[-1] - scipy.ndimage.label(kept)[1])
-        write_small_image(
+        _write(
             outmaskname or inmaskname.rstrip("/") + ".pruned",
             pruned.astype(np.float64),
             np.ones(pruned.shape, dtype=bool),

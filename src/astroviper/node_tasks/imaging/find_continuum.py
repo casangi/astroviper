@@ -15,6 +15,10 @@ import numpy as np
 def write_small_image(path, values, mask, metadata):
     """Write a small image (CASA axis order) as a Zarr store.
 
+    Each variable is one uncompressed chunk, written and read whole. The store
+    gets a new write id, so that a reader can tell a rewritten image from the
+    one it read before.
+
     Parameters
     ----------
     path : str
@@ -25,18 +29,49 @@ def write_small_image(path, values, mask, metadata):
         Pixel mask of the same shape (``True`` = valid).
     metadata : dict
         CASA image metadata (coordinates, beam, units), stored as JSON.
+
+    Returns
+    -------
+    str
+        The write id of the store.
     """
+    import uuid
+
     import xarray as xr
 
     dims = ["time", "frequency", "polarization", "l", "m"]
+    write_id = uuid.uuid4().hex
     xds = xr.Dataset(
         {
             "SKY": (dims, np.transpose(values, (3, 2, 0, 1))[None]),
             "MASK": (dims, np.transpose(mask, (3, 2, 0, 1))[None]),
         },
-        attrs={"casa_metadata": json.dumps(metadata)},
+        attrs={"casa_metadata": json.dumps(metadata), "write_id": write_id},
     )
-    xds.to_zarr(path, mode="w", consolidated=False)
+    encoding = {
+        name: {"chunks": xds[name].shape, "compressors": None} for name in xds.data_vars
+    }
+    xds.to_zarr(path, mode="w", consolidated=False, encoding=encoding)
+    return write_id
+
+
+def small_image_attributes(path):
+    """The write id and the CASA metadata of a small image, without its pixels.
+
+    Parameters
+    ----------
+    path : str
+        Store path.
+
+    Returns
+    -------
+    write_id : str
+    metadata : dict
+    """
+    import zarr
+
+    attrs = zarr.open_group(path, mode="r").attrs
+    return attrs["write_id"], json.loads(attrs["casa_metadata"])
 
 
 def read_small_image(path):
