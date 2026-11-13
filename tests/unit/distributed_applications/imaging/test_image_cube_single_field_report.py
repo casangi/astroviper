@@ -372,3 +372,40 @@ def test_restoring_beam_section_without_uncorrected_channels(tmp_path):
     text = _restoring_beam_section(tmp_path, store, "zarr", available)
     assert 'restored to the beam 2" x 2"' in text
     assert "The beam fit of the point spread function was not kept" in text
+
+
+def test_restoring_beam_section_of_fits_output_without_the_kept_variables(tmp_path):
+    """The restoring beam is the header beam of the restored FITS image; the
+    PSF beams of the BEAMS tables are found only with the kept variables."""
+    psf_beams = np.array([[1.2, 1.0, 0.3], [1.4, 1.1, 1.0]])
+    psf_beams[:, :2] *= ARCSEC
+    store, _ = _beam_store(tmp_path, "fits", psf_beams, [2 * ARCSEC, 2 * ARCSEC, 0])
+    available = {"sky_residual", "sky_restored"}  # the FITS files
+    text = _restoring_beam_section(tmp_path, store, "fits", available)
+    assert 'restored to the beam 2" x 2", position angle 0.0 deg' in text
+    assert "or no FITS file carries it" in text
+    available = {"sky_residual"}
+    text = _restoring_beam_section(tmp_path, store, "fits", available)
+    assert "No restoring beam: no restored FITS image has a header beam" in text
+
+
+def test_restoring_beam_section_after_a_skipped_first_task(tmp_path):
+    """The channels of a skipped task keep the store's NaN: the restoring beam
+    comes from the first plane that holds it, those channels have no fit."""
+    import zarr
+
+    psf_beams = np.array([[1.2, 1.0, 0.3], [2.0, 1.0, 0.0], [1.4, 1.1, 1.0]])
+    psf_beams[:, :2] *= ARCSEC
+    store, keep = _beam_store(
+        tmp_path, "zarr", psf_beams, [1.5 * ARCSEC, 1.5 * ARCSEC, 0.0]
+    )
+    group = zarr.open_group(store, mode="r+")
+    for name in (
+        "BEAM_FIT_PARAMS_SKY_RESTORED",
+        "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    ):
+        group[name][:, 0] = np.nan
+    text = _restoring_beam_section(tmp_path, store, "zarr", set(keep))
+    assert 'restored to the beam 1.5" x 1.5", position angle 0.0 deg' in text
+    assert text.count("<td>no fit</td>") == 1
+    assert text.count("<td>not contained</td>") == 1

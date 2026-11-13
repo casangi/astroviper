@@ -249,14 +249,27 @@ def _add_restoring_beam(document, image_store, output_image_format, available):
     )
     if restored_beam is None:
         document.note(
-            "No restoring beam: beam_fit_params_sky_restored was not written (it "
-            "needs restore=True and a restoring_beam)."
+            "No restoring beam: "
+            + (
+                "no restored FITS image has a header beam"
+                if output_image_format == "fits"
+                else "beam_fit_params_sky_restored was not written"
+            )
+            + " (it needs restore=True and a restoring_beam)."
         )
         return
-    target = np.asarray(
-        restored_beam.isel(time=0, frequency=0, polarization=0).values,
-        dtype=np.float64,
-    )
+    # Every plane holds the target, but a plane of a skipped task holds none.
+    planes = np.asarray(restored_beam.values, dtype=np.float64).reshape(-1, 3)
+    planes = planes[
+        np.isfinite(planes).all(axis=1) & (planes[:, 0] > 0.0) & (planes[:, 1] > 0.0)
+    ]
+    if not len(planes):
+        document.note(
+            "No restoring beam: beam_fit_params_sky_restored holds no beam (no "
+            "task wrote it)."
+        )
+        return
+    target = planes[0]
     arcsec = 180.0 / np.pi * 3600.0
     document.text(
         f'Every plane was restored to the beam {target[0] * arcsec:.4g}" x '
@@ -271,7 +284,14 @@ def _add_restoring_beam(document, image_store, output_image_format, available):
     if psf_beam is None:
         document.note(
             "The beam fit of the point spread function was not kept "
-            "(beam_fit_params_point_spread_function)."
+            "(beam_fit_params_point_spread_function)"
+            + (
+                ", or no FITS file carries it: FITS output holds it in the BEAMS "
+                "tables of the point spread function, residual, model and "
+                "deconvolved images, found with the list of the kept variables."
+                if output_image_format == "fits"
+                else "."
+            )
         )
         return
     # The restore applies the beam of the first polarization to every plane.
