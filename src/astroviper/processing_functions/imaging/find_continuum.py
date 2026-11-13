@@ -341,6 +341,55 @@ def radio_velocity_km_s(frequency, rest_frequency):
     )
 
 
+def find_continuum_first_round_requests(
+    n_channels, first_frequency, channel_width, rest_frequency, cube, primary_beam
+):
+    """The reductions of findContinuum's first round that need no earlier result.
+
+    The moment 0 and 8 images of the cube where it is nonzero, the statistics
+    of the cube and of the primary beam, and the mean primary beam at five
+    channels, as findContinuum asks for them.
+
+    Parameters
+    ----------
+    n_channels : int
+        Channels of the cube.
+    first_frequency, channel_width : float
+        Frequency of channel 0 and the channel width (Hz).
+    rest_frequency : float
+        Rest frequency of the moment axis (Hz).
+    cube, primary_beam : str
+        Names of the cube and of the primary beam in the requests.
+
+    Returns
+    -------
+    list of dict
+        Requests for :func:`find_continuum_cube_reductions`.
+    """
+    frequency = (first_frequency + channel_width * np.arange(n_channels)).tolist()
+    channels = (n_channels // 8, n_channels // 4, n_channels // 2)
+    channels += (3 * n_channels // 4, 7 * n_channels // 8)
+    moments = dict(kind="moments", frequency=frequency, rest_frequency=rest_frequency)
+    return [
+        dict(
+            moments,
+            image=primary_beam,
+            mask="",
+            channels=None if n_channels < 16 else sorted(set(channels)),
+            moments=[-1],
+        ),
+        dict(moments, image=cube, mask=f'"{cube}"!=0', channels=None, moments=[0, 8]),
+        dict(kind="statistics", image=cube, mask="", channels=None, per_channel=False),
+        dict(
+            kind="statistics",
+            image=primary_beam,
+            mask="",
+            channels=None,
+            per_channel=False,
+        ),
+    ]
+
+
 def find_continuum_cube_reductions(
     img_xds,
     requests,

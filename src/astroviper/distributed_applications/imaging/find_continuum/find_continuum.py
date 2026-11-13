@@ -191,6 +191,7 @@ def find_continuum_fused(
     spectral_dynamic_range_bandwidth: float | None = None,
     primary_beam_limit: float | None = 0.2,
     n_mapping_parallelism: dict | None = None,
+    first_round_reductions: dict | None = None,
     *,
     input_checked: bool = False,
 ) -> dict:
@@ -235,6 +236,12 @@ def find_continuum_fused(
     n_mapping_parallelism : dict, optional
         ``{"frequency": n}``, the number of frequency chunks of every
         map-reduce; one chunk if not given.
+    first_round_reductions : dict, optional
+        The first-round reductions of the cube, as
+        :func:`~astroviper.distributed_applications.imaging.image_cube_single_field.image_cube_single_field`
+        returns them in ``find_continuum_first_round`` when it makes the cube
+        (with the same primary beam limit); the pass that would compute them
+        is then not made.
     input_checked : bool, default False
         Skip the configuration checks already done by the calling layer. The
         checks of the opened image and of the work directory always run.
@@ -267,6 +274,7 @@ def find_continuum_fused(
         n_mapping_parallelism,
         input_checked=input_checked,
         fused=True,
+        first_round_reductions=first_round_reductions,
     )
 
 
@@ -285,6 +293,7 @@ def _find_continuum(
     *,
     input_checked,
     fused,
+    first_round_reductions=None,
 ):
     import dask
     import matplotlib.pyplot as plt
@@ -313,7 +322,9 @@ def _find_continuum(
     )
 
     if not input_checked:
-        check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism)
+        check_find_continuum_config(
+            n_bin, primary_beam_limit, n_mapping_parallelism, first_round_reductions
+        )
     # findContinuum runs in its work directory, as in the pipeline, and node
     # tasks may run elsewhere, so every path is made absolute.
     input_image_store = os.path.abspath(input_image_store)
@@ -424,7 +435,14 @@ def _find_continuum(
             contextlib.redirect_stdout(log_stream),
             casa_image_tasks.cube_session(
                 cubes,
-                FusedReductions(run_reductions, stem + ".residual", stem + ".pb")
+                FusedReductions(
+                    run_reductions,
+                    stem + ".residual",
+                    stem + ".pb",
+                    None
+                    if first_round_reductions is None
+                    else first_round_reductions["reductions"],
+                )
                 if fused
                 else run_reductions,
             ),

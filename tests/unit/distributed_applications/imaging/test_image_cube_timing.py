@@ -216,3 +216,34 @@ def test_add_lazy_input_data_is_a_driver_timing_leaf():
     )
     assert "add lazy input data" in summary
     assert "0.250" in summary
+
+
+def test_combine_return_data_frames_merges_the_find_continuum_first_round():
+    """The node tasks' first rounds are merged; a missing one leaves none."""
+    leaves = [
+        _make_chunk_result(0, 1.0, 2.0, 4.0, chan=0),
+        _make_chunk_result(1, 3.0, 6.0, 10.0, chan=1),
+    ]
+    statistics = [
+        {"npts": 2.0, "sum": 1.0, "sumsq": 1.0, "min": 0.0, "max": 1.0},
+        {"npts": 3.0, "sum": 2.0, "sumsq": 4.0, "min": -1.0, "max": 2.0},
+    ]
+    for leaf, partial in zip(leaves, statistics, strict=True):
+        leaf["find_continuum_first_round"] = [partial]
+    merged = combine_return_data_frames(leaves, input_params={})
+    assert merged["find_continuum_first_round"] == [
+        {"npts": 5.0, "sum": 3.0, "sumsq": 5.0, "min": -1.0, "max": 2.0}
+    ]
+
+    leaves[1]["find_continuum_first_round"] = None
+    assert (
+        combine_return_data_frames(leaves, input_params={})[
+            "find_continuum_first_round"
+        ]
+        is None
+    )
+    del leaves[1]["find_continuum_first_round"]
+    del leaves[0]["find_continuum_first_round"]
+    assert "find_continuum_first_round" not in combine_return_data_frames(
+        leaves, input_params={}
+    )

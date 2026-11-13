@@ -164,6 +164,7 @@ def image_cube_single_field(
     monitor_resources_seconds: float | None = None,
     msv2_open_options: dict[str, Any] | None = None,
     report: str | None = None,
+    find_continuum_first_round: bool = False,
     parameters_file: str | None = None,
     *,
     input_checked: bool = False,
@@ -817,6 +818,20 @@ def image_cube_single_field(
         next to the output store. It is made after the output is written: a
         failure while making it is logged and leaves the results intact.
         ``None`` (default): no report.
+    find_continuum_first_round : bool, optional
+        Also make, while every chunk is in memory, the first-round reductions
+        that
+        :func:`~astroviper.distributed_applications.imaging.find_continuum.find_continuum_fused`
+        makes of the cube (moment 0 and 8 images of the Stokes I residual,
+        statistics of the residual and of the primary beam, mean primary
+        beam; masked where the primary beam is below the
+        ``primary_beam_limit`` of ``cycle_control_params``), returned in
+        ``"find_continuum_first_round"``; passed to ``find_continuum_fused``,
+        they save its first pass over the cube.
+        Keeps the variables find_continuum reads (``sky_residual``,
+        ``primary_beam``, ``point_spread_function`` and
+        ``beam_fit_params_point_spread_function``). Needs Stokes I. Default
+        ``False``.
     parameters_file : str, optional
         JSON file whose ``"image_cube_single_field"`` block gives the
         arguments, as
@@ -867,6 +882,13 @@ def image_cube_single_field(
           without one, for ``report="notebook"`` and when the report failed).
           With a report the image statistics of the residual also hold
           ``entropy``, the entropy of every plane's final residual.
+        * ``"find_continuum_first_round"`` (with
+          ``find_continuum_first_round=True``) is
+          ``{"primary_beam_limit", "reductions"}``: the results of
+          :func:`~astroviper.processing_functions.imaging.find_continuum.find_continuum_first_round_requests`
+          for the cube written, masked where the primary beam is below the
+          ``primary_beam_limit`` of ``cycle_control_params``; ``None`` when a
+          chunk could not be written.
 
     Notes
     -----
@@ -907,6 +929,12 @@ def image_cube_single_field(
         )
 
         check_config(locals(), mode=CUBE_SINGLE_FIELD, require_complete=True)
+        if find_continuum_first_round:
+            from astroviper.processing_functions.imaging.config_check import (
+                check_find_continuum_first_round,
+            )
+
+            check_find_continuum_first_round(image_params)
 
     from astroviper.utils.io import check_image_output_destination
 
@@ -981,6 +1009,18 @@ def image_cube_single_field(
         image_data_variables_keep = list(image_data_variables_keep) + [
             "beam_fit_params_point_spread_function"
         ]
+    # find_continuum reads these four variables of the cube.
+    if find_continuum_first_round:
+        image_data_variables_keep = list(image_data_variables_keep) + [
+            variable
+            for variable in (
+                "sky_residual",
+                "primary_beam",
+                "point_spread_function",
+                "beam_fit_params_point_spread_function",
+            )
+            if variable not in image_data_variables_keep
+        ]
 
     # Every driver step is timed into ``timing_distributed_application``; the
     # individual per-step timing log messages are replaced by the formatted
@@ -1024,6 +1064,22 @@ def image_cube_single_field(
         do_sky_coords=False,
     )
     timing_distributed_application["T_make_empty_image_xds"] = time.time() - start
+    find_continuum_requests = None
+    if find_continuum_first_round:
+        from astroviper.processing_functions.imaging.find_continuum import (
+            find_continuum_first_round_requests,
+        )
+
+        # The frequency axis as find_continuum reads it from the cube written.
+        frequency = img_xds.frequency.values
+        find_continuum_requests = find_continuum_first_round_requests(
+            frequency.size,
+            float(frequency[0]),
+            float(frequency[1] - frequency[0]) if frequency.size > 1 else 1.0,
+            float(img_xds.frequency.attrs["rest_frequency"]["data"]),
+            "sky",
+            "primary_beam",
+        )
 
     # Register the image data groups for the kept variables so the on-disk
     # store carries the same group layout the node tasks build in memory
@@ -1133,6 +1189,7 @@ def image_cube_single_field(
     input_params["output_image_format"] = output_image_format
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
     input_params["report_statistics"] = report is not None
+    input_params["find_continuum_first_round_requests"] = find_continuum_requests
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
@@ -1396,6 +1453,29 @@ def image_cube_single_field(
     # task's own dict, whose monitor series are folded in here as the reduce
     # folds them in.
     imaging_dict["input_validation"] = spectral_diagnostics
+    first_round = imaging_dict.pop("find_continuum_first_round", None)
+    if find_continuum_requests is not None:
+        from astroviper.processing_functions.imaging.find_continuum import (
+            finalize_find_continuum_reductions,
+        )
+
+        if first_round is None:
+            logger.warning(
+                "The find_continuum first round was not made: a chunk of the "
+                "cube could not be written."
+            )
+        imaging_dict["find_continuum_first_round"] = (
+            None
+            if first_round is None
+            else {
+                "primary_beam_limit": cycle_control_params.get(
+                    "primary_beam_limit", 0.2
+                ),
+                "reductions": finalize_find_continuum_reductions(
+                    first_round, find_continuum_requests
+                ),
+            }
+        )
     usage = imaging_dict.pop("resource_usage", None)
     if usage is not None:
         imaging_dict["timing_node_tasks"] = _with_resource_usage(
@@ -1544,6 +1624,7 @@ def combine_return_data_frames(input_data, input_params):
     timing_frames = []
     imaging_dicts = []
     statistics_list = []
+    first_rounds = []
     # Per-reduce-node timing provenance: child reduce calls carry their records
     # in "timing_reduce_nodes" (leaf node-task results have none); pool them and
     # append this call's own record, so the final result holds one record per
@@ -1564,6 +1645,7 @@ def combine_return_data_frames(input_data, input_params):
         timing_frames.append(timing)
         imaging_dicts.append(result["deconvolution"])
         statistics_list.append(result.get("image_statistics", {}))
+        first_rounds.append(result.get("find_continuum_first_round"))
         reduce_records.extend(result.get("timing_reduce_nodes", []))
 
     # ONE concat per reduce call: concatenating inside the loop re-copied the
@@ -1597,12 +1679,25 @@ def combine_return_data_frames(input_data, input_params):
             "n_rows_out": int(len(combined_timing)),
         }
     )
-    return {
+    combined = {
         "timing_node_tasks": combined_timing,
         "deconvolution": merged_deconvolve,
         "image_statistics": merged_statistics,
         "timing_reduce_nodes": reduce_records,
     }
+    # find_continuum's first round, when the node tasks made it; one missing
+    # (a chunk not written) leaves none.
+    if any(first_round is not None for first_round in first_rounds):
+        from astroviper.processing_functions.imaging.find_continuum import (
+            merge_find_continuum_reductions,
+        )
+
+        combined["find_continuum_first_round"] = (
+            functools.reduce(merge_find_continuum_reductions, first_rounds)
+            if all(first_round is not None for first_round in first_rounds)
+            else None
+        )
+    return combined
 
 
 def _validate_n_mapping_parallelism(n_mapping_parallelism):

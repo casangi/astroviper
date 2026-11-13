@@ -25,8 +25,11 @@ FIND_CONTINUUM_ROLES = (
 # ========================================================================
 
 
-def check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism):
-    """Validate the channel binning, the primary beam limit and the frequency chunking.
+def check_find_continuum_config(
+    n_bin, primary_beam_limit, n_mapping_parallelism, first_round_reductions=None
+):
+    """Validate the channel binning, the primary beam limit, the frequency
+    chunking and a first round made by the imager.
 
     Parameters
     ----------
@@ -36,12 +39,29 @@ def check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism
         In ``[0, 1)``, or ``None``.
     n_mapping_parallelism : mapping or None
         ``{"frequency": n}`` with at least one chunk, or ``None``.
+    first_round_reductions : mapping or None
+        ``{"primary_beam_limit", "reductions"}`` as ``image_cube_single_field``
+        returns it: one result per request of
+        ``find_continuum_first_round_requests``, made with this
+        ``primary_beam_limit``.
     """
     require_integer("n_bin", n_bin, minimum=1)
     if primary_beam_limit is not None:
         require_finite_real("primary_beam_limit", primary_beam_limit, scalar=True)
         if not 0.0 <= primary_beam_limit < 1.0:
             raise ValueError("primary_beam_limit must be in [0, 1).")
+    if first_round_reductions is not None:
+        require_mapping("first_round_reductions", first_round_reductions)
+        if len(first_round_reductions.get("reductions", ())) != 4:
+            raise ValueError(
+                "first_round_reductions must hold the 4 results of the first round."
+            )
+        if first_round_reductions.get("primary_beam_limit") != primary_beam_limit:
+            raise ValueError(
+                "first_round_reductions were made with primary_beam_limit "
+                f"{first_round_reductions.get('primary_beam_limit')}, not "
+                f"{primary_beam_limit}."
+            )
     if n_mapping_parallelism is None:
         return
     require_mapping("n_mapping_parallelism", n_mapping_parallelism)
@@ -52,6 +72,21 @@ def check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism
         n_mapping_parallelism["frequency"],
         minimum=1,
     )
+
+
+def check_find_continuum_first_round(image_params):
+    """Require the Stokes I plane of which the imager makes the first round.
+
+    Parameters
+    ----------
+    image_params : mapping
+        Image parameters of ``image_cube_single_field``.
+    """
+    if "I" not in list(image_params["polarization_coords"]):
+        raise ValueError(
+            "find_continuum_first_round needs Stokes I in "
+            "image_params['polarization_coords']."
+        )
 
 
 # ========================================================================
