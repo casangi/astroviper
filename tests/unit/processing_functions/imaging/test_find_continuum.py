@@ -14,6 +14,7 @@ from astroviper.processing_functions.imaging.find_continuum import (
     finalize_find_continuum_reductions,
     find_continuum_cube_reductions,
     find_continuum_first_round_requests,
+    frequency_axis_values,
     image_statistics,
     lattice_expression_names,
     merge_find_continuum_reductions,
@@ -57,7 +58,12 @@ def requests_all_kinds():
             "mask": '"pb">0.3',
             "channels": [1, 2, 3, 7],
             "moments": [-1, 0, 8, 10],
-            "frequency": FREQUENCY.tolist(),
+            "frequency_axis": [
+                FREQUENCY[0],
+                FREQUENCY[1] - FREQUENCY[0],
+                0.0,
+                N_CHANNELS,
+            ],
             "rest_frequency": REST_FREQUENCY,
         },
         {
@@ -380,7 +386,8 @@ def test_first_round_requests(n_channels, beam_channels):
     assert moments["image"] == "sky" and moments["mask"] == '"sky"!=0'
     assert moments["moments"] == [0, 8] and moments["channels"] is None
     np.testing.assert_array_equal(
-        moments["frequency"], 230.0e9 + 1.0e6 * np.arange(n_channels)
+        frequency_axis_values(moments["frequency_axis"]),
+        230.0e9 + 1.0e6 * np.arange(n_channels),
     )
     assert cube_statistics == dict(
         kind="statistics", image="sky", mask="", channels=None, per_channel=False

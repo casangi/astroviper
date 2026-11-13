@@ -68,7 +68,12 @@ def test_map_and_reduce_tasks_match_one_reduction(cube_store, tmp_path):
             "mask": '"mask_image">0.5 && "pb">0.2',
             "channels": list(range(5, 16)),
             "moments": [0, 8],
-            "frequency": img_xds.frequency.values.tolist(),
+            "frequency_axis": [
+                float(img_xds.frequency[0]),
+                float(img_xds.frequency[1] - img_xds.frequency[0]),
+                0.0,
+                N_CHANNELS,
+            ],
             "rest_frequency": float(img_xds.frequency.attrs["rest_frequency"]["data"]),
         },
         {

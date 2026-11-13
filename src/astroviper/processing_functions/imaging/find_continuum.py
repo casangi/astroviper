@@ -353,6 +353,13 @@ def _profile_value(values, function):
     raise ValueError(f"getprofile function {function!r} is not supported")
 
 
+def frequency_axis_values(frequency_axis):
+    """Frequency of every channel (Hz) of a linear axis ``[reference_value,
+    increment, reference_pixel, n_channels]``, as CASA computes it."""
+    reference_value, increment, reference_pixel, n_channels = frequency_axis
+    return reference_value + increment * (np.arange(int(n_channels)) - reference_pixel)
+
+
 def radio_velocity_km_s(frequency, rest_frequency):
     """Radio velocity of every frequency (km/s), the moment-axis coordinate of CASA."""
     return SPEED_OF_LIGHT_KM_S * (
@@ -485,10 +492,13 @@ def find_continuum_first_round_requests(
     list of dict
         Requests for :func:`find_continuum_cube_reductions`.
     """
-    frequency = (first_frequency + channel_width * np.arange(n_channels)).tolist()
     channels = (n_channels // 8, n_channels // 4, n_channels // 2)
     channels += (3 * n_channels // 4, 7 * n_channels // 8)
-    moments = dict(kind="moments", frequency=frequency, rest_frequency=rest_frequency)
+    moments = dict(
+        kind="moments",
+        frequency_axis=[first_frequency, channel_width, 0.0, n_channels],
+        rest_frequency=rest_frequency,
+    )
     return [
         dict(
             moments,
@@ -538,8 +548,9 @@ def find_continuum_cube_reductions(
         ``"profile"`` or ``"statistics"``), ``image`` (the name of the reduced
         cube), ``mask`` (a lattice expression, or ``""``) and ``channels``
         (global channel indices, or ``None`` for all). ``moments`` requests add
-        ``moments`` (CASA moment numbers), ``frequency`` (every channel of the
-        cube, Hz) and ``rest_frequency`` (Hz); ``profile`` requests add
+        ``moments`` (CASA moment numbers), ``frequency_axis`` (the cube's linear
+        frequency axis, see :func:`frequency_axis_values`) and
+        ``rest_frequency`` (Hz); ``profile`` requests add
         ``function``; ``statistics`` requests add ``per_channel``.
     variables : dict
         Cube name to the data variable of ``img_xds`` that holds it.
@@ -682,7 +693,10 @@ def _new_partial(request, shape):
     if kind == "moments":
         return MomentMaps(
             request["moments"],
-            radio_velocity_km_s(request["frequency"], request["rest_frequency"]),
+            radio_velocity_km_s(
+                frequency_axis_values(request["frequency_axis"]),
+                request["rest_frequency"],
+            ),
             shape,
         )
     if kind == "profile":

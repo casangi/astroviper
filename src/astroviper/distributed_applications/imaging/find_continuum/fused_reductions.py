@@ -127,7 +127,7 @@ class FusedReductions:
         fields = {
             key: value
             for key, value in request.items()
-            if key not in ("frequency", "rest_frequency")
+            if key not in ("frequency_axis", "rest_frequency")
         }
         return _frozen(fields), tuple(self._fingerprint(path) for path in small_images)
 
@@ -198,7 +198,7 @@ class FusedReductions:
     def _selection_round(self, request):
         channels = set(request["channels"])
         predicted = [dict(request, kind="statistics", per_channel=False)]
-        for key in ("moments", "frequency", "rest_frequency"):
+        for key in ("moments", "frequency_axis", "rest_frequency"):
             predicted[0].pop(key)
         for earlier in self.selections:
             common = channels & earlier

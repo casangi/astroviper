@@ -227,11 +227,12 @@ def _moments_request(path, moments, chans="", mask=""):
         chans,
         mask,
         moments=list(moments),
-        frequency=(
-            metadata["reference_value"][3]
-            + metadata["increment"][3]
-            * (np.arange(metadata["shape"][3]) - metadata["reference_pixel"][3])
-        ).tolist(),
+        frequency_axis=[
+            metadata["reference_value"][3],
+            metadata["increment"][3],
+            metadata["reference_pixel"][3],
+            metadata["shape"][3],
+        ],
         rest_frequency=metadata["rest_frequency"],
     )
 
