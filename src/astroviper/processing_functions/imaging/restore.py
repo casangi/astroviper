@@ -483,7 +483,7 @@ def _divide_taylor_polynomials(
     return result
 
 
-def _correcting_transforms(beam, restoring_beam, pixel_size):
+def _correcting_transforms(beam, restoring_beam, pixel_size, plane_coordinate=None):
     """The correcting transform of every plane whose residual goes to the target.
 
     Parameters
@@ -494,6 +494,9 @@ def _correcting_transforms(beam, restoring_beam, pixel_size):
         Target ``[major, minor, pa]`` in radians.
     pixel_size : float
         Absolute image-cell size in radians.
+    plane_coordinate : tuple, optional
+        ``(name, values)`` of the plane axis, by which the warning names the
+        planes; their indices by default.
 
     Returns
     -------
@@ -521,12 +524,21 @@ def _correcting_transforms(beam, restoring_beam, pixel_size):
                 float(area_ratio[index]),
             )
     if not_contained or no_fit:
+        name, values = plane_coordinate or ("plane index", range(beam.shape[1]))
+        growth = [
+            ((time_index, values[plane_index]), factor)
+            for (time_index, plane_index), factor in _growth_factors(
+                beam, restoring_beam, not_contained
+            )
+        ]
+        without_fit = [
+            (time_index, values[plane_index]) for time_index, plane_index in no_fit
+        ]
         logger.warning(
             f"restoring_beam {list(map(float, restoring_beam))} rad: the residual "
-            "of these (time, plane) planes is kept unconvolved and unscaled. "
-            "Not contained by the target (growth factor that would contain "
-            f"them): {_growth_factors(beam, restoring_beam, not_contained)}. "
-            f"Without a PSF fit: {no_fit}."
+            f"of these (time index, {name}) planes is kept unconvolved and "
+            "unscaled. Not contained by the target (growth factor that would "
+            f"contain them): {growth}. Without a PSF fit: {without_fit}."
         )
     return transforms
 
@@ -696,6 +708,7 @@ def _restore_image_arrays(
     output="apparent",
     consume_model=False,
     restoring_beam=None,
+    plane_coordinate=None,
 ):
     """Restore generic image planes without assuming an axis coordinate name.
 
@@ -733,6 +746,10 @@ def _restore_image_arrays(
     restoring_beam : array_like, optional
         Target beam ``[major, minor, pa]`` in radians; ``None`` restores each
         plane with its own beam.
+    plane_coordinate : tuple, optional
+        ``(name, values)`` of the plane axis, by which the warning of
+        :func:`_correcting_transforms` names the planes; their indices by
+        default.
 
     Returns
     -------
@@ -805,7 +822,9 @@ def _restore_image_arrays(
             if model.any()
             else None
         )
-        transforms = _correcting_transforms(beam[:, :, 0], restoring_beam, pixel_size)
+        transforms = _correcting_transforms(
+            beam[:, :, 0], restoring_beam, pixel_size, plane_coordinate
+        )
 
     for time_index in range(nt):
         for plane_index in range(nplane):
@@ -1180,6 +1199,7 @@ def restore_image(
         output=restoration_output,
         consume_model=(consume_model and model_sky_name != residual_sky_name),
         restoring_beam=restoring_beam,
+        plane_coordinate=("frequency in Hz", residual_da["frequency"].values.tolist()),
     )
     consume = bool(array_timing["consumed_model"])
     if correct:

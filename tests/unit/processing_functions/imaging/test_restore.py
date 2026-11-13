@@ -908,9 +908,11 @@ def test_planes_not_contained_or_without_a_fit_keep_their_residual(
             np.testing.assert_array_equal(
                 restored["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"][0, f, q], expected
             )
+    frequency = xds.frequency.values.tolist()
     assert len(messages) == 1
-    assert "[((0, 1), 1.2" in messages[0]
-    assert "Without a PSF fit: [(0, 2)]" in messages[0]
+    assert "(time index, frequency in Hz)" in messages[0]
+    assert f"[((0, {frequency[1]}), 1.2" in messages[0]
+    assert f"Without a PSF fit: [(0, {frequency[2]})]" in messages[0]
 
 
 @pytest.mark.parametrize("output", OUTPUTS)
