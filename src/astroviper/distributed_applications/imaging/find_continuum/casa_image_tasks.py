@@ -52,10 +52,13 @@ def cube_session(cubes, reduce):
     Parameters
     ----------
     cubes : dict
-        Path findContinuum uses to a dict with ``variable`` (data variable of
-        the image store), ``metadata`` (CASA image metadata) and, for the dirty
-        cube, ``atmosphere`` (``{"transmission": ..., "tsky": ...}``, one value
-        per channel). Each path must exist as a directory.
+        Path findContinuum uses to a dict with ``store`` (the image store),
+        ``variable`` (its data variable), ``metadata`` (CASA image metadata),
+        optionally ``primary_beam`` and ``primary_beam_limit`` (pixels where
+        that variable is below the limit are masked, as in the cubes of
+        ``tclean`` with ``pblimit``) and, for the dirty cube, ``atmosphere``
+        (``{"transmission": ..., "tsky": ...}``, one value per channel). Each
+        path must exist as a directory.
     reduce : callable
         ``reduce(requests)`` returns the finalized results of a list of
         reduction requests over the registered cubes.
@@ -120,18 +123,24 @@ def _read(path):
     return values, mask, metadata
 
 
-def _read_cube_channels(path, channels):
+def _read_cube_channels(path, channels, spatial=(slice(None), slice(None))):
     import xarray as xr
 
     cube = _cube(path)
     lazy_xds = xr.open_zarr(cube["store"], chunks=None)
-    plane = (
-        lazy_xds[cube["variable"]]
-        .isel(frequency=slice(None) if channels is None else list(channels))
-        .sel(polarization=["I"])
-        .values[0]
+    selection = dict(
+        frequency=slice(None) if channels is None else list(channels),
+        l=spatial[0],
+        m=spatial[1],
     )
-    values = np.transpose(plane, (2, 3, 1, 0)).astype(np.float64)
+
+    def plane(variable):
+        planes = lazy_xds[variable].isel(selection).sel(polarization=["I"]).values[0]
+        return np.transpose(planes, (2, 3, 1, 0))
+
+    values = plane(cube["variable"]).astype(np.float64)
+    if cube.get("primary_beam_limit") is not None:
+        values[plane(cube["primary_beam"]) < cube["primary_beam_limit"]] = np.nan
     return values, np.isfinite(values), dict(cube["metadata"], shape=list(values.shape))
 
 
@@ -232,6 +241,9 @@ def immoments(
 
 
 def _statistics_dict(stats, maxpos=None, minpos=None):
+    # CASA returns empty arrays when no pixel of the image is valid.
+    if np.ndim(stats["npts"]) == 0 and not stats["npts"]:
+        return {key: np.array([], dtype=np.float64) for key in stats}
     result = {
         key: np.atleast_1d(np.asarray(value, dtype=np.float64))
         for key, value in stats.items()
@@ -281,17 +293,17 @@ def imstat(
         )
         return _statistics_dict(_reduce([request])[0])
     if _cube(imagename) is not None:
-        channels = parse_channel_selection(
-            chans, _cube(imagename)["metadata"]["shape"][3]
-        )
-        values, valid, _ = _read_cube_channels(imagename, channels)
+        shape = _cube(imagename)["metadata"]["shape"]
+        channels = parse_channel_selection(chans, shape[3])
+        spatial = _box_slices(box, shape)
+        values, valid, _ = _read_cube_channels(imagename, channels, spatial)
     else:
         values, valid, _ = _read(imagename)
         channels = parse_channel_selection(chans, values.shape[3])
         if channels is not None:
             values, valid = values[..., channels], valid[..., channels]
-    spatial = _box_slices(box, values.shape)
-    values, valid = values[spatial], valid[spatial]
+        spatial = _box_slices(box, values.shape)
+        values, valid = values[spatial], valid[spatial]
     valid = valid & np.isfinite(values)
     if mask:
         valid &= np.broadcast_to(
