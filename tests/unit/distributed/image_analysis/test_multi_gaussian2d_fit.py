@@ -1985,9 +1985,9 @@ class TestAngleEndToEndFitter(unittest.TestCase):
         # Expected wrap: ((θ + π/2) % π) − π/2  ∈ (-π/2, π/2]
         expected_wrapped = ((theta_math_true + np.pi / 2) % np.pi) - np.pi / 2
         assert (-np.pi / 2 - 1e-9) < th_m <= (np.pi / 2 + 1e-9)
-        assert (
-            abs(th_m - expected_wrapped) < 0.15
-        ), f"got {th_m}, expected ~{expected_wrapped}"
+        assert abs(th_m - expected_wrapped) < 0.15, (
+            f"got {th_m}, expected ~{expected_wrapped}"
+        )
 
         # Also verify PA report matches θ→PA conversion on the same fit if requested
         # (exercises publishing in requested convention).
@@ -2234,7 +2234,9 @@ class TestResultMetadataVersion:
 
 
 class TestBoundsFwhmMapping:
-    def _dummy_results(self, da: xr.DataArray, n: int) -> tuple[
+    def _dummy_results(
+        self, da: xr.DataArray, n: int
+    ) -> tuple[
         xr.DataArray,
         xr.DataArray,
         xr.DataArray,

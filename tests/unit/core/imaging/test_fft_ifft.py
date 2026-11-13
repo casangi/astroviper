@@ -8,7 +8,6 @@ import unittest
 
 
 class FFTTest(unittest.TestCase):
-
     def test_fft_ifft_round_trip(self):
         sky_lm = np.zeros((128, 128))
         sky_lm[64, 64] = 1

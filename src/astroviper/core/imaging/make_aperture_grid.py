@@ -21,9 +21,9 @@ def make_aperture_grid(
     _grid_params = copy.deepcopy(grid_params)
 
     _img_sel_params["overwrite"] = True
-    assert check_grid_params(
-        _grid_params
-    ), "######### ERROR: grid_params checking failed"
+    assert check_grid_params(_grid_params), (
+        "######### ERROR: grid_params checking failed"
+    )
 
     ms_data_group_in, ms_data_group_out = check_sel_params(
         ms_xds, _vis_sel_params, default_data_group_in_name="base"
@@ -107,9 +107,9 @@ def make_aperture_grid(
         phase_gradient,
     )
 
-    img_xds.attrs["data_groups"][
-        img_data_group_out["data_group_out_name"]
-    ] = img_data_group_out
+    img_xds.attrs["data_groups"][img_data_group_out["data_group_out_name"]] = (
+        img_data_group_out
+    )
 
 
 #    plt.figure()

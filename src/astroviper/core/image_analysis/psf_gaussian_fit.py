@@ -330,9 +330,7 @@ def psf_gaussian_fit_core(image_to_fit, blc, trc, sampling, cutoff, delta):
     for time in range(image_to_fit.shape[0]):
         for chan in range(image_to_fit.shape[1]):
             for pol in range(image_to_fit.shape[2]):
-
                 with objmode(res_x="f8[:]"):  # return type annotation
-
                     interp_image_to_fit = np.reshape(
                         interpn(
                             (d0, d1),

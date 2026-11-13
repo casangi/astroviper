@@ -150,7 +150,6 @@ class FeatherShared:
 
 
 class FeatherTest(FeatherShared, unittest.TestCase):
-
     # ------------------------------------------------------------------------
     def setUp(self):
         pass

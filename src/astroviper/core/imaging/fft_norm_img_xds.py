@@ -17,14 +17,14 @@ import copy
 def fft_norm_img_xds(img_xds, gcf_xds, grid_params, norm_params, sel_params):
     _sel_params = copy.deepcopy(sel_params)
     _grid_params = copy.deepcopy(grid_params)
-    assert check_grid_params(
-        _grid_params
-    ), "######### ERROR: grid_params checking failed"
+    assert check_grid_params(_grid_params), (
+        "######### ERROR: grid_params checking failed"
+    )
 
     _norm_params = copy.deepcopy(norm_params)
-    assert check_norm_params(
-        _norm_params
-    ), "######### ERROR: norm_params checking failed"
+    assert check_norm_params(_norm_params), (
+        "######### ERROR: norm_params checking failed"
+    )
 
     if "PRIMARY_BEAM" in img_xds:
         data_group_in, data_group_out = check_sel_params(
@@ -63,7 +63,6 @@ def fft_norm_img_xds(img_xds, gcf_xds, grid_params, norm_params, sel_params):
 
     for data_variable in ["aperture", "uv_sampling", "visibility"]:
         if data_variable in data_group_in.keys():
-
             if (data_variable == "aperture") and ("APERTURE" in img_xds):
                 # print('1.',data_group_out["aperture_grid_sum_weight"],img_xds[data_group_in[data_variable]].shape,_grid_params['image_size'])
                 image = remove_padding(

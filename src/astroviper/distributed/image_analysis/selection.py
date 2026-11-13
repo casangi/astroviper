@@ -833,7 +833,9 @@ def _build_creation_for_expression(expr: str, env: Mapping[str, ArrayLike]) -> s
             op = (
                 "&"
                 if isinstance(node.op, ast.BitAnd)
-                else "|" if isinstance(node.op, ast.BitOr) else "^"
+                else "|"
+                if isinstance(node.op, ast.BitOr)
+                else "^"
             )
             left = _emit(node.left)
             right = _emit(node.right)

@@ -121,9 +121,9 @@ def calculate_imaging_weights(
     """
     _sel_params = copy.deepcopy(sel_params)
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
-    assert check_imaging_weights_params(
-        _imaging_weights_params
-    ), "######### ERROR: imaging_weights_params checking failed"
+    assert check_imaging_weights_params(_imaging_weights_params), (
+        "######### ERROR: imaging_weights_params checking failed"
+    )
 
     if _imaging_weights_params["weighting"] == "natural":
         _sel_params["overwrite"] = True  # No actual overwrite is occuring.
@@ -163,9 +163,9 @@ def calculate_imaging_weights(
         )
 
     _grid_params = copy.deepcopy(grid_params)
-    assert check_grid_params(
-        _grid_params
-    ), "######### ERROR: grid_params checking failed"
+    assert check_grid_params(_grid_params), (
+        "######### ERROR: grid_params checking failed"
+    )
     _grid_params["image_size_padded"] = _grid_params[
         "image_size"
     ]  # do not need to pad since no fft

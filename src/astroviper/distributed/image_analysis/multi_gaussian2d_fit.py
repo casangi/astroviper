@@ -448,7 +448,9 @@ def _merge_bounds_multi(
             if len(val) != n:
                 raise ValueError(f"bounds[{key!r}] length must be n={n}")
             for i, rng in enumerate(val):  # type: ignore[assignment]
-                _set_range(canon, idx_in_comp, _to_sigma_rng(canon, tuple(rng)), comp_idx=i)  # type: ignore[arg-type]
+                _set_range(
+                    canon, idx_in_comp, _to_sigma_rng(canon, tuple(rng)), comp_idx=i
+                )  # type: ignore[arg-type]
     return lb, ub
 
 
@@ -1103,18 +1105,18 @@ def _interp_centers_world(
     )
 
     # Self-documenting attrs
-    ds["x0_world"].attrs[
-        "description"
-    ] = "Component center x in world coordinates (interpolated from pixel index)."
-    ds["y0_world"].attrs[
-        "description"
-    ] = "Component center y in world coordinates (interpolated from pixel index)."
-    ds["x0_world_err"].attrs[
-        "description"
-    ] = "1-sigma uncertainty of x0_world via local axis slope."
-    ds["y0_world_err"].attrs[
-        "description"
-    ] = "1-sigma uncertainty of y0_world via local axis slope."
+    ds["x0_world"].attrs["description"] = (
+        "Component center x in world coordinates (interpolated from pixel index)."
+    )
+    ds["y0_world"].attrs["description"] = (
+        "Component center y in world coordinates (interpolated from pixel index)."
+    )
+    ds["x0_world_err"].attrs["description"] = (
+        "1-sigma uncertainty of x0_world via local axis slope."
+    )
+    ds["y0_world_err"].attrs["description"] = (
+        "1-sigma uncertainty of y0_world via local axis slope."
+    )
     return ds
 
 
@@ -2197,12 +2199,12 @@ def fit_multi_gaussian2d(
             ds["x0_world_err"] = x0_e
             ds["y0_world_err"] = y0_e
             # Self-documenting attrs
-            ds["x0_world"].attrs[
-                "description"
-            ] = "Component center x in world coordinates."
-            ds["y0_world"].attrs[
-                "description"
-            ] = "Component center y in world coordinates."
+            ds["x0_world"].attrs["description"] = (
+                "Component center x in world coordinates."
+            )
+            ds["y0_world"].attrs["description"] = (
+                "Component center y in world coordinates."
+            )
             ds["x0_world_err"].attrs["description"] = "1-sigma uncertainty of x0_world."
             ds["y0_world_err"].attrs["description"] = "1-sigma uncertainty of y0_world."
         else:
@@ -2639,7 +2641,7 @@ def overlay_fit_components(
             ax.text(
                 cx_i,
                 cy_i,
-                f"{i+1}",
+                f"{i + 1}",
                 ha="center",
                 va="center",
                 fontsize=9,
