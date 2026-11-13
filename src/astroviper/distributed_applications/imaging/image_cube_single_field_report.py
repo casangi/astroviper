@@ -57,7 +57,9 @@ def image_cube_single_field_report(
     image_data_variables_keep : list of str, optional
         The image variables the run kept; ``None`` takes the variables found
         in ``image_store``. FITS output has no file of a beam-fit-params
-        variable, so its restoring beam is shown only with the list.
+        variable, so the PSF beams of its restoring-beam section are found
+        only with the list; the restoring beam is the header beam of the
+        restored images.
     thread_info : dict, optional
         Passed to ``moments``.
 
@@ -194,22 +196,42 @@ def _add_point_spread_function(document, image_store, output_image_format, avail
 
 def _open_beam_fit_params(image_store, output_image_format, available, key):
     """The beam-fit-params variable ``key`` (lazily opened), ``None`` when it
-    was not written. FITS output holds it in the ``BEAMS`` tables of the image
-    files it labels."""
-    if key not in available:
-        return None
+    was not written. FITS output holds the restoring beam in the header of the
+    restored images, and the others in the ``BEAMS`` tables of the image files
+    they label."""
     if output_image_format != "fits":
+        if key not in available:
+            return None
         return _open_variable(image_store, output_image_format, key)[key.upper()]
+    from astropy.io import fits
+
     from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+        _RESTORED_VARIABLES,
         _beams_table_variable,
     )
 
-    beam_variables = [name for name in available if name.startswith("beam_fit_params")]
-    for image_key in sorted(available):
-        if _beams_table_variable(image_key, beam_variables) == key:
-            img_xds = _open_variable(image_store, output_image_format, image_key)
-            return img_xds["BEAM_FIT_PARAMS_" + image_key.upper()]
-    return None
+    if key == "beam_fit_params_sky_restored":
+        image_keys = [
+            image_key
+            for image_key in sorted(_RESTORED_VARIABLES & available)
+            if "BMAJ"
+            in fits.getheader(os.path.join(image_store, image_key.upper() + ".fits"))
+        ]
+    elif key in available:
+        beam_variables = [
+            name for name in available if name.startswith("beam_fit_params")
+        ]
+        image_keys = [
+            image_key
+            for image_key in sorted(available)
+            if _beams_table_variable(image_key, beam_variables) == key
+        ]
+    else:
+        image_keys = []
+    if not image_keys:
+        return None
+    img_xds = _open_variable(image_store, output_image_format, image_keys[0])
+    return img_xds["BEAM_FIT_PARAMS_" + image_keys[0].upper()]
 
 
 def _add_restoring_beam(document, image_store, output_image_format, available):

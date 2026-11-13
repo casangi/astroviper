@@ -789,7 +789,9 @@ def image_cube_single_field(
         range, since frequency is the slowest-varying FITS axis -- directly
         into the shared files (no locking, no file creation). Kept
         beam-fit-params variables become CASA-style multi-beam ``BEAMS`` table
-        extensions. uv-domain / complex variables cannot be written to FITS.
+        extensions, except ``beam_fit_params_sky_restored``, the header beam
+        (``BMAJ``, ``BMIN``, ``BPA``) of the restored images.
+        uv-domain / complex variables cannot be written to FITS.
     task_time_kill_switch_seconds : float, optional
         Watchdog: if a node task's total wall time exceeds this many seconds, it
         writes an error log with that task's full timing breakdown and then raises,
@@ -1297,6 +1299,7 @@ def image_cube_single_field(
             double_precision=not single_precision_image,
             telescope_name=telescope_name,
             overwrite=overwrite,
+            restoring_beam=restoring_beam,
         )
         timing_distributed_application["T_create_empty_data_variables"] += (
             time.time() - start

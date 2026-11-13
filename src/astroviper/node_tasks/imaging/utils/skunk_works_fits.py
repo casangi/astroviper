@@ -29,6 +29,9 @@ Layout of each FITS file (conforming to what
   (``BMAJ, BMIN, BPA, CHAN, POL`` -- CASA's multi-beam convention). Rows are
   fixed-size and channel-major, so node tasks ``pwrite`` their channels' rows
   at disjoint offsets exactly like the image planes.
+* The restored images of a run with a ``restoring_beam`` instead carry that
+  one beam as ``BMAJ``, ``BMIN`` and ``BPA`` cards (degrees) of the primary
+  header, as ``tclean`` writes a restored image, and no ``BEAMS`` table.
 
 Unwritten planes of a sparse data area read back as 0.0 (filesystem holes),
 not NaN -- unlike the NaN-filled empty Zarr store. Every channel is written by
@@ -78,11 +81,12 @@ _BEAM_CARRYING_VARIABLES = frozenset(
         "sky_residual",
         "sky_model",
         "sky_restored",
-        "sky_restored_primary_beam_corrected",
         "sky_deconvolved",
         "point_spread_function",
     }
 )
+# With beam_fit_params_sky_restored kept, these carry the restoring beam in
+# their header.
 _RESTORED_VARIABLES = frozenset({"sky_restored", "sky_restored_primary_beam_corrected"})
 
 # Fixed BEAMS-table row layout written by create_empty_fits_images and assumed
@@ -94,18 +98,26 @@ _FULL_DIMS_LM = ("time", "frequency", "polarization", "l", "m")
 _BEAM_PARAMS_DIMS = ("time", "frequency", "polarization", "beam_params_label")
 
 
-def _beams_table_variable(image_variable, beam_variables):
-    """The beam-fit-params variable whose rows fill the ``BEAMS`` table of
-    ``image_variable`` (``None`` for a file without one): the restoring beam
-    for a restored image when it is kept, else the clean beam (PSF fit), else
-    the first other beam-fit-params variable kept."""
-    if image_variable not in _BEAM_CARRYING_VARIABLES:
-        return None
-    if (
+def _header_beam(image_variable, beam_variables):
+    """Whether the file of ``image_variable`` carries the restoring beam as
+    its header beam: a restored image when ``beam_fit_params_sky_restored`` is
+    kept."""
+    return (
         image_variable in _RESTORED_VARIABLES
         and "beam_fit_params_sky_restored" in beam_variables
+    )
+
+
+def _beams_table_variable(image_variable, beam_variables):
+    """The beam-fit-params variable whose rows fill the ``BEAMS`` table of
+    ``image_variable`` (``None`` for a file without one): the clean beam (PSF
+    fit), else the first other beam-fit-params variable kept, except the
+    restoring beam, which goes into the header of the restored images
+    (:func:`_header_beam`)."""
+    if image_variable not in _BEAM_CARRYING_VARIABLES or _header_beam(
+        image_variable, beam_variables
     ):
-        return "beam_fit_params_sky_restored"
+        return None
     others = [dv for dv in beam_variables if dv != "beam_fit_params_sky_restored"]
     if "beam_fit_params_point_spread_function" in others:
         return "beam_fit_params_point_spread_function"
@@ -170,7 +182,7 @@ def _direction_axis_values(coord_values):
 
 
 def _build_primary_header(
-    img_xds, bitpix, bunit, btype, telescope_name, has_beams_extension
+    img_xds, bitpix, bunit, btype, telescope_name, has_beams_extension, beam=None
 ):
     """Primary-HDU header for one image variable, generated from the empty image.
 
@@ -179,7 +191,9 @@ def _build_primary_header(
     ``RESTFRQ``/``SPECSYS``, ``TELESCOP``, ``DATE-OBS``/``TIMESYS``), and every
     keyword written is one the reader consumes or excludes from the user attrs,
     so nothing leaks into ``attrs["user"]`` on read. Nonuniform frequency
-    grids are rejected by the shared coordinate check.
+    grids are rejected by the shared coordinate check. ``beam``
+    (``[major, minor, pa]`` in radians) is written as the ``BMAJ``, ``BMIN``
+    and ``BPA`` cards in degrees, the one beam of every plane.
     """
     from astropy.io import fits
     from astropy.time import Time
@@ -265,6 +279,9 @@ def _build_primary_header(
         )
     if has_beams_extension:
         header["CASAMBM"] = (True, "CASA multiple beams per channel/polarization")
+    if beam is not None:
+        for keyword, value in zip(("BMAJ", "BMIN", "BPA"), beam, strict=True):
+            header[keyword] = float(np.degrees(value))
     return header
 
 
@@ -359,6 +376,7 @@ def create_empty_fits_images(
     double_precision=False,
     telescope_name="UNKNOWN",
     overwrite=False,
+    restoring_beam=None,
 ):
     """Pre-create one XRADIO-conformant FITS file per kept image variable.
 
@@ -372,10 +390,12 @@ def create_empty_fits_images(
       reference direction, spectral frame, and observation date;
     * a sparse (``ftruncate``\\ d) primary data area sized for the full cube --
       no pixel data is materialised, so creation is metadata-cost only;
-    * a zero-filled ``BEAMS`` binary-table extension (and ``CASAMBM = T``) on
-      every variable a kept beam-fit-params variable labels
+    * a ``BEAMS`` binary-table extension of zero beams (and ``CASAMBM = T``)
+      on every variable a kept beam-fit-params variable labels
       (:func:`_beams_table_variable`), whose fixed-size rows the node tasks
-      later overwrite in place.
+      later overwrite in place;
+    * with ``beam_fit_params_sky_restored`` kept, ``restoring_beam`` as the
+      header beam of the restored images (:func:`_header_beam`).
 
     The concurrent write phase then creates no files and writes only disjoint
     byte ranges (:func:`write_result_chunk_to_fits_skunk_works`).
@@ -402,6 +422,9 @@ def create_empty_fits_images(
     overwrite : bool, optional
         Replace an existing ``image_store``. Default ``False`` (raise
         ``FileExistsError``).
+    restoring_beam : sequence of float, optional
+        The run's target beam ``[major, minor, pa]`` in radians, required when
+        ``beam_fit_params_sky_restored`` is kept.
 
     Returns
     -------
@@ -418,6 +441,11 @@ def create_empty_fits_images(
     check_kept_variables(
         {"image_data_variables_keep": image_data_variables_keep}, fits=True
     )
+    if "beam_fit_params_sky_restored" in beam_variables and restoring_beam is None:
+        raise ValueError(
+            "beam_fit_params_sky_restored needs the restoring_beam: the restored "
+            "FITS images carry it as their header beam."
+        )
 
     if os.path.exists(image_store):
         if not overwrite:
@@ -445,7 +473,13 @@ def create_empty_fits_images(
         bunit, btype = _VARIABLE_FITS_UNITS.get(key, _DEFAULT_FITS_UNITS)
         has_beams = _beams_table_variable(key, beam_variables) is not None
         header = _build_primary_header(
-            img_xds, bitpix, bunit, btype, telescope_name, has_beams
+            img_xds,
+            bitpix,
+            bunit,
+            btype,
+            telescope_name,
+            has_beams,
+            beam=restoring_beam if _header_beam(key, beam_variables) else None,
         )
         header_bytes = header.tostring().encode("ascii")
         path = os.path.join(image_store, key.upper() + ".fits")
@@ -628,9 +662,9 @@ def write_result_chunk_to_fits_skunk_works(
 
     Every kept image file that carries a ``BEAMS`` extension gets full table
     rows (values plus their ``CHAN``/``POL`` indices) of the beam-fit-params
-    variable that :func:`_beams_table_variable` assigns to it: the restoring
-    beam for the restored images when it is kept, else the clean beam (PSF
-    fit).
+    variable that :func:`_beams_table_variable` assigns to it, the clean beam
+    (PSF fit) when it is kept. The restoring beam is not written here: the
+    restored images carry it in their header from the start.
 
     Parameters
     ----------

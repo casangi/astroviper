@@ -310,7 +310,7 @@ def _beam_store(tmp_path, output_image_format, psf_beams, restoring_beam):
     if output_image_format == "zarr":
         return write_zarr_image_store(img_xds, str(tmp_path / "cube.img.zarr")), keep
     store = str(tmp_path / "cube.img.fits")
-    create_empty_fits_images(store, img_xds, keep)
+    create_empty_fits_images(store, img_xds, keep, restoring_beam=restoring_beam)
     write_result_chunk_to_fits_skunk_works(
         store, keep, {"frequency": {"slice": slice(0, n_chan)}}, img_xds
     )

@@ -1731,23 +1731,31 @@ def test_restoring_beam_casa_image_has_one_restoring_beam(common_beam_cube, tmp_
     )
 
 
-def test_restoring_beam_fits_beams_tables_hold_the_target(common_beam_cube):
-    """The ``BEAMS`` tables of both restored FITS files hold the target in the
-    row of every plane, the flagged channel's included."""
+def test_restoring_beam_fits_files_carry_the_target_as_their_beam(common_beam_cube):
+    """Both restored FITS files carry the target as their header beam, as
+    tclean writes a restored image, without a BEAMS table; XRADIO reads it for
+    every plane, the flagged channel's included."""
     from astropy.io import fits
+    from xradio.image import open_image
 
-    columns = ("BMAJ", "BMIN", "BPA")
+    target = common_beam_cube["target"]
     for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
         path = os.path.join(common_beam_cube["fits_store"], f"{name}.fits")
         with fits.open(path) as hdulist:
-            beams = hdulist["BEAMS"]
-            units = [beams.columns[column].unit for column in columns]
-            rows = np.stack([beams.data[column] for column in columns], axis=-1)
-        assert units == ["rad"] * 3, name
-        # a row for every (channel, Stokes I and Q) plane
-        assert rows.shape == (COMMON_BEAM_FREQUENCY_PARAMS["n_channels"] * 2, 3), name
-        np.testing.assert_array_equal(
-            rows, np.broadcast_to(common_beam_cube["target"], rows.shape), err_msg=name
+            assert len(hdulist) == 1, name
+            header = hdulist[0].header
+        assert "CASAMBM" not in header, name
+        np.testing.assert_allclose(
+            [header[keyword] for keyword in ("BMAJ", "BMIN", "BPA")],
+            np.degrees(target),
+            rtol=1e-15,
+            err_msg=name,
+        )
+        beams = open_image({name.lower(): path})[f"BEAM_FIT_PARAMS_{name}"].values
+        # a beam for every (channel, Stokes I and Q) plane
+        assert beams.shape == (1, COMMON_BEAM_FREQUENCY_PARAMS["n_channels"], 2, 3)
+        np.testing.assert_allclose(
+            beams, np.broadcast_to(target, beams.shape), rtol=1e-14, err_msg=name
         )
 
 
