@@ -13,6 +13,7 @@ a Measurement Set.
 
 import collections
 import contextlib
+import copy
 import os
 import re
 
@@ -72,6 +73,7 @@ def cube_session(cubes, reduce):
     finally:
         _session = None
         _small_images.clear()
+        _small_image_statistics.clear()
 
 
 def _cube(path):
@@ -147,6 +149,11 @@ def _read(path):
         _small_images.move_to_end((path, write_id))
         return _small_images[path, write_id]
     return _remember(path, write_id, *read_small_image(path))
+
+
+# imstat results of small images, keyed by the arguments and the write ids
+# of the images they read; findContinuum repeats many of its imstat calls.
+_small_image_statistics = {}
 
 
 def _write(path, values, mask, metadata):
@@ -329,6 +336,29 @@ def imstat(
             imagename, "statistics", chans, mask, per_channel=per_channel
         )
         return _statistics_dict(_reduce([request])[0])
+    if _cube(imagename) is not None:
+        return _image_statistics(
+            imagename, per_channel, box, chans, mask, algorithm, maxiter
+        )
+    images = [imagename.rstrip("/"), *_mask_references(mask)[0]]
+    key = (
+        tuple((name, small_image_attributes(name)[0]) for name in images),
+        per_channel,
+        box,
+        chans,
+        mask,
+        algorithm,
+        maxiter,
+    )
+    if key not in _small_image_statistics:
+        _small_image_statistics[key] = _image_statistics(
+            imagename, per_channel, box, chans, mask, algorithm, maxiter
+        )
+    return copy.deepcopy(_small_image_statistics[key])
+
+
+def _image_statistics(imagename, per_channel, box, chans, mask, algorithm, maxiter):
+    """imstat of a box of a cube, or of a small image."""
     if _cube(imagename) is not None:
         shape = _cube(imagename)["metadata"]["shape"]
         channels = parse_channel_selection(chans, shape[3])
