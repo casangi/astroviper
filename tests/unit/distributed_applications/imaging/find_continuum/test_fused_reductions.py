@@ -2,12 +2,16 @@
 
 import numpy as np
 import pytest
+import zarr
 
 from astroviper.distributed_applications.imaging.find_continuum import (
     casa_image_tasks as cit,
 )
 from astroviper.distributed_applications.imaging.find_continuum.fused_reductions import (
     FusedReductions,
+)
+from astroviper.distributed_applications.imaging.find_continuum.ultra_reductions import (
+    StoredMap,
 )
 from astroviper.node_tasks.imaging.find_continuum import write_small_image
 
@@ -23,14 +27,21 @@ CUBE, PRIMARY_BEAM = "/data/cube.residual", "/data/cube.pb"
 
 
 class FakePasses:
-    """Records every pass and answers each request with its pass and position."""
+    """Records every pass and answers each request with its pass and position;
+    with ``drop``, predictions are left out (``None``)."""
 
-    def __init__(self):
-        self.passes = []
+    def __init__(self, drop=False):
+        self.passes, self.n_requested, self.drop = [], [], drop
 
-    def __call__(self, requests):
+    def __call__(self, requests, n_requested):
         self.passes.append(list(requests))
-        return [{"pass": len(self.passes), "position": i} for i in range(len(requests))]
+        self.n_requested.append(n_requested)
+        return [
+            None
+            if self.drop and i >= n_requested
+            else {"pass": len(self.passes), "position": i}
+            for i in range(len(requests))
+        ]
 
 
 @pytest.fixture
@@ -52,7 +63,7 @@ def test_first_pass_adds_the_first_round(backend):
     fused([request])
     (first,) = passes.passes
     assert first[0] == request
-    assert len(first) == 4
+    assert len(first) == 4 and passes.n_requested == [1]
     moments = [r for r in first if r["kind"] == "moments" and r["image"] == CUBE]
     assert moments[0]["mask"] == f'"{CUBE}"!=0' and moments[0]["moments"] == [0, 8]
     assert {(r["image"], r["kind"]) for r in first[2:]} == {
@@ -145,6 +156,67 @@ def test_failed_prediction_does_not_stop_the_run(backend):
 
     assert fused._capture(fails) == []
     assert fused.captured is None
+
+
+def test_predictions_left_out_are_not_cached():
+    passes = FakePasses(drop=True)
+    fused = FusedReductions(passes, CUBE, PRIMARY_BEAM)
+    cubes = {CUBE: {"metadata": METADATA}, PRIMARY_BEAM: {"metadata": METADATA}}
+    with cit.cube_session(cubes, fused):
+        request = _statistics(chans="2~5", per_channel=True)
+        assert fused([request]) == [{"pass": 1, "position": 0}]
+        assert len(passes.passes[0]) == 5
+        assert fused([_statistics()]) == [{"pass": 2, "position": 0}]
+        assert fused([request]) == [{"pass": 1, "position": 0}]
+        assert passes.n_requested == [1, 1]
+
+
+def test_moment_maps_are_answered_without_copies(tmp_path):
+    """Maps in memory are answered as they are, maps in a store are read afresh
+    for every answer, and other results are copies."""
+    store = str(tmp_path / "results.zarr")
+    zarr.open_group(store, mode="w").create_array(
+        "R0_MOMENT_8", data=np.arange(12, dtype=np.float32).reshape(4, 3)
+    )
+    integrated, profile = np.ones((4, 3)), np.arange(N_CHANNELS, dtype=float)
+
+    def run_pass(requests, n_requested):
+        return [
+            {0: integrated, 8: StoredMap(store, "R0_MOMENT_8")}
+            if request["kind"] == "moments"
+            else profile
+            for request in requests
+        ]
+
+    fused = FusedReductions(run_pass, CUBE, PRIMARY_BEAM)
+    cubes = {CUBE: {"metadata": METADATA}, PRIMARY_BEAM: {"metadata": METADATA}}
+    with cit.cube_session(cubes, fused):
+        moments = cit._moments_request(CUBE, [0, 8], "2~10")
+        first, second = fused([moments])[0], fused([moments])[0]
+        assert first[0] is integrated and second[0] is integrated
+        assert first[8] is not second[8] and first[8].dtype == np.float64
+        np.testing.assert_array_equal(first[8], np.arange(12.0).reshape(4, 3))
+        request = cit._cube_request(CUBE, "profile", "", "", function="mean")
+        answer = fused([request])[0]
+        answer[:] = -1.0
+        np.testing.assert_array_equal(fused([request])[0], profile)
+
+
+def test_first_pass_adds_the_first_round_the_imager_left_out():
+    passes = FakePasses()
+    first_round = [{"precomputed": index} for index in range(4)]
+    first_round[1] = None
+    fused = FusedReductions(passes, CUBE, PRIMARY_BEAM, first_round)
+    cubes = {CUBE: {"metadata": METADATA}, PRIMARY_BEAM: {"metadata": METADATA}}
+    with cit.cube_session(cubes, fused):
+        assert fused([_statistics()]) == [{"precomputed": 2}]
+        assert passes.passes == []
+        fused([_statistics(chans="1~3")])
+        (first,) = passes.passes
+        assert first[0] == _statistics(chans="1~3") and len(first) == 2
+        assert first[1]["moments"] == [0, 8] and first[1]["mask"] == f'"{CUBE}"!=0'
+        fused([_statistics(chans="1~4")])
+        assert len(passes.passes[1]) == 1
 
 
 def test_precomputed_first_round_fills_the_cache():

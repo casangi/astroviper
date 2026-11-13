@@ -158,22 +158,25 @@ _FIELD_NAME_DOC = (
     "not currently filter fields; prepare a single-field input Processing Set."
 )
 
-# The parameters of find_continuum and find_continuum_fused.
+# The parameters of find_continuum, find_continuum_fused and find_continuum_ultra.
 _FIND_CONTINUUM_PARAM_DOCS = {
     "input_image_store": "xradio image store of the dirty cube (Stokes I is used).",
     "atmospheric_transmission": (
-        "Atmospheric transmission at every channel (0 to 1), as CASA's\n"
-        "atmosphere model gives it for the observation."
+        "Atmospheric transmission at every channel of ``channel_range`` (0 to\n"
+        "1), as CASA's atmosphere model gives it for the observation."
     ),
-    "atmospheric_sky_temperature": "Sky brightness temperature at every channel (K).",
+    "atmospheric_sky_temperature": (
+        "Sky brightness temperature at every channel of ``channel_range`` (K)."
+    ),
     "work_directory": (
         "Directory for findContinuum's plots, spectra and intermediate images.\n"
         "It must not hold the products of an earlier run on a cube of the same\n"
         "name: findContinuum would reuse them, as in the pipeline."
     ),
     "image_data_group_in_name": (
-        "Image data group with the roles ``sky``, ``primary_beam``,\n"
-        "``point_spread_function`` and ``beam_fit_params_point_spread_function``."
+        "Image data group with the roles ``sky``, ``primary_beam`` and\n"
+        "``beam_fit_params_point_spread_function`` (findContinuum reads the\n"
+        "point spread function through its beams only)."
     ),
     "telescope_name": "Telescope, as findContinuum reads it from a CASA image header.",
     "single_continuum": (
@@ -194,11 +197,45 @@ _FIND_CONTINUUM_PARAM_DOCS = {
         '``{"frequency": n}``, the number of frequency chunks of every\n'
         "map-reduce; one chunk if not given."
     ),
+    "first_round_reductions": (
+        "``find_continuum_first_round`` of\n"
+        ":func:`~astroviper.distributed_applications.imaging.image_cube_single_field.image_cube_single_field`\n"
+        "(made with the same primary beam limit): the first-round store it\n"
+        "made next to the cube while imaging it. The store's primary-beam\n"
+        "statistics, cube statistics and, when they are complete for the\n"
+        "spectral window, moments 0 and 8 answer findContinuum's first round,\n"
+        "and the mean primary beam is read from five planes, so the pass that\n"
+        "would compute them is not made. A store is used only on the cube and\n"
+        "data group it was made from, unchanged since."
+    ),
+    "thread_info": (
+        "``n_threads`` and ``memory_per_thread`` (GiB) of the cluster, as\n"
+        ":func:`~astroviper.utils.data_partitioning.get_thread_info` returns\n"
+        "them (the default): the frequency chunks and the memory budget of a\n"
+        "task follow from them."
+    ),
+    "memory_budget_gb": (
+        "Memory budget of a frequency task (GiB). The default, and the largest\n"
+        "value used, is 0.8 of ``memory_per_thread`` less the task baseline\n"
+        "(``min(1.5, 0.2 x memory_per_thread)``). A pass whose tasks would\n"
+        "exceed it reads fewer planes at a time, leaves out predicted moment\n"
+        "maps or is split into passes; a requested reduction that does not fit\n"
+        "at one plane per read is refused."
+    ),
+    "channel_range": (
+        "``[start, stop)``, the channels of the cube that findContinuum sees as\n"
+        "its cube: one spectral window, on which the frequencies are linear (a\n"
+        "run of\n"
+        ":func:`~astroviper.processing_functions.imaging.find_continuum.linear_channel_ranges`).\n"
+        "``None`` (default): every channel, refused for a cube of several\n"
+        "spectral windows."
+    ),
     "monitor_resources_seconds": (
         "If set, sample each node task's worker-process CPU, memory and I/O\n"
         "every this many seconds (graphviper's resource monitor) and carry the\n"
         "series into ``timing_node_tasks`` as list-valued columns, as\n"
-        "``image_cube_single_field`` does. Requires ``psutil``."
+        "``image_cube_single_field`` does; the driver is sampled while\n"
+        "findContinuum runs. Requires ``psutil``."
     ),
     "report": (
         'Make a report of the run: ``"html"`` or ``"pdf"``, written in\n'
@@ -926,7 +963,15 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
     ),
     **{
         f"{function}.{name}": description
-        for function in ("find_continuum", "find_continuum_fused")
+        for function in (
+            "find_continuum",
+            "find_continuum_fused",
+            "find_continuum_ultra",
+        )
         for name, description in _FIND_CONTINUUM_PARAM_DOCS.items()
     },
+    "find_continuum_ultra.n_mapping_parallelism": (
+        '``{"frequency": n}``, the number of frequency chunks of every pass;\n'
+        "about 4 x ``n_threads`` chunks of whole shards if not given."
+    ),
 }
