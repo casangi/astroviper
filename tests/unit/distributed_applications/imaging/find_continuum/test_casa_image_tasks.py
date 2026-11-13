@@ -1,5 +1,7 @@
 """Tests of the CASA tasks and tools that find_continuum gives findContinuum."""
 
+import os
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -8,6 +10,7 @@ from xradio.image import write_image
 from astroviper.distributed_applications.imaging.find_continuum import (
     casa_image_tasks as cit,
 )
+from astroviper.distributed_applications.imaging.find_continuum import findContinuum
 from astroviper.distributed_applications.imaging.find_continuum.find_continuum import (
     _cube_metadata,
 )
@@ -163,6 +166,29 @@ class TestCubeTasks:
         whole_box = cit.imstat(session["residual"], box="0,0,3,3", axes=[0, 1, 2])
         np.testing.assert_allclose(whole_box["max"], sky[:4, :4].max(axis=(0, 1, 2)))
 
+    def test_imstat_box_below_primary_beam_limit(self, session):
+        """A box below the primary beam limit has no valid pixel: CASA gives
+        empty arrays, which findContinuum counts to find masked corners."""
+        middle = N_CHANNELS // 2
+        pb = session["pb_values"][..., 0, middle]
+        half = N_PIXELS // 2
+        corners = pb[[0, 0, -1, -1], [0, -1, 0, -1]]
+        edges = pb[[0, -1, half, half], [half, half, 0, -1]]
+        assert corners.max() < edges.min()
+        limit = 0.5 * (corners.max() + edges.min())
+        for path in (session["residual"], session["pb"]):
+            cit._cube(path).update(
+                primary_beam="PRIMARY_BEAM", primary_beam_limit=limit
+            )
+            os.makedirs(path)
+
+        empty = cit.imstat(session["pb"], chans=str(middle), box="0,0,0,0")
+        assert empty and all(value.size == 0 for value in empty.values())
+        assert cit.imstat(session["pb"], chans=str(middle), box="0,6,0,6")["npts"] == 1
+        assert findContinuum.cornersEmptyEdgesNotEmpty(
+            session["pb"], middleChannel=middle
+        )
+
     def test_image_tool(self, session):
         ia = cit.iatool()
         ia.open(session["residual"])
@@ -257,7 +283,7 @@ class TestSmallImageTasks:
         chauvenet = cit.imstat(path, algorithm="chauvenet", maxiter=5)
         assert chauvenet["npts"][0] == 19
         empty = cit.imstat(path, mask=f'"{path}">100')
-        assert empty["npts"][0] == 0 and "maxpos" not in empty
+        assert empty["npts"].size == 0 and "maxpos" not in empty
 
     def test_immath_and_imsubimage(self, small, tmp_path):
         path, values, valid = small

@@ -6,11 +6,8 @@
 # the framework of the Atacama Large Millimeter/submillimeter Array (ALMA)
 # collaboration. All rights reserved.
 #
-# This library is free software; you can redistribute it and/or modify it under
-# the terms of the GNU Lesser General Public License as published by the Free
-# Software Foundation; either version 3 of the License, or (at your option) any
-# later version. It is distributed WITHOUT ANY WARRANTY; see the GNU Lesser
-# General Public License <https://www.gnu.org/licenses/> for details.
+# Included in AstroVIPER with the authorization of the copyright holders and
+# distributed under AstroVIPER's BSD 3-Clause License (LICENSE.txt).
 #
 # AstroVIPER changes: the CASA tasks and tools are imported from
 # casa_image_tasks (AstroVIPER implementations on xradio images), and the
