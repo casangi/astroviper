@@ -6,9 +6,8 @@ from scipy.optimize import minimize
 
 
 from typing import (Union, Mapping)
-
 from astroviper.distributed_applications.calibration.fringe_cal_xds import make_empty_cal_xds
-
+from astroviper.distributed_applications.calibration.utils import combine_xdses
 
 # Kring magic: scipy.special.ive is the "exponentially-scaled modified
 # Bessel function of the first kind"
@@ -72,7 +71,7 @@ def kring_snr(peak : float,
             snr = 0
     return snr
 
-def get_ref_baselines(xds : xa.DataSet) -> list[int]:
+def get_ref_baselines(xds : xr.Dataset, ref_ant : str) -> list[int]:
     ref_baselines = xds.baseline_id[
         (xds.baseline_id.baseline_antenna1_name == ref_ant).compute()
         | (xds.baseline_id.baseline_antenna2_name == ref_ant).compute()
@@ -89,33 +88,39 @@ def _fringe_fft_node_task(input_params: dict):
     ps = input_params["ps"]
     data_selection = input_params["data_selection"]
     ref_ant = input_params["ref_ant"]
+    vis_key = input_params.get('vis_key', 'VISIBILITY')
+    print(f"_fringe_fft_node_task: {vis_key=}")
+    snr_threshold = input_params.get('snr_threshold', 5.0)
+    print(f"{vis_key=}")
     npad = 8  
     # FIXME: for now we do single xds data
     xdses = [ps[k] for k in data_selection.keys() if ps[k].time.size > 0]
     if len(xdses) > 1:
         raise RuntimeError("We only do single xdses so far")
+    if len(xdses) < 1: 
+        raise RuntimeError("No data in ProcessingSet")
     xds = xdses[0]
     name = xds.name
     q = make_empty_cal_xds(xds)
     pol_hands = "RL"  # FIXME: we should support data_sub_selection['polarization']
     par_hands = [p+p for p in pol_hands]
-    baseline_id = xds.baseline_id # Which we also need to pass in
     xds2 = xds.sel(polarization=par_hands).isel(**data_selection[name])
     ddelay, drate = getFourierSpacings(xds2, npad)
-    ref_baselines = get_ref_baselines(xds2, refant)
-    vis = xds2.VISIBILITY[:, ref_baselines, :]
-    flags = xds2.FLAG[:, ref_baselines, :]
-    weights = xds2.WEIGHT[:, ref_baselines, :]
-    summed_w = weights.sum(index=(0,2)), skipna=True)
-    summed_ww = (weights*weights).sum(index=(0,2)), skipna=True)
-    xcounts = (np.logical_not(vis[:, i, :, pol_index].isnull())).sum(axis=(0,2))
+    ref_baselines = get_ref_baselines(xds2, ref_ant)
+    vis = xds2[vis_key].sel(baseline_id=ref_baselines)
+    if 'uvw_label' in xds2.FLAG.dims:
+        flags = xds2.FLAG.sel(baseline_id=ref_baselines).any(dim='uvw_label')
+    else:
+        flags = xds2.FLAG
+    weights = xds2.WEIGHT.sel(baseline_id=ref_baselines)
+    summed_w = weights.sum(dim=['time', 'frequency'], skipna=True)
+    summed_ww = (weights*weights).sum(dim=['time', 'frequency'], skipna=True)
+    xcounts = (np.logical_not(vis.isnull())).sum(dim=['time', 'frequency'])
     normed = weight_phasors(vis, weights, flags)
     s = list(normed.shape)
     nt, nf = s[0], s[2]
     s2 = (npad * nt, npad * nf)  # Pad in time and frequency
-    # FIXME: We should be using weights here!
     fftvis = np.fft.fftshift(np.fft.fft2(normed, axes=(0, 2), s=s2), axes=(0, 2))
-
     freqs = xds2.frequency
     # xds.polarization has polarization values along a polarization axis.
     # Your guess is as good as mine why.
@@ -127,25 +132,11 @@ def _fringe_fft_node_task(input_params: dict):
     # bookkeeping! Which requires quite a lot of metadata! Which is
     # going to suck when we have to aggregate it by hand for the
     # multiband case!
-    
-    return fft_to_caltable(fftvis, freqs, )
-
-# Honestly, we need so much metadata that we basically need most of what is in an xds
-# so we might as well bite the bullet and do something like make_combined_xds(xdses)
-# and go back to living a better life.
-def fft_to_caltable(fftvis, freqs, baseline_id, pol_hands,
-                    vis_pols,
-                    antenna_xds,
-                    baseline_antenna1_name,
-                    baseline_antenna2_name,
-                    summed_w, summed_ww, xcounts,
-                    ddelay, drate):
-    
     ref_freq = freqs.reference_frequency["data"]
     for p_ind, pol_hand in enumerate(pol_hands):
         par_pol = pol_hand + pol_hand
         # antenna_xds.polarization_type
-        pt = antenna_xds.polarization_type
+        pt = xds2.antenna_xds.polarization_type
         receptor_indices = (pt==pol_hand).argmax(dim='receptor_label')
         receptor_labels = (pt==pol_hand).idxmax(dim='receptor_label')
         pol_index = (vis_pols==par_pol).argmax(dim='polarization')
@@ -182,57 +173,88 @@ def fft_to_caltable(fftvis, freqs, baseline_id, pol_hands,
             delay = sign * (iy - ny / 2) * ddelay
             phi0 -= (
                 2 * np.pi * (delay * (freqs.values[0] - ref_freq))
-            )  # We'll fix the sign convention empirically
+            )  
             phi0 *= sign
             rate = sign * (ix - nx / 2) * drate / ref_freq
             # Calculate SNR of choice:
             peak = a[ind]
             if False: # FIXME!
                 snr = aips_snr(peak, xcount, sumw_, sumww_)
-            if else: # Kring SNR
+            else: # Kring SNR
                 snr = kring_snr(peak, xcount, sumw_, sumww_)
-            # Fill the table.
-            loc_dict = dict(antenna_name=ant, receptor_label=receptor_label)
-            q.CALPARAM_PHASE.loc[loc_dict] = phi0
-            q.CALPARAM_DELAY.loc[loc_dict] = delay
-            q.CALPARAM_RATE.loc[loc_dict] = rate
-            q.SNR.loc[loc_dict] = snr
+            if snr < snr_threshold:
+                continue
+            else:
+                # Fill the table.
+                loc_dict = dict(antenna_name=ant, receptor_label=receptor_label)
+                q.CALPARAM_PHASE.loc[loc_dict] = phi0
+                q.CALPARAM_DELAY.loc[loc_dict] = delay
+                q.CALPARAM_RATE.loc[loc_dict] = rate
+                q.SNR.loc[loc_dict] = snr
+    print("Yeah we're done?")
     return q
+
+def _fringe_fft_mbd_node_task(input_params: dict):
+    """
+    In the multiband case we just combine the xdses and pass them on to the single xds
+    """
+    ps = input_params["ps"]
+    ## FIXME:
+    ## We should be using input_params['data_selection'] generated by the parallelisation machinery
+    ## for the individual xdses, but (a) that's a bunch of work and (b) the parallelisation machinery
+    ## doesn't currently do what I want anyway, and that's *another* bunch of work to sort out
+    combined_xds = combine_xdses(ps)
+    combined_xds.name = 'combined'
+    input_params["ps"] = dict(combined=combined_xds)
+    input_params["data_selection"] = dict(combined={})
+    calq = _fringe_fft_node_task(input_params)
+    return calq
+
+def _fringe_global_mbd_node_task(input_params: dict):
+    """
+    We try repeating the trick for the multiband case
+    """
+    ps = input_params["ps"]
+    combined_xds = combine_xdses(ps)
+    combined_xds.name = 'combined'
+    input_params["ps"] = dict(combined=combined_xds)
+    input_params["data_selection"] = dict(combined={})
+    # breakpoint()
+    calq = _fringe_global_node_task(input_params)
+    return calq
+
+def get_cal_for_xds(xds:xr.DataTree, cal_tree:xr.DataTree, spw_map:Union[dict, None]=None):
+    if spw_map==None:
+        spw_to_use = xds.frequency.spectral_window_name
+    else:
+        spw_to_use = spw_map.get(xds.frequency.spectral_window_name)
+    for q in cal_tree.values():
+        if q.spectral_window_name == spw_to_use:
+            cal = q
+            break
+    else:
+        raise KeyError(f"{spw_to_use} not found in Cal Tree")
+    return cal
+
+def _apply_cal_task(input_params: dict):
+    ps = input_params["ps"]
+    cal_tree = input_params["cal_tree"]
+    data_selection = input_params["data_selection"]
+    spw_map = input_params.get('spw_map', {})
+
+    xdses = [ps[k] for k in data_selection.keys() if ps[k].time.size > 0]
+    if len(xdses) > 1:
+        raise RuntimeError("We only do single xdses so far")
+    if len(xdses) < 1: 
+        raise RuntimeError("No data in ProcessingSet")
+
+    xds = xdses[0]
+    name = xds.name
+    cal = get_cal_for_xds(xds, cal_tree, spw_map)
+    sfj = SingleFringeJones(cal)
+    new_xds = sfj.apply_cal(xds)
+    return new_xds
     
-
-def _fringefit_mbd_node_task(input_params: dict):
-    all_vis = []
-    all_times = []
-    for xds in ps5:
-        # FIXME: we should do this for a reference antenna and *all* the baselines to it
-        baselines = (xds.baseline_antenna1_name.compute()==ant1) & (xds.baseline_antenna2_name.compute()==ant2)
-        vis = xds.VISIBILITY_CORRECTED[:, baselines, :, xds.polarization==pol].squeeze()
-        # Upper and lower bands share a DC edge in the visibilities for EVN
-        # data, but the value there is of no use to anyone. The other edge
-        # isn't either, and we need to wipe them so our merge onto a big
-        # grid works nicely.
-        vis[:,0] = np.nan
-        vis[:,-1] = np.nan
-        vis /= np.abs(vis)
-        all_vis.append(vis)
-        all_times.append(xds.time.values)
-        if not np.all(all_times[0]==all_times[i] for i in range(1, len(all_times)-1)):
-            raise ValueError("Times don't agree")
-
-    # Interpolate each spectral window onto the unified grid
-    big_coords = make_uniform_freq_grid(ps5)
-    big_vis_subs = [vis.interp_like(big_coords) for vis in all_vis]
-    big_vis = xa.merge(big_vis_subs, compat='no_conflicts')
-    # FFT and search
-    bgf = np.fft.fftshift(np.fft.fft2(bv))
-    a = np.abs(bgf)
-    ind = np.unravel_index(np.argmax(a), a.shape)
-    print(f"{ant1}-{ant2} {ind=} {a[ind]=}")
-    # TODO: calculate the actual values!
-    
-
-
-
 def _fringe_global_node_task(input_params: dict):
     """The dask task function for global fringefit
 
@@ -242,14 +264,18 @@ def _fringe_global_node_task(input_params: dict):
     ref_ant = input_params["ref_ant"]
     cal_map = input_params["cal_map"]
     options = input_params["options"]
+    vis_key = input_params.get('vis_key', 'VISIBILITY')
+    print(f"_fringe_global_node_task: {vis_key=}")
+
     # FIXME: for now we do single band
     xdses = [ps[k] for k in data_selection.keys() if ps[k].time.size > 0]
     if len(xdses) > 1:
         raise RuntimeError("We only do single xdses so far")
+    if len(xdses) < 1: 
+        raise RuntimeError("No data in ProcessingSet")
     xds = xdses[0] 
     spw_name = xds.frequency.attrs['spectral_window_name']
     cal = cal_map[spw_name]
-    # print(f"{cal['CALPARAM_DELAY']=}")
     nvis = np.prod(xds.VISIBILITY.shape)
     if nvis==0:
         raise ValueError("No data to process")
@@ -257,7 +283,8 @@ def _fringe_global_node_task(input_params: dict):
     # SNR shape: time, antenna_name, frequency, recptor_label 
     good_ants0 = cal.antenna_name[np.any(cal.SNR[0, :, 0, :] > 0, axis=1)]
     good_ants = [str(n) for n in good_ants0.values]
-    ns = XDSNewtonSolver(xds, cal, ref_ant=ref_ant, ants=good_ants, options=options)
+    ns = XDSNewtonSolver(xds, cal, ref_ant=ref_ant, ants=good_ants,
+                         vis_key=vis_key, options=options)
     new_q = ns.do_newton_solve()
     return new_q
 
@@ -288,6 +315,7 @@ class XDSNewtonSolver():
                  ref_ant : str ='' ,
                  ants : Union[str, None] = None,
                  receptor_labels : str = '',
+                 vis_key:str='VISIBILITY',
                  options : Union[dict, None] = None
                  ):
         self.xds = xds # Just in case
@@ -305,6 +333,7 @@ class XDSNewtonSolver():
             self.pol_hands = allpols
         else:
             self.pol_hands = receptor_labels
+        self.vis_key = vis_key
         if options == None:
             self.options = {}
         else:
@@ -333,12 +362,15 @@ class XDSNewtonSolver():
         
     def setup_for_pol_hand(self, pol_hand):
         par_pol = pol_hand + pol_hand
-        sel_dict = {'baseline_id':self.bl_subset,
-                    'polarization':par_pol}
-        vises = self.xds.VISIBILITY.sel(sel_dict)
+        sel_dict = {'baseline_id' : self.bl_subset,
+                    'polarization' : par_pol}
+        vises = self.xds[self.vis_key].sel(sel_dict)
         self.phase_obs = np.angle(vises.values)
         self.weight_obs = self.xds.WEIGHT.sel(sel_dict).values
-        self.flags_obs = self.xds.FLAG.sel(sel_dict).values
+        if 'uvw_label' in self.xds.FLAG.dims:
+            self.flags_obs = self.xds.FLAG.sel(sel_dict).any(dim='uvw_label')
+        else:
+            self.flags_obs = self.xds.FLAG.sel(sel_dict).values
         # Apply flags:
         self.phase_obs[self.flags_obs] = np.nan
         # We make a map of antenna_name to number:
@@ -515,8 +547,10 @@ class XDSNewtonSolver():
                 # FIXME! Where are the scales?
                 cal_out *= np.expand_dims(self.xscale, (0,))
                 cal_out[:, 2] /= q.frequency.values[0] # There is only 1 entry so far
-                q.ref_antenna[0] = self.ref_ant
-                print(f"Cal for {pol_ind=} on the way out is {cal_out}")
+                # I remove reference antenna from the cal_set
+                # But I am too cowardly to remove it from here entirely in case I get bullied into restoring it
+                # q.ref_antenna[0] = self.ref_ant
+                # print(f"Cal for {pol_ind=} on the way out is {cal_out}")
                 j = 0
                 for i, n in enumerate(self.ordered_names):
                     d = dict(antenna_name=n, receptor_label=receptor_labels.loc[n])

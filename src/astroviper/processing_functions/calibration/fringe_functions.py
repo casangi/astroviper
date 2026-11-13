@@ -93,13 +93,13 @@ class SingleFringeJones:
             print(f"No calibration entries for {', '.join(unfound)}")
         return np.array(bl_found), np.array(left_indices), np.array(right_indices)
 
-    def apply_cal(self, xds):
+    def apply_cal(self, xds, *, vis_key_in:str='VISIBILITY', vis_key_out:str='VISIBILITY_CORRECTED'):
         if len(xds.time.values) == 0:
             return xds
         bl_found, left_indices, right_indices = self.get_ant_to_baseline_maps(xds)
         antenna_jones = self.calc_antenna_jones(xds)
         # v has shape (n_time, n_baselines, n_freq, 2, 2)
-        v = square_up_last_dimension(xds.VISIBILITY.values)
+        v = square_up_last_dimension(xds[vis_key_in].values)
         # Jones matrices for each visibility for left and right antennas on a baseline
         left_jones = self.get_left_jones(antenna_jones, left_indices)
         right_jones = self.get_right_jones(antenna_jones, right_indices)
@@ -116,10 +116,10 @@ class SingleFringeJones:
             "polarization": xds.polarization,
         }
         da = xr.DataArray(coords=coords, data=v2)
-        new_xds = xds.assign({"VISIBILITY_CORRECTED": da})
+        new_xds = xds.assign({vis_key_out: da})
         # Now we add the new data group:
-        xds.attrs["data_groups"]["calibrated"] = {
-            "correlated_data": "VISIBILITY_CORRECTED",
+        new_xds.attrs["data_groups"][vis_key_out] = {
+            "correlated_data": vis_key_out,
             "flag": "FLAG",
             "weight": "WEIGHT",
             "uvw": "UVW",

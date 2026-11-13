@@ -58,7 +58,10 @@ This is a stub! I should make an aggregator!"""
             raise ValueError("Polarization mismatch")
     return pol_coords
         
-def make_cal_map(cal_tree):
+def make_cal_map(cal_tree: xr.DataTree) -> dict[str, xr.DataTree]:
+    """
+Map a caltree to a dict with keys of its spectral_window_name
+    """
     spw_to_cal_map = {}
     for s in cal_tree.children:
         spw_to_cal_map.setdefault(cal_tree[s].spectral_window_name, []).append(cal_tree[s])
@@ -106,9 +109,7 @@ For now, we only support the case where the metadata is otherwise compatible.
     # We use this for coordinates below:
     ds = empty_datasets[0]
     big_coords = xr.Coordinates({
-        # 'baseline_id': ds.baseline_id,
         'frequency' : big_freq_coord,
-        # 'polarization' : ds.polarization,
         'time' : ds.time,
         })
 
@@ -137,9 +138,12 @@ For now, we only support the case where the metadata is otherwise compatible.
         big_dataset = xr.merge(big_var_subs, compat='no_conflicts', combine_attrs='identical')
         # We only want the variable we had, so we extract it
         var_dict[var_name] = big_dataset[var_name]
-        # and we add back a dummy flag array so no one has to get sad
-        var_dict['FLAG'] = xr.DataArray(coords=ds.coords, data=False)
-    combo_xds = xr.Dataset(data_vars=var_dict, coords=ds.coords)\
+    # and we add back a dummy flag array so no one has to get sad.
+    # The coordinates for these things are surprisingly fiddly to get!
+    ref_coords = var_dict['VISIBILITY'].coords
+    var_dict['FLAG'] = xr.DataArray(coords=ref_coords, data=False)
+    combo_xds = xr.Dataset(data_vars=var_dict, coords=ds.coords)
+    # breakpoint()
     # The antenna_xds member is already a DataTree but we can't use it
     # as-is because the interited coordinates it doesn't even use don't
     # match the new grid.
