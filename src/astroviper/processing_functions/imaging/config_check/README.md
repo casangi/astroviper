@@ -441,7 +441,8 @@ chunking before the image is opened; `check_find_continuum_inputs` checks the
 data group roles, the single time, the Stokes I plane and the length of the
 atmospheric spectra on the opened image without loading pixels. The driver
 keeps the work-directory check: findContinuum reuses the products of an
-earlier run that it finds there.
+earlier run that it finds there. `check_find_continuum_first_round` requires
+the Stokes I plane when `image_cube_single_field` makes the first round.
 
 ## Runtime Taylor-Hessian reuse
 

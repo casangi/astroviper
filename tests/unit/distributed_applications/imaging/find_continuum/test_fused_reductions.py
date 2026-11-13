@@ -135,3 +135,17 @@ def test_failed_prediction_does_not_stop_the_run(backend):
 
     assert fused._capture(fails) == []
     assert fused.captured is None
+
+
+def test_precomputed_first_round_fills_the_cache():
+    passes = FakePasses()
+    first_round = [{"precomputed": index} for index in range(4)]
+    fused = FusedReductions(passes, CUBE, PRIMARY_BEAM, first_round)
+    cubes = {CUBE: {"metadata": METADATA}, PRIMARY_BEAM: {"metadata": METADATA}}
+    with cit.cube_session(cubes, fused):
+        mean_beam = cit._moments_request(PRIMARY_BEAM, [-1], "3,6,12,18,21")
+        assert fused([mean_beam]) == [{"precomputed": 0}]
+        assert fused([_statistics()]) == [{"precomputed": 2}]
+        assert passes.passes == []
+        fused([_statistics(chans="1~3")])
+        assert passes.passes == [[_statistics(chans="1~3")]]

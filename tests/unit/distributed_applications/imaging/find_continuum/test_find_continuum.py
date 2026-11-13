@@ -114,6 +114,57 @@ def test_selection_matches_casa(case, fused, tmp_path, monkeypatch):
         )
 
 
+def test_fused_with_the_first_round_of_the_imager(tmp_path):
+    """Given the first round (as image_cube_single_field makes it), the fused
+    version reads the cube once less and finds the same channels."""
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.find_continuum import (
+        finalize_find_continuum_reductions,
+        find_continuum_cube_reductions,
+        find_continuum_first_round_requests,
+    )
+
+    kwargs, selection, _, snr, (_, dirty_cube_reads) = CASA_RESULTS["line_set"]
+    store = _write_cube(
+        tmp_path / "line_set.img.zarr", make_find_continuum_image_xds(**kwargs)
+    )
+    img_xds = xr.open_zarr(store, chunks=None)
+    frequency = img_xds.frequency.values
+    requests = find_continuum_first_round_requests(
+        frequency.size,
+        float(frequency[0]),
+        float(frequency[1] - frequency[0]),
+        float(img_xds.frequency.attrs["rest_frequency"]["data"]),
+        "sky",
+        "primary_beam",
+    )
+    variables = {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+    reductions = finalize_find_continuum_reductions(
+        find_continuum_cube_reductions(
+            img_xds[list(variables.values())].sel(polarization=["I"]).load(),
+            requests,
+            variables,
+            {},
+            np.arange(frequency.size),
+            "PRIMARY_BEAM",
+            0.2,
+        ),
+        requests,
+    )
+    first_round = {"primary_beam_limit": 0.2, "reductions": reductions}
+
+    result = find_continuum_fused(
+        input_image_store=store,
+        work_directory=str(tmp_path / "work"),
+        first_round_reductions=first_round,
+        **_flat_atmosphere(480),
+    )
+    assert result["channel_selection"] == selection
+    assert result["moment_difference_snr"] == pytest.approx(snr, abs=1e-4)
+    assert result["cube_reads"]["SKY_RESIDUAL"] == dirty_cube_reads - 1
+
+
 @pytest.fixture
 def small_cube(tmp_path):
     return make_find_continuum_image_xds(n_pixels=16, n_channels=20)

@@ -25,6 +25,7 @@
     "spectral_dynamic_range_bandwidth": {"type": ["float"], "nullable": true},
     "primary_beam_limit": {"type": ["int", "float"], "nullable": true},
     "n_mapping_parallelism": {"type": ["dict"], "nullable": true},
+    "first_round_reductions": {"type": ["dict"], "nullable": true},
     "input_checked": {"type": "boolean"}
   }
 }
