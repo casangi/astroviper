@@ -169,6 +169,16 @@ def find_continuum_cube_reductions(
     return {"reductions": partials, "timing_node_tasks": timing_df}
 
 
+def with_resource_usage(timing, usage):
+    """A copy of a node task's one-row ``timing`` frame with the resource
+    monitor's ``usage`` series as columns (a list becomes one cell; scalars
+    broadcast)."""
+    timing = timing.copy()
+    for key, value in usage.items():
+        timing[key] = [value] if isinstance(value, list) else value
+    return timing
+
+
 def merge_find_continuum_cube_reductions(input_data, input_params):
     """Reduce node task: merge the outputs of map or reduce nodes.
 
@@ -182,20 +192,54 @@ def merge_find_continuum_cube_reductions(input_data, input_params):
     Returns
     -------
     dict
-        Merged ``reductions`` and concatenated ``timing_node_tasks``.
+        Merged ``reductions``, the concatenated ``timing_node_tasks`` (with
+        the series of graphviper's resource monitor, when it ran, as columns)
+        and ``timing_reduce_nodes``, one record per reduce node so far.
     """
+    import os
+    import socket
+    import threading
+    import time
+
     import pandas as pd
 
     from astroviper.processing_functions.imaging.find_continuum import (
         merge_find_continuum_reductions,
     )
 
+    start_unixtime = time.time()
     merged = input_data[0]["reductions"]
     for other in input_data[1:]:
         merged = merge_find_continuum_reductions(merged, other["reductions"])
+    timing, records = [], []
+    for item in input_data:
+        usage = item.get("resource_usage")
+        frame = item["timing_node_tasks"]
+        timing.append(frame if usage is None else with_resource_usage(frame, usage))
+        records.extend(item.get("timing_reduce_nodes", []))
+    combined = pd.concat(timing, ignore_index=True)
+    try:
+        from dask.distributed import get_worker
+
+        worker_name = str(get_worker().name)
+    except Exception:
+        worker_name = None
+    end_unixtime = time.time()
+    records.append(
+        {
+            "start_unixtime": start_unixtime,
+            "end_unixtime": end_unixtime,
+            "T_reduce_node": end_unixtime - start_unixtime,
+            "hostname": socket.gethostname(),
+            "process_pid": os.getpid(),
+            "thread_native_id": threading.get_native_id(),
+            "worker_name": worker_name,
+            "n_inputs": len(input_data),
+            "n_rows_out": int(len(combined)),
+        }
+    )
     return {
         "reductions": merged,
-        "timing_node_tasks": pd.concat(
-            [item["timing_node_tasks"] for item in input_data], ignore_index=True
-        ),
+        "timing_node_tasks": combined,
+        "timing_reduce_nodes": records,
     }

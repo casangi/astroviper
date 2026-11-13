@@ -22,6 +22,35 @@ from astroviper.utils.param_docs import shares_param_docs
 
 _PARAM_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# The layout of ``timing_distributed_application`` (format_timing_summary and
+# the processing section of the report). findContinuum runs in the driver and
+# asks for one pass over the image store at a time: the graph and compute
+# timings are summed over the passes, and the driver's work between them
+# (2-D images, spectra, plots) is the last step.
+DISTRIBUTED_APPLICATION_TIMING_PHASES = [
+    (
+        "DISTRIBUTED APPLICATION (driver)",
+        None,
+        [
+            ("open and check the image", "T_open_image"),
+            ("register the cubes, parallel coords", "T_register_cubes"),
+            ("create map/reduce graphs (all passes)", "T_create_map_reduce_graph"),
+            ("generate dask graphs (all passes)", "T_generate_dask_graph"),
+            ("compute dask graphs (all passes)", "T_compute_dask_graph"),
+            ("findContinuum between the passes", "T_find_continuum_between_passes"),
+        ],
+    ),
+]
+DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
+NODE_TASK_TIMING_PHASES = [
+    (
+        "NODE TASK (one chunk of one pass)",
+        None,
+        [("load the chunk", "T_load"), ("reductions", "T_reduce")],
+    ),
+]
+NODE_TASK_TIMING_TOTAL_KEY = "T_find_continuum_task"
+
 
 class _LogStream(io.TextIOBase):
     """Sends findContinuum's printed lines to the logger at debug level."""
@@ -94,6 +123,8 @@ def find_continuum(
     spectral_dynamic_range_bandwidth: float | None = None,
     primary_beam_limit: float | None = 0.2,
     n_mapping_parallelism: dict | None = None,
+    monitor_resources_seconds: float | None = None,
+    report: str | None = None,
     *,
     input_checked: bool = False,
 ) -> dict:
@@ -132,6 +163,19 @@ def find_continuum(
     n_mapping_parallelism : dict, optional
         ``{"frequency": n}``, the number of frequency chunks of every
         map-reduce; one chunk if not given.
+    monitor_resources_seconds : float, optional
+        If set, sample each node task's worker-process CPU, memory and I/O
+        every this many seconds (graphviper's resource monitor) and carry the
+        series into ``timing_node_tasks`` as list-valued columns, as
+        ``image_cube_single_field`` does. Requires ``psutil``.
+    report : str, optional
+        Make a report of the run: ``"html"`` or ``"pdf"``, written in
+        ``work_directory`` as ``<name>_report.html`` or ``.pdf``, or
+        ``"notebook"``, displayed in the calling notebook. It has the
+        processing section of every distributed application (timing, task
+        stream and, with ``monitor_resources_seconds``, CPU, memory and I/O)
+        and the results of findContinuum. A failure while making it is logged
+        and leaves the results intact. ``None`` (default): no report.
     input_checked : bool, default False
         Skip the configuration checks already done by the calling layer. The
         checks of the opened image and of the work directory always run.
@@ -144,7 +188,13 @@ def find_continuum(
         ``joint_mask`` (path of the final joint mask), ``moment_difference_snr``,
         ``plot`` (path of the summary plot), ``n_cube_reductions`` (map-reduce
         passes over the image store), ``cube_reads`` (data variable to the
-        number of passes that read it) and ``timing_node_tasks``.
+        number of passes that read it), ``passes`` (one row per pass: the
+        reductions asked for, the data variables read and the graph and
+        compute times), ``timing_node_tasks`` (one row per node task of every
+        pass), ``timing_reduce_nodes``, ``timing_distributed_application``
+        (the driver steps of :data:`DISTRIBUTED_APPLICATION_TIMING_PHASES`,
+        ``T_total`` and the wall-clock anchors) and ``report`` (the path of
+        the report written, else ``None``).
 
     Raises
     ------
@@ -174,6 +224,8 @@ def find_continuum(
         n_mapping_parallelism,
         input_checked=input_checked,
         fused=False,
+        monitor_resources_seconds=monitor_resources_seconds,
+        report=report,
     )
 
 
@@ -192,6 +244,8 @@ def find_continuum_fused(
     primary_beam_limit: float | None = 0.2,
     n_mapping_parallelism: dict | None = None,
     first_round_reductions: dict | None = None,
+    monitor_resources_seconds: float | None = None,
+    report: str | None = None,
     *,
     input_checked: bool = False,
 ) -> dict:
@@ -242,6 +296,19 @@ def find_continuum_fused(
         returns them in ``find_continuum_first_round`` when it makes the cube
         (with the same primary beam limit); the pass that would compute them
         is then not made.
+    monitor_resources_seconds : float, optional
+        If set, sample each node task's worker-process CPU, memory and I/O
+        every this many seconds (graphviper's resource monitor) and carry the
+        series into ``timing_node_tasks`` as list-valued columns, as
+        ``image_cube_single_field`` does. Requires ``psutil``.
+    report : str, optional
+        Make a report of the run: ``"html"`` or ``"pdf"``, written in
+        ``work_directory`` as ``<name>_report.html`` or ``.pdf``, or
+        ``"notebook"``, displayed in the calling notebook. It has the
+        processing section of every distributed application (timing, task
+        stream and, with ``monitor_resources_seconds``, CPU, memory and I/O)
+        and the results of findContinuum. A failure while making it is logged
+        and leaves the results intact. ``None`` (default): no report.
     input_checked : bool, default False
         Skip the configuration checks already done by the calling layer. The
         checks of the opened image and of the work directory always run.
@@ -275,6 +342,8 @@ def find_continuum_fused(
         input_checked=input_checked,
         fused=True,
         first_round_reductions=first_round_reductions,
+        monitor_resources_seconds=monitor_resources_seconds,
+        report=report,
     )
 
 
@@ -294,6 +363,8 @@ def _find_continuum(
     input_checked,
     fused,
     first_round_reductions=None,
+    monitor_resources_seconds=None,
+    report=None,
 ):
     import dask
     import matplotlib.pyplot as plt
@@ -320,7 +391,14 @@ def _find_continuum(
     from astroviper.processing_functions.imaging.find_continuum import (
         finalize_find_continuum_reductions,
     )
+    from astroviper.utils.timing import format_timing_summary
 
+    application_start = time.time()
+    timing_distributed_application = {
+        key: 0.0
+        for _, _, steps in DISTRIBUTED_APPLICATION_TIMING_PHASES
+        for _, key in steps
+    }
     if not input_checked:
         check_find_continuum_config(
             n_bin, primary_beam_limit, n_mapping_parallelism, first_round_reductions
@@ -346,7 +424,9 @@ def _find_continuum(
     )
     data_group = lazy_xds.attrs["data_groups"][image_data_group_in_name]
     nchan = lazy_xds.sizes["frequency"]
+    timing_distributed_application["T_open_image"] = time.time() - application_start
 
+    start = time.time()
     os.makedirs(work_directory, exist_ok=True)
     beam_variable = data_group["beam_fit_params_point_spread_function"]
     cubes = {}
@@ -379,10 +459,12 @@ def _find_continuum(
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, {"img": index_xds}
     )
-    timing, cube_reads = [], {}
+    timing_distributed_application["T_register_cubes"] = time.time() - start
+    timing, cube_reads, passes, reduce_records = [], {}, [], []
     primary_beam = data_group["primary_beam"]
 
     def run_reductions(requests):
+        start = time.time()
         variables, image_paths = {}, {}
         for request in requests:
             variables[request["image"]] = cubes[request["image"]]["variable"]
@@ -410,6 +492,7 @@ def _find_continuum(
                 "primary_beam_limit": primary_beam_limit,
             },
             in_memory_compute=False,
+            monitor_resources_seconds=monitor_resources_seconds,
         )
         viper_graph = reduce(
             viper_graph,
@@ -417,16 +500,55 @@ def _find_continuum(
             {},
             mode="tree",
         )
-        start = time.time()
-        output = dask.compute(generate_dask_workflow(viper_graph))[0]
-        logger.debug(
-            f"find_continuum reduction {[r['kind'] for r in requests]} in {time.time() - start:.2f} s"
+        graph_end = time.time()
+        dask_graph = generate_dask_workflow(viper_graph)
+        compute_start = time.time()
+        output = dask.compute(dask_graph)[0]
+        compute_end = time.time()
+        index = len(passes)
+        # A pass of one task has no reduce node to fold the monitor series in.
+        frame, usage = output["timing_node_tasks"], output.get("resource_usage")
+        if usage is not None:
+            frame = node_tasks.with_resource_usage(frame, usage)
+        timing.append(frame.assign(reduction=index))
+        reduce_records.extend(
+            dict(record, reduction=index)
+            for record in output.get("timing_reduce_nodes", [])
         )
-        timing.append(output["timing_node_tasks"].assign(reduction=len(timing)))
+        passes.append(
+            {
+                "pass": index,
+                "reductions": ", ".join(
+                    f"{request['kind']} of {os.path.basename(request['image'])}"
+                    for request in requests
+                ),
+                "data_variables_read": ", ".join(sorted(read)),
+                "n_tasks": len(frame),
+                "start_unixtime": compute_start,
+                "T_create_map_reduce_graph": graph_end - start,
+                "T_generate_dask_graph": compute_start - graph_end,
+                "T_compute_dask_graph": compute_end - compute_start,
+            }
+        )
+        for key in (
+            "T_create_map_reduce_graph",
+            "T_generate_dask_graph",
+            "T_compute_dask_graph",
+        ):
+            timing_distributed_application[key] += passes[-1][key]
+        timing_distributed_application.setdefault(
+            "compute_start_unixtime", compute_start
+        )
+        timing_distributed_application["compute_end_unixtime"] = compute_end
+        logger.debug(
+            f"find_continuum pass {index} ({passes[-1]['reductions']}) in "
+            f"{compute_end - start:.2f} s"
+        )
         return finalize_find_continuum_reductions(output["reductions"], requests)
 
     figures = set(plt.get_fignums())
     log_stream = _LogStream()
+    find_continuum_start = time.time()
     try:
         with (
             contextlib.chdir(work_directory),
@@ -461,6 +583,22 @@ def _find_continuum(
         log_stream.write("\n")
         for number in set(plt.get_fignums()) - figures:
             plt.close(number)
+    timing_distributed_application["T_find_continuum_between_passes"] = (
+        time.time()
+        - find_continuum_start
+        - sum(
+            timing_distributed_application[key]
+            for key in (
+                "T_create_map_reduce_graph",
+                "T_generate_dask_graph",
+                "T_compute_dask_graph",
+            )
+        )
+    )
+    application_end = time.time()
+    timing_distributed_application["T_total"] = application_end - application_start
+    timing_distributed_application["application_start_unixtime"] = application_start
+    timing_distributed_application["application_end_unixtime"] = application_end
     (
         selection,
         plot,
@@ -470,7 +608,28 @@ def _find_continuum(
         joint_mask,
         moment_difference_snr,
     ) = result
-    return {
+    timing_node_tasks = (
+        pd.concat(timing, ignore_index=True) if timing else pd.DataFrame()
+    )
+    logger.info(
+        format_timing_summary(
+            timing_distributed_application,
+            DISTRIBUTED_APPLICATION_TIMING_PHASES,
+            total_key=DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY,
+            title="find_continuum timing (driver, seconds)",
+            total_label="TOTAL (driver wall time)",
+        )
+    )
+    if len(timing_node_tasks):
+        logger.info(
+            format_timing_summary(
+                timing_node_tasks.sum(numeric_only=True).to_dict(),
+                NODE_TASK_TIMING_PHASES,
+                total_key=NODE_TASK_TIMING_TOTAL_KEY,
+                title="find_continuum node-task timing: TOTAL over all tasks (seconds)",
+            )
+        )
+    return_dict = {
         "channel_selection": selection,
         "aggregate_bandwidth": aggregate_bandwidth,
         "all_continuum": bool(all_continuum),
@@ -480,7 +639,23 @@ def _find_continuum(
         "plot": plot,
         "n_cube_reductions": len(timing),
         "cube_reads": cube_reads,
-        "timing_node_tasks": pd.concat(timing, ignore_index=True)
-        if timing
-        else pd.DataFrame(),
+        "passes": pd.DataFrame(passes),
+        "timing_node_tasks": timing_node_tasks,
+        "timing_reduce_nodes": reduce_records,
+        "timing_distributed_application": timing_distributed_application,
+        "report": None,
     }
+    if report is not None:
+        from astroviper.distributed_applications.imaging.find_continuum.find_continuum_report import (
+            find_continuum_report,
+        )
+        from astroviper.utils.report import make_report
+
+        return_dict["report"] = make_report(
+            find_continuum_report,
+            return_dict,
+            report_store=stem,
+            report=report,
+            application="find_continuum_fused" if fused else "find_continuum",
+        )
+    return return_dict
