@@ -153,3 +153,34 @@ def check_restoration_output(value):
         raise ValueError(
             "restoration_output must be 'apparent', 'primary_beam_corrected', or 'both'."
         )
+
+
+def check_restoring_beam(value):
+    """Require an explicit target beam ``[major, minor, pa]`` in radians.
+
+    Parameters
+    ----------
+    value : sequence of float
+        FWHM of the major and minor axes and the position angle, in radians,
+        as ``BEAM_FIT_PARAMS``, with ``major >= minor > 0``. The caller handles
+        ``None`` (no target).
+
+    Raises
+    ------
+    TypeError
+        The values are not real numbers.
+    ValueError
+        A string (tclean's ``'common'`` among them), not three values, a value
+        that is not finite, an axis that is not positive, or ``minor > major``.
+    """
+    if isinstance(value, str):
+        raise ValueError(
+            f"restoring_beam={value!r} is not supported; give [major, minor, pa] "
+            "in radians. For tclean's 'common', pass common_beam of the Stokes I "
+            "PSF beams (astroviper.processing_functions.image_analysis.common_beam)."
+        )
+    beam = require_finite_real("restoring_beam", value)
+    if beam.shape != (3,):
+        raise ValueError("restoring_beam must be [major, minor, pa] in radians.")
+    if not beam[0] >= beam[1] > 0:
+        raise ValueError("restoring_beam must have major >= minor > 0.")

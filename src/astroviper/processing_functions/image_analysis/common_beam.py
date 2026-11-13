@@ -1,233 +1,375 @@
-"""The common beam of a set of Gaussian beams, and the beam that convolves one into another.
+"""The common beam of a set of beams, and the Gaussian that takes a beam to a larger one.
 
 A beam is ``[major, minor, pa]`` as the ``BEAM_FIT_PARAMS_*`` variables hold it: the full
-widths at half maximum and the position angle of the major axis, from north through east,
-all in radians.
+widths at half maximum of the major and minor axes and the position angle of the major
+axis, north through east, in radians. In the ``(l index, m index)`` frame of an image the
+major axis lies along ``(sin pa, -cos pa)``.
 """
 
 import math
+from typing import NamedTuple
 
 import numpy as np
 import toolviper.utils.logger as logger
+import xarray as xr
 
-# casacore's C::arcsec. CASA builds its enclosing ellipses from the axes in arcsec and
-# keeps them in arcsec; the conversions are part of its result.
+# casacore's C::arcsec and C::degree, the factors of its units "arcsec" and "deg". CASA keeps
+# its enclosing ellipses in arcsec; its unit conversions are part of its result.
 _ARCSEC = 0.00000484813681109535993589914098765
-_FOUR_LN_2 = 4.0 * math.log(2.0)
+_DEGREE = 0.0174532925199432957692369
+_AREA_FACTOR = math.pi / (4.0 * math.log(2.0))
+_FWHM_FACTOR = 2.0 * math.sqrt(2.0 * math.log(2.0))
+_MAX_GROWTH_STEPS = 1000
+_CONTAINMENT_TOLERANCE = 1e-6
+_MAX_PLANES_NAMED = 10
 
 
-def common_beam(beams):
-    """CASA's common beam of a set of beams.
+class _Beam(NamedTuple):
+    """A beam as casacore holds it: the axes in the unit of factor ``unit`` (1 for
+    radians, C::arcsec for arcsec), pa in radians as stored and unwrapped."""
 
-    The algorithm of ``CasaImageBeamSet::getCommonBeam``, which ``tclean`` uses for
-    ``restoringbeam='common'``, as CASA 6.8 has it (with the fixes of CAS-14719 for
-    circular and nearly identical beams, which make CASA 6.7 return beams up to several
-    times too large). It returns the largest beam (by area) when every other beam fits
-    inside it. Otherwise it builds an ellipse around the largest beam and the last beam
-    that does not fit, grows it by factors of 1.001 until both fit, puts it in place of the
-    largest beam and starts again; when 1000 steps are not enough it gives up and returns
-    the largest beam. A beam fits inside another when CASA's ``GaussianDeconvolver``
-    deconvolves it without its point-source case. The result is therefore not the
-    smallest ellipse that encloses all beams. It depends on the order of the beams, so it
-    equals CASA's for the beams in the order of the CASA image's channels.
+    major: float
+    minor: float
+    pa: float
+    unit: float
+    unwrapped_pa: float
+
+
+def common_beam(beam_fit_params):
+    """The common beam of a set of beams, as CASA computes it.
+
+    The algorithm of CASA's ``CasaImageBeamSet::getCommonBeam``, the beam of ``tclean``'s
+    ``restoringbeam='common'``, as CASA 6.8.0.4 has it (CAS-14719). The first beam of
+    largest area is the common beam when every other beam deconvolves from it cleanly
+    (CASA's ``GaussianDeconvolver``, without its point-source case). Otherwise an ellipse
+    is built around it and the last beam that does not, grown by factors of 1.001 until
+    both deconvolve from it and put in its place, and the test is repeated; when 1000
+    growth steps are not enough, a warning is logged and the beam of largest area is the
+    result. The result is not the smallest ellipse that contains every beam, and two CASA
+    rules are kept: at an exact right angle between the two beams CASA returns the ellipse
+    of their major axes at once, without testing the other beams, and for position angles
+    more than 90 degrees apart its enclosing ellipse is mirrored and grows until it
+    contains both. :func:`correcting_beam` tells whether the result contains every beam.
 
     Parameters
     ----------
-    beams : array_like
-        Beams ``(..., 3)``: ``[major, minor, pa]`` in radians. Beams with a zero axis
-        (CASA's null beams) or a non-finite one (failed fits) are left out.
+    beam_fit_params : xarray.DataArray or numpy.ndarray
+        Beams ``[major, minor, pa]`` in radians: a DataArray whose last dimension holds
+        them and whose other dimensions are among ``time``, ``frequency`` and
+        ``polarization`` (``BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION``, for example), or an
+        array ``(time, frequency, polarization, 3)``. The beams are visited frequency
+        fastest, then polarization, then time, as CASA visits the beams of an image, and
+        the order can change the result: to reproduce the common beam of a CASA image,
+        pass its beams in its channel order. Beams with a zero axis (CASA's null beams)
+        or a value that is not finite (failed fits) are left out.
 
     Returns
     -------
     numpy.ndarray
-        The common beam ``[major, minor, pa]``, with pa in ``[0, pi)``.
+        The common beam ``[major, minor, pa]`` in radians, pa in ``(-pi/2, pi/2]``.
 
     Raises
     ------
     ValueError
-        If no beam has finite, positive axes.
+        If a beam has a negative axis or a minor axis larger than its major axis, if every
+        beam is left out, or if ``beam_fit_params`` is not shaped as described.
+
+    See Also
+    --------
+    correcting_beam : The correcting Gaussian of every plane, with the containment check.
+
+    Notes
+    -----
+    Given the same doubles in the same units and order, the result is that of casatools
+    6.7.6, except where CAS-14719 changed it. Inputs that differ by rounding (one ulp, or
+    float32 storage of the beams) can take a different number of growth steps.
+
+    Examples
+    --------
+    ``tclean``'s ``restoringbeam='common'`` for ``image_cube_single_field``: the common
+    beam of the Stokes I PSF beams made with the imager's ``image_params`` and weighting
+    (the restore applies the beam of the first polarization to every polarization),
+    checked before the run::
+
+        psf = point_spread_function_cube_single_field(
+            ps_store, image_params, imaging_weights_params, ...
+        )
+        beams = psf["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].isel(polarization=[0])
+        target = common_beam(beams)
+        correcting_beam(beams, target)  # raises if the target misses a plane's beam
+        image_cube_single_field(..., restore=True, restoring_beam=target)
     """
-    beams = np.asarray(beams, dtype=np.float64).reshape(-1, 3)
-    usable = np.isfinite(beams).all(axis=1) & (beams[:, 0] > 0) & (beams[:, 1] > 0)
-    if not usable.any():
-        raise ValueError("No beam has finite, positive axes.")
-    # (major, minor, pa, in_arcsec): the input beams keep their radians, CASA's
-    # enclosing ellipses are kept in arcsec, as CASA keeps them.
-    flat = [(b[0], b[1], _unwrap(b[2]), False) for b in beams[usable]]
+    beams = _beams_in_casa_order(beam_fit_params)
+    finite = beams[np.isfinite(beams).all(axis=1)]
+    invalid = (finite[:, 1] < 0.0) | (finite[:, 1] > finite[:, 0])
+    if invalid.any():
+        raise ValueError(
+            f"{int(invalid.sum())} beam(s) do not have 0 <= minor <= major, the first "
+            f"{finite[invalid][0].tolist()}."
+        )
+    usable = finite[finite[:, 1] > 0.0]
+    if usable.size == 0:
+        raise ValueError("Every beam has a zero axis or a value that is not finite.")
+    beams = [
+        _Beam(major, minor, pa, 1.0, unwrapped_pa)
+        for (major, minor, pa), unwrapped_pa in zip(
+            usable.tolist(), _unwrap(usable[:, 2]).tolist(), strict=True
+        )
+    ]
     while True:
-        if all(b == flat[0] for b in flat):
-            return _result(flat[0])
-        areas = [_area(b, flat[0][3]) for b in flat]
-        largest = flat[int(np.argmax(areas))]
+        first = beams[0]
+        if all(_equal(beam, first) for beam in beams):
+            return _result(first)
+        areas = [_area(beam, first.unit) for beam in beams]
+        largest_index = 0
+        for index, area in enumerate(areas):
+            if area > areas[largest_index]:
+                largest_index = index
+        largest = beams[largest_index]
         problem = None
-        for b in flat:
-            if b != largest and not _fits_inside(b, largest):
-                problem = b
+        for beam in beams:
+            if not _equal(beam, largest) and not _deconvolves_cleanly(largest, beam):
+                problem = beam
         if problem is None:
             return _result(largest)
-        if abs(problem[2] - largest[2]) == 0.5 * math.pi:
-            outer, inner = (largest, problem)
-            if _radians(problem)[0] > _radians(largest)[0]:
+        angle = problem.unwrapped_pa - largest.unwrapped_pa
+        if abs(angle) == math.pi / 2:
+            if _arcsec(largest.major, largest.unit) >= _arcsec(
+                problem.major, problem.unit
+            ):
+                outer, inner = largest, problem
+            else:
                 outer, inner = problem, largest
-            return _result((_radians(outer)[0], _radians(inner)[0], outer[2], False))
-        enclosing = _enclosing(largest, problem)
+            return np.array(
+                [
+                    _radians(outer.major, outer.unit),
+                    _radians(inner.major, inner.unit),
+                    outer.unwrapped_pa,
+                ]
+            )
+        enclosing = _enclosing_beam(largest, problem, angle)
         if enclosing is None:
             logger.warning(
-                "No beam enclosing all beams after 1000 steps; using the largest beam."
+                "Could not build an enclosing beam for the common beam within "
+                f"{_MAX_GROWTH_STEPS} growth steps; using the beam of largest area, "
+                f"{_result(largest).tolist()} rad."
             )
             return _result(largest)
-        flat[flat.index(largest)] = enclosing
+        beams[largest_index] = enclosing
 
 
-def correcting_beam(beam, target_beam, tolerance=1e-10):
-    """The Gaussian that convolves ``beam`` into ``target_beam``.
+def correcting_beam(beam_fit_params, restoring_beam):
+    """The Gaussian that takes each beam to a larger target beam.
 
-    The correcting beam of CASA Memo 10 (CAS-12148), in covariance form: its covariance is
-    the target's minus the beam's, which is a Gaussian when that difference is positive
-    semidefinite, that is, when the target contains the beam. Unlike the memo's
-    parametrization, this holds when the beams are equal (the correcting beam is then
-    ``[0, 0, 0]``, no convolution) or touch (a zero minor axis, a line).
+    Its covariance is ``D = S_T - S_p``, the target's minus the beam's (CASA Memo 10,
+    CAS-12148, eqs. 16-20, in covariance form, which also holds for equal and touching
+    beams): restoring a plane to ``restoring_beam`` convolves its residual with this
+    Gaussian and multiplies it by ``area_ratio``. The target must contain every beam,
+    ``D`` positive semidefinite; negative eigenvalues of ``D`` down to ``-1e-6`` times
+    the largest eigenvalue of ``S_p`` count as rounding and are set to zero. Memo 10's
+    test (eqs. 24-26) lacks the condition ``det D >= 0`` and accepts beams the target
+    does not contain.
 
     Parameters
     ----------
-    beam, target_beam : array_like
-        ``[major, minor, pa]`` in radians.
-    tolerance : float, optional
-        Negative eigenvalues of the covariance difference down to ``tolerance`` times the
-        target's major-axis variance count as zero (rounding when the ellipses touch).
+    beam_fit_params : xarray.DataArray or array_like
+        Beams ``(..., 3)``, ``[major, minor, pa]`` in radians: the PSF beams of a cube,
+        for example.
+    restoring_beam : array_like
+        The target ``[major, minor, pa]`` in radians, ``major >= minor > 0``.
 
     Returns
     -------
-    numpy.ndarray
-        ``[major, minor, pa]`` of the correcting beam, pa in ``[0, pi)``.
+    correcting_beam_params : numpy.ndarray
+        ``(..., 3)``: ``[major, minor, pa]`` of the correcting Gaussian of every beam in
+        radians, pa in ``(-pi/2, pi/2]``; ``minor = 0`` where the target touches the beam,
+        ``[0, 0, 0]`` where the two are equal, NaN for a beam without a fit (a value that
+        is not finite, or an axis that is not positive).
+    area_ratio : numpy.ndarray
+        ``(...)``: the area of the target over that of the beam, NaN for a beam without a
+        fit.
 
     Raises
     ------
     ValueError
-        If ``target_beam`` does not contain ``beam``.
+        If ``restoring_beam`` is not ``[major, minor, pa]`` with ``major >= minor > 0``,
+        or if it does not contain a beam. The message names the planes (indices, and
+        frequencies for a DataArray), the beams and the factor by which both axes of the
+        target must grow to contain them.
+
+    See Also
+    --------
+    common_beam : The target of ``tclean``'s ``restoringbeam='common'``, with the recipe.
     """
-    target = _covariance(target_beam)
-    difference = target - _covariance(beam)
-    variances, directions = np.linalg.eigh(difference)
-    if variances[0] < -tolerance * np.linalg.eigvalsh(target)[-1]:
-        raise ValueError(
-            f"The target beam {target_beam} does not contain the beam {beam}."
-        )
-    variances = np.maximum(variances, 0.0)
-    if variances[1] == 0.0:
-        return np.zeros(3)
-    major_direction = directions[:, 1]
-    pa = math.atan2(major_direction[0], -major_direction[1]) % math.pi
-    return np.array([*np.sqrt(2.0 * _FOUR_LN_2 * variances[::-1]), pa])
+    from astroviper.processing_functions.imaging.config_check._predicates import (
+        check_restoring_beam,
+    )
+
+    check_restoring_beam(restoring_beam)
+    beams = np.asarray(beam_fit_params, dtype=np.float64)
+    if beams.shape[-1:] != (3,):
+        raise ValueError(f"beam_fit_params must be shaped (..., 3), not {beams.shape}.")
+    target = np.asarray(restoring_beam, dtype=np.float64)
+    covariance, area_ratio, state = _correcting_covariance(beams, target)
+    planes = [
+        index for index in np.ndindex(state.shape) if state[index] == "not contained"
+    ]
+    if planes:
+        raise ValueError(_not_contained_message(beam_fit_params, beams, target, planes))
+    return _beam_from_covariance(covariance), area_ratio
 
 
-def _covariance(beam):
-    """Covariance of a beam in the frame where the major axis lies along (sin pa, -cos pa)."""
-    major, minor, pa = (float(x) for x in beam)
-    major_axis = np.array([math.sin(pa), -math.cos(pa)])
-    minor_axis = np.array([math.cos(pa), math.sin(pa)])
-    return (
-        major**2 * np.outer(major_axis, major_axis)
-        + minor**2 * np.outer(minor_axis, minor_axis)
-    ) / (2.0 * _FOUR_LN_2)
+def _beams_in_casa_order(beam_fit_params):
+    """The beams as rows ``(n, 3)``: frequency fastest, then polarization, then time."""
+    if isinstance(beam_fit_params, xr.DataArray):
+        planes = beam_fit_params.dims[:-1]
+        if beam_fit_params.shape[-1] != 3 or not set(planes) <= {
+            "time",
+            "frequency",
+            "polarization",
+        }:
+            raise ValueError(
+                "beam_fit_params must hold the beams in its last dimension and have its "
+                "other dimensions among time, frequency and polarization, not "
+                f"{dict(beam_fit_params.sizes)}."
+            )
+        order = [dim for dim in ("time", "polarization", "frequency") if dim in planes]
+        values = beam_fit_params.transpose(*order, beam_fit_params.dims[-1]).values
+    else:
+        values = np.asarray(beam_fit_params)
+        if values.ndim != 4 or values.shape[-1] != 3:
+            raise ValueError(
+                "beam_fit_params must be shaped (time, frequency, polarization, 3), "
+                f"not {values.shape}."
+            )
+        values = values.transpose(0, 2, 1, 3)
+    return np.asarray(values, dtype=np.float64).reshape(-1, 3)
+
+
+def _radians(value, unit):
+    """casacore's ``Quantum::getValue("rad")`` of a value in the unit of factor ``unit``."""
+    return value / (1.0 / unit)
+
+
+def _arcsec(value, unit):
+    """casacore's ``Quantum::getValue("arcsec")``."""
+    return value / (_ARCSEC / unit)
 
 
 def _unwrap(pa):
-    """GaussianBeam::_unwrap: the position angle in (-pi/2, pi/2]."""
-    if pa > 0.5 * math.pi or pa <= -0.5 * math.pi:
-        degrees = math.fmod(math.degrees(pa), 180.0)
-        if degrees > 90.0:
-            degrees -= 180.0
-        elif degrees <= -90.0:
-            degrees += 180.0
-        return math.radians(degrees)
-    return pa
+    """casacore's ``GaussianBeam::getPA(true)`` of pa in radians: to (-pi/2, pi/2],
+    through degrees."""
+    degrees = np.fmod(pa / _DEGREE, 180.0)
+    degrees = np.where(
+        degrees > 90.0,
+        degrees - 180.0,
+        np.where(degrees <= -90.0, degrees + 180.0, degrees),
+    )
+    return np.where(
+        (pa > 90.0 * _DEGREE) | (pa <= -90.0 * _DEGREE), degrees * _DEGREE, pa
+    )
 
 
-def _radians(beam):
-    """The axes of an internal beam in radians, converted as casacore converts them."""
-    major, minor, pa, in_arcsec = beam
-    if in_arcsec:
-        return major / (1.0 / _ARCSEC), minor / (1.0 / _ARCSEC), pa
-    return major, minor, pa
+def _equal(beam, other):
+    """casacore's ``GaussianBeam::operator==``: ``other`` in the unit of ``beam``, pa as
+    stored."""
+    factor = other.unit / beam.unit
+    return (
+        beam.major == other.major * factor
+        and beam.minor == other.minor * factor
+        and beam.pa == other.pa
+    )
 
 
-def _area(beam, first_in_arcsec):
-    """GaussianBeam::getArea in the unit of the first beam (without the common factor)."""
-    major, minor, _, in_arcsec = beam
-    if in_arcsec == first_in_arcsec:
-        return major * minor
-    if in_arcsec:
-        return (major * minor) / (1.0 / (_ARCSEC * _ARCSEC))
-    return (major * minor) / ((_ARCSEC * _ARCSEC) / 1.0)
+def _area(beam, unit):
+    """casacore's ``GaussianBeam::getArea`` in the square of the unit of factor ``unit``."""
+    return _AREA_FACTOR * (
+        (beam.major * beam.minor) / ((unit * unit) / (beam.unit * beam.unit))
+    )
 
 
 def _result(beam):
-    major, minor, pa = _radians(beam)
-    return np.array([major, minor, pa % math.pi])
-
-
-def _fits_inside(beam, outer):
-    """Whether GaussianDeconvolver deconvolves ``beam`` from ``outer`` cleanly."""
-    major_o, minor_o, pa_o = _radians(outer)
-    major_b, minor_b, pa_b = _radians(beam)
-    cos_o, sin_o, cos_b, sin_b = (
-        math.cos(pa_o),
-        math.sin(pa_o),
-        math.cos(pa_b),
-        math.sin(pa_b),
+    return np.array(
+        [
+            _radians(beam.major, beam.unit),
+            _radians(beam.minor, beam.unit),
+            beam.unwrapped_pa,
+        ]
     )
+
+
+def _square(value):
+    return value * value
+
+
+def _deconvolves_cleanly(convolved, beam):
+    """Whether CASA's ``GaussianDeconvolver::deconvolve`` takes ``beam`` out of
+    ``convolved`` without its point-source case or an error."""
+    major_s = _radians(convolved.major, convolved.unit)
+    minor_s = _radians(convolved.minor, convolved.unit)
+    major_b = _radians(beam.major, beam.unit)
+    minor_b = _radians(beam.minor, beam.unit)
+    cos_s, sin_s = math.cos(convolved.unwrapped_pa), math.sin(convolved.unwrapped_pa)
+    cos_b, sin_b = math.cos(beam.unwrapped_pa), math.sin(beam.unwrapped_pa)
     alpha = (
-        (major_o * cos_o) ** 2
-        + (minor_o * sin_o) ** 2
-        - (major_b * cos_b) ** 2
-        - (minor_b * sin_b) ** 2
+        _square(major_s * cos_s)
+        + _square(minor_s * sin_s)
+        - _square(major_b * cos_b)
+        - _square(minor_b * sin_b)
     )
     beta = (
-        (major_o * sin_o) ** 2
-        + (minor_o * cos_o) ** 2
-        - (major_b * sin_b) ** 2
-        - (minor_b * cos_b) ** 2
+        _square(major_s * sin_s)
+        + _square(minor_s * cos_s)
+        - _square(major_b * sin_b)
+        - _square(minor_b * cos_b)
     )
     gamma = 2 * (
-        (minor_o**2 - major_o**2) * sin_o * cos_o
-        - (minor_b**2 - major_b**2) * sin_b * cos_b
+        (_square(minor_s) - _square(major_s)) * sin_s * cos_s
+        - (_square(minor_b) - _square(major_b)) * sin_b * cos_b
     )
     s = alpha + beta
-    t = math.sqrt((alpha - beta) ** 2 + gamma**2)
-    # Otherwise CASA returns its point-source case or fails; neither counts as fitting.
+    t = math.sqrt(_square(alpha - beta) + _square(gamma))
     return not (alpha < 0.0 or beta < 0.0 or s < t)
 
 
 def _transform_ellipse_by_scaling(major, minor, pa, x_scale, y_scale):
-    """CasaImageBeamSet::_transformEllipseByScaling of CASA 6.8 (CAS-14719)."""
-    cos2, sin2 = math.cos(pa) ** 2, math.sin(pa) ** 2
-    a = cos2 / major**2 + sin2 / minor**2
-    b = -2 * math.cos(pa) * math.sin(pa) * (1 / major**2 - 1 / minor**2)
-    c = sin2 / major**2 + cos2 / minor**2
-    r = a / x_scale**2
-    s = b * b / (4 * x_scale**2 * y_scale**2)
-    t = c / y_scale**2
+    """CASA's ``CasaImageBeamSet::_transformEllipseByScaling`` after CAS-14719: the
+    ellipse with its x and y axes scaled; pa takes the sign of the input pa."""
+    cos_pa = math.cos(pa)
+    sin_pa = math.sin(pa)
+    cos2 = cos_pa * cos_pa
+    sin2 = sin_pa * sin_pa
+    major2 = major * major
+    minor2 = minor * minor
+    a = cos2 / major2 + sin2 / minor2
+    b = -2 * cos_pa * sin_pa * (1 / major2 - 1 / minor2)
+    c = sin2 / major2 + cos2 / minor2
+    xs = x_scale * x_scale
+    ys = y_scale * y_scale
+    r = a / xs
+    s = b * b / (4 * xs * ys)
+    t = c / ys
     u = r - t
     f1 = u * u + 4 * s
     j1 = j2 = 0.5
-    # The roots tend to (r + t) / 2 +- sqrt(s) when the scaled ellipse is (nearly)
-    # circular, where the general form divides zero by zero.
     if not f1 > 0.0 or abs(u) < 1e-14 * (abs(r) + abs(t)):
-        k1, k2 = 0.5 * (r + t) + math.sqrt(s), 0.5 * (r + t) - math.sqrt(s)
+        k1 = 0.5 * (r + t) + math.sqrt(s)
+        k2 = 0.5 * (r + t) - math.sqrt(s)
     else:
         f2 = math.sqrt(f1) * abs(u)
         j1 = (f2 + f1) / f1 / 2
         j2 = (-f2 + f1) / f1 / 2
         if 2 * j1 - 1 == 0.0 or 2 * j2 - 1 == 0.0:
-            k1, k2 = 0.5 * (r + t) + math.sqrt(s), 0.5 * (r + t) - math.sqrt(s)
+            k1 = 0.5 * (r + t) + math.sqrt(s)
+            k2 = 0.5 * (r + t) - math.sqrt(s)
         else:
             k1 = (j1 * r + j1 * t - t) / (2 * j1 - 1)
             k2 = (j2 * r + j2 * t - t) / (2 * j2 - 1)
     if not (k1 > 0.0 and k2 > 0.0):
         k1 = k2 = 0.5 * (r + t) if 0.5 * (r + t) > 0.0 else 1.0 / (major * minor)
         j1 = j2 = 1.0
-    c1, c2 = math.sqrt(1 / k1), math.sqrt(1 / k2)
+    c1 = math.sqrt(1 / k1)
+    c2 = math.sqrt(1 / k2)
     sign = 1 if pa >= 0 else -1
     if c1 == c2:
         return c1, c1, 0.0
@@ -236,29 +378,197 @@ def _transform_ellipse_by_scaling(major, minor, pa, x_scale, y_scale):
     return c2, c1, sign * math.acos(math.sqrt(j2))
 
 
-def _enclosing(largest, problem):
-    """CASA's ellipse around the largest beam and a beam that does not fit inside it:
-    scaled so that the largest beam becomes a circle of the same area, it takes the major
-    axis and angle of the other beam and the circle's radius as minor axis; it is then
-    grown by factors of 1.001 until both beams fit, at most 1000 times (``None`` when
-    that is not enough)."""
-    major_a = largest[0] if largest[3] else largest[0] / _ARCSEC
-    minor_a = largest[1] if largest[3] else largest[1] / _ARCSEC
-    major_p = problem[0] if problem[3] else problem[0] / _ARCSEC
-    minor_p = problem[1] if problem[3] else problem[1] / _ARCSEC
+def _enclosing_beam(largest, problem, angle):
+    """CASA's ellipse, in arcsec, around the beam of largest area and a beam that does not
+    fit in it, grown until both fit; ``None`` after 1000 growth steps or for a size that is
+    not finite. Scaled so that the largest beam becomes a circle of the same area, the
+    ellipse has the major axis and pa of the other beam and the circle's radius as minor
+    axis."""
+    major_a = _arcsec(largest.major, largest.unit)
+    minor_a = _arcsec(largest.minor, largest.unit)
     radius = math.sqrt(major_a * minor_a)
-    x_scale, y_scale = radius / major_a, radius / minor_a
+    x_scale = radius / major_a
+    y_scale = radius / minor_a
     major_b, _, pa_b = _transform_ellipse_by_scaling(
-        major_p, minor_p, problem[2] - largest[2], x_scale, y_scale
+        _arcsec(problem.major, problem.unit),
+        _arcsec(problem.minor, problem.unit),
+        angle,
+        x_scale,
+        y_scale,
     )
-    major_c, minor_c, pa_c = _transform_ellipse_by_scaling(
+    major, minor, pa = _transform_ellipse_by_scaling(
         major_b, radius, pa_b, 1 / x_scale, 1 / y_scale
     )
-    pa_c = _unwrap(pa_c + largest[2])
-    for _ in range(1001):
-        enclosing = (major_c, minor_c, pa_c, True)
-        if _fits_inside(largest, enclosing) and _fits_inside(problem, enclosing):
+    pa += largest.unwrapped_pa
+    unwrapped_pa = float(_unwrap(pa))
+    for _ in range(_MAX_GROWTH_STEPS + 1):
+        if not (math.isfinite(major) and math.isfinite(minor)):
+            return None
+        enclosing = _Beam(major, minor, pa, _ARCSEC, unwrapped_pa)
+        if _deconvolves_cleanly(enclosing, largest) and _deconvolves_cleanly(
+            enclosing, problem
+        ):
             return enclosing
-        major_c *= 1.001
-        minor_c *= 1.001
+        major *= 1.001
+        minor *= 1.001
     return None
+
+
+def _covariance(variance_major, variance_minor, pa):
+    """Covariance ``(..., 2, 2)``, in the ``(l index, m index)`` frame, of Gaussians with
+    the given variances along their axes and the major axis along ``(sin pa, -cos pa)``."""
+    sin_pa, cos_pa = np.sin(pa), np.cos(pa)
+    cross = (variance_minor - variance_major) * sin_pa * cos_pa
+    ll = variance_major * sin_pa * sin_pa + variance_minor * cos_pa * cos_pa
+    mm = variance_major * cos_pa * cos_pa + variance_minor * sin_pa * sin_pa
+    return np.stack(
+        [np.stack([ll, cross], axis=-1), np.stack([cross, mm], axis=-1)], axis=-2
+    )
+
+
+def _beam_covariance(beam_fit_params):
+    """Covariance ``(..., 2, 2)`` in rad² of beams ``(..., 3)``. pa is unwrapped first,
+    so a beam and its :func:`common_beam` (pa in [0, pi) from the fit, (-pi/2, pi/2]
+    from CASA's rule) have the same covariance."""
+    beams = np.asarray(beam_fit_params, dtype=np.float64)
+    sigma_major = beams[..., 0] / _FWHM_FACTOR
+    sigma_minor = beams[..., 1] / _FWHM_FACTOR
+    return _covariance(
+        sigma_major * sigma_major, sigma_minor * sigma_minor, _unwrap(beams[..., 2])
+    )
+
+
+def _eigenvalues(covariance):
+    """The smaller and the larger eigenvalue of symmetric matrices ``(..., 2, 2)``."""
+    half_trace = 0.5 * (covariance[..., 0, 0] + covariance[..., 1, 1])
+    radius = np.hypot(
+        0.5 * (covariance[..., 0, 0] - covariance[..., 1, 1]), covariance[..., 0, 1]
+    )
+    return half_trace - radius, half_trace + radius
+
+
+def _orientation(covariance):
+    """pa of the major axis of covariances ``(..., 2, 2)``, in (-pi/2, pi/2]."""
+    pa = 0.5 * np.arctan2(
+        -2.0 * covariance[..., 0, 1], covariance[..., 1, 1] - covariance[..., 0, 0]
+    )
+    return np.where(pa <= -0.5 * np.pi, pa + np.pi, pa)
+
+
+def _beam_from_covariance(covariance):
+    """Beams ``(..., 3)`` of covariances ``(..., 2, 2)`` in rad²; pa is 0 for a circle and
+    negative eigenvalues count as zero."""
+    smallest, largest = _eigenvalues(covariance)
+    pa = np.where(smallest == largest, 0.0, _orientation(covariance))
+    return np.stack(
+        [
+            _FWHM_FACTOR * np.sqrt(np.maximum(largest, 0.0)),
+            _FWHM_FACTOR * np.sqrt(np.maximum(smallest, 0.0)),
+            pa,
+        ],
+        axis=-1,
+    )
+
+
+def _correcting_covariance(beam_fit_params, restoring_beam):
+    """The covariance of the correcting Gaussian of every beam, without raising.
+
+    Parameters
+    ----------
+    beam_fit_params : array_like
+        Beams ``(..., 3)``, ``[major, minor, pa]`` in radians.
+    restoring_beam : array_like
+        The target ``[major, minor, pa]`` in radians.
+
+    Returns
+    -------
+    covariance : numpy.ndarray
+        ``(..., 2, 2)``: ``D = S_T - S_p`` in rad² where the target contains the beam,
+        with negative eigenvalues within the tolerance set to zero (``0`` for a beam equal
+        to the target); NaN elsewhere.
+    area_ratio : numpy.ndarray
+        ``(...)``: the area of the target over that of the beam, NaN for a beam without a
+        fit.
+    state : numpy.ndarray
+        ``(...)``: ``"contained"``, ``"not contained"``, or ``"no fit"`` for a beam with a
+        value that is not finite or an axis that is not positive.
+    """
+    beams = np.asarray(beam_fit_params, dtype=np.float64)
+    target = np.asarray(restoring_beam, dtype=np.float64)
+    fitted = (
+        np.isfinite(beams).all(axis=-1) & (beams[..., 0] > 0.0) & (beams[..., 1] > 0.0)
+    )
+    point_spread_function = _beam_covariance(beams)
+    difference = _beam_covariance(target) - point_spread_function
+    smallest, largest = _eigenvalues(difference)
+    contained = fitted & (
+        smallest >= -_CONTAINMENT_TOLERANCE * _eigenvalues(point_spread_function)[1]
+    )
+    clipped = _covariance(np.maximum(largest, 0.0), 0.0, _orientation(difference))
+    covariance = np.where(
+        contained[..., None, None],
+        np.where((smallest < 0.0)[..., None, None], clipped, difference),
+        np.nan,
+    )
+    area_ratio = np.full(fitted.shape, np.nan)
+    np.divide(
+        target[0] * target[1],
+        beams[..., 0] * beams[..., 1],
+        out=area_ratio,
+        where=fitted,
+    )
+    state = np.where(
+        contained, "contained", np.where(fitted, "not contained", "no fit")
+    )
+    return covariance, area_ratio, state
+
+
+def _growth_factor(beam_fit_params, restoring_beam):
+    """The factor ``(...)`` by which both axes of the target must grow to contain each
+    fitted beam ``(..., 3)``, ``sqrt(max eig(S_T^-1 S_p))``."""
+    return np.sqrt(
+        np.linalg.eigvals(
+            np.linalg.solve(
+                _beam_covariance(restoring_beam), _beam_covariance(beam_fit_params)
+            )
+        ).real.max(axis=-1)
+    )
+
+
+def _not_contained_message(beam_fit_params, beams, target, planes):
+    """The error of :func:`correcting_beam` for the planes whose beam the target misses."""
+    selected = np.array([beams[index] for index in planes])
+    growth = _growth_factor(selected, target)
+    lines = [
+        f"  {_plane_name(beam_fit_params, index)}: {_format_beam(beam)}, growth "
+        f"factor {factor:.7g}"
+        for index, beam, factor in zip(
+            planes[:_MAX_PLANES_NAMED], selected, growth, strict=False
+        )
+    ]
+    if len(planes) > _MAX_PLANES_NAMED:
+        lines.append(f"  and {len(planes) - _MAX_PLANES_NAMED} more")
+    return (
+        f"restoring_beam {_format_beam(target)} does not contain the beam of "
+        f"{len(planes)} of {math.prod(beams.shape[:-1])} plane(s):\n"
+        + "\n".join(lines)
+        + f"\nBoth axes of restoring_beam must grow by {growth.max():.7g} to contain "
+        "them. A beam typed from a rounded printout must be at least as large as the "
+        "largest beam along every direction: round it up."
+    )
+
+
+def _plane_name(beam_fit_params, index):
+    if not isinstance(beam_fit_params, xr.DataArray):
+        return f"plane {index}"
+    names = []
+    for dim, position in zip(beam_fit_params.dims[:-1], index, strict=True):
+        name = f"{dim} {position}"
+        if dim == "frequency" and "frequency" in beam_fit_params.coords:
+            name += f" ({float(beam_fit_params['frequency'][position]):.10g} Hz)"
+        names.append(name)
+    return ", ".join(names)
+
+
+def _format_beam(beam):
+    return "[" + ", ".join(f"{value:.10g}" for value in beam) + "] rad"
