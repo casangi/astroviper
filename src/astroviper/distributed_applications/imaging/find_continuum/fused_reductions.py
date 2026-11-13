@@ -14,7 +14,9 @@ findContinuum asks for next, as far as they are known by then:
   of the cube outside the joint mask in those channels (``cubeNoiseLevel``,
   with the arguments findContinuum has computed by then), the cube peak in
   those channels and the moment images of the intersections with earlier
-  selections.
+  selections;
+- a pass for the median absolute deviation spectrum outside the joint mask
+  (``xmadm``) adds the mean spectrum with the same mask.
 
 The cache answers only a request identical to one already computed, with the
 small images of its mask unchanged, so the results are those of
@@ -182,6 +184,10 @@ class FusedReductions:
                 and request["channels"] is not None
             ):
                 predicted += self._selection_round(request)
+            if request["kind"] == "profile" and request["function"] == "xmadm":
+                # computeStatisticalSpectrumFromMask asks for the mean profile
+                # with the same mask next.
+                predicted.append(dict(request, function="mean"))
         return predicted
 
     def _first_round(self):

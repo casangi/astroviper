@@ -104,6 +104,16 @@ def test_selection_round_adds_peak_and_intersections(backend):
     assert fused([cit._moments_request(CUBE, [0, 8], "6~10")])[0]["pass"] == 2
 
 
+def test_xmadm_profile_adds_the_mean_profile(backend):
+    fused, passes = backend
+    mask = f'"{PRIMARY_BEAM}">0.3 && "{PRIMARY_BEAM}"<0.5'
+    fused([cit._cube_request(CUBE, "profile", "", mask, function="xmadm")])
+    mean = cit._cube_request(CUBE, "profile", "", mask, function="mean")
+    assert mean in passes.passes[0]
+    assert fused([mean])[0]["pass"] == 1
+    assert len(passes.passes) == 1
+
+
 def test_placeholders_while_capturing(backend):
     fused, _ = backend
 
