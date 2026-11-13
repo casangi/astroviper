@@ -285,6 +285,16 @@ class TestSmallImageTasks:
         empty = cit.imstat(path, mask=f'"{path}">100')
         assert empty["npts"].size == 0 and "maxpos" not in empty
 
+    def test_repeated_imstat_returns_fresh_results(self, small):
+        """imageSNR overwrites the peak in the dictionary imstat returns; a
+        repeated imstat must not see that change."""
+        path, values, valid = small
+        mask = f'"{path}"<10'
+        _, peak, _, _ = findContinuum.imageSNR(path, mask=mask, applyMaskToAll=False)
+        assert peak == values[valid].max()
+        _, peak, _, _ = findContinuum.imageSNR(path, mask=mask, applyMaskToAll=True)
+        assert peak == values[valid & (values < 10)].max()
+
     def test_immath_and_imsubimage(self, small, tmp_path):
         path, values, valid = small
         other = str(tmp_path / "other.image")
