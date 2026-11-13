@@ -21,7 +21,6 @@ import xarray as xr
 from astroviper.processing_functions.imaging.restore import (
     _clean_beam_kernel_ft,
     _convolve_with_clean_beam,
-    _correct_residual_arrays,
     _elliptical_gaussian_kernel,
     _inverse_rfft2,
     _multiply_by_correcting_transform,
@@ -602,7 +601,10 @@ def test_inverse_rfft2_is_irfft2_bit_for_bit(shape, dtype, workers):
 @pytest.mark.parametrize("output", ["apparent", "primary_beam_corrected", "both"])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("consume_model", [False, True])
-def test_cube_restoration_selector_matches_both_products(output, dtype, consume_model):
+@pytest.mark.parametrize("restoring_beam", [None, [10.0e-3, 6.0e-3, 0.0]])
+def test_cube_restoration_selector_matches_both_products(
+    output, dtype, consume_model, restoring_beam
+):
     image = _make_restore_xds(ny=16, nx=16)
     image["SKY_MODEL"][:] = 0
     image["SKY_MODEL"].values[..., 8, 8] = 2
@@ -611,10 +613,15 @@ def test_cube_restoration_selector_matches_both_products(output, dtype, consume_
     image["PRIMARY_BEAM"] = xr.full_like(image.SKY_RESIDUAL, 0.5)
     image.PRIMARY_BEAM.values[..., 0, :] = 0
     image.attrs["data_groups"]["residual"]["primary_beam"] = "PRIMARY_BEAM"
-    reference, _ = restore_image(image.copy(deep=True), restoration_output="both")
+    reference, _ = restore_image(
+        image.copy(deep=True), restoration_output="both", restoring_beam=restoring_beam
+    )
     model = image.SKY_MODEL.copy(deep=True)
     result, _ = restore_image(
-        image, restoration_output=output, consume_model=consume_model
+        image,
+        restoration_output=output,
+        consume_model=consume_model,
+        restoring_beam=restoring_beam,
     )
     apparent = output in ("apparent", "both")
     corrected = output in ("primary_beam_corrected", "both")
@@ -693,6 +700,17 @@ def _correcting_transform(ny, nx, psf, target):
     return ratio * np.exp(-2.0 * np.pi**2 * q)
 
 
+def _divided(plane, primary_beam_plane, outside, dtype=np.float64):
+    """``plane / P`` where the primary beam is not below the 0.2 cutoff,
+    ``outside`` elsewhere, at ``dtype``."""
+    return np.divide(
+        plane,
+        primary_beam_plane,
+        out=np.full(plane.shape, outside, dtype=dtype),
+        where=primary_beam_plane >= 0.2,
+    )
+
+
 def _restored(xds, output, consume_model, restoring_beam):
     out, _ = restore_image(
         xds,
@@ -757,10 +775,19 @@ def test_target_equal_to_the_psf_beam_gives_the_none_result(
 @pytest.mark.parametrize("output", OUTPUTS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("consume_model", [False, True])
-def test_target_restore_matches_the_float64_construction(output, dtype, consume_model):
+@pytest.mark.parametrize("nan_pixel", [False, True])
+def test_target_restore_matches_the_float64_construction(
+    output, dtype, consume_model, nan_pixel
+):
     """The model convolved with the sampled target beam plus the residual
-    multiplied by H; the corrected plane is ``(M / P) * B_T + (R * K) / P``."""
+    multiplied by H. The corrected plane is ``(M / P) * B_T + (R_0 / P) * K``:
+    the residual, like the model, is divided by the primary beam before it is
+    convolved, with ``R_0`` zero outside the cutoff and at a NaN residual
+    pixel, where the planes are NaN. CASA's order for the residual,
+    ``(R_0 * K) / P``, is off by more than 100 times the tolerance."""
     xds = _target_inputs(dtype)
+    if nan_pixel:
+        xds.SKY_RESIDUAL.values[0, 0, 0, 10, 50] = np.nan
     residual = xds.SKY_RESIDUAL.values.astype(np.float64)
     model = xds.SKY_MODEL.values.astype(np.float64)
     primary_beam = xds.PRIMARY_BEAM.values.astype(np.float64)
@@ -768,21 +795,33 @@ def test_target_restore_matches_the_float64_construction(output, dtype, consume_
     kernel_ft = _clean_beam_kernel_ft(TARGET, 64, 64, _pixel_size(xds), np.float64, 1)
     transform = _correcting_transform(64, 64, PSF_PIXELS, TARGET_PIXELS)
     tolerance = 1e-6 if dtype == np.float32 else 1e-12
+
+    def convolved(plane, spectrum):
+        return np.fft.irfft2(np.fft.rfft2(plane) * spectrum, s=(64, 64))
+
     for q in range(2):
-        residual_to_beam = np.fft.irfft2(
-            np.fft.rfft2(residual[0, 0, q]) * transform, s=(64, 64)
+        finite = np.isfinite(residual[0, 0, q])
+        residual_zero = np.where(finite, residual[0, 0, q], 0.0)
+        primary_beam_plane = primary_beam[0, 0, q]
+        model_part = convolved(
+            _divided(model[0, 0, q], primary_beam_plane, 0.0), kernel_ft
         )
         expected = {
-            "SKY_RESTORED": np.fft.irfft2(
-                np.fft.rfft2(model[0, 0, q]) * kernel_ft, s=(64, 64)
-            )
-            + residual_to_beam
+            "SKY_RESTORED": np.where(
+                finite,
+                convolved(model[0, 0, q], kernel_ft)
+                + convolved(residual_zero, transform),
+                np.nan,
+            ),
+            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED": np.where(
+                (primary_beam_plane >= 0.2) & finite,
+                model_part
+                + convolved(
+                    _divided(residual_zero, primary_beam_plane, 0.0), transform
+                ),
+                np.nan,
+            ),
         }
-        inside = primary_beam[0, 0, q] >= 0.2
-        divided = np.where(inside, model[0, 0, q] / primary_beam[0, 0, q], 0.0)
-        expected["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"] = np.fft.irfft2(
-            np.fft.rfft2(divided) * kernel_ft, s=(64, 64)
-        ) + np.where(inside, residual_to_beam / primary_beam[0, 0, q], np.nan)
         for name, value in restored.items():
             assert value.dtype == dtype
             np.testing.assert_array_equal(
@@ -790,6 +829,13 @@ def test_target_restore_matches_the_float64_construction(output, dtype, consume_
             )
             error = np.nanmax(np.abs(value[0, 0, q] - expected[name]))
             assert error <= tolerance * np.nanmax(np.abs(expected[name]))
+        corrected = expected["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
+        casa_order = model_part + _divided(
+            convolved(residual_zero, transform), primary_beam_plane, 0.0
+        )
+        assert np.nanmax(np.abs(casa_order - corrected)) > 100 * tolerance * np.nanmax(
+            np.abs(corrected)
+        )
 
 
 def test_correcting_transform_takes_the_psf_beam_to_the_target():
@@ -808,9 +854,13 @@ def test_correcting_transform_takes_the_psf_beam_to_the_target():
         )
 
     residual, expected = made_with(psf), made_with(target)
-    got = _correct_residual_arrays(
-        residual[None, None, None], np.array(psf)[None, None, None], target, 1.0
-    )[0, 0, 0]
+    got = _restore_image_arrays(
+        residual[None, None, None],
+        np.zeros((1, 1, 1, ny, nx)),
+        np.array(psf)[None, None, None],
+        1.0,
+        restoring_beam=target,
+    )[0]["apparent"][0, 0, 0]
     assert np.abs(got - expected).max() <= 1e-12 * np.abs(expected).max()
 
     flipped = (_covariance_pixels(*target) - _covariance_pixels(*psf)) * [
@@ -843,7 +893,8 @@ def test_correcting_transform_makes_no_subnormal_values(dtype):
 def test_point_source_in_the_residual_keeps_its_peak(output, dtype):
     """CASA Memo 10, Fig. 2: with the target axes doubled a point source left
     in the residual keeps its peak (Jy per target beam), not 0.25. The
-    primary beam is 1 at the source."""
+    primary beam is 1 across the source, which the corrected plane divides
+    before the convolution."""
     residual = _elliptical_gaussian_kernel(64, 64, *PSF_PIXELS, dtype)
     xds = _with_primary_beam(
         _make_restore_xds(
@@ -854,6 +905,7 @@ def test_point_source_in_the_residual_keeps_its_peak(output, dtype):
             dtype=dtype,
         )
     )
+    xds.PRIMARY_BEAM.values[...] = 1.0
     doubled = [2 * PSF_PIXELS[0] * DELTA, 2 * PSF_PIXELS[1] * DELTA, PSF_PIXELS[2]]
     restored = _restored(xds, output, False, doubled)
     apparent = restored["SKY_RESTORED"]
@@ -934,7 +986,8 @@ def test_target_equal_within_the_tolerance_scales_the_residual(
     output, dtype, monkeypatch
 ):
     """D is zero after clipping: H is the area ratio, applied without a
-    transform."""
+    transform, to the residual and to the residual divided by the primary
+    beam."""
     import astroviper.processing_functions.imaging.restore as restore
 
     def no_transform(*args):
@@ -946,13 +999,24 @@ def test_target_equal_within_the_tolerance_scales_the_residual(
     xds = _target_inputs(dtype)
     residual = xds.SKY_RESIDUAL.values.copy()
     model = xds.SKY_MODEL.values.copy()
+    primary_beam = xds.PRIMARY_BEAM.values.copy()
     restored = _restored(xds, output, False, target)
-    if output != "apparent":
-        assert np.isfinite(restored["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]).any()
-    if output != "primary_beam_corrected":
-        kernel_ft = _clean_beam_kernel_ft(target, 64, 64, _pixel_size(xds), dtype, 1)
-        ratio = dtype((target[0] * target[1]) / (major * minor))
-        for q in range(2):
+    kernel_ft = _clean_beam_kernel_ft(target, 64, 64, _pixel_size(xds), dtype, 1)
+    ratio = dtype((target[0] * target[1]) / (major * minor))
+    for q in range(2):
+        if output != "apparent":
+            primary_beam_plane = primary_beam[0, 0, q]
+            expected = _convolve_with_clean_beam(
+                _divided(model[0, 0, q], primary_beam_plane, 0, dtype), kernel_ft, 1
+            )
+            expected += (
+                _divided(residual[0, 0, q], primary_beam_plane, np.nan, dtype) * ratio
+            )
+            np.testing.assert_array_equal(
+                restored["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"][0, 0, q], expected
+            )
+            assert np.isfinite(expected[primary_beam_plane >= 0.2]).all()
+        if output != "primary_beam_corrected":
             expected = _convolve_with_clean_beam(model[0, 0, q], kernel_ft, 1)
             expected += residual[0, 0, q] * ratio
             np.testing.assert_array_equal(restored["SKY_RESTORED"][0, 0, q], expected)

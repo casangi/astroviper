@@ -663,23 +663,34 @@ def _assert_close(value, expected, dtype):
 @pytest.mark.parametrize("n_taylor_terms", [1, 2])
 @pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_mfs_restore_to_a_target_corrects_the_residual_before_the_taylor_division(
+def test_mfs_restore_to_a_target_convolves_the_taylor_divided_residual(
     n_taylor_terms, output, dtype
 ):
-    """``TaylorDivide(M) * B_T + TaylorDivide(R * K)``, finite inside the
-    cutoff; ALPHA_ERROR and its validity come from the unconvolved residuals."""
+    """``TaylorDivide(M) * B_T + TaylorDivide(R)_0 * K``, finite inside the
+    cutoff and NaN outside: the divided residual, zero outside the cutoff, is
+    convolved after the division, as the divided model is. ALPHA_ERROR and its
+    validity come from the unconvolved residuals."""
     image = _continuum_target_image(dtype).isel(taylor_term=slice(n_taylor_terms))
     kernel_ft, transform = _target_kernel_and_transform()
     primary_beam_taylor = image.PRIMARY_BEAM_TAYLOR.astype(np.float64)
     residual_to_beam = image.SKY_RESIDUAL.copy(
         data=_apply(image.SKY_RESIDUAL, transform)
     )
-    divided_model = _divide_taylor_polynomials(
-        image.SKY_MODEL.astype(np.float64), primary_beam_taylor, 0.2, outside_value=0.0
+    divided_model, divided_residual = (
+        _divide_taylor_polynomials(
+            image[name].astype(np.float64), primary_beam_taylor, 0.2, **options
+        ).values
+        for name, options in (
+            ("SKY_MODEL", {"outside_value": 0.0}),
+            ("SKY_RESIDUAL", {}),
+        )
     )
-    expected = (
+    finite = np.isfinite(divided_residual)
+    expected = np.where(
+        finite,
         _apply(divided_model, kernel_ft)
-        + _divide_taylor_polynomials(residual_to_beam, primary_beam_taylor, 0.2).values
+        + _apply(np.where(finite, divided_residual, 0.0), transform),
+        np.nan,
     )
 
     result, _ = restore_continuum_image(
@@ -724,22 +735,17 @@ def test_mfs_restore_to_a_target_corrects_the_residual_before_the_taylor_divisio
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_mvc_restore_to_a_target_divides_the_corrected_residual(dtype):
+def test_mvc_restore_to_a_target_convolves_the_divided_residual(dtype):
+    """``(M / P) * B_T + (R_0 / P) * K``, NaN outside the cutoff."""
     image = _continuum_target_image(dtype, continuum_mode="mvc")
     kernel_ft, transform = _target_kernel_and_transform()
     model = image.SKY_MODEL.values
-    residual_to_beam = _apply(image.SKY_RESIDUAL, transform)
+    residual = image.SKY_RESIDUAL.values
     primary_beam = image.PRIMARY_BEAM.values[:, None].astype(np.float64)
-    inside = primary_beam >= 0.2
-    divided_model = np.divide(
-        model, primary_beam, out=np.zeros(model.shape), where=inside
-    )
-    divided_residual = np.divide(
-        residual_to_beam,
-        primary_beam,
-        out=np.full(model.shape, np.nan),
-        where=inside,
-    )
+    inside = np.broadcast_to(primary_beam >= 0.2, model.shape)
+
+    def divided(planes):
+        return np.divide(planes, primary_beam, out=np.zeros(model.shape), where=inside)
 
     result, _ = restore_continuum_image(
         image,
@@ -750,12 +756,16 @@ def test_mvc_restore_to_a_target_divides_the_corrected_residual(dtype):
 
     _assert_close(
         result.SKY_RESTORED_FLAT_NOISE,
-        _apply(model, kernel_ft) + residual_to_beam,
+        _apply(model, kernel_ft) + _apply(residual, transform),
         dtype,
     )
     _assert_close(
         result.SKY_RESTORED_FLAT_SKY,
-        _apply(divided_model, kernel_ft) + divided_residual,
+        np.where(
+            inside,
+            _apply(divided(model), kernel_ft) + _apply(divided(residual), transform),
+            np.nan,
+        ),
         dtype,
     )
 
@@ -937,13 +947,14 @@ def _restore_memory_image(n, n_polarizations):
 
 
 @pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
-def test_mfs_restore_to_a_target_holds_one_taylor_stack_more(output):
-    """Design section 6: R (*) K and then its Taylor-divided form are one stack
-    more than the restore without a target holds. Dividing R (*) K after the
-    apparent restore held two more for one Taylor term in two polarizations."""
+def test_mfs_restore_to_a_target_holds_no_more_than_without_one(output):
+    """The divided residual terms are taken to the target after the division,
+    so the restore holds no Taylor stack more than without a target; taking
+    R (*) K to the division held one more. At 1024 x 1024 the row block of the
+    correcting transform is 0.4 plane, below the kernel build's peak."""
     import tracemalloc
 
-    n, n_polarizations = 256, 2
+    n, n_polarizations = 1024, 2
     peaks = {}
     for restoring_beam in (None, TARGET_BEAM):
         image = _restore_memory_image(n, n_polarizations)
@@ -959,9 +970,7 @@ def test_mfs_restore_to_a_target_holds_one_taylor_stack_more(output):
             peaks[restoring_beam is None] = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()
-    plane = n * n * 4
-    stack = n_polarizations * plane
-    assert peaks[False] - peaks[True] <= stack + 0.25 * plane
+    assert peaks[False] - peaks[True] <= 0.25 * n * n * 4
 
 
 @pytest.mark.parametrize("frequency_shift", [0.0, 1.0e6])

@@ -256,22 +256,25 @@ def _correcting_spectrum(residual_plane, covariance_pixels, area_ratio, workers)
     return spectrum, finite
 
 
-def _residual_to_beam(residual_plane, covariance_pixels, area_ratio, workers):
-    """``R (*) K``: a residual plane taken to the target beam, as a new plane.
+def _add_model_and_invert(spectrum, model_plane, kernel_ft, out, workers):
+    """Write ``IDFT[spectrum + DFT(model_plane) kernel_ft]`` to ``out``.
 
-    ``D = 0`` scales the residual by the area ratio without a transform.
-    Otherwise non-finite residual pixels are NaN in the result.
+    ``spectrum`` (``None`` for none) is overwritten. A zero model plane, or no
+    clean beam (``kernel_ft`` ``None``), adds no model term; with neither term
+    ``out`` is zero. ``model_plane`` may be ``out``.
     """
-    if not covariance_pixels.any():
-        return residual_plane * residual_plane.dtype.type(area_ratio)
-    spectrum, finite = _correcting_spectrum(
-        residual_plane, covariance_pixels, area_ratio, workers
-    )
-    plane = _inverse_rfft2(spectrum, residual_plane.shape, workers)
-    del spectrum
-    if not finite:
-        plane[~np.isfinite(residual_plane)] = np.nan
-    return plane
+    if kernel_ft is not None and model_plane.any():
+        model_spectrum = scipy.fft.rfft2(model_plane, workers=workers)
+        model_spectrum *= kernel_ft
+        if spectrum is None:
+            spectrum = model_spectrum
+        else:
+            spectrum += model_spectrum
+        del model_spectrum
+    if spectrum is None:
+        out.fill(0)
+    else:
+        out[...] = _inverse_rfft2(spectrum, out.shape, workers)
 
 
 def primary_beam_corrected_plane(
@@ -585,12 +588,21 @@ def _restore_plane_to_beam(
 ):
     """Restore one plane to the target beam into the given output planes.
 
-    The model is convolved with the target's clean beam (``kernel_ft``,
-    ``None`` for a zero model) and the residual is taken to the target,
-    ``R (*) K``. The corrected plane is ``(M / P) (*) B_T + (R (*) K) / P``,
-    NaN where the primary beam is below ``primary_beam_limit``. The model
-    parts are made first, so the model plane may be the apparent output plane,
-    and at most three planes besides the outputs are live.
+    The apparent plane is ``M (*) B_T + R (*) K``: the model convolved with
+    the target's clean beam (``kernel_ft``, ``None`` for a zero model) plus
+    the residual taken to the target. The corrected plane is ``(M / P) (*)
+    B_T + (R / P) (*) K``, NaN where the primary beam is below
+    ``primary_beam_limit``: the residual, like the model, is divided by the
+    primary beam before it is convolved, AstroVIPER's convention
+    (:func:`primary_beam_corrected_plane`; CASA's ``pbcor`` divides the
+    restored image). Both quotients are zero outside the cutoff for their
+    transforms. Each output is one inverse transform of its model and residual
+    spectra; ``D = 0`` scales the residual term by the area ratio without a
+    transform. Non-finite residual pixels are zero for the transform and NaN
+    in the outputs. The corrected plane is made first, so the model plane may
+    be the apparent output plane. The residual spectrum is multiplied by the
+    correcting transform before the model spectrum is made, so at most three
+    planes besides the outputs are live.
 
     Returns
     -------
@@ -599,105 +611,67 @@ def _restore_plane_to_beam(
     """
     import time
 
-    convolve_model = kernel_ft is not None and model_plane.any()
-    if corrected_plane is None and covariance_pixels.any():
-        # One inverse transform of rfft2(R) H + rfft2(M) B_T.
-        spectrum, finite = _correcting_spectrum(
-            residual_plane, covariance_pixels, area_ratio, workers
-        )
-        if convolve_model:
-            model_spectrum = scipy.fft.rfft2(model_plane, workers=workers)
-            model_spectrum *= kernel_ft
-            spectrum += model_spectrum
-            del model_spectrum
-        apparent_plane[...] = _inverse_rfft2(spectrum, apparent_plane.shape, workers)
-        del spectrum
-        if not finite:
-            apparent_plane[~np.isfinite(residual_plane)] = np.nan
-        return 0.0
-
+    transform = covariance_pixels.any()
     corrected_seconds = 0.0
     if corrected_plane is not None:
         start = time.time()
-        corrected_plane.fill(0)
-        np.divide(
-            model_plane,
-            primary_beam_plane,
-            out=corrected_plane,
-            where=_primary_beam_inside(primary_beam_plane, primary_beam_limit),
-        )
-        if kernel_ft is not None and corrected_plane.any():
-            corrected_plane[...] = _convolve_with_clean_beam(
-                corrected_plane, kernel_ft, workers
-            )
-        corrected_seconds += time.time() - start
-    if apparent_plane is not None:
-        if convolve_model:
-            apparent_plane[...] = _convolve_with_clean_beam(
-                model_plane, kernel_ft, workers
-            )
-        else:
-            apparent_plane.fill(0)
-    residual_to_beam = _residual_to_beam(
-        residual_plane, covariance_pixels, area_ratio, workers
-    )
-    if apparent_plane is not None:
-        apparent_plane += residual_to_beam
-    if corrected_plane is not None:
-        start = time.time()
+        # R / P and then M / P are written inside the cutoff of the corrected
+        # plane for their transforms; outside it the plane stays zero.
         inside = _primary_beam_inside(primary_beam_plane, primary_beam_limit)
-        np.divide(
-            residual_to_beam, primary_beam_plane, out=residual_to_beam, where=inside
-        )
-        residual_to_beam[~inside] = np.nan
+        corrected_plane.fill(0)
+        spectrum = None
+        if transform:
+            np.divide(
+                residual_plane,
+                primary_beam_plane,
+                out=corrected_plane,
+                where=inside & np.isfinite(residual_plane),
+            )
+            spectrum = scipy.fft.rfft2(corrected_plane, workers=workers)
+        np.divide(model_plane, primary_beam_plane, out=corrected_plane, where=inside)
         del inside
-        corrected_plane += residual_to_beam
-        corrected_seconds += time.time() - start
-    return corrected_seconds
-
-
-def _correct_residual_arrays(
-    residual, beam, restoring_beam, pixel_size, processing_function_threads=1
-):
-    """Residual planes taken to the target beam, ``R (*) K``, as a new array.
-
-    Parameters
-    ----------
-    residual : numpy.ndarray
-        Residual planes ``(time, plane, polarization, l, m)``.
-    beam : numpy.ndarray
-        PSF beams ``(time, plane, polarization, 3)``; the beam of polarization
-        0 applies to every polarization.
-    restoring_beam : array_like
-        Target ``[major, minor, pa]`` in radians.
-    pixel_size : float
-        Absolute image-cell size in radians.
-    processing_function_threads : int, optional
-        Number of workers supplied to SciPy FFT operations. Values ``<= 0``
-        use all available cores.
-
-    Returns
-    -------
-    numpy.ndarray
-        ``R (*) K`` of every plane, at the dtype of ``residual``. A plane whose
-        PSF beam is the target, has no fit or is not contained by the target
-        keeps its residual (:func:`_correcting_transforms`).
-    """
-    workers = (
-        processing_function_threads
-        if processing_function_threads and processing_function_threads > 0
-        else -1
-    )
-    transforms = _correcting_transforms(beam[:, :, 0], restoring_beam, pixel_size)
-    corrected = np.empty_like(residual)
-    for index in np.ndindex(residual.shape[:3]):
-        transform = transforms.get(index[:2])
-        corrected[index] = (
-            residual[index]
-            if transform is None
-            else _residual_to_beam(residual[index], *transform, workers)
+        if transform:
+            # After the mask is freed: on small planes H's row block is most
+            # of a plane.
+            _multiply_by_correcting_transform(
+                spectrum, covariance_pixels, area_ratio, corrected_plane.shape[1]
+            )
+        _add_model_and_invert(
+            spectrum, corrected_plane, kernel_ft, corrected_plane, workers
         )
-    return corrected
+        del spectrum
+        if transform:
+            corrected_plane[
+                ~(
+                    _primary_beam_inside(primary_beam_plane, primary_beam_limit)
+                    & np.isfinite(residual_plane)
+                )
+            ] = np.nan
+        else:
+            divided = np.full_like(corrected_plane, np.nan)
+            np.divide(
+                residual_plane,
+                primary_beam_plane,
+                out=divided,
+                where=_primary_beam_inside(primary_beam_plane, primary_beam_limit),
+            )
+            divided *= divided.dtype.type(area_ratio)
+            corrected_plane += divided
+            del divided
+        corrected_seconds = time.time() - start
+    if apparent_plane is not None:
+        spectrum, finite = None, True
+        if transform:
+            spectrum, finite = _correcting_spectrum(
+                residual_plane, covariance_pixels, area_ratio, workers
+            )
+        _add_model_and_invert(spectrum, model_plane, kernel_ft, apparent_plane, workers)
+        del spectrum
+        if not transform:
+            apparent_plane += residual_plane * residual_plane.dtype.type(area_ratio)
+        elif not finite:
+            apparent_plane[~np.isfinite(residual_plane)] = np.nan
+    return corrected_seconds
 
 
 def _restore_image_arrays(
@@ -1018,9 +992,11 @@ def restore_image(
     model is entirely zero skip the convolution (the restored plane is just the
     residual).  With ``restoring_beam`` the target's clean beam is transformed
     once per call, and every plane whose residual goes to the target costs one
-    more transform pair, its residual spectrum multiplied by the correcting
-    transform in blocks of rows, with at most three planes besides the outputs
-    live; a plane whose model is zero still takes its residual to the target.
+    more forward transform per output: the spectrum of its residual term,
+    multiplied by the correcting transform in blocks of rows, is added to the
+    model spectrum before the one inverse transform, with at most three planes
+    besides the outputs live; a plane whose model is zero still takes its
+    residual to the target.
     With ``consume_model=True`` and apparent output, its cube allocation is
     avoided: the model cube's buffer is reused and the model variable dropped.
 
@@ -1141,8 +1117,10 @@ def restore_image(
     ``H = (Omega_T / Omega_p) exp(-2 pi^2 f^T D f)``, with ``D`` the covariance
     of the target minus that of the PSF beam (CASA Memo 10 in covariance form),
     which also holds for equal and touching beams. The corrected image is
-    ``(SKY_MODEL / P) * B_T + (SKY_RESIDUAL * K) / P``. Non-finite residual
-    pixels are zero for the transform and NaN in the restored images.
+    ``(SKY_MODEL / P) * B_T + (SKY_RESIDUAL / P) * K``: the residual too is
+    divided by the primary beam before it is convolved, with both quotients
+    zero outside the cutoff for the transforms. Non-finite residual pixels are
+    zero for the transform and NaN in the restored images.
     """
     import pandas as pd
 
