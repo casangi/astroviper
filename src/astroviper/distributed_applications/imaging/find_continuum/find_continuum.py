@@ -264,8 +264,12 @@ def find_continuum(
         (one row per node task of every pass), ``timing_reduce_nodes``,
         ``timing_distributed_application`` (the driver steps of
         :data:`DISTRIBUTED_APPLICATION_TIMING_PHASES`, ``T_total``, the
-        wall-clock anchors, ``driver_rss_peak_bytes``, ``driver_bytes_read``
-        (the bytes the driver read from the image store) and, with
+        wall-clock anchors, ``driver_rss_peak_bytes`` (the peak resident
+        memory of the driver during the call: the process's peak when the
+        call raised it, else the largest sample of ``driver_resource_usage``,
+        else ``None``), ``driver_rss_lifetime_peak_bytes`` (the process's peak
+        since it started, ``getrusage``), ``driver_bytes_read`` (the bytes the
+        driver read from the image store) and, with
         ``monitor_resources_seconds``, ``driver_resource_usage``),
         ``first_round`` (``source``, the application that computed
         findContinuum's first round, or ``"imager"``; ``store``, the
@@ -692,6 +696,7 @@ def _find_continuum(
     from astroviper.utils.timing import format_timing_summary
 
     application_start = time.time()
+    rss_peak_start = _rss_peak_bytes()
     application = {
         "separate": "find_continuum",
         "fused": "find_continuum_fused",
@@ -1046,7 +1051,16 @@ def _find_continuum(
     timing_distributed_application["T_total"] = application_end - application_start
     timing_distributed_application["application_start_unixtime"] = application_start
     timing_distributed_application["application_end_unixtime"] = application_end
-    timing_distributed_application["driver_rss_peak_bytes"] = _rss_peak_bytes()
+    rss_peak = _rss_peak_bytes()
+    timing_distributed_application["driver_rss_lifetime_peak_bytes"] = rss_peak
+    # The process's peak is the call's when the call raised it; otherwise only
+    # the driver's samples, if any, tell the call's peak.
+    samples = (output.get("resource_usage") or {}).get("memory_rss_bytes") or []
+    timing_distributed_application["driver_rss_peak_bytes"] = (
+        rss_peak
+        if rss_peak > rss_peak_start
+        else (int(max(samples)) if samples else None)
+    )
     timing_distributed_application["driver_bytes_read"] = sum(
         counters.get("bytes", 0) + counters.get("index_bytes", 0)
         for counters in (load_counters, session.counters)

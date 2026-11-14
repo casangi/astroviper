@@ -115,6 +115,7 @@ DRIVER_KEYS = {
     "compute_start_unixtime",
     "compute_end_unixtime",
     "driver_rss_peak_bytes",
+    "driver_rss_lifetime_peak_bytes",
     "driver_bytes_read",
 }
 PASS_COLUMNS = {
@@ -805,6 +806,39 @@ def test_ultra_runs_a_task_over_its_budget_within_the_memory_of_a_thread(
     assert any("the first round" in warning for warning in warnings)
 
 
+@pytest.mark.parametrize("monitor", [None, 0.05])
+def test_driver_peak_is_the_calls_own(two_windows, tmp_path, monitor):
+    """An earlier peak of the driver process is not reported as the call's:
+    with the driver sampled, its largest sample; without, ``None``."""
+    import mmap
+
+    pytest.importorskip("psutil")
+    for name in ("warm", "after_a_transient"):
+        if name == "after_a_transient":
+            # 256 MiB resident, then returned to the system.
+            size = 256 * 2**20
+            with mmap.mmap(-1, size) as transient:
+                for offset in range(0, size, mmap.PAGESIZE):
+                    transient[offset] = 1
+        result = _run(
+            "fused",
+            two_windows["single"][0],
+            tmp_path / name,
+            n_channels=12,
+            monitor_resources_seconds=monitor,
+        )
+    timing = result["timing_distributed_application"]
+    peak, lifetime = (
+        timing["driver_rss_peak_bytes"],
+        timing["driver_rss_lifetime_peak_bytes"],
+    )
+    if monitor is None:
+        assert peak is None
+    else:
+        samples = timing["driver_resource_usage"]["memory_rss_bytes"]
+        assert peak == max(samples) < lifetime
+
+
 @pytest.mark.parametrize(
     "backend, n_chunks, monitor, memory_budget_gb",
     [
@@ -846,7 +880,13 @@ def test_profiling_and_report(
     assert DRIVER_KEYS <= set(timing)
     assert ("driver_resource_usage" in timing) == (monitor is not None)
     assert timing["compute_start_unixtime"] <= timing["compute_end_unixtime"]
-    assert timing["driver_rss_peak_bytes"] > 0
+    assert timing["driver_rss_lifetime_peak_bytes"] > 0
+    if monitor is not None:
+        assert (
+            0
+            < timing["driver_rss_peak_bytes"]
+            <= timing["driver_rss_lifetime_peak_bytes"]
+        )
     assert set(result["first_round"]) == {
         "source",
         "store",
