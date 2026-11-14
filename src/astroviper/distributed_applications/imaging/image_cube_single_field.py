@@ -39,6 +39,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             # Measurement Set v2 input only (0.0 for a processing set).
             ("add lazy input data", "T_add_lazy_input_data"),
             ("create map/reduce graph", "T_create_map_reduce_graph"),
+            ("get compute resources", "T_get_compute_resources"),
             ("generate dask graph", "T_generate_dask_graph"),
             ("compute dask graph", "T_compute_dask_graph"),
             ("consolidate metadata", "T_consolidate_metadata"),
@@ -837,7 +838,7 @@ def image_cube_single_field(
     -------
     dict
         ``{"timing_node_tasks", "deconvolution", "image_statistics",
-        "timing_distributed_application", "report"}``:
+        "timing_distributed_application", "compute_resources", "report"}``:
 
         * ``"timing_node_tasks"`` is a :class:`pandas.DataFrame` with one row per
           frequency chunk and a ``T_*`` column per processing function (the
@@ -863,6 +864,8 @@ def image_cube_single_field(
           opening the input, building the graph, computing it, consolidating
           metadata; ``T_add_lazy_input_data`` is ``0.0`` for a processing set)
           plus the grand total ``T_total``.
+        * ``"compute_resources"``: what the graphs ran on, see
+          :func:`astroviper.utils.data_partitioning.get_compute_resources`.
         * ``"report"`` is the path of the report file written (``None``
           without one, for ``report="notebook"`` and when the report failed).
           With a report the image statistics of the residual also hold
@@ -933,6 +936,7 @@ def image_cube_single_field(
     )
     from astroviper.utils.clean_mask import load_clean_mask
     from astroviper.utils.data_group_tools import modify_data_groups_xds
+    from astroviper.utils.data_partitioning import get_compute_resources
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
@@ -1359,6 +1363,11 @@ def image_cube_single_field(
     # pool, selected with compute_backend="mpi" and launched via
     # `python -m mpi4py.futures`). The MPI backend builds no dask.delayed graph, so
     # there is no separate "generate" step (T_generate_dask_graph = 0).
+    start = time.time()
+    compute_resources = get_compute_resources(
+        compute_backend, processing_function_threads
+    )
+    timing_distributed_application["T_get_compute_resources"] = time.time() - start
     if compute_backend == "mpi":
         if vizualize_graph:
             logger.warning(
@@ -1396,6 +1405,7 @@ def image_cube_single_field(
     # task's own dict, whose monitor series are folded in here as the reduce
     # folds them in.
     imaging_dict["input_validation"] = spectral_diagnostics
+    imaging_dict["compute_resources"] = compute_resources
     usage = imaging_dict.pop("resource_usage", None)
     if usage is not None:
         imaging_dict["timing_node_tasks"] = _with_resource_usage(
@@ -1431,7 +1441,7 @@ def image_cube_single_field(
         IMAGING_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
     )
-    from astroviper.utils.timing import format_timing_summary
+    from astroviper.utils.timing import format_timing_summary, node_task_timing_table
 
     # Driver-level ("distributed application") timing breakdown.
     logger.info(
@@ -1444,24 +1454,14 @@ def image_cube_single_field(
         )
     )
 
-    # Per-node-task timing summarized across all frequency chunks: the mean of
-    # each timing column over all chunks, then the max (the slowest chunk).
+    # Node-task timing over all frequency chunks, as in the report.
     timing_node_tasks = imaging_dict["timing_node_tasks"]
     logger.info(
-        format_timing_summary(
-            timing_node_tasks.mean(numeric_only=True).to_dict(),
-            IMAGING_TIMING_PHASES,
-            total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER node-task timing: MEAN over frequency chunks (seconds)",
-        )
-    )
-    logger.info(
-        format_timing_summary(
-            timing_node_tasks.max(numeric_only=True).to_dict(),
-            IMAGING_TIMING_PHASES,
-            total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER node-task timing: MAX over frequency chunks (seconds)",
-        )
+        f"AstroVIPER node-task timing over the {len(timing_node_tasks)} frequency "
+        "chunks (seconds)\n"
+        + node_task_timing_table(
+            timing_node_tasks, IMAGING_TIMING_PHASES, total_key=IMAGING_TIMING_TOTAL_KEY
+        ).to_string(float_format="{:.3f}".format)
     )
 
     imaging_dict["report"] = None

@@ -193,6 +193,10 @@ next to it (`<application>_report.py`), built with `utils.report.Report` and the
 pyplot-free figures of `utils/report_plots.py`. For the task stream and the
 resource monitor, a node task records `start_unixtime` and its execution identity
 (`hostname`, `process_pid`, `thread_native_id`, `worker_name`) and returns a dict.
+Right before its first compute the application records what its graphs run on
+(`utils.data_partitioning.get_compute_resources`, the driver step
+`T_get_compute_resources`) under `return_dict["compute_resources"]`, which the
+performance measures and the plots of `utils/resource_plots.py` read.
 
 ### The `simulation` subdomain (port of SIRIUS)
 `simulate_processing_set` is a **pure generator**: there is no input processing

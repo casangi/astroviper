@@ -27,7 +27,6 @@ __all__ = [
     "Report",
     "add_processing_section",
     "make_report",
-    "node_task_timing_table",
     "report_files_directory",
     "report_path",
 ]
@@ -488,45 +487,20 @@ class _PdfFlow:
         self._pages.close()
 
 
-def node_task_timing_table(timing_node_tasks):
-    """The mean, maximum and total over the node tasks of every ``T_*`` timing.
-
-    Parameters
-    ----------
-    timing_node_tasks : pandas.DataFrame
-        The ``"timing_node_tasks"`` frame of a distributed application, one
-        row per node task.
-
-    Returns
-    -------
-    pandas.DataFrame
-        One row per numeric ``T_*`` column (seconds), with the columns
-        ``mean``, ``max`` and ``total``.
-    """
-    import pandas as pd
-
-    columns = [
-        column
-        for column in timing_node_tasks.columns
-        if str(column).startswith("T_")
-        and pd.api.types.is_numeric_dtype(timing_node_tasks[column])
-    ]
-    timing = timing_node_tasks[columns]
-    table = pd.DataFrame(
-        {"mean": timing.mean(), "max": timing.max(), "total": timing.sum()}
-    )
-    table.index.name = "node task step"
-    return table
-
-
 def add_processing_section(
-    document, return_dict, timing_phases, task_columns=None, task_name="node task"
+    document,
+    return_dict,
+    timing_phases,
+    task_columns=None,
+    task_name="node task",
+    node_task_timing_phases=None,
 ):
     """Add the processing section common to all distributed applications.
 
     The timing of the application's own steps
     (:func:`~astroviper.utils.timing.format_timing_summary`), the timing of its
-    node tasks (:func:`node_task_timing_table`), the task stream
+    node tasks (:func:`~astroviper.utils.timing.node_task_timing_table`), the
+    task stream
     (:func:`~astroviper.utils.resource_plots.plot_task_stream`) and, for a run
     with ``monitor_resources_seconds``, the cluster CPU, memory and I/O
     (:func:`~astroviper.utils.resource_plots.plot_cluster_resource_usage`);
@@ -538,27 +512,36 @@ def add_processing_section(
         The report.
     return_dict : dict
         The application's return dict (``"timing_distributed_application"``,
-        ``"timing_node_tasks"`` and, when recorded, ``"timing_reduce_nodes"``).
+        ``"timing_node_tasks"`` and, when recorded, ``"timing_reduce_nodes"``
+        and ``"compute_resources"``).
     timing_phases : list of tuple
         The phase layout of ``"timing_distributed_application"``, the
-        application's ``DISTRIBUTED_APPLICATION_TIMING_PHASES``.
+        application's ``DISTRIBUTED_APPLICATION_TIMING_PHASES``: the timing
+        summary and the driver strip of the task stream follow it.
     task_columns : dict, optional
         The node task columns of the task stream (``task_columns`` of
         :func:`~astroviper.utils.resource_plots.plot_task_stream`); ``None``
         for the imager's.
     task_name : str, optional
         What a node task does, for the captions (e.g. ``"frequency chunk"``).
+    node_task_timing_phases : list of tuple, optional
+        The phase layout of the node task's timings (as for
+        :func:`~astroviper.utils.timing.format_timing_summary`, e.g.
+        ``IMAGING_TIMING_PHASES``): the node task table is grouped by it.
+        ``None`` (default): one row per ``T_*`` column.
     """
     import contextlib
 
     import pandas as pd
 
     from astroviper.utils.resource_plots import (
+        IMAGING_TASK_STREAM_COLUMNS,
         plot_cluster_resource_usage,
         plot_task_stream,
     )
-    from astroviper.utils.timing import format_timing_summary
+    from astroviper.utils.timing import format_timing_summary, node_task_timing_table
 
+    columns = {**IMAGING_TASK_STREAM_COLUMNS, **(task_columns or {})}
     document.section("Processing")
     timing = return_dict.get("timing_distributed_application") or {}
     if timing:
@@ -574,15 +557,28 @@ def add_processing_section(
     frame = return_dict.get("timing_node_tasks")
     if isinstance(frame, pd.DataFrame) and len(frame):
         document.table(
-            node_task_timing_table(frame),
+            node_task_timing_table(
+                frame,
+                node_task_timing_phases,
+                total_key=None if node_task_timing_phases is None else columns["task"],
+            ),
             caption=f"Node task timing (seconds) over the {len(frame)} tasks, one "
-            f"per {task_name}.",
+            f"per {task_name}: the mean, median, maximum and total over the tasks"
+            + (
+                "; grouped by phase, (unaccounted) is the time of a phase outside "
+                "its steps and (outside the phases) the task time outside every phase"
+                if node_task_timing_phases
+                else ""
+            )
+            + ".",
         )
 
     # The plot functions print their notes and summaries; the figures carry them.
     printed = io.StringIO()
     with contextlib.redirect_stdout(printed):
-        figure = plot_task_stream(return_dict, task_columns=task_columns)
+        figure = plot_task_stream(
+            return_dict, timing_phases=timing_phases, task_columns=task_columns
+        )
     if figure is None:
         document.note("Task stream: " + (printed.getvalue().strip() or "not recorded."))
     else:

@@ -16,7 +16,6 @@ from astroviper.utils.report import (
     Report,
     add_processing_section,
     make_report,
-    node_task_timing_table,
     report_files_directory,
     report_path,
 )
@@ -171,20 +170,6 @@ def test_make_report_returns_the_path_or_logs_a_failure():
     assert make_report(failing) is None
 
 
-def test_node_task_timing_table():
-    frame = _timing_frame(monitored=False)
-    frame["hostname"] = "node"
-    table = node_task_timing_table(frame)
-    assert list(table.columns) == ["mean", "max", "total"]
-    assert list(table.index) == [
-        "T_image_cube_task",
-        "T_make_empty_image",
-        "T_load",
-        "T_write",
-    ]
-    assert table.loc["T_load", "total"] == pytest.approx(1.2)
-
-
 def test_processing_section_of_a_monitored_run(tmp_path):
     path = str(tmp_path / "r.html")
     with Report("t", "html", path) as document:
@@ -193,6 +178,7 @@ def test_processing_section_of_a_monitored_run(tmp_path):
     assert "<h2>Processing</h2>" in text
     assert "Distributed application steps (seconds)" in text
     assert "over the 3 tasks, one per chunk" in text
+    assert "<th>median</th>" in text
     assert "Task stream" in text
     assert "Cluster CPU" in text and "Cluster memory" in text
     assert "Cluster I/O was not recorded" in text
@@ -224,3 +210,21 @@ def test_processing_section_with_other_task_columns(tmp_path):
             task_columns={"task": "T_simulate_task", "load": (), "write": "T_write"},
         )
     assert "Task stream: one lane per worker" in (tmp_path / "r.html").read_text()
+
+
+def test_processing_section_groups_the_node_task_table(tmp_path):
+    node_task_timing_phases = [
+        ("NODE I/O", None, [("load", "T_load"), ("write", "T_write")])
+    ]
+    path = str(tmp_path / "r.html")
+    with Report("t", "html", path) as document:
+        add_processing_section(
+            document,
+            _return_dict(monitored=False),
+            PHASES,
+            node_task_timing_phases=node_task_timing_phases,
+        )
+    text = (tmp_path / "r.html").read_text()
+    assert "grouped by phase" in text
+    assert "NODE I/O" in text and "phase total" in text
+    assert "(outside the phases)" in text and "T_image_cube_task" in text

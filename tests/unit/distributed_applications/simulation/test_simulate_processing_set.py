@@ -8,6 +8,9 @@ from xradio.measurement_set import load_processing_set, open_processing_set
 from xradio.schema.check import check_datatree
 
 import astroviper.distributed_applications as distributed_applications
+from astroviper.distributed_applications.simulation.simulate_processing_set import (
+    DISTRIBUTED_APPLICATION_TIMING_PHASES,
+)
 from astroviper.processing_functions.simulation import (
     simulate_processing_set as simulate_processing_set_pf,
 )
@@ -18,6 +21,7 @@ from astroviper.utils.beam_models import (
     airy_disk_model,
     read_aperture_polynomial_coefficients,
 )
+from astroviper.utils.data_partitioning import check_compute_resources
 from astroviper.utils.telescope_layout import (
     observatory_position,
     read_telescope_layout,
@@ -69,6 +73,15 @@ def test_full_stack_matches_processing_function(tmp_path):
     assert list(result["timing_node_tasks"]["task_id"]) == list(range(6))
     assert result["ms_name"] == "VLA_SBand"
     assert result["timing_distributed_application"]["T_total"] > 0
+    driver_keys = [
+        key for _, _, steps in DISTRIBUTED_APPLICATION_TIMING_PHASES for _, key in steps
+    ]
+    assert {
+        key for key in result["timing_distributed_application"] if key.startswith("T_")
+    } - {"T_total"} <= set(driver_keys)
+    assert result["timing_distributed_application"]["T_get_compute_resources"] >= 0
+    assert result["compute_resources"]["compute_backend"] == "dask"
+    assert result["compute_resources"]["n_hosts"] == 1
 
     ps_xdt = open_processing_set(result["ps_store"])
     issues = check_datatree(ps_xdt)  # XRADIO MSv4 schema checker
@@ -418,6 +431,9 @@ def test_sky_image_output(tmp_path):
     )
     assert result["sky_image_store"] == store
     assert result["timing_distributed_application"]["T_write_sky_image"] >= 0.0
+    assert ("write sky image", "T_write_sky_image") in (
+        DISTRIBUTED_APPLICATION_TIMING_PHASES[0][2]
+    )
     img = load_image(store)
     assert img.SKY.dims == ("time", "frequency", "polarization", "l", "m")
     assert list(img.polarization.values) == ["I", "Q", "U", "V"]
@@ -564,6 +580,8 @@ def test_html_report_of_a_monitored_single_task_run(tmp_path):
     for column in ("cpu_percent", "memory_rss_bytes", "start_unixtime", "hostname"):
         assert column in timing, column
     driver = result["timing_distributed_application"]
+    check_compute_resources(result["compute_resources"])
+    assert result["compute_resources"]["n_worker_slots"] >= 1
     assert (
         driver["application_start_unixtime"]
         <= driver["compute_start_unixtime"]
