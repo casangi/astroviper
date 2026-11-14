@@ -436,10 +436,8 @@ a direct helper call still applies its own applicable checks.
 
 ## find_continuum
 
-`check_find_continuum_config` checks the channel binning, the frequency
-chunking, a first round made by `image_cube_single_field` (the path of its
-store, made with the same primary beam limit; the older in-memory results are
-refused), `thread_info` and `memory_budget_gb` before the image is opened.
+`check_find_continuum_config` checks the channel binning, the primary beam
+limit and the frequency chunking before the image is opened.
 `check_find_continuum_channel_range` returns the `[start, stop)` channels that
 findContinuum sees and refuses a range whose frequencies are not linear,
 listing the linear channel ranges of the cube. It also runs without a range,

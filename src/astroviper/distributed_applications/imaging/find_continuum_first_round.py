@@ -11,8 +11,8 @@ per-channel statistics of the cube and of the primary beam, and moments 0 and
 moments; :func:`drain_first_round_moments` merges them after the imaging
 compute, for the windows whose every channel was added exactly once. The store
 is bound to the cube it was made from
-(:func:`bind_find_continuum_first_round_store`), and find_continuum uses it
-only on that cube (:func:`load_find_continuum_first_round`).
+(:func:`bind_find_continuum_first_round_store`) and is used only on that cube
+(:func:`validate_find_continuum_first_round`).
 """
 
 import contextlib
@@ -24,22 +24,20 @@ import numpy as np
 import toolviper.utils.logger as logger
 import zarr
 
-from astroviper.node_tasks.imaging.find_continuum import (
+from astroviper.node_tasks.imaging.find_continuum_first_round import (
     discard_first_round_moments,
     merge_first_round_moment_tile,
     pop_first_round_moments,
-    primary_beam_channel_mean,
 )
 from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
     FIND_CONTINUUM_FIRST_ROUND_VERSION,
     check_find_continuum_first_round_store,
 )
-from astroviper.processing_functions.imaging.find_continuum import (
-    PROFILE_LEVEL,
-    finalize_streamed_reductions,
-    find_continuum_first_round_requests,
-    linear_frequency_axis,
-)
+from astroviper.processing_functions.imaging.find_continuum import PROFILE_LEVEL
+
+#: Inner chunk (px) of which merge tiles are made along an axis that one chunk
+#: of the cube spans.
+MERGE_TILE_INNER_CHUNK = 625
 
 _IMAGE_DIMS = ("time", "frequency", "polarization", "l", "m")
 # Shortest wait for the result of a finished pop.
@@ -84,6 +82,32 @@ def find_continuum_first_round_partials_path(first_round_store):
     return (
         f"{os.path.normpath(first_round_store).removesuffix('.zarr')}_moments_partials"
     )
+
+
+def find_continuum_merge_tile_counts(map_shape: tuple, tile_shape: tuple) -> list[int]:
+    """Merge tiles of the moment maps along ``l`` and ``m``.
+
+    About two inner chunks of the cube per tile, or two of
+    ``MERGE_TILE_INNER_CHUNK`` pixels along an axis that one chunk spans (an
+    image without ``l`` and ``m`` chunking), so that a merge task never holds
+    whole planes.
+
+    Parameters
+    ----------
+    map_shape : sequence of int
+        ``(l, m)`` pixels of the cube.
+    tile_shape : sequence of int
+        ``(l, m)`` inner chunks of the cube.
+
+    Returns
+    -------
+    list of int
+        ``n_chunks`` of ``make_parallel_coord`` along ``l`` and ``m``.
+    """
+    return [
+        -(-n // (2 * (chunk if chunk < n else MERGE_TILE_INNER_CHUNK)))
+        for n, chunk in zip(map_shape, tile_shape, strict=True)
+    ]
 
 
 def create_find_continuum_first_round_store(
@@ -234,7 +258,7 @@ def drain_first_round_moments(
 
     Every process that ran imaging tasks takes its moments of ``run_id`` off
     its registry
-    (:func:`~astroviper.node_tasks.imaging.find_continuum.pop_first_round_moments`):
+    (:func:`~astroviper.node_tasks.imaging.find_continuum_first_round.pop_first_round_moments`):
     with a distributed client, one pop per worker, pinned to it, in sorted
     address order (a pop not finished after ``timeout_seconds``, or whose
     result cannot be fetched within 30 s after that, is cancelled, so the
@@ -244,7 +268,7 @@ def drain_first_round_moments(
     once and saved all of them. The slots of a complete
     window, sorted by worker address, process and sequence, are merged tile by
     tile into ``MOMENT_0`` and ``MOMENT_8``
-    (:func:`~astroviper.node_tasks.imaging.find_continuum.merge_first_round_moment_tile`,
+    (:func:`~astroviper.node_tasks.imaging.find_continuum_first_round.merge_first_round_moment_tile`,
     a task each with a distributed client); a window with a tile that fails to
     merge is left incomplete. The partials directory is then removed, also
     when the drain fails, and ``moments_complete``, ``n_missing`` and
@@ -379,7 +403,7 @@ def clear_first_round_moments(run_id, first_round_store):
 
     Every worker process of the distributed client (otherwise this process)
     discards its moments of the run
-    (:func:`~astroviper.node_tasks.imaging.find_continuum.discard_first_round_moments`).
+    (:func:`~astroviper.node_tasks.imaging.find_continuum_first_round.discard_first_round_moments`).
     An error is logged, not raised.
 
     Parameters
@@ -467,106 +491,6 @@ def validate_find_continuum_first_round(
         if first_round is None
         else cube[first_round["variables"]["sky"]].chunks[-2:],
     )
-
-
-def load_find_continuum_first_round(
-    first_round_reductions,
-    input_image_store,
-    lazy_xds,
-    primary_beam_limit,
-    channel_range,
-    counters=None,
-):
-    """The results of findContinuum's first-round requests on a spectral window.
-
-    Validates the store (:func:`validate_find_continuum_first_round`) and
-    answers the requests of
-    :func:`~astroviper.processing_functions.imaging.find_continuum.find_continuum_first_round_requests`
-    for the cube's channels ``channel_range``.
-
-    Parameters
-    ----------
-    first_round_reductions : dict
-        ``find_continuum_first_round`` of ``image_cube_single_field``: the path
-        of the first-round store as ``store``.
-    input_image_store : str
-        Path of the xradio image store of the cube.
-    lazy_xds : xarray.Dataset
-        The cube, opened lazily; its ``polarization`` coordinate gives the
-        index of Stokes I.
-    primary_beam_limit : float or None
-        Primary beam limit of the find_continuum call.
-    channel_range : sequence of int
-        ``[start, stop)``, channels of the cube that findContinuum sees.
-    counters : dict, optional
-        Accumulates the read counters of the primary-beam planes
-        (:func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`).
-
-    Returns
-    -------
-    list
-        In request order: ``{-1: mean primary beam}`` (float64 ``(l, m)``, read
-        from the image store); ``{0: StoredMap, 8: StoredMap}`` of the store's
-        moments when ``channel_range`` is one of its windows and the window's
-        moments are complete, else ``None``; the whole-cube statistics of the
-        cube and of the primary beam, from the per-channel rows of
-        ``STATISTICS`` summed in channel order.
-
-    Raises
-    ------
-    ValueError
-        The store cannot be used, or holds no first round of these channels.
-    """
-    from astroviper.distributed_applications.imaging.find_continuum.ultra_reductions import (
-        StoredMap,
-    )
-
-    validate_find_continuum_first_round(
-        first_round_reductions, input_image_store, primary_beam_limit
-    )
-    store = first_round_reductions["store"]
-    group = zarr.open_group(store, mode="r")
-    attributes = group.attrs["find_continuum_first_round"]
-    start, stop = (int(channel) for channel in channel_range)
-    ranges = [window["channel_range"] for window in attributes["windows"]]
-    if not any(first <= start and stop <= last for first, last in ranges):
-        raise ValueError(
-            f"The first-round store {store} holds channels {ranges} of the cube, "
-            f"not [{start}, {stop})."
-        )
-    variables = attributes["variables"]
-    frequency = zarr.open_array(os.path.join(input_image_store, "frequency"), mode="r")
-    requests = find_continuum_first_round_requests(
-        linear_frequency_axis(frequency[start:stop]),
-        attributes["rest_frequency"],
-        variables["sky"],
-        variables["primary_beam"],
-    )
-    channels = requests[0]["channels"]
-    primary_beam_mean = primary_beam_channel_mean(
-        input_image_store,
-        variables["primary_beam"],
-        lazy_xds.polarization.values.tolist().index("I"),
-        np.arange(start, stop) if channels is None else start + np.asarray(channels),
-        primary_beam_limit,
-        counters,
-    )
-    window = ranges.index([start, stop]) if [start, stop] in ranges else None
-    moments = None
-    if window is not None and attributes["moments_complete"][window]:
-        moments = {
-            moment: StoredMap(store, f"MOMENT_{moment}", index=window)
-            for moment in (0, 8)
-        }
-    rows = group["STATISTICS"][start:stop]
-    statistics = finalize_streamed_reductions(
-        [
-            {"channels": np.arange(start, stop), "rows": rows[:, index]}
-            for index in (0, 1)
-        ],
-        requests[2:],
-    )
-    return [{-1: primary_beam_mean}, moments, *statistics]
 
 
 def _call(function, *args):

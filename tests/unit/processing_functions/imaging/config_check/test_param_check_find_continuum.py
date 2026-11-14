@@ -61,60 +61,6 @@ def test_invalid_config(n_bin, primary_beam_limit, n_mapping_parallelism, error)
         check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism)
 
 
-def test_first_round_of_the_imager():
-    first_round = {
-        "store": "cube_find_continuum_first_round.zarr",
-        "primary_beam_limit": 0.2,
-        "complete": True,
-        "moments_complete": True,
-    }
-    check_find_continuum_config(1, 0.2, None, first_round)
-    with pytest.raises(ValueError, match="made with primary_beam_limit 0.2, not 0.3"):
-        check_find_continuum_config(1, 0.3, None, first_round)
-    in_memory = {"primary_beam_limit": 0.2, "reductions": [{}, {}, {}, {}]}
-    with pytest.raises(ValueError, match="path of its store as 'store'"):
-        check_find_continuum_config(1, 0.2, None, in_memory)
-    with pytest.raises(TypeError):
-        check_find_continuum_config(1, 0.2, None, [{}, {}, {}, {}])
-
-
-@pytest.mark.parametrize(
-    "thread_info, memory_budget_gb",
-    [
-        ({"n_threads": 24, "memory_per_thread": 21.33}, None),
-        ({"n_threads": 1, "memory_per_thread": 2}, 1.5),
-        (None, 4),
-    ],
-)
-def test_task_memory_settings(thread_info, memory_budget_gb):
-    check_find_continuum_config(
-        1, 0.2, None, thread_info=thread_info, memory_budget_gb=memory_budget_gb
-    )
-
-
-@pytest.mark.parametrize(
-    "thread_info, memory_budget_gb, error",
-    [
-        ({"n_threads": 0, "memory_per_thread": 4.0}, None, ValueError),
-        ({"n_threads": 2.0, "memory_per_thread": 4.0}, None, TypeError),
-        ({"memory_per_thread": 4.0}, None, TypeError),
-        ({"n_threads": 2, "memory_per_thread": 0.0}, None, ValueError),
-        ({"n_threads": 2, "memory_per_thread": np.inf}, None, ValueError),
-        ({"n_threads": 2, "memory_per_thread": "4"}, None, TypeError),
-        ([2, 4.0], None, TypeError),
-        (None, 0, ValueError),
-        (None, -1.0, ValueError),
-        (None, np.nan, ValueError),
-        (None, "1", TypeError),
-    ],
-)
-def test_invalid_task_memory_settings(thread_info, memory_budget_gb, error):
-    with pytest.raises(error):
-        check_find_continuum_config(
-            1, 0.2, None, thread_info=thread_info, memory_budget_gb=memory_budget_gb
-        )
-
-
 def test_first_round_needs_stokes_i_in_zarr():
     check_find_continuum_first_round({"polarization_coords": ["I", "Q"]}, "zarr")
     with pytest.raises(ValueError, match="Stokes I"):

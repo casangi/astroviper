@@ -833,17 +833,15 @@ def image_cube_single_field(
         the primary beam inside the limit, and with the Dask backend the
         moment 0 and 8 images of the residual of every spectral window (a
         linear run of channels), accumulated in the worker processes and
-        merged after the imaging. Passed as ``first_round_reductions``, the
-        returned ``"find_continuum_first_round"`` gives
-        ``find_continuum_ultra`` and ``find_continuum_fused`` this first
-        round, bound to the cube as written (refused for any other). A part of
-        the first round that cannot be written (after the retries of
-        transient I/O errors) leaves it, or a window's moments, incomplete and
-        is logged; the imaging goes on. If the imaging compute raises, the
-        worker processes drop the moments of the run and their slots are
-        removed. Keeps the variables find_continuum reads (``sky_residual``,
-        ``primary_beam`` and ``beam_fit_params_point_spread_function``).
-        Needs Stokes I and ``output_image_format="zarr"``. Default ``False``.
+        merged after the imaging. The store is bound to the cube as written
+        and refused for any other. A part of the first round that cannot be
+        written (after the retries of transient I/O errors) leaves it, or a
+        window's moments, incomplete and is logged; the imaging goes on. If
+        the imaging compute raises, the worker processes drop the moments of
+        the run and their slots are removed. Keeps the variables
+        find_continuum reads (``sky_residual``, ``primary_beam`` and
+        ``beam_fit_params_point_spread_function``). Needs Stokes I and
+        ``output_image_format="zarr"``. Default ``False``.
     parameters_file : str, optional
         JSON file whose ``"image_cube_single_field"`` block gives the
         arguments, as
@@ -1476,12 +1474,12 @@ def image_cube_single_field(
     # A failure of the first round after the compute leaves it incomplete (or
     # its moments) and is logged; the imaging results are returned.
     if first_round_params is not None:
-        from astroviper.distributed_applications.imaging.find_continuum.first_round import (
+        from astroviper.distributed_applications.imaging.find_continuum_first_round import (
             bind_find_continuum_first_round_store,
             clear_first_round_moments,
             drain_first_round_moments,
         )
-        from astroviper.node_tasks.imaging.find_continuum import (
+        from astroviper.node_tasks.imaging.find_continuum_first_round import (
             write_find_continuum_first_round_rows,
         )
 
@@ -1668,7 +1666,7 @@ def _first_round_cleared_on_failure(first_round_params):
         yield
     except BaseException:
         if first_round_params is not None:
-            from astroviper.distributed_applications.imaging.find_continuum.first_round import (
+            from astroviper.distributed_applications.imaging.find_continuum_first_round import (
                 clear_first_round_moments,
             )
 
@@ -1693,17 +1691,17 @@ def _create_find_continuum_first_round(
 
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
 
-    from astroviper.distributed_applications.imaging.find_continuum.first_round import (
+    from astroviper.distributed_applications.imaging.find_continuum_first_round import (
         create_find_continuum_first_round_store,
         find_continuum_first_round_partials_path,
         find_continuum_first_round_store_path,
-    )
-    from astroviper.distributed_applications.imaging.find_continuum.ultra_reductions import (
-        ultra_merge_tile_counts,
+        find_continuum_merge_tile_counts,
     )
     from astroviper.processing_functions.imaging.find_continuum import (
-        linear_channel_ranges,
         linear_frequency_axis,
+    )
+    from astroviper.processing_functions.imaging.utils.spectral_windows import (
+        linear_channel_ranges,
     )
 
     residual = img_xds.attrs["data_groups"]["residual"]
@@ -1740,7 +1738,7 @@ def _create_find_continuum_first_round(
         )
         for dim, n_chunks in zip(
             ("l", "m"),
-            ultra_merge_tile_counts(arrays["sky"].shape[-2:], tile_shape),
+            find_continuum_merge_tile_counts(arrays["sky"].shape[-2:], tile_shape),
             strict=True,
         )
     ]

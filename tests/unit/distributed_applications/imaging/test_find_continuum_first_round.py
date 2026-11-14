@@ -12,18 +12,18 @@ import xarray as xr
 import zarr
 from xradio.image import make_empty_sky_image
 
-import astroviper.node_tasks.imaging.find_continuum as node_tasks
-from astroviper.distributed_applications.imaging.find_continuum import first_round
-from astroviper.distributed_applications.imaging.find_continuum.first_round import (
+import astroviper.node_tasks.imaging.find_continuum_first_round as node_tasks
+from astroviper.distributed_applications.imaging import find_continuum_first_round
+from astroviper.distributed_applications.imaging.find_continuum_first_round import (
     bind_find_continuum_first_round_store,
     create_find_continuum_first_round_store,
     drain_first_round_moments,
     find_continuum_first_round_partials_path,
     find_continuum_first_round_store_path,
-    load_find_continuum_first_round,
+    find_continuum_merge_tile_counts,
     validate_find_continuum_first_round,
 )
-from astroviper.node_tasks.imaging.find_continuum import (
+from astroviper.node_tasks.imaging.find_continuum_first_round import (
     find_continuum_first_round_chunk,
     write_find_continuum_first_round_rows,
 )
@@ -33,13 +33,13 @@ from astroviper.node_tasks.imaging.utils import (
 from astroviper.processing_functions.imaging.find_continuum import (
     PROFILE_LEVEL,
     FindContinuumMoments,
-    finalize_streamed_reductions,
-    first_round_statistics,
-    linear_channel_ranges,
     linear_frequency_axis,
     merge_in_tree_order,
     moment_velocity_widths,
     primary_beam_masks,
+)
+from astroviper.processing_functions.imaging.utils.spectral_windows import (
+    linear_channel_ranges,
 )
 from astroviper.utils.io import (
     create_empty_data_variables_on_disk,
@@ -278,8 +278,12 @@ class _InProcessClient:
 
 def _drain_pops(monkeypatch, store, pops, windows):
     """The drain of a distributed client whose workers popped ``pops``."""
-    monkeypatch.setattr(first_round, "_distributed_client", _InProcessClient)
-    monkeypatch.setattr(first_round, "_pop_on_workers", lambda *args: pops)
+    monkeypatch.setattr(
+        find_continuum_first_round, "_distributed_client", _InProcessClient
+    )
+    monkeypatch.setattr(
+        find_continuum_first_round, "_pop_on_workers", lambda *args: pops
+    )
     return drain_first_round_moments("run", store, windows)
 
 
@@ -298,6 +302,15 @@ def test_store_paths():
         )
         == "/d/cube_find_continuum_first_round_moments_partials"
     )
+
+
+def test_merge_tiles_of_a_cube_whose_chunks_span_the_plane():
+    """Without l and m chunking a chunk spans the plane: merge tiles are made
+    of 625 px chunks, so that a merge task does not hold whole planes."""
+    assert find_continuum_merge_tile_counts((11250, 11250), (11250, 11250)) == [9, 9]
+    assert find_continuum_merge_tile_counts((11250, 11250), (625, 625)) == [9, 9]
+    assert find_continuum_merge_tile_counts((11250, 11250), (5000, 11250)) == [2, 9]
+    assert find_continuum_merge_tile_counts((64, 64), (64, 64)) == [1, 1]
 
 
 def test_create_store(cube, tmp_path):
@@ -400,7 +413,9 @@ def test_drain_merges_the_slots_in_sequence_order(cube, tmp_path, monkeypatch):
             store, partials_directory, window, slots, tile
         )
 
-    monkeypatch.setattr(first_round, "merge_first_round_moment_tile", merge)
+    monkeypatch.setattr(
+        find_continuum_first_round, "merge_first_round_moment_tile", merge
+    )
     pairs = zip(range(6), range(16, 22), strict=True)
     order = [channel for pair in pairs for channel in pair]
     order += [*range(6, 16), *range(22, 34)]
@@ -574,7 +589,9 @@ def test_drain_leaves_a_window_with_a_tile_that_fails_to_merge_incomplete(
             store, partials_directory, window, slots, tile
         )
 
-    monkeypatch.setattr(first_round, "merge_first_round_moment_tile", merge)
+    monkeypatch.setattr(
+        find_continuum_first_round, "merge_first_round_moment_tile", merge
+    )
     store = _first_round(cube, tmp_path / "fr.zarr")
     if with_client:
         pop = node_tasks.pop_first_round_moments(
@@ -598,7 +615,9 @@ def test_drain_refuses_pops_that_ran_elsewhere(cube, tmp_path, monkeypatch):
         pop = node_tasks.pop_first_round_moments(run_id, address, partials_directory)
         return dict(pop, placement_ok=False)
 
-    monkeypatch.setattr(first_round, "pop_first_round_moments", misplaced)
+    monkeypatch.setattr(
+        find_continuum_first_round, "pop_first_round_moments", misplaced
+    )
     store = _first_round(cube, tmp_path / "fr.zarr")
     result, records = drain_first_round_moments("run", store, cube["windows"])
 
@@ -643,9 +662,9 @@ def test_a_pop_whose_result_cannot_be_fetched_counts_as_missing(monkeypatch):
     monkeypatch.setattr(distributed, "wait", lambda futures, timeout: None)
     client = Client()
 
-    assert first_round._pop_on_workers(client, "run", "partials", 600.0) == [
-        {"address": "tcp://a"}
-    ]
+    assert find_continuum_first_round._pop_on_workers(
+        client, "run", "partials", 600.0
+    ) == [{"address": "tcp://a"}]
     assert [future.value for future in client.cancelled] == [None]
 
 
@@ -793,122 +812,3 @@ def test_validation_refuses_a_rewritten_cube(cube, tmp_path):
     os.utime(zarr_json, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
     with pytest.raises(ValueError, match="image_store_zarr_json_mtime_ns differs"):
         validate_find_continuum_first_round({"store": store}, image_store, LIMIT)
-
-
-def _statistics(cube, start, stop):
-    """The whole-cube statistics of P1: per-channel rows summed in channel order."""
-    sky = cube["sky"][:, start:stop]
-    primary_beam = cube["primary_beam"][:, start:stop]
-    inside = primary_beam_masks(primary_beam, LIMIT)[0]
-    rows = first_round_statistics(sky, primary_beam, inside)
-    request = {"kind": "statistics", "per_channel": False}
-    return finalize_streamed_reductions(
-        [{"channels": np.arange(start, stop), "rows": rows[:, i]} for i in (0, 1)],
-        [request, request],
-    )
-
-
-def _primary_beam_mean(cube, channels):
-    planes = cube["primary_beam"][0, channels, 0]
-    valid = ~(planes < LIMIT) & np.isfinite(planes)
-    count = valid.sum(axis=0)
-    total = np.where(valid, planes.astype(np.float64), 0.0).sum(axis=0)
-    with np.errstate(invalid="ignore"):
-        return np.where(count > 0, total / count, np.nan)
-
-
-@pytest.fixture
-def drained_store(cube, tmp_path):
-    store = _first_round(cube, tmp_path / "fr.zarr")
-    drain_first_round_moments("run", store, cube["windows"])
-    bind_find_continuum_first_round_store(store, cube["store"])
-    return store
-
-
-@pytest.mark.parametrize(
-    "window, primary_beam_channels",
-    [(0, [2, 4, 8, 12, 14]), (1, [18, 20, 25, 29, 31])],
-)
-def test_load_a_window(cube, drained_store, window, primary_beam_channels):
-    channel_range = WINDOW_RANGES[window]
-    lazy_xds = xr.open_zarr(cube["store"], chunks=None)
-    counters = {}
-    entries = load_find_continuum_first_round(
-        {"store": drained_store},
-        cube["store"],
-        lazy_xds,
-        LIMIT,
-        channel_range,
-        counters,
-    )
-
-    assert len(entries) == 4 and list(entries[0]) == [-1]
-    # The mean primary beam reads 5 planes of 9 chunks.
-    assert counters["units_read"] == 5 * 9 and counters["bytes"] > 0
-    np.testing.assert_array_equal(
-        entries[0][-1], _primary_beam_mean(cube, primary_beam_channels)
-    )
-    assert {m: (stored.array, stored.index) for m, stored in entries[1].items()} == {
-        0: ("MOMENT_0", window),
-        8: ("MOMENT_8", window),
-    }
-    for moment in (0, 8):
-        loaded = entries[1][moment].load()
-        assert loaded.dtype == np.float64
-        np.testing.assert_array_equal(loaded, _direct(cube, window)[moment])
-    for loaded, expected in zip(
-        entries[2:], _statistics(cube, *channel_range), strict=True
-    ):
-        assert loaded["npts"] > 0
-        np.testing.assert_equal(loaded, expected)
-    windowed = load_find_continuum_first_round(
-        {"store": drained_store},
-        cube["store"],
-        lazy_xds.isel(frequency=slice(*channel_range)),
-        LIMIT,
-        channel_range,
-    )
-    np.testing.assert_array_equal(windowed[0][-1], entries[0][-1])
-    assert windowed[1] == entries[1]
-    np.testing.assert_equal(windowed[2:], entries[2:])
-
-
-def test_load_without_moments(cube, drained_store):
-    """A range that is not a window of the store, or a window without
-    complete moments, is answered without moments."""
-    lazy_xds = xr.open_zarr(cube["store"], chunks=None)
-    entries = load_find_continuum_first_round(
-        {"store": drained_store}, cube["store"], lazy_xds, LIMIT, [17, 22]
-    )
-    assert entries[1] is None
-    np.testing.assert_array_equal(
-        entries[0][-1], _primary_beam_mean(cube, list(range(17, 22)))
-    )
-    for loaded, expected in zip(entries[2:], _statistics(cube, 17, 22), strict=True):
-        np.testing.assert_equal(loaded, expected)
-
-    group = zarr.open_group(drained_store, mode="r+")
-    group.attrs["find_continuum_first_round"] = dict(
-        group.attrs["find_continuum_first_round"], moments_complete=[True, False]
-    )
-    entries = load_find_continuum_first_round(
-        {"store": drained_store}, cube["store"], lazy_xds, LIMIT, [16, 34]
-    )
-    assert entries[1] is None
-
-
-def test_load_refuses_channels_the_store_does_not_hold(cube, tmp_path):
-    """A store of one window, as find_continuum_ultra makes it, holds no first
-    round of another window."""
-    chunks = [slice(0, 8), slice(8, 16)]
-    store = _first_round(cube, tmp_path / "fr.zarr", chunks, None, cube["windows"][:1])
-    bind_find_continuum_first_round_store(store, cube["store"])
-    lazy_xds = xr.open_zarr(cube["store"], chunks=None)
-    with pytest.raises(ValueError, match=r"not \[16, 34\)"):
-        load_find_continuum_first_round(
-            {"store": store}, cube["store"], lazy_xds, LIMIT, [16, 34]
-        )
-    with pytest.raises(ValueError, match="primary_beam_limit"):
-        load_find_continuum_first_round(
-            {"store": store}, cube["store"], lazy_xds, 0.3, [0, 16]
-        )

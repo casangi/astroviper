@@ -27,16 +27,9 @@ FIND_CONTINUUM_FIRST_ROUND_VERSION = 1
 # ========================================================================
 
 
-def check_find_continuum_config(
-    n_bin,
-    primary_beam_limit,
-    n_mapping_parallelism,
-    first_round_reductions=None,
-    thread_info=None,
-    memory_budget_gb=None,
-):
-    """Validate the channel binning, the primary beam limit, the frequency
-    chunking, a first round made by the imager and the task memory settings.
+def check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism):
+    """Validate the channel binning, the primary beam limit and the frequency
+    chunking.
 
     Parameters
     ----------
@@ -46,50 +39,12 @@ def check_find_continuum_config(
         In ``[0, 1)``, or ``None``.
     n_mapping_parallelism : mapping or None
         ``{"frequency": n}`` with at least one chunk, or ``None``.
-    first_round_reductions : mapping or None
-        ``find_continuum_first_round`` as ``image_cube_single_field`` returns
-        it: the path of the first-round store as ``store``, made with this
-        ``primary_beam_limit``.
-    thread_info : mapping or None
-        ``n_threads`` (at least 1) and ``memory_per_thread`` (GiB, finite and
-        positive), as :func:`~astroviper.utils.data_partitioning.get_thread_info`
-        returns them.
-    memory_budget_gb : float or None
-        Memory budget of a node task (GiB), finite and positive.
     """
     require_integer("n_bin", n_bin, minimum=1)
     if primary_beam_limit is not None:
         require_finite_real("primary_beam_limit", primary_beam_limit, scalar=True)
         if not 0.0 <= primary_beam_limit < 1.0:
             raise ValueError("primary_beam_limit must be in [0, 1).")
-    if first_round_reductions is not None:
-        require_mapping("first_round_reductions", first_round_reductions)
-        if not isinstance(first_round_reductions.get("store"), str):
-            raise ValueError(
-                "first_round_reductions must be the find_continuum_first_round "
-                "of image_cube_single_field, with the path of its store as 'store'."
-            )
-        if first_round_reductions.get("primary_beam_limit") != primary_beam_limit:
-            raise ValueError(
-                "first_round_reductions were made with primary_beam_limit "
-                f"{first_round_reductions.get('primary_beam_limit')}, not "
-                f"{primary_beam_limit}."
-            )
-    if thread_info is not None:
-        require_mapping("thread_info", thread_info)
-        require_integer(
-            'thread_info["n_threads"]', thread_info.get("n_threads"), minimum=1
-        )
-        require_finite_real(
-            'thread_info["memory_per_thread"]',
-            thread_info.get("memory_per_thread"),
-            positive=True,
-            scalar=True,
-        )
-    if memory_budget_gb is not None:
-        require_finite_real(
-            "memory_budget_gb", memory_budget_gb, positive=True, scalar=True
-        )
     if n_mapping_parallelism is None:
         return
     require_mapping("n_mapping_parallelism", n_mapping_parallelism)
@@ -206,10 +161,10 @@ def check_find_continuum_channel_range(channel_range, frequency):
     ValueError
         The range is empty or outside the cube, or its frequencies are not
         linear by
-        :func:`~astroviper.processing_functions.imaging.find_continuum.linear_channel_ranges`
+        :func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`
         (the message lists the linear channel ranges of the cube).
     """
-    from astroviper.processing_functions.imaging.find_continuum import (
+    from astroviper.processing_functions.imaging.utils.spectral_windows import (
         linear_channel_ranges,
     )
 

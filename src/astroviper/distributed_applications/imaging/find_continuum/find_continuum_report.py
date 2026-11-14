@@ -1,4 +1,4 @@
-"""Report of a :func:`~astroviper.distributed_applications.imaging.find_continuum.find_continuum.find_continuum`, ``find_continuum_fused`` or ``find_continuum_ultra`` run."""
+"""Report of a :func:`~astroviper.distributed_applications.imaging.find_continuum.find_continuum.find_continuum` run."""
 
 from __future__ import annotations
 
@@ -8,28 +8,17 @@ FIND_CONTINUUM_TASK_STREAM_COLUMNS = {
     "load": ["T_load"],
     "write": None,
 }
-# find_continuum_ultra's frequency and merge tasks; a column a task does not
-# have counts as 0.
-FIND_CONTINUUM_ULTRA_TASK_STREAM_COLUMNS = {
-    "task": "T_find_continuum_task",
-    "load": ["T_read_wait", "T_read_partials"],
-    "write": ["T_write_partials", "T_write_results"],
-}
 
 
-def find_continuum_report(
-    return_dict, report_store, report="html", application="find_continuum"
-):
-    """Make the report of a ``find_continuum``, ``find_continuum_fused`` or ``find_continuum_ultra`` run.
+def find_continuum_report(return_dict, report_store, report="html"):
+    """Make the report of a ``find_continuum`` run.
 
     The processing section is the one of every distributed application
     (:func:`~astroviper.utils.report.add_processing_section`); the task stream
-    has the node tasks of every pass over the image store (for
-    ``find_continuum_ultra`` its frequency tasks and the tasks merging the
-    moment maps), and the driver's work between the passes shows as the gaps
-    between them. The results section holds the channel selection and
-    findContinuum's other results, its summary plot, and one row per pass
-    with the reductions it made.
+    has the node tasks of every pass over the image store, and the driver's
+    work between the passes shows as the gaps between them. The results
+    section holds the channel selection and findContinuum's other results, its
+    summary plot, and one row per pass with the reductions it made.
 
     Parameters
     ----------
@@ -39,9 +28,6 @@ def find_continuum_report(
         The report is ``<report_store>_report.html`` (or ``.pdf``).
     report : str, optional
         ``"html"`` (default), ``"pdf"`` or ``"notebook"``.
-    application : str, optional
-        ``"find_continuum"`` (default), ``"find_continuum_fused"`` or
-        ``"find_continuum_ultra"``.
 
     Returns
     -------
@@ -60,40 +46,20 @@ def find_continuum_report(
     )
     from astroviper.utils.report import Report, add_processing_section, report_path
 
-    ultra = application == "find_continuum_ultra"
-    task_columns, processing = FIND_CONTINUUM_TASK_STREAM_COLUMNS, return_dict
-    if ultra:
-        # The task stream draws the sum of the write columns as one.
-        tasks = return_dict["timing_node_tasks"]
-        load, write = (
-            [c for c in FIND_CONTINUUM_ULTRA_TASK_STREAM_COLUMNS[key] if c in tasks]
-            for key in ("load", "write")
-        )
-        processing = dict(
-            return_dict,
-            timing_node_tasks=tasks.assign(write_seconds=tasks[write].sum(axis=1)),
-        )
-        task_columns = {
-            "task": FIND_CONTINUUM_ULTRA_TASK_STREAM_COLUMNS["task"],
-            "load": load,
-            "write": "write_seconds",
-        }
     path = report_path(report_store, report)
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
     with Report(
-        f"{application} report",
+        "find_continuum report",
         report,
         path,
         subtitle=f"Work directory {os.path.dirname(report_store)}, report made {stamp}.",
     ) as document:
         add_processing_section(
             document,
-            processing,
+            return_dict,
             DISTRIBUTED_APPLICATION_TIMING_PHASES,
-            task_columns=task_columns,
-            task_name="frequency chunk or merge tile of one pass"
-            if ultra
-            else "frequency chunk of one pass",
+            task_columns=FIND_CONTINUUM_TASK_STREAM_COLUMNS,
+            task_name="frequency chunk of one pass",
         )
         document.section("Results")
         warnings = [warning for warning in return_dict["warnings"] if warning]
@@ -148,14 +114,6 @@ def find_continuum_report(
                     columns=[c for c in passes if c.endswith("_unixtime")]
                 ).set_index("pass"),
                 caption="The passes over the image store, in order, with the "
-                "reductions each made and its graph and compute times (seconds)"
-                + (
-                    "; the chunks and bytes read, the planes per read, the task "
-                    "memory planned (bytes), the moments requests merged, the "
-                    "predictions left out, and the bytes of the moment partials "
-                    "and maps."
-                    if ultra
-                    else "."
-                ),
+                "reductions each made and its graph and compute times (seconds).",
             )
     return path

@@ -1127,7 +1127,7 @@ def image_cube_single_field(
     find_continuum_first_round_params : dict, optional
         Make findContinuum's first round of every chunk once it is written:
         the keyword arguments of
-        :func:`~astroviper.node_tasks.imaging.find_continuum.find_continuum_first_round_chunk`,
+        :func:`~astroviper.node_tasks.imaging.find_continuum_first_round.find_continuum_first_round_chunk`,
         except that each of the ``windows`` carries its ``frequency_axis``
         (:func:`~astroviper.processing_functions.imaging.find_continuum.linear_frequency_axis`)
         instead of its velocity widths, which the task computes with
@@ -1178,7 +1178,7 @@ def image_cube_single_field(
           ``find_continuum_first_round_params``, when a chunk was written):
           the rows of the chunks written, concatenated (``channels``,
           ``statistics`` and ``tiles``, see
-          :func:`~astroviper.node_tasks.imaging.find_continuum.find_continuum_first_round_chunk`),
+          :func:`~astroviper.node_tasks.imaging.find_continuum_first_round.find_continuum_first_round_chunk`),
           and ``write_failed``, whether a chunk could not be written or its
           first round could not be made.
     """
@@ -1380,7 +1380,7 @@ def image_cube_single_field(
     first_round_failures = []  # (exception, chunk task_coords) per failed chunk
     first_round_params = None
     if find_continuum_first_round_params is not None:
-        from astroviper.node_tasks.imaging.find_continuum import (
+        from astroviper.node_tasks.imaging.find_continuum_first_round import (
             find_continuum_first_round_chunk,
         )
         from astroviper.processing_functions.imaging.find_continuum import (

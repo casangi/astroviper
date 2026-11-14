@@ -24,8 +24,8 @@ from xradio.image import load_image
 from xradio.measurement_set import open_processing_set
 
 import astroviper.distributed_applications as distributed_applications
-import astroviper.node_tasks.imaging.find_continuum as find_continuum_node_tasks
-from astroviper.distributed_applications.imaging.find_continuum.first_round import (
+import astroviper.node_tasks.imaging.find_continuum_first_round as find_continuum_node_tasks
+from astroviper.distributed_applications.imaging.find_continuum_first_round import (
     find_continuum_first_round_partials_path,
     validate_find_continuum_first_round,
 )
@@ -1067,18 +1067,18 @@ def test_find_continuum_first_round_with_a_tile_that_fails_to_merge(
 ):
     """A merge of the moments that fails after the imaging leaves only that
     window's moments incomplete; the first round is bound and returned."""
-    from astroviper.distributed_applications.imaging.find_continuum import (
-        first_round,
-    )
+    from astroviper.distributed_applications.imaging import find_continuum_first_round
 
-    merge = first_round.merge_first_round_moment_tile
+    merge = find_continuum_first_round.merge_first_round_moment_tile
 
     def merge_or_fail(store, partials_directory, window, slots, tile):
         if window == 1:
             raise OSError(errno.EIO, "Input/output error")
         return merge(store, partials_directory, window, slots, tile)
 
-    monkeypatch.setattr(first_round, "merge_first_round_moment_tile", merge_or_fail)
+    monkeypatch.setattr(
+        find_continuum_first_round, "merge_first_round_moment_tile", merge_or_fail
+    )
     result = _image_first_round(tmp_path)
 
     _assert_imaged(result)
@@ -1206,79 +1206,3 @@ def test_find_continuum_first_round_refuses_fits(tmp_path):
             find_continuum_first_round=True,
         )
     assert os.listdir(tmp_path) == []
-
-
-def test_find_continuum_ultra_with_the_first_round_of_the_imager(
-    tmp_path, threaded_dask
-):
-    """find_continuum_ultra on each spectral window of the imager's cube finds
-    the same channels with the imager's first round as without it, reading
-    the cube once less where the window's moments are complete and never
-    reading the primary beam."""
-    # findContinuum returns nothing with fewer than 2 edge channels,
-    # round(0.19 x 7) = 1; 4 GHz keeps the windows apart.
-    n_channels = 8
-    result = _image_first_round(tmp_path, n_channels=n_channels, offset=4.0e9)
-    first_round = result["find_continuum_first_round"]
-    assert first_round["moments_complete"] == [True, True]
-    group = zarr.open_group(first_round["store"], mode="r+")
-    attributes = group.attrs["find_continuum_first_round"]
-
-    def find_continuum_ultra(window, name, first_round_reductions):
-        return distributed_applications.imaging.find_continuum_ultra(
-            input_image_store=str(tmp_path / "cube.img.zarr"),
-            atmospheric_transmission=np.full(n_channels, 0.92),
-            atmospheric_sky_temperature=np.full(n_channels, 27.0),
-            work_directory=str(tmp_path / name),
-            n_mapping_parallelism={"frequency": 2},
-            first_round_reductions=first_round_reductions,
-            thread_info={"n_threads": 4, "memory_per_thread": 4.0},
-            channel_range=window,
-        )
-
-    def assert_same_channels(result, expected):
-        for key in (
-            "channel_selection",
-            "aggregate_bandwidth",
-            "all_continuum",
-            "warnings",
-        ):
-            assert result[key] == expected[key], key
-        assert result["moment_difference_snr"] == pytest.approx(
-            expected["moment_difference_snr"], rel=1e-12
-        )
-
-    windows = [window["channel_range"] for window in attributes["windows"]]
-    computed = [
-        find_continuum_ultra(window, f"computed_{w}", None)
-        for w, window in enumerate(windows)
-    ]
-    stored = {
-        "source": "imager",
-        "store": first_round["store"],
-        "moments": "imager",
-        "moments_complete": True,
-        "imager": attributes["imager"],
-    }
-    for w, window in enumerate(windows):
-        imager = find_continuum_ultra(window, f"imager_{w}", first_round)
-        assert_same_channels(imager, computed[w])
-        assert computed[w]["cube_reads"]["PRIMARY_BEAM"] == 1
-        assert imager["cube_reads"] == {
-            "SKY_RESIDUAL": computed[w]["cube_reads"]["SKY_RESIDUAL"] - 1
-        }
-        assert not imager["passes"]["compute_first_round"].any()
-        assert imager["first_round"] == stored
-
-    # Without the imager's moments of a window, the first pass computes them.
-    group.attrs["find_continuum_first_round"] = dict(
-        attributes, moments_complete=[True, False]
-    )
-    recomputed = find_continuum_ultra(windows[1], "recomputed", first_round)
-    assert_same_channels(recomputed, computed[1])
-    assert recomputed["cube_reads"] == {
-        "SKY_RESIDUAL": computed[1]["cube_reads"]["SKY_RESIDUAL"]
-    }
-    assert recomputed["first_round"] == dict(
-        stored, moments="computed", moments_complete=False
-    )

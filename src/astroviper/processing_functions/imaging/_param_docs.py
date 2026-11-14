@@ -158,7 +158,7 @@ _FIELD_NAME_DOC = (
     "not currently filter fields; prepare a single-field input Processing Set."
 )
 
-# The parameters of find_continuum, find_continuum_fused and find_continuum_ultra.
+# The parameters of find_continuum.
 _FIND_CONTINUUM_PARAM_DOCS = {
     "input_image_store": "xradio image store of the dirty cube (Stokes I is used).",
     "atmospheric_transmission": (
@@ -197,39 +197,11 @@ _FIND_CONTINUUM_PARAM_DOCS = {
         '``{"frequency": n}``, the number of frequency chunks of every\n'
         "map-reduce; one chunk if not given."
     ),
-    "first_round_reductions": (
-        "``find_continuum_first_round`` of\n"
-        ":func:`~astroviper.distributed_applications.imaging.image_cube_single_field.image_cube_single_field`\n"
-        "(made with the same primary beam limit): the first-round store it\n"
-        "made next to the cube while imaging it. The store's primary-beam\n"
-        "statistics, cube statistics and, when they are complete for the\n"
-        "spectral window, moments 0 and 8 answer findContinuum's first round,\n"
-        "and the mean primary beam is read from five planes, so the pass that\n"
-        "would compute them is not made. A store is used only on the cube and\n"
-        "data group it was made from, unchanged since."
-    ),
-    "thread_info": (
-        "``n_threads`` and ``memory_per_thread`` (GiB) of the cluster, as\n"
-        ":func:`~astroviper.utils.data_partitioning.get_thread_info` returns\n"
-        "them (the default, refused when the cluster reports no thread or no\n"
-        "memory limit): the frequency chunks and the memory budget of a task\n"
-        "follow from them."
-    ),
-    "memory_budget_gb": (
-        "Memory budget of a frequency task (GiB). The default, and the largest\n"
-        "value used, is 0.8 of ``memory_per_thread`` less the task baseline\n"
-        "(``min(1.5, 0.2 x memory_per_thread)``). A pass whose tasks would\n"
-        "exceed it reads fewer planes at a time, leaves out predicted moment\n"
-        "maps or is split into passes. A requested reduction, or the first\n"
-        "round, that does not fit it at one plane per read runs so, alone, with\n"
-        "a warning; it is refused only when it needs more than\n"
-        "``memory_per_thread``."
-    ),
     "channel_range": (
         "``[start, stop)``, the channels of the cube that findContinuum sees as\n"
         "its cube: one spectral window, on which the frequencies are linear (a\n"
         "run of\n"
-        ":func:`~astroviper.processing_functions.imaging.find_continuum.linear_channel_ranges`).\n"
+        ":func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`).\n"
         "``None`` (default): every channel, refused for a cube of several\n"
         "spectral windows."
     ),
@@ -965,16 +937,7 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "coefficients of 0.7 to 0.9."
     ),
     **{
-        f"{function}.{name}": description
-        for function in (
-            "find_continuum",
-            "find_continuum_fused",
-            "find_continuum_ultra",
-        )
+        f"find_continuum.{name}": description
         for name, description in _FIND_CONTINUUM_PARAM_DOCS.items()
     },
-    "find_continuum_ultra.n_mapping_parallelism": (
-        '``{"frequency": n}``, the number of frequency chunks of every pass;\n'
-        "about 4 x ``n_threads`` chunks of whole shards if not given."
-    ),
 }

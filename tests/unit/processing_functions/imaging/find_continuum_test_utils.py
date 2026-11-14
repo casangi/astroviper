@@ -1,16 +1,8 @@
 """Simulated dirty cubes and reduction helpers for the find_continuum tests."""
 
-import re
-
 import numpy as np
 import xarray as xr
 from xradio.image import make_empty_sky_image
-
-from astroviper.processing_functions.imaging.find_continuum import (
-    PROFILE_LEVEL,
-    evaluate_lattice_expression,
-    split_lattice_conjuncts,
-)
 
 RAD_PER_ARCSEC = np.pi / (180.0 * 3600.0)
 FWHM_TO_SIGMA = 1.0 / np.sqrt(8.0 * np.log(2.0))
@@ -183,6 +175,51 @@ LINE_SET = (
         "size_fwhm_pixels": 4,
     },
 )
+COMPACT_LINE = dict(
+    channel=120,
+    fwhm_channels=14,
+    peak_jy=0.04,
+    offset_pixels=(0, 0),
+    size_fwhm_pixels=6,
+)
+# Channel selection, all-continuum flag and moment difference SNR of CASA
+# 6.7.6's findContinuum (pipeline 2026.3.0.7) on the same cubes, with CASA's
+# atmosphere model. The windows have no atmospheric line, and a flat atmosphere
+# selects the same channels. Last, the passes of find_continuum that read the
+# dirty cube.
+CASA_RESULTS = {
+    "no_lines": (dict(lines=()), "9~464", True, 4.4041, 7),
+    "line_set": (dict(lines=LINE_SET), "6~85;154~367;433~472", False, 6.2507, 7),
+    # The primary beam falls below 0.2 in the corners: masked there, as by
+    # tclean's pblimit in the pipeline (and in the CASA reference).
+    "small_beam": (
+        dict(lines=LINE_SET, primary_beam_fwhm_arcsec=8.0),
+        "6~85;154~367;433~467",
+        False,
+        7.3877,
+        7,
+    ),
+    # The ripple of the bright line's channels amends the joint mask.
+    "sidelobes": (
+        dict(
+            n_pixels=96,
+            lines=(
+                dict(COMPACT_LINE, sidelobe_fraction=0.2),
+                dict(
+                    channel=300,
+                    fwhm_channels=20,
+                    peak_jy=6e-3,
+                    offset_pixels=(22, -18),
+                    size_fwhm_pixels=24,
+                ),
+            ),
+        ),
+        "3~86;154~255;339~472",
+        False,
+        5.0069,
+        8,
+    ),
+}
 
 
 def graphviper_tree(leaves, merge):
@@ -195,76 +232,3 @@ def graphviper_tree(leaves, merge):
             for i in range(0, len(level), 2)
         ]
     return level[0]
-
-
-def encode_streamed_requests(requests, images, map_shape, channel_offset=0):
-    """Encode requests for ``find_continuum_batch_reductions``.
-
-    Parameters
-    ----------
-    requests : list of dict
-        Requests of ``find_continuum_cube_reductions`` whose masks name the
-        cubes ``"sky"`` and ``"primary_beam"``.
-    images : dict
-        Two-dimensional images ``(l, m, 1, 1)``, masked pixels NaN.
-    map_shape : tuple of int
-        ``(l, m)``.
-    channel_offset : int, default 0
-        Added to the channels of the requests (the window's first channel).
-
-    Returns
-    -------
-    encoded : list of dict
-    two_d_masks : list of numpy.ndarray
-        The evaluated two-dimensional parts the encoded requests index.
-    """
-    encoded, two_d_masks = [], []
-    for request in requests:
-        item = {
-            key: request[key]
-            for key in (
-                "kind",
-                "image",
-                "moments",
-                "frequency_axis",
-                "rest_frequency",
-                "function",
-                "per_channel",
-            )
-            if key in request
-        }
-        item.update(
-            channels=None
-            if request["channels"] is None
-            else np.asarray(request["channels"], dtype=np.int32) + channel_offset,
-            two_d_mask=None,
-            cube_terms=[],
-            expression=None,
-            footprint=None,
-        )
-        if request["kind"] == "moments":
-            item["channel_offset"] = channel_offset
-        split = split_lattice_conjuncts(request["mask"], ("sky", "primary_beam"))
-        if split is None:
-            item["expression"] = request["mask"]
-            split = None, []
-        two_d, terms = split
-        if two_d is not None:
-            mask = evaluate_lattice_expression(two_d, images)
-            two_d_masks.append(
-                np.broadcast_to(np.asarray(mask, dtype=bool), (*map_shape, 1, 1))[
-                    ..., 0, 0
-                ].copy()
-            )
-            item["two_d_mask"] = len(two_d_masks) - 1
-        for term in terms:
-            nonzero = re.fullmatch(r'"(sky|primary_beam)"\s*!=\s*0', term)
-            level = re.fullmatch(r'"primary_beam"\s*>\s*(\S+)', term)
-            if nonzero:
-                item["cube_terms"].append(("nonzero", nonzero.group(1)))
-            elif level and float(level.group(1)) == PROFILE_LEVEL:
-                item["cube_terms"].append(("profile",))
-            else:
-                item["cube_terms"].append(("expression", term))
-        encoded.append(item)
-    return encoded, two_d_masks
