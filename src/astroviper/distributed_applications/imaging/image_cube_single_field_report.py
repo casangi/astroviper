@@ -33,12 +33,12 @@ def image_cube_single_field_report(
     ``"maximum"`` moment of
     :func:`~astroviper.distributed_applications.image_analysis.moments.moments`)
     of the residual, the model and the primary beam corrected restored image
-    per Stokes plane; the spectrum of the peak inside the clean mask (of the
-    restored image, else of the residual); and per channel the cycle control
-    stop codes, the occurrences of the model update stop codes, the
-    iterations, the imaging cycles, the final residual entropy and the
-    residual RMS. What the run did not write or record is left out with a
-    note.
+    per Stokes plane; every per-plane statistic of the residual and of the
+    restored image; and per channel the cycle control stop codes, the
+    occurrences of the model update stop codes, the iterations, the imaging
+    cycles, the peak residual at the start of the first model update and at
+    the end, the final residual entropy and the residual RMS. What the run
+    did not write or record is left out with a note.
 
     Parameters
     ----------
@@ -106,7 +106,7 @@ def image_cube_single_field_report(
             files_directory,
             thread_info,
         )
-        _add_spectrum(document, return_dict)
+        _add_image_statistics(document, return_dict)
         _add_deconvolution(document, return_dict)
     return path
 
@@ -247,115 +247,89 @@ def _add_moment_maximum(
         )
 
 
-def _stokes_and_frequency(statistics):
-    stokes = [str(label) for label in statistics["polarization"].values]
-    return stokes, statistics["frequency"].values
+# The image statistics drawn, in this order: (image variable key, description).
+_IMAGE_STATISTICS_VARIABLES = (
+    ("sky_residual", "residual"),
+    ("sky_restored", "restored image"),
+)
 
 
-def _add_spectrum(document, return_dict):
-    from astroviper.utils.report_plots import plot_spectra
+def _add_image_statistics(document, return_dict):
+    from astroviper.utils.report_plots import plot_image_statistics
 
-    document.subsection("Spectrum")
+    document.subsection("Image statistics")
     image_statistics = return_dict.get("image_statistics") or {}
-    descriptions = {"sky_restored": "restored image", "sky_residual": "residual"}
-    key = next((key for key in descriptions if key in image_statistics), None)
-    if key is None:
-        document.note("No image statistics were recorded.")
-        return
-    description = descriptions[key]
-    statistics = image_statistics[key].isel(time=0)
-    stokes, frequency = _stokes_and_frequency(statistics)
-    document.figure(
-        plot_spectra(
-            frequency,
-            statistics["peak_masked"].transpose("frequency", "polarization").values,
-            stokes,
-            "peak inside the mask",
-            title=f"Spectrum: peak of the {description} inside the clean mask",
-        ),
-        caption=f"The signed peak of the {description} inside the clean mask (the "
-        "primary beam mask without one) of every channel and Stokes plane, from "
-        "the image statistics of the run.",
-    )
+    drawn = [key for key, _ in _IMAGE_STATISTICS_VARIABLES if key in image_statistics]
+    if not drawn:
+        document.note(
+            "No image statistics of the residual or the restored image were recorded."
+        )
+    for key, description in _IMAGE_STATISTICS_VARIABLES:
+        if key in drawn:
+            document.figure(
+                plot_image_statistics(
+                    return_dict,
+                    image_variable=key,
+                    title=f"Image statistics of the {description}",
+                ),
+                caption=f"Every per-plane statistic of the {description} over (l, m), "
+                "per channel and Stokes plane: over the image (solid) and inside the "
+                "clean mask (dashed; the primary beam mask without one), from the "
+                "image statistics of the run (time 0).",
+            )
+    others = [key for key in image_statistics if key not in drawn]
+    if others:
+        document.note(
+            "The statistics of "
+            + ", ".join(others)
+            + " are in the return dict (image_statistics; plot_image_statistics "
+            "draws them)."
+        )
 
 
 def _add_deconvolution(document, return_dict):
-    from astroviper.processing_functions.imaging.utils import imaging_dict_to_dataframe
+    from astroviper.processing_functions.imaging.utils import (
+        deconvolution_per_channel,
+    )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_STOP_DESCRIPTIONS,
-        MODEL_UPDATE_CONTINUE,
         MODEL_UPDATE_STOP_DESCRIPTIONS,
     )
-    from astroviper.utils.report_plots import plot_deconvolution_summary, plot_spectra
+    from astroviper.utils.report_plots import plot_deconvolution_summary
 
     document.subsection("Deconvolution")
-    residual = (return_dict.get("image_statistics") or {}).get("sky_residual")
-    if residual is None:
+    if (return_dict.get("image_statistics") or {}).get("sky_residual") is None:
         document.note("No image statistics of the residual were recorded.")
         return
-    residual = residual.isel(time=0).transpose("frequency", "polarization")
-    stokes, frequency = _stokes_and_frequency(residual)
-    shape = (len(frequency), len(stokes))
-    entropy = (
-        residual["entropy"].values if "entropy" in residual else np.full(shape, np.nan)
-    )
-    record = imaging_dict_to_dataframe(return_dict.get("deconvolution"))
-    if record.empty:
+    per_channel = deconvolution_per_channel(return_dict)
+    if per_channel is None:
         document.note(
             "No deconvolution (max_iter=0 or max_cycles=0): no stop codes, "
-            "iterations or imaging cycles."
-        )
-        document.figure(
-            plot_spectra(frequency, residual["rms"].values, stokes, "RMS"),
-            caption="The RMS of the residual (the dirty image) of every channel "
-            "and Stokes plane.",
+            "iterations or imaging cycles; the RMS of the residual (the dirty "
+            "image) is in the image statistics."
         )
         return
-
-    record = record[record["time_index"] == 0]
-    # The statistics are in frequency order: a plane goes to the row of its
-    # frequency (its channel number for a record without one).
-    row_of_frequency = {float(value): index for index, value in enumerate(frequency)}
-    imaging_stop_code = np.full(shape, np.nan)
-    iterations = np.zeros(shape)
-    imaging_cycles = np.zeros(len(frequency))
-    counts = {}
-    has_model_update_codes = "model_update_stop_code" in record
-    for row in record.itertuples(index=False):
-        chan = row_of_frequency.get(
-            float(getattr(row, "frequency", np.nan)), int(row.chan)
-        )
-        pol = int(row.pol)
-        imaging_stop_code[chan, pol] = getattr(row, "stop_code_imaging", np.nan)
-        iterations[chan, pol] = row.iter_total
-        imaging_cycles[chan] = max(imaging_cycles[chan], row.n_cycles)
-        if has_model_update_codes and isinstance(row.model_update_stop_code, list):
-            for code in row.model_update_stop_code:
-                if int(code) == MODEL_UPDATE_CONTINUE:
-                    continue
-                counts.setdefault(int(code), np.zeros(len(frequency)))[chan] += 1
     document.figure(
         plot_deconvolution_summary(
-            frequency,
-            stokes,
-            imaging_stop_code,
-            counts,
-            iterations,
-            imaging_cycles,
-            entropy,
-            residual["rms"].values,
-            IMAGING_STOP_DESCRIPTIONS,
-            MODEL_UPDATE_STOP_DESCRIPTIONS,
+            **per_channel,
+            imaging_stop_descriptions=IMAGING_STOP_DESCRIPTIONS,
+            model_update_stop_descriptions=MODEL_UPDATE_STOP_DESCRIPTIONS,
         ),
         caption="Per channel: the cycle control stop code of every Stokes plane, "
         "the number of model updates (over the Stokes planes) that ended with "
         "each model update stop code (a model update that did not run is not "
-        "counted), the total iterations, the imaging cycles, and the entropy and "
-        "RMS of the final residual.",
+        "counted), the total iterations, the imaging cycles, the absolute peak "
+        "residual inside the clean mask at the start of the first model update "
+        "and of the final residual (with the threshold when the record holds "
+        "one), and the entropy and RMS of the final residual. Shaded: channels "
+        "never deconvolved.",
     )
-    if not has_model_update_codes:
+    if not any(
+        "model_update_stop_code" in fields
+        for fields in return_dict["deconvolution"].data.values()
+    ):
         document.note("The deconvolver recorded no model update stop codes.")
-    if not np.any(np.isfinite(entropy)):
+    if not np.any(np.isfinite(per_channel["entropy"])):
         document.note(
             "The final residual entropy is not a number for every plane: it is "
             "worked out only for a residual whose peak is at most entropy_max_snr "

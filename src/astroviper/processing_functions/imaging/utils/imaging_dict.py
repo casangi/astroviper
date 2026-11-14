@@ -252,3 +252,200 @@ def imaging_dict_to_dataframe(imaging_dict):
     return pd.DataFrame(rows).sort_values(
         ["time_index", "pol", "chan"], ignore_index=True
     )
+
+
+# The columns imaging_dict_to_dataframe adds to the fields of a plane.
+_DERIVED_COLUMNS = (
+    "time_index",
+    "pol",
+    "chan",
+    "n_cycles",
+    "iter_total",
+    "peakres_start",
+    "peakres_final",
+    "model_flux_final",
+)
+
+
+def imaging_dict_from_dataframe(frame):
+    """Rebuild a deconvolution :class:`ImagingDict` from its table.
+
+    The inverse of :func:`imaging_dict_to_dataframe`: every row becomes the
+    fields of the plane ``Key(time_index, pol, chan)``, in row order, set
+    directly (not through :meth:`ImagingDict.add`).
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        One row per plane, as written by :func:`imaging_dict_to_dataframe`
+        (for example read back from feather).
+
+    Returns
+    -------
+    ImagingDict
+        The derived columns (``n_cycles``, ``iter_total``, ``peakres_start``,
+        ``peakres_final``, ``model_flux_final``) and the key columns are left
+        out; ``stop_code_imaging`` and ``stop_code_model_update`` become
+        ``stop_code``, a ``StopCode``. List, tuple and array cells become
+        lists (the per-cycle arrays of the iteration history inside them stay
+        arrays). A scalar cell that is None or NaN is left out, as the field
+        of a plane that did not record it, so a recorded NaN scalar is lost.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from astroviper.processing_functions.imaging.utils.cycle_control import StopCode
+
+    imaging_dict = ImagingDict()
+    for row in frame.to_dict("records"):
+        fields = {}
+        for column, value in row.items():
+            if column in _DERIVED_COLUMNS or column == "stop_code_model_update":
+                continue
+            if column == "stop_code_imaging":
+                model_update = row.get("stop_code_model_update")
+                if not (pd.isna(value) or pd.isna(model_update)):
+                    fields["stop_code"] = StopCode(
+                        imaging=int(value), model_update=int(model_update)
+                    )
+            elif isinstance(value, list | tuple | np.ndarray):
+                fields[column] = list(value)
+            elif not pd.isna(value):
+                fields[column] = value
+        key = Key(int(row["time_index"]), int(row["pol"]), int(row["chan"]))
+        imaging_dict.data[key] = fields
+    return imaging_dict
+
+
+def deconvolution_per_channel(return_dict, time_index=0):
+    """The deconvolution record of a cube imaging run as per-channel arrays.
+
+    Places every plane of the record (:func:`imaging_dict_to_dataframe`) at
+    the row of its ``frequency`` field among the frequencies of the residual
+    statistics, at the row of its channel number for a plane without one,
+    and takes the final residual entropy and RMS from those statistics. The
+    result holds the array arguments of
+    :func:`~astroviper.utils.report_plots.plot_deconvolution_summary`.
+
+    Parameters
+    ----------
+    return_dict : dict
+        The return dict of ``image_cube_single_field``: its ``"deconvolution"``
+        record and ``image_statistics["sky_residual"]`` are read.
+    time_index : int, optional
+        The time plane. Default 0.
+
+    Returns
+    -------
+    dict or None
+        ``frequency`` (Hz, the frequencies of the residual statistics),
+        ``stokes`` (their polarization labels) and, per channel
+        ``[n_frequency]`` or per plane ``[n_frequency, n_stokes]``:
+
+        - ``imaging_stop_code``: the cycle control stop code of every plane;
+        - ``model_update_stop_code_counts``: ``{code: [n_frequency]}``, the
+          model updates of each channel (over its Stokes planes) that ended
+          with ``code`` (a model update that did not run is not counted);
+        - ``iterations``: the total iterations of every plane;
+        - ``imaging_cycles``: the imaging cycles of every channel (the most
+          over its Stokes planes);
+        - ``peakres_start`` and ``peakres_final``: the signed peak residual
+          inside the clean mask at the start of the first model update and
+          the peak of the final residual (NaN without a model update);
+        - ``threshold``: the ``threshold`` field of every plane, NaN where
+          the record has none;
+        - ``entropy`` and ``residual_rms``: the final residual entropy (NaN
+          without one) and RMS of every plane.
+
+        A channel or plane without a record is NaN. ``None`` when the run
+        has no residual statistics or no record at ``time_index``.
+
+    Raises
+    ------
+    ValueError
+        If a plane of the record lies outside the channels or the Stokes
+        planes of the residual statistics.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        MODEL_UPDATE_CONTINUE,
+    )
+
+    residual = (return_dict.get("image_statistics") or {}).get("sky_residual")
+    deconvolution = return_dict.get("deconvolution")
+    if residual is None or deconvolution is None:
+        return None
+    record = imaging_dict_to_dataframe(deconvolution)
+    record = record[record["time_index"] == time_index]
+    if record.empty:
+        return None
+    residual = residual.isel(time=time_index).transpose("frequency", "polarization")
+    stokes = [str(label) for label in residual["polarization"].values]
+    frequency = np.asarray(residual["frequency"].values, dtype=np.float64)
+    shape = (len(frequency), len(stokes))
+
+    def column(name):
+        values = record[name] if name in record else pd.Series(np.nan, record.index)
+        return pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
+
+    row_of_frequency = {value: index for index, value in enumerate(frequency)}
+    channel = np.array(
+        [
+            row_of_frequency.get(value, chan)
+            for value, chan in zip(column("frequency"), record["chan"], strict=True)
+        ],
+        dtype=int,
+    )
+    pol = record["pol"].to_numpy(dtype=int)
+    outside = (channel < 0) | (channel >= shape[0]) | (pol < 0) | (pol >= shape[1])
+    if outside.any():
+        raise ValueError(
+            f"deconvolution_per_channel: {int(outside.sum())} planes of the record "
+            f"lie outside the {shape[0]} channels and {shape[1]} Stokes planes of "
+            "the residual statistics"
+        )
+
+    per_plane = {}
+    for name, source in (
+        ("imaging_stop_code", "stop_code_imaging"),
+        ("iterations", "iter_total"),
+        ("peakres_start", "peakres_start"),
+        ("peakres_final", "peakres_final"),
+        ("threshold", "threshold"),
+    ):
+        values = np.full(shape, np.nan)
+        values[channel, pol] = column(source)
+        per_plane[name] = values
+    imaging_cycles = np.full(shape[0], np.nan)
+    np.fmax.at(imaging_cycles, channel, column("n_cycles"))
+    recorded = np.zeros(shape[0], dtype=bool)
+    recorded[channel] = True
+    counts = {}
+    if "model_update_stop_code" in record:
+        for row, codes in zip(channel, record["model_update_stop_code"], strict=True):
+            if not isinstance(codes, list):
+                continue
+            for code in codes:
+                if int(code) != MODEL_UPDATE_CONTINUE:
+                    counts.setdefault(int(code), np.zeros(shape[0]))[row] += 1
+    for values in counts.values():
+        values[~recorded] = np.nan
+    return {
+        "frequency": frequency,
+        "stokes": stokes,
+        "imaging_stop_code": per_plane["imaging_stop_code"],
+        "model_update_stop_code_counts": dict(sorted(counts.items())),
+        "iterations": per_plane["iterations"],
+        "imaging_cycles": imaging_cycles,
+        "peakres_start": per_plane["peakres_start"],
+        "peakres_final": per_plane["peakres_final"],
+        "threshold": per_plane["threshold"],
+        "entropy": (
+            np.asarray(residual["entropy"].values, dtype=np.float64)
+            if "entropy" in residual
+            else np.full(shape, np.nan)
+        ),
+        "residual_rms": np.asarray(residual["rms"].values, dtype=np.float64),
+    }
