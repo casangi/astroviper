@@ -25,7 +25,7 @@ def options(workflow):
         config["image_params"]["n_taylor_terms"] = 1
         config["deconvolver"] = "hogbom"
         if workflow == "cube_fits":
-            config.update(output_image_format="fits", skunk_works=True)
+            config.update(output_image_format="fits", io_engine="chunk")
         return image_cube_single_field, config
     config["continuum_mode"] = workflow
     return image_continuum_single_field, config

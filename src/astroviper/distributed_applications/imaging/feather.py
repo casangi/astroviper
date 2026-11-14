@@ -68,6 +68,8 @@ def feather(
     processing_function_threads: int = 1,
     fft_backend: str = "scipy",
     compressor=None,
+    io_engine: str = "chunk",
+    output_image_format: str = "zarr",
     *,
     input_checked=False,
 ):
@@ -108,6 +110,16 @@ def feather(
         FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).
     compressor : numcodecs compressor
         Compressor applied to each on-disk ``SKY`` chunk.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of the output image: a Zarr store, or a directory with
+        ``SKY.fits`` (``io_engine="chunk"`` only). Default ``"zarr"``.
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active. For graph nodes
@@ -119,6 +131,13 @@ def feather(
     Supplied configuration is checked before opening images. Shape and dtype
     checks use the opened image metadata and always run before output creation.
     """
+    from astroviper.utils.node_task_io import check_io_engine
+
+    check_io_engine(io_engine)
+    if output_image_format not in ("zarr", "fits"):
+        raise ValueError("output_image_format must be 'zarr' or 'fits'.")
+    if output_image_format == "fits" and io_engine != "chunk":
+        raise ValueError("FITS output needs io_engine='chunk'.")
     import dask
     import zarr
     from graphviper.graph_tools import generate_dask_workflow
@@ -224,27 +243,53 @@ def feather(
     # of newer XRADIO versions); everything below uses the store written. The
     # check above tests outim["name"]; XRADIO raises FileExistsError, before
     # writing anything, if the store written exists.
-    try:
-        image_store = write_zarr_image_store(
-            featherd_img_xds, outim["name"], overwrite=overwrite
+    if output_image_format == "fits":
+        from astroviper.utils.chunk_io import create_empty_fits_images
+        from astroviper.utils.io import (
+            beam_params_dims,
+            imaging_data_variables_and_dims_double_precision,
+            imaging_data_variables_and_dims_single_precision,
         )
-    except FileExistsError as exc:
-        raise RuntimeError(
-            "Already existing image store will not be overwritten. To "
-            f"overwrite it, set outim['overwrite'] = True ({exc})"
-        ) from exc
 
-    # Pre-allocate the SKY data variable (NaN-filled) so each map task can lazily
-    # write its own frequency slice in parallel (Zarr v3 compatible).
-    create_empty_data_variables_on_disk(
-        image_store,
-        ["sky"],
-        shape_dict=int_xds.sizes,
-        parallel_coords=parallel_coords,
-        compressor=compressor,
-        double_precision=double_precision,
-        data_variable_definitions="imaging",
-    )
+        definitions = (
+            imaging_data_variables_and_dims_double_precision
+            if double_precision
+            else imaging_data_variables_and_dims_single_precision
+        )
+        image_store = outim["name"]
+        create_empty_fits_images(
+            image_store,
+            featherd_img_xds,
+            ["sky", "beam_fit_params_sky"],
+            double_precision=double_precision,
+            overwrite=overwrite,
+            data_variable_definitions={
+                "sky": definitions["sky"],
+                "beam_fit_params_sky": {"dims": beam_params_dims},
+            },
+        )
+    else:
+        try:
+            image_store = write_zarr_image_store(
+                featherd_img_xds, outim["name"], overwrite=overwrite
+            )
+        except FileExistsError as exc:
+            raise RuntimeError(
+                "Already existing image store will not be overwritten. To "
+                f"overwrite it, set outim['overwrite'] = True ({exc})"
+            ) from exc
+
+        # Pre-allocate the SKY data variable (NaN-filled) so each map task can lazily
+        # write its own frequency slice in parallel (Zarr v3 compatible).
+        create_empty_data_variables_on_disk(
+            image_store,
+            ["sky"],
+            shape_dict=int_xds.sizes,
+            parallel_coords=parallel_coords,
+            compressor=compressor,
+            double_precision=double_precision,
+            data_variable_definitions="imaging",
+        )
 
     # --- Build and run the map graph -----------------------------------------
     input_data = {"sd": sd_xds, "int": int_xds}
@@ -255,7 +300,10 @@ def feather(
     input_params = {
         "input_data_store": {"sd": lowres, "int": highres},
         "image_store": image_store,
-        "image_data_variables_keep": ["sky"],
+        "image_data_variables_keep": (
+            ["sky", "beam_fit_params_sky"] if output_image_format == "fits" else ["sky"]
+        ),
+        "output_image_format": output_image_format,
         "axes": ("l", "m"),
         "sdfactor": sdfactor,
         "selection": selection,
@@ -263,6 +311,7 @@ def feather(
         "processing_function_threads": processing_function_threads,
         "to_disk": True,
         "compressor": compressor,
+        "io_engine": io_engine,
     }
 
     t0 = time.time()
@@ -280,4 +329,5 @@ def feather(
     dask.compute(dask_graph)
     logger.info("Time to compute() feather " + str(time.time() - t0) + "s")
 
-    zarr.consolidate_metadata(image_store)
+    if output_image_format == "zarr":
+        zarr.consolidate_metadata(image_store)

@@ -3,83 +3,8 @@
 import numpy as np
 
 from astroviper.processing_functions.imaging.config_check._common import (
-    require_finite_real,
     require_mapping,
 )
-
-
-def check_fits_coordinates(image_params):
-    """Require image coordinates exactly representable by the cube FITS writer.
-
-    Parameters
-    ----------
-    image_params : mapping
-        Supplied image coordinates. Only available keys are checked.
-    """
-    # --- Number of axes ---
-    # The implemented four-axis FITS image has no independent time axis.
-    if "time_coords" in image_params and np.size(image_params["time_coords"]) != 1:
-        raise ValueError("FITS output supports a single time plane.")
-    if "image_size" in image_params and np.any(
-        np.asarray(image_params["image_size"]) < 2
-    ):
-        raise ValueError("FITS output needs at least 2 pixels per direction axis.")
-
-    # --- Polarization axis ---
-    # A linear FITS axis can encode consecutive Stokes/correlation codes only.
-    if "polarization_coords" in image_params:
-        codes_by_label = {
-            "I": 1,
-            "Q": 2,
-            "U": 3,
-            "V": 4,
-            "RR": -1,
-            "LL": -2,
-            "RL": -3,
-            "LR": -4,
-            "XX": -5,
-            "YY": -6,
-            "XY": -7,
-            "YX": -8,
-        }
-        labels = image_params["polarization_coords"]
-        if (
-            not isinstance(labels, list | tuple | np.ndarray)
-            or np.ndim(labels) != 1
-            or not len(labels)
-        ):
-            raise ValueError("FITS polarization_coords must be a nonempty vector.")
-        if any(label not in codes_by_label for label in labels):
-            raise ValueError("FITS polarization_coords contains an unknown label.")
-        codes = [codes_by_label[label] for label in labels]
-        if codes != list(range(codes[0], codes[0] + len(codes))):
-            raise ValueError("FITS output requires consecutive polarization codes.")
-
-    # --- Spectral axis ---
-    # Do not substitute the first-to-last linear approximation for real centres.
-    # Use the writer's tolerance (one millionth of a channel) for round-off.
-    if "frequency_coords" in image_params:
-        frequencies = require_finite_real(
-            "FITS frequency_coords", image_params["frequency_coords"], positive=True
-        )
-        if frequencies.ndim != 1:
-            raise ValueError("FITS frequency_coords must be one-dimensional.")
-        if frequencies.size > 1:
-            increment = (frequencies[-1] - frequencies[0]) / (frequencies.size - 1)
-            if increment == 0:
-                raise ValueError("FITS frequency coordinates have zero overall span.")
-            linear = frequencies[0] + increment * np.arange(frequencies.size)
-            if np.max(np.abs(frequencies - linear)) > 1e-6 * abs(increment):
-                raise ValueError(
-                    "FITS output requires uniformly spaced frequency_coords; use Zarr to preserve the channel centres."
-                )
-
-    # --- Direction frame ---
-    # The writer/reader pair supports RA/DEC in these two reference frames.
-    if "direction_reference" in image_params:
-        frame = image_params["direction_reference"]
-        if not isinstance(frame, str) or frame.upper() not in ("FK5", "ICRS"):
-            raise ValueError("FITS direction_reference must be FK5 or ICRS.")
 
 
 def check_kept_variables(
@@ -300,7 +225,7 @@ def check_output_codec(config):
     # --- Supplied/planned direct-writer metadata ---
     # Validate known codec chains before dispatch; actual disk metadata is still
     # checked by the original reader/writer guards at the point of use.
-    if config.get("skunk_works", False) and config.get("zarr_meta"):
+    if config.get("io_engine", "chunk") == "chunk" and config.get("zarr_meta"):
         metadata = require_mapping("zarr_meta", config["zarr_meta"])
         for name, meta in metadata.items():
             require_mapping(f"zarr_meta[{name!r}]", meta)
@@ -359,7 +284,7 @@ def check_output_codec(config):
 
     # --- Direct writer codec support ---
     # That writer implements a smaller codec set than the Zarr library itself.
-    if config.get("skunk_works", False) and codec_name not in (
+    if config.get("io_engine", "chunk") == "chunk" and codec_name not in (
         "blosc",
         "zstd",
         "gzip",

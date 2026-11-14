@@ -429,3 +429,79 @@ class TestImageOutputDestination:
             write_zarr_image_store(TestWriteZarrImageStore._image_xds(), str(path))
         assert list(path.iterdir()) == [marker]
         assert marker.read_bytes() == b"keep concurrent output"
+
+
+class TestWriteResultChunk:
+    @staticmethod
+    def _image_store(tmp_path, name, image_sharding=None):
+        import zarr
+
+        from astroviper.utils.io import create_empty_data_variables_on_disk
+
+        store = str(tmp_path / name)
+        zarr.open_group(store, mode="w")
+        create_empty_data_variables_on_disk(
+            store,
+            ["sky_residual"],
+            shape_dict={
+                "time": 1,
+                "frequency": 4,
+                "polarization": 2,
+                "l": 8,
+                "m": 8,
+            },
+            parallel_coords={"frequency": {"data_chunks": [[0], [1], [2], [3]]}},
+            compressor=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+            double_precision=False,
+            data_variable_definitions="imaging",
+            image_sharding=image_sharding,
+        )
+        return store
+
+    @pytest.mark.parametrize(
+        "io_engine, image_sharding",
+        [("xradio", None), ("chunk", None), ("chunk", {"frequency": 2})],
+    )
+    def test_writes_the_chunk(self, tmp_path, io_engine, image_sharding):
+        import numpy as np
+        import xarray as xr
+        import zarr
+
+        from astroviper.utils.io import write_result_chunk
+
+        store = self._image_store(tmp_path, "img.zarr", image_sharding)
+        values = np.random.default_rng(2).standard_normal((1, 1, 2, 8, 8))
+        chunk = xr.Dataset(
+            {
+                "SKY_RESIDUAL": (
+                    ["time", "frequency", "polarization", "l", "m"],
+                    values.astype("<f4"),
+                )
+            }
+        )
+        write_result_chunk(
+            io_engine,
+            store,
+            ["sky_residual"],
+            {"frequency": {"slice": slice(2, 3)}},
+            chunk,
+            image_sharding=image_sharding,
+        )
+        back = zarr.open_array(store + "/SKY_RESIDUAL")[:]
+        np.testing.assert_array_equal(back[:, 2:3], values.astype("<f4"))
+        assert np.isnan(np.delete(back, 2, axis=1)).all()
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"io_engine": "zarr"}, "io_engine must be"),
+            ({"io_engine": "xradio", "output_image_format": "fits"}, "chunk"),
+            ({"io_engine": "xradio", "image_sharding": {"frequency": 2}}, "chunk"),
+        ],
+    )
+    def test_refuses(self, kwargs, match):
+        from astroviper.utils.io import write_result_chunk
+
+        engine = kwargs.pop("io_engine")
+        with pytest.raises(ValueError, match=match):
+            write_result_chunk(engine, "unused", [], {}, None, **kwargs)

@@ -1,5 +1,7 @@
 """Unit tests for the moments distributed application (full 3-layer runs)."""
 
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -668,3 +670,45 @@ class TestMomentsInput:
             img_xds.SKY.values, axis=1, coord_values=img_xds.frequency.values
         )
         assert_moments_match(load_image(out), reference, axis=1)
+
+
+def test_io_engines_and_fits_write_the_same_moments(input_image, tmp_path):
+    """The chunk engine writes the moment maps of the xradio engine, in Zarr
+    and in FITS (one file per moment)."""
+    from xradio.image import open_image
+
+    path, _ = input_image
+    names = ["mean", "maximum"]
+    stores = {
+        "xradio": (str(tmp_path / "xradio.img.zarr"), {"io_engine": "xradio"}),
+        "chunk": (str(tmp_path / "chunk.img.zarr"), {"io_engine": "chunk"}),
+        "fits": (
+            str(tmp_path / "moments_fits"),
+            {"io_engine": "chunk", "output_image_format": "fits", "report": "html"},
+        ),
+    }
+    results = {}
+    for name, (store, options) in stores.items():
+        results[name] = moments(
+            input_image_store=path,
+            moments_image_store=store,
+            moments=names,
+            moment_axis="frequency",
+            n_mapping_parallelism={"m": 3},
+            **options,
+        )
+    xradio = load_image(stores["xradio"][0])
+    chunk = load_image(stores["chunk"][0])
+    for name in names:
+        variable = "SKY_MOMENT_" + name.upper()
+        np.testing.assert_array_equal(chunk[variable].values, xradio[variable].values)
+        fits = open_image({"sky": f"{stores['fits'][0]}/{variable}.fits"})
+        np.testing.assert_allclose(
+            fits.SKY.values, xradio[variable].values, rtol=1e-6, equal_nan=True
+        )
+    assert sorted(os.listdir(stores["fits"][0])) == [
+        "SKY_MOMENT_MAXIMUM.fits",
+        "SKY_MOMENT_MEAN.fits",
+    ]
+    assert results["fits"]["moments_image_store"] == stores["fits"][0]
+    assert os.path.isfile(results["fits"]["report"])

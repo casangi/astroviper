@@ -327,6 +327,69 @@ def write_result_chunk_to_disk_using_zarr(
         sky[idx] = img_xds[dv].values
 
 
+def write_result_chunk(
+    io_engine,
+    image_store,
+    image_data_variables_keep,
+    task_coords,
+    img_xds,
+    output_image_format="zarr",
+    image_sharding=None,
+    processing_function_threads=1,
+):
+    """Write a node task's result chunk into the pre-created image store.
+
+    Parameters
+    ----------
+    io_engine : {"chunk", "xradio"}
+        ``"chunk"`` writes the chunk blobs directly
+        (:func:`~astroviper.utils.chunk_io.write_zarr`,
+        :func:`~astroviper.utils.chunk_io.write_zarr_sharded` when
+        ``image_sharding`` is set, :func:`~astroviper.utils.chunk_io.write_fits`
+        for FITS); ``"xradio"`` writes with
+        :func:`write_result_chunk_to_disk_using_zarr`.
+    image_store : str
+        Path of the image store (the directory of the FITS files for FITS).
+    image_data_variables_keep : list of str
+        Variables to write.
+    task_coords : dict
+        ``{dimension: {"slice": slice, ...}}`` of the chunk in the image.
+    img_xds : xarray.Dataset
+        The chunk.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of the image store; FITS needs ``io_engine="chunk"``.
+    image_sharding : dict, optional
+        Shard sizes of a sharded Zarr store (``io_engine="chunk"`` only).
+    processing_function_threads : int, optional
+        Threads of the chunk writers.
+    """
+    if io_engine not in ("chunk", "xradio"):
+        raise ValueError(f"io_engine must be 'chunk' or 'xradio', not {io_engine!r}.")
+    if io_engine == "xradio":
+        if output_image_format == "fits" or image_sharding:
+            raise ValueError("FITS and sharded output need io_engine='chunk'.")
+        write_result_chunk_to_disk_using_zarr(
+            image_store, image_data_variables_keep, task_coords, img_xds
+        )
+        return
+
+    from astroviper.utils import chunk_io
+
+    if output_image_format == "fits":
+        writer = chunk_io.write_fits
+    elif image_sharding:
+        writer = chunk_io.write_zarr_sharded
+    else:
+        writer = chunk_io.write_zarr
+    writer(
+        image_store,
+        image_data_variables_keep,
+        task_coords,
+        img_xds,
+        processing_function_threads=processing_function_threads,
+    )
+
+
 def _to_zarr_v3_codec(compressor):
     """Translate a numcodecs compressor to a Zarr v3 ``BytesBytesCodec``.
 
@@ -618,6 +681,38 @@ def write_zarr_image_store(img_xds, image_store, overwrite=False):
     return image_store
 
 
+def fill_zarr_restored_beams_without_fit(image_store):
+    """Give the planes of ``BEAM_FIT_PARAMS_SKY_RESTORED`` without a fit the beam
+    ``tclean`` gives them.
+
+    Run ONCE in the driver, after every node task has written its beams, for
+    every Zarr image store, whichever writer made it. The planes without a fit
+    (a flagged channel, a failed fit, a skipped task) take the first beam of
+    largest area of the planes with one, or a circle of 1e-6 arcsec at 0
+    degrees when no plane has one
+    (:func:`~astroviper.processing_functions.imaging.restore.fill_planes_without_fit`).
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the Zarr image store, which holds ``BEAM_FIT_PARAMS_SKY_RESTORED``.
+    """
+    import zarr
+
+    from astroviper.processing_functions.imaging.restore import (
+        NO_FIT_BEAM,
+        fill_planes_without_fit,
+    )
+
+    restored_beam = zarr.open_group(image_store, mode="r+")[
+        "BEAM_FIT_PARAMS_SKY_RESTORED"
+    ]
+    beams = restored_beam[...]
+    filled = fill_planes_without_fit(beams, NO_FIT_BEAM)
+    if filled is not beams:
+        restored_beam[...] = filled
+
+
 def create_empty_data_variables_on_disk(
     zarr_store,
     data_variables,
@@ -679,7 +774,7 @@ def create_empty_data_variables_on_disk(
         their own index entry, and the shard files are pre-created sparse with
         an empty index. This replaces one-file-per-chunk with far fewer files
         (metadata-server relief) and is written by
-        :func:`astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_sharded_skunk_works`.
+        :func:`astroviper.utils.chunk_io.write_zarr_sharded`.
         ``None`` (default) keeps the original one-file-per-chunk layout.
     """
     import os
@@ -731,7 +826,7 @@ def create_empty_data_variables_on_disk(
             # Sharded array: `chunks` is the INNER chunk shape and `shard` the
             # shard shape (see image_chunk_and_shard_shapes). The index CRC is
             # disabled so independent single-chunk writers can set their own
-            # index entries (see write_result_chunk_to_disk_sharded_skunk_works).
+            # index entries (see write_zarr_sharded).
             from zarr.codecs import BytesCodec, ShardingCodec
 
             inner_codecs = [BytesCodec()] + ([compressor] if compressor else [])
@@ -779,7 +874,7 @@ def create_empty_data_variables_on_disk(
     if sharded:
         # Pre-create every shard file (sparse, empty index) ONCE here in the driver
         # so the concurrent write phase creates no files (metadata-server relief).
-        from astroviper.node_tasks.imaging.utils import (
+        from astroviper.utils.chunk_io import (
             precreate_sharded_files,
             record_shard_ost_map,
         )

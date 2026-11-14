@@ -182,3 +182,53 @@ def test_psf_driver_checks_nested_configuration_before_io(tmp_path):
             image_store=str(output),
         )
     assert not output.exists()
+
+
+def test_both_io_engines_and_fits_write_the_same_cube(tmp_path):
+    """The xradio and chunk engines write the same point spread function cube,
+    and the chunk engine's FITS files hold the same values."""
+    from xradio.image import open_image
+    from xradio.measurement_set import open_processing_set
+
+    from tests.unit.distributed_applications.simulation.test_simulate_processing_set import (
+        run,
+    )
+
+    simulated, _ = run(tmp_path, polarization=["XX", "YY"], noise_params=None)
+    ps_store = simulated["ps_store"]
+    frequency_coords = open_processing_set(ps_store).xr_ps.get_freq_axis().values
+    common = dict(
+        instrument_polarization_basis="linear",
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        n_mapping_parallelism={"frequency": 3},
+    )
+    stores = {}
+    for name, options in {
+        "xradio": dict(io_engine="xradio"),
+        "chunk": dict(io_engine="chunk"),
+        "fits": dict(io_engine="chunk", output_image_format="fits"),
+    }.items():
+        stores[name] = str(tmp_path / f"psf_{name}")
+        psf_module.point_spread_function_cube_single_field(
+            ps_store,
+            {**_image_params(frequency_coords), "polarization_coords": ["I", "Q"]},
+            {"weighting": "natural"},
+            image_store=stores[name],
+            **options,
+            **common,
+        )
+    xradio = xr.open_zarr(stores["xradio"] + ".img.zarr").load()
+    chunk = xr.open_zarr(stores["chunk"] + ".img.zarr").load()
+    np.testing.assert_array_equal(
+        chunk.POINT_SPREAD_FUNCTION.values, xradio.POINT_SPREAD_FUNCTION.values
+    )
+    fits = open_image(
+        {"point_spread_function": stores["fits"] + "/POINT_SPREAD_FUNCTION.fits"}
+    )
+    np.testing.assert_allclose(
+        fits.POINT_SPREAD_FUNCTION.values,
+        xradio.POINT_SPREAD_FUNCTION.values,
+        rtol=0,
+        atol=1e-12,
+    )

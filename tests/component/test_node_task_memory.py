@@ -93,9 +93,10 @@ one point source, no noise, a few CLEAN iterations, two imaging cycles,
 restore and primary beam correction on, the synchronous Dask scheduler so
 that the node tasks run in this process. Runtime (three node tasks) is
 about a minute and a quarter natively on Apple silicon and two and a half
-minutes under x86-64 emulation. The test runs twice: restoring every plane
-with its own PSF beam, and to a ``restoring_beam`` that contains the PSF beam
-of every plane, so that the restore also takes every residual plane to it.
+minutes under x86-64 emulation. The test runs with each I/O engine twice:
+restoring every plane with its own PSF beam, and to a ``restoring_beam`` that
+contains the PSF beam of every plane, so that the restore also takes every
+residual plane to it.
 """
 
 from __future__ import annotations
@@ -217,13 +218,9 @@ RESTORING_BEAM = [6.0 * ARCSEC, 5.0 * ARCSEC, np.deg2rad(30.0)]
 #                                            3.8 planes here; CI installs
 #                                            numcodecs 0.16.5 and 0.17.0
 PHASES = [
-    # xradio's loader, imported by the node task at every call, so the module
-    # attribute wrapped here is what it calls
-    (
-        "xradio.measurement_set.load_processing_set",
-        "load_processing_set",
-        2.5,
-    ),
+    # the node task's loader and writer (both I/O engines), imported at every
+    # call, so the module attributes wrapped here are what it calls
+    ("astroviper.utils.node_task_io", "load_processing_set", 2.5),
     (
         "astroviper.processing_functions.imaging.residual_update",
         "imaging_setup_single_field",
@@ -245,7 +242,7 @@ PHASES = [
         "calculate_plane_statistics",
         3.7,
     ),
-    ("astroviper.utils.io", "write_result_chunk_to_disk_using_zarr", 2.5),
+    ("astroviper.utils.io", "write_result_chunk", 2.5),
 ]
 # The whole node task: the peak of the traced memory above its value at the
 # start of the node task, the largest of (traced memory held at the start of
@@ -1012,7 +1009,7 @@ def image_params_of(ps_store):
     }
 
 
-def image(work_dir, ps_store, image_params, restoring_beam):
+def image(work_dir, ps_store, image_params, io_engine, restoring_beam):
     """Image the field the way the point source component test does, one
     node task per channel."""
     image_store = f"{work_dir}/memory.img.zarr"
@@ -1048,6 +1045,7 @@ def image(work_dir, ps_store, image_params, restoring_beam):
             restoration_output="both",
             restoring_beam=restoring_beam,
             overwrite=True,
+            io_engine=io_engine,
         )
     return image_store
 
@@ -1055,7 +1053,8 @@ def image(work_dir, ps_store, image_params, restoring_beam):
 @pytest.mark.parametrize(
     "restoring_beam", [None, RESTORING_BEAM], ids=["psf_beam", "restoring_beam"]
 )
-def test_node_task_memory(tmp_path, monkeypatch, restoring_beam):
+@pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
+def test_node_task_memory(tmp_path, monkeypatch, io_engine, restoring_beam):
     pytest.importorskip("psutil")
     work_dir = str(tmp_path)
     ps_store = simulate(work_dir)
@@ -1084,7 +1083,7 @@ def test_node_task_memory(tmp_path, monkeypatch, restoring_beam):
         # the application's other node tasks are recorded, not run
         imports.watch(monkeypatch)
         driver_start = monitor.state()
-        image_store = image(work_dir, ps_store, image_params, restoring_beam)
+        image_store = image(work_dir, ps_store, image_params, io_engine, restoring_beam)
         driver_left = monitor.state()
         assert len(captured) == N_TASKS, (
             f"{len(captured)} node tasks, expected {N_TASKS}"

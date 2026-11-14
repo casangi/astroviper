@@ -207,7 +207,7 @@ def test_pdf_report_of_fits_output(processing_set, tmp_path):
     result = _image(
         processing_set,
         str(tmp_path / "cube.img.fits"),
-        skunk_works=True,
+        io_engine="chunk",
         output_image_format="fits",
         report="pdf",
     )
@@ -293,11 +293,11 @@ def _beam_store(tmp_path, output_image_format, psf_beams, restoring_beam):
     them; returns the store and its kept variables."""
     from xradio.image import make_empty_sky_image
 
-    from astroviper.node_tasks.imaging.utils import (
-        create_empty_fits_images,
-        write_result_chunk_to_fits_skunk_works,
+    from astroviper.utils.chunk_io import create_empty_fits_images, write_fits
+    from astroviper.utils.io import (
+        imaging_data_variables_and_dims_double_precision,
+        write_zarr_image_store,
     )
-    from astroviper.utils.io import write_zarr_image_store
 
     n_chan = len(psf_beams)
     img_xds = make_empty_sky_image(
@@ -330,10 +330,14 @@ def _beam_store(tmp_path, output_image_format, psf_beams, restoring_beam):
     if output_image_format == "zarr":
         return write_zarr_image_store(img_xds, str(tmp_path / "cube.img.zarr")), keep
     store = str(tmp_path / "cube.img.fits")
-    create_empty_fits_images(store, img_xds, keep, restoring_beam=restoring_beam)
-    write_result_chunk_to_fits_skunk_works(
-        store, keep, {"frequency": {"slice": slice(0, n_chan)}}, img_xds
+    create_empty_fits_images(
+        store,
+        img_xds,
+        keep,
+        data_variable_definitions=imaging_data_variables_and_dims_double_precision,
+        restoring_beam=restoring_beam,
     )
+    write_fits(store, keep, {"frequency": {"slice": slice(0, n_chan)}}, img_xds)
     return store, keep
 
 
@@ -457,7 +461,7 @@ def test_restoring_beam_section_of_fits_output_without_the_kept_variables(tmp_pa
 def test_restoring_beam_section_of_fits_output_with_filled_rows(tmp_path):
     """Once the run has filled the BEAMS rows of a channel without a fit, the
     report knows the channel from the planes the fill returned."""
-    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+    from astroviper.utils.chunk_io.fits_blocks import (
         fill_fits_beams_without_fit,
     )
 

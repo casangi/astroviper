@@ -441,17 +441,21 @@ def write_spy(monkeypatch):
     """Record every chunk write's global frequency slice; optionally fail one."""
     import astroviper.utils.io as io_module
 
-    original = io_module.write_result_chunk_to_disk_using_zarr
+    original = io_module.write_result_chunk
     spy = {"slices": [], "fail_on_call": None}
 
-    def wrapper(image_store, image_data_variables_keep, task_coords, img_xds):
+    def wrapper(
+        io_engine, image_store, image_data_variables_keep, task_coords, *a, **k
+    ):
         call_index = len(spy["slices"])
         spy["slices"].append(task_coords["frequency"]["slice"])
         if spy["fail_on_call"] == call_index:
             raise OSError("simulated Lustre write failure")
-        original(image_store, image_data_variables_keep, task_coords, img_xds)
+        original(
+            io_engine, image_store, image_data_variables_keep, task_coords, *a, **k
+        )
 
-    monkeypatch.setattr(io_module, "write_result_chunk_to_disk_using_zarr", wrapper)
+    monkeypatch.setattr(io_module, "write_result_chunk", wrapper)
     return spy
 
 

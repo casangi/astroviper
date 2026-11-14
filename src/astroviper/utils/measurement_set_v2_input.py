@@ -1,12 +1,12 @@
-"""Measurement Set v2 input of the skunk-works cube-imaging path (experimental).
+"""Measurement Set v2 input of cube imaging, read through XRADIO's engine.
 
 A Measurement Set v2 is imaged without converting it, through XRADIO's
 ``xradio_msv2`` xarray engine (:func:`xradio.measurement_set.open_msv2`):
 
 * the distributed application opens the MSv2 lazily
-  (:func:`open_processing_set_skunk_works_msv2`: metadata only, the main data
+  (:func:`open_processing_set_msv2`: metadata only, the main data
   variables are lazily indexed arrays), checks the data group to image
-  (:func:`check_data_group_skunk_works_msv2`, before anything is written) and
+  (:func:`check_data_group_msv2`, before anything is written) and
   builds the graph mapping exactly as for a Zarr processing set;
 * :func:`add_lazy_input_data` then gives every node task the lazily indexed
   selection of its data under the mapping key ``lazy_input_data``: per MSv4,
@@ -15,7 +15,7 @@ A Measurement Set v2 is imaged without converting it, through XRADIO's
   the imaging reads (``frequency``, ``polarization`` and the baseline antenna
   names, shipped as small integer codes into a per-MSv4 name table, which
   keeps the graph payload small for arrays with many baselines);
-* the node task reads it with :func:`load_processing_set_skunk_works_msv2`,
+* the node task reads it with :func:`load_processing_set_msv2`,
   which rebuilds ``baseline_antenna1_name`` and ``baseline_antenna2_name``
   exactly.
 
@@ -39,7 +39,7 @@ run dask with one thread per worker (``threads_per_worker=1``) or the MPI
 backend.
 
 The Zarr processing-set sibling of this path is
-:mod:`astroviper.node_tasks.imaging.utils.skunk_works`.
+:mod:`astroviper.utils.chunk_io.zarr_chunks`.
 """
 
 from __future__ import annotations
@@ -142,9 +142,7 @@ def require_msv2_engine():
     return open_msv2
 
 
-def open_processing_set_skunk_works_msv2(
-    ms_path, scan_intents=None, msv2_open_options=None
-):
+def open_processing_set_msv2(ms_path, scan_intents=None, msv2_open_options=None):
     """Open a Measurement Set v2 lazily as a processing set.
 
     :func:`xradio.measurement_set.open_msv2` with lazily indexed (not dask)
@@ -235,7 +233,7 @@ def open_processing_set_skunk_works_msv2(
 
 
 @shares_param_docs
-def check_data_group_skunk_works_msv2(ps_xdt, processing_set_data_group_name):
+def check_data_group_msv2(ps_xdt, processing_set_data_group_name):
     """Check that every MSv4 can be imaged with the data group.
 
     The checks of :func:`add_lazy_input_data`, on every MSv4 of the
@@ -253,7 +251,7 @@ def check_data_group_skunk_works_msv2(ps_xdt, processing_set_data_group_name):
     ----------
     ps_xdt : xarray.DataTree
         Lazily opened processing set, as
-        :func:`open_processing_set_skunk_works_msv2` returns it.
+        :func:`open_processing_set_msv2` returns it.
     processing_set_data_group_name : str
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
 
@@ -293,13 +291,13 @@ def add_lazy_input_data(ps_xdt, node_task_data_mapping, processing_set_data_grou
 
     GraphVIPER's ``map`` forwards the key to every node task that declares a
     ``lazy_input_data`` parameter; the node task reads it with
-    :func:`load_processing_set_skunk_works_msv2`, which rebuilds the names.
+    :func:`load_processing_set_msv2`, which rebuilds the names.
 
     Parameters
     ----------
     ps_xdt : xarray.DataTree
         Lazily opened processing set, as
-        :func:`open_processing_set_skunk_works_msv2` returns it.
+        :func:`open_processing_set_msv2` returns it.
     node_task_data_mapping : dict
         GraphVIPER node-task data mapping, with the final ``data_selection``
         of every task (frequency slice and correlation selection). An MSv4
@@ -419,7 +417,7 @@ def _data_group_dataset(ms_xdt, ms_name, data_group_name):
         [name for name in dataset.coords if name not in _KEPT_COORDINATES]
     )
     # The attrs of this new, minimal per-task dataset are built here, as the
-    # Zarr skunk loader builds its datasets' (not with data_group_tools, which
+    # Zarr chunk loader builds its datasets' (not with data_group_tools, which
     # resolve and register groups on an existing dataset). The input MSv4's
     # attrs are not touched: data_group is a copy.
     dataset.attrs = {"data_groups": {data_group_name: data_group}}
@@ -516,7 +514,7 @@ def _decode_baseline_antenna_names(dataset):
     return dataset
 
 
-def load_processing_set_skunk_works_msv2(lazy_input_data):
+def load_processing_set_msv2(lazy_input_data):
     """Read a node task's lazily indexed data into a processing set.
 
     Each dataset is computed into a new one (the lazy datasets in the task's
@@ -536,7 +534,7 @@ def load_processing_set_skunk_works_msv2(lazy_input_data):
     -------
     xarray.DataTree
         One child per MSv4, as
-        :func:`~astroviper.node_tasks.imaging.utils.load_processing_set_skunk_works`
+        :func:`~astroviper.utils.chunk_io.load_processing_set`
         returns it: the four data-group variables, the coordinates
         ``frequency``, ``polarization``, ``baseline_antenna1_name`` and
         ``baseline_antenna2_name`` (the MSv4's own values: the converted

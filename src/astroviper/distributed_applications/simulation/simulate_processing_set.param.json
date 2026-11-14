@@ -8,6 +8,7 @@
         "sky_components": { "type": ["list"], "nullable": true },
         "sky_model_image": { "type": ["str"], "nullable": true },
         "sky_model_image_predict": { "type": ["dict"], "nullable": true },
+        "io_engine": { "type": ["str"], "allowed": ["chunk", "xradio"] },
         "point_source_flux": { "type": ["ndarray", "list"], "nullable": true },
         "point_source_ra_dec": { "type": ["ndarray", "list"], "nullable": true },
         "gaussian_source_flux": { "type": ["ndarray", "list"], "nullable": true },
