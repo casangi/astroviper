@@ -164,6 +164,187 @@ def test_double_precision(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# The beam of each file
+# --------------------------------------------------------------------------- #
+RESTORED = ["sky_restored", "sky_restored_primary_beam_corrected"]
+TARGET = np.array([3.0e-5, 2.0e-5, 0.5])
+
+
+def _beams_table(store, key):
+    """The ``BEAMS`` rows of ``<KEY>.fits`` as (channel, polarization, 3), or None."""
+    from astropy.io import fits
+
+    with fits.open(os.path.join(store, key.upper() + ".fits")) as hdulist:
+        if "BEAMS" not in hdulist:
+            return None
+        beams = hdulist["BEAMS"].data
+        rows = np.stack([beams[column] for column in ("BMAJ", "BMIN", "BPA")], -1)
+    return rows.reshape(len(FREQS), len(POLS), 3)
+
+
+def _restored_arrays(keep):
+    full = _full_arrays()
+    full["SKY_RESTORED"] = full["SKY_RESIDUAL"] + 1
+    full["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"] = full["SKY_RESIDUAL"] + 2
+    full["BEAM_FIT_PARAMS_SKY_RESTORED"] = np.broadcast_to(
+        TARGET, full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].shape
+    ).copy()
+    return {name: array for name, array in full.items() if name.lower() in keep}
+
+
+def _header_beam(store, key):
+    """``BMAJ``, ``BMIN``, ``BPA`` (degrees) of ``<KEY>.fits``, or None."""
+    from astropy.io import fits
+
+    header = fits.getheader(os.path.join(store, key.upper() + ".fits"))
+    if "BMAJ" not in header:
+        return None
+    return np.array([header[keyword] for keyword in ("BMAJ", "BMIN", "BPA")])
+
+
+def test_without_a_restoring_beam_the_corrected_file_has_no_beams(tmp_path):
+    """Without a restoring beam the restored file carries the PSF beams and
+    the corrected file none, as before restoring_beam existed."""
+    from astropy.io import fits
+
+    store = str(tmp_path / "img.fits")
+    keep = KEEP + RESTORED
+    create_empty_fits_images(store, _empty_image(), keep)
+    full = _restored_arrays(keep)
+    _write_chunk(store, full, slice(0, 5), keep=keep)
+    np.testing.assert_array_equal(
+        _beams_table(store, "sky_restored"),
+        full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0],
+    )
+    path = os.path.join(store, "SKY_RESTORED_PRIMARY_BEAM_CORRECTED.fits")
+    with fits.open(path) as hdulist:
+        assert len(hdulist) == 1
+        assert "CASAMBM" not in hdulist[0].header
+        assert "BMAJ" not in hdulist[0].header
+        np.testing.assert_array_equal(
+            hdulist[0].data,
+            full["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"][0].transpose(0, 1, 3, 2),
+        )
+
+
+def test_restored_files_carry_the_restoring_beam(tmp_path, monkeypatch):
+    """The restored files carry the restoring beam as their header beam, in
+    degrees, as tclean writes it (CASA reads it, not BEAMS tables of float64
+    values), with no BEAMS table; the others the PSF beams, encoded once per
+    chunk."""
+    import xradio.image
+    from astropy.io import fits
+
+    import astroviper.node_tasks.imaging.utils.skunk_works_fits as module
+
+    encode_beam_rows = module._encode_beam_rows
+    encoded = []
+
+    def counting_encode_beam_rows(beam_variable_key, chan_start, img_xds):
+        encoded.append(beam_variable_key)
+        return encode_beam_rows(beam_variable_key, chan_start, img_xds)
+
+    monkeypatch.setattr(module, "_encode_beam_rows", counting_encode_beam_rows)
+    store = str(tmp_path / "img.fits")
+    keep = KEEP + RESTORED + ["beam_fit_params_sky_restored"]
+    create_empty_fits_images(store, _empty_image(), keep, restoring_beam=TARGET)
+    full = _restored_arrays(keep)
+    _write_chunk(store, full, slice(0, 2), keep=keep)
+    _write_chunk(store, full, slice(2, 5), keep=keep)
+    assert encoded == 2 * ["beam_fit_params_point_spread_function"]
+    for key in RESTORED:
+        path = os.path.join(store, key.upper() + ".fits")
+        with fits.open(path) as hdulist:
+            assert len(hdulist) == 1
+            assert "CASAMBM" not in hdulist[0].header
+            np.testing.assert_array_equal(
+                hdulist[0].data, full[key.upper()][0].transpose(0, 1, 3, 2)
+            )
+        np.testing.assert_allclose(
+            _header_beam(store, key), np.degrees(TARGET), rtol=1e-15
+        )
+        xds = xradio.image.open_image({key: path})
+        np.testing.assert_allclose(
+            xds["BEAM_FIT_PARAMS_" + key.upper()].values,
+            full["BEAM_FIT_PARAMS_SKY_RESTORED"],
+            rtol=1e-14,
+        )
+    for key in ("sky_residual", "point_spread_function"):
+        assert _header_beam(store, key) is None
+        np.testing.assert_array_equal(
+            _beams_table(store, key), full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0]
+        )
+
+
+def test_restoring_beam_labels_no_other_file(tmp_path):
+    store = str(tmp_path / "img.fits")
+    keep = ["sky_residual", "beam_fit_params_sky_restored", *RESTORED]
+    create_empty_fits_images(store, _empty_image(), keep, restoring_beam=TARGET)
+    full = _restored_arrays(keep)
+    _write_chunk(store, full, slice(0, 5), keep=keep)
+    assert _beams_table(store, "sky_residual") is None
+    assert _header_beam(store, "sky_residual") is None
+    for key in RESTORED:
+        assert _beams_table(store, key) is None
+        np.testing.assert_allclose(
+            _header_beam(store, key), np.degrees(TARGET), rtol=1e-15
+        )
+
+
+def test_kept_restored_beam_needs_the_restoring_beam(tmp_path):
+    with pytest.raises(ValueError, match="needs the restoring_beam"):
+        create_empty_fits_images(
+            str(tmp_path / "img.fits"),
+            _empty_image(),
+            ["sky_restored", "beam_fit_params_sky_restored"],
+        )
+
+
+def test_unwritten_beams_rows_hold_their_channel_and_polarization(tmp_path):
+    """Rows no task writes (a kept variable the run does not make, a skipped
+    task) hold zero beams with their CHAN and POL, so the file still opens."""
+    import xradio.image
+    from astropy.io import fits
+
+    store = str(tmp_path / "img.fits")
+    create_empty_fits_images(store, _empty_image(), KEEP)
+    path = os.path.join(store, "SKY_RESIDUAL.fits")
+    with fits.open(path) as hdulist:
+        beams = hdulist["BEAMS"].data
+        np.testing.assert_array_equal(beams["CHAN"], np.repeat(range(5), 2))
+        np.testing.assert_array_equal(beams["POL"], np.tile(range(2), 5))
+        assert not np.any([beams[column] for column in ("BMAJ", "BMIN", "BPA")])
+    xds = xradio.image.open_image({"sky_residual": path})
+    assert not xds["BEAM_FIT_PARAMS_SKY_RESIDUAL"].values.any()
+
+
+PSF_BEAM = "beam_fit_params_point_spread_function"
+RESTORED_BEAM = "beam_fit_params_sky_restored"
+RESIDUAL_BEAM = "beam_fit_params_sky_residual"
+
+
+@pytest.mark.parametrize(
+    "image_variable, beam_variables, expected",
+    [
+        ("sky_restored", [PSF_BEAM], PSF_BEAM),
+        ("sky_restored", [RESTORED_BEAM, PSF_BEAM], None),
+        ("sky_restored_primary_beam_corrected", [PSF_BEAM], None),
+        ("sky_restored_primary_beam_corrected", [RESTORED_BEAM, PSF_BEAM], None),
+        ("sky_residual", [RESTORED_BEAM, PSF_BEAM], PSF_BEAM),
+        ("sky_residual", [RESTORED_BEAM, RESIDUAL_BEAM], RESIDUAL_BEAM),
+        ("sky_residual", [RESTORED_BEAM], None),
+        ("mask", [RESTORED_BEAM, PSF_BEAM], None),
+    ],
+)
+def test_beams_table_variable(image_variable, beam_variables, expected):
+    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+        _beams_table_variable,
+    )
+
+    assert _beams_table_variable(image_variable, beam_variables) == expected
+
+
+# --------------------------------------------------------------------------- #
 # XRADIO-conformance round trip
 # --------------------------------------------------------------------------- #
 def test_xradio_open_image_round_trip(written_store):

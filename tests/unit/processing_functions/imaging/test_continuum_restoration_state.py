@@ -179,3 +179,69 @@ def test_global_append_converts_counts_only_after_reduction(monkeypatch):
             initialize_static_products=True,
         )
     assert reached == [True]
+
+
+FAILED_FIT = "PSF fit failed .* the restore needs the PSF beam to take the residual"
+
+
+@pytest.mark.parametrize(
+    "psf_beam, restoring_beam, refusal",
+    [
+        ([3.0e-5, 2.0e-5, 0.3], [5.0e-5, 3.5e-5, 0.6], None),
+        ([3.0e-5, 2.0e-5, 0.3], [5.0e-5, 1.5e-5, 0.3], "does not contain"),
+        ([np.nan, np.nan, np.nan], [5.0e-5, 3.5e-5, 0.6], FAILED_FIT),
+        ([0.0, 0.0, 0.0], [5.0e-5, 3.5e-5, 0.6], FAILED_FIT),
+        ([np.nan, np.nan, np.nan], None, None),
+    ],
+)
+def test_global_append_refuses_a_target_that_does_not_contain_the_psf_beam(
+    monkeypatch, psf_beam, restoring_beam, refusal
+):
+    """The first append node refuses a target that does not contain the PSF
+    beam, and any target when the PSF fit failed, right after the fit, before
+    any model update; the step after the fit is a sentinel here. Without a
+    target a failed fit is not refused there."""
+    node = importlib.import_module(
+        "astroviper.node_tasks.imaging.image_continuum_single_field"
+    )
+    processing = importlib.import_module(
+        "astroviper.processing_functions.imaging.image_continuum_single_field"
+    )
+    polarization = importlib.import_module(
+        "astroviper.processing_functions.image_analysis.transform_polarization_basis"
+    )
+    fitted = []
+
+    def fit(img_xds, image_data_group_out_name, **kwargs):
+        img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = xr.DataArray(
+            np.broadcast_to(psf_beam, (2, 1, 2, 3)),
+            dims=("time", "frequency", "polarization", "beam_params"),
+        )
+        img_xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = xr.DataArray(
+            np.zeros((2, 1, 2)), dims=("time", "frequency", "polarization")
+        )
+        img_xds.attrs["data_groups"][image_data_group_out_name].update(
+            beam_fit_params_point_spread_function="BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+            max_sidelobe_point_spread_function="MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+        )
+        fitted.append(True)
+        return img_xds, None
+
+    def after_the_fit(*args, **kwargs):
+        raise StopIteration
+
+    monkeypatch.setattr(processing, "point_spread_function_gaussian_fit_continuum", fit)
+    monkeypatch.setattr(polarization, "transform_polarization_basis", after_the_fit)
+    raw = _global_mvc_contributions()
+    raw.attrs["data_groups"] = {"residual": {}}
+    with pytest.raises(ValueError if refusal else StopIteration, match=refusal):
+        node._prepare_continuum_image(
+            raw,
+            {
+                "continuum_mode": "mvc",
+                "image_params": {"n_taylor_terms": 2, "reference_frequency": 100.0},
+                "restoring_beam": restoring_beam,
+            },
+            initialize_static_products=True,
+        )
+    assert fitted == [True]

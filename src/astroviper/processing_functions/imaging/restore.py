@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.fft
+import toolviper.utils.logger as logger
 import xarray as xr
 
 from astroviper.utils.data_group_tools import (
@@ -201,6 +202,76 @@ def _convolve_with_clean_beam(plane, kernel_ft, workers):
     plane_ft = scipy.fft.rfft2(plane, workers=workers)
     np.multiply(plane_ft, kernel_ft, out=plane_ft)
     return _inverse_rfft2(plane_ft, (ny, nx), workers)
+
+
+def _multiply_by_correcting_transform(spectrum, covariance_pixels, area_ratio, nx):
+    """Multiply an ``rfft2`` half spectrum in place by the correcting transform.
+
+    ``H(f) = r exp(-2 pi^2 f^T D f)``, with ``D`` (``covariance_pixels``) the
+    covariance of the correcting Gaussian in pixels^2 of the ``(l index,
+    m index)`` frame, ``r`` the area ratio, and ``f`` the frequencies of the
+    spectrum in cycles per pixel (``fftfreq`` along ``l``, ``rfftfreq(nx)``
+    along ``m``). The exponent is evaluated for 256 rows at a time in one
+    float64 buffer and cast to the real dtype of the spectrum for the
+    multiplication. ``H`` below ``tiny / eps**2`` of that dtype is zero, so that
+    neither it nor its products with the spectrum are subnormal (slow on x86).
+    """
+    (c00, c01), (_, c11) = covariance_pixels
+    f0 = scipy.fft.fftfreq(spectrum.shape[0])
+    f1 = scipy.fft.rfftfreq(nx)
+    cross = 2.0 * c01 * f1
+    along_m = c11 * f1 * f1
+    real = np.finfo(spectrum.dtype)
+    floor = np.log(real.tiny) - 2.0 * np.log(real.eps) - np.log(area_ratio)
+    exponent = np.empty((min(256, f0.size), f1.size))
+    for start in range(0, f0.size, 256):
+        rows = f0[start : start + 256]
+        block = exponent[: rows.size]
+        np.multiply(rows[:, None], cross, out=block)
+        block += along_m
+        block += (c00 * rows * rows)[:, None]
+        block *= -2.0 * np.pi**2
+        block[block < floor] = -np.inf
+        np.exp(block, out=block)
+        block *= area_ratio
+        spectrum[start : start + rows.size] *= block.astype(real.dtype, copy=False)
+
+
+def _correcting_spectrum(residual_plane, covariance_pixels, area_ratio, workers):
+    """``rfft2`` of a residual plane times the correcting transform.
+
+    Non-finite residual pixels are zero for the transform, in a copy freed
+    right after it. Returns the spectrum and whether every pixel is finite.
+    """
+    finite = bool(np.isfinite(residual_plane).all())
+    spectrum = scipy.fft.rfft2(
+        residual_plane
+        if finite
+        else np.where(np.isfinite(residual_plane), residual_plane, 0),
+        workers=workers,
+    )
+    _multiply_by_correcting_transform(
+        spectrum, covariance_pixels, area_ratio, residual_plane.shape[1]
+    )
+    return spectrum, finite
+
+
+def _residual_to_beam(residual_plane, covariance_pixels, area_ratio, workers):
+    """``R (*) K``: a residual plane taken to the target beam, as a new plane.
+
+    ``D = 0`` scales the residual by the area ratio without a transform.
+    Otherwise non-finite residual pixels are NaN in the result.
+    """
+    if not covariance_pixels.any():
+        return residual_plane * residual_plane.dtype.type(area_ratio)
+    spectrum, finite = _correcting_spectrum(
+        residual_plane, covariance_pixels, area_ratio, workers
+    )
+    plane = _inverse_rfft2(spectrum, residual_plane.shape, workers)
+    del spectrum
+    if not finite:
+        plane[~np.isfinite(residual_plane)] = np.nan
+    return plane
 
 
 def primary_beam_corrected_plane(
@@ -415,6 +486,199 @@ def _divide_taylor_polynomials(
     return result
 
 
+def _correcting_transforms(beam, restoring_beam, pixel_size, plane_coordinate=None):
+    """The correcting transform of every plane whose residual goes to the target.
+
+    Parameters
+    ----------
+    beam : numpy.ndarray
+        PSF beams ``(time, plane, 3)``: ``[major, minor, pa]`` in radians.
+    restoring_beam : array_like
+        Target ``[major, minor, pa]`` in radians.
+    pixel_size : float
+        Absolute image-cell size in radians.
+    plane_coordinate : tuple, optional
+        ``(name, values)`` of the plane axis, by which the warning names the
+        planes; their indices by default.
+
+    Returns
+    -------
+    dict
+        ``(time, plane)`` to ``(covariance_pixels, area_ratio)`` of
+        :func:`_multiply_by_correcting_transform`. A plane whose PSF beam is
+        the target, has no fit or is not contained by the target is left out:
+        its residual is kept unconvolved and unscaled. The last two are named
+        in one warning.
+    """
+    from astroviper.processing_functions.image_analysis.common_beam import (
+        _correcting_covariance,
+    )
+
+    covariance, area_ratio, state = _correcting_covariance(beam, restoring_beam)
+    transforms, not_contained, no_fit = {}, [], []
+    for index in np.ndindex(beam.shape[:2]):
+        if state[index] == "no fit":
+            no_fit.append(index)
+        elif state[index] == "not contained":
+            not_contained.append(index)
+        elif covariance[index].any() or area_ratio[index] != 1.0:
+            transforms[index] = (
+                covariance[index] / pixel_size**2,
+                float(area_ratio[index]),
+            )
+    if not_contained or no_fit:
+        name, values = plane_coordinate or ("plane index", range(beam.shape[1]))
+        growth = [
+            ((time_index, values[plane_index]), factor)
+            for (time_index, plane_index), factor in _growth_factors(
+                beam, restoring_beam, not_contained
+            )
+        ]
+        without_fit = [
+            (time_index, values[plane_index]) for time_index, plane_index in no_fit
+        ]
+        logger.warning(
+            f"restoring_beam {list(map(float, restoring_beam))} rad: the residual "
+            f"of these (time index, {name}) planes is kept unconvolved and "
+            "unscaled. Not contained by the target (growth factor that would "
+            f"contain them): {growth}. Without a PSF fit: {without_fit}."
+        )
+    return transforms
+
+
+def _growth_factors(beam, restoring_beam, planes):
+    """``(time, plane)`` with the uniform growth of the target that would
+    contain the plane's PSF beam, ``sqrt(max eig(S_T^-1 S_p))``."""
+    from astroviper.processing_functions.image_analysis.common_beam import (
+        _growth_factor,
+    )
+
+    if not planes:
+        return []
+    growth = _growth_factor(np.array([beam[index] for index in planes]), restoring_beam)
+    return [
+        (index, round(float(factor), 6))
+        for index, factor in zip(planes, growth, strict=True)
+    ]
+
+
+def _primary_beam_inside(primary_beam_plane, primary_beam_limit):
+    """Pixels where the primary beam is finite, positive and not below the cutoff."""
+    return (
+        np.isfinite(primary_beam_plane)
+        & (primary_beam_plane > 0.0)
+        & (primary_beam_plane >= primary_beam_limit)
+    )
+
+
+def _restore_plane_to_beam(
+    model_plane,
+    residual_plane,
+    kernel_ft,
+    covariance_pixels,
+    area_ratio,
+    workers,
+    apparent_plane=None,
+    corrected_plane=None,
+    primary_beam_plane=None,
+    primary_beam_limit=0.2,
+):
+    """Restore one plane to the target beam into the given output planes.
+
+    The apparent plane is ``M (*) B_T + R (*) K``: the model convolved with
+    the target's clean beam (``kernel_ft``, ``None`` for a zero model) plus
+    the residual taken to the target. The corrected plane is ``(M / P) (*)
+    B_T + (R / P) (*) K``, NaN where the primary beam is below
+    ``primary_beam_limit``: the residual, like the model, is divided by the
+    primary beam before it is convolved, AstroVIPER's convention
+    (:func:`primary_beam_corrected_plane`; CASA's ``pbcor`` divides the
+    restored image). Both quotients are zero outside the cutoff for their
+    transforms, so within a few widths of ``K`` of the cutoff the residual
+    term leaves out the residual beyond it. ``D = 0`` scales the residual term
+    by the area ratio without a transform. Non-finite residual pixels, and in
+    the corrected plane pixels whose quotient overflows, are zero for the
+    transform and NaN in the outputs; ``D = 0`` keeps them, as
+    ``restoring_beam=None`` does. The corrected plane is made first, so the
+    model plane may be the apparent output plane. An apparent plane alone is
+    one inverse transform of its model and residual spectra; otherwise each
+    term has its own inverse transform, so that, as without a target, at most
+    one spectrum and one plane are live besides ``kernel_ft`` and the outputs.
+
+    Returns
+    -------
+    float
+        Wall-clock seconds spent on the corrected plane alone.
+    """
+    import time
+
+    convolve_model = kernel_ft is not None and model_plane.any()
+    if corrected_plane is None and covariance_pixels.any():
+        # One inverse transform of rfft2(R) H + rfft2(M) B_T.
+        spectrum, finite = _correcting_spectrum(
+            residual_plane, covariance_pixels, area_ratio, workers
+        )
+        if convolve_model:
+            model_spectrum = scipy.fft.rfft2(model_plane, workers=workers)
+            model_spectrum *= kernel_ft
+            spectrum += model_spectrum
+            del model_spectrum
+        apparent_plane[...] = _inverse_rfft2(spectrum, apparent_plane.shape, workers)
+        del spectrum
+        if not finite:
+            apparent_plane[~np.isfinite(residual_plane)] = np.nan
+        return 0.0
+
+    corrected_seconds = 0.0
+    if corrected_plane is not None:
+        start = time.time()
+        corrected_plane.fill(0)
+        np.divide(
+            model_plane,
+            primary_beam_plane,
+            out=corrected_plane,
+            where=_primary_beam_inside(primary_beam_plane, primary_beam_limit),
+        )
+        if kernel_ft is not None and corrected_plane.any():
+            corrected_plane[...] = _convolve_with_clean_beam(
+                corrected_plane, kernel_ft, workers
+            )
+        quotient = np.full_like(corrected_plane, np.nan)
+        np.divide(
+            residual_plane,
+            primary_beam_plane,
+            out=quotient,
+            where=_primary_beam_inside(primary_beam_plane, primary_beam_limit),
+        )
+        if covariance_pixels.any():
+            blank = ~np.isfinite(quotient)
+            corrected_plane[blank] = np.nan
+            quotient[blank] = 0
+            del blank
+            spectrum = scipy.fft.rfft2(quotient, workers=workers)
+            del quotient
+            _multiply_by_correcting_transform(
+                spectrum, covariance_pixels, area_ratio, corrected_plane.shape[1]
+            )
+            corrected_plane += _inverse_rfft2(spectrum, corrected_plane.shape, workers)
+            del spectrum
+        else:
+            quotient *= quotient.dtype.type(area_ratio)
+            corrected_plane += quotient
+            del quotient
+        corrected_seconds = time.time() - start
+    if apparent_plane is not None:
+        if convolve_model:
+            apparent_plane[...] = _convolve_with_clean_beam(
+                model_plane, kernel_ft, workers
+            )
+        else:
+            apparent_plane.fill(0)
+        apparent_plane += _residual_to_beam(
+            residual_plane, covariance_pixels, area_ratio, workers
+        )
+    return corrected_seconds
+
+
 def _restore_image_arrays(
     residual,
     model,
@@ -425,6 +689,8 @@ def _restore_image_arrays(
     primary_beam_limit=0.2,
     output="apparent",
     consume_model=False,
+    restoring_beam=None,
+    plane_coordinate=None,
 ):
     """Restore generic image planes without assuming an axis coordinate name.
 
@@ -432,6 +698,11 @@ def _restore_image_arrays(
     polarization, l, m)``; only the meaning of ``plane`` differs (frequency or
     Taylor term). This core owns their common clean-beam convolution, safe
     primary-beam division, cutoff masking, and output allocation.
+
+    With ``restoring_beam`` every plane is restored to that beam: the model is
+    convolved with its clean beam, built once per call, and the residual is
+    taken from the plane's beam to it (:func:`_restore_plane_to_beam`), except
+    where :func:`_correcting_transforms` keeps the residual.
 
     Parameters
     ----------
@@ -454,6 +725,13 @@ def _restore_image_arrays(
         Restored products to calculate.
     consume_model : bool, optional
         Reuse the model buffer for the apparent restored output when possible.
+    restoring_beam : array_like, optional
+        Target beam ``[major, minor, pa]`` in radians; ``None`` restores each
+        plane with its own beam.
+    plane_coordinate : tuple, optional
+        ``(name, values)`` of the plane axis, by which the warning of
+        :func:`_correcting_transforms` names the planes; their indices by
+        default.
 
     Returns
     -------
@@ -518,20 +796,66 @@ def _restore_image_arrays(
     apparent_seconds = 0.0
     corrected_seconds = 0.0
     total_start = time.time()
+    if restoring_beam is not None:
+        target_kernel_ft = (
+            _clean_beam_kernel_ft(
+                restoring_beam, ny, nx, pixel_size, residual.dtype, workers
+            )
+            if model.any()
+            else None
+        )
+        transforms = _correcting_transforms(
+            beam[:, :, 0], restoring_beam, pixel_size, plane_coordinate
+        )
 
     for time_index in range(nt):
         for plane_index in range(nplane):
-            kernel_ft = _clean_beam_kernel_ft(
-                beam[time_index, plane_index, 0],
-                ny,
-                nx,
-                pixel_size,
-                residual.dtype,
-                workers,
-            )
+            if restoring_beam is None:
+                kernel_ft = _clean_beam_kernel_ft(
+                    beam[time_index, plane_index, 0],
+                    ny,
+                    nx,
+                    pixel_size,
+                    residual.dtype,
+                    workers,
+                )
+                transform = None
+            else:
+                kernel_ft = target_kernel_ft
+                transform = transforms.get((time_index, plane_index))
             for polarization_index in range(npol):
                 model_plane = model[time_index, plane_index, polarization_index]
                 residual_plane = residual[time_index, plane_index, polarization_index]
+                if transform is not None:
+                    beam_polarization = (
+                        polarization_index
+                        if make_corrected and primary_beam.shape[2] == npol
+                        else 0
+                    )
+                    corrected_seconds += _restore_plane_to_beam(
+                        model_plane,
+                        residual_plane,
+                        kernel_ft,
+                        *transform,
+                        workers,
+                        apparent_plane=(
+                            apparent[time_index, plane_index, polarization_index]
+                            if make_apparent
+                            else None
+                        ),
+                        corrected_plane=(
+                            corrected[time_index, plane_index, polarization_index]
+                            if make_corrected
+                            else None
+                        ),
+                        primary_beam_plane=(
+                            primary_beam[time_index, plane_index, beam_polarization]
+                            if make_corrected
+                            else None
+                        ),
+                        primary_beam_limit=primary_beam_limit,
+                    )
+                    continue
                 # Corrected restoration must precede an apparent restoration
                 # that consumes the model buffer.
                 if make_corrected:
@@ -585,6 +909,29 @@ def _restore_image_arrays(
     }
 
 
+def _restored_beam_variable(beam_da, restoring_beam):
+    """``BEAM_FIT_PARAMS_SKY_RESTORED``: the target beam in every plane of the
+    PSF beam variable ``beam_da``, whose last dimension holds the parameters.
+    That dimension is ``beam_params_label``, labelled as xradio's
+    ``BeamFitParamsArray``, which its image writers require."""
+    parameters = beam_da.dims[-1]
+    return xr.DataArray(
+        np.broadcast_to(
+            np.asarray(restoring_beam, dtype=np.float64), beam_da.shape
+        ).copy(),
+        dims=(*beam_da.dims[:-1], "beam_params_label"),
+        coords={
+            **{
+                name: coordinate
+                for name, coordinate in beam_da.coords.items()
+                if parameters not in coordinate.dims
+            },
+            "beam_params_label": ["major", "minor", "pa"],
+        },
+        attrs={"type": "beam_fit_params_sky", "units": "rad"},
+    )
+
+
 @shares_param_docs
 def restore_image(
     img_xds: xr.Dataset,
@@ -597,6 +944,7 @@ def restore_image(
     processing_function_threads: int = 1,
     consume_model: bool = False,
     restoration_output: str = "apparent",
+    restoring_beam: list[float] | None = None,
     primary_beam_limit: float = 0.2,
     primary_beam_key: str = "primary_beam",
     overwrite: bool = True,
@@ -645,10 +993,16 @@ def restore_image(
     as soon as it is transformed).  Per polarization at most two extra planes
     are live at once -- the model spectrum, multiplied by the beam in place,
     and the inverse-transform output, with the residual added into the restored
-    cube without a further temporary.  Planes whose model is entirely zero skip
-    the convolution (the restored plane is just the residual).  With
-    ``consume_model=True`` and apparent output, its cube allocation is avoided: the
-    model cube's buffer is reused and the model variable dropped.
+    cube without a further temporary.  Without ``restoring_beam``, planes whose
+    model is entirely zero skip the convolution (the restored plane is just the
+    residual).  With ``restoring_beam`` the target's clean beam is transformed
+    once per call, and every plane whose residual goes to the target costs one
+    more transform pair per output (one more forward transform for the
+    apparent output alone), its residual spectrum multiplied by the correcting
+    transform in blocks of rows, with at most three planes besides the outputs
+    live; a plane whose model is zero still takes its residual to the target.
+    With ``consume_model=True`` and apparent output, its cube allocation is
+    avoided: the model cube's buffer is reused and the model variable dropped.
 
     Parameters
     ----------
@@ -670,7 +1024,10 @@ def restore_image(
     image_data_group_out_modified : dict, optional
         Role overrides layered on top of the residual group to form the restored
         group.  Default ``{"sky": "SKY_RESTORED"}`` so the restored sky is stored
-        in the ``SKY_RESTORED`` data variable.
+        in the ``SKY_RESTORED`` data variable.  With ``restoring_beam`` the
+        restored beam goes to the variable of its ``"beam_fit_params_sky"``
+        entry, ``BEAM_FIT_PARAMS_SKY_RESTORED`` without one; like the restored
+        sky, an existing variable of that name is refused unless ``overwrite``.
     beam_fit_params_key : str, optional
         Role key in the residual data group holding the ``[major, minor, pa]``
         beam-fit parameters (FWHM major/minor and position angle, in radians),
@@ -704,6 +1061,23 @@ def restore_image(
         by its common power primary beam. Corrected pixels below
         ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
         selector only when ``restore=True``.
+    restoring_beam : list of float, optional
+        ``None`` restores each plane with its own PSF fit [CASA ``tclean``
+        ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
+        in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,
+        ``|pa| <= pi``) restores every plane to that beam as ``tclean`` does
+        since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
+        target beam, and the residual with the Gaussian that takes the plane's
+        PSF beam to the target, times the ratio of the beam areas, so it is in
+        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        beam the target does not contain, or that has no PSF fit, keeps its
+        residual unconvolved and unscaled, as ``tclean`` does, and is named in a
+        warning. The continuum imager refuses a target that does not contain its
+        PSF beam, and any target when its PSF fit failed, right after that fit
+        in its first imaging cycle: the residual update has run, but no model
+        update. The beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        ``tclean``'s ``restoringbeam='common'``, see
+        :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
     primary_beam_limit : float, optional
         Primary beam (power) cutoff below which the corrected image is blanked
         with NaN, as a fraction of the beam peak.  Default ``0.2`` (the CASA
@@ -724,7 +1098,10 @@ def restore_image(
     -------
     img_xds : xarray.Dataset
         The input dataset with the restored sky variable added and the restored
-        data group registered.
+        data group registered. With ``restoring_beam`` it also holds the
+        restored beam, ``BEAM_FIT_PARAMS_SKY_RESTORED`` unless
+        ``image_data_group_out_modified`` names another variable (the target in
+        every plane, role ``beam_fit_params_sky`` of the restored group).
     return_df : pandas.DataFrame
         One-row timing frame with a ``T_restore`` column (wall-clock seconds of
         the clean-beam convolution), matching the other imaging processing
@@ -735,8 +1112,25 @@ def restore_image(
     -----
     A square pixel grid (``|delta_l| == |delta_m|``) is assumed, as in the PSF
     Gaussian fit.  Frequencies whose beam-fit parameters are non-finite or
-    non-positive have no defined clean beam; their restored plane falls back to
-    the residual (the model cannot be restored without a beam).
+    non-positive have no defined clean beam; without ``restoring_beam`` their
+    restored plane falls back to the residual (the model cannot be restored
+    without a beam), with a target their model is restored with the target and
+    their residual added unconvolved and unscaled.
+
+    With ``restoring_beam`` the residual is multiplied in the uv plane by
+    ``H = (Omega_T / Omega_p) exp(-2 pi^2 f^T D f)``, with ``D`` the covariance
+    of the target minus that of the PSF beam (CASA Memo 10 in covariance form),
+    which also holds for equal and touching beams. The corrected image is
+    ``(SKY_MODEL / P) * B_T + (SKY_RESIDUAL / P) * K``: the residual too is
+    divided by the primary beam before it is convolved, with both quotients
+    zero outside the cutoff for the transforms, so within a few widths of K of
+    the cutoff the corrected residual leaves out the residual beyond it.
+    Non-finite residual pixels, and corrected pixels whose quotient overflows,
+    are zero for the transform and NaN in the restored images; where ``D = 0``
+    there is no transform, and they stay as with ``restoring_beam=None``. A
+    small ``primary_beam_limit`` lets the large quotients near the nulls of the
+    primary beam into the transform, and in single precision their rounding
+    spreads over the corrected image.
     """
     import pandas as pd
 
@@ -744,10 +1138,22 @@ def restore_image(
         from astroviper.processing_functions.imaging.config_check._predicates import (
             check_primary_beam_limit,
             check_restoration_output,
+            check_restoring_beam,
+            check_restoring_beam_within_image,
         )
 
         check_restoration_output(restoration_output)
         check_primary_beam_limit(primary_beam_limit)
+        if restoring_beam is not None:
+            check_restoring_beam(restoring_beam)
+            check_restoring_beam_within_image(
+                restoring_beam,
+                [img_xds.sizes["l"], img_xds.sizes["m"]],
+                [
+                    img_xds.l.values[1] - img_xds.l.values[0],
+                    img_xds.m.values[1] - img_xds.m.values[0],
+                ],
+            )
 
     make_apparent = restoration_output in ("apparent", "both")
     correct = restoration_output in ("primary_beam_corrected", "both")
@@ -756,6 +1162,12 @@ def restore_image(
             "sky": "SKY_RESTORED"
             if make_apparent
             else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        }
+    if restoring_beam is not None:
+        # The output-variable check of overwrite=False then covers the beam.
+        image_data_group_out_modified = {
+            "beam_fit_params_sky": "BEAM_FIT_PARAMS_SKY_RESTORED",
+            **image_data_group_out_modified,
         }
 
     # Resolve every required runtime product before building output metadata.
@@ -816,6 +1228,8 @@ def restore_image(
         primary_beam_limit=primary_beam_limit,
         output=restoration_output,
         consume_model=(consume_model and model_sky_name != residual_sky_name),
+        restoring_beam=restoring_beam,
+        plane_coordinate=("frequency in Hz", residual_da["frequency"].values.tolist()),
     )
     consume = bool(array_timing["consumed_model"])
     if correct:
@@ -834,7 +1248,16 @@ def restore_image(
         # model data variable so nothing reads the overwritten planes.
         del img_xds[model_sky_name]
 
-    description = "Restored image: clean-beam-convolved model plus residual."
+    if restoring_beam is None:
+        description = "Restored image: clean-beam-convolved model plus residual."
+    else:
+        img_xds[restored_group["beam_fit_params_sky"]] = _restored_beam_variable(
+            img_xds[beam_name], restoring_beam
+        )
+        description = (
+            "Restored image: model convolved with the restoring beam "
+            f"{list(map(float, restoring_beam))} rad plus residual taken to it."
+        )
     if correct:
         description += (
             " Primary beam corrected restored image "

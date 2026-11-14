@@ -20,6 +20,7 @@ from astroviper.utils.report_plots import (
     plot_deconvolution_summary,
     plot_plane_deconvolution_summary,
     plot_point_spread_function_cross_sections,
+    plot_restoring_beam_axes,
     plot_signed_images,
     plot_spectra,
     plot_stokes_images,
@@ -165,6 +166,29 @@ def test_spectra_and_deconvolution_summary():
         {1: "Reached max_iter_per_cycle_updated", 2: "Reached threshold_per_cycle"},
     )
     _assert_pyplot_free(figure, 6)
+
+
+@pytest.mark.parametrize("not_contained", [[False, True, False], [False] * 3])
+def test_restoring_beam_axes(not_contained):
+    frequency = np.array([372.7626, 372.7632, 372.7638]) * 1e9
+    beams = np.array([[2.0, 1.0, 0.1], [2.2, 1.1, 0.2], [1.9, 0.9, 0.3]])
+    beams[:, :2] *= ARCSEC
+    figure = plot_restoring_beam_axes(
+        frequency, beams, [2.1 * ARCSEC, 1.2 * ARCSEC, 0.0], not_contained
+    )
+    _assert_pyplot_free(figure, 2)
+    for ax, axis_index, restoring_axis in zip(
+        figure.axes[:2], (0, 1), (2.1, 1.2), strict=True
+    ):
+        lines = {line.get_label(): line for line in ax.lines}
+        np.testing.assert_allclose(
+            lines["PSF fit"].get_ydata(), beams[:, axis_index] / ARCSEC
+        )
+        np.testing.assert_allclose(lines["restoring beam"].get_ydata(), restoring_axis)
+        if any(not_contained):
+            np.testing.assert_allclose(lines["not contained"].get_xdata(), [372.7632])
+        else:
+            assert "not contained" not in lines
 
 
 def test_antenna_positions_and_uv_coverage():

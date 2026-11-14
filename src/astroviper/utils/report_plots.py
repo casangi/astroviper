@@ -22,6 +22,7 @@ __all__ = [
     "plot_deconvolution_summary",
     "plot_plane_deconvolution_summary",
     "plot_point_spread_function_cross_sections",
+    "plot_restoring_beam_axes",
     "plot_signed_images",
     "plot_spectra",
     "plot_stokes_images",
@@ -329,6 +330,67 @@ def plot_spectra(frequency, values, stokes, ylabel, title=None):
     axes[0, 0].set_ylabel(ylabel)
     if title:
         figure.suptitle(title, fontsize=11)
+    return figure
+
+
+def plot_restoring_beam_axes(frequency, beams, restoring_beam, not_contained):
+    """The major and the minor axis of the PSF fit of every channel against
+    those of the restoring beam.
+
+    Parameters
+    ----------
+    frequency : array_like, [n_frequency]
+        Hz.
+    beams : array_like, [n_frequency, 3]
+        ``[major, minor, pa]`` of the PSF fits in radians.
+    restoring_beam : array_like, [3]
+        ``[major, minor, pa]`` in radians, drawn dashed.
+    not_contained : array_like of bool, [n_frequency]
+        The channels whose PSF beam the restoring beam does not contain, drawn
+        as crosses.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    beams = np.asarray(beams, dtype=np.float64)
+    not_contained = np.asarray(not_contained, dtype=bool)
+    figure, axes = _figure(1, 2, panel_size=(4.2, 3.0))
+    for ax, index, name in zip(
+        axes[0], (0, 1), ("major axis", "minor axis"), strict=True
+    ):
+        x = _frequency_axis(ax, frequency)
+        values = beams[:, index] * RADIANS_TO_ARCSEC
+        ax.plot(
+            x,
+            values,
+            color=_COLORS[0],
+            marker="o",
+            markersize=4,
+            linewidth=1.5,
+            label="PSF fit",
+        )
+        ax.axhline(
+            restoring_beam[index] * RADIANS_TO_ARCSEC,
+            color=_COLORS[1],
+            linestyle="--",
+            linewidth=1.5,
+            label="restoring beam",
+        )
+        if not_contained.any():
+            ax.plot(
+                x[not_contained],
+                values[not_contained],
+                linestyle="none",
+                marker="x",
+                markersize=8,
+                color=_COLORS[4],
+                label="not contained",
+            )
+        ax.set_title(name, fontsize=10)
+        ax.grid(True, **_GRID)
+    axes[0, 0].set_ylabel("FWHM (arcsec)")
+    axes[0, 0].legend(fontsize=8)
     return figure
 
 

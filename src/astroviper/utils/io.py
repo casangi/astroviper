@@ -134,6 +134,12 @@ imaging_data_variables_and_dims_double_precision = {
         "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_DECONVOLVED",
     },
+    "beam_fit_params_sky_restored": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_RESTORED",
+        "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
+    },
 }
 
 imaging_data_variables_and_dims_single_precision = {
@@ -207,25 +213,32 @@ imaging_data_variables_and_dims_single_precision = {
         "name": "MASK",
         "attrs": {"dtype": "bool"},
     },
+    # Beam fits stay float64: float32 copies can change their common_beam.
     "beam_fit_params_point_spread_function": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
     },
     "beam_fit_params_sky_residual": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_RESIDUAL",
     },
     "beam_fit_params_sky_dirty": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_DIRTY",
     },
     "beam_fit_params_sky_deconvolved": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_DECONVOLVED",
+    },
+    "beam_fit_params_sky_restored": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_RESTORED",
+        "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
     },
 }
 
@@ -257,6 +270,7 @@ imaging_data_variable_data_group_roles = {
     ),
     "sky_restored_flat_noise": ("restored", "sky_flat_noise"),
     "sky_restored_flat_sky": ("restored", "sky_flat_sky"),
+    "beam_fit_params_sky_restored": ("restored", "beam_fit_params_sky"),
     "alpha": ("restored", "alpha"),
     "alpha_error": ("restored", "alpha_error"),
     "beta": ("restored", "beta"),

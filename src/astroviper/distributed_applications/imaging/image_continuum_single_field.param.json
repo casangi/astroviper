@@ -72,6 +72,7 @@
             "type": ["str"],
             "allowed": ["apparent", "primary_beam_corrected", "both"]
         },
+        "restoring_beam": { "type": ["list", "ndarray"], "nullable": true },
         "gridding_kernel_params": { "type": ["dict"], "nullable": true },
         "skunk_works": { "type": "boolean" },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
