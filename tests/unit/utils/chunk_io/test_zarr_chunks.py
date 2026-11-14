@@ -1542,3 +1542,55 @@ def test_inner_chunks_of_a_shard_are_read_concurrently(tmp_path, monkeypatch):
     monkeypatch.setattr(zarr_chunks, "_READ_CONCURRENCY", 1)
     np.testing.assert_array_equal(open_image(store).SKY_RESIDUAL.values, sky)
     assert threads == {threading.get_ident()}
+
+
+@pytest.mark.parametrize("processing_function_threads", [1, 2])
+@pytest.mark.parametrize("sharded", [False, True])
+def test_write_holds_one_batch_of_variables(
+    tmp_path, processing_function_threads, sharded
+):
+    """The writers encode and write processing_function_threads variables at a
+    time: the traced memory they add stays near that many chunks (each one
+    compressed buffer at its uncompressed size), not one per kept variable."""
+    import tracemalloc
+
+    from astroviper.utils.chunk_io import write_zarr, write_zarr_sharded
+
+    n = 256
+    keep = ["sky_model", "sky_residual", "primary_beam", "point_spread_function"]
+    store = str(tmp_path / "img.zarr")
+    zarr.open_group(store, mode="w")
+    create_empty_data_variables_on_disk(
+        store,
+        keep,
+        shape_dict={"time": 1, "frequency": 2, "polarization": 2, "l": n, "m": n},
+        parallel_coords={"frequency": {"data_chunks": [[0], [1]]}},
+        compressor=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        double_precision=True,
+        data_variable_definitions="imaging",
+        image_sharding={"frequency": 2} if sharded else None,
+    )
+    dims = ["time", "frequency", "polarization", "l", "m"]
+    rng = np.random.default_rng(0)
+    xds = xr.Dataset(
+        {key.upper(): (dims, rng.standard_normal((1, 1, 2, n, n))) for key in keep}
+    )
+    chunk_bytes = 2 * n * n * 8
+    writer = write_zarr_sharded if sharded else write_zarr
+    tracemalloc.start()
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        writer(
+            store,
+            keep,
+            {"frequency": {"slice": slice(1, 2)}},
+            xds,
+            processing_function_threads=processing_function_threads,
+        )
+        added = (tracemalloc.get_traced_memory()[1] - start) / chunk_bytes
+    finally:
+        tracemalloc.stop()
+    assert added <= processing_function_threads + 0.25, added
+    back = zarr.open_array(store + "/SKY_RESIDUAL")[:, 1:2]
+    np.testing.assert_array_equal(back, xds.SKY_RESIDUAL.values)

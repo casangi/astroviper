@@ -53,6 +53,7 @@ import numpy as np
 from astroviper.utils.chunk_io.zarr_chunks import (
     _EIO_RETRY_BACKOFF_SECONDS,
     _TRANSIENT_IO_ERRNOS,
+    _encode_and_write,
     _retry_transient_io,
 )
 
@@ -650,11 +651,12 @@ def write_fits(
 
     FITS counterpart of
     :func:`~astroviper.utils.chunk_io.write_zarr`,
-    with the same two decoupled phases:
+    with the same batches of ``processing_function_threads`` variables and two
+    decoupled phases per batch:
 
-    1. **Encode** each kept image variable's chunk (transpose to FITS axis
-       order + convert to the file's big-endian float type) concurrently
-       across up to ``processing_function_threads`` threads. There is no
+    1. **Encode** each image variable's chunk of the batch (transpose to FITS
+       axis order + convert to the file's big-endian float type) concurrently,
+       one thread per variable. There is no
        compression -- FITS image data is raw -- so this phase is much cheaper
        than the Zarr encode.
     2. **Write** the blobs serially, one ``pwrite`` per file at this chunk's
@@ -698,48 +700,31 @@ def write_fits(
         else (beam_variables[0] if beam_variables else None)
     )
 
-    # Phase 1: encode each image variable's chunk (optionally concurrent).
-    if processing_function_threads <= 1 or len(image_variables) <= 1:
-        encoded = [
-            _encode_image_chunk(dv, image_store, chan_start, img_xds)
-            for dv in image_variables
-        ]
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(
-            max_workers=min(processing_function_threads, len(image_variables))
-        ) as executor:
-            futures = [
-                executor.submit(
-                    _encode_image_chunk, dv, image_store, chan_start, img_xds
-                )
-                for dv in image_variables
-            ]
-            encoded = [f.result() for f in futures]  # order matches; re-raises
-
-    writes = [(path, offset, blob) for path, offset, blob, _structure in encoded]
-
-    # Beam rows go into every kept image file that carries a BEAMS extension.
-    if beam_variable is not None:
-        for path, _offset, _blob, structure in encoded:
-            beams = structure["beams"]
-            if beams is None:
-                continue
-            if beams["row_bytes"] != _BEAMS_ROW_STRUCT.size:
-                raise ValueError(
-                    f"{path}: BEAMS rows are {beams['row_bytes']} B; expected "
-                    f"{_BEAMS_ROW_STRUCT.size} (BMAJ,BMIN,BPA,CHAN,POL)."
-                )
-            rows = _encode_beam_rows(beam_variable, chan_start, img_xds)
-            offset = (
-                beams["data_start"] + chan_start * beams["n_pol"] * beams["row_bytes"]
-            )
-            writes.append((path, offset, rows))
-
-    # Phase 2: write the blobs serially (one open file at a time for this task).
-    for path, offset, blob in writes:
+    def write(encoded):
+        path, offset, blob, structure = encoded
         _pwrite_with_eio_retry(path, offset, blob)
+        # Beam rows go into every kept image file that carries a BEAMS extension.
+        beams = structure["beams"]
+        if beam_variable is None or beams is None:
+            return
+        if beams["row_bytes"] != _BEAMS_ROW_STRUCT.size:
+            raise ValueError(
+                f"{path}: BEAMS rows are {beams['row_bytes']} B; expected "
+                f"{_BEAMS_ROW_STRUCT.size} (BMAJ,BMIN,BPA,CHAN,POL)."
+            )
+        rows = _encode_beam_rows(beam_variable, chan_start, img_xds)
+        _pwrite_with_eio_retry(
+            path,
+            beams["data_start"] + chan_start * beams["n_pol"] * beams["row_bytes"],
+            rows,
+        )
+
+    _encode_and_write(
+        image_variables,
+        lambda dv: _encode_image_chunk(dv, image_store, chan_start, img_xds),
+        write,
+        processing_function_threads,
+    )
 
 
 def write_fits_image(

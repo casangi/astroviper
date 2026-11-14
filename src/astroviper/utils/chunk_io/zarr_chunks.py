@@ -794,7 +794,7 @@ def _encode_chunk_blob(chunk, meta):
     """Encode a full-chunk array to the on-disk blob for ``meta``'s codecs."""
     if meta["format"] == 3:
         b = np.ascontiguousarray(chunk, dtype=meta["dtype"])
-        out = b.tobytes()
+        out = memoryview(b).cast("B")
         for codec in meta["codecs"]:
             name = codec["name"]
             if name in ("bytes", "sharding_indexed"):
@@ -917,6 +917,29 @@ def _write_blob(path, blob):
         fh.write(blob)
 
 
+def _encode_and_write(variables, encode, write, processing_function_threads):
+    """Encode and write ``variables`` in batches of ``processing_function_threads``.
+
+    A batch is encoded concurrently and written serially before the next one
+    is encoded, so a task holds the blobs of one batch at a time, not of every
+    variable.
+    """
+    batch = max(1, int(processing_function_threads))
+    if batch == 1 or len(variables) <= 1:
+        for dv in variables:
+            write(encode(dv))
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    def write_batch(executor, batch_variables):
+        for encoded in executor.map(encode, batch_variables):
+            write(encoded)
+
+    with ThreadPoolExecutor(max_workers=min(batch, len(variables))) as executor:
+        for start in range(0, len(variables), batch):
+            write_batch(executor, variables[start : start + batch])
+
+
 def write_zarr(
     image_store,
     image_data_variables_keep,
@@ -926,11 +949,13 @@ def write_zarr(
 ):
     """Write this task's image chunk(s) directly to their Zarr chunk file(s).
 
-    Two phases, deliberately decoupled:
+    The variables are taken in batches of ``processing_function_threads``,
+    each in two phases, deliberately decoupled, so a task holds the blobs of
+    one batch at a time:
 
-    1. **Encode (compress)** each kept variable's chunk with its on-disk codecs.
-       This is the dominant, CPU-bound, GIL-releasing cost and runs concurrently
-       across up to ``processing_function_threads`` threads (one per variable).
+    1. **Encode (compress)** each variable's chunk of the batch with its on-disk
+       codecs. This is the dominant, CPU-bound, GIL-releasing cost and runs
+       concurrently (one thread per variable).
     2. **Write** the resulting blobs to disk **serially** -- one open file at a
        time for this task.
 
@@ -960,36 +985,17 @@ def write_zarr(
         concurrently (the disk writes are always serial).  Default ``1`` (serial
         encode).
     """
-    variables = list(image_data_variables_keep)
 
-    # Phase 1: encode/compress (optionally concurrent across variables). Each
-    # variable yields one blob per on-disk chunk its region covers (several
-    # when image_chunking subdivides the chunk grid).
-    if processing_function_threads <= 1 or len(variables) <= 1:
-        encoded_per_variable = [
-            _encode_one_variable(dv, image_store, task_coords, img_xds)
-            for dv in variables
-        ]
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(
-            max_workers=min(processing_function_threads, len(variables))
-        ) as executor:
-            futures = [
-                executor.submit(
-                    _encode_one_variable, dv, image_store, task_coords, img_xds
-                )
-                for dv in variables
-            ]
-            encoded_per_variable = [
-                f.result() for f in futures
-            ]  # order matches variables; re-raises
-
-    # Phase 2: write the blobs serially (one open file at a time for this task).
-    for encoded in encoded_per_variable:
+    def write(encoded):
         for path, blob in encoded:
             _write_blob(path, blob)
+
+    _encode_and_write(
+        list(image_data_variables_keep),
+        lambda dv: _encode_one_variable(dv, image_store, task_coords, img_xds),
+        write,
+        processing_function_threads,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1056,7 +1062,7 @@ def _encode_inner_chunk(chunk, meta):
     (``meta["sharding"]["codecs"]`` -- e.g. bytes -> blosc), not the array's
     top-level codec (which for a sharded array is just the sharding codec)."""
     b = np.ascontiguousarray(chunk, dtype=meta["dtype"])
-    out = b.tobytes()
+    out = memoryview(b).cast("B")
     did_transform = False  # a byte-transform codec has run
     for codec in meta["sharding"]["codecs"]:
         name = codec["name"]
@@ -1202,37 +1208,21 @@ def write_zarr_sharded(
 
     Parameters mirror :func:`write_zarr`.
     """
-    variables = list(image_data_variables_keep)
 
-    # Phase 1: encode/compress each variable's inner chunk(s) (optionally
-    # concurrent across variables; several inner chunks per variable when
-    # image_chunking subdivides the inner-chunk grid).
-    if processing_function_threads <= 1 or len(variables) <= 1:
-        encoded_per_variable = [
-            _encode_one_variable_sharded(dv, image_store, task_coords, img_xds)
-            for dv in variables
-        ]
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(
-            max_workers=min(processing_function_threads, len(variables))
-        ) as executor:
-            futures = [
-                executor.submit(
-                    _encode_one_variable_sharded, dv, image_store, task_coords, img_xds
-                )
-                for dv in variables
-            ]
-            encoded_per_variable = [f.result() for f in futures]
-
-    # Phase 2: pwrite each inner chunk + its index entry into the shared shard
-    # file (serial per task; disjoint offsets across tasks -> concurrency-safe).
-    for encoded in encoded_per_variable:
+    def write(encoded):
+        # pwrite each inner chunk + its index entry into the shared shard file
+        # (serial per task; disjoint offsets across tasks -> concurrency-safe).
         for shard_path, slot_offset, index_offset, blob in encoded:
             _pwrite_shard_slot_with_eio_retry(
                 shard_path, slot_offset, index_offset, blob
             )
+
+    _encode_and_write(
+        list(image_data_variables_keep),
+        lambda dv: _encode_one_variable_sharded(dv, image_store, task_coords, img_xds),
+        write,
+        processing_function_threads,
+    )
 
 
 # Transient-I/O retry schedule for the direct chunk reads and sharded pwrites:
