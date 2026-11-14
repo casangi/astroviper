@@ -137,6 +137,32 @@ TWO_POLARIZATIONS_EXPECTED = (
     -0.10914975423278478,
 )
 MIRRORED_PA_TURNED = (1.6487903480947445e-05, 6.879137721400835e-06, 0.7953541936904902)
+# common_beam's results where it departs from CASA (common_beam, Notes): a beam that does not
+# fit in the largest is more than 90 deg from it, where CASA's enclosing ellipse is mirrored.
+# The float64 results are casatools' for the sets turned by -45 deg, turned back (to two ulps
+# in the axes and 4e-15 rad in pa).
+DEPARTURES = {
+    ("mirrored PA", False): (
+        1.648790348094745e-05,
+        6.879137721400837e-06,
+        -1.5608402965018544,
+    ),
+    ("mirrored PA", True): (
+        1.648790342897044e-05,
+        6.8791382108603325e-06,
+        -1.560840294747453,
+    ),
+    ("PA near 90", False): (
+        7.326527418734816e-06,
+        4.967913423740029e-06,
+        -1.5692515749029088,
+    ),
+    ("PA near 90", True): (
+        7.3192083032134806e-06,
+        4.9629504947521245e-06,
+        -1.569251604717078,
+    ),
+}
 # Where an enclosing ellipse touches a beam, one ulp of sin, cos or acos can change the
 # number of growth steps (common_beam, Notes). The casatools values above are from macOS
 # arm64, whose math library is not correctly rounded at some arguments of these cases (acos
@@ -215,12 +241,25 @@ def casa_deconvolve(convolved, beam):
     )
 
 
-@pytest.mark.parametrize(("name", "single"), list(CASA_COMMON_BEAMS))
+@pytest.mark.parametrize(
+    ("name", "single"), [key for key in CASA_COMMON_BEAMS if key not in DEPARTURES]
+)
 def test_common_beam_equals_casatools(name, single):
     expected = [CASA_COMMON_BEAMS[name, single]]
     if (name, single) in CORRECTLY_ROUNDED:
         expected.append(CORRECTLY_ROUNDED[name, single])
     assert_beam_one_of(common_beam(cube(radians(CASA_SETS[name], single))), *expected)
+
+
+@pytest.mark.parametrize(("name", "single"), list(DEPARTURES))
+def test_common_beam_departs_from_casatools_where_its_ellipse_is_mirrored(name, single):
+    """CASA's result (CASA_COMMON_BEAMS) has 5 to 86 % more area."""
+    beams = radians(CASA_SETS[name], single)
+    result = common_beam(cube(beams))
+    assert_beam(result, DEPARTURES[name, single])
+    correcting_beam(beams, result)
+    casa = CASA_COMMON_BEAMS[name, single]
+    assert result[0] * result[1] < casa[0] * casa[1]
 
 
 def test_common_beam_of_nearly_identical_float32_beams():
@@ -248,32 +287,44 @@ def test_common_beam_of_a_circle_and_a_beam_at_45_degrees():
     )
 
 
-def test_common_beam_returns_at_a_right_angle_without_testing_the_other_beams():
-    """The last beam that does not fit is at a right angle to the largest: the ellipse of
-    their major axes, which misses the second beam; correcting_beam finds it."""
+def test_common_beam_tests_the_other_beams_after_a_right_angle():
+    """The last beam that does not fit is at a right angle to the largest. casatools returns
+    the ellipse of their major axes, which misses the second beam; common_beam goes on from
+    it to a beam that contains all three."""
     beams = radians([(3.0, 1.0, 0.0), (3.2, 0.5, 20.0), (2.5, 1.1, 90.0)])
-    result = common_beam(cube(beams))
-    np.testing.assert_array_equal(result, [beams[0, 0], beams[2, 0], 0.0])
+    casa = [beams[0, 0], beams[2, 0], 0.0]
     with pytest.raises(ValueError, match=r"1 of 3 plane\(s\):\n  plane \(1,\)"):
-        correcting_beam(beams, result)
+        correcting_beam(beams, casa)
+    result = common_beam(cube(beams))
+    # The enclosing ellipse of that ellipse and the second beam.
+    assert_beam(
+        result, (1.5766999561023844e-05, 1.2256213736748345e-05, 0.13211298984545697)
+    )
+    correcting_beam(np.vstack([beams, casa]), result)
     # The beam that does not fit has the larger major axis: its pa.
     beams = radians([(2.5, 1.3, 0.0), (3.0, 1.0, 90.0)])
     np.testing.assert_array_equal(
         common_beam(cube(beams)), [beams[1, 0], beams[0, 0], beams[1, 2]]
     )
+    # The ellipse touches the largest beam, given twice, which the containment test misses
+    # by rounding: not grown, as in casatools.
+    beams = radians([(3.0, 1.0, 45.0), (3.0, 1.0, 45.0), (2.5, 1.2, -45.0)])
+    np.testing.assert_array_equal(
+        common_beam(cube(beams)), [beams[0, 0], beams[2, 0], beams[0, 2]]
+    )
 
 
-def test_common_beam_keeps_the_mirrored_position_angle():
-    """Position angles more than 90 deg apart: CASA's enclosing ellipse takes the mirrored
-    angle and grows until it contains both beams, to 1.86 times the area of the common
-    beam of the same pair turned by -45 deg."""
+def test_common_beam_of_position_angles_more_than_90_degrees_apart():
+    """The pair at 80 and -80 deg has the beam of the pair turned by -45 deg, turned back.
+    CASA's enclosing ellipse is mirrored and grows until it contains both beams, to 1.86
+    times that area (CASA_COMMON_BEAMS)."""
     pair = CASA_SETS["mirrored PA"]
     turned = common_beam(cube(radians([(a, b, pa - 45.0) for a, b, pa in pair])))
     assert_beam(turned, MIRRORED_PA_TURNED)
     mirrored = common_beam(cube(radians(pair)))
-    assert mirrored[0] * mirrored[1] / (turned[0] * turned[1]) == pytest.approx(
-        1.862, abs=1e-3
-    )
+    assert_beam(mirrored, [*turned[:2], turned[2] + math.radians(45.0) - math.pi])
+    casa = CASA_COMMON_BEAMS["mirrored PA", False]
+    assert casa[0] * casa[1] / (turned[0] * turned[1]) == pytest.approx(1.862, abs=1e-3)
 
 
 def test_common_beam_gives_up_after_1000_growth_steps(monkeypatch):

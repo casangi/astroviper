@@ -36,20 +36,19 @@ class _Beam(NamedTuple):
 
 
 def common_beam(beam_fit_params):
-    """The common beam of a set of beams, as CASA computes it.
+    """The common beam of a set of beams, by CASA's algorithm.
 
     The algorithm of CASA's ``CasaImageBeamSet::getCommonBeam``, the beam of ``tclean``'s
-    ``restoringbeam='common'``, as CASA 6.8.0.4 has it (CAS-14719). The first beam of
-    largest area is the common beam when every other beam deconvolves from it cleanly
-    (CASA's ``GaussianDeconvolver``, without its point-source case). Otherwise an ellipse
-    is built around it and the last beam that does not, grown by factors of 1.001 until
-    both deconvolve from it and put in its place, and the test is repeated; when 1000
-    growth steps are not enough, a warning is logged and the beam of largest area is the
-    result. The result is not the smallest ellipse that contains every beam, and two CASA
-    rules are kept: at an exact right angle between the two beams CASA returns the ellipse
-    of their major axes at once, without testing the other beams, and for position angles
-    more than 90 degrees apart its enclosing ellipse is mirrored and grows until it
-    contains both. :func:`correcting_beam` tells whether the result contains every beam.
+    ``restoringbeam='common'``, as CASA 6.8.0.4 has it (CAS-14719), corrected in two cases
+    where its result is wrong (Notes). The first beam of largest area is the common beam
+    when every other beam deconvolves from it cleanly (CASA's ``GaussianDeconvolver``,
+    without its point-source case). Otherwise an ellipse is built around it and the last
+    beam that does not, grown by factors of 1.001 until both deconvolve from it and put in
+    its place, and the test is repeated; when 1000 growth steps are not enough, a warning
+    is logged and the beam of largest area is the result. At an exact right angle between
+    the two beams the ellipse has their major axes and is not grown. The result is not the
+    smallest ellipse that contains every beam. :func:`correcting_beam` tells whether the
+    result contains every beam.
 
     Parameters
     ----------
@@ -80,12 +79,26 @@ def common_beam(beam_fit_params):
 
     Notes
     -----
-    Given the same doubles in the same units and order, the result is that of casatools
-    6.7.6, except where CAS-14719 changed it, up to the rounding of sin, cos and acos, which
-    the port and casatools take from the platform's math library. Where an enclosing ellipse
-    touches a beam, one ulp of one of them, or of an input (float32 storage of the beams,
-    for example), can change the number of growth steps and so the result by a factor of
-    1.001: the math libraries of macOS and Linux give such different results for some sets.
+    ``common_beam`` departs from CASA in two cases:
+
+    - CASA's enclosing ellipse takes the sign of the angle between the two beams, the
+      difference of their position angles, each in (-90, 90] degrees. For a difference of
+      more than 90 degrees, of either sign, that gives the mirror image of the ellipse,
+      which then grows until it contains both beams: for beams of 3" x 1" at 80 degrees
+      and 2.9" x 1.2" at -80 degrees, to 1.86 times the area of CASA's result for the pair
+      turned by -45 degrees. ``common_beam`` takes the difference modulo 180 degrees, as
+      for the axes of an ellipse, and gives the turned pair's beam, turned back.
+    - At an exact right angle CASA returns the ellipse of the two major axes at once,
+      without testing the other beams, so a third beam can stick out of it. ``common_beam``
+      puts that ellipse in place of the two beams and repeats the test.
+
+    Elsewhere, given the same doubles in the same units and order, the result is that of
+    casatools 6.7.6, except where CAS-14719 changed it, up to the rounding of sin, cos and
+    acos, which the port and casatools take from the platform's math library. Where an
+    enclosing ellipse touches a beam, one ulp of one of them, or of an input (float32
+    storage of the beams, for example), can change the number of growth steps and so the
+    result by a factor of 1.001: the math libraries of macOS and Linux give such different
+    results for some sets.
 
     Examples
     --------
@@ -135,7 +148,8 @@ def common_beam(beam_fit_params):
                 problem = beam
         if problem is None:
             return _result(largest)
-        angle = problem.unwrapped_pa - largest.unwrapped_pa
+        # Modulo pi, as for axes: beyond pi/2 CASA's enclosing ellipse is mirrored (Notes).
+        angle = math.remainder(problem.unwrapped_pa - largest.unwrapped_pa, math.pi)
         if abs(angle) == math.pi / 2:
             if _arcsec(largest.major, largest.unit) >= _arcsec(
                 problem.major, problem.unit
@@ -143,13 +157,20 @@ def common_beam(beam_fit_params):
                 outer, inner = largest, problem
             else:
                 outer, inner = problem, largest
-            return np.array(
-                [
-                    _radians(outer.major, outer.unit),
-                    _radians(inner.major, inner.unit),
-                    outer.unwrapped_pa,
-                ]
+            right_angle = _Beam(
+                _radians(outer.major, outer.unit),
+                _radians(inner.major, inner.unit),
+                outer.unwrapped_pa,
+                1.0,
+                outer.unwrapped_pa,
             )
+            # It touches both beams, where the containment test can fail by rounding: it
+            # takes the place of both and of their copies, and the test is repeated.
+            beams = [
+                right_angle if _equal(beam, largest) or _equal(beam, problem) else beam
+                for beam in beams
+            ]
+            continue
         enclosing = _enclosing_beam(largest, problem, angle)
         if enclosing is None:
             logger.warning(
@@ -339,7 +360,8 @@ def _deconvolves_cleanly(convolved, beam):
 
 def _transform_ellipse_by_scaling(major, minor, pa, x_scale, y_scale):
     """CASA's ``CasaImageBeamSet::_transformEllipseByScaling`` after CAS-14719: the
-    ellipse with its x and y axes scaled; pa takes the sign of the input pa."""
+    ellipse with its x and y axes scaled; pa takes the sign of the input pa, which is right
+    for ``|pa| <= pi/2`` and ``major >= minor``."""
     cos_pa = math.cos(pa)
     sin_pa = math.sin(pa)
     cos2 = cos_pa * cos_pa
