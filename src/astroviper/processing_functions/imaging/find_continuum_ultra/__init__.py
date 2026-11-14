@@ -52,6 +52,20 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.numerics impor
     round_to_significant_digits,
     scaled_median_absolute_deviation,
 )
+from astroviper.processing_functions.imaging.find_continuum_ultra.selection_maps import (
+    count_above_level,
+    difference_map_snr,
+    image_snr,
+    image_snr_outside,
+    lowered_moment_difference_level,
+    map_statistics,
+    moment_difference_counts,
+    negative_pixel_fraction,
+    original_round_cube_statistics,
+    round_zero_regions,
+    selection_maps,
+    selection_statistics,
+)
 from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
     atmosphere_variation,
     continuum_n_bin,
@@ -151,4 +165,16 @@ __all__ = [
     "reject_narrow_inner_runs",
     "widest_run_in_other_half",
     "all_continuum_selected",
+    "round_zero_regions",
+    "selection_maps",
+    "map_statistics",
+    "image_snr",
+    "image_snr_outside",
+    "selection_statistics",
+    "original_round_cube_statistics",
+    "lowered_moment_difference_level",
+    "count_above_level",
+    "moment_difference_counts",
+    "negative_pixel_fraction",
+    "difference_map_snr",
 ]
