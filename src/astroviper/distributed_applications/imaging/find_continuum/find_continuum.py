@@ -573,9 +573,11 @@ def find_continuum_ultra(
     dict
         As :func:`find_continuum`, with: ``passes`` (one row per pass over the
         image store: its reductions and data variables, the first round, the
-        tasks, channels, planes, chunks and bytes read, the memory plan, the
-        anchors and the graph and compute times of the pass and of its merge,
-        and the bytes of the scratch stores); ``timing_node_tasks`` (frequency
+        tasks, channels, planes, chunks and bytes read, the memory plan of
+        its frequency tasks and of its merge tasks
+        (``merge_task_memory_plan_bytes``), the anchors and the graph and
+        compute times of the pass and of its merge, and the bytes of the
+        scratch stores); ``timing_node_tasks`` (frequency
         and merge tasks, ``family``, with the reads, writes and phase times of
         each); ``timing_reduce_nodes`` (with ``reduction`` and ``family``);
         ``memory_plan`` (``n_threads``, ``memory_per_thread_gib``,

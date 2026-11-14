@@ -1698,6 +1698,9 @@ def _create_find_continuum_first_round(
         find_continuum_first_round_partials_path,
         find_continuum_first_round_store_path,
     )
+    from astroviper.distributed_applications.imaging.find_continuum.ultra_reductions import (
+        ultra_merge_tile_counts,
+    )
     from astroviper.processing_functions.imaging.find_continuum import (
         linear_channel_ranges,
         linear_frequency_axis,
@@ -1733,11 +1736,13 @@ def _create_find_continuum_first_round(
     # The merge tiles of find_continuum_ultra's moments.
     merge_tile_shape = [
         len(
-            make_parallel_coord(
-                coord=img_xds[dim], n_chunks=-(-img_xds.sizes[dim] // (2 * tile))
-            )["data_chunks"][0]
+            make_parallel_coord(coord=img_xds[dim], n_chunks=n_chunks)["data_chunks"][0]
         )
-        for dim, tile in zip(("l", "m"), tile_shape, strict=True)
+        for dim, n_chunks in zip(
+            ("l", "m"),
+            ultra_merge_tile_counts(arrays["sky"].shape[-2:], tile_shape),
+            strict=True,
+        )
     ]
     create_find_continuum_first_round_store(
         first_round_store=store,

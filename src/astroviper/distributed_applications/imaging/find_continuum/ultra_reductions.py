@@ -56,6 +56,9 @@ from astroviper.processing_functions.imaging.find_continuum import (
 )
 
 ULTRA_TASKS_PER_THREAD = 4
+#: Inner chunk (px) of which merge tiles are made along an axis that one chunk
+#: of the cube spans.
+MERGE_TILE_INNER_CHUNK = 625
 
 # Node-task baseline of the moments application (interpreter, worker, zarr).
 _TASK_BASELINE_BYTES = 1.5 * 2**30
@@ -174,6 +177,64 @@ def ultra_task_memory_bytes(
         + 2 * 8 * _BLOCK_ROWS * n_m
         + 2 * read_unit_bytes
         + first_round
+    )
+
+
+def ultra_merge_tile_counts(map_shape, tile_shape):
+    """Merge tiles of the moment maps along ``l`` and ``m``.
+
+    About two inner chunks of the cube per tile, or two of
+    ``MERGE_TILE_INNER_CHUNK`` pixels along an axis that one chunk spans (an
+    image without ``l`` and ``m`` chunking), so that a merge task never holds
+    whole planes.
+
+    Parameters
+    ----------
+    map_shape : sequence of int
+        ``(l, m)`` pixels of the cube.
+    tile_shape : sequence of int
+        ``(l, m)`` inner chunks of the cube.
+
+    Returns
+    -------
+    list of int
+        ``n_chunks`` of ``make_parallel_coord`` along ``l`` and ``m``.
+    """
+    return [
+        -(-n // (2 * (chunk if chunk < n else MERGE_TILE_INNER_CHUNK)))
+        for n, chunk in zip(map_shape, tile_shape, strict=True)
+    ]
+
+
+def ultra_merge_task_memory_bytes(
+    tile_pixels, n_slots, state_bytes_per_pixel, n_moments
+):
+    """Memory of a merge task of find_continuum_ultra or of the imager's drain.
+
+    The baseline of a node task, the partial states of a tile that GraphVIPER's
+    tree order holds at once (at most ``ceil(log2(n_slots)) + 1``), and the
+    float64 maps it finalizes.
+
+    Parameters
+    ----------
+    tile_pixels : int
+        Pixels of a merge tile.
+    n_slots : int
+        Slots merged.
+    state_bytes_per_pixel : int
+        Bytes per pixel of a slot's state (the fields of its moments).
+    n_moments : int
+        Moments finalized.
+
+    Returns
+    -------
+    int
+        Bytes.
+    """
+    states = int(np.ceil(np.log2(max(n_slots, 1)))) + 1
+    return int(
+        _TASK_BASELINE_BYTES
+        + (states * state_bytes_per_pixel + 8 * n_moments + 1) * tile_pixels
     )
 
 
@@ -352,11 +413,11 @@ class UltraReductions:
             sky.chunks[1], max(map(len, chunks["data_chunks"].values()))
         )
         tiles = {
-            dim: make_parallel_coord(
-                coord=self.index_xds[dim], n_chunks=-(-n // (2 * chunk))
-            )
-            for dim, n, chunk in zip(
-                ("l", "m"), self.map_shape, self.tile_shape, strict=True
+            dim: make_parallel_coord(coord=self.index_xds[dim], n_chunks=n_chunks)
+            for dim, n_chunks in zip(
+                ("l", "m"),
+                ultra_merge_tile_counts(self.map_shape, self.tile_shape),
+                strict=True,
             )
         }
         self.tile_mapping = interpolate_data_coords_onto_parallel_coords(
@@ -825,6 +886,7 @@ class UltraReductions:
         results = finalize_streamed_reductions(output["reductions"], encoded)
 
         row = {
+            "merge_task_memory_plan_bytes": 0,
             "merge_start_unixtime": np.nan,
             "merge_end_unixtime": np.nan,
             "T_merge_create_graph": 0.0,
@@ -835,6 +897,21 @@ class UltraReductions:
             "bytes_results_written": 0,
         }
         if moments:
+            row["merge_task_memory_plan_bytes"] = max(
+                ultra_merge_task_memory_bytes(
+                    int(np.prod(self.merge_tile_shape)),
+                    self.n_slots,
+                    sum(d.itemsize for d in self._field_dtypes(encoded[r]).values()),
+                    len(encoded[r]["moments"]),
+                )
+                for r in moments
+            )
+            if row["merge_task_memory_plan_bytes"] > self.budget_bytes:
+                logger.warning(
+                    "A find_continuum_ultra merge task needs "
+                    f"{row['merge_task_memory_plan_bytes'] / 2**30:.2f} GiB, more "
+                    f"than the task budget of {self.budget_bytes / 2**30:.2f} GiB."
+                )
             merge_start = time.time()
             viper_graph = map(
                 input_data={"img": self.index_xds},

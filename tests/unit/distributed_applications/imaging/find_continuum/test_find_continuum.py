@@ -134,6 +134,7 @@ PASS_COLUMNS = {
     "n_moments_requests",
     "n_dropped_predictions",
     "task_rss_peak_bytes",
+    "merge_task_memory_plan_bytes",
     "graph_start_unixtime",
     "start_unixtime",
     "compute_end_unixtime",

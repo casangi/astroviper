@@ -21,6 +21,8 @@ from astroviper.distributed_applications.imaging.find_continuum.ultra_reductions
     StoredMap,
     UltraReductions,
     ultra_frequency_tasks,
+    ultra_merge_task_memory_bytes,
+    ultra_merge_tile_counts,
     ultra_task_memory_bytes,
 )
 from astroviper.node_tasks.imaging.find_continuum import (
@@ -72,6 +74,7 @@ PASS_COLUMNS = {
     "n_moments_requests",
     "n_dropped_predictions",
     "task_rss_peak_bytes",
+    "merge_task_memory_plan_bytes",
     "graph_start_unixtime",
     "start_unixtime",
     "compute_end_unixtime",
@@ -393,6 +396,57 @@ def test_the_plan_takes_the_store_layout(cube, tmp_path, monkeypatch):
     assert all(arguments[6] for arguments in calls if arguments[10])
 
 
+def test_merge_tiles_of_a_cube_whose_chunks_span_the_plane(tmp_path):
+    """Without l and m chunking a chunk spans the plane: merge tiles are made
+    of 625 px chunks, so that a merge task does not hold whole planes."""
+    assert ultra_merge_tile_counts((11250, 11250), (11250, 11250)) == [9, 9]
+    assert ultra_merge_tile_counts((11250, 11250), (625, 625)) == [9, 9]
+    assert ultra_merge_tile_counts((11250, 11250), (5000, 11250)) == [2, 9]
+    assert ultra_merge_tile_counts((64, 64), (64, 64)) == [1, 1]
+    n_pixels = 1500
+    coords = make_empty_sky_image(
+        phase_center=[1.2, -0.4],
+        image_size=[n_pixels, n_pixels],
+        cell_size=[0.1 * RAD_PER_ARCSEC] * 2,
+        frequency_coords=230.0e9 + 1.0e6 * np.arange(4),
+        pol_coords=["I"],
+        time_coords=[0.0],
+    )
+    store = write_zarr_image_store(coords, str(tmp_path / "cube.img.zarr"))
+    create_empty_data_variables_on_disk(
+        store,
+        ["sky_residual", "primary_beam"],
+        shape_dict=dict(coords.sizes),
+        parallel_coords={"frequency": {"data_chunks": [[0, 1], [2, 3]]}},
+        compressor=None,
+        double_precision=False,
+        data_variable_definitions="imaging",
+    )
+    assert zarr.open_array(os.path.join(store, "SKY_RESIDUAL")).chunks[-2:] == (
+        n_pixels,
+        n_pixels,
+    )
+    ultra = UltraReductions(
+        {
+            str(tmp_path / f"cube.{role}"): {"variable": variable, "channel_offset": 0}
+            for role, variable in VARIABLES.items()
+        },
+        store,
+        VARIABLES,
+        0,
+        str(tmp_path / "work"),
+        0.2,
+        None,
+        1,
+        64 * GiB,
+        linear_frequency_axis(coords.frequency.values),
+        230.0e9,
+        None,
+    )
+    assert ultra.layout["merge_tile_shape"] == [750, 750]
+    assert ultra.layout["n_merge_tiles"] == 4
+
+
 def test_stored_map_loads_a_new_float64_array(tmp_path):
     group = zarr.open_group(str(tmp_path / "maps.zarr"), mode="w")
     values = np.random.default_rng(1).standard_normal((2, 5, 4)).astype(np.float32)
@@ -444,6 +498,10 @@ def test_first_pass_equals_the_port(cube, first_pass):
     assert row["n_tasks"] == N_TASKS
     assert row["n_channels_read"] == WINDOW[1] - WINDOW[0]
     assert row["planes_per_batch"] == 4 and row["n_moments_requests"] == 3
+    # The merge of moments [-1, 0, 10] holds the most: 22 B/px per state.
+    assert row["merge_task_memory_plan_bytes"] == ultra_merge_task_memory_bytes(
+        32 * 32, N_TASKS, 22, 3
+    )
     assert row["n_chunks_skipped"] > 0
     assert row["bytes_partials_written"] > 0 and row["bytes_results_written"] > 0
     assert ultra.T_primary_beam_mean > 0

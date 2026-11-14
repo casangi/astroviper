@@ -1128,6 +1128,51 @@ def test_a_failed_imaging_compute_drops_the_first_round_moments(
     assert not os.path.exists(find_continuum_first_round_partials_path(store))
 
 
+def test_find_continuum_first_round_merge_tiles_without_l_and_m_chunking(tmp_path):
+    """The default image chunking spans the plane; the moments of the first
+    round are merged in tiles of 625 px chunks, not of the whole plane."""
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.utils.io import (
+        create_empty_data_variables_on_disk,
+        write_zarr_image_store,
+    )
+
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_cube_single_field"
+    )
+    n_pixels = 1500
+    img_xds = make_empty_sky_image(
+        phase_center=[1.2, -0.4],
+        image_size=[n_pixels, n_pixels],
+        cell_size=[1.0e-7, 1.0e-7],
+        frequency_coords=230.0e9 + 1.0e6 * np.arange(4),
+        pol_coords=["I", "Q"],
+        time_coords=[0.0],
+    )
+    img_xds.attrs["data_groups"] = {
+        "residual": {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+    }
+    image_store = write_zarr_image_store(img_xds, str(tmp_path / "cube.img.zarr"))
+    create_empty_data_variables_on_disk(
+        image_store,
+        ["sky_residual", "primary_beam"],
+        shape_dict=dict(img_xds.sizes),
+        parallel_coords={"frequency": {"data_chunks": [[0, 1], [2, 3]]}},
+        compressor=None,
+        double_precision=False,
+        data_variable_definitions="imaging",
+    )
+    params = driver._create_find_continuum_first_round(
+        image_store, img_xds, 0.2, "dask"
+    )
+    store = params["first_round_store"]
+    for moment in (0, 8):
+        array = zarr.open_array(os.path.join(store, f"MOMENT_{moment}"), mode="r")
+        assert array.chunks == (1, 750, 750)
+    shutil.rmtree(params["partials_directory"])
+
+
 def test_find_continuum_first_round_refuses_fits(tmp_path):
     """findContinuum reads Zarr image stores: FITS output is refused before
     anything is written."""
