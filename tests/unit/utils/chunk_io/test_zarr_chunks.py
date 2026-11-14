@@ -5,7 +5,9 @@ strings) and checks that the low-level reader matches ``zarr.open_array`` for
 multi-channel selections, that the direct chunk writer round-trips through Zarr
 (uncompressed, Blosc, and partial/edge chunks), and that
 ``load_processing_set`` reconstructs a usable, mutable processing
-set from the chunk blobs alone.
+set from the chunk blobs alone. The lazy image readers ``open_image`` and
+``load_image`` match ``xarray.open_zarr`` and XRADIO's ``load_image`` and read
+only the shard index and the compressed chunks of a selection.
 """
 
 from __future__ import annotations
@@ -1321,3 +1323,189 @@ def test_write_misaligned_region_raises(tmp_path):
     task_coords = {"frequency": {"slice": slice(1, 3), "data": [0, 1]}}
     with pytest.raises(ValueError, match="not aligned"):
         write_zarr(store, ["sky_residual"], task_coords, img)
+
+
+# --------------------------------------------------------------------------- #
+# Lazy image reads
+# --------------------------------------------------------------------------- #
+_IMAGE_SELECTIONS = [
+    {},
+    {"frequency": slice(1, 4), "l": slice(2, 15, 3), "m": [9, 1, 5]},
+    {"frequency": 2, "polarization": 1},
+    {"l": slice(None, None, -2)},
+    {"frequency": slice(3, 3)},
+]
+
+
+def _fixed_slot_image(tmp_path, n_frequency=8, shard=4, image_chunking=None):
+    """A fixed-slot sharded image store written by :func:`write_zarr_sharded`."""
+    from astroviper.utils.chunk_io import write_zarr_sharded
+
+    store = str(tmp_path / "fixed_slot.img.zarr")
+    zarr.open_group(store, mode="w")
+    create_empty_data_variables_on_disk(
+        store,
+        ["sky_residual"],
+        shape_dict={
+            "time": 1,
+            "frequency": n_frequency,
+            "polarization": 2,
+            "l": 16,
+            "m": 16,
+        },
+        parallel_coords={
+            "frequency": {"data_chunks": [[k] for k in range(n_frequency)]}
+        },
+        compressor=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        double_precision=False,
+        data_variable_definitions="imaging",
+        image_chunking=image_chunking,
+        image_sharding={"frequency": shard},
+    )
+    dims = ["time", "frequency", "polarization", "l", "m"]
+    sky = (
+        np.random.default_rng(3)
+        .standard_normal((1, n_frequency, 2, 16, 16))
+        .astype("<f4")
+    )
+    for k in range(n_frequency):
+        write_zarr_sharded(
+            store,
+            ["sky_residual"],
+            {"frequency": {"slice": slice(k, k + 1)}},
+            xr.Dataset({"SKY_RESIDUAL": (dims, sky[:, k : k + 1])}),
+        )
+    return store, sky
+
+
+@pytest.mark.parametrize("selection", _IMAGE_SELECTIONS)
+def test_open_image_matches_open_zarr(tmp_path, selection):
+    from astroviper.utils.chunk_io import open_image
+
+    store, _ = _fixed_slot_image(tmp_path, image_chunking={"l": 8, "m": 8})
+    ours = open_image(store).isel(selection)
+    reference = xr.open_zarr(store, chunks=None).isel(selection)
+    xr.testing.assert_identical(ours.load(), reference.load())
+    for key in ("chunks", "shards", "preferred_chunks", "dtype"):
+        assert ours.SKY_RESIDUAL.encoding.get(key) == (
+            reference.SKY_RESIDUAL.encoding.get(key)
+        )
+
+
+@pytest.mark.parametrize("selection", _IMAGE_SELECTIONS[:3])
+def test_load_image_matches_xradio(tmp_path, selection):
+    from xradio.image import load_image as xradio_load_image
+
+    from astroviper.utils.chunk_io import load_image
+    from tests.unit.processing_functions.image_analysis.moments_test_utils import (
+        make_test_image_xds,
+        write_test_image,
+    )
+
+    store = str(tmp_path / "image.img.zarr")
+    write_test_image(make_test_image_xds(n_frequency=6, n_l=16, n_m=16), store)
+    xradio_selection = {
+        dim: sel for dim, sel in selection.items() if dim in ("frequency", "l", "m")
+    }
+    ours = load_image(store, xradio_selection)
+    reference = xradio_load_image(store, block_des=xradio_selection)
+    xr.testing.assert_identical(ours.load(), reference.load())
+
+
+def test_open_image_reads_only_what_is_indexed(tmp_path, monkeypatch):
+    from astroviper.utils.chunk_io import open_image, zarr_chunks
+
+    store, sky = _fixed_slot_image(tmp_path)
+    calls = []
+    real = zarr_chunks.read_array_region
+
+    def counting(array_path, sel):
+        calls.append(dict(sel))
+        return real(array_path, sel)
+
+    monkeypatch.setattr(zarr_chunks, "read_array_region", counting)
+    tile = open_image(store).SKY_RESIDUAL.isel(frequency=slice(2, 5), l=0)
+    assert calls == []
+    np.testing.assert_array_equal(tile.values, sky[:, 2:5, :, 0])
+    assert len(calls) == 1
+
+
+def test_tile_read_takes_only_the_compressed_chunks(tmp_path, monkeypatch):
+    """On a file system whose ``st_blksize`` is 4 MiB (Lustre), a tile read
+    from a fixed-slot sharded image store reads the shard index and each inner
+    chunk's compressed bytes, not the 4 MiB a buffered ``open()`` reads."""
+    import glob
+    import io
+    from pathlib import Path
+
+    from astroviper.utils.chunk_io import open_image
+
+    shard = 4
+    store, sky = _fixed_slot_image(
+        tmp_path, shard=shard, image_chunking={"l": 8, "m": 8}
+    )
+    # Expected reads per shard for the tile l 0..7, m 8..15: the index and
+    # inner chunk (l 0, m 1) of each channel, at the lengths the index records.
+    index_nbytes = 16 * shard * 2 * 2
+    expected = {}
+    paths = sorted(
+        p
+        for p in glob.glob(store + "/SKY_RESIDUAL/c/**", recursive=True)
+        if os.path.isfile(p)
+    )
+    for path in paths:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(size - index_nbytes)
+            index = np.frombuffer(f.read(), dtype="<u8").reshape(shard, 2, 2, 2)
+        expected[os.stat(path).st_ino] = sorted(
+            [(size - index_nbytes, index_nbytes)]
+            + [tuple(int(v) for v in index[f, 0, 1]) for f in range(shard)]
+        )
+
+    blksize = 4 << 20
+    reads = []
+    real_open, real_pread = io.open, os.pread
+
+    class LustreFileIO(io.FileIO):
+        def readinto(self, buffer):
+            offset = self.tell()
+            n = super().readinto(buffer)
+            reads.append((os.fstat(self.fileno()).st_ino, offset, n))
+            return n
+
+        def readall(self):
+            offset = self.tell()
+            data = super().readall()
+            reads.append((os.fstat(self.fileno()).st_ino, offset, len(data)))
+            return data
+
+    def lustre_open(file, mode="r", buffering=-1, *args, **kwargs):
+        if mode == "rb" and buffering == -1:
+            return io.BufferedReader(LustreFileIO(file), blksize)
+        return real_open(file, mode, buffering, *args, **kwargs)
+
+    def counting_pread(fd, n, offset):
+        data = real_pread(fd, n, offset)
+        reads.append((os.fstat(fd).st_ino, offset, len(data)))
+        return data
+
+    monkeypatch.setattr(io, "open", lustre_open)
+    monkeypatch.setattr(os, "pread", counting_pread)
+
+    # A read the way zarr's LocalStore makes it fills the whole buffer.
+    inode = os.stat(paths[0]).st_ino
+    offset, nbytes = expected[inode][0]
+    with Path(paths[0]).open("rb") as f:
+        f.seek(offset)
+        f.read(nbytes)
+    assert reads == [(inode, offset, blksize)]
+    reads.clear()
+
+    tile = open_image(store).SKY_RESIDUAL.isel(l=slice(0, 8), m=slice(8, 16)).values
+    np.testing.assert_array_equal(tile, sky[..., 0:8, 8:16])
+    per_shard = {}
+    for inode, offset, n in reads:
+        if inode in expected:
+            per_shard.setdefault(inode, []).append((offset, n))
+    assert {inode: sorted(r) for inode, r in per_shard.items()} == expected

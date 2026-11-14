@@ -3,7 +3,9 @@
 from astroviper.utils.chunk_io.fits_blocks import create_empty_fits_images, write_fits
 from astroviper.utils.chunk_io.zarr_chunks import (
     compute_shard_task_priorities,
+    load_image,
     load_processing_set,
+    open_image,
     precreate_sharded_files,
     read_array_region,
     record_shard_ost_map,
@@ -14,7 +16,9 @@ from astroviper.utils.chunk_io.zarr_chunks import (
 __all__ = [
     "compute_shard_task_priorities",
     "create_empty_fits_images",
+    "load_image",
     "load_processing_set",
+    "open_image",
     "precreate_sharded_files",
     "read_array_region",
     "record_shard_ost_map",

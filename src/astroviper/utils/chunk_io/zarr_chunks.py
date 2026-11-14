@@ -43,6 +43,7 @@ from itertools import product
 
 import numcodecs
 import numpy as np
+from xarray.backends import BackendArray
 
 # Zarr v3 ``data_type`` -> little-endian NumPy dtype string.
 _V3_DTYPE = {
@@ -422,6 +423,110 @@ def read_array_region(array_path, sel):
             continue
         out[out_sl] = arr[tuple(slice(c[1], c[2]) for c in combo)]
     return _apply_relative_indices(out), dims
+
+
+class _ChunkArray(BackendArray):
+    """Lazily indexed Zarr array whose reads go through :func:`read_array_region`."""
+
+    def __init__(self, array_path, shape, dtype, dims):
+        self.array_path = array_path
+        self.shape = tuple(shape)
+        self.dtype = np.dtype(dtype)
+        self.dims = tuple(dims)
+
+    def __getitem__(self, key):
+        from xarray.core import indexing
+
+        return indexing.explicit_indexing_adapter(
+            key, self.shape, indexing.IndexingSupport.OUTER, self._getitem
+        )
+
+    def _getitem(self, key):
+        sel, out_shape, squeeze = {}, [], []
+        for axis, (dim, n, k) in enumerate(
+            zip(self.dims, self.shape, key, strict=True)
+        ):
+            if isinstance(k, slice):
+                size = len(range(*k.indices(n)))
+            elif np.ndim(k) == 0:
+                start = int(k) + n if int(k) < 0 else int(k)
+                k, size = slice(start, start + 1), 1
+                squeeze.append(axis)
+            else:
+                size = np.size(k)
+            sel[dim] = k
+            out_shape.append(size)
+        if 0 in out_shape:
+            values = np.empty(out_shape, dtype=self.dtype)
+        else:
+            values, _ = read_array_region(self.array_path, sel)
+        return np.squeeze(values, axis=tuple(squeeze)) if squeeze else values
+
+
+def open_image(image_store):
+    """Open a Zarr image store lazily, its data variables read by byte offset.
+
+    The dataset is the one ``xarray.open_zarr(image_store, chunks=None)``
+    gives (coordinates, attributes, encoding), without dask; each data
+    variable is read with :func:`read_array_region` when it is indexed or
+    loaded. A variable that xarray decodes to another dtype keeps xarray's
+    reader.
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the Zarr image store.
+
+    Returns
+    -------
+    xarray.Dataset
+    """
+    import xarray as xr
+    from xarray.core import indexing
+
+    xds = xr.open_zarr(image_store, chunks=None)
+    for name, var in xds.data_vars.items():
+        array_path = os.path.join(image_store, name)
+        if np.dtype(_read_array_meta(array_path)["dtype"]) != var.dtype:
+            continue
+        data = indexing.LazilyIndexedArray(
+            _ChunkArray(array_path, var.shape, var.dtype, var.dims)
+        )
+        xds[name] = xr.Variable(var.dims, data, var.attrs, var.encoding)
+    return xds
+
+
+def load_image(image_store, selection=None):
+    """Select part of a Zarr image lazily, with XRADIO's image conventions.
+
+    The counterpart of :func:`xradio.image.load_image` for a Zarr store:
+    :func:`open_image`, the selection (an integer keeps its dimension), then
+    XRADIO's upgrade of legacy attributes and canonical polarization order.
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the Zarr image store.
+    selection : dict, optional
+        ``{dimension: int, slice or integer array}`` in the order of the store.
+
+    Returns
+    -------
+    xarray.Dataset
+    """
+    from xradio.image._util.common import _to_canonical_polarization_order
+    from xradio.image._util.legacy import upgrade_legacy_image_attrs
+
+    selection = {
+        dim: (
+            slice(int(sel), int(sel) + 1 or None)
+            if isinstance(sel, int | np.integer)
+            else sel
+        )
+        for dim, sel in (selection or {}).items()
+    }
+    xds = open_image(image_store).isel(selection)
+    return _to_canonical_polarization_order(upgrade_legacy_image_attrs(xds))
 
 
 # ---------------------------------------------------------------------------
