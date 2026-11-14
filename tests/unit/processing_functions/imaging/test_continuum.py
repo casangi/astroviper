@@ -48,7 +48,10 @@ from astroviper.processing_functions.imaging.residual_cycle_continuum_single_fie
     make_visibility_model_continuum_single_field,
     residual_cycle_continuum_single_field,
 )
-from astroviper.processing_functions.imaging.restore import _divide_taylor_polynomials
+from astroviper.processing_functions.imaging.restore import (
+    NO_FIT_BEAM,
+    _divide_taylor_polynomials,
+)
 from astroviper.processing_functions.imaging.utils import Key
 from astroviper.utils.continuum_cache import MVC_LOCAL_BEAM_STATIC_VARIABLES
 from tests.utils.continuum_images import make_continuum_image
@@ -817,7 +820,13 @@ def test_continuum_target_equal_to_the_psf_beam_gives_the_none_result(
         )[0]
         for restoring_beam in (None, [3.0e-5, 2.0e-5, 0.3])
     ]
-    names = ("SKY_RESTORED_FLAT_NOISE", "SKY_RESTORED_FLAT_SKY", "ALPHA", "ALPHA_ERROR")
+    names = (
+        "SKY_RESTORED_FLAT_NOISE",
+        "SKY_RESTORED_FLAT_SKY",
+        "ALPHA",
+        "ALPHA_ERROR",
+        "BEAM_FIT_PARAMS_SKY_RESTORED",
+    )
     for name in names:
         assert (name in restored[0]) == (name in restored[1])
         if name in restored[0]:
@@ -883,6 +892,75 @@ def test_continuum_restored_beam_variable_holds_the_target():
     assert restored_beam.attrs == {"type": "beam_fit_params_sky", "units": "rad"}
     restored_group = result.attrs["data_groups"]["restored"]
     assert restored_group["beam_fit_params_sky"] == "BEAM_FIT_PARAMS_SKY_RESTORED"
+
+
+def _psf_beams(image, beams):
+    """``image`` with the PSF beams ``beams``, laid out as its beam variable."""
+    image["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = (
+        image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.copy(data=np.array(beams))
+    )
+    return image
+
+
+def test_continuum_restore_without_a_target_records_the_beam_of_stokes_i():
+    """The restore applies the PSF beam of Stokes I to Stokes Q too, whose own
+    PSF beam differs, and records it in both."""
+    beams = [[[3.0e-5, 2.0e-5, 0.3], [4.0e-5, 2.5e-5, -0.2]]]
+    image = _psf_beams(_restore_memory_image(16, 2), beams)
+
+    result, _ = restore_continuum_image(image, continuum_mode="mfs")
+
+    restored_beam = result.BEAM_FIT_PARAMS_SKY_RESTORED
+    assert restored_beam.dims == ("time", "polarization", "beam_params_label")
+    assert restored_beam.beam_params_label.values.tolist() == ["major", "minor", "pa"]
+    assert restored_beam.attrs == {"type": "beam_fit_params_sky", "units": "rad"}
+    np.testing.assert_array_equal(restored_beam, [[beams[0][0], beams[0][0]]])
+    restored_group = result.attrs["data_groups"]["restored"]
+    assert restored_group["beam_fit_params_sky"] == "BEAM_FIT_PARAMS_SKY_RESTORED"
+
+
+def test_continuum_restore_without_a_target_records_the_taylor_zero_beam():
+    """A beam with a Taylor axis: the restore applies the beam of Taylor term
+    zero to term one too, and records it in both."""
+    image = _psf_beams(
+        make_continuum_image(beam_axis="taylor_term"),
+        [[[[3.0e-5, 2.0e-5, 0.3]], [[5.0e-5, 4.0e-5, -1.0]]]],
+    )
+
+    result, _ = restore_continuum_image(image)
+
+    np.testing.assert_array_equal(
+        result.BEAM_FIT_PARAMS_SKY_RESTORED,
+        [[[[3.0e-5, 2.0e-5, 0.3]], [[3.0e-5, 2.0e-5, 0.3]]]],
+    )
+
+
+@pytest.mark.parametrize("first_time_fitted", [True, False])
+def test_continuum_restore_without_a_target_fills_planes_without_a_fit(
+    first_time_fitted,
+):
+    """Stokes I of time 1 has no fit (zero axes, as a fit of a flagged plane
+    has): it holds the beam tclean gives it, that of time 0, or a circle of
+    1e-6 arcsec at 0 deg when time 0 has no fit either. The fits of Stokes Q
+    play no part."""
+    image = _restore_memory_image(16, 2)
+    image = xr.concat([image, image.assign_coords(time=[1.0])], dim="time")
+    beams = np.array(
+        [
+            [[3.0e-5, 2.0e-5, 0.3], [4.0e-5, 2.5e-5, -0.2]],
+            [[0.0, 0.0, 0.0], [6.0e-5, 5.0e-5, -0.2]],
+        ]
+    )
+    if not first_time_fitted:
+        beams[0, 0] = np.nan
+    image = _psf_beams(image, beams)
+
+    result, _ = restore_continuum_image(image, continuum_mode="mfs")
+
+    np.testing.assert_array_equal(
+        result.BEAM_FIT_PARAMS_SKY_RESTORED,
+        np.broadcast_to(beams[0, 0] if first_time_fitted else NO_FIT_BEAM, (2, 2, 3)),
+    )
 
 
 def test_continuum_restoring_beam_in_arcseconds_is_refused_on_a_direct_call():

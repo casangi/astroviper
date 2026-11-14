@@ -367,12 +367,23 @@ def test_a_continuum_target_equal_to_the_psf_beam_restores_bit_for_bit(
 ):
     """The restored Taylor stacks equal those without a target; the beam
     variables are kept although the caller's list (left unchanged) has
-    neither, and the restore gets the target as three floats."""
+    neither, and the restore gets the target as three floats. Without a
+    target the restored beam, kept although the default list does not have
+    it, is the PSF beam of Stokes I, which the restore applies to Stokes Q
+    too."""
     import astroviper.processing_functions.imaging.image_continuum_single_field as continuum_processing
 
     reference = _image_continuum(processing_set, tmp_path / "none.img.zarr")
-    assert "BEAM_FIT_PARAMS_SKY_RESTORED" not in reference
-    target = reference.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values.reshape(-1, 3)[0]
+    psf_beam = reference.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
+    np.testing.assert_array_equal(
+        reference.BEAM_FIT_PARAMS_SKY_RESTORED.values,
+        np.repeat(psf_beam[:, :1], psf_beam.shape[1], axis=1),
+    )
+    assert (
+        reference.attrs["data_groups"]["restored"]["beam_fit_params_sky"]
+        == "BEAM_FIT_PARAMS_SKY_RESTORED"
+    )
+    target = psf_beam.reshape(-1, 3)[0]
 
     received = []
     restore = continuum_processing.restore_continuum_image

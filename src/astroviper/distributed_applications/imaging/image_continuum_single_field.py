@@ -2704,8 +2704,9 @@ def image_continuum_single_field(
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
         Restoration automatically retains its selected restored Taylor
-        products and the derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``;
-        with a ``restoring_beam`` also ``"beam_fit_params_sky_restored"`` and
+        products, the derived ``"alpha"``, ``"alpha_error"``, and, when
+        available, ``"beta"``, and ``"beam_fit_params_sky_restored"``, the beam
+        the restore applied; with a ``restoring_beam`` also
         ``"beam_fit_params_point_spread_function"``.
         Restored and spectral products require ``restore=True``. Alpha products
         require at least two Taylor terms; beta requires at least three.
@@ -3407,12 +3408,11 @@ def image_continuum_single_field(
             "primary_beam_corrected": ("sky_restored_flat_sky",),
             "both": ("sky_restored_flat_noise", "sky_restored_flat_sky"),
         }[restoration_output]
-        # A restore to a target records it beside the PSF beam.
+        # A restore records the beam it applied, a restore to a target beside
+        # the PSF beam.
+        restored_products += ("beam_fit_params_sky_restored",)
         if restoring_beam is not None:
-            restored_products += (
-                "beam_fit_params_sky_restored",
-                "beam_fit_params_point_spread_function",
-            )
+            restored_products += ("beam_fit_params_point_spread_function",)
         image_data_variables_keep = list(image_data_variables_keep) + [
             key for key in restored_products if key not in image_data_variables_keep
         ]

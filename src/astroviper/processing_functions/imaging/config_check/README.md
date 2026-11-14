@@ -107,11 +107,11 @@ of the primary beam spreads over the corrected image. The cutoff is
 `primary_beam_limit` for continuum imaging and direct restore calls; cube
 imaging restores at `cycle_control_params['primary_beam_limit']`, or at 0.2
 for 0.
-`beam_fit_params_sky_restored` can be kept only with `restore=True`, and by
-continuum imaging only with a target. Whether the target contains a plane's
-PSF beam, and whether that plane has a PSF fit, is known only after the PSF
-fit: the cube restore keeps the residual of such a plane unscaled and warns,
-and the continuum append node refuses the target right after its PSF fit.
+`beam_fit_params_sky_restored` can be kept only with `restore=True`. Whether
+the target contains a plane's PSF beam, and whether that plane has a PSF fit,
+is known only after the PSF fit: the cube restore keeps the residual of such a
+plane unscaled and warns, and the continuum append node refuses the target
+right after its PSF fit.
 
 Output requests must match the selected workflow and restoration products.
 Restored images and spectral products require `restore=True`; alpha products

@@ -4640,8 +4640,13 @@ def restore_continuum_image(
         Continuum dataset with the requested restored Taylor product or
         products. For at least two Taylor terms it also contains ``ALPHA`` and
         ``ALPHA_ERROR``; for at least three terms it additionally contains
-        ``BETA``. With ``restoring_beam`` it holds
-        ``BEAM_FIT_PARAMS_SKY_RESTORED`` (role ``beam_fit_params_sky``).
+        ``BETA``. It also holds ``BEAM_FIT_PARAMS_SKY_RESTORED`` (role
+        ``beam_fit_params_sky``), the beam the restore applied: the target, or
+        without one the Taylor-zero PSF beam of the first polarization
+        (Stokes I), in every polarization. Without a target a plane without a
+        fit holds the beam ``tclean`` gives it, the first beam of largest area
+        of the planes with a fit, or a circle of 1e-6 arcsec when no plane has
+        one.
 
     timing_df : pandas.DataFrame
         Timing information returned by the shared restoration core.
@@ -4698,9 +4703,11 @@ def restore_continuum_image(
     import pandas as pd
 
     from astroviper.processing_functions.imaging.restore import (
+        NO_FIT_BEAM,
         _divide_taylor_polynomials,
         _restore_image_arrays,
         _restored_beam_variable,
+        fill_planes_without_fit,
         resolve_restoration_product,
     )
     from astroviper.utils.data_group_tools import (
@@ -4945,11 +4952,30 @@ def restore_continuum_image(
         data_group_out_modified={"sky": sky_name},
         overwrite=True,
     )
-    if restoring_beam is not None:
-        img_xds["BEAM_FIT_PARAMS_SKY_RESTORED"] = _restored_beam_variable(
-            beam_da, restoring_beam
+    if restoring_beam is None:
+        # The restore applies the plane zero beam of the first polarization to
+        # every Taylor term and polarization.
+        restored_beams = fill_planes_without_fit(
+            beam_da.isel(
+                {
+                    dim: [0]
+                    for dim in (
+                        "frequency",
+                        "taylor_term",
+                        "psf_taylor_order",
+                        "polarization",
+                    )
+                    if dim in beam_da.dims
+                }
+            ).values,
+            NO_FIT_BEAM,
         )
-        continuum_restored_group["beam_fit_params_sky"] = "BEAM_FIT_PARAMS_SKY_RESTORED"
+    else:
+        restored_beams = restoring_beam
+    img_xds["BEAM_FIT_PARAMS_SKY_RESTORED"] = _restored_beam_variable(
+        beam_da, restored_beams
+    )
+    continuum_restored_group["beam_fit_params_sky"] = "BEAM_FIT_PARAMS_SKY_RESTORED"
 
     apparent_da = None
     if "apparent" in products:

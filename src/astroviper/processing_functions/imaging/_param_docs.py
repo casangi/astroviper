@@ -760,9 +760,9 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
         "Restoration automatically retains its selected restored Taylor\n"
-        "products and the "
-        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``;\n'
-        'with a ``restoring_beam`` also ``"beam_fit_params_sky_restored"`` and\n'
+        'products, the derived ``"alpha"``, ``"alpha_error"``, and, when\n'
+        'available, ``"beta"``, and ``"beam_fit_params_sky_restored"``, the beam\n'
+        "the restore applied; with a ``restoring_beam`` also\n"
         '``"beam_fit_params_point_spread_function"``.\n'
         "Restored and spectral products require ``restore=True``. Alpha products\n"
         "require at least two Taylor terms; beta requires at least three.\n"
