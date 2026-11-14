@@ -262,7 +262,7 @@ def check_find_continuum_ultra_inputs(
     Returns
     -------
     list of int
-        ``[start, stop]`` of the window.
+        ``[start, stop)`` of the window.
 
     Raises
     ------
@@ -364,7 +364,7 @@ def check_find_continuum_channel_range(channel_range, frequency):
     Returns
     -------
     list of int
-        ``[start, stop]``.
+        ``[start, stop)``.
 
     Raises
     ------

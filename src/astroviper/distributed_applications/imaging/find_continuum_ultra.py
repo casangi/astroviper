@@ -225,8 +225,11 @@ def find_continuum_ultra(
         of the run's directory.
     n_mapping_parallelism : dict, optional
         ``{"frequency": n}``, the frequency chunks of every pass; ``None``
-        (default): chunks of whole shards, about
-        ``FREQUENCY_TASKS_PER_THREAD`` per thread.
+        (default): ``ceil(n_channels / k)`` chunks of the window, ``k`` the
+        channels of a whole number of shards that gives about
+        ``FREQUENCY_TASKS_PER_THREAD`` chunks per thread. GraphVIPER makes the
+        chunks of equal length, so they are whole shards only when the window
+        starts on a shard and ``k`` divides its channels.
     thread_info : dict, optional
         ``n_threads`` and ``memory_per_thread`` (GiB) of the cluster, which
         set the frequency chunks and the memory budget of a task. ``None``
@@ -263,7 +266,7 @@ def find_continuum_ultra(
     dict
         Results: ``continuum_channel_ranges`` (``[start, stop)`` channel pairs
         of the spectral window in findContinuum's list order),
-        ``channel_range`` (``[start, stop]`` of the window in the cube),
+        ``channel_range`` (``[start, stop)`` of the window in the cube),
         ``continuum_frequency_ranges`` (per range the outer channel edges in
         Hz, the lower first), ``frequency_frame`` (of the cube's frequency
         coordinate), ``aggregate_bandwidth`` (Hz, the value findContinuum
@@ -539,7 +542,7 @@ def _open_window(
     atmospheric_sky_temperature,
 ):
     """The spectral window of the image store opened lazily and checked
-    (metadata only), its data group, its ``[start, stop]`` in channels of the
+    (metadata only), its data group, its ``[start, stop)`` in channels of the
     cube, the shape of the cube and the coordinates of the window's maps (one
     time, the mean frequency and Stokes I)."""
     from astroviper.processing_functions.image_analysis.moments import (

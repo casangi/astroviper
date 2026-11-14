@@ -327,8 +327,11 @@ _FIND_CONTINUUM_ULTRA_PARAM_DOCS = {
             ),
             "n_mapping_parallelism": (
                 '``{"frequency": n}``, the frequency chunks of every pass; ``None``\n'
-                "(default): chunks of whole shards, about\n"
-                "``FREQUENCY_TASKS_PER_THREAD`` per thread."
+                "(default): ``ceil(n_channels / k)`` chunks of the window, ``k`` the\n"
+                "channels of a whole number of shards that gives about\n"
+                "``FREQUENCY_TASKS_PER_THREAD`` chunks per thread. GraphVIPER makes the\n"
+                "chunks of equal length, so they are whole shards only when the window\n"
+                "starts on a shard and ``k`` divides its channels."
             ),
             "thread_info": (
                 "``n_threads`` and ``memory_per_thread`` (GiB) of the cluster, which\n"
