@@ -1199,42 +1199,21 @@ def image_cube_single_field(
             # I/O coalescing). The framework has already applied the task-level
             # sub-selection, so use the dict directly.
             ps_xdt = input_data
-        elif lazy_input_data is not None:
-            # Measurement Set v2: read the lazily indexed selection that the
-            # distributed application attached to this task (the values are
-            # read by XRADIO's xradio_msv2 engine).
-            from astroviper.utils.measurement_set_v2_input import (
-                load_processing_set_msv2,
-            )
-
-            ps_xdt = load_processing_set_msv2(lazy_input_data)
-        elif io_engine == "chunk":
-            # Experimental performance path: read only this chunk's data-group
-            # variables straight from the Zarr chunk blobs and reconstruct the
-            # coordinates from the inputs (no datatree/coords/sub-datasets open).
-            from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-                map_visibility_frequencies_to_image,
-            )
-            from astroviper.utils.chunk_io import load_processing_set
+        else:
+            # A Measurement Set v2's lazily indexed selection (attached by the
+            # distributed application) is read by XRADIO's xradio_msv2 engine.
+            from astroviper.utils.node_task_io import load_processing_set
 
             ps_xdt = load_processing_set(
+                io_engine,
                 input_data_store,
-                sel_parms=data_selection,
-                data_group=data_group,
-                processing_set_data_group_name=processing_set_data_group_name,
+                data_selection,
+                processing_set_data_group_name,
                 frequency_coords=task_coords["frequency"]["data"],
                 instrument_polarization_basis=instrument_polarization_basis,
+                data_group=data_group,
                 processing_function_threads=processing_function_threads,
-                map_frequencies=map_visibility_frequencies_to_image,
-            )
-        else:
-            from xradio.measurement_set.load_processing_set import load_processing_set
-
-            ps_xdt = load_processing_set(
-                input_data_store,
-                sel_parms=data_selection,
-                data_group_name=processing_set_data_group_name,
-                load_sub_datasets=False,
+                lazy_input_data=lazy_input_data,
             )
     except Exception as exc:
         # A Measurement Set v2 that changed after the distributed application

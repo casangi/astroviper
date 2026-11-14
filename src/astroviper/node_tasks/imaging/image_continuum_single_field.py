@@ -86,15 +86,6 @@ def _single_leaf_cache_mapping(
     return {int(input_data["task_id"]): input_data[leaf_key]}
 
 
-def _weighting_drop_variables(data_group, node_name):
-    """Return the correlated-data variable omitted by a weighting node load."""
-    if not isinstance(data_group, dict) or "correlated_data" not in data_group:
-        raise ValueError(
-            f"{node_name} requires the resolved processing-set data_group mapping."
-        )
-    return [data_group["correlated_data"]]
-
-
 def _add_task_execution_metadata(timing_df, task_start):
     """Add the common wall-clock and worker identity columns in place."""
     import os
@@ -1439,42 +1430,19 @@ def residual_update_continuum_single_field(
         # task-level sub-selection.
         ps_xdt = input_data
 
-    elif io_engine == "chunk":
-        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-            map_visibility_frequencies_to_image,
-        )
-        from astroviper.utils.chunk_io import load_processing_set
+    else:
+        from astroviper.utils.node_task_io import load_processing_set
 
         ps_xdt = load_processing_set(
+            io_engine,
             input_data_store,
-            sel_parms=data_selection,
-            data_group=data_group,
-            processing_set_data_group_name=processing_set_data_group_name,
+            data_selection,
+            processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
             instrument_polarization_basis=instrument_polarization_basis,
-            processing_function_threads=processing_function_threads,
+            data_group=data_group,
             load_correlated_data=not omit_observed_visibility,
-            map_frequencies=map_visibility_frequencies_to_image,
-        )
-
-    else:
-        from xradio.measurement_set.load_processing_set import load_processing_set
-
-        drop_variables = None
-        if omit_observed_visibility:
-            if not isinstance(data_group, dict) or "correlated_data" not in data_group:
-                raise ValueError(
-                    "Cached-grid loading requires the resolved processing-set "
-                    "data_group mapping."
-                )
-            drop_variables = [data_group["correlated_data"]]
-
-        ps_xdt = load_processing_set(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group_name=processing_set_data_group_name,
-            drop_variables=drop_variables,
-            load_sub_datasets=False,
+            processing_function_threads=processing_function_threads,
         )
 
     T_load = time.time() - start
@@ -1977,35 +1945,19 @@ def grid_imaging_weight_density_continuum_node(
         # processing-set partition.
         ps_xdt = input_data
 
-    elif io_engine == "chunk":
-        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-            map_visibility_frequencies_to_image,
-        )
-        from astroviper.utils.chunk_io import load_processing_set
-
-        ps_xdt = load_processing_set(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group=data_group,
-            processing_set_data_group_name=(processing_set_data_group_name),
-            frequency_coords=task_coords["frequency"]["data"],
-            instrument_polarization_basis=(instrument_polarization_basis),
-            processing_function_threads=(processing_function_threads),
-            load_correlated_data=False,
-            map_frequencies=map_visibility_frequencies_to_image,
-        )
-
     else:
-        from xradio.measurement_set.load_processing_set import load_processing_set
+        from astroviper.utils.node_task_io import load_processing_set
 
         ps_xdt = load_processing_set(
+            io_engine,
             input_data_store,
-            sel_parms=data_selection,
-            data_group_name=processing_set_data_group_name,
-            drop_variables=_weighting_drop_variables(
-                data_group, "grid_imaging_weight_density_continuum_node"
-            ),
-            load_sub_datasets=False,
+            data_selection,
+            processing_set_data_group_name,
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=instrument_polarization_basis,
+            data_group=data_group,
+            load_correlated_data=False,
+            processing_function_threads=processing_function_threads,
         )
 
     T_load = time.time() - start
@@ -2305,35 +2257,19 @@ def degrid_imaging_weights_continuum_node(
     if input_data is not None:
         ps_xdt = input_data
 
-    elif io_engine == "chunk":
-        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-            map_visibility_frequencies_to_image,
-        )
-        from astroviper.utils.chunk_io import load_processing_set
-
-        ps_xdt = load_processing_set(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group=data_group,
-            processing_set_data_group_name=(processing_set_data_group_name),
-            frequency_coords=task_coords["frequency"]["data"],
-            instrument_polarization_basis=(instrument_polarization_basis),
-            processing_function_threads=(processing_function_threads),
-            load_correlated_data=False,
-            map_frequencies=map_visibility_frequencies_to_image,
-        )
-
     else:
-        from xradio.measurement_set.load_processing_set import load_processing_set
+        from astroviper.utils.node_task_io import load_processing_set
 
         ps_xdt = load_processing_set(
+            io_engine,
             input_data_store,
-            sel_parms=data_selection,
-            data_group_name=processing_set_data_group_name,
-            drop_variables=_weighting_drop_variables(
-                data_group, "degrid_imaging_weights_continuum_node"
-            ),
-            load_sub_datasets=False,
+            data_selection,
+            processing_set_data_group_name,
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=instrument_polarization_basis,
+            data_group=data_group,
+            load_correlated_data=False,
+            processing_function_threads=processing_function_threads,
         )
 
     T_load = time.time() - start
