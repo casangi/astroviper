@@ -1863,6 +1863,45 @@ def test_read_holds_the_units_it_reads_at_once(
     np.testing.assert_array_equal(out.view(np.uint32), arr[:].view(np.uint32))
 
 
+@pytest.mark.parametrize("concurrency, at_once", [(None, 4), (1, 1)])
+def test_read_concurrency_sets_the_inner_chunks_read_at_once(
+    tmp_path, monkeypatch, concurrency, at_once
+):
+    """``concurrency=1`` reads the inner chunks of a shard one at a time; the
+    values and counters are those of a concurrent read."""
+    from astroviper.utils.chunk_io import zarr_chunks
+
+    path, data = _sharded_store(tmp_path)
+    read_inner_chunk = zarr_chunks._read_inner_chunk
+    lock = threading.Lock()
+    reading = {"now": 0, "most": 0}
+    arrived = threading.Barrier(at_once, timeout=10)
+
+    def counted(*args):
+        with lock:
+            reading["now"] += 1
+            reading["most"] = max(reading["most"], reading["now"])
+        if at_once > 1:
+            arrived.wait()  # all four inner chunks are in flight together
+        else:
+            time.sleep(0.02)  # concurrent reads would overlap here
+        try:
+            return read_inner_chunk(*args)
+        finally:
+            with lock:
+                reading["now"] -= 1
+
+    monkeypatch.setattr(zarr_chunks, "_read_inner_chunk", counted)
+    counters = {}
+    got, _ = read_array_region(path, {}, counters=counters, concurrency=concurrency)
+    assert reading["most"] == at_once
+    np.testing.assert_array_equal(got, data)
+    monkeypatch.setattr(zarr_chunks, "_read_inner_chunk", read_inner_chunk)
+    concurrent = {}
+    read_array_region(path, {}, counters=concurrent)
+    assert counters == concurrent
+
+
 def test_read_refuses_a_bad_chunk_mask_or_out(tmp_path):
     array_path = _written_image_store(tmp_path, 1, True)
     sel = {"frequency": slice(0, 2)}  # unit grid (1, 2, 2, 3, 3)

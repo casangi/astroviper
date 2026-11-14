@@ -571,6 +571,64 @@ def test_first_round_phases_count_the_reader_once(cube, tmp_path, monkeypatch):
     assert row["T_read_masks"] > 22 * 0.02
 
 
+def test_the_reader_decodes_one_read_unit_at_a_time(cube, tmp_path, monkeypatch):
+    """The task's memory bound holds one read unit being decoded: the reader
+    reads the inner chunks of a shard one at a time."""
+    import threading
+    import time
+
+    from astroviper.utils.chunk_io import zarr_chunks
+
+    read_inner_chunk = zarr_chunks._read_inner_chunk
+    lock = threading.Lock()
+    reading = {"now": 0, "most": 0, "units": 0}
+
+    def counted(*args):
+        with lock:
+            reading["now"] += 1
+            reading["units"] += 1
+            reading["most"] = max(reading["most"], reading["now"])
+        time.sleep(0.001)  # concurrent reads would overlap here
+        try:
+            return read_inner_chunk(*args)
+        finally:
+            with lock:
+                reading["now"] -= 1
+
+    monkeypatch.setattr(zarr_chunks, "_read_inner_chunk", counted)
+    store = str(tmp_path / "first_round.zarr")
+    create_find_continuum_first_round_store(
+        store,
+        N_CHANNELS,
+        (1, N_CHANNELS, 2, N_PIXELS, N_PIXELS),
+        TILE,
+        MERGE_TILE,
+        LIMIT,
+        VARIABLES,
+        STOKES_I,
+        {"sky": "float32", "primary_beam": "float32"},
+        None,
+        "find_continuum_ultra",
+        [cube["window"]],
+        cube["rest_frequency"],
+    )
+    partials_store, _ = _moment_stores(tmp_path / "pass")
+    _frequency_tasks(
+        find_continuum_first_round_task,
+        cube["store"],
+        chunks=CHUNKS[:1],
+        primary_beam_limit=LIMIT,
+        moment_channel_weights=cube["weights"],
+        first_round_store=store,
+        compute_masks=True,
+        compute_moments=True,
+        partials_store=partials_store,
+        planes_per_batch=5,
+    )
+    assert reading["units"] > 0
+    assert reading["most"] == 1
+
+
 def _regions():
     l_index, m_index = np.indices((N_PIXELS, N_PIXELS))
     radius2 = (l_index - 36) ** 2 + (m_index - 28) ** 2
@@ -1213,14 +1271,13 @@ def test_refusals(cube, first_round, tmp_path):
         (("first_round", False, 0, True, 0.0), 7.3),  # store without moments
         (("spectrum", False, 1, False, 0.30), 6.5),
         (("spectrum", True, 2, False, 0.30), 10.4),  # with normalization
-        (("selection_moments", False, 1, True, 0.19), 7.6),  # round original
-        (("selection_moments", False, 0, True, 0.0), 7.2),
+        (("selection_moments", False, 1, True, 0.19), 7.5),  # round original
+        (("selection_moments", False, 0, True, 0.0), 7.1),
     ],
 )
 def test_task_memory_bounds_at_the_medium_scale(arguments, gib):
     """The bounds at 11250^2, 4 planes per batch and 625^2 read units, within
-    0.1 GiB of design section 9.2 (which decodes one read unit at a time, not
-    ``_READ_CONCURRENCY``), below the task budget of 15.6 GiB."""
+    0.1 GiB of design section 9.2, below the task budget of 15.6 GiB."""
     pass_kind, read_primary_beam, n_regions, moments, gather_fraction = arguments
     task_bytes = find_continuum_ultra_task_bytes(
         pass_kind,
@@ -1239,8 +1296,6 @@ def test_task_memory_bounds_at_the_medium_scale(arguments, gib):
 
 
 def test_task_memory_counts_its_terms():
-    from astroviper.utils.chunk_io.zarr_chunks import _READ_CONCURRENCY
-
     n = 1000
 
     def task_bytes(pass_kind="selection_moments", **changes):
@@ -1272,7 +1327,7 @@ def test_task_memory_counts_its_terms():
         == 16 * n * n
     )
     assert task_bytes(gather_fraction=0.5) - base == 6 * n * n
-    assert task_bytes(read_unit_bytes=10**6) - base == 2 * _READ_CONCURRENCY * 10**6
+    assert task_bytes(read_unit_bytes=10**6) - base == 2 * 10**6
     assert task_bytes("spectrum") - base == 2 * 4 * packed + n * n
     first_round = task_bytes("first_round", read_primary_beam=True, moments=True)
     assert first_round - task_bytes(read_primary_beam=True, moments=True) == 3 * n * n

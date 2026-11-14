@@ -288,7 +288,9 @@ def _axis_overlaps(start, stop, csize):
     return out
 
 
-def read_array_region(array_path, sel, chunk_mask=None, counters=None, out=None):
+def read_array_region(
+    array_path, sel, chunk_mask=None, counters=None, out=None, concurrency=None
+):
     """Read ``array[sel]`` for one Zarr array via direct chunk-blob reads.
 
     Handles Zarr v3 (sharded and plain) and v2; supports selections spanning
@@ -324,6 +326,9 @@ def read_array_region(array_path, sel, chunk_mask=None, counters=None, out=None)
         Array of the selection's shape and the dtype of the values (boolean
         for an array stored with xarray's encoding of booleans); it receives
         the values and is returned.
+    concurrency : int, optional
+        Inner chunks of a shard read at the same time; 1 reads them one at a
+        time. None is ``_READ_CONCURRENCY``.
 
     Returns
     -------
@@ -459,7 +464,8 @@ def read_array_region(array_path, sel, chunk_mask=None, counters=None, out=None)
 
         # chunk_mask can leave no shard to read.
         n_threads = min(
-            _READ_CONCURRENCY, max((len(i) for i in by_shard.values()), default=0)
+            _READ_CONCURRENCY if concurrency is None else concurrency,
+            max((len(i) for i in by_shard.values()), default=0),
         )
         executor = ThreadPoolExecutor(max_workers=n_threads) if n_threads > 1 else None
         for shard_index, items in by_shard.items():

@@ -1166,10 +1166,8 @@ def find_continuum_ultra_task_bytes(
     it reads the primary beam) and one per region; the moment partials (a
     float64 integral and a maximum in the residual's dtype); the values a
     masked reduction gathers, in the residual's dtype and in float64; two
-    float64 blocks of rows; and up to ``_READ_CONCURRENCY`` read units being
-    decoded with their stored bytes
-    (:func:`~astroviper.utils.chunk_io.read_array_region` reads the inner
-    chunks of a shard concurrently).
+    float64 blocks of rows; and a read unit being decoded with its stored
+    bytes.
 
     Parameters
     ----------
@@ -1203,8 +1201,6 @@ def find_continuum_ultra_task_bytes(
     ValueError
         If ``pass_kind`` is not one of the three.
     """
-    from astroviper.utils.chunk_io.zarr_chunks import _READ_CONCURRENCY
-
     if pass_kind not in _PASS_KINDS:
         raise ValueError(f"pass_kind is one of {_PASS_KINDS}, not {pass_kind!r}")
     pixels = n_l * n_m
@@ -1223,7 +1219,7 @@ def find_continuum_ultra_task_bytes(
         + value_bytes * pixels * moments
         + value_bytes * gather_fraction * pixels
         + 2 * 8 * _BLOCK_ROWS * n_m
-        + 2 * _READ_CONCURRENCY * read_unit_bytes
+        + 2 * read_unit_bytes
     )
 
 
@@ -1346,6 +1342,7 @@ def _stream_batches(
             os.path.join(first_round_store, _MASK_TILES[name]),
             {"frequency": frequency},
             counters=counters["masks"],
+            concurrency=1,
         )[0]
         for name in stored_masks
     }
@@ -1376,6 +1373,7 @@ def _stream_batches(
                     {"frequency": frequency},
                     wanted,
                     counters["masks"],
+                    concurrency=1,
                 )[0]
                 for name in stored_masks
             },
@@ -1399,6 +1397,7 @@ def _stream_batches(
                 np.logical_or.reduceat(used, starts, axis=0)[None, :, None],
                 counters[role],
                 buffers[role][index][:, : channels.size],
+                concurrency=1,
             )[0]
             counters[role]["planes"] += channels.size
         reader_seconds["T_read"] += time.perf_counter() - start - masks_seconds
