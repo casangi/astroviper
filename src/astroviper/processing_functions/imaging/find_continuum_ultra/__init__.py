@@ -1,6 +1,14 @@
 """Processing functions of find_continuum_ultra: findContinuum's algorithm on
 image-shaped maps and one-dimensional spectra."""
 
+from astroviper.processing_functions.imaging.find_continuum_ultra.channel_selection import (
+    all_continuum_selected,
+    continuum_channel_threshold,
+    reject_narrow_inner_runs,
+    select_continuum_channels,
+    trim_runs,
+    widest_run_in_other_half,
+)
 from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
     accumulate_moments,
     finalize_moments,
@@ -87,4 +95,10 @@ __all__ = [
     "tile_occupancy",
     "pack_plane_masks",
     "unpack_plane_masks",
+    "select_continuum_channels",
+    "continuum_channel_threshold",
+    "trim_runs",
+    "reject_narrow_inner_runs",
+    "widest_run_in_other_half",
+    "all_continuum_selected",
 ]
