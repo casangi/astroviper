@@ -101,8 +101,12 @@ of the first pass without a first-round store, and the imager's first round
 of one chunk, each in a new process, as on a worker. The resident set peak
 of the process stays within 1.3 times the plan (on macOS the memory
 compressor can only lower it), and the traced peak of the frequency task
-does not grow from 16 to 64 channels per task. The measured values were
-taken on Apple silicon (macOS, Python 3.13).
+does not grow from 16 to 64 channels per task. As the fixed baseline of the
+plan dominates at that size, the bytes per pixel of a frequency task are
+also checked, from its peaks at 512 x 512 and 1024 x 1024, against the
+plan's, on the harness's sharded layout, in float64 and on the imager's
+default layout of whole-plane chunks. The measured values were taken on
+Apple silicon (macOS, Python 3.13).
 """
 
 from __future__ import annotations
@@ -1741,3 +1745,193 @@ def test_find_continuum_first_round_chunk_memory(tmp_path):
     )
     print(line)
     assert resident <= FIND_CONTINUUM_RESIDENT_FACTOR * planned, line
+
+
+#: Layouts of the per-pixel check: the harness's (sharded, 1-channel inner
+#: chunks of an eighth of the plane, float32), the same in float64, and the
+#: imager's default (one unsharded chunk of two channels, Stokes I and Q and
+#: the whole plane, float32).
+FIND_CONTINUUM_LAYOUTS = ("sharded", "sharded_float64", "whole_plane")
+#: Plane sizes (px) whose difference gives the bytes per pixel of a task.
+FIND_CONTINUUM_SLOPE_SIZES = (512, 1024)
+#: The traced bytes per pixel of a frequency task are within this fraction of
+#: the plan's (measured: 1 to 6 % below it).
+FIND_CONTINUUM_SLOPE_TOLERANCE = 0.1
+
+
+def find_continuum_layout_cube(directory, n_pixels, layout, n_channels=8):
+    """Stokes I and Q of a residual cube and its primary beam (below 0.2 in
+    the corners) in one of ``FIND_CONTINUUM_LAYOUTS``; returns the store."""
+    import zarr
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.node_tasks.imaging.utils import (
+        write_result_chunk_to_disk_sharded_skunk_works,
+        write_result_chunk_to_disk_using_zarr_skunk_works,
+    )
+    from astroviper.utils.io import (
+        create_empty_data_variables_on_disk,
+        write_zarr_image_store,
+    )
+
+    dtype = np.float64 if layout == "sharded_float64" else np.float32
+    coords = make_empty_sky_image(
+        phase_center=[1.2, -0.4],
+        image_size=[n_pixels, n_pixels],
+        cell_size=[0.1 * ARCSEC, 0.1 * ARCSEC],
+        frequency_coords=230.0e9 + 0.5e6 * np.arange(n_channels),
+        pol_coords=["I", "Q"],
+        time_coords=[0.0],
+    )
+    store = write_zarr_image_store(coords, f"{directory}/{layout}_{n_pixels}.img.zarr")
+    sharded = layout != "whole_plane"
+    task = 1 if sharded else 2
+    create_empty_data_variables_on_disk(
+        store,
+        ["sky_residual", "primary_beam"],
+        shape_dict=dict(coords.sizes),
+        parallel_coords={
+            "frequency": {
+                "data_chunks": [
+                    list(range(c, c + task)) for c in range(0, n_channels, task)
+                ]
+            }
+        },
+        compressor=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        double_precision=dtype == np.float64,
+        data_variable_definitions="imaging",
+        image_chunking={"polarization": 1, "l": n_pixels // 8, "m": n_pixels // 8}
+        if sharded
+        else None,
+        image_sharding={"frequency": n_channels} if sharded else None,
+    )
+    write = (
+        write_result_chunk_to_disk_sharded_skunk_works
+        if sharded
+        else write_result_chunk_to_disk_using_zarr_skunk_works
+    )
+    offsets = np.indices((n_pixels, n_pixels)) - (n_pixels - 1) / 2
+    sigma = 0.45 * n_pixels / np.sqrt(2 * np.log(5.0))
+    primary_beam = np.exp(-np.square(offsets).sum(axis=0) / (2 * sigma**2))
+    primary_beam = (np.round(1024 * primary_beam) / 1024).astype(dtype)
+    rng = np.random.default_rng(0)
+    dims = ["time", "frequency", "polarization", "l", "m"]
+    for start in range(0, n_channels, task):
+        sky = np.empty((1, task, 2, n_pixels, n_pixels), dtype=dtype)
+        for k in range(task):
+            sky[0, k, 0] = 0.01 * primary_beam + 1e-3 * rng.standard_normal(
+                (n_pixels, n_pixels)
+            )
+            sky[0, k, 1] = 0.1 * sky[0, k, 0]
+        chunk_xds = xr.Dataset(
+            {
+                "SKY_RESIDUAL": (dims, sky),
+                "PRIMARY_BEAM": (dims, np.broadcast_to(primary_beam, sky.shape).copy()),
+            }
+        )
+        write(
+            store,
+            ["sky_residual", "primary_beam"],
+            {"frequency": {"slice": slice(start, start + task)}},
+            chunk_xds,
+        )
+    return store
+
+
+def ultra_pass_memory(store, work_directory):
+    """find_continuum_ultra's first pass without a first-round store over the
+    whole cube as one frequency task, then the moments again with the store
+    it made, in this process (synchronous scheduler): per pass the bytes
+    planned for a task and the traced peak of the frequency task, and the
+    resident set peak of the first pass above the resident set before it."""
+    import psutil
+
+    from astroviper.distributed_applications.imaging.find_continuum import (
+        ultra_reductions,
+    )
+    from astroviper.processing_functions.imaging.find_continuum import (
+        find_continuum_first_round_requests,
+        linear_frequency_axis,
+    )
+
+    peaks = []
+    task = ultra_reductions.find_continuum_streamed_reductions
+
+    @functools.wraps(task)
+    def traced(**kwargs):
+        tracemalloc.start()
+        try:
+            return task(**kwargs)
+        finally:
+            peaks.append(tracemalloc.get_traced_memory()[1])
+            tracemalloc.stop()
+
+    ultra_reductions.find_continuum_streamed_reductions = traced
+    frequency = xr.open_zarr(store, chunks=None).frequency
+    frequency_axis = linear_frequency_axis(frequency.values)
+    rest_frequency = float(frequency.attrs["rest_frequency"]["data"])
+    paths = {role: f"{work_directory}/cube.{role}" for role in FIND_CONTINUUM_VARIABLES}
+    ultra = ultra_reductions.UltraReductions(
+        {
+            paths[role]: {"variable": variable, "channel_offset": 0}
+            for role, variable in FIND_CONTINUUM_VARIABLES.items()
+        },
+        store,
+        FIND_CONTINUUM_VARIABLES,
+        0,
+        work_directory,
+        0.2,
+        None,
+        1,
+        16 * 2**30,
+        frequency_axis,
+        rest_frequency,
+        None,
+    )
+    requests = find_continuum_first_round_requests(
+        frequency_axis, rest_frequency, paths["sky"], paths["primary_beam"]
+    )[1:]
+    resident = psutil.Process().memory_info().rss
+    with dask.config.set(scheduler="synchronous"):
+        ultra.run_pass(requests, len(requests))
+        first_pass_resident = resident_peak() - resident
+        ultra.run_pass(requests, len(requests))
+    return {
+        "planned": [row["task_memory_plan_bytes"] for row in ultra.passes],
+        "traced": peaks,
+        "resident": first_pass_resident,
+    }
+
+
+@pytest.mark.parametrize("layout", FIND_CONTINUUM_LAYOUTS)
+def test_find_continuum_ultra_task_memory_per_pixel(tmp_path, layout):
+    """The bytes per pixel of a frequency task, from its peaks at two plane
+    sizes (free of the fixed baseline), against the plan's: the traced ones
+    within ``FIND_CONTINUUM_SLOPE_TOLERANCE``, the resident ones within
+    ``FIND_CONTINUUM_RESIDENT_FACTOR``, for the first pass without a store
+    (which reads the primary beam and makes the first round) and with the
+    store it made."""
+    runs = {}
+    for n_pixels in FIND_CONTINUUM_SLOPE_SIZES:
+        store = find_continuum_layout_cube(tmp_path, n_pixels, layout)
+        runs[n_pixels] = in_new_process(
+            ultra_pass_memory, store, f"{tmp_path}/work_{layout}_{n_pixels}"
+        )
+    small, large = (runs[n] for n in FIND_CONTINUUM_SLOPE_SIZES)
+    pixels = np.diff(np.square(FIND_CONTINUUM_SLOPE_SIZES))[0]
+    lines, failures = [], []
+    for index, name in enumerate(("without a store", "with the store")):
+        planned = (large["planned"][index] - small["planned"][index]) / pixels
+        traced = (large["traced"][index] - small["traced"][index]) / pixels
+        lines.append(
+            f"{layout}, {name}: planned {planned:.1f} B/px, traced {traced:.1f} B/px"
+        )
+        if abs(traced - planned) > FIND_CONTINUUM_SLOPE_TOLERANCE * planned:
+            failures.append(lines[-1])
+        if index == 0:
+            resident = (large["resident"] - small["resident"]) / pixels
+            lines[-1] += f", resident {resident:.1f} B/px"
+            if resident > FIND_CONTINUUM_RESIDENT_FACTOR * planned:
+                failures.append(lines[-1])
+    print("\n".join(lines))
+    assert not failures, failures
