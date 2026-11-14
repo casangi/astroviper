@@ -44,6 +44,10 @@ stream prints. The worker slots, hosts and memory come from the run's
 ``return_dict["compute_resources"]``
 (:func:`~astroviper.utils.data_partitioning.get_compute_resources`), or from
 a ``compute_resources`` argument, which replaces it.
+
+Over several runs, :func:`plot_scaling` draws the performance measures, the
+total time or the throughput, and :func:`plot_efficiency_loss_decomposition`
+splits each run's wall clock into useful work and losses.
 """
 
 from __future__ import annotations
@@ -57,6 +61,8 @@ __all__ = [
     "plot_cluster_resource_usage",
     "plot_core_resource_usage",
     "plot_task_stream",
+    "plot_scaling",
+    "plot_efficiency_loss_decomposition",
     "plot_application_task_stream",
     "assign_task_stream_lanes",
     "IMAGING_TASK_STREAM_COLUMNS",
@@ -2789,3 +2795,599 @@ def plot_task_stream(
             add_time_labels=add_time_labels,
         )
     return fig
+
+
+_SCALING_TITLES = {
+    "total_time": "Total Time",
+    "speedup": "Speedup: absolute (work-based)",
+    "speedup_relative": "Speedup: relative (baseline-normalized)",
+    "parallel_efficiency": "Parallel efficiency: absolute (work-based)",
+    "parallel_efficiency_relative": (
+        "Parallel efficiency: relative (baseline-normalized)"
+    ),
+    "throughput": "Delivered Throughput and Allocation Cost",
+}
+_TIME_UNIT_SECONDS = {"hours": 3600.0, "minutes": 60.0, "seconds": 1.0}
+
+
+def _aligned_with_runs(values, n_runs, name):
+    """``values`` as a list with one entry per run; refuses a dict or another
+    length."""
+    if isinstance(values, (dict, str)) or len(values) != n_runs:
+        raise ValueError(
+            f"{name} must be a sequence with one entry per run ({n_runs})."
+        )
+    return list(values)
+
+
+def _runs_and_resources(source, compute_resources, caller):
+    """The runs of a multi-run figure, each one's compute resources
+    (:func:`_compute_resources`) and the per-run overrides passed on to
+    :func:`performance_measures`."""
+    if isinstance(source, (dict, pd.DataFrame)):
+        raise ValueError(
+            f"{caller}: source must be a sequence of return dicts, one per run."
+        )
+    runs = list(source)
+    if not runs:
+        raise ValueError(f"{caller}: source holds no run.")
+    overrides = (
+        None
+        if compute_resources is None
+        else _aligned_with_runs(compute_resources, len(runs), "compute_resources")
+    )
+    resources = [
+        _compute_resources(run, None if overrides is None else overrides[i])
+        for i, run in enumerate(runs)
+    ]
+    return runs, resources, overrides
+
+
+def _scale_point_label(n_hosts, n_worker_slots):
+    """A bar label: the hosts over the worker slots p (the hosts alone when
+    p is not known)."""
+    if n_worker_slots is None or not np.isfinite(n_worker_slots):
+        return str(n_hosts)
+    return f"{n_hosts}\n{int(n_worker_slots)}"
+
+
+def plot_scaling(
+    source,
+    quantity,
+    x=None,
+    compute_resources=None,
+    sweep_labels=None,
+    scaling="strong",
+    total_time=None,
+    time_unit="hours",
+    x_label="Number of Nodes",
+    x_tick_labels="n_worker_slots",
+    reference_points=None,
+    timing_phases=None,
+    task_columns=None,
+    fixed_non_io_compute=None,
+    notes=None,
+    title=None,
+    save_path=None,
+):
+    """Plot one scaling quantity of several runs of a distributed application.
+
+    The quantities are the total time, the speedups and parallel efficiencies
+    of the RADPS benchmarking memo (:func:`performance_measures`) over the map
+    reduce window (t3 - t1) and the end to end window (t3 - t0), absolute or
+    relative to a baseline run, and the throughput with the cost in
+    node-hours. Runs with equal ``sweep_labels`` form a sweep, drawn as one
+    line (one line per window for the speedups and efficiencies) in input
+    order; the relative measures are relative to the sweep's baseline. One
+    sweep is coloured by window, several sweeps by sweep.
+
+    Parameters
+    ----------
+    source : sequence of dict
+        The return dicts of the runs (``"timing_node_tasks"``,
+        ``"timing_distributed_application"``, ``"timing_reduce_nodes"`` and
+        ``"compute_resources"``), in plotting order.
+    quantity : str
+        ``"total_time"``, ``"speedup"``, ``"speedup_relative"``,
+        ``"parallel_efficiency"``, ``"parallel_efficiency_relative"`` or
+        ``"throughput"`` (channels per second of ``total_time``, the sum of
+        the node tasks' ``n_channels``, over the cost ``n_hosts *
+        total_time`` in node-hours).
+    x : sequence, optional
+        The x value of every run, e.g. the number of channels of a weak
+        scaling; default the hosts ``n_hosts`` of each run's compute
+        resources.
+    compute_resources : sequence of dict, optional
+        One entry per run replacing its recorded
+        ``return_dict["compute_resources"]``; None entries keep the recorded
+        ones (see :func:`performance_measures`).
+    sweep_labels : sequence of str, optional
+        The sweep of every run; default one sweep labelled ``"measured"``.
+    scaling : str, optional
+        ``"strong"`` (default) or ``"weak"``: the baseline of the relative
+        measures (see :func:`performance_measures`). Weak scaling also starts
+        the total-time axis at 0 and fits the speedup axis to the data.
+    total_time : sequence of float, optional
+        The wall clock of every run in seconds, e.g. a benchmark harness's;
+        default each run's ``T_total``.
+    time_unit : str, optional
+        ``"hours"`` (default), ``"minutes"`` or ``"seconds"``, for the total
+        time.
+    x_label : str, optional
+        The x axis label.
+    x_tick_labels : str, optional
+        ``"n_worker_slots"`` (default): ticks at the x values with the worker
+        slots p of the runs there below them; ``"values"``: ticks at the x
+        values.
+    reference_points : list of dict, optional
+        Reference measurements drawn on the total-time figure, each
+        ``{"label": str, "x": sequence, "total_time": sequence}`` (seconds),
+        e.g. ``[{"label": "CASA Memo 13", "x": [72], "total_time": [11194]}]``.
+    timing_phases : list of tuple, optional
+        The application's ``DISTRIBUTED_APPLICATION_TIMING_PHASES``, to
+        rebuild t0 of runs that did not record ``application_start_unixtime``.
+    task_columns : dict, optional
+        The node task timing columns, as for :func:`plot_task_stream`.
+    fixed_non_io_compute : float, optional
+        Seconds of non-I/O compute per map task (see
+        :func:`performance_measures`); the total-time figure is shortened by
+        the same ``fixed_compute_shift`` as the windows. The throughput is
+        always that of the measured total time.
+    notes : str or sequence of str, optional
+        Notes written along the bottom of the figure.
+    title : str, optional
+        The figure title; default a title naming the quantity.
+    save_path : str, optional
+        If set, the figure is saved there (PNG, dpi 150, tight bounding box)
+        and the path printed; the field ``{figure}`` in it is replaced by
+        ``quantity``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        The figure, or None (with a printed note) when no run has the
+        quantity: a speedup or efficiency needs a finite map reduce window
+        (the tasks' ``start_unixtime`` and the ``compute_end_unixtime``
+        anchor), the throughput the ``n_channels`` column.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``quantity``, ``scaling``, ``time_unit`` or
+        ``x_tick_labels``, a ``source`` that is not a sequence of runs, a
+        per-run argument without one entry per run, or a run without a
+        recorded ``n_hosts`` when ``x`` is not given or for the throughput.
+    """
+    if quantity not in _SCALING_TITLES:
+        raise ValueError(
+            f"quantity must be one of {list(_SCALING_TITLES)}; got {quantity!r}."
+        )
+    if time_unit not in _TIME_UNIT_SECONDS:
+        raise ValueError(
+            f"time_unit must be one of {list(_TIME_UNIT_SECONDS)}; got {time_unit!r}."
+        )
+    if x_tick_labels not in ("n_worker_slots", "values"):
+        raise ValueError(
+            "x_tick_labels must be 'n_worker_slots' or 'values'; got "
+            f"{x_tick_labels!r}."
+        )
+    runs, resources, overrides = _runs_and_resources(
+        source, compute_resources, "plot_scaling"
+    )
+    n_runs = len(runs)
+    n_hosts = [_n_hosts(r) for r in resources]
+    if None in n_hosts and quantity == "throughput":
+        raise ValueError(
+            "plot_scaling: the node-hours need the n_hosts of every run's "
+            "compute resources; pass compute_resources."
+        )
+    if None in n_hosts and x is None:
+        raise ValueError(
+            "plot_scaling: x defaults to the n_hosts of every run's compute "
+            "resources, which not every run records; pass x or compute_resources."
+        )
+    x_values = n_hosts if x is None else _aligned_with_runs(x, n_runs, "x")
+    x_plot = np.asarray(x_values, dtype=float)
+    sweep_labels = (
+        ["measured"] * n_runs
+        if sweep_labels is None
+        else _aligned_with_runs(sweep_labels, n_runs, "sweep_labels")
+    )
+    sweeps = {}
+    for i, label in enumerate(sweep_labels):
+        sweeps.setdefault(label, []).append(i)
+    frames = []
+    for index in sweeps.values():
+        measures = performance_measures(
+            [runs[i] for i in index],
+            None if overrides is None else [overrides[i] for i in index],
+            scaling=scaling,
+            timing_phases=timing_phases,
+            task_columns=task_columns,
+            fixed_non_io_compute=fixed_non_io_compute,
+        )
+        measures.index = index
+        frames.append(measures)
+    measures = pd.concat(frames).sort_index()
+    p = measures["n_worker_slots"].to_numpy(dtype=float)
+    seconds = (
+        measures["T_total"].to_numpy(dtype=float)
+        if total_time is None
+        else np.asarray(
+            _aligned_with_runs(total_time, n_runs, "total_time"), dtype=float
+        )
+    )
+
+    if quantity == "throughput":
+        n_channels = np.full(n_runs, np.nan)
+        for i, run in enumerate(runs):
+            tasks = _as_timing_frame(run)
+            if "n_channels" in tasks.columns:
+                n_channels[i] = float(tasks["n_channels"].sum())
+        throughput = n_channels / seconds
+        node_hours = np.asarray(n_hosts, dtype=float) * seconds / 3600
+        drawn = np.isfinite(throughput) & np.isfinite(node_hours) & np.isfinite(x_plot)
+        if not drawn.any():
+            print(
+                "plot_scaling: no run has the n_channels column and a finite "
+                "total time; no throughput figure."
+            )
+            return None
+        figure, (ax_throughput, ax_cost) = _performance_figure(
+            (9, 10), 2, 1, sharex=True, gridspec_kw={"hspace": 0.06}
+        )
+        for sweep, index in sweeps.items():
+            index = [i for i in index if drawn[i]]
+            if not index:
+                continue
+            if len(sweeps) == 1:
+                ax_throughput.plot(x_plot[index], throughput[index], marker="o")
+                ax_cost.plot(
+                    x_plot[index], node_hours[index], marker="o", color="tab:orange"
+                )
+            else:
+                (line,) = ax_throughput.plot(
+                    x_plot[index], throughput[index], marker="o", label=sweep
+                )
+                ax_cost.plot(
+                    x_plot[index],
+                    node_hours[index],
+                    marker="o",
+                    color=line.get_color(),
+                    label=sweep,
+                )
+        ax_throughput.set_ylabel("Throughput (channels / s)")
+        ax_throughput.set_ylim(bottom=0)
+        ax_throughput.set_title(title or _SCALING_TITLES[quantity])
+        if len(sweeps) > 1:
+            ax_throughput.legend()
+        ax_cost.set_ylabel("Cost of the run (node-hours)")
+        ax_cost.set_ylim(bottom=0)
+        for ax in (ax_throughput, ax_cost):
+            ax.grid(True, color="lightgray")
+        ax = ax_cost
+    elif quantity == "total_time":
+        shift = (
+            measures["fixed_compute_shift"].to_numpy(dtype=float)
+            if fixed_non_io_compute is not None
+            else 0.0
+        )
+        y = (seconds - shift) / _TIME_UNIT_SECONDS[time_unit]
+        drawn = np.isfinite(y) & np.isfinite(x_plot)
+        if not drawn.any():
+            print("plot_scaling: no run has a finite total time; no figure.")
+            return None
+        figure, ax = _performance_figure((8, 8))
+        for sweep, index in sweeps.items():
+            index = [i for i in index if drawn[i]]
+            if index:
+                ax.plot(x_plot[index], y[index], marker="o", label=sweep)
+        for reference in reference_points or ():
+            reference_x = np.asarray(reference["x"], dtype=float)
+            ax.plot(
+                reference_x,
+                np.asarray(reference["total_time"], dtype=float)
+                / _TIME_UNIT_SECONDS[time_unit],
+                marker="X",
+                markersize=10,
+                linestyle="--" if len(reference_x) > 1 else "none",
+                label=reference["label"],
+            )
+        ax.set_ylabel(f"Total Time ({time_unit})")
+        if scaling == "weak":
+            ax.set_ylim(bottom=0)
+    else:
+        measure = "speedup" if quantity.startswith("speedup") else "parallel_efficiency"
+        relative = quantity.endswith("_relative")
+        keys = {
+            window: f"{measure}_{window}" + ("_relative" if relative else "")
+            for window in _WINDOW_NAMES
+        }
+        values = {
+            window: measures[key].to_numpy(dtype=float) for window, key in keys.items()
+        }
+        usable = np.isfinite(measures["map_reduce_window"].to_numpy(dtype=float))
+        usable &= np.isfinite(x_plot)
+        if not usable.any():
+            print(
+                "plot_scaling: no run has a finite map reduce window (tasks "
+                "with start_unixtime and the compute_end_unixtime anchor); "
+                f"no {quantity} figure."
+            )
+            return None
+        figure, ax = _performance_figure((8, 8))
+        if len(sweeps) == 1:
+            labels = (
+                _WEAK_RELATIVE_LABELS
+                if scaling == "weak" and relative
+                else _MEASURE_LABELS
+            )
+            for window, key in keys.items():
+                ax.plot(
+                    x_plot[usable],
+                    values[window][usable],
+                    label=labels[key],
+                    **_WINDOW_STYLES[window],
+                )
+        else:
+            for sweep, index in sweeps.items():
+                index = [i for i in index if usable[i]]
+                if not index:
+                    continue
+                (line,) = ax.plot(
+                    x_plot[index],
+                    values["map_reduce"][index],
+                    marker=_WINDOW_STYLES["map_reduce"]["marker"],
+                    label=f"{sweep}, {_WINDOW_NAMES['map_reduce']} "
+                    f"({_MEASURE_SYMBOLS[keys['map_reduce']]})",
+                )
+                ax.plot(
+                    x_plot[index],
+                    values["end_to_end"][index],
+                    marker=_WINDOW_STYLES["end_to_end"]["marker"],
+                    linestyle="--",
+                    color=line.get_color(),
+                    label=f"{sweep}, {_WINDOW_NAMES['end_to_end']} "
+                    f"({_MEASURE_SYMBOLS[keys['end_to_end']]})",
+                )
+        plotted = np.concatenate([values[window][usable] for window in keys])
+        if measure == "speedup":
+            ideal = sorted(set(zip(x_plot[usable], p[usable], strict=True)))
+            ax.plot(
+                [value for value, _ in ideal],
+                [slots for _, slots in ideal],
+                label=r"ideal ($S = p$)",
+                **_IDEAL_LINE,
+            )
+            if scaling == "weak":
+                plotted = np.concatenate([plotted, p[usable]])
+                ax.set_ylim(0.95 * np.nanmin(plotted), 1.02 * np.nanmax(plotted))
+            ax.set_ylabel("Speedup (worker units)")
+            hosts = [n_hosts[i] for i in np.flatnonzero(usable)]
+            if None not in hosts:
+                _node_units_axis(ax, p[usable], hosts)
+        else:
+            ax.axhline(1.0, label=r"ideal ($E = 1$)", **_IDEAL_LINE)
+            ax.set_ylim(
+                min(0.75, 0.95 * np.nanmin(plotted)),
+                max(1.02, 1.02 * np.nanmax(plotted)),
+            )
+            ax.set_ylabel("Parallel Efficiency")
+
+    ax.set_xlabel(x_label)
+    if x_tick_labels == "n_worker_slots":
+        _parallelism_ticks(ax, x_values, p, x_label)
+    else:
+        _value_ticks(ax, sorted(set(x_values)), x_label)
+    if quantity != "throughput":
+        ax.set_title(title or _SCALING_TITLES[quantity])
+        ax.grid(True, color="lightgray")
+        ax.legend()
+        ax.set_aspect(1.0 / ax.get_data_ratio())
+    _add_notes(figure, notes)
+    _save_figures({quantity: figure}, save_path)
+    return figure
+
+
+def plot_efficiency_loss_decomposition(
+    source,
+    compute_resources=None,
+    breakdown="losses",
+    timing_phases=None,
+    task_columns=None,
+    notes=None,
+    title=None,
+    save_path=None,
+):
+    """Stacked bars of where the wall clock of every run of a distributed
+    application goes.
+
+    ``breakdown="losses"`` splits each run's ``T_total`` into the useful work
+    (the map work over the worker slots, ``work_map / n_worker_slots``) and
+    the loss sources of :func:`performance_measures`: the idle worker time
+    during the ramp (until 95 % of the slots are busy), inside the window and
+    in the straggler tail (after 95 % of the map tasks ended), the time before
+    the first map task (``pre_map``) and after the last one (``post_map``)
+    inside the compute call, and the fixed costs outside it (``T_total -
+    T_compute_dask_graph``). Useful work and idle time make up the map window
+    exactly. A second panel shows the losses as a percentage of ``T_total``.
+
+    ``breakdown="driver_steps"`` stacks the application's own driver steps
+    outside the compute call (the steps of ``timing_phases`` except
+    ``T_compute_dask_graph``, recorded in
+    ``return_dict["timing_distributed_application"]``), largest mean at the
+    bottom; the stack is the fixed costs of the losses breakdown.
+
+    Parameters
+    ----------
+    source : sequence of dict
+        The return dicts of the runs, one bar per run in input order.
+    compute_resources : sequence of dict, optional
+        One entry per run replacing its recorded
+        ``return_dict["compute_resources"]``; None entries keep the recorded
+        ones. The bars are labelled with each run's ``n_hosts`` and
+        ``n_worker_slots``.
+    breakdown : str, optional
+        ``"losses"`` (default) or ``"driver_steps"``.
+    timing_phases : list of tuple, optional
+        The application's ``DISTRIBUTED_APPLICATION_TIMING_PHASES``; needed
+        for ``"driver_steps"``.
+    task_columns : dict, optional
+        The node task timing columns, as for :func:`plot_task_stream`.
+    notes : str or sequence of str, optional
+        Notes written along the bottom of the figure.
+    title : str, optional
+        The figure title; default a title naming the breakdown.
+    save_path : str, optional
+        If set, the figure is saved there (PNG, dpi 150, tight bounding box)
+        and the path printed; the field ``{figure}`` in it is replaced by
+        ``breakdown``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        The figure, or None (with a printed note) when no run can be drawn:
+        the losses need the tasks' ``start_unixtime``, the driver steps a
+        recorded step.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``breakdown``, ``"driver_steps"`` without
+        ``timing_phases``, a ``source`` that is not a sequence of runs, a
+        ``compute_resources`` without one entry per run, or a run without a
+        recorded ``n_hosts``.
+    """
+    if breakdown not in ("losses", "driver_steps"):
+        raise ValueError(
+            f"breakdown must be 'losses' or 'driver_steps'; got {breakdown!r}."
+        )
+    if breakdown == "driver_steps" and timing_phases is None:
+        raise ValueError(
+            "breakdown='driver_steps' needs the application's timing_phases."
+        )
+    runs, resources, overrides = _runs_and_resources(
+        source, compute_resources, "plot_efficiency_loss_decomposition"
+    )
+    n_hosts = [_n_hosts(r) for r in resources]
+    if None in n_hosts:
+        raise ValueError(
+            "plot_efficiency_loss_decomposition: not every run records n_hosts "
+            "in its compute resources; pass compute_resources."
+        )
+
+    if breakdown == "losses":
+        measures = performance_measures(
+            runs,
+            overrides,
+            timing_phases=timing_phases,
+            task_columns=task_columns,
+        )
+        drawn = []
+        for i in range(len(runs)):
+            if np.isfinite(measures.at[i, "task_window"]):
+                drawn.append(i)
+            else:
+                print(
+                    f"plot_efficiency_loss_decomposition: skipping run {i} "
+                    f"({n_hosts[i]} hosts): no start_unixtime anchor."
+                )
+        if not drawn:
+            print("plot_efficiency_loss_decomposition: nothing to plot.")
+            return None
+        m = measures.loc[drawn]
+        parts = [
+            (m["work_map"] / m["n_worker_slots"]).to_numpy(dtype=float),
+            *(
+                m[key].to_numpy(dtype=float)
+                for key in (
+                    "idle_ramp",
+                    "idle_in_window",
+                    "idle_tail",
+                    "pre_map",
+                    "post_map",
+                    "fixed_costs",
+                )
+            ),
+        ]
+        labels = [
+            _scale_point_label(n_hosts[i], measures.at[i, "n_worker_slots"])
+            for i in drawn
+        ]
+        x = np.arange(len(drawn))
+        figure, (ax_time, ax_percent) = _performance_figure(
+            (11, 10), 2, 1, sharex=True, gridspec_kw={"hspace": 0.06}
+        )
+        bottom = np.zeros(len(drawn))
+        for (name, color), seconds in zip(_LOSS_PARTS, parts, strict=True):
+            ax_time.bar(
+                x, seconds / 3600, bottom=bottom / 3600, color=color, label=name
+            )
+            bottom += seconds
+        ax_time.set_ylabel("Wall-clock time (hours)")
+        ax_time.set_title(
+            title
+            or "Where the Wall Clock Goes: T_total split into useful work and "
+            "loss sources"
+        )
+        ax_time.legend(fontsize=8)
+        total = m["T_total"].to_numpy(dtype=float)
+        bottom = np.zeros(len(drawn))
+        for (name, color), seconds in zip(_LOSS_PARTS[1:], parts[1:], strict=True):
+            percent = 100 * seconds / total
+            ax_percent.bar(x, percent, bottom=bottom, color=color, label=name)
+            bottom += percent
+        ax_percent.set_ylabel("Losses (% of T_total; useful work excluded)")
+        axes = (ax_time, ax_percent)
+    else:
+        from matplotlib import colormaps
+
+        keys = [
+            key
+            for _, _, steps in timing_phases
+            for _, key in steps
+            if key != "T_compute_dask_graph"
+        ]
+        timings = [run.get("timing_distributed_application") or {} for run in runs]
+        values = np.array(
+            [
+                [np.nan if t.get(key) is None else float(t[key]) for t in timings]
+                for key in keys
+            ]
+        ).reshape(len(keys), len(runs))
+        recorded = [k for k in range(len(keys)) if np.isfinite(values[k]).any()]
+        if not recorded:
+            print(
+                "plot_efficiency_loss_decomposition: no run records a driver "
+                "step of timing_phases; nothing to plot."
+            )
+            return None
+        recorded.sort(key=lambda k: -np.nanmean(values[k]))
+        labels = [
+            _scale_point_label(n_hosts[i], resources[i].get("n_worker_slots"))
+            for i in range(len(runs))
+        ]
+        x = np.arange(len(runs))
+        figure, ax_steps = _performance_figure((11, 7))
+        tab20 = colormaps["tab20"]
+        bottom = np.zeros(len(runs))
+        for i, k in enumerate(recorded):
+            seconds = np.nan_to_num(values[k])
+            ax_steps.bar(x, seconds, bottom=bottom, color=tab20(i % 20), label=keys[k])
+            bottom += seconds
+        ax_steps.set_ylabel("Time (s)")
+        ax_steps.set_title(
+            title
+            or "Distributed-Application Fixed Costs per Scale Point "
+            "(compute call excluded)"
+        )
+        ax_steps.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.0, 0.5))
+        axes = (ax_steps,)
+    axes[-1].set_xticks(x, labels)
+    axes[-1].set_xlabel("Number of Nodes (total parallel workers)")
+    for ax in axes:
+        ax.grid(True, axis="y", color="lightgray")
+        ax.set_axisbelow(True)
+    _add_notes(figure, notes)
+    _save_figures({breakdown: figure}, save_path)
+    return figure

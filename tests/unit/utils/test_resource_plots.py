@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib.colors import to_hex
 
 from astroviper.utils.resource_plots import (
     _add_notes,
@@ -43,6 +44,8 @@ from astroviper.utils.resource_plots import (
     plot_application_task_stream,
     plot_cluster_resource_usage,
     plot_core_resource_usage,
+    plot_efficiency_loss_decomposition,
+    plot_scaling,
     plot_task_resource_usage,
     plot_task_stream,
 )
@@ -733,6 +736,359 @@ def test_performance_measures_refuse():
     source["compute_resources"] = {"parallelism": 2}
     with pytest.raises(ValueError, match="unknown keys"):
         performance_measures(source)
+
+
+# --- plot_scaling and plot_efficiency_loss_decomposition -------------------- #
+
+
+def _scaling_runs():
+    """Three runs of _stream_dict (W = 43 s, map reduce window 25 s, end to
+    end window 35 s, T_total 40 s) on 1, 2 and 4 hosts of two worker slots;
+    the 2-host run is the same run at half speed: every time doubles."""
+    runs = []
+    for n_hosts in (1, 2, 4):
+        run = _stream_dict()
+        run["compute_resources"] = {
+            "n_hosts": n_hosts,
+            "n_workers": 2 * n_hosts,
+            "n_worker_slots": 2 * n_hosts,
+        }
+        run["timing_node_tasks"]["n_channels"] = 3
+        runs.append(run)
+    tasks = runs[1]["timing_node_tasks"]
+    for column in ("T_image_cube_task", "T_make_empty_image", "T_load", "T_write"):
+        tasks[column] *= 2
+    tasks["start_unixtime"] = 1000.0 + 2 * (tasks["start_unixtime"] - 1000.0)
+    for reduce_node in runs[1]["timing_reduce_nodes"]:
+        for key in ("start_unixtime", "end_unixtime"):
+            reduce_node[key] = 1000.0 + 2 * (reduce_node[key] - 1000.0)
+    timing = runs[1]["timing_distributed_application"]
+    for key, value in timing.items():
+        timing[key] = 1000.0 + 2 * (value - 1000.0) if "unixtime" in key else 2 * value
+    return runs
+
+
+def _line_data(ax):
+    """``{label: xy}`` of the lines of ``ax``."""
+    return {line.get_label(): line.get_xydata() for line in ax.get_lines()}
+
+
+def _bar_data(ax):
+    """``{label: [(y, height), ...]}`` of the bar groups of ``ax``."""
+    return {
+        bars.get_label(): [(bar.get_y(), bar.get_height()) for bar in bars]
+        for bars in ax.containers
+    }
+
+
+def test_scaling_total_time(tmp_path, capsys):
+    open_figures = plt.get_fignums()
+    runs = _scaling_runs()
+    figure = plot_scaling(
+        runs,
+        "total_time",
+        sweep_labels=["a", "a", "b"],
+        reference_points=[
+            {"label": "CASA", "x": [4], "total_time": [7200.0]},
+            {"label": "two points", "x": [1, 4], "total_time": [3600.0, 1800.0]},
+        ],
+        notes=["occupancy 90 %"],
+        save_path=str(tmp_path / "x_{figure}.png"),
+    )
+    assert plt.get_fignums() == open_figures  # no pyplot figure
+    ax = figure.axes[0]
+    lines = _line_data(ax)
+    np.testing.assert_allclose(lines["a"], [[1, 40 / 3600], [2, 80 / 3600]])
+    np.testing.assert_allclose(lines["b"], [[4, 40 / 3600]])
+    np.testing.assert_allclose(lines["CASA"], [[4, 2.0]])
+    np.testing.assert_allclose(lines["two points"], [[1, 1.0], [4, 0.5]])
+    styles = {line.get_label(): line for line in ax.get_lines()}
+    assert (
+        styles["CASA"].get_marker() == "X" and styles["CASA"].get_linestyle() == "None"
+    )
+    assert styles["two points"].get_linestyle() == "--"
+    assert ax.get_ylabel() == "Total Time (hours)" and ax.get_title() == "Total Time"
+    assert [label.get_text() for label in ax.get_xticklabels()] == [
+        "1\n2",
+        "2\n4",
+        "4\n8",
+    ]
+    assert ax.get_xlabel() == "Number of Nodes (total parallel workers)"
+    assert [text.get_text() for text in figure.texts] == ["occupancy 90 %"]
+    assert (tmp_path / "x_total_time.png").exists()
+    assert "wrote" in capsys.readouterr().out
+    # the harness wall clock, minutes, weak scaling from 0, value ticks
+    figure = plot_scaling(
+        runs[::2],
+        "total_time",
+        x=[3840, 15360],
+        scaling="weak",
+        total_time=[120.0, np.nan],
+        time_unit="minutes",
+        x_label="Number of Channels",
+        x_tick_labels="values",
+    )
+    ax = figure.axes[0]
+    np.testing.assert_allclose(_line_data(ax)["measured"], [[3840, 2.0]])
+    assert ax.get_ylim()[0] == 0
+    assert [label.get_text() for label in ax.get_xticklabels()] == ["3,840", "15,360"]
+    assert ax.get_xlabel() == "Number of Channels"
+
+
+def test_scaling_total_time_with_a_fixed_non_io_compute():
+    runs = _scaling_runs()
+    shift = performance_measures(runs, fixed_non_io_compute=4.0)["fixed_compute_shift"]
+    figure = plot_scaling(
+        runs, "total_time", time_unit="seconds", fixed_non_io_compute=4.0
+    )
+    np.testing.assert_allclose(
+        _line_data(figure.axes[0])["measured"][:, 1], [40.0, 80.0, 40.0] - shift
+    )
+
+
+def test_scaling_speedup_and_efficiency_of_one_sweep():
+    runs = _scaling_runs()
+    measures = performance_measures(runs)
+    figure = plot_scaling(runs, "speedup")
+    ax = figure.axes[0]
+    lines = ax.get_lines()
+    assert [line.get_label() for line in lines] == [
+        r"map reduce: $S^{mr} = W/(t_3-t_1)$",
+        r"end to end: $S^{e2e} = W/(t_3-t_0)$",
+        r"ideal ($S = p$)",
+    ]
+    np.testing.assert_allclose(lines[0].get_ydata(), measures["speedup_map_reduce"])
+    np.testing.assert_allclose(lines[1].get_ydata(), measures["speedup_end_to_end"])
+    np.testing.assert_allclose(lines[2].get_xydata(), [[1, 2], [2, 4], [4, 8]])
+    assert [line.get_color() for line in lines] == ["C0", "C1", "black"]
+    assert ax.get_ylabel() == "Speedup (worker units)"
+    assert ax.child_axes[0].get_ylabel() == "Speedup (node units, 2 workers/node)"
+    figure = plot_scaling(runs, "parallel_efficiency_relative")
+    ax = figure.axes[0]
+    lines = ax.get_lines()
+    np.testing.assert_allclose(lines[0].get_ydata(), [1.0, 0.25, 0.25])
+    np.testing.assert_allclose(lines[2].get_xydata(), [[0, 1], [1, 1]])
+    assert lines[2].get_label() == r"ideal ($E = 1$)"
+    assert ax.get_ylim() == pytest.approx((min(0.75, 0.95 * 0.25), 1.02))
+    assert ax.get_title() == "Parallel efficiency: relative (baseline-normalized)"
+
+
+def test_scaling_weak_and_several_sweeps():
+    runs = _scaling_runs()
+    figure = plot_scaling(
+        runs,
+        "speedup_relative",
+        x=[10, 20, 30],
+        scaling="weak",
+        x_tick_labels="values",
+    )
+    ax = figure.axes[0]
+    lines = ax.get_lines()
+    assert lines[0].get_label().startswith(r"map reduce: $S^{mr,rel} = p_0\,(W/W_0)")
+    weak = performance_measures(runs, scaling="weak")["speedup_map_reduce_relative"]
+    np.testing.assert_allclose(lines[0].get_ydata(), weak)
+    plotted = [*weak, *lines[1].get_ydata(), 2, 4, 8]
+    assert ax.get_ylim() == pytest.approx((0.95 * min(plotted), 1.02 * max(plotted)))
+    figure = plot_scaling(runs, "speedup_relative", sweep_labels=["a", "b", "a"])
+    ax = figure.axes[0]
+    lines = {line.get_label(): line for line in ax.get_lines()}
+    assert list(lines) == [
+        r"a, map reduce ($S^{mr,rel}$)",
+        r"a, end to end ($S^{e2e,rel}$)",
+        r"b, map reduce ($S^{mr,rel}$)",
+        r"b, end to end ($S^{e2e,rel}$)",
+        r"ideal ($S = p$)",
+    ]
+    # relative to each sweep's own baseline
+    np.testing.assert_allclose(lines[r"a, map reduce ($S^{mr,rel}$)"].get_ydata(), 2.0)
+    np.testing.assert_allclose(lines[r"b, map reduce ($S^{mr,rel}$)"].get_ydata(), 4.0)
+    color = {label: to_hex(line.get_color()) for label, line in lines.items()}
+    assert color[r"a, map reduce ($S^{mr,rel}$)"] == to_hex("C0")
+    assert color[r"a, end to end ($S^{e2e,rel}$)"] == to_hex("C0")
+    assert lines[r"a, end to end ($S^{e2e,rel}$)"].get_linestyle() == "--"
+    assert color[r"b, map reduce ($S^{mr,rel}$)"] == to_hex("C1")
+    assert lines[r"b, end to end ($S^{e2e,rel}$)"].get_marker() == "s"
+
+
+def test_scaling_skips_unusable_runs(capsys):
+    runs = _scaling_runs()
+    del runs[2]["timing_distributed_application"]["compute_end_unixtime"]
+    figure = plot_scaling(runs, "parallel_efficiency")
+    lines = figure.axes[0].get_lines()
+    np.testing.assert_allclose(lines[0].get_xdata(), [1, 2])
+    # the ticks name every run
+    assert len(figure.axes[0].get_xticklabels()) == 3
+    for run in runs:
+        run["timing_node_tasks"] = run["timing_node_tasks"].drop(
+            columns="start_unixtime"
+        )
+    assert plot_scaling(runs, "speedup") is None
+    assert "no run has a finite map reduce window" in capsys.readouterr().out
+    for run in runs:
+        run["timing_distributed_application"]["T_total"] = np.nan
+    assert plot_scaling(runs, "total_time") is None
+    assert "no run has a finite total time" in capsys.readouterr().out
+
+
+def test_scaling_throughput(capsys):
+    open_figures = plt.get_fignums()
+    runs = _scaling_runs()
+    figure = plot_scaling(runs, "throughput", total_time=[100.0, 50.0, 25.0])
+    assert plt.get_fignums() == open_figures
+    ax_throughput, ax_cost = figure.axes
+    np.testing.assert_allclose(
+        ax_throughput.get_lines()[0].get_xydata(), [[1, 0.12], [2, 0.24], [4, 0.48]]
+    )
+    np.testing.assert_allclose(
+        ax_cost.get_lines()[0].get_xydata(),
+        [[1, 100 / 3600], [2, 100 / 3600], [4, 100 / 3600]],
+    )
+    assert ax_cost.get_lines()[0].get_color() == "tab:orange"
+    assert ax_throughput.get_ylim()[0] == 0 and ax_cost.get_ylim()[0] == 0
+    assert ax_throughput.get_title() == "Delivered Throughput and Allocation Cost"
+    figure = plot_scaling(runs, "throughput", sweep_labels=["a", "b", "b"])
+    ax_throughput, ax_cost = figure.axes
+    assert list(_line_data(ax_throughput)) == ["a", "b"]
+    np.testing.assert_allclose(
+        _line_data(ax_cost)["b"], [[2, 160 / 3600], [4, 160 / 3600]]
+    )
+    for run in runs:
+        run["timing_node_tasks"] = run["timing_node_tasks"].drop(columns="n_channels")
+    assert plot_scaling(runs, "throughput") is None
+    assert "no run has the n_channels column" in capsys.readouterr().out
+
+
+def test_scaling_refuses():
+    runs = _scaling_runs()
+    with pytest.raises(ValueError, match="quantity must be one of"):
+        plot_scaling(runs, "speedup_task_sum")
+    with pytest.raises(ValueError, match="time_unit"):
+        plot_scaling(runs, "total_time", time_unit="days")
+    with pytest.raises(ValueError, match="x_tick_labels"):
+        plot_scaling(runs, "total_time", x_tick_labels="parallelism")
+    with pytest.raises(ValueError, match="sequence of return dicts"):
+        plot_scaling(runs[0], "total_time")
+    with pytest.raises(ValueError, match="holds no run"):
+        plot_scaling([], "total_time")
+    with pytest.raises(ValueError, match="x must be a sequence with one entry"):
+        plot_scaling(runs, "total_time", x=[1, 2])
+    with pytest.raises(ValueError, match="compute_resources must be a sequence"):
+        plot_scaling(runs, "total_time", compute_resources={"n_hosts": 1})
+    with pytest.raises(ValueError, match="scaling"):
+        plot_scaling(runs, "speedup", scaling="linear")
+    no_hosts = [None, None, {"n_worker_slots": 8}]
+    with pytest.raises(ValueError, match="x defaults to the n_hosts"):
+        plot_scaling(runs, "speedup", compute_resources=no_hosts)
+    with pytest.raises(ValueError, match="the node-hours need the n_hosts"):
+        plot_scaling(runs, "throughput", x=[1, 2, 3], compute_resources=no_hosts)
+    # with x given the speedup needs no host count; no node-units axis then
+    figure = plot_scaling(runs, "speedup", x=[1, 2, 3], compute_resources=no_hosts)
+    assert not figure.axes[0].child_axes
+    np.testing.assert_allclose(figure.axes[0].get_lines()[2].get_ydata(), [2, 4, 8])
+
+
+def test_efficiency_loss_decomposition_losses(tmp_path, capsys):
+    open_figures = plt.get_fignums()
+    runs = _scaling_runs()
+    del runs[2]["timing_node_tasks"]["start_unixtime"]
+    figure = plot_efficiency_loss_decomposition(
+        runs, notes="occupancy", save_path=str(tmp_path / "loss.png")
+    )
+    assert plt.get_fignums() == open_figures
+    assert "skipping run 2 (4 hosts): no start_unixtime anchor" in (
+        capsys.readouterr().out
+    )
+    assert (tmp_path / "loss.png").exists()
+    ax_time, ax_percent = figure.axes
+    measures = performance_measures(runs[:2])
+    parts = {
+        "useful work": measures["work_map"] / measures["n_worker_slots"],
+        "ramp": measures["idle_ramp"],
+        "in-window gaps": measures["idle_in_window"],
+        "straggler tail": measures["idle_tail"],
+        "pre-map": measures["pre_map"],
+        "post-map": measures["post_map"],
+        "fixed costs": measures["fixed_costs"],
+    }
+    bars = _bar_data(ax_time)
+    assert list(bars) == list(parts)
+    bottom = np.zeros(2)
+    for name, seconds in parts.items():
+        np.testing.assert_allclose(bars[name], np.c_[bottom / 3600, seconds / 3600])
+        bottom += seconds
+    np.testing.assert_allclose(bottom, measures["T_total"])  # the parts are T_total
+    # useful work and idle time make up the task window
+    np.testing.assert_allclose(
+        sum(np.asarray(parts[name]) for name in list(parts)[:4]),
+        measures["task_window"],
+    )
+    percent = _bar_data(ax_percent)
+    assert list(percent) == list(parts)[1:]
+    np.testing.assert_allclose(
+        np.array(percent["fixed costs"])[:, 1], 100 * np.array([10.0, 20.0]) / [40, 80]
+    )
+    assert [label.get_text() for label in ax_percent.get_xticklabels()] == [
+        "1\n2",
+        "2\n4",
+    ]
+    assert ax_percent.get_xlabel() == "Number of Nodes (total parallel workers)"
+    assert ax_time.get_title().startswith("Where the Wall Clock Goes")
+    for run in runs[:2]:
+        del run["timing_node_tasks"]["start_unixtime"]
+    assert plot_efficiency_loss_decomposition(runs) is None
+    assert "nothing to plot" in capsys.readouterr().out
+
+
+def test_efficiency_loss_decomposition_driver_steps(capsys):
+    runs = _scaling_runs()
+    del runs[2]["timing_distributed_application"]["T_graph"]
+    runs[2]["timing_distributed_application"]["T_ideal"] = 21.5
+    phases = [
+        (*DRIVER_PHASES[0][:2], [*DRIVER_PHASES[0][2], ("never", "T_never")]),
+    ]
+    figure = plot_efficiency_loss_decomposition(
+        runs,
+        compute_resources=[None, None, {"n_hosts": 4}],
+        breakdown="driver_steps",
+        timing_phases=phases,
+    )
+    ax = figure.axes[0]
+    bars = _bar_data(ax)
+    # largest mean at the bottom; no compute call, no T_ideal, no unrecorded step
+    assert list(bars) == ["T_graph", "T_open", "T_consolidate_metadata"]
+    np.testing.assert_allclose(bars["T_graph"], [[0, 3], [0, 6], [0, 0]])
+    np.testing.assert_allclose(bars["T_open"], [[3, 2], [6, 4], [0, 2]])
+    np.testing.assert_allclose(
+        bars["T_consolidate_metadata"], [[5, 1], [10, 2], [2, 1]]
+    )
+    assert [label.get_text() for label in ax.get_xticklabels()] == [
+        "1\n2",
+        "2\n4",
+        "4",
+    ]
+    assert ax.get_ylabel() == "Time (s)"
+    assert ax.get_title().startswith("Distributed-Application Fixed Costs")
+    for run in runs:
+        run["timing_distributed_application"] = {}
+    assert (
+        plot_efficiency_loss_decomposition(
+            runs, breakdown="driver_steps", timing_phases=phases
+        )
+        is None
+    )
+    assert "no run records a driver step" in capsys.readouterr().out
+
+
+def test_efficiency_loss_decomposition_refuses():
+    runs = _scaling_runs()
+    with pytest.raises(ValueError, match="breakdown must be"):
+        plot_efficiency_loss_decomposition(runs, breakdown="phases")
+    with pytest.raises(ValueError, match="needs the application's timing_phases"):
+        plot_efficiency_loss_decomposition(runs, breakdown="driver_steps")
+    with pytest.raises(ValueError, match="not every run records n_hosts"):
+        plot_efficiency_loss_decomposition(
+            runs, compute_resources=[{"n_worker_slots": 2}, None, None]
+        )
 
 
 # --- shared helpers ---------------------------------------------------------- #
