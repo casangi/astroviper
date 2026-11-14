@@ -220,6 +220,69 @@ CASA_RESULTS = {
         8,
     ),
 }
+# Cubes of findContinuum's paths without rounds (time-division mode), with an
+# extra joint mask after round original and with the low-spread fix, with
+# CASA's results as in CASA_RESULTS.
+NATIVE_CASES = {
+    "tdm": (
+        dict(
+            lines=LINE_SET[:1],
+            n_channels=120,
+            channel_width=15.625e6,
+            beam_fwhm_arcsec=0.3,
+            cell_arcsec=0.06,
+        ),
+        "3~106",
+        False,
+        0.0,
+    ),
+    "only_extra_mask": (
+        dict(
+            n_pixels=96,
+            lines=(
+                dict(COMPACT_LINE, sidelobe_fraction=0.1),
+                dict(
+                    channel=300,
+                    fwhm_channels=20,
+                    peak_jy=6e-3,
+                    offset_pixels=(22, -18),
+                    size_fwhm_pixels=24,
+                ),
+            ),
+        ),
+        "7~95;172~260;325~473",
+        False,
+        4.8890,
+    ),
+    "eight_channels": (
+        dict(
+            n_channels=8,
+            lines=(
+                dict(
+                    channel=4,
+                    fwhm_channels=1.5,
+                    peak_jy=0.04,
+                    offset_pixels=(0, 0),
+                    size_fwhm_pixels=6,
+                ),
+            ),
+        ),
+        "1~1;6~7",
+        False,
+        4.1222,
+    ),
+}
+# The passes of find_continuum_ultra that read the dirty cube, without a
+# first-round store and with the imager's (design section 14.3 item 5).
+NATIVE_RESIDUAL_READS = {
+    "no_lines": (3, 2),
+    "line_set": (3, 2),
+    "small_beam": (3, 2),
+    "sidelobes": (5, 4),
+    "tdm": (2, 1),
+    "only_extra_mask": (5, 4),
+    "eight_channels": (4, 3),
+}
 
 
 def graphviper_tree(leaves, merge):

@@ -11,6 +11,9 @@ from astroviper.processing_functions.imaging.config_check import (
     check_find_continuum_first_round,
     check_find_continuum_first_round_store,
     check_find_continuum_inputs,
+    check_find_continuum_ultra_config,
+    check_find_continuum_ultra_inputs,
+    check_find_continuum_ultra_task_config,
     check_find_continuum_ultra_task_memory,
 )
 from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
@@ -294,3 +297,211 @@ def test_one_atmospheric_value_per_channel(img_xds, which):
         check_find_continuum_inputs(
             img_xds, "residual", spectra["transmission"], spectra["sky_temperature"]
         )
+
+
+ULTRA_CONFIG = dict(
+    n_bin=1,
+    spectral_dynamic_range_bandwidth=None,
+    telescope_name="ALMA",
+    single_continuum=False,
+    primary_beam_limit=0.2,
+    first_round_store=None,
+    n_mapping_parallelism=None,
+    thread_info=None,
+    memory_budget_gb=None,
+    monitor_resources_seconds=None,
+)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        dict(
+            n_bin=3,
+            spectral_dynamic_range_bandwidth=1.875e9,
+            telescope_name="VLA",
+            single_continuum=True,
+            primary_beam_limit=0.5,
+            first_round_store="cube_find_continuum_first_round.zarr",
+            n_mapping_parallelism={"frequency": 4},
+            thread_info={"n_threads": 24, "memory_per_thread": 20.0, "other": 1},
+            memory_budget_gb=12,
+            monitor_resources_seconds=0.5,
+        ),
+    ],
+)
+def test_valid_ultra_config(changes):
+    check_find_continuum_ultra_config(**{**ULTRA_CONFIG, **changes})
+
+
+@pytest.mark.parametrize(
+    "changes, error, match",
+    [
+        (dict(n_bin=0), ValueError, "n_bin"),
+        (dict(n_bin=1.0), TypeError, "n_bin"),
+        (dict(spectral_dynamic_range_bandwidth=0.0), ValueError, "positive"),
+        (dict(spectral_dynamic_range_bandwidth=np.inf), ValueError, "finite"),
+        (dict(spectral_dynamic_range_bandwidth="1GHz"), TypeError, "real"),
+        (dict(telescope_name="alma"), ValueError, r"\('ALMA', 'VLA'\), not 'alma'"),
+        (dict(single_continuum=1), TypeError, "bool"),
+        (dict(primary_beam_limit=0.0), ValueError, r"\(0, 1\)"),
+        (dict(primary_beam_limit=1.0), ValueError, r"\(0, 1\)"),
+        (dict(primary_beam_limit=None), TypeError, "real"),
+        (dict(first_round_store=1), TypeError, "first_round_store"),
+        (dict(n_mapping_parallelism={"time": 2}), ValueError, "frequency"),
+        (dict(n_mapping_parallelism={"frequency": 0}), ValueError, ">= 1"),
+        (dict(thread_info=[24, 20.0]), TypeError, "mapping"),
+        (dict(thread_info={"memory_per_thread": 20.0}), TypeError, "n_threads"),
+        (
+            dict(thread_info={"n_threads": 0, "memory_per_thread": 20.0}),
+            ValueError,
+            ">= 1",
+        ),
+        (
+            dict(thread_info={"n_threads": 4, "memory_per_thread": 0.0}),
+            ValueError,
+            "positive",
+        ),
+        (dict(memory_budget_gb=-1.0), ValueError, "memory_budget_gb"),
+        (dict(monitor_resources_seconds=np.nan), ValueError, "finite"),
+    ],
+)
+def test_invalid_ultra_config(changes, error, match):
+    with pytest.raises(error, match=match):
+        check_find_continuum_ultra_config(**{**ULTRA_CONFIG, **changes})
+
+
+def test_ultra_task_config():
+    check_find_continuum_ultra_task_config(4, 0, [3, 45])
+    check_find_continuum_ultra_task_config(1, 1, (0, 1))
+    for arguments, error in (
+        ((0, 0, [3, 45]), ValueError),
+        ((4.0, 0, [3, 45]), TypeError),
+        ((4, -1, [3, 45]), ValueError),
+        ((4, 0, [3]), ValueError),
+        ((4, 0, [3, 3]), ValueError),
+        ((4, 0, [3.0, 45]), TypeError),
+    ):
+        with pytest.raises(error):
+            check_find_continuum_ultra_task_config(*arguments)
+
+
+@pytest.fixture
+def window_xds():
+    return make_find_continuum_image_xds(n_pixels=8, n_channels=12)
+
+
+def _ultra_inputs(img_xds, channel_range=None, n_channels=12, **spectra):
+    return check_find_continuum_ultra_inputs(
+        img_xds,
+        "residual",
+        channel_range,
+        spectra.get("transmission", np.full(n_channels, 0.9)),
+        spectra.get("sky_temperature", [20.0] * n_channels),
+    )
+
+
+def test_valid_ultra_inputs(window_xds):
+    assert _ultra_inputs(window_xds) == [0, 12]
+    assert _ultra_inputs(window_xds, [2, 10], n_channels=8) == [2, 10]
+    residual = window_xds.attrs["data_groups"]["residual"]
+    roles = ("sky", "primary_beam", "beam_fit_params_point_spread_function")
+    modify_data_groups_xds(
+        window_xds, "beams", {role: residual[role] for role in roles}, "PSF beams"
+    )
+    check_find_continuum_ultra_inputs(
+        window_xds, "beams", None, np.ones(12), np.ones(12)
+    )
+
+
+def _without_rest_frequency(img_xds):
+    frequency = img_xds.frequency.copy()
+    frequency.attrs = {
+        key: value for key, value in frequency.attrs.items() if key != "rest_frequency"
+    }
+    return img_xds.assign_coords(frequency=frequency)
+
+
+def _with_beam(img_xds, value):
+    beams = img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].values.copy()
+    beams[0, 3, 0, 1] = value
+    return img_xds.assign(
+        BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION=img_xds[
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+        ].copy(data=beams)
+    )
+
+
+@pytest.mark.parametrize(
+    "change, arguments, error, match",
+    [
+        (
+            lambda xds: xds,
+            dict(channel_range=[0, 7], n_channels=7),
+            ValueError,
+            "at least 8",
+        ),
+        (lambda xds: xds, dict(channel_range=[0, 13]), ValueError, "outside"),
+        (
+            lambda xds: xds.isel(frequency=slice(None, None, -1)),
+            {},
+            ValueError,
+            "must increase",
+        ),
+        (
+            lambda xds: xds.assign(
+                SKY_RESIDUAL=xds.SKY_RESIDUAL.transpose(
+                    "time", "frequency", "polarization", "m", "l"
+                )
+            ),
+            {},
+            ValueError,
+            "dimensions",
+        ),
+        (lambda xds: xds, dict(n_channels=11), ValueError, "one value per channel"),
+        (
+            lambda xds: xds,
+            dict(transmission=np.r_[np.nan, np.ones(11)]),
+            ValueError,
+            "finite",
+        ),
+        (lambda xds: xds, dict(sky_temperature=np.zeros(12)), ValueError, "no zero"),
+        (
+            lambda xds: xds,
+            dict(transmission=np.array(["a"] * 12)),
+            TypeError,
+            "real",
+        ),
+        (lambda xds: _with_beam(xds, 0.0), {}, ValueError, "beam axes"),
+        (lambda xds: _with_beam(xds, np.nan), {}, ValueError, "beam axes"),
+        (_without_rest_frequency, {}, ValueError, "rest_frequency"),
+        (lambda xds: xds.isel(l=slice(0, 1)), {}, ValueError, "two pixels"),
+        (
+            lambda xds: xds.assign_coords(polarization=["Q"]),
+            {},
+            ValueError,
+            "Stokes I",
+        ),
+    ],
+)
+def test_ultra_inputs_refused(window_xds, change, arguments, error, match):
+    with pytest.raises(error, match=match):
+        _ultra_inputs(change(window_xds), **arguments)
+
+
+def test_ultra_inputs_need_the_roles_and_one_time(window_xds):
+    with pytest.raises(ValueError, match="no data group"):
+        check_find_continuum_ultra_inputs(
+            window_xds, "model", None, np.ones(12), np.ones(12)
+        )
+    modify_data_groups_xds(window_xds, "sky_only", {"sky": "SKY_RESIDUAL"}, "Sky only")
+    with pytest.raises(ValueError, match="lacks the roles"):
+        check_find_continuum_ultra_inputs(
+            window_xds, "sky_only", None, np.ones(12), np.ones(12)
+        )
+    two_times = xr.concat(
+        [window_xds, window_xds.assign_coords(time=[1.0])], dim="time"
+    )
+    with pytest.raises(ValueError, match="one time"):
+        _ultra_inputs(two_times)

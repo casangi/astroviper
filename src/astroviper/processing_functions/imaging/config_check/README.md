@@ -449,6 +449,24 @@ and the length of the atmospheric spectra on the opened image without loading
 pixels. The driver keeps the work-directory check: findContinuum reuses the
 products of an earlier run that it finds there.
 
+`check_find_continuum_ultra_config` checks the configuration of
+`find_continuum_ultra` before the image is opened: `n_bin`, the spectral
+dynamic range bandwidth, the telescope, `single_continuum`, a primary beam
+limit in (0, 1), the first-round store path, the frequency chunking,
+`thread_info`, the memory budget and the monitor interval.
+`check_find_continuum_ultra_inputs` checks the opened cube without loading a
+plane and returns the `[start, stop)` of its spectral window: the data group
+roles, the sky and primary beam on the image dimensions, one time, Stokes I,
+the channel range of `check_find_continuum_channel_range` with at least 8
+channels of increasing frequency, atmospheric spectra of one finite, non-zero
+value per channel, finite positive beam axes of Stokes I in every channel, the
+rest frequency and two pixels along `l` and `m`. The driver of
+`find_continuum_ultra` refuses a run directory that exists instead of reusing
+the products in it.
+`check_find_continuum_ultra_task_config` checks the planes per batch, the
+Stokes I index and the channel range of a `find_continuum_ultra` frequency
+task called without `input_checked`.
+
 `check_find_continuum_first_round` requires the Stokes I plane and a Zarr
 output (FITS is refused) when `image_cube_single_field` makes the first round.
 `check_find_continuum_first_round_store` refuses a first-round store that is

@@ -7,6 +7,7 @@ neither open files nor insert configuration defaults.
 import numpy as np
 
 from astroviper.processing_functions.imaging.config_check._common import (
+    require_boolean,
     require_finite_real,
     require_integer,
     require_mapping,
@@ -21,6 +22,12 @@ FIND_CONTINUUM_ROLES = (
 )
 # Format version of the first-round store made next to the cube.
 FIND_CONTINUUM_FIRST_ROUND_VERSION = 2
+# Telescopes of findContinuum's time-division-mode rules (fC 4449-4463).
+FIND_CONTINUUM_ULTRA_TELESCOPES = ("ALMA", "VLA")
+# Fewest channels of a spectral window: findContinuum's selection needs two
+# baseline channels at 19 % of the window (fC 5092-5102).
+FIND_CONTINUUM_ULTRA_MIN_CHANNELS = 8
+_IMAGE_DIMS = ("time", "frequency", "polarization", "l", "m")
 
 # ========================================================================
 # Supplied configuration, checked before opening the image
@@ -45,6 +52,95 @@ def check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism
         require_finite_real("primary_beam_limit", primary_beam_limit, scalar=True)
         if not 0.0 <= primary_beam_limit < 1.0:
             raise ValueError("primary_beam_limit must be in [0, 1).")
+    _check_frequency_chunks(n_mapping_parallelism)
+
+
+def check_find_continuum_ultra_config(
+    n_bin,
+    spectral_dynamic_range_bandwidth,
+    telescope_name,
+    single_continuum,
+    primary_beam_limit,
+    first_round_store,
+    n_mapping_parallelism,
+    thread_info,
+    memory_budget_gb,
+    monitor_resources_seconds,
+):
+    """Validate the configuration of find_continuum_ultra.
+
+    Parameters
+    ----------
+    n_bin : int
+        Channels averaged in the mean spectrum, at least 1 (findContinuum
+        divides by it, fC 1009).
+    spectral_dynamic_range_bandwidth : float or None
+        Finite and positive (Hz), or ``None``.
+    telescope_name : str
+        One of ``FIND_CONTINUUM_ULTRA_TELESCOPES``.
+    single_continuum : bool
+        Whether the window is a single-continuum setup.
+    primary_beam_limit : float
+        Finite, in ``(0, 1)``: findContinuum's annulus levels need a
+        positive level (fC 9603-9605).
+    first_round_store : str or None
+        Path of a first-round store, or ``None``.
+    n_mapping_parallelism : mapping or None
+        ``{"frequency": n}`` with at least one chunk, or ``None``.
+    thread_info : mapping or None
+        ``n_threads`` (at least 1) and ``memory_per_thread`` (finite and
+        positive, GiB), or ``None``.
+    memory_budget_gb, monitor_resources_seconds : float or None
+        Finite and positive, or ``None``.
+
+    Raises
+    ------
+    TypeError
+        A value of another type.
+    ValueError
+        A value outside its range.
+    """
+    require_integer("n_bin", n_bin, minimum=1)
+    if spectral_dynamic_range_bandwidth is not None:
+        require_finite_real(
+            "spectral_dynamic_range_bandwidth",
+            spectral_dynamic_range_bandwidth,
+            positive=True,
+            scalar=True,
+        )
+    if telescope_name not in FIND_CONTINUUM_ULTRA_TELESCOPES:
+        raise ValueError(
+            f"telescope_name must be one of {FIND_CONTINUUM_ULTRA_TELESCOPES}, not "
+            f"{telescope_name!r}."
+        )
+    require_boolean("single_continuum", single_continuum)
+    require_finite_real("primary_beam_limit", primary_beam_limit, scalar=True)
+    if not 0.0 < primary_beam_limit < 1.0:
+        raise ValueError("primary_beam_limit must be in (0, 1).")
+    if first_round_store is not None and not isinstance(first_round_store, str):
+        raise TypeError("first_round_store must be a path (str) or None.")
+    _check_frequency_chunks(n_mapping_parallelism)
+    if thread_info is not None:
+        require_mapping("thread_info", thread_info)
+        require_integer(
+            'thread_info["n_threads"]', thread_info.get("n_threads"), minimum=1
+        )
+        require_finite_real(
+            'thread_info["memory_per_thread"]',
+            thread_info.get("memory_per_thread"),
+            positive=True,
+            scalar=True,
+        )
+    for name, value in (
+        ("memory_budget_gb", memory_budget_gb),
+        ("monitor_resources_seconds", monitor_resources_seconds),
+    ):
+        if value is not None:
+            require_finite_real(name, value, positive=True, scalar=True)
+
+
+def _check_frequency_chunks(n_mapping_parallelism):
+    """``{"frequency": n}`` with at least one chunk, or ``None``."""
     if n_mapping_parallelism is None:
         return
     require_mapping("n_mapping_parallelism", n_mapping_parallelism)
@@ -134,6 +230,120 @@ def check_find_continuum_inputs(
     ):
         if np.shape(spectrum) != (n_channels,):
             raise ValueError(f"{name} must have one value per channel ({n_channels}).")
+
+
+def check_find_continuum_ultra_inputs(
+    img_xds,
+    image_data_group_in_name,
+    channel_range,
+    atmospheric_transmission,
+    atmospheric_sky_temperature,
+):
+    """Require of the opened image what find_continuum_ultra reads: the cubes
+    of the data group on the image dimensions with one time and Stokes I, a
+    spectral window of increasing frequencies and at least
+    ``FIND_CONTINUUM_ULTRA_MIN_CHANNELS`` channels, finite atmosphere spectra
+    without a zero, finite positive beams of Stokes I, the rest frequency and
+    two pixels along ``l`` and ``m``.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        The opened image, every channel of the cube.
+    image_data_group_in_name : str
+        Data group with the roles of ``FIND_CONTINUUM_ROLES``.
+    channel_range : sequence of int or None
+        ``[start, stop)`` of the spectral window in channels of the cube
+        (:func:`check_find_continuum_channel_range`); ``None``: every
+        channel.
+    atmospheric_transmission, atmospheric_sky_temperature : array_like
+        One value per channel of the window.
+
+    Returns
+    -------
+    list of int
+        ``[start, stop]`` of the window.
+
+    Raises
+    ------
+    TypeError
+        An atmosphere spectrum of values that are not real.
+    ValueError
+        The data group is missing or lacks a role, a cube is not on
+        ``(time, frequency, polarization, l, m)``, the image has more than one
+        time or no Stokes I, the window is refused by
+        :func:`check_find_continuum_channel_range`, has too few channels or
+        frequencies that do not increase (the bandwidth warning divides by
+        the signed increment, fC 3750-3752), an atmosphere spectrum has
+        another length, a non-finite value or a zero (its fit divides by its
+        values, fC 4465-4488), a beam axis of Stokes I in the window is not
+        finite and positive, the rest frequency is missing, or ``l`` or ``m``
+        has fewer than two pixels (fC 7410-7417).
+
+    Notes
+    -----
+    Reads the beam fits of the window besides metadata; no plane of a cube.
+    """
+    data_groups = img_xds.attrs.get("data_groups", {})
+    if image_data_group_in_name not in data_groups:
+        raise ValueError(f"The image has no data group {image_data_group_in_name!r}.")
+    data_group = data_groups[image_data_group_in_name]
+    missing = [role for role in FIND_CONTINUUM_ROLES if role not in data_group]
+    if missing:
+        raise ValueError(
+            f"Data group {image_data_group_in_name!r} lacks the roles {missing}."
+        )
+    for role in ("sky", "primary_beam"):
+        dims = img_xds[data_group[role]].dims
+        if dims != _IMAGE_DIMS:
+            raise ValueError(
+                f"{data_group[role]} has the dimensions {dims}, not {_IMAGE_DIMS}."
+            )
+    if img_xds.sizes["time"] != 1:
+        raise ValueError("find_continuum_ultra needs an image with one time.")
+    if "I" not in img_xds.polarization.values:
+        raise ValueError("find_continuum_ultra needs a Stokes I plane.")
+    start, stop = check_find_continuum_channel_range(
+        channel_range, img_xds.frequency.values
+    )
+    n_channels = stop - start
+    if n_channels < FIND_CONTINUUM_ULTRA_MIN_CHANNELS:
+        raise ValueError(
+            f"The spectral window [{start}, {stop}) has {n_channels} channels: "
+            f"findContinuum needs at least {FIND_CONTINUUM_ULTRA_MIN_CHANNELS}, for "
+            "two baseline channels at each edge."
+        )
+    if not np.all(np.diff(img_xds.frequency.values[start:stop]) > 0):
+        raise ValueError(
+            f"The frequencies of the spectral window [{start}, {stop}) must increase."
+        )
+    for name, spectrum in (
+        ("atmospheric_transmission", atmospheric_transmission),
+        ("atmospheric_sky_temperature", atmospheric_sky_temperature),
+    ):
+        if np.shape(spectrum) != (n_channels,):
+            raise ValueError(
+                f"{name} must have one value per channel of the spectral window "
+                f"({n_channels})."
+            )
+        if np.any(require_finite_real(name, spectrum) == 0):
+            raise ValueError(f"{name} must have no zero.")
+    beams = (
+        img_xds[data_group["beam_fit_params_point_spread_function"]]
+        .sel(polarization="I")
+        .isel(frequency=slice(start, stop))
+        .values[..., :2]
+    )
+    if not np.all(np.isfinite(beams) & (beams > 0)):
+        raise ValueError(
+            "The beam axes of Stokes I must be finite and positive in every channel "
+            f"of the spectral window [{start}, {stop})."
+        )
+    if "rest_frequency" not in img_xds.frequency.attrs:
+        raise ValueError("The frequency coordinate has no rest_frequency attribute.")
+    if img_xds.sizes["l"] < 2 or img_xds.sizes["m"] < 2:
+        raise ValueError("find_continuum_ultra needs two pixels along l and m.")
+    return [start, stop]
 
 
 def check_find_continuum_channel_range(channel_range, frequency):
@@ -272,6 +482,39 @@ def _plain(value):
 # ========================================================================
 # Planned node tasks
 # ========================================================================
+
+
+def check_find_continuum_ultra_task_config(
+    planes_per_batch, polarization_index, channel_range
+):
+    """Validate the configuration a find_continuum_ultra frequency task gets.
+
+    Parameters
+    ----------
+    planes_per_batch : int
+        Planes a read spans at most, at least 1.
+    polarization_index : int
+        Index of Stokes I along ``polarization``, at least 0.
+    channel_range : sequence of int
+        ``[start, stop)`` of the spectral window in channels of the cube,
+        ``0 <= start < stop``.
+
+    Raises
+    ------
+    TypeError
+        A value that is not an integer.
+    ValueError
+        A value outside its range.
+    """
+    require_integer("planes_per_batch", planes_per_batch, minimum=1)
+    require_integer("polarization_index", polarization_index)
+    if len(channel_range) != 2:
+        raise ValueError("channel_range must be [start, stop].")
+    start, stop = channel_range
+    require_integer("channel_range[0]", start)
+    require_integer("channel_range[1]", stop)
+    if not start < stop:
+        raise ValueError(f"channel_range [{start}, {stop}) is empty.")
 
 
 def check_find_continuum_ultra_task_memory(task_bytes, memory_per_thread_bytes):

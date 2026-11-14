@@ -26,6 +26,9 @@ from astroviper.processing_functions.imaging.config_check.param_check_find_conti
     check_find_continuum_first_round,
     check_find_continuum_first_round_store,
     check_find_continuum_inputs,
+    check_find_continuum_ultra_config,
+    check_find_continuum_ultra_inputs,
+    check_find_continuum_ultra_task_config,
     check_find_continuum_ultra_task_memory,
 )
 from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
@@ -48,6 +51,9 @@ __all__ = [
     "check_find_continuum_first_round",
     "check_find_continuum_first_round_store",
     "check_find_continuum_inputs",
+    "check_find_continuum_ultra_config",
+    "check_find_continuum_ultra_inputs",
+    "check_find_continuum_ultra_task_config",
     "check_find_continuum_ultra_task_memory",
     "check_driver_workflow",
     "check_model_update",
