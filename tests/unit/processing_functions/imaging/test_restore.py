@@ -69,8 +69,8 @@ def _make_restore_xds(
         "time": np.arange(nt, dtype=np.float64),
         "frequency": 1.0e9 + 1.0e6 * np.arange(nf),
         "polarization": ["I", "Q", "U", "V"][:npol],
-        "l": (np.arange(nx) - nx // 2) * (-delta),  # negative increment (RA-like)
-        "m": (np.arange(ny) - ny // 2) * delta,
+        "l": (np.arange(ny) - ny // 2) * (-delta),  # negative increment (RA-like)
+        "m": (np.arange(nx) - nx // 2) * delta,
         "beam_params_label": ["major", "minor", "pa"],
     }
     dims_lm = ["time", "frequency", "polarization", "l", "m"]
@@ -387,7 +387,9 @@ def _with_primary_beam(xds, primary_beam_limit=0.2):
     clean beam.
     """
     ny, nx = xds["SKY_RESIDUAL"].shape[-2:]
-    radius = np.hypot(*np.meshgrid(np.arange(ny) - ny // 2, np.arange(nx) - nx // 2))
+    radius = np.hypot(
+        *np.meshgrid(np.arange(ny) - ny // 2, np.arange(nx) - nx // 2, indexing="ij")
+    )
     power = np.clip(1.0 - radius / (0.75 * max(ny, nx)), 0.0, None)
     shape = xds["SKY_RESIDUAL"].shape
     xds["PRIMARY_BEAM"] = xr.DataArray(
@@ -629,7 +631,14 @@ def test_cube_restoration_selector_matches_both_products(
     assert ("SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in result) == corrected
     for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
         if name in result:
-            np.testing.assert_array_equal(result[name], reference[name])
+            if restoring_beam is not None and output == "apparent":
+                # One inverse transform of both terms; "both" has one per term.
+                atol = 10 * np.finfo(dtype).eps * float(np.abs(reference[name]).max())
+                np.testing.assert_allclose(
+                    result[name], reference[name], rtol=0, atol=atol
+                )
+            else:
+                np.testing.assert_array_equal(result[name], reference[name])
             assert result[name].dtype == dtype
     assert result.attrs["data_groups"]["restored"]["sky"] == (
         "SKY_RESTORED" if apparent else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
@@ -659,19 +668,25 @@ def _radians(beam_pixels):
     return (beam_pixels[0] * DELTA, beam_pixels[1] * DELTA, beam_pixels[2])
 
 
-def _target_inputs(dtype, nf=1, beams=None, seed=11):
+def _target_inputs(dtype, nf=1, beams=None, seed=11, shape=(64, 64)):
     """Two polarizations of noise, off-centre point sources and a primary beam
     that crosses its cutoff; every plane has the PSF beam ``PSF_PIXELS``."""
     rng = np.random.default_rng(seed)
-    residual = (0.01 * rng.standard_normal((1, nf, 2, 64, 64))).astype(dtype)
-    model = np.zeros((1, nf, 2, 64, 64), dtype=dtype)
+    residual = (0.01 * rng.standard_normal((1, nf, 2, *shape))).astype(dtype)
+    model = np.zeros((1, nf, 2, *shape), dtype=dtype)
     model[0, :, :, 20, 44] = 3.0
     model[0, :, 1, 40, 25] = -1.5
     if beams is None:
         beams = {(0, f): _radians(PSF_PIXELS) for f in range(nf)}
     return _with_primary_beam(
         _make_restore_xds(
-            nf=nf, beams=beams, residual=residual, model=model, dtype=dtype
+            nf=nf,
+            ny=shape[0],
+            nx=shape[1],
+            beams=beams,
+            residual=residual,
+            model=model,
+            dtype=dtype,
         )
     )
 
@@ -776,8 +791,9 @@ def test_target_equal_to_the_psf_beam_gives_the_none_result(
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("consume_model", [False, True])
 @pytest.mark.parametrize("nan_pixel", [False, True])
+@pytest.mark.parametrize("shape", [(64, 64), (64, 51)])
 def test_target_restore_matches_the_float64_construction(
-    output, dtype, consume_model, nan_pixel
+    output, dtype, consume_model, nan_pixel, shape
 ):
     """The model convolved with the sampled target beam plus the residual
     multiplied by H. The corrected plane is ``(M / P) * B_T + (R_0 / P) * K``:
@@ -785,19 +801,19 @@ def test_target_restore_matches_the_float64_construction(
     convolved, with ``R_0`` zero outside the cutoff and at a NaN residual
     pixel, where the planes are NaN. CASA's order for the residual,
     ``(R_0 * K) / P``, is off by more than 100 times the tolerance."""
-    xds = _target_inputs(dtype)
+    xds = _target_inputs(dtype, shape=shape)
     if nan_pixel:
         xds.SKY_RESIDUAL.values[0, 0, 0, 10, 50] = np.nan
     residual = xds.SKY_RESIDUAL.values.astype(np.float64)
     model = xds.SKY_MODEL.values.astype(np.float64)
     primary_beam = xds.PRIMARY_BEAM.values.astype(np.float64)
     restored = _restored(xds, output, consume_model, TARGET)
-    kernel_ft = _clean_beam_kernel_ft(TARGET, 64, 64, _pixel_size(xds), np.float64, 1)
-    transform = _correcting_transform(64, 64, PSF_PIXELS, TARGET_PIXELS)
+    kernel_ft = _clean_beam_kernel_ft(TARGET, *shape, _pixel_size(xds), np.float64, 1)
+    transform = _correcting_transform(*shape, PSF_PIXELS, TARGET_PIXELS)
     tolerance = 1e-6 if dtype == np.float32 else 1e-12
 
     def convolved(plane, spectrum):
-        return np.fft.irfft2(np.fft.rfft2(plane) * spectrum, s=(64, 64))
+        return np.fft.irfft2(np.fft.rfft2(plane) * spectrum, s=shape)
 
     for q in range(2):
         finite = np.isfinite(residual[0, 0, q])
@@ -930,6 +946,59 @@ def test_a_nan_residual_pixel_is_the_only_nonfinite_pixel(output, dtype, consume
         else:
             np.testing.assert_array_equal(~np.isfinite(value) & inside, expected)
             assert np.isnan(value[~inside]).all()
+
+
+@pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
+def test_an_overflowing_quotient_is_the_only_nonfinite_pixel(output):
+    """At ``primary_beam_limit=0`` a residual of 10 over a primary beam of
+    1e-38 overflows ``R / P`` in single precision. That pixel is left out of
+    the transform and NaN, as a non-finite residual pixel; the rest of the
+    corrected plane stays finite."""
+    xds = _target_inputs(np.float32)
+    xds.PRIMARY_BEAM.values[0, 0, 0, 30, 30] = 1e-38
+    xds.SKY_RESIDUAL.values[0, 0, 0, 30, 30] = 10.0
+    expected = ~(xds.PRIMARY_BEAM.values > 0)
+    expected[0, 0, 0, 30, 30] = True
+    with np.errstate(over="ignore"):
+        out, _ = restore_image(
+            xds,
+            restoration_output=output,
+            restoring_beam=TARGET,
+            primary_beam_limit=0.0,
+        )
+    corrected = out.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values
+    np.testing.assert_array_equal(np.isnan(corrected), expected)
+    assert np.isfinite(corrected[~expected]).all()
+
+
+@pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
+def test_corrected_restore_to_a_target_keeps_one_spectrum_besides_the_beam(
+    output, monkeypatch
+):
+    """Each term of the corrected plane, and of the apparent plane made with
+    it, has its own inverse transform: as without a target, at most the clean
+    beam's transform and one more spectrum are live. One inverse transform of
+    both terms kept a third spectrum, which took one plane more physical
+    memory than without a target on macOS."""
+    import weakref
+
+    import scipy.fft
+
+    live, counts = [], []
+    rfft2 = scipy.fft.rfft2
+
+    def counted(*args, **kwargs):
+        spectrum = rfft2(*args, **kwargs)
+        live.append(weakref.ref(spectrum))
+        counts.append(sum(ref() is not None for ref in live))
+        return spectrum
+
+    monkeypatch.setattr(scipy.fft, "rfft2", counted)
+    for restoring_beam in (None, TARGET):
+        live.clear()
+        counts.clear()
+        _restored(_target_inputs(np.float32), output, False, restoring_beam)
+        assert max(counts) == 2
 
 
 @pytest.mark.parametrize("output", OUTPUTS)

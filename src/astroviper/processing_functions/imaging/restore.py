@@ -256,25 +256,22 @@ def _correcting_spectrum(residual_plane, covariance_pixels, area_ratio, workers)
     return spectrum, finite
 
 
-def _add_model_and_invert(spectrum, model_plane, kernel_ft, out, workers):
-    """Write ``IDFT[spectrum + DFT(model_plane) kernel_ft]`` to ``out``.
+def _residual_to_beam(residual_plane, covariance_pixels, area_ratio, workers):
+    """``R (*) K``: a residual plane taken to the target beam, as a new plane.
 
-    ``spectrum`` (``None`` for none) is overwritten. A zero model plane, or no
-    clean beam (``kernel_ft`` ``None``), adds no model term; with neither term
-    ``out`` is zero. ``model_plane`` may be ``out``.
+    ``D = 0`` scales the residual by the area ratio without a transform.
+    Otherwise non-finite residual pixels are NaN in the result.
     """
-    if kernel_ft is not None and model_plane.any():
-        model_spectrum = scipy.fft.rfft2(model_plane, workers=workers)
-        model_spectrum *= kernel_ft
-        if spectrum is None:
-            spectrum = model_spectrum
-        else:
-            spectrum += model_spectrum
-        del model_spectrum
-    if spectrum is None:
-        out.fill(0)
-    else:
-        out[...] = _inverse_rfft2(spectrum, out.shape, workers)
+    if not covariance_pixels.any():
+        return residual_plane * residual_plane.dtype.type(area_ratio)
+    spectrum, finite = _correcting_spectrum(
+        residual_plane, covariance_pixels, area_ratio, workers
+    )
+    plane = _inverse_rfft2(spectrum, residual_plane.shape, workers)
+    del spectrum
+    if not finite:
+        plane[~np.isfinite(residual_plane)] = np.nan
+    return plane
 
 
 def primary_beam_corrected_plane(
@@ -596,13 +593,16 @@ def _restore_plane_to_beam(
     primary beam before it is convolved, AstroVIPER's convention
     (:func:`primary_beam_corrected_plane`; CASA's ``pbcor`` divides the
     restored image). Both quotients are zero outside the cutoff for their
-    transforms. Each output is one inverse transform of its model and residual
-    spectra; ``D = 0`` scales the residual term by the area ratio without a
-    transform. Non-finite residual pixels are zero for the transform and NaN
-    in the outputs. The corrected plane is made first, so the model plane may
-    be the apparent output plane. The residual spectrum is multiplied by the
-    correcting transform before the model spectrum is made, so at most three
-    planes besides the outputs are live.
+    transforms, so within a few widths of ``K`` of the cutoff the residual
+    term leaves out the residual beyond it. ``D = 0`` scales the residual term
+    by the area ratio without a transform. Non-finite residual pixels, and in
+    the corrected plane pixels whose quotient overflows, are zero for the
+    transform and NaN in the outputs; ``D = 0`` keeps them, as
+    ``restoring_beam=None`` does. The corrected plane is made first, so the
+    model plane may be the apparent output plane. An apparent plane alone is
+    one inverse transform of its model and residual spectra; otherwise each
+    term has its own inverse transform, so that, as without a target, at most
+    one spectrum and one plane are live besides ``kernel_ft`` and the outputs.
 
     Returns
     -------
@@ -611,66 +611,71 @@ def _restore_plane_to_beam(
     """
     import time
 
-    transform = covariance_pixels.any()
+    convolve_model = kernel_ft is not None and model_plane.any()
+    if corrected_plane is None and covariance_pixels.any():
+        # One inverse transform of rfft2(R) H + rfft2(M) B_T.
+        spectrum, finite = _correcting_spectrum(
+            residual_plane, covariance_pixels, area_ratio, workers
+        )
+        if convolve_model:
+            model_spectrum = scipy.fft.rfft2(model_plane, workers=workers)
+            model_spectrum *= kernel_ft
+            spectrum += model_spectrum
+            del model_spectrum
+        apparent_plane[...] = _inverse_rfft2(spectrum, apparent_plane.shape, workers)
+        del spectrum
+        if not finite:
+            apparent_plane[~np.isfinite(residual_plane)] = np.nan
+        return 0.0
+
     corrected_seconds = 0.0
     if corrected_plane is not None:
         start = time.time()
-        # R / P and then M / P are written inside the cutoff of the corrected
-        # plane for their transforms; outside it the plane stays zero.
-        inside = _primary_beam_inside(primary_beam_plane, primary_beam_limit)
         corrected_plane.fill(0)
-        spectrum = None
-        if transform:
-            np.divide(
-                residual_plane,
-                primary_beam_plane,
-                out=corrected_plane,
-                where=inside & np.isfinite(residual_plane),
+        np.divide(
+            model_plane,
+            primary_beam_plane,
+            out=corrected_plane,
+            where=_primary_beam_inside(primary_beam_plane, primary_beam_limit),
+        )
+        if kernel_ft is not None and corrected_plane.any():
+            corrected_plane[...] = _convolve_with_clean_beam(
+                corrected_plane, kernel_ft, workers
             )
-            spectrum = scipy.fft.rfft2(corrected_plane, workers=workers)
-        np.divide(model_plane, primary_beam_plane, out=corrected_plane, where=inside)
-        del inside
-        if transform:
-            # After the mask is freed: on small planes H's row block is most
-            # of a plane.
+        quotient = np.full_like(corrected_plane, np.nan)
+        np.divide(
+            residual_plane,
+            primary_beam_plane,
+            out=quotient,
+            where=_primary_beam_inside(primary_beam_plane, primary_beam_limit),
+        )
+        if covariance_pixels.any():
+            blank = ~np.isfinite(quotient)
+            corrected_plane[blank] = np.nan
+            quotient[blank] = 0
+            del blank
+            spectrum = scipy.fft.rfft2(quotient, workers=workers)
+            del quotient
             _multiply_by_correcting_transform(
                 spectrum, covariance_pixels, area_ratio, corrected_plane.shape[1]
             )
-        _add_model_and_invert(
-            spectrum, corrected_plane, kernel_ft, corrected_plane, workers
-        )
-        del spectrum
-        if transform:
-            corrected_plane[
-                ~(
-                    _primary_beam_inside(primary_beam_plane, primary_beam_limit)
-                    & np.isfinite(residual_plane)
-                )
-            ] = np.nan
+            corrected_plane += _inverse_rfft2(spectrum, corrected_plane.shape, workers)
+            del spectrum
         else:
-            divided = np.full_like(corrected_plane, np.nan)
-            np.divide(
-                residual_plane,
-                primary_beam_plane,
-                out=divided,
-                where=_primary_beam_inside(primary_beam_plane, primary_beam_limit),
-            )
-            divided *= divided.dtype.type(area_ratio)
-            corrected_plane += divided
-            del divided
+            quotient *= quotient.dtype.type(area_ratio)
+            corrected_plane += quotient
+            del quotient
         corrected_seconds = time.time() - start
     if apparent_plane is not None:
-        spectrum, finite = None, True
-        if transform:
-            spectrum, finite = _correcting_spectrum(
-                residual_plane, covariance_pixels, area_ratio, workers
+        if convolve_model:
+            apparent_plane[...] = _convolve_with_clean_beam(
+                model_plane, kernel_ft, workers
             )
-        _add_model_and_invert(spectrum, model_plane, kernel_ft, apparent_plane, workers)
-        del spectrum
-        if not transform:
-            apparent_plane += residual_plane * residual_plane.dtype.type(area_ratio)
-        elif not finite:
-            apparent_plane[~np.isfinite(residual_plane)] = np.nan
+        else:
+            apparent_plane.fill(0)
+        apparent_plane += _residual_to_beam(
+            residual_plane, covariance_pixels, area_ratio, workers
+        )
     return corrected_seconds
 
 
@@ -992,11 +997,10 @@ def restore_image(
     model is entirely zero skip the convolution (the restored plane is just the
     residual).  With ``restoring_beam`` the target's clean beam is transformed
     once per call, and every plane whose residual goes to the target costs one
-    more forward transform per output: the spectrum of its residual term,
-    multiplied by the correcting transform in blocks of rows, is added to the
-    model spectrum before the one inverse transform, with at most three planes
-    besides the outputs live; a plane whose model is zero still takes its
-    residual to the target.
+    more transform pair per output (one more forward transform for the
+    apparent output alone), its residual spectrum multiplied by the correcting
+    transform in blocks of rows, with at most three planes besides the outputs
+    live; a plane whose model is zero still takes its residual to the target.
     With ``consume_model=True`` and apparent output, its cube allocation is
     avoided: the model cube's buffer is reused and the model variable dropped.
 
@@ -1119,8 +1123,14 @@ def restore_image(
     which also holds for equal and touching beams. The corrected image is
     ``(SKY_MODEL / P) * B_T + (SKY_RESIDUAL / P) * K``: the residual too is
     divided by the primary beam before it is convolved, with both quotients
-    zero outside the cutoff for the transforms. Non-finite residual pixels are
-    zero for the transform and NaN in the restored images.
+    zero outside the cutoff for the transforms, so within a few widths of K of
+    the cutoff the corrected residual leaves out the residual beyond it.
+    Non-finite residual pixels, and corrected pixels whose quotient overflows,
+    are zero for the transform and NaN in the restored images; where ``D = 0``
+    there is no transform, and they stay as with ``restoring_beam=None``. A
+    small ``primary_beam_limit`` lets the large quotients near the nulls of the
+    primary beam into the transform, and in single precision their rounding
+    spreads over the corrected image.
     """
     import pandas as pd
 
