@@ -23,13 +23,8 @@ def _log_task_io_failure(phase, exc, task_id, image_store, data_selection, task_
     import toolviper.utils.logger as logger
 
     hostname = socket.gethostname()
-    frequency = task_coords["frequency"]
-    frequency_slice = frequency.get("slice")
-    if isinstance(frequency_slice, slice) and frequency_slice.start is not None:
-        chan_start = int(frequency_slice.start)
-    else:
-        chan_start = _global_channel_offset(data_selection)
-    n_channels = len(frequency["data"])
+    chan_start = _image_channel_start(task_coords, data_selection)
+    n_channels = len(task_coords["frequency"]["data"])
     logger.error(
         f"node task {task_id} on {hostname}: {phase} FAILED for channels "
         f"[{chan_start}, {chan_start + n_channels}) of {image_store}; skipping "
@@ -47,11 +42,23 @@ def _log_task_io_failure(phase, exc, task_id, image_store, data_selection, task_
     }
 
 
+def _image_channel_start(task_coords, data_selection):
+    """Image channel number of this task's first channel: the start of the
+    task's ``frequency`` slice into the image, else (a task without one) the
+    ``data_selection`` offset of :func:`_global_channel_offset`. The
+    ``data_selection`` slice indexes one MSv4's own channels, so it is the image
+    channel only for an image of a single spectral window."""
+    frequency_slice = task_coords["frequency"].get("slice")
+    if isinstance(frequency_slice, slice) and frequency_slice.start is not None:
+        return int(frequency_slice.start)
+    return _global_channel_offset(data_selection)
+
+
 def _global_channel_offset(data_selection):
-    """Global channel number of this task's first channel: the start of the
-    ``frequency`` slice in ``data_selection`` (frequency and channel are the
-    same axis), e.g. ``{'ms_name': {'frequency': slice(2, 4)}}`` -> 2; 0 when
-    no frequency slice is present."""
+    """The start of the ``frequency`` slice in ``data_selection``, e.g.
+    ``{'ms_name': {'frequency': slice(2, 4)}}`` -> 2; 0 when no frequency slice
+    is present. This indexes the MSv4's own channels (see
+    :func:`_image_channel_start`)."""
     for sel in (data_selection or {}).values():
         freq_sel = sel.get("frequency") if isinstance(sel, dict) else None
         if isinstance(freq_sel, slice) and freq_sel.start is not None:
@@ -59,21 +66,22 @@ def _global_channel_offset(data_selection):
     return 0
 
 
-def _remap_imaging_dict_to_global_channels(combined_imaging_dict, data_selection):
-    """Shift a chunk-local deconvolve ImagingDict onto global channel numbers.
+def _remap_imaging_dict_to_global_channels(
+    combined_imaging_dict, task_coords, data_selection
+):
+    """Shift a chunk-local deconvolve ImagingDict onto image channel numbers.
 
     The per-chunk ``image_cube_single_field`` labels channels ``0..N-1`` within
-    the chunk. The global channel offset for this chunk is the start of the
-    ``frequency`` slice in ``data_selection`` (frequency and channel are the
-    same axis), e.g. ``{'ms_name': {'frequency': slice(2, 4)}}`` -> offset 2.
+    the chunk; the offset is the image channel of the task's first channel
+    (:func:`_image_channel_start`), so the planes of different spectral windows
+    do not collide.
 
-    Returns a new ImagingDict whose ``Key.chan`` values are global channel
-    numbers. A no-op returning the input unchanged when the offset is 0 (e.g. a
-    single chunk starting at channel 0) or no frequency slice is present.
+    Returns a new ImagingDict whose ``Key.chan`` values are image channel
+    numbers. A no-op returning the input unchanged when the offset is 0.
     """
 
     return _shift_imaging_dict_channels(
-        combined_imaging_dict, _global_channel_offset(data_selection)
+        combined_imaging_dict, _image_channel_start(task_coords, data_selection)
     )
 
 
@@ -318,11 +326,7 @@ def _chunk_task_coords(task_coords, data_selection, local_start, local_stop):
     import numpy as np
 
     frequency = dict(task_coords["frequency"])
-    task_slice = frequency.get("slice")
-    if isinstance(task_slice, slice) and task_slice.start is not None:
-        global_start = int(task_slice.start)
-    else:
-        global_start = _global_channel_offset(data_selection)
+    global_start = _image_channel_start(task_coords, data_selection)
     frequency["data"] = np.asarray(task_coords["frequency"]["data"])[
         local_start:local_stop
     ]
@@ -428,6 +432,22 @@ def _variables_made(image_data_variables_keep, chunk_xds):
     return [
         key for key in image_data_variables_keep if key.upper() in chunk_xds.data_vars
     ]
+
+
+def _with_image_spectral_reference(img_xds, image_frequency_attrs):
+    """``img_xds`` with the whole image's frequency attributes and the
+    velocities their rest frequency gives. ``make_empty_sky_image`` takes the
+    rest frequency from the middle of the frequencies it is given, which for a
+    task are only its own channels."""
+    from astropy.constants import c
+
+    rest_frequency = float(image_frequency_attrs["rest_frequency"]["data"])
+    velocity = (1.0 - img_xds["frequency"].values / rest_frequency) * c.value
+    img_xds = img_xds.assign_coords(
+        velocity=("frequency", velocity, dict(img_xds["velocity"].attrs))
+    )
+    img_xds.coords["frequency"].attrs.update(image_frequency_attrs)
+    return img_xds
 
 
 def _concat_image_statistics(statistics_chunks):
@@ -544,6 +564,7 @@ def image_cube_single_field(
     task_time_kill_switch_seconds=None,
     report_statistics=False,
     *,
+    image_frequency_attrs,
     input_checked: bool = False,
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
@@ -1124,6 +1145,11 @@ def image_cube_single_field(
         number for a plane whose peak is above ``entropy_max_snr`` times its
         RMS). Default ``False``.
 
+    image_frequency_attrs : dict
+        The attributes of the whole image's ``frequency`` coordinate (from the
+        distributed application's empty image): the task's image takes them, and
+        its velocities are computed from their ``rest_frequency``, so every task's
+        velocities match the image store's.
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active. For graph nodes
@@ -1217,6 +1243,7 @@ def image_cube_single_field(
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
+    img_xds = _with_image_spectral_reference(img_xds, image_frequency_attrs)
     T_make_empty_image = time.time() - start
 
     start = time.time()
@@ -1477,7 +1504,7 @@ def image_cube_single_field(
     # The deconvolve dict's channels are chunk-local (0-based); remap them to
     # global channel numbers so the reduce can merge chunks correctly.
     combined_imaging_dict = _remap_imaging_dict_to_global_channels(
-        combined_imaging_dict, data_selection
+        combined_imaging_dict, task_coords, data_selection
     )
 
     # Two reference-cycle classes pin this task's gigabytes past `= None`

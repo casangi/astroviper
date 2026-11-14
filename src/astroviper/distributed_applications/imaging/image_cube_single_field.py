@@ -1103,6 +1103,9 @@ def image_cube_single_field(
         for name, value in image_params.items()
         if name != "frequency_coords"
     }
+    # Each task's image covers its own channels; the whole image's spectral
+    # reference keeps its velocities equal to the image store's.
+    input_params["image_frequency_attrs"] = dict(img_xds.frequency.attrs)
     input_params["imaging_weights_params"] = imaging_weights_params
     input_params["zarr_meta"] = zarr_meta
     input_params["to_disk"] = True
