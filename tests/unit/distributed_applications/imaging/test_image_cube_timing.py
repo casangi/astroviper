@@ -13,6 +13,7 @@ They do not run the imaging graph (no data download); the end-to-end shape is
 validated in ``tests/stakeholder/test_single_field_imaging.py``.
 """
 
+import numpy as np
 import pandas as pd
 
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
@@ -216,3 +217,58 @@ def test_add_lazy_input_data_is_a_driver_timing_leaf():
     )
     assert "add lazy input data" in summary
     assert "0.250" in summary
+
+
+def test_combine_return_data_frames_concatenates_the_find_continuum_first_round():
+    """The node tasks' first-round rows are concatenated in input order and
+    their ``write_failed`` or-ed; a leaf without rows adds nothing, and
+    without any there are none."""
+    leaves = [
+        _make_chunk_result(task_id, 1.0, 2.0, 4.0, chan=task_id) for task_id in range(3)
+    ]
+    rows = [
+        {
+            "channels": np.array([4, 5], dtype=np.int32),
+            "sky_valid_count": np.array([7, 0]),
+            "sky_minimum": np.array([-1.5, np.nan]),
+            "sky_maximum": np.array([2.5, np.nan]),
+            "primary_beam_valid_count": np.array([9, 9]),
+            "primary_beam_minimum": np.array([0.2, 0.25]),
+            "tiles": np.array([True, False] * 4).reshape(2, 2, 1, 2),
+            "write_failed": False,
+        },
+        {
+            "channels": np.array([0], dtype=np.int32),
+            "sky_valid_count": np.array([3]),
+            "sky_minimum": np.array([-0.5]),
+            "sky_maximum": np.array([0.5]),
+            "primary_beam_valid_count": np.array([4]),
+            "primary_beam_minimum": np.array([0.3]),
+            "tiles": np.ones((1, 2, 1, 2), dtype=bool),
+            "write_failed": True,
+        },
+    ]
+    leaves[0]["find_continuum_first_round"] = rows[0]
+    leaves[2]["find_continuum_first_round"] = rows[1]
+    merged = combine_return_data_frames(leaves, input_params={})[
+        "find_continuum_first_round"
+    ]
+    assert set(merged) == set(rows[0])
+    for key in set(rows[0]) - {"write_failed"}:
+        np.testing.assert_array_equal(
+            merged[key], np.concatenate([row[key] for row in rows])
+        )
+        assert merged[key].dtype == rows[0][key].dtype
+    assert merged["write_failed"] is True
+
+    del leaves[2]["find_continuum_first_round"]
+    merged = combine_return_data_frames(leaves, input_params={})[
+        "find_continuum_first_round"
+    ]
+    np.testing.assert_array_equal(merged["channels"], rows[0]["channels"])
+    assert merged["write_failed"] is False
+
+    del leaves[0]["find_continuum_first_round"]
+    assert "find_continuum_first_round" not in combine_return_data_frames(
+        leaves, input_params={}
+    )

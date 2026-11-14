@@ -1,3 +1,4 @@
+import contextlib
 import functools
 import inspect
 import json
@@ -41,6 +42,9 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             ("create map/reduce graph", "T_create_map_reduce_graph"),
             ("generate dask graph", "T_generate_dask_graph"),
             ("compute dask graph", "T_compute_dask_graph"),
+            # With find_continuum_first_round (0.0 without).
+            ("write find_continuum first round", "T_find_continuum_first_round_write"),
+            ("drain find_continuum moments", "T_find_continuum_first_round_drain"),
             ("consolidate metadata", "T_consolidate_metadata"),
         ],
     ),
@@ -164,6 +168,7 @@ def image_cube_single_field(
     monitor_resources_seconds: float | None = None,
     msv2_open_options: dict[str, Any] | None = None,
     report: str | None = None,
+    find_continuum_first_round: bool = False,
     parameters_file: str | None = None,
     *,
     input_checked: bool = False,
@@ -817,6 +822,28 @@ def image_cube_single_field(
         next to the output store. It is made after the output is written: a
         failure while making it is logged and leaves the results intact.
         ``None`` (default): no report.
+    find_continuum_first_round : bool, optional
+        Also make findContinuum's first round of the Stokes I cube as each
+        chunk is written, into a store next to the image store
+        (``cube.img.zarr`` gives ``cube_find_continuum_first_round.zarr``,
+        store version 2): per channel the primary-beam limit mask at the
+        ``primary_beam_limit`` of ``cycle_control_params`` (0.2,
+        findContinuum's default, when the key is absent, although cube
+        imaging then cleans to a limit of 0) and the spectrum mask above
+        0.21 inside it, their tile occupancy, the count, minimum and maximum
+        of the finite residual and the count and minimum of the finite
+        primary beam inside the limit, and with the Dask backend the
+        integrated and maximum moments of the residual of every spectral
+        window (a linear run of channels), accumulated in the worker
+        processes and merged after the imaging. The store is bound to the
+        cube as written and refused for any other. A part of the first round
+        that cannot be written (after the retries of transient I/O errors)
+        leaves it, or a window's moments, incomplete and is logged; the
+        imaging goes on. If the imaging compute raises, the worker processes
+        drop the moments of the run and their slots are removed. Keeps the
+        variables find_continuum reads (``sky_residual``, ``primary_beam``
+        and ``beam_fit_params_point_spread_function``). Needs Stokes I and
+        ``output_image_format="zarr"``. Default ``False``.
     parameters_file : str, optional
         JSON file whose ``"image_cube_single_field"`` block gives the
         arguments, as
@@ -860,13 +887,26 @@ def image_cube_single_field(
           Computed in every node task right before its chunk is written.
         * ``"timing_distributed_application"`` is a dict of the driver-level
           step timings (``T_*`` seconds: building/writing the empty image,
-          opening the input, building the graph, computing it, consolidating
-          metadata; ``T_add_lazy_input_data`` is ``0.0`` for a processing set)
-          plus the grand total ``T_total``.
+          opening the input, building the graph, computing it, writing
+          find_continuum's first round and draining its moments, consolidating
+          metadata; ``T_add_lazy_input_data`` is ``0.0`` for a processing set,
+          the first-round steps without ``find_continuum_first_round``) plus
+          the grand total ``T_total``.
         * ``"report"`` is the path of the report file written (``None``
           without one, for ``report="notebook"`` and when the report failed).
           With a report the image statistics of the residual also hold
           ``entropy``, the entropy of every plane's final residual.
+        * ``"find_continuum_first_round"`` (with
+          ``find_continuum_first_round=True``) is ``{"store",
+          "primary_beam_limit", "complete", "moments_complete"}``: the path of
+          the first-round store, the ``primary_beam_limit`` of
+          ``cycle_control_params`` (0.2 when the key is absent), ``True``, and
+          per spectral window whether its moments are in the store (every
+          channel added exactly once, every slot saved and merged; never with
+          MPI); ``None`` when a chunk or its first round could not be
+          written. The records of the moments' drain (``stage``
+          ``"first_round_pop"`` and ``"first_round_merge"``) are added to
+          ``"timing_reduce_nodes"``.
 
     Notes
     -----
@@ -907,6 +947,12 @@ def image_cube_single_field(
         )
 
         check_config(locals(), mode=CUBE_SINGLE_FIELD, require_complete=True)
+        if find_continuum_first_round:
+            from astroviper.processing_functions.imaging.config_check import (
+                check_find_continuum_first_round,
+            )
+
+            check_find_continuum_first_round(image_params, output_image_format)
 
     from astroviper.utils.io import check_image_output_destination
 
@@ -980,6 +1026,18 @@ def image_cube_single_field(
     ):
         image_data_variables_keep = list(image_data_variables_keep) + [
             "beam_fit_params_point_spread_function"
+        ]
+    # find_continuum reads these variables of the cube (of the point spread
+    # function only its beams).
+    if find_continuum_first_round:
+        image_data_variables_keep = list(image_data_variables_keep) + [
+            variable
+            for variable in (
+                "sky_residual",
+                "primary_beam",
+                "beam_fit_params_point_spread_function",
+            )
+            if variable not in image_data_variables_keep
         ]
 
     # Every driver step is timed into ``timing_distributed_application``; the
@@ -1236,6 +1294,14 @@ def image_cube_single_field(
             image_chunking=image_chunking,
             image_sharding=image_sharding,
         )
+    first_round_params = None
+    if find_continuum_first_round:
+        first_round_params = _create_find_continuum_first_round(
+            image_store,
+            img_xds,
+            cycle_control_params.get("primary_beam_limit", 0.2),
+            compute_backend,
+        )
     timing_distributed_application["T_create_empty_data_variables"] = (
         time.time() - start
     )
@@ -1267,6 +1333,7 @@ def image_cube_single_field(
         )
 
     input_params["image_store"] = image_store
+    input_params["find_continuum_first_round_params"] = first_round_params
     # Preflight diagnostics belong to the output metadata and driver result;
     # cube nodes do not consume them.
 
@@ -1367,7 +1434,8 @@ def image_cube_single_field(
             )
         timing_distributed_application["T_generate_dask_graph"] = 0.0
         start = time.time()
-        imaging_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
+        with _first_round_cleared_on_failure(first_round_params):
+            imaging_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
         end = time.time()
         timing_distributed_application["T_compute_dask_graph"] = end - start
         # ABSOLUTE anchors of the compute call, saved with the overall row so
@@ -1386,7 +1454,8 @@ def image_cube_single_field(
             dask.visualize(dask_graph, filename="cube_imaging.png")
 
         start = time.time()
-        imaging_dict = dask.compute(dask_graph)[0]
+        with _first_round_cleared_on_failure(first_round_params):
+            imaging_dict = dask.compute(dask_graph)[0]
         end = time.time()
         timing_distributed_application["T_compute_dask_graph"] = end - start
         # Same absolute compute-call anchors as the MPI branch (see above).
@@ -1402,6 +1471,58 @@ def image_cube_single_field(
             imaging_dict["timing_node_tasks"], usage
         )
 
+    timing_distributed_application["T_find_continuum_first_round_write"] = 0.0
+    timing_distributed_application["T_find_continuum_first_round_drain"] = 0.0
+    # A failure of the first round after the compute leaves it incomplete (or
+    # its moments) and is logged; the imaging results are returned.
+    if first_round_params is not None:
+        from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+            bind_find_continuum_first_round_store,
+            clear_first_round_moments,
+            drain_first_round_moments,
+        )
+        from astroviper.node_tasks.imaging.find_continuum_first_round import (
+            write_first_round_rows,
+        )
+
+        first_round_store = first_round_params["first_round_store"]
+        run_id = first_round_params["run_id"]
+        start = time.time()
+        rows = imaging_dict.pop("find_continuum_first_round", None)
+        try:
+            first_round_complete = (
+                rows is not None
+                and write_first_round_rows(
+                    first_round_store, rows, img_xds.sizes["frequency"]
+                )["complete"]
+            )
+        except Exception as exc:
+            logger.error(
+                f"The find_continuum first round could not be written: {exc!r}"
+            )
+            first_round_complete = False
+        timing_distributed_application["T_find_continuum_first_round_write"] = (
+            time.time() - start
+        )
+        # Also when incomplete, so that the worker processes free their moments.
+        start = time.time()
+        moments_complete = [False] * len(first_round_params["windows"])
+        if run_id is not None:
+            try:
+                drained, records = drain_first_round_moments(
+                    run_id, first_round_store, first_round_params["windows"]
+                )
+                moments_complete = drained["moments_complete"]
+                imaging_dict.setdefault("timing_reduce_nodes", []).extend(records)
+            except Exception as exc:
+                logger.error(
+                    f"The imager's find_continuum moments could not be drained: {exc!r}"
+                )
+                clear_first_round_moments(run_id, first_round_store)
+        timing_distributed_application["T_find_continuum_first_round_drain"] = (
+            time.time() - start
+        )
+
     # The processing set is not needed any more. Severing its parent<->child
     # links lets it, with the lazy arrays and dask graphs of every node, die by
     # reference counting when the driver returns, not as cyclic garbage.
@@ -1414,6 +1535,52 @@ def image_cube_single_field(
     if output_image_format == "zarr":
         zarr.consolidate_metadata(image_store)
     timing_distributed_application["T_consolidate_metadata"] = time.time() - start
+
+    if first_round_params is not None:
+        start = time.time()
+        # Absent when no task loaded its data.
+        task_seconds = imaging_dict["timing_node_tasks"].get(
+            "T_find_continuum_first_round"
+        )
+        try:
+            group = zarr.open_group(first_round_store, mode="r+")
+            group.attrs["find_continuum_first_round"] = dict(
+                group.attrs["find_continuum_first_round"],
+                imager={
+                    "n_tasks": n_map_tasks,
+                    "T_find_continuum_first_round_sum": 0.0
+                    if task_seconds is None
+                    else float(task_seconds.sum()),
+                    "T_drain": timing_distributed_application[
+                        "T_find_continuum_first_round_drain"
+                    ],
+                },
+            )
+            bind_find_continuum_first_round_store(first_round_store, image_store)
+        except Exception as exc:
+            logger.error(
+                "The find_continuum first-round store could not be bound to the "
+                f"cube: {exc!r}"
+            )
+            first_round_complete = False
+        timing_distributed_application["T_find_continuum_first_round_write"] += (
+            time.time() - start
+        )
+        if not first_round_complete:
+            logger.warning(
+                "The find_continuum first round was not made: a chunk of the "
+                "cube or its first round could not be written."
+            )
+        imaging_dict["find_continuum_first_round"] = (
+            {
+                "store": first_round_store,
+                "primary_beam_limit": first_round_params["primary_beam_limit"],
+                "complete": True,
+                "moments_complete": moments_complete,
+            }
+            if first_round_complete
+            else None
+        )
 
     application_end = time.time()
     timing_distributed_application["T_total"] = application_end - application_start
@@ -1493,6 +1660,118 @@ def _with_resource_usage(timing, usage):
     return timing
 
 
+@contextlib.contextmanager
+def _first_round_cleared_on_failure(first_round_params):
+    """When the imaging compute raises, no worker keeps the moments of the run
+    and its slots are removed."""
+    try:
+        yield
+    except BaseException:
+        if first_round_params is not None:
+            from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+                clear_first_round_moments,
+            )
+
+            clear_first_round_moments(
+                first_round_params["run_id"], first_round_params["first_round_store"]
+            )
+        raise
+
+
+def _create_find_continuum_first_round(
+    image_store, img_xds, primary_beam_limit, compute_backend
+):
+    """Create the empty first-round store of the cube and the directory of
+    the moments' slots; return the node tasks' ``find_continuum_first_round_params``.
+
+    The spectral windows are the linear runs of the cube's channels. Without
+    the Dask backend the run has no ``run_id`` (the drain cannot address MPI
+    ranks), so no moments.
+    """
+    import shutil
+    import uuid
+
+    from graphviper.graph_tools.coordinate_utils import make_parallel_coord
+
+    from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+        create_find_continuum_first_round_store,
+        find_continuum_first_round_partials_path,
+        find_continuum_first_round_store_path,
+        find_continuum_merge_tile_counts,
+    )
+    from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
+        linear_spectral_axis,
+    )
+    from astroviper.processing_functions.imaging.utils.spectral_windows import (
+        linear_channel_ranges,
+    )
+
+    residual = img_xds.attrs["data_groups"]["residual"]
+    variables = {role: residual[role] for role in ("sky", "primary_beam")}
+    arrays = {
+        role: zarr.open_array(os.path.join(image_store, variable), mode="r")
+        for role, variable in variables.items()
+    }
+    tile_shape = arrays["sky"].chunks[-2:]
+    frequency = img_xds.frequency.values
+    windows = []
+    for start, stop in linear_channel_ranges(frequency):
+        n_channels, first_frequency, _, channel_increment = linear_spectral_axis(
+            frequency[start:stop]
+        )
+        windows.append(
+            {
+                "channel_range": [start, stop],
+                "first_frequency": first_frequency,
+                "channel_increment": channel_increment,
+                "n_channels": n_channels,
+            }
+        )
+    store = find_continuum_first_round_store_path(image_store)
+    params = {
+        "first_round_store": store,
+        "variables": variables,
+        "polarization_index": list(img_xds.polarization.values).index("I"),
+        "primary_beam_limit": primary_beam_limit,
+        "tile_shape": tile_shape,
+        "value_dtypes": {role: array.dtype.name for role, array in arrays.items()},
+        "run_id": uuid.uuid4().hex if compute_backend == "dask" else None,
+        "windows": windows,
+        "partials_directory": find_continuum_first_round_partials_path(store),
+        "rest_frequency": float(img_xds.frequency.attrs["rest_frequency"]["data"]),
+    }
+    # The merge tiles of find_continuum_ultra's moments.
+    merge_tile_shape = [
+        len(
+            make_parallel_coord(coord=img_xds[dim], n_chunks=n_chunks)["data_chunks"][0]
+        )
+        for dim, n_chunks in zip(
+            ("l", "m"),
+            find_continuum_merge_tile_counts(arrays["sky"].shape[-2:], tile_shape),
+            strict=True,
+        )
+    ]
+    create_find_continuum_first_round_store(
+        first_round_store=store,
+        n_channels=frequency.size,
+        image_shape=arrays["sky"].shape,
+        tile_shape=tile_shape,
+        merge_tile_shape=merge_tile_shape,
+        primary_beam_limit=primary_beam_limit,
+        variables=variables,
+        polarization_index=params["polarization_index"],
+        value_dtypes=params["value_dtypes"],
+        run_id=params["run_id"],
+        written_by="image_cube_single_field",
+        windows=params["windows"],
+        rest_frequency=params["rest_frequency"],
+    )
+    shutil.rmtree(params["partials_directory"], ignore_errors=True)
+    if params["run_id"] is not None:
+        os.makedirs(params["partials_directory"])
+    return params
+
+
 def combine_return_data_frames(input_data, input_params):
     """Reduce per-chunk ``{"timing_node_tasks", "deconvolution"}`` results into one dict.
 
@@ -1505,7 +1784,9 @@ def combine_return_data_frames(input_data, input_params):
     chunk), merges the per-chunk deconvolution dicts with
     :func:`merge_imaging_dicts` and concatenates the per-chunk statistics along
     ``frequency`` (:func:`concatenate_plane_statistics`). Because every chunk
-    covers a disjoint global channel range, the merges never collide.
+    covers a disjoint global channel range, the merges never collide. The
+    rows of find_continuum's first round are concatenated and their
+    ``write_failed`` or-ed.
 
     Returns the same ``{"timing_node_tasks", "deconvolution",
     "image_statistics"}`` shape so it composes under tree-mode reduction (its
@@ -1516,7 +1797,7 @@ def combine_return_data_frames(input_data, input_params):
     input_data : list of dict
         Per-chunk (or partially reduced) results, each with
         ``"timing_node_tasks"``, ``"deconvolution"`` and (optionally)
-        ``"image_statistics"`` keys.
+        ``"image_statistics"`` and ``"find_continuum_first_round"`` keys.
     input_params : dict
         Unused; present for the GraphVIPER reduce signature.
 
@@ -1524,7 +1805,8 @@ def combine_return_data_frames(input_data, input_params):
     -------
     dict
         ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ImagingDict,
-        "image_statistics": dict, "timing_reduce_nodes": list}``.
+        "image_statistics": dict, "timing_reduce_nodes": list}``, and
+        ``"find_continuum_first_round"`` when an input has it.
     """
     import os
     import socket
@@ -1544,6 +1826,7 @@ def combine_return_data_frames(input_data, input_params):
     timing_frames = []
     imaging_dicts = []
     statistics_list = []
+    first_rounds = []
     # Per-reduce-node timing provenance: child reduce calls carry their records
     # in "timing_reduce_nodes" (leaf node-task results have none); pool them and
     # append this call's own record, so the final result holds one record per
@@ -1564,6 +1847,8 @@ def combine_return_data_frames(input_data, input_params):
         timing_frames.append(timing)
         imaging_dicts.append(result["deconvolution"])
         statistics_list.append(result.get("image_statistics", {}))
+        if "find_continuum_first_round" in result:
+            first_rounds.append(result["find_continuum_first_round"])
         reduce_records.extend(result.get("timing_reduce_nodes", []))
 
     # ONE concat per reduce call: concatenating inside the loop re-copied the
@@ -1597,12 +1882,24 @@ def combine_return_data_frames(input_data, input_params):
             "n_rows_out": int(len(combined_timing)),
         }
     )
-    return {
+    combined = {
         "timing_node_tasks": combined_timing,
         "deconvolution": merged_deconvolve,
         "image_statistics": merged_statistics,
         "timing_reduce_nodes": reduce_records,
     }
+    if first_rounds:
+        import numpy as np
+
+        combined["find_continuum_first_round"] = {
+            **{
+                key: np.concatenate([rows[key] for rows in first_rounds])
+                for key in first_rounds[0]
+                if key != "write_failed"
+            },
+            "write_failed": any(rows["write_failed"] for rows in first_rounds),
+        }
+    return combined
 
 
 def _validate_n_mapping_parallelism(n_mapping_parallelism):

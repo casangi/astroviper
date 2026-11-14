@@ -1,19 +1,26 @@
 """Node tasks of the find_continuum distributed application.
 
-The map task loads one chunk of channels of the dirty cube (and of its primary
-beam when a reduction uses it) and returns the partial reductions of
-:func:`astroviper.processing_functions.imaging.find_continuum.find_continuum_cube_reductions`;
-the reduce task merges them. The two-dimensional images that masks refer to
-are the small Zarr images find_continuum writes (:func:`write_small_image`).
+``find_continuum`` maps :func:`find_continuum_cube_reductions` over chunks of
+channels and merges the partial reductions with
+:func:`merge_find_continuum_cube_reductions`. The two-dimensional images that
+masks refer to are the small Zarr images find_continuum writes
+(:func:`write_small_image`).
 """
 
 import json
+import os
+import threading
+import time
 
 import numpy as np
 
 
 def write_small_image(path, values, mask, metadata):
     """Write a small image (CASA axis order) as a Zarr store.
+
+    Each variable is one uncompressed chunk, written and read whole. The store
+    gets a new write id, so that a reader can tell a rewritten image from the
+    one it read before, and records whether every pixel is valid.
 
     Parameters
     ----------
@@ -25,18 +32,57 @@ def write_small_image(path, values, mask, metadata):
         Pixel mask of the same shape (``True`` = valid).
     metadata : dict
         CASA image metadata (coordinates, beam, units), stored as JSON.
+
+    Returns
+    -------
+    str
+        The write id of the store.
     """
+    import uuid
+
     import xarray as xr
 
     dims = ["time", "frequency", "polarization", "l", "m"]
+    write_id = uuid.uuid4().hex
     xds = xr.Dataset(
         {
             "SKY": (dims, np.transpose(values, (3, 2, 0, 1))[None]),
             "MASK": (dims, np.transpose(mask, (3, 2, 0, 1))[None]),
         },
-        attrs={"casa_metadata": json.dumps(metadata)},
+        attrs={
+            "casa_metadata": json.dumps(metadata),
+            "write_id": write_id,
+            "all_valid": bool(np.all(mask)),
+        },
     )
-    xds.to_zarr(path, mode="w", consolidated=False)
+    encoding = {
+        name: {"chunks": xds[name].shape, "compressors": None} for name in xds.data_vars
+    }
+    xds.to_zarr(path, mode="w", consolidated=False, encoding=encoding)
+    return write_id
+
+
+def small_image_attributes(path):
+    """The attributes of a small image, read from its ``zarr.json`` only.
+
+    Parameters
+    ----------
+    path : str
+        Store path.
+
+    Returns
+    -------
+    dict
+        ``write_id`` (str), ``all_valid`` (bool, no masked pixel) and
+        ``casa_metadata`` (dict).
+    """
+    with open(os.path.join(path, "zarr.json")) as stream:
+        attributes = json.load(stream)["attributes"]
+    return {
+        "write_id": attributes["write_id"],
+        "all_valid": attributes["all_valid"],
+        "casa_metadata": json.loads(attributes["casa_metadata"]),
+    }
 
 
 def read_small_image(path):
@@ -71,6 +117,7 @@ def find_continuum_cube_reductions(
     requests,
     primary_beam=None,
     primary_beam_limit=None,
+    channel_offset=0,
     data_selection=None,
     task_id=None,
 ):
@@ -94,8 +141,12 @@ def find_continuum_cube_reductions(
     primary_beam_limit : float, optional
         Pixels where the primary beam is below this level are masked in every
         cube. ``None`` (default): the cubes as they are.
+    channel_offset : int, default 0
+        Channel of the store that is channel 0 of the requests: the first
+        channel of the spectral window findContinuum sees.
     data_selection : dict, optional
-        ``{"img": {"frequency": slice}}``, the chunk of this task.
+        ``{"img": {"frequency": slice}}``, the chunk of this task in channels
+        of the store.
     task_id : int, optional
         Graph node id.
 
@@ -105,11 +156,6 @@ def find_continuum_cube_reductions(
         ``reductions`` (the partial results) and ``timing_node_tasks`` (a
         one-row ``pandas.DataFrame``).
     """
-    import os
-    import socket
-    import threading
-    import time
-
     import pandas as pd
     import xarray as xr
 
@@ -125,7 +171,9 @@ def find_continuum_cube_reductions(
         names.add(primary_beam)
     img_xds = lazy_xds[sorted(names)].isel(selection).sel(polarization=["I"]).load()
     frequency_selection = selection.get("frequency", slice(None))
-    channel_index = np.arange(lazy_xds.sizes["frequency"])[frequency_selection]
+    channel_index = (
+        np.arange(lazy_xds.sizes["frequency"])[frequency_selection] - channel_offset
+    )
     images = {}
     for name, path in image_paths.items():
         values, mask, _ = read_small_image(path)
@@ -144,12 +192,6 @@ def find_continuum_cube_reductions(
     )
     T_reduce = time.time() - start
 
-    try:
-        from dask.distributed import get_worker
-
-        worker_name = str(get_worker().name)
-    except Exception:
-        worker_name = None
     timing_df = pd.DataFrame(
         [
             {
@@ -159,14 +201,21 @@ def find_continuum_cube_reductions(
                 "T_load": T_load,
                 "T_reduce": T_reduce,
                 "T_find_continuum_task": time.time() - start_unixtime,
-                "hostname": socket.gethostname(),
-                "process_pid": os.getpid(),
-                "thread_native_id": threading.get_native_id(),
-                "worker_name": worker_name,
+                **_execution_identity(),
             }
         ]
     )
     return {"reductions": partials, "timing_node_tasks": timing_df}
+
+
+def with_resource_usage(timing, usage):
+    """A copy of a node task's one-row ``timing`` frame with the resource
+    monitor's ``usage`` series as columns (a list becomes one cell; scalars
+    broadcast)."""
+    timing = timing.copy()
+    for key, value in usage.items():
+        timing[key] = [value] if isinstance(value, list) else value
+    return timing
 
 
 def merge_find_continuum_cube_reductions(input_data, input_params):
@@ -182,20 +231,67 @@ def merge_find_continuum_cube_reductions(input_data, input_params):
     Returns
     -------
     dict
-        Merged ``reductions`` and concatenated ``timing_node_tasks``.
+        Merged ``reductions``, the concatenated ``timing_node_tasks`` (with
+        the series of graphviper's resource monitor, when it ran, as columns)
+        and ``timing_reduce_nodes``, one record per reduce node so far.
     """
-    import pandas as pd
-
     from astroviper.processing_functions.imaging.find_continuum import (
         merge_find_continuum_reductions,
     )
 
+    start_unixtime = time.time()
     merged = input_data[0]["reductions"]
     for other in input_data[1:]:
         merged = merge_find_continuum_reductions(merged, other["reductions"])
+    combined, records = _gather_timing(input_data)
+    records.append(_reduce_record(start_unixtime, input_data, combined))
     return {
         "reductions": merged,
-        "timing_node_tasks": pd.concat(
-            [item["timing_node_tasks"] for item in input_data], ignore_index=True
-        ),
+        "timing_node_tasks": combined,
+        "timing_reduce_nodes": records,
+    }
+
+
+def _execution_identity():
+    """Where the calling task runs: host, process, thread and Dask worker."""
+    import socket
+
+    try:
+        from dask.distributed import get_worker
+
+        worker_name = str(get_worker().name)
+    except Exception:
+        worker_name = None
+    return {
+        "hostname": socket.gethostname(),
+        "process_pid": os.getpid(),
+        "thread_native_id": threading.get_native_id(),
+        "worker_name": worker_name,
+    }
+
+
+def _gather_timing(input_data):
+    """The timing rows of the inputs of a reduce node (with the series of
+    graphviper's resource monitor folded in) and their reduce records."""
+    import pandas as pd
+
+    timing, records = [], []
+    for item in input_data:
+        usage = item.get("resource_usage")
+        frame = item["timing_node_tasks"]
+        timing.append(frame if usage is None else with_resource_usage(frame, usage))
+        records.extend(item.get("timing_reduce_nodes", []))
+    return pd.concat(timing, ignore_index=True), records
+
+
+def _reduce_record(start_unixtime, input_data, combined):
+    """The timing record of a reduce node."""
+    end_unixtime = time.time()
+    return {
+        "start_unixtime": start_unixtime,
+        "end_unixtime": end_unixtime,
+        "T_reduce_node": end_unixtime - start_unixtime,
+        **_execution_identity(),
+        "n_inputs": len(input_data),
+        "n_rows_out": int(len(combined)),
     }

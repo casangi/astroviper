@@ -9,6 +9,8 @@
   leaves the Measurement Set unwritten.
 """
 
+import errno
+import importlib
 import os
 import shutil
 
@@ -16,15 +18,36 @@ import dask
 import numpy as np
 import pytest
 import xarray as xr
+import zarr
 from astropy.coordinates import SkyCoord
 from xradio.image import load_image
 from xradio.measurement_set import open_processing_set
 
 import astroviper.distributed_applications as distributed_applications
+import astroviper.node_tasks.imaging.find_continuum_first_round as find_continuum_node_tasks
+from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+    FirstRoundStoreInputs,
+    find_continuum_first_round_partials_path,
+    validate_find_continuum_first_round,
+)
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
     DISTRIBUTED_APPLICATION_TIMING_PHASES,
 )
 from astroviper.node_tasks.imaging.utils import msv2_engine_available
+from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+    accumulate_moments,
+    finalize_moments,
+    first_round_channel_rows,
+    new_moment_partials,
+    primary_beam_masks,
+    valid_voxels,
+)
+from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
+    moment_channel_weights,
+)
+from astroviper.processing_functions.imaging.find_continuum_ultra.step_results import (
+    FirstRoundRows,
+)
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.telescope_layout import read_telescope_layout
 
@@ -43,8 +66,9 @@ PC = np.array([PHASE_CENTER.ra.rad, PHASE_CENTER.dec.rad])
 N_ANTENNA = 8
 
 
-def _simulate_point_source(tmp_path):
-    """1 Jy unpolarised point source at the phase centre, 8 VLA antennas, 2 channels."""
+def _simulate_point_source(tmp_path, n_channels=2):
+    """1 Jy unpolarised point source at the phase centre, 8 VLA antennas,
+    ``n_channels`` channels 0.4 GHz apart from 3 GHz."""
     result = distributed_applications.simulation.simulate_processing_set(
         ps_store=str(tmp_path / "point.ps.zarr"),
         antenna_xds=read_telescope_layout(
@@ -58,7 +82,7 @@ def _simulate_point_source(tmp_path):
         frequency_params={
             "freq_start": 3e9,
             "freq_delta": 0.4e9,
-            "n_channels": 2,
+            "n_channels": n_channels,
             "channel_width": 1e7,
         },
         polarization=["RR", "LL"],
@@ -808,3 +832,414 @@ def test_cube_publishes_only_selected_restoration_products(
         else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
     )
     assert np.isfinite(image[selected]).any()
+
+
+# --------------------------------------------------------------------------- #
+# find_continuum's first round
+# --------------------------------------------------------------------------- #
+#: Offset (Hz) of the second spectral window from the first.
+SECOND_WINDOW_OFFSET = 2.0e9
+#: Spectral windows of the first-round cube, and its tiles (px).
+WINDOW_RANGES = [[0, 3], [3, 6]]
+FIRST_ROUND_TILE = 32
+
+
+@pytest.fixture
+def threaded_dask():
+    """Run the graphs on the threaded scheduler: every node task adds its
+    moments to the registry of this process."""
+    with dask.config.set(scheduler="threads"):
+        yield
+
+
+def _image_first_round(tmp_path, n_channels=3, offset=SECOND_WINDOW_OFFSET, **kwargs):
+    """The dirty cube of the point source in two spectral windows of
+    ``n_channels`` channels (the second ``offset`` Hz above the first and
+    three times brighter), with find_continuum's first round: three node
+    tasks (the second straddles the windows), a chunk per channel, tiles of
+    32 px and the primary beam below its limit in the corners."""
+    ps_store = _simulate_point_source(tmp_path, n_channels=n_channels)
+    frequencies = _add_shifted_execution_block(ps_store, offset)
+    return distributed_applications.imaging.image_cube_single_field(
+        ps_store=ps_store,
+        image_store=str(tmp_path / "cube.img.zarr"),
+        image_params={
+            "image_size": [64, 64],
+            "cell_size": np.array([-40.0, 40.0]) * np.pi / (180 * 3600),
+            "phase_direction": PC,
+            "frequency_coords": np.concatenate([frequencies, frequencies + offset]),
+            "polarization_coords": ["I", "V"],
+            "time_coords": [0],
+            "fft_padding": 1.2,
+        },
+        instrument_polarization_basis="circular",
+        imaging_weights_params={"weighting": "natural"},
+        cycle_control_params={
+            "max_iter": 0,
+            "max_cycles": 0,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+            "primary_beam_limit": 0.2,
+        },
+        image_data_variables_keep=["sky_residual"],
+        processing_set_data_group_name="base",
+        n_mapping_parallelism={"frequency": 3},
+        image_chunking={"frequency": 1, "l": FIRST_ROUND_TILE, "m": FIRST_ROUND_TILE},
+        find_continuum_first_round=True,
+        **kwargs,
+    )
+
+
+def _first_round_array(store, name):
+    return zarr.open_array(os.path.join(store, name), mode="r")[:]
+
+
+@pytest.mark.parametrize("windows_in_memory", [2, 1])
+def test_find_continuum_first_round(
+    tmp_path, threaded_dask, monkeypatch, windows_in_memory
+):
+    """The imager writes findContinuum's first round (store version 2) of the
+    cube it wrote into a store bound to it: the masks and rows of every
+    channel, and the moments of both spectral windows from the registry of the
+    worker process (holding both windows, or one and saving the other). Each
+    window validates with its moments; a range across the two windows is
+    refused. It keeps the variables find_continuum reads, but not the point
+    spread function."""
+    monkeypatch.setattr(
+        find_continuum_node_tasks, "FIRST_ROUND_WINDOWS_IN_MEMORY", windows_in_memory
+    )
+    result = _image_first_round(tmp_path)
+
+    _assert_imaged(result)
+    image_store = str(tmp_path / "cube.img.zarr")
+    store = str(tmp_path / "cube_find_continuum_first_round.zarr")
+    assert result["find_continuum_first_round"] == {
+        "store": store,
+        "primary_beam_limit": 0.2,
+        "complete": True,
+        "moments_complete": [True, True],
+    }
+    for index, window in enumerate(WINDOW_RANGES):
+        assert validate_find_continuum_first_round(
+            store, image_store, 0.2, window
+        ) == FirstRoundStoreInputs(store, index, True, "image_cube_single_field")
+    with pytest.raises(ValueError, match=r"holds channels .* not \[2, 5\)"):
+        validate_find_continuum_first_round(store, image_store, 0.2, [2, 5])
+    assert not find_continuum_node_tasks._FIRST_ROUND_MOMENTS
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+    img_xds = xr.open_zarr(image_store, chunks=None)
+    frequency = img_xds.frequency.values
+    attributes = zarr.open_group(store, mode="r").attrs["find_continuum_first_round"]
+    assert attributes["version"] == 2
+    assert attributes["written_by"] == "image_cube_single_field"
+    assert attributes["spectrum_primary_beam_level"] == 0.21
+    assert attributes["windows"] == [
+        {
+            "channel_range": [start, stop],
+            "first_frequency": float(frequency[start]),
+            "channel_increment": float(frequency[start + 1] - frequency[start]),
+            "n_channels": stop - start,
+        }
+        for start, stop in WINDOW_RANGES
+    ]
+    assert attributes["n_missing"] == attributes["n_duplicated"] == [0, 0]
+    task_seconds = result["timing_node_tasks"]["T_find_continuum_first_round"]
+    assert (task_seconds > 0).all()
+    timing = result["timing_distributed_application"]
+    assert TIMING_KEYS <= set(timing)
+    assert timing["T_find_continuum_first_round_write"] > 0
+    assert attributes["imager"] == {
+        "n_tasks": 3,
+        "T_find_continuum_first_round_sum": pytest.approx(task_seconds.sum()),
+        "T_drain": timing["T_find_continuum_first_round_drain"],
+    }
+    assert timing["T_find_continuum_first_round_drain"] > 0
+    stages = [record.get("stage") for record in result["timing_reduce_nodes"]]
+    assert stages.count("first_round_pop") == 1
+    assert stages.count("first_round_merge") == len(WINDOW_RANGES)
+
+    group = img_xds.attrs["data_groups"]["residual"]
+    assert "point_spread_function" not in group
+    assert "POINT_SPREAD_FUNCTION" not in img_xds
+    beams = img_xds[group["beam_fit_params_point_spread_function"]].values
+    assert np.isfinite(beams).all()
+    stokes_i = list(img_xds.polarization.values).index("I")
+    planes = slice(stokes_i, stokes_i + 1)
+    sky = img_xds[group["sky"]].values[:, :, planes]
+    beam = img_xds[group["primary_beam"]].values[:, :, planes]
+    limit_mask, spectrum_mask = primary_beam_masks(beam, 0.2)
+    assert not limit_mask.all() and spectrum_mask.any()
+    assert (spectrum_mask != limit_mask).any()
+
+    n_channels, n_tiles = sky.shape[1], 64 // FIRST_ROUND_TILE
+    for name, mask in zip(
+        ("LIMIT", "SPECTRUM"),
+        (limit_mask[0, :, 0], spectrum_mask[0, :, 0]),
+        strict=True,
+    ):
+        packed = _first_round_array(store, f"PRIMARY_BEAM_{name}_MASK")
+        np.testing.assert_array_equal(
+            np.unpackbits(packed, axis=-1, count=64).view(bool), mask
+        )
+        tiles = mask.reshape(n_channels, n_tiles, FIRST_ROUND_TILE, n_tiles, -1)
+        np.testing.assert_array_equal(
+            _first_round_array(store, f"PRIMARY_BEAM_{name}_TILES"),
+            tiles.any(axis=(2, 4)),
+        )
+
+    rows = first_round_channel_rows(sky, beam, limit_mask)
+    assert (rows["sky_valid_count"] > 0).all()
+    for field in FirstRoundRows._fields:
+        stored = _first_round_array(store, field.upper())
+        assert stored.dtype == rows[field].dtype
+        np.testing.assert_array_equal(stored, rows[field][0, :, 0])
+
+    rest_frequency = float(img_xds.frequency.attrs["rest_frequency"]["data"])
+    maps = [
+        _first_round_array(store, name)
+        for name in ("SKY_MOMENT_INTEGRATED", "SKY_MOMENT_MAXIMUM")
+    ]
+    map_shape = (1, 1, 1, *sky.shape[-2:])
+    valid = valid_voxels(sky, limit_mask) & (sky != 0)
+    for window, (start, stop) in enumerate(WINDOW_RANGES):
+        partials = new_moment_partials(map_shape, sky.dtype)
+        accumulate_moments(
+            partials,
+            sky[:, start:stop],
+            valid[:, start:stop],
+            moment_channel_weights(
+                float(frequency[start]),
+                float(frequency[start + 1] - frequency[start]),
+                stop - start,
+                rest_frequency,
+            ),
+        )
+        integral, maximum = (
+            values[0, 0, 0]
+            for values in finalize_moments(partials, map_shape, sky.dtype)
+        )
+        assert np.isfinite(integral).any() and np.isnan(integral).any()
+        np.testing.assert_array_equal(maps[1][window], maximum)
+        np.testing.assert_allclose(maps[0][window], integral, rtol=1e-12)
+
+
+def test_find_continuum_first_round_of_a_chunk_not_written(
+    tmp_path, threaded_dask, monkeypatch
+):
+    """A chunk that cannot be written leaves the first round incomplete: the
+    imager returns ``None``. The moments are still drained, so the process
+    keeps none of them, and the window of that chunk has none."""
+    node_task = importlib.import_module(
+        "astroviper.node_tasks.imaging.image_cube_single_field"
+    )
+    select_chunk_writer = node_task._select_chunk_writer
+
+    def select_failing_writer(*args):
+        write = select_chunk_writer(*args)
+
+        def write_or_fail(chunk_xds, chunk_task_coords):
+            if chunk_task_coords["frequency"]["slice"].start == 4:
+                raise OSError("no space left on device")
+            write(chunk_xds, chunk_task_coords)
+
+        return write_or_fail
+
+    monkeypatch.setattr(node_task, "_select_chunk_writer", select_failing_writer)
+    result = _image_first_round(tmp_path)
+
+    assert result["find_continuum_first_round"] is None
+    assert (result["timing_node_tasks"]["task_failed_phase"] == "write").sum() == 1
+    store = str(tmp_path / "cube_find_continuum_first_round.zarr")
+    attributes = zarr.open_group(store, mode="r").attrs["find_continuum_first_round"]
+    assert not attributes["complete"]
+    assert attributes["moments_complete"] == [True, False]
+    assert attributes["n_missing"] == [0, 1]
+    with pytest.raises(ValueError, match="incomplete"):
+        validate_find_continuum_first_round(
+            store, str(tmp_path / "cube.img.zarr"), 0.2, WINDOW_RANGES[0]
+        )
+    assert not find_continuum_node_tasks._FIRST_ROUND_MOMENTS
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+
+def test_find_continuum_first_round_of_a_chunk_that_fails(
+    tmp_path, threaded_dask, monkeypatch
+):
+    """The first round of a chunk that cannot be written (after the retries of
+    transient errors) is logged and leaves the first round incomplete; the
+    imaging goes on, and no process keeps moments or slots."""
+    write_masks = find_continuum_node_tasks.write_primary_beam_masks
+
+    def write_or_fail(first_round_store, channels, limit_mask, spectrum_mask):
+        if list(channels) == [4]:
+            raise OSError(errno.EIO, "Input/output error")
+        return write_masks(first_round_store, channels, limit_mask, spectrum_mask)
+
+    monkeypatch.setattr(
+        find_continuum_node_tasks, "write_primary_beam_masks", write_or_fail
+    )
+    result = _image_first_round(tmp_path)
+
+    _assert_imaged(result)
+    assert result["find_continuum_first_round"] is None
+    assert result["timing_node_tasks"]["n_failed_first_round_chunks"].sum() == 1
+    store = str(tmp_path / "cube_find_continuum_first_round.zarr")
+    assert not zarr.open_group(store, mode="r").attrs["find_continuum_first_round"][
+        "complete"
+    ]
+    assert not find_continuum_node_tasks._FIRST_ROUND_MOMENTS
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+
+def test_find_continuum_first_round_with_a_tile_that_fails_to_merge(
+    tmp_path, threaded_dask, monkeypatch
+):
+    """A merge of the moments that fails after the imaging leaves only that
+    window's moments incomplete; the first round is bound and returned."""
+    from astroviper.distributed_applications.imaging import find_continuum_first_round
+
+    merge = find_continuum_first_round.merge_first_round_moment_tile
+
+    def merge_or_fail(store, partials_directory, window, slots, tile):
+        if window == 1:
+            raise OSError(errno.EIO, "Input/output error")
+        return merge(store, partials_directory, window, slots, tile)
+
+    monkeypatch.setattr(
+        find_continuum_first_round, "merge_first_round_moment_tile", merge_or_fail
+    )
+    result = _image_first_round(tmp_path)
+
+    _assert_imaged(result)
+    store = str(tmp_path / "cube_find_continuum_first_round.zarr")
+    assert result["find_continuum_first_round"] == {
+        "store": store,
+        "primary_beam_limit": 0.2,
+        "complete": True,
+        "moments_complete": [True, False],
+    }
+    assert [
+        validate_find_continuum_first_round(
+            store, str(tmp_path / "cube.img.zarr"), 0.2, window
+        ).moments_usable
+        for window in WINDOW_RANGES
+    ] == [True, False]
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+
+def test_a_failed_imaging_compute_drops_the_first_round_moments(
+    tmp_path, threaded_dask, monkeypatch
+):
+    """The compute fails after every task added its moments (here in the
+    reduce): the call raises, no process keeps the moments of the run and
+    their slots are removed."""
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_cube_single_field"
+    )
+    monkeypatch.setattr(find_continuum_node_tasks, "FIRST_ROUND_WINDOWS_IN_MEMORY", 1)
+    flushed = []
+    flush = find_continuum_node_tasks._flush_first_round_window
+
+    def recorded_flush(entry, window, partials_directory):
+        flush(entry, window, partials_directory)
+        flushed.append(window)
+
+    def failing_reduce(input_data, input_params):
+        raise RuntimeError("reduce failed")
+
+    monkeypatch.setattr(
+        find_continuum_node_tasks, "_flush_first_round_window", recorded_flush
+    )
+    monkeypatch.setattr(driver, "combine_return_data_frames", failing_reduce)
+    with pytest.raises(RuntimeError, match="reduce failed"):
+        _image_first_round(tmp_path)
+
+    assert flushed
+    assert not find_continuum_node_tasks._FIRST_ROUND_MOMENTS
+    store = str(tmp_path / "cube_find_continuum_first_round.zarr")
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+
+def test_find_continuum_first_round_merge_tiles_without_l_and_m_chunking(tmp_path):
+    """The default image chunking spans the plane; the moments of the first
+    round are merged in tiles of 625 px chunks, not of the whole plane."""
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.utils.io import (
+        create_empty_data_variables_on_disk,
+        write_zarr_image_store,
+    )
+
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_cube_single_field"
+    )
+    n_pixels = 1500
+    img_xds = make_empty_sky_image(
+        phase_center=[1.2, -0.4],
+        image_size=[n_pixels, n_pixels],
+        cell_size=[1.0e-7, 1.0e-7],
+        frequency_coords=230.0e9 + 1.0e6 * np.arange(4),
+        pol_coords=["I", "Q"],
+        time_coords=[0.0],
+    )
+    img_xds.attrs["data_groups"] = {
+        "residual": {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+    }
+    image_store = write_zarr_image_store(img_xds, str(tmp_path / "cube.img.zarr"))
+    create_empty_data_variables_on_disk(
+        image_store,
+        ["sky_residual", "primary_beam"],
+        shape_dict=dict(img_xds.sizes),
+        parallel_coords={"frequency": {"data_chunks": [[0, 1], [2, 3]]}},
+        compressor=None,
+        double_precision=False,
+        data_variable_definitions="imaging",
+    )
+    params = driver._create_find_continuum_first_round(
+        image_store, img_xds, 0.2, "dask"
+    )
+    store = params["first_round_store"]
+    for name in ("SKY_MOMENT_INTEGRATED", "SKY_MOMENT_MAXIMUM"):
+        array = zarr.open_array(os.path.join(store, name), mode="r")
+        assert array.chunks == (1, 750, 750)
+    shutil.rmtree(params["partials_directory"])
+
+
+def test_find_continuum_first_round_refuses_fits(tmp_path):
+    """findContinuum reads Zarr image stores: FITS output is refused before
+    anything is written."""
+    with pytest.raises(ValueError, match="output_image_format 'zarr'"):
+        distributed_applications.imaging.image_cube_single_field(
+            ps_store=str(tmp_path / "point.ps.zarr"),
+            image_store=str(tmp_path / "cube"),
+            image_params={
+                "image_size": [64, 64],
+                "cell_size": np.array([-40.0, 40.0]) * np.pi / (180 * 3600),
+                "phase_direction": PC,
+                "frequency_coords": np.array([3.0e9, 3.4e9]),
+                "polarization_coords": ["I", "Q"],
+                "time_coords": [0],
+                "fft_padding": 1.2,
+            },
+            instrument_polarization_basis="linear",
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params={
+                "max_iter": 0,
+                "max_cycles": 0,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": -1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            skunk_works=True,
+            output_image_format="fits",
+            find_continuum_first_round=True,
+        )
+    assert os.listdir(tmp_path) == []

@@ -16,11 +16,13 @@ from astroviper.distributed_applications.imaging.find_continuum.find_continuum i
 )
 from astroviper.node_tasks.imaging.find_continuum import (
     read_small_image,
+    small_image_attributes,
     write_small_image,
 )
 from astroviper.processing_functions.imaging.find_continuum import (
     finalize_find_continuum_reductions,
     find_continuum_cube_reductions,
+    image_statistics,
 )
 from tests.unit.processing_functions.imaging.find_continuum_test_utils import (
     make_find_continuum_image_xds,
@@ -48,6 +50,13 @@ def _casa_order(img_xds, variable):
     return np.transpose(img_xds[variable].values[0], (2, 3, 1, 0)).astype(np.float64)
 
 
+@pytest.fixture(autouse=True)
+def empty_small_image_cache():
+    cit._small_images.clear()
+    yield
+    cit._small_images.clear()
+
+
 @pytest.fixture
 def session(tmp_path):
     """Registered dirty cube and primary beam, reduced in one process."""
@@ -71,6 +80,8 @@ def session(tmp_path):
             "store": store,
             "variable": "SKY_RESIDUAL",
             "metadata": _cube_metadata(lazy_xds, "SKY_RESIDUAL", beam, "ALMA"),
+            "channel_offset": 0,
+            "polarization_index": 0,
             "atmosphere": {
                 "transmission": np.full(N_CHANNELS, 0.9),
                 "tsky": np.full(N_CHANNELS, 20.0),
@@ -80,6 +91,8 @@ def session(tmp_path):
             "store": store,
             "variable": "PRIMARY_BEAM",
             "metadata": _cube_metadata(lazy_xds, "SKY_RESIDUAL", None, "ALMA"),
+            "channel_offset": 0,
+            "polarization_index": 0,
         },
     }
     image = lazy_xds.sel(polarization=["I"]).load()
@@ -108,6 +121,41 @@ def session(tmp_path):
 
 
 @pytest.fixture
+def window(tmp_path):
+    """Channels 3 to 7 of a cube with Stokes Q before I, registered as the
+    cube findContinuum sees, with a primary beam limit."""
+    img_xds = make_find_continuum_image_xds(n_pixels=N_PIXELS, n_channels=N_CHANNELS)
+    stokes_q = img_xds.assign_coords(polarization=["Q"])
+    stokes_q["SKY_RESIDUAL"] = stokes_q["SKY_RESIDUAL"] + 100.0
+    store = str(tmp_path / "cube.img.zarr")
+    write_image(
+        xr.concat([stokes_q, img_xds], dim="polarization"),
+        imagename=store,
+        out_format="zarr",
+        overwrite=True,
+    )
+    window_xds = xr.open_zarr(store, chunks=None).isel(frequency=slice(3, 8))
+    primary_beam = np.transpose(img_xds["PRIMARY_BEAM"].values[0], (2, 3, 1, 0))
+    primary_beam = primary_beam[..., 3:8]
+    limit = float(np.median(primary_beam))
+    sky = _casa_order(img_xds, "SKY_RESIDUAL")[..., 3:8]
+    sky[primary_beam < limit] = np.nan
+    residual = str(tmp_path / "cube.residual")
+    cubes = {
+        residual: {
+            "store": store,
+            "variable": "SKY_RESIDUAL",
+            "metadata": _cube_metadata(window_xds, "SKY_RESIDUAL", None, "ALMA"),
+            "channel_offset": 3,
+            "polarization_index": 1,
+            "primary_beam": "PRIMARY_BEAM",
+            "primary_beam_limit": limit,
+        }
+    }
+    return {"cubes": cubes, "residual": residual, "sky": sky, "tmp_path": tmp_path}
+
+
+@pytest.fixture
 def small(tmp_path):
     """A 5 x 4 small image with its first pixel masked."""
     values = np.arange(20.0).reshape(5, 4, 1, 1)
@@ -115,6 +163,18 @@ def small(tmp_path):
     valid[0, 0] = False
     path = str(tmp_path / "small.image")
     write_small_image(path, values, valid, METADATA)
+    return path, values, valid
+
+
+@pytest.fixture
+def noisy(tmp_path):
+    """A 40 x 30 small image of noise with an outlier and masked pixels."""
+    rng = np.random.default_rng(3)
+    values = rng.normal(size=(40, 30, 1, 1))
+    values[5, 7] = 40.0
+    valid = rng.random(values.shape) > 0.1
+    path = str(tmp_path / "noisy.image")
+    write_small_image(path, values, valid, dict(METADATA, shape=[40, 30, 1, 1]))
     return path, values, valid
 
 
@@ -188,6 +248,58 @@ class TestCubeTasks:
         assert findContinuum.cornersEmptyEdgesNotEmpty(
             session["pb"], middleChannel=middle
         )
+
+    def test_reads_of_a_window_at_stokes_i(self, window, monkeypatch):
+        """Box and channel reads take Stokes I by index and the window's
+        channels of the store, one read per run of consecutive channels."""
+        reads, read = [], cit.read_array_region
+
+        def read_array_region(array_path, sel, **kwargs):
+            reads.append((os.path.basename(array_path), sel["frequency"]))
+            assert sel["polarization"] == slice(1, 2)
+            return read(array_path, sel, **kwargs)
+
+        monkeypatch.setattr(cit, "read_array_region", read_array_region)
+        residual, sky = window["residual"], window["sky"]
+        with cit.cube_session(window["cubes"], None) as session:
+            values, valid, metadata = cit._read_cube_channels(
+                residual, np.array([0, 1, 3]), (slice(2, 6), slice(3, 7))
+            )
+            np.testing.assert_array_equal(values, sky[2:6, 3:7][..., [0, 1, 3]])
+            np.testing.assert_array_equal(valid, np.isfinite(values))
+            assert metadata["shape"] == [4, 4, 1, 3]
+            assert reads == [
+                (variable, run)
+                for variable in ("SKY_RESIDUAL", "PRIMARY_BEAM")
+                for run in (slice(3, 5), slice(6, 7))
+            ]
+            assert session.counters["bytes"] > 0
+
+            stats = cit.imstat(residual, box="2,3,5,6", chans="1~2")
+            region = sky[2:6, 3:7, :, 1:3]
+            assert stats["npts"][0] == np.isfinite(region).sum()
+            np.testing.assert_array_equal(stats["max"], [np.nanmax(region)])
+            i, j, _, c = np.unravel_index(np.nanargmax(region), region.shape)
+            assert list(stats["maxpos"]) == [2 + i, 3 + j, 0, 1 + c]
+            per_channel = cit.imstat(residual, box="0,0,11,11", axes=[0, 1, 2])
+            np.testing.assert_array_equal(
+                per_channel["max"], np.nanmax(sky, axis=(0, 1, 2))
+            )
+
+            out = str(window["tmp_path"] / "two")
+            cit.immath(residual, expr="IM0", chans="0;4", outfile=out)
+            np.testing.assert_array_equal(read_small_image(out)[0], sky[..., [0, 4]])
+
+    def test_moments_request_carries_the_frequency_axis(self, session):
+        request = cit._moments_request(session["residual"], [0, 8], chans="2~4")
+        frequency = session["frequency"]
+        assert request["frequency_axis"] == (
+            frequency[0],
+            frequency[1] - frequency[0],
+            0.0,
+            N_CHANNELS,
+        )
+        assert request["channels"] == [2, 3, 4] and "frequency" not in request
 
     def test_image_tool(self, session):
         ia = cit.iatool()
@@ -284,6 +396,136 @@ class TestSmallImageTasks:
         assert chauvenet["npts"][0] == 19
         empty = cit.imstat(path, mask=f'"{path}">100')
         assert empty["npts"].size == 0 and "maxpos" not in empty
+
+    def test_repeated_imstat_returns_fresh_results(self, small):
+        """imageSNR overwrites the peak in the dictionary imstat returns; a
+        repeated imstat must not see that change."""
+        path, values, valid = small
+        mask = f'"{path}"<10'
+        _, peak, _, _ = findContinuum.imageSNR(path, mask=mask, applyMaskToAll=False)
+        assert peak == values[valid].max()
+        _, peak, _, _ = findContinuum.imageSNR(path, mask=mask, applyMaskToAll=True)
+        assert peak == values[valid & (values < 10)].max()
+
+    def test_repeated_imstat_returns_a_new_result(self, small):
+        path, _, _ = small
+        mask = f'"{path}"<10'
+        first = cit.imstat(path, mask=mask)
+        peak, median = first["max"].copy(), first["median"].copy()
+        first["max"] = np.array([-1.0])
+        first["median"] = -1.0
+        second = cit.imstat(path, mask=mask)
+        np.testing.assert_array_equal(second["max"], peak)
+        np.testing.assert_array_equal(second["median"], median)
+
+        before = cit.imstat(path)
+        before["median"] = -1.0
+        np.testing.assert_array_equal(before["q1"], cit.imstat(path)["q1"])
+        assert before["median"] == -1.0
+
+    @pytest.mark.parametrize("algorithm, maxiter", [("classic", -1), ("chauvenet", 5)])
+    def test_lazy_statistics(self, noisy, monkeypatch, algorithm, maxiter):
+        """The order statistics and the positions are computed when first read;
+        every statistic equals the eager one of the same pixels."""
+        path, values, valid = noisy
+        calls = []
+        channel_statistics = cit.channel_statistics
+        monkeypatch.setattr(
+            cit,
+            "channel_statistics",
+            lambda *args, **kwargs: (
+                calls.append(args) or channel_statistics(*args, **kwargs)
+            ),
+        )
+        stats = cit.imstat(
+            path, mask=f'"{path}">-1', algorithm=algorithm, maxiter=maxiter
+        )
+        selected = valid & (values > -1)
+        expected = image_statistics(values[selected], algorithm, maxiter)
+        assert (expected["npts"] < selected.sum()) == (algorithm == "chauvenet")
+        for key in ("npts", "sum", "sumsq", "mean", "sigma", "rms", "min", "max"):
+            np.testing.assert_array_equal(stats[key], [expected[key]])
+        assert not calls and "median" not in stats and "maxpos" not in stats
+        for key in ("median", "medabsdevmed", "q1", "q3", "quartile"):
+            np.testing.assert_array_equal(stats[key], [expected[key]])
+        assert len(calls) == 1
+        masked = np.where(selected, values, np.nan)
+        for key, index in (
+            ("maxpos", np.nanargmax(masked)),
+            ("minpos", np.nanargmin(masked)),
+        ):
+            assert list(stats[key]) == list(np.unravel_index(index, values.shape))
+
+    def test_cache_by_write_id(self, tmp_path, monkeypatch):
+        """A renamed store is found in the cache; a rewritten one is read again."""
+        values = np.arange(6.0).reshape(3, 2, 1, 1)
+        valid = np.ones(values.shape, dtype=bool)
+        metadata = dict(METADATA, shape=[3, 2, 1, 1])
+        path, renamed = str(tmp_path / "a.image"), str(tmp_path / "b.image")
+        cit._write(path, values, valid, metadata)
+        os.rename(path, renamed)
+        reads = []
+        monkeypatch.setattr(
+            cit, "read_small_image", lambda p: reads.append(p) or read_small_image(p)
+        )
+        cached_values, cached_valid, cached_metadata = cit._read(renamed)
+        assert not reads and cached_values is values and cached_valid is valid
+        assert not cached_values.flags.writeable and cached_metadata == metadata
+        write_small_image(renamed, values + 1, valid, metadata)
+        np.testing.assert_array_equal(cit._read(renamed)[0], values + 1)
+        cit._read(renamed + "/")
+        assert reads == [renamed]
+
+    def test_cache_is_bounded(self, tmp_path, monkeypatch):
+        """The least recently used images leave the cache beyond its size."""
+        values = np.zeros((4, 4, 1, 1))
+        valid = np.ones(values.shape, dtype=bool)
+        metadata = dict(METADATA, shape=[4, 4, 1, 1])
+        monkeypatch.setattr(
+            cit, "_SMALL_IMAGE_BYTES", 2 * (values.nbytes + valid.nbytes)
+        )
+        paths = [str(tmp_path / name) for name in "abcd"]
+        for path in paths[:3]:
+            cit._write(path, values.copy(), valid.copy(), metadata)
+        cit._read(paths[1])
+        cit._write(paths[3], values.copy(), valid.copy(), metadata)
+        assert list(cit._small_images) == [
+            small_image_attributes(path)["write_id"] for path in paths[1::2]
+        ]
+
+    def test_metadata_reads_no_pixels(self, small, tmp_path, monkeypatch):
+        path, _, _ = small
+        all_valid = str(tmp_path / "all_valid.image")
+        write_small_image(
+            all_valid, np.zeros((5, 4, 1, 1)), np.ones((5, 4, 1, 1), bool), METADATA
+        )
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("pixels were read")
+
+        monkeypatch.setattr(cit, "read_small_image", refuse)
+        monkeypatch.setattr(cit, "read_array_region", refuse)
+        ia = cit.iatool()
+        ia.open(path)
+        np.testing.assert_array_equal(ia.shape(), METADATA["shape"])
+        assert ia.brightnessunit() == "Jy/beam"
+        assert ia.coordsys().referencevalue()["numeric"][3] == 230.0e9
+        assert ia.restoringbeam()["minor"]["value"] == pytest.approx(
+            np.degrees(2.5e-6) * 3600.0
+        )
+        assert ia.maskhandler("default") == ["mask0"]
+        assert cit.imhead(path, mode="get", hdkey="object") == "M100"
+        ia.open(all_valid)
+        assert ia.maskhandler("default") == [""]
+
+    def test_getregion_returns_copies(self, small):
+        path, values, valid = small
+        ia = cit.iatool()
+        ia.open(path)
+        for getmask, expected in ((False, values), (True, valid)):
+            region = ia.getregion(getmask=getmask)
+            region[...] = 0
+            np.testing.assert_array_equal(ia.getregion(getmask=getmask), expected)
 
     def test_immath_and_imsubimage(self, small, tmp_path):
         path, values, valid = small
@@ -412,6 +654,8 @@ def test_quanta_and_log():
         lambda p: cit.immoments(p, moments=[0], outfile="x"),
         lambda p: cit.imstat(p, region="r"),
         lambda p: cit.imstat(p, axes=[0, 1]),
+        lambda p: cit.imstat(p, algorithm="chauvenet", maxiter=3),
+        lambda p: cit.imstat(p, algorithm="biweight"),
         lambda p: cit.immath(p, mode="spix"),
         lambda p: cit.imsubimage(p, box="1,1,2,2"),
         lambda p: cit.makemask(mode="expand"),

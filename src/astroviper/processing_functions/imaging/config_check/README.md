@@ -436,12 +436,53 @@ a direct helper call still applies its own applicable checks.
 
 ## find_continuum
 
-`check_find_continuum_config` checks the channel binning and the frequency
-chunking before the image is opened; `check_find_continuum_inputs` checks the
-data group roles, the single time, the Stokes I plane and the length of the
-atmospheric spectra on the opened image without loading pixels. The driver
-keeps the work-directory check: findContinuum reuses the products of an
-earlier run that it finds there.
+`check_find_continuum_config` checks the channel binning, the primary beam
+limit and the frequency chunking before the image is opened.
+`check_find_continuum_channel_range` returns the `[start, stop)` channels that
+findContinuum sees and refuses a range whose frequencies are not linear,
+listing the linear channel ranges of the cube. It also runs without a range,
+so a cube of several spectral windows is refused instead of being analysed on
+a wrong frequency axis. `check_find_continuum_inputs` checks the data group
+roles (the sky, the primary beam and the beams of the point spread function,
+whose cube findContinuum does not read), the single time, the Stokes I plane
+and the length of the atmospheric spectra on the opened image without loading
+pixels. The driver keeps the work-directory check: findContinuum reuses the
+products of an earlier run that it finds there.
+
+`check_find_continuum_ultra_config` checks the configuration of
+`find_continuum_ultra` before the image is opened: `n_bin`, the spectral
+dynamic range bandwidth, the telescope, `single_continuum`, a primary beam
+limit in (0, 1), the first-round store path, the frequency chunking,
+`thread_info`, the memory budget and the monitor interval.
+`check_find_continuum_ultra_inputs` checks the opened cube without loading a
+plane and returns the `[start, stop)` of its spectral window: the data group
+roles, the sky and primary beam on the image dimensions, one time, Stokes I,
+the channel range of `check_find_continuum_channel_range` with at least 8
+channels of increasing frequency, atmospheric spectra of one finite, non-zero
+value per channel, finite positive beam axes of Stokes I in every channel, the
+rest frequency and two pixels along `l` and `m`. The driver of
+`find_continuum_ultra` refuses a run directory that exists instead of reusing
+the products in it.
+`check_find_continuum_ultra_task_config` checks the planes per batch, the
+Stokes I index and the channel range of a `find_continuum_ultra` frequency
+task called without `input_checked`.
+
+`check_find_continuum_first_round` requires the Stokes I plane and a Zarr
+output (FITS is refused) when `image_cube_single_field` makes the first round.
+`check_find_continuum_first_round_store` refuses a first-round store that is
+missing, incomplete or of another version, that was made with another primary
+beam limit, Stokes I index or tile shape, that holds no spectral window with
+every channel of the call's `channel_range`, or whose binding (the
+modification time of the cube's `zarr.json`, the digests of its coordinates
+and its shape) differs from the cube's: a rewritten cube needs a new first
+round.
+`check_find_continuum_ultra_task_memory` refuses a planned
+`find_continuum_ultra` node task that does not fit the memory of a thread with
+one requested reduction (or the first round) at one plane per batch; a task
+over its budget but within a thread runs, with a warning.
+`check_find_continuum_cluster_threads` refuses the threads of a cluster with no
+worker or no memory limit, when `find_continuum_ultra` takes `thread_info` from
+the cluster.
 
 ## Runtime Taylor-Hessian reuse
 
