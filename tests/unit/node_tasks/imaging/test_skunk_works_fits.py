@@ -321,13 +321,69 @@ def test_restoring_beam_labels_no_other_file(tmp_path):
         )
 
 
-def test_kept_restored_beam_needs_the_restoring_beam(tmp_path):
-    with pytest.raises(ValueError, match="needs the restoring_beam"):
-        create_empty_fits_images(
-            str(tmp_path / "img.fits"),
-            _empty_image(),
-            ["sky_restored", "beam_fit_params_sky_restored"],
+def test_without_a_restoring_beam_the_restored_file_carries_the_restored_beam(
+    tmp_path,
+):
+    """Without a restoring beam the BEAMS table of the restored file holds the
+    beams the restore applied, not the PSF beams, and it has no header beam;
+    the corrected file has no beam. After the run the rows of the flagged
+    channel hold the beam of largest area, channel 2's, which XRADIO reads."""
+    import xradio.image
+    from astropy.io import fits
+
+    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+        fill_fits_beams_without_fit,
+    )
+
+    store = str(tmp_path / "img.fits")
+    keep = KEEP + RESTORED + ["beam_fit_params_sky_restored"]
+    create_empty_fits_images(store, _empty_image(), keep)
+    full = _restored_arrays(keep)
+    restored = np.array(
+        [
+            [2.0, 1.0, 50.0],
+            [0.0, 0.0, 0.0],  # flagged
+            [3.0, 2.0, 30.0],
+            [2.5, 1.5, 20.0],
+            [2.2, 1.9, -40.0],
+        ]
+    )
+    restored = np.radians(restored / [3600.0, 3600.0, 1.0])
+    full["BEAM_FIT_PARAMS_SKY_RESTORED"] = np.repeat(
+        restored[None, :, None], len(POLS), axis=2
+    )
+    _write_chunk(store, full, slice(0, 2), keep=keep)
+    _write_chunk(store, full, slice(2, 5), keep=keep)
+    np.testing.assert_array_equal(
+        _beams_table(store, "sky_restored"),
+        _casa_rows(full["BEAM_FIT_PARAMS_SKY_RESTORED"][0]),
+    )
+    assert _header_beam(store, "sky_restored") is None
+    for key in ("sky_residual", "point_spread_function"):
+        np.testing.assert_array_equal(
+            _beams_table(store, key),
+            _casa_rows(full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0]),
         )
+    path = os.path.join(store, "SKY_RESTORED_PRIMARY_BEAM_CORRECTED.fits")
+    with fits.open(path) as hdulist:
+        assert len(hdulist) == 1
+        assert "CASAMBM" not in hdulist[0].header
+        assert "BMAJ" not in hdulist[0].header
+
+    fill_fits_beams_without_fit(store, keep)
+    filled = full["BEAM_FIT_PARAMS_SKY_RESTORED"][0].copy()
+    filled[1] = restored[2]
+    np.testing.assert_array_equal(
+        _beams_table(store, "sky_restored"), _casa_rows(filled)
+    )
+    xds = xradio.image.open_image(
+        {"sky_restored": os.path.join(store, "SKY_RESTORED.fits")}
+    )
+    np.testing.assert_allclose(
+        xds["BEAM_FIT_PARAMS_SKY_RESTORED"].values[0],
+        filled,
+        rtol=np.finfo(np.float32).eps,
+    )
 
 
 def test_unwritten_beams_rows_hold_their_channel_and_polarization(tmp_path):
@@ -435,7 +491,7 @@ RESIDUAL_BEAM = "beam_fit_params_sky_residual"
     "image_variable, beam_variables, expected",
     [
         ("sky_restored", [PSF_BEAM], PSF_BEAM),
-        ("sky_restored", [RESTORED_BEAM, PSF_BEAM], None),
+        ("sky_restored", [RESTORED_BEAM, PSF_BEAM], RESTORED_BEAM),
         ("sky_restored_primary_beam_corrected", [PSF_BEAM], None),
         ("sky_restored_primary_beam_corrected", [RESTORED_BEAM, PSF_BEAM], None),
         ("sky_residual", [RESTORED_BEAM, PSF_BEAM], PSF_BEAM),

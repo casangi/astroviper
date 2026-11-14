@@ -909,16 +909,41 @@ def _restore_image_arrays(
     }
 
 
-def _restored_beam_variable(beam_da, restoring_beam):
-    """``BEAM_FIT_PARAMS_SKY_RESTORED``: the target beam in every plane of the
-    PSF beam variable ``beam_da``, whose last dimension holds the parameters.
-    That dimension is ``beam_params_label``, labelled as xradio's
-    ``BeamFitParamsArray``, which its image writers require."""
+# tclean's beam for every plane when no plane has a fit: a circle of 1e-6
+# arcsec at 0 deg (SIImageStore::makeImageBeamSet).
+_NO_FIT_BEAM = (np.radians(1e-6 / 3600.0), np.radians(1e-6 / 3600.0), 0.0)
+
+
+def _fill_planes_without_fit(beams, no_fit_beam=None):
+    """``beams`` (``[major, minor, pa]`` along the last axis, planes in C order)
+    with every plane without a fit, a non-finite beam or an axis that is not
+    positive, given the beam ``tclean`` gives it
+    (``SIImageStore::makeImageBeamSet``): the first beam of largest area of the
+    planes with a fit, else ``no_fit_beam``. ``beams`` itself when there is
+    nothing to fill."""
+    planes = np.reshape(beams, (-1, 3))
+    fitted = np.isfinite(planes).all(axis=1) & (planes[:, 0] > 0) & (planes[:, 1] > 0)
+    if fitted.all() or (not fitted.any() and no_fit_beam is None):
+        return beams
+    filled = planes.copy()
+    if fitted.any():
+        area = np.full(len(planes), -np.inf)
+        area[fitted] = planes[fitted, 0] * planes[fitted, 1]
+        filled[~fitted] = planes[np.argmax(area)]
+    else:
+        filled[:] = no_fit_beam
+    return filled.reshape(np.shape(beams))
+
+
+def _restored_beam_variable(beam_da, beams):
+    """``BEAM_FIT_PARAMS_SKY_RESTORED``: ``beams``, the beams the restore
+    applied, broadcast to the PSF beam variable ``beam_da``, whose last
+    dimension holds the parameters. That dimension is ``beam_params_label``,
+    labelled as xradio's ``BeamFitParamsArray``, which its image writers
+    require."""
     parameters = beam_da.dims[-1]
     return xr.DataArray(
-        np.broadcast_to(
-            np.asarray(restoring_beam, dtype=np.float64), beam_da.shape
-        ).copy(),
+        np.broadcast_to(np.asarray(beams, dtype=np.float64), beam_da.shape).copy(),
         dims=(*beam_da.dims[:-1], "beam_params_label"),
         coords={
             **{
@@ -1024,10 +1049,10 @@ def restore_image(
     image_data_group_out_modified : dict, optional
         Role overrides layered on top of the residual group to form the restored
         group.  Default ``{"sky": "SKY_RESTORED"}`` so the restored sky is stored
-        in the ``SKY_RESTORED`` data variable.  With ``restoring_beam`` the
-        restored beam goes to the variable of its ``"beam_fit_params_sky"``
-        entry, ``BEAM_FIT_PARAMS_SKY_RESTORED`` without one; like the restored
-        sky, an existing variable of that name is refused unless ``overwrite``.
+        in the ``SKY_RESTORED`` data variable.  The restored beam goes to the
+        variable of its ``"beam_fit_params_sky"`` entry,
+        ``BEAM_FIT_PARAMS_SKY_RESTORED`` without one; like the restored sky, an
+        existing variable of that name is refused unless ``overwrite``.
     beam_fit_params_key : str, optional
         Role key in the residual data group holding the ``[major, minor, pa]``
         beam-fit parameters (FWHM major/minor and position angle, in radians),
@@ -1103,10 +1128,14 @@ def restore_image(
     -------
     img_xds : xarray.Dataset
         The input dataset with the restored sky variable added and the restored
-        data group registered. With ``restoring_beam`` it also holds the
-        restored beam, ``BEAM_FIT_PARAMS_SKY_RESTORED`` unless
-        ``image_data_group_out_modified`` names another variable (the target in
-        every plane, role ``beam_fit_params_sky`` of the restored group).
+        data group registered. It also holds the restored beam,
+        ``BEAM_FIT_PARAMS_SKY_RESTORED`` unless ``image_data_group_out_modified``
+        names another variable (role ``beam_fit_params_sky`` of the restored
+        group): the beams the restore applied, the target in every plane, or
+        without one the PSF beam of ``beam_polarization_index`` in every
+        polarization. Without a target, a plane without a fit, which no beam
+        restores, holds the beam ``tclean`` gives it, the first beam of largest
+        area of the planes with a fit, and keeps its own when no plane has one.
     return_df : pandas.DataFrame
         One-row timing frame with a ``T_restore`` column (wall-clock seconds of
         the clean-beam convolution), matching the other imaging processing
@@ -1171,12 +1200,11 @@ def restore_image(
             if make_apparent
             else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
         }
-    if restoring_beam is not None:
-        # The output-variable check of overwrite=False then covers the beam.
-        image_data_group_out_modified = {
-            "beam_fit_params_sky": "BEAM_FIT_PARAMS_SKY_RESTORED",
-            **image_data_group_out_modified,
-        }
+    # The output-variable check of overwrite=False then covers the beam.
+    image_data_group_out_modified = {
+        "beam_fit_params_sky": "BEAM_FIT_PARAMS_SKY_RESTORED",
+        **image_data_group_out_modified,
+    }
 
     # Resolve every required runtime product before building output metadata.
     # A cube consumes the fitted beam directly and does not require a PSF.
@@ -1257,15 +1285,19 @@ def restore_image(
         del img_xds[model_sky_name]
 
     if restoring_beam is None:
+        restored_beams = _fill_planes_without_fit(
+            beam[:, :, beam_polarization_index : beam_polarization_index + 1]
+        )
         description = "Restored image: clean-beam-convolved model plus residual."
     else:
-        img_xds[restored_group["beam_fit_params_sky"]] = _restored_beam_variable(
-            img_xds[beam_name], restoring_beam
-        )
+        restored_beams = restoring_beam
         description = (
             "Restored image: model convolved with the restoring beam "
             f"{list(map(float, restoring_beam))} rad plus residual taken to it."
         )
+    img_xds[restored_group["beam_fit_params_sky"]] = _restored_beam_variable(
+        img_xds[beam_name], restored_beams
+    )
     if correct:
         description += (
             " Primary beam corrected restored image "

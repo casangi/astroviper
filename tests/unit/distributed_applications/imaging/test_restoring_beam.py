@@ -137,14 +137,19 @@ def test_a_cube_target_equal_to_the_psf_beam_restores_bit_for_bit(
     """Channel 0 is restored to its own PSF beam as without a target; the
     target is kept although the caller's list (left unchanged) does not have
     it, the PSF beams not (only a report keeps them), and every task gets the
-    target as three floats."""
+    target as three floats. Without a target the restored beam is the PSF
+    beam of Stokes I, which the restore applies to Stokes Q too."""
     reference = _image_cube(
         processing_set,
         tmp_path / "none.img.zarr",
         ["sky_residual", "sky_model", "beam_fit_params_point_spread_function"],
     )
-    assert "BEAM_FIT_PARAMS_SKY_RESTORED" not in reference
-    target = reference.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0, 0, 0]
+    psf_beam = reference.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
+    np.testing.assert_array_equal(
+        reference.BEAM_FIT_PARAMS_SKY_RESTORED.values,
+        np.repeat(psf_beam[:, :, :1], psf_beam.shape[2], axis=2),
+    )
+    target = psf_beam[0, 0, 0]
 
     received = []
     node_task = node_tasks.imaging.image_cube_single_field
@@ -178,6 +183,85 @@ def test_a_cube_target_equal_to_the_psf_beam_restores_bit_for_bit(
     np.testing.assert_array_equal(
         restored_beam.reshape(-1, 3), np.tile(target, (restored_beam.size // 3, 1))
     )
+
+
+@pytest.fixture(scope="module")
+def flagged_processing_set(processing_set, tmp_path_factory):
+    """The processing set with channel 1 fully flagged."""
+    import shutil
+
+    import zarr
+
+    store = tmp_path_factory.mktemp("flagged") / "point.ps.zarr"
+    shutil.copytree(processing_set, store)
+    for ms_name in open_processing_set(str(store)):
+        zarr.open_array(f"{store}/{ms_name}/FLAG", mode="r+")[:, :, 1] = True
+    return str(store)
+
+
+def test_without_a_target_a_flagged_channel_holds_the_tclean_beam(
+    flagged_processing_set, tmp_path
+):
+    """The task restores the flagged channel with no beam and records its null
+    fit; once every task has written its beams the driver gives it the beam
+    tclean gives it, that of largest area, channel 0's. The restored group
+    records the beams."""
+    image = _image_cube(
+        flagged_processing_set,
+        tmp_path / "none.img.zarr",
+        ["beam_fit_params_point_spread_function"],
+    )
+    psf_beam = image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
+    np.testing.assert_array_equal(psf_beam[0, 1], 0.0)
+    restored_beam = image.BEAM_FIT_PARAMS_SKY_RESTORED.values
+    np.testing.assert_array_equal(
+        restored_beam, np.broadcast_to(psf_beam[0, 0, 0], restored_beam.shape)
+    )
+    assert (
+        image.attrs["data_groups"]["restored"]["beam_fit_params_sky"]
+        == "BEAM_FIT_PARAMS_SKY_RESTORED"
+    )
+
+
+def test_fits_rows_without_a_fit_hold_the_tclean_beam(flagged_processing_set, tmp_path):
+    """FITS output: after the run the BEAMS rows of the flagged channel hold the
+    beam of largest area, channel 0's, in the restored image (the beams the
+    restore applied, those of Stokes I) as in the residual image (the PSF
+    beams); the primary beam corrected image has no beam."""
+    from astropy.io import fits
+
+    image_store = tmp_path / "none_fits"
+    with dask.config.set(scheduler="synchronous"):
+        image_cube_single_field(
+            ps_store=flagged_processing_set,
+            image_store=str(image_store),
+            image_params=_image_params(flagged_processing_set),
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params=CYCLE_CONTROL_PARAMS,
+            image_data_variables_keep=[
+                "sky_residual",
+                "beam_fit_params_point_spread_function",
+            ],
+            processing_set_data_group_name="base",
+            n_mapping_parallelism={"frequency": 2},
+            restore=True,
+            restoration_output="both",
+            skunk_works=True,
+            output_image_format="fits",
+        )
+    for name in ("SKY_RESTORED", "SKY_RESIDUAL"):
+        with fits.open(image_store / f"{name}.fits") as hdulist:
+            beams = hdulist["BEAMS"].data
+            rows = np.stack([beams[column] for column in ("BMAJ", "BMIN", "BPA")], -1)
+        rows = rows.reshape(2, 2, 3)  # (channel, Stokes I and Q)
+        assert np.all(rows[:, :, :2] > 0), name
+        np.testing.assert_array_equal(rows[1], rows[0], err_msg=name)
+        if name == "SKY_RESTORED":
+            np.testing.assert_array_equal(rows[:, 1], rows[:, 0])
+    with fits.open(image_store / "SKY_RESTORED_PRIMARY_BEAM_CORRECTED.fits") as hdulist:
+        assert len(hdulist) == 1
+        assert "CASAMBM" not in hdulist[0].header
+        assert "BMAJ" not in hdulist[0].header
 
 
 def test_a_continuum_target_equal_to_the_psf_beam_restores_bit_for_bit(

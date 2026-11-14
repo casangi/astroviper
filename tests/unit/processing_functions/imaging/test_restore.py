@@ -1118,9 +1118,75 @@ def test_restored_beam_variable_holds_the_target_in_every_plane():
     assert "restoring beam" in restored_group["description"]
     xr.testing.assert_identical(out.SKY_RESIDUAL, residual)
 
-    out, _ = restore_image(_target_inputs(np.float32), restoration_output="both")
-    assert "BEAM_FIT_PARAMS_SKY_RESTORED" not in out
-    assert "beam_fit_params_sky" not in out.attrs["data_groups"]["restored"]
+
+@pytest.mark.parametrize("beam_polarization_index", [0, 1])
+def test_without_a_target_the_restored_beam_holds_the_beams_the_restore_applied(
+    beam_polarization_index,
+):
+    """The PSF beam of ``beam_polarization_index`` in every polarization, as
+    the restore applies it. The planes without a fit, the zeros of a flagged
+    channel and the NaN of a failed fit, hold the first beam of largest area,
+    channel 3's, as tclean labels them: not the first fit's, not a
+    neighbour's, not the later one of the same area."""
+    pixels = [
+        (8.0, 4.0, 0.3),
+        (0.0, 0.0, 0.0),  # a flagged channel
+        (7.0, 5.0, 0.1),
+        (10.0, 4.5, 0.2),  # the largest area
+        (8.0, 5.0, 1.0),
+        (np.nan, np.nan, np.nan),  # a failed fit
+        (10.0, 4.5, -0.4),  # the same area, later
+    ]
+    beams = {(0, f): _radians(beam) for f, beam in enumerate(pixels)}
+    xds = _target_inputs(np.float32, nf=len(pixels), beams=beams)
+    psf = xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION
+    psf[:, :, 1, :2] *= 1.25  # another beam in polarization 1
+    applied = psf.values[:, :, beam_polarization_index].copy()
+    out, _ = restore_image(
+        xds,
+        restoration_output="both",
+        beam_polarization_index=beam_polarization_index,
+    )
+    applied[0, [1, 5]] = applied[0, 3]
+    restored_beam = out.BEAM_FIT_PARAMS_SKY_RESTORED
+    assert restored_beam.dims == (*psf.dims[:-1], "beam_params_label")
+    assert restored_beam.attrs == {"type": "beam_fit_params_sky", "units": "rad"}
+    for polarization in range(2):
+        np.testing.assert_array_equal(restored_beam.values[:, :, polarization], applied)
+    restored_group = out.attrs["data_groups"]["restored"]
+    assert restored_group["beam_fit_params_sky"] == "BEAM_FIT_PARAMS_SKY_RESTORED"
+
+
+def test_without_a_target_and_without_a_fit_the_restored_beam_keeps_the_fit():
+    """A plane of a call without any fit, as the cube imager restores a flagged
+    channel, keeps its null fit for the driver to fill once every channel is
+    written; the image is the residual."""
+    xds = _target_inputs(np.float32, beams={(0, 0): (0.0, 0.0, 0.0)})
+    out, _ = restore_image(xds)
+    np.testing.assert_array_equal(out.BEAM_FIT_PARAMS_SKY_RESTORED.values, 0.0)
+    np.testing.assert_array_equal(out.SKY_RESTORED.values, out.SKY_RESIDUAL.values)
+
+
+def test_planes_without_a_fit_take_the_tclean_beam():
+    """With no fit in any plane the given beam, tclean's circle of 1e-6 arcsec
+    at 0 degrees, else the beams as they are; the beams themselves when every
+    plane has a fit."""
+    from astroviper.processing_functions.imaging.restore import (
+        _NO_FIT_BEAM,
+        _fill_planes_without_fit,
+    )
+
+    fitted = np.array([[[[2.0, 1.0, 0.1]], [[3.0, 2.0, 0.2]]]])
+    assert _fill_planes_without_fit(fitted, _NO_FIT_BEAM) is fitted
+    null = np.array([[[[0.0, 0.0, 0.0]], [[np.nan, np.nan, np.nan]]]])
+    assert _fill_planes_without_fit(null) is null
+    np.testing.assert_array_equal(
+        _fill_planes_without_fit(null, _NO_FIT_BEAM),
+        np.broadcast_to(_NO_FIT_BEAM, null.shape),
+    )
+    np.testing.assert_allclose(
+        np.degrees(_NO_FIT_BEAM) * [3600.0, 3600.0, 1.0], [1e-6, 1e-6, 0.0]
+    )
 
 
 def test_restores_to_two_targets_keep_the_beam_of_each_group():

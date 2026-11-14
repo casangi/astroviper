@@ -131,6 +131,7 @@ def test_html_report_of_a_monitored_single_task_run(processing_set, tmp_path):
     ):
         assert f">{heading}</h" in text, heading
     assert "Cluster CPU" in text
+    assert "No restoring beam: every plane was restored with the PSF fit" in text
     assert text.count("data:image/png;base64,") >= 8
     files = tmp_path / "cube_report_files"
     for key in ("sky_residual", "sky_model", "sky_restored_primary_beam_corrected"):
@@ -372,6 +373,22 @@ def test_restoring_beam_section_without_uncorrected_channels(tmp_path):
     text = _restoring_beam_section(tmp_path, store, "zarr", available)
     assert 'restored to the beam 2" x 2"' in text
     assert "The beam fit of the point spread function was not kept" in text
+
+
+def test_restoring_beam_section_without_a_restoring_beam(tmp_path):
+    """Without a restoring beam the restored beams are the PSF fits, the null
+    fit of a flagged channel among them: no restoring beam, nothing drawn."""
+    psf_beams = np.array([[1.2, 1.0, 0.3], [0.0, 0.0, 0.0], [1.4, 1.1, 1.0]])
+    psf_beams[:, :2] *= ARCSEC
+    psf = np.repeat(psf_beams[None, :, None], 2, axis=2)
+    store, keep = _beam_store(tmp_path, "zarr", psf_beams, psf)
+    text = _restoring_beam_section(tmp_path, store, "zarr", set(keep))
+    assert (
+        "No restoring beam: every plane was restored with the PSF fit of its "
+        "first Stokes plane" in text
+    )
+    assert "data:image/png;base64," not in text
+    assert "<table" not in text
 
 
 def test_restoring_beam_section_of_fits_output_without_the_kept_variables(tmp_path):

@@ -251,14 +251,15 @@ def _add_restoring_beam(document, image_store, output_image_format, available):
         document.note(
             "No restoring beam: "
             + (
-                "no restored FITS image has a header beam"
+                "no restored FITS image has a header beam (it needs restore=True "
+                "and a restoring_beam)."
                 if output_image_format == "fits"
-                else "beam_fit_params_sky_restored was not written"
+                else "beam_fit_params_sky_restored was not written (it needs "
+                "restore=True)."
             )
-            + " (it needs restore=True and a restoring_beam)."
         )
         return
-    # Every plane holds the target, but a plane of a skipped task holds none.
+    # A target is in every plane, but a plane of a skipped task holds none.
     planes = np.asarray(restored_beam.values, dtype=np.float64).reshape(-1, 3)
     planes = planes[
         np.isfinite(planes).all(axis=1) & (planes[:, 0] > 0.0) & (planes[:, 1] > 0.0)
@@ -266,7 +267,13 @@ def _add_restoring_beam(document, image_store, output_image_format, available):
     if not len(planes):
         document.note(
             "No restoring beam: beam_fit_params_sky_restored holds no beam (no "
-            "task wrote it)."
+            "task wrote it, or no plane has a PSF fit)."
+        )
+        return
+    if np.any(planes != planes[0]):
+        document.note(
+            "No restoring beam: every plane was restored with the PSF fit of its "
+            "first Stokes plane, as beam_fit_params_sky_restored records."
         )
         return
     target = planes[0]

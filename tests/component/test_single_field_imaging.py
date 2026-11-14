@@ -1530,7 +1530,8 @@ def common_beam_cube(tmp_path_factory):
     """The cube restored (``restoration_output="both"``) to the common beam of
     the Stokes I PSF beams of a first run, as in the recipe of
     :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`,
-    into a Zarr store and into FITS files."""
+    into a Zarr store and into FITS files, and the same without a restoring
+    beam."""
     import zarr
 
     work_dir = tmp_path_factory.mktemp("common_beam")
@@ -1637,11 +1638,29 @@ def common_beam_cube(tmp_path_factory):
         output_image_format="fits",
         **restore,
     )
+    without_target = {"restore": True, "restoration_output": "both"}
+    none_zarr_store = image(
+        "none.img.zarr",
+        COMMON_BEAM_CYCLE_CONTROL_PARAMS,
+        ["sky_residual"],
+        **without_target,
+    )
+    none_fits_store = image(
+        "none_fits",
+        COMMON_BEAM_CYCLE_CONTROL_PARAMS,
+        ["sky_residual"],
+        skunk_works=True,
+        output_image_format="fits",
+        **without_target,
+    )
     return {
         "target": target,
         "area_ratio": area_ratio[0, :, 0],
         "image": xr.open_zarr(zarr_store).load(),
         "fits_store": fits_store,
+        "psf_beams": beams.values[0, :, 0],
+        "none_image": xr.open_zarr(none_zarr_store).load(),
+        "none_fits_store": none_fits_store,
     }
 
 
@@ -1769,6 +1788,102 @@ def test_restoring_beam_fits_files_carry_the_target_as_their_beam(common_beam_cu
         np.testing.assert_allclose(
             beams, np.broadcast_to(target, beams.shape), rtol=1e-14, err_msg=name
         )
+
+
+def _beams_restored_without_a_target(psf_beams):
+    """The beams a restore without a restoring beam applies: the PSF beam of
+    Stokes I in Stokes I and Q, and in the flagged channel the beam tclean
+    gives it, that of largest area, channel 0's (the lowest frequency)."""
+    assert not psf_beams[COMMON_BEAM_FLAGGED_CHANNEL].any()
+    assert np.argmax(psf_beams[:, 0] * psf_beams[:, 1]) == 0
+    beams = psf_beams.copy()
+    beams[COMMON_BEAM_FLAGGED_CHANNEL] = psf_beams[0]
+    return np.repeat(beams[None, :, None], 2, axis=2)
+
+
+def test_without_a_restoring_beam_the_restored_beam_is_the_psf_beam(
+    common_beam_cube,
+):
+    """The restored group of the cube restored without a restoring beam records
+    the beams the restore applied, the flagged channel's filled as tclean
+    fills it."""
+    image = common_beam_cube["none_image"]
+    assert (
+        image.attrs["data_groups"]["restored"]["beam_fit_params_sky"]
+        == "BEAM_FIT_PARAMS_SKY_RESTORED"
+    )
+    np.testing.assert_array_equal(
+        image.BEAM_FIT_PARAMS_SKY_RESTORED.values,
+        _beams_restored_without_a_target(common_beam_cube["psf_beams"]),
+    )
+
+
+def test_without_a_restoring_beam_the_casa_image_has_a_beam_per_plane(
+    common_beam_cube, tmp_path
+):
+    """XRADIO writes the restored image of the cube with a flagged channel,
+    restored without a restoring beam, to a CASA image with the restored beam
+    of every plane, and reads them back unchanged."""
+    arcae = pytest.importorskip("arcae")
+    from xradio.image import open_image
+
+    restored = common_beam_cube["none_image"].xr_img.sel(data_group_name="restored")
+    restored.xr_img.delete_data_variables(["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"])
+    (path,) = write_image(restored, str(tmp_path / "restored.im"), out_format="casa")
+    with arcae.table(path) as table:
+        imageinfo = table.getkeywords()["imageinfo"]
+    assert "restoringbeam" not in imageinfo
+    planes = imageinfo["perplanebeams"]
+    beams = restored.BEAM_FIT_PARAMS_SKY_RESTORED.values
+    n_chan, n_pol = beams.shape[1:3]
+    assert (planes["nChannels"], planes["nStokes"]) == (n_chan, n_pol)
+    axes = ("major", "minor", "positionangle")
+    for polarization in range(n_pol):
+        for channel in range(n_chan):
+            beam = planes[f"*{n_chan * polarization + channel}"]
+            assert [beam[axis]["unit"] for axis in axes] == ["rad"] * 3
+            np.testing.assert_array_equal(
+                [beam[axis]["value"] for axis in axes], beams[0, channel, polarization]
+            )
+    np.testing.assert_array_equal(open_image(path).BEAM_FIT_PARAMS_SKY.values, beams)
+
+
+def test_without_a_restoring_beam_the_restored_fits_file_has_a_beam_per_plane(
+    common_beam_cube,
+):
+    """The restored FITS file of the cube restored without a restoring beam
+    carries the restored beams in its BEAMS table, the flagged channel's
+    filled, and no header beam; XRADIO reads them. The primary beam corrected
+    file has no beam."""
+    from astropy.io import fits
+    from xradio.image import open_image
+
+    expected = _beams_restored_without_a_target(common_beam_cube["psf_beams"])
+    path = os.path.join(common_beam_cube["none_fits_store"], "SKY_RESTORED.fits")
+    with fits.open(path) as hdulist:
+        assert hdulist[0].header["CASAMBM"]
+        assert "BMAJ" not in hdulist[0].header
+        rows = hdulist["BEAMS"].data
+        assert [rows.columns[name].format for name in ("BMAJ", "BMIN", "BPA")] == [
+            "E"
+        ] * 3
+        table = np.stack([rows[name] for name in ("BMAJ", "BMIN", "BPA")], -1)
+    degrees = np.degrees(expected[0])
+    np.testing.assert_array_equal(
+        table.reshape(degrees.shape),
+        np.stack(
+            [degrees[..., 0] * 3600.0, degrees[..., 1] * 3600.0, degrees[..., 2]], -1
+        ).astype(np.float32),
+    )
+    beams = open_image({"sky_restored": path}).BEAM_FIT_PARAMS_SKY_RESTORED.values
+    np.testing.assert_allclose(beams, expected, rtol=np.finfo(np.float32).eps)
+    path = os.path.join(
+        common_beam_cube["none_fits_store"], "SKY_RESTORED_PRIMARY_BEAM_CORRECTED.fits"
+    )
+    with fits.open(path) as hdulist:
+        assert len(hdulist) == 1
+        assert "CASAMBM" not in hdulist[0].header
+        assert "BMAJ" not in hdulist[0].header
 
 
 def _regenerate_truth_images():

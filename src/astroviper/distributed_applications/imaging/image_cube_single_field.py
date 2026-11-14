@@ -795,8 +795,9 @@ def image_cube_single_field(
         into the shared files (no locking, no file creation). Kept
         beam-fit-params variables become CASA-style multi-beam ``BEAMS`` table
         extensions, whose rows of planes without a fit hold the beam ``tclean``
-        gives them, except ``beam_fit_params_sky_restored``, the header beam
-        (``BMAJ``, ``BMIN``, ``BPA``) of the restored images.
+        gives them, except that a ``restoring_beam`` is the header beam
+        (``BMAJ``, ``BMIN``, ``BPA``) of the restored images; without one the
+        primary beam corrected image has no beam.
         uv-domain / complex variables cannot be written to FITS.
     task_time_kill_switch_seconds : float, optional
         Watchdog: if a node task's total wall time exceeds this many seconds, it
@@ -909,8 +910,11 @@ def image_cube_single_field(
     residual entropy and the residual RMS. With a report and a kept
     ``point_spread_function``, or a report and a ``restoring_beam``,
     ``beam_fit_params_point_spread_function`` is kept too. With
-    ``restore=True`` and a ``restoring_beam``, ``beam_fit_params_sky_restored``
-    is kept.
+    ``restore=True``, ``beam_fit_params_sky_restored`` is kept: the beams the
+    restore applied (the ``restoring_beam``, or without one the PSF beam of
+    the first Stokes plane in every plane of its channel), planes without a
+    fit holding the beam ``tclean`` gives them, the first beam of largest area
+    of the planes with one (a circle of 1e-6 arcsec when no plane has one).
 
     The Zarr image store is created with :func:`xradio.image.write_image`.
     XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
@@ -1002,12 +1006,8 @@ def image_cube_single_field(
             image_data_variables_keep = list(image_data_variables_keep) + [
                 "sky_restored_primary_beam_corrected"
             ]
-    # A restore to a target records it.
-    if (
-        restore
-        and restoring_beam is not None
-        and "beam_fit_params_sky_restored" not in image_data_variables_keep
-    ):
+    # A restore records the beams it applied.
+    if restore and "beam_fit_params_sky_restored" not in image_data_variables_keep:
         image_data_variables_keep = list(image_data_variables_keep) + [
             "beam_fit_params_sky_restored"
         ]
@@ -1538,6 +1538,19 @@ def image_cube_single_field(
         )
 
         fill_fits_beams_without_fit(image_store, image_data_variables_keep)
+    elif "beam_fit_params_sky_restored" in image_data_variables_keep:
+        from astroviper.processing_functions.imaging.restore import (
+            _NO_FIT_BEAM,
+            _fill_planes_without_fit,
+        )
+
+        restored_beam = zarr.open_group(image_store, mode="r+")[
+            "BEAM_FIT_PARAMS_SKY_RESTORED"
+        ]
+        beams = restored_beam[...]
+        filled = _fill_planes_without_fit(beams, _NO_FIT_BEAM)
+        if filled is not beams:
+            restored_beam[...] = filled
     return imaging_dict
 
 

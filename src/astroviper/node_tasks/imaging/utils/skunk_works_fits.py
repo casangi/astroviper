@@ -36,6 +36,8 @@ Layout of each FITS file (conforming to what
 * The restored images of a run with a ``restoring_beam`` instead carry that
   one beam as ``BMAJ``, ``BMIN`` and ``BPA`` cards (degrees) of the primary
   header, as ``tclean`` writes a restored image, and no ``BEAMS`` table.
+  Without one, the beams the restore applied fill the ``BEAMS`` table of the
+  restored image, and the primary beam corrected image has no beam.
 
 Unwritten planes of a sparse data area read back as 0.0 (filesystem holes),
 not NaN -- unlike the NaN-filled empty Zarr store. Every channel is written by
@@ -88,8 +90,8 @@ _BEAM_CARRYING_VARIABLES = frozenset(
         "point_spread_function",
     }
 )
-# With beam_fit_params_sky_restored kept, these carry the restoring beam in
-# their header.
+# With beam_fit_params_sky_restored kept, these carry a restoring beam in their
+# header.
 _RESTORED_VARIABLES = frozenset({"sky_restored", "sky_restored_primary_beam_corrected"})
 
 # Fixed BEAMS-table row layout written by create_empty_fits_images and assumed
@@ -107,26 +109,30 @@ _FULL_DIMS_LM = ("time", "frequency", "polarization", "l", "m")
 _BEAM_PARAMS_DIMS = ("time", "frequency", "polarization", "beam_params_label")
 
 
-def _header_beam(image_variable, beam_variables):
-    """Whether the file of ``image_variable`` carries the restoring beam as
-    its header beam: a restored image when ``beam_fit_params_sky_restored`` is
-    kept."""
+def _header_beam(image_variable, beam_variables, restoring_beam):
+    """Whether the file of ``image_variable`` carries ``restoring_beam`` as its
+    header beam: a restored image, when there is a ``restoring_beam`` and
+    ``beam_fit_params_sky_restored`` is kept."""
     return (
-        image_variable in _RESTORED_VARIABLES
+        restoring_beam is not None
+        and image_variable in _RESTORED_VARIABLES
         and "beam_fit_params_sky_restored" in beam_variables
     )
 
 
 def _beams_table_variable(image_variable, beam_variables):
     """The beam-fit-params variable whose rows fill the ``BEAMS`` table of
-    ``image_variable`` (``None`` for a file without one): the clean beam (PSF
-    fit), else the first other beam-fit-params variable kept, except the
-    restoring beam, which goes into the header of the restored images
-    (:func:`_header_beam`)."""
-    if image_variable not in _BEAM_CARRYING_VARIABLES or _header_beam(
-        image_variable, beam_variables
-    ):
+    ``image_variable`` (``None`` for a file without one): for the restored
+    image the beams the restore applied (with a restoring beam the file has
+    its header beam instead, :func:`_header_beam`); else the clean beam (PSF
+    fit), else the first other beam-fit-params variable kept."""
+    if image_variable not in _BEAM_CARRYING_VARIABLES:
         return None
+    if (
+        image_variable == "sky_restored"
+        and "beam_fit_params_sky_restored" in beam_variables
+    ):
+        return "beam_fit_params_sky_restored"
     others = [dv for dv in beam_variables if dv != "beam_fit_params_sky_restored"]
     if "beam_fit_params_point_spread_function" in others:
         return "beam_fit_params_point_spread_function"
@@ -397,7 +403,8 @@ def create_empty_fits_images(
       later overwrite in place and :func:`fill_fits_beams_without_fit`
       completes after the run;
     * with ``beam_fit_params_sky_restored`` kept, ``restoring_beam`` as the
-      header beam of the restored images (:func:`_header_beam`).
+      header beam of the restored images, which then have no ``BEAMS`` table
+      (:func:`_header_beam`).
 
     The concurrent write phase then creates no files and writes only disjoint
     byte ranges (:func:`write_result_chunk_to_fits_skunk_works`).
@@ -425,8 +432,8 @@ def create_empty_fits_images(
         Replace an existing ``image_store``. Default ``False`` (raise
         ``FileExistsError``).
     restoring_beam : sequence of float, optional
-        The run's target beam ``[major, minor, pa]`` in radians, required when
-        ``beam_fit_params_sky_restored`` is kept.
+        The run's target beam ``[major, minor, pa]`` in radians; ``None``
+        without one.
 
     Returns
     -------
@@ -443,11 +450,6 @@ def create_empty_fits_images(
     check_kept_variables(
         {"image_data_variables_keep": image_data_variables_keep}, fits=True
     )
-    if "beam_fit_params_sky_restored" in beam_variables and restoring_beam is None:
-        raise ValueError(
-            "beam_fit_params_sky_restored needs the restoring_beam: the restored "
-            "FITS images carry it as their header beam."
-        )
 
     if os.path.exists(image_store):
         if not overwrite:
@@ -473,7 +475,10 @@ def create_empty_fits_images(
     paths = {}
     for key in image_variables:
         bunit, btype = _VARIABLE_FITS_UNITS.get(key, _DEFAULT_FITS_UNITS)
-        has_beams = _beams_table_variable(key, beam_variables) is not None
+        header_beam = _header_beam(key, beam_variables, restoring_beam)
+        has_beams = (
+            not header_beam and _beams_table_variable(key, beam_variables) is not None
+        )
         header = _build_primary_header(
             img_xds,
             bitpix,
@@ -481,7 +486,7 @@ def create_empty_fits_images(
             btype,
             telescope_name,
             has_beams,
-            beam=restoring_beam if _header_beam(key, beam_variables) else None,
+            beam=restoring_beam if header_beam else None,
         )
         header_bytes = header.tostring().encode("ascii")
         path = os.path.join(image_store, key.upper() + ".fits")
@@ -669,10 +674,10 @@ def write_result_chunk_to_fits_skunk_works(
     Every kept image file that carries a ``BEAMS`` extension gets full table
     rows (values plus their ``CHAN``/``POL`` indices) of the beam-fit-params
     variable that :func:`_beams_table_variable` assigns to it, the clean beam
-    (PSF fit) when it is kept; the rows of planes without a fit are filled
-    after the run (:func:`fill_fits_beams_without_fit`). The restoring beam is
-    not written here: the restored images carry it in their header from the
-    start.
+    (PSF fit) when it is kept, the restored beam for the restored image; the
+    rows of planes without a fit are filled after the run
+    (:func:`fill_fits_beams_without_fit`). A restoring beam is not written
+    here: the restored images carry it in their header from the start.
 
     Parameters
     ----------

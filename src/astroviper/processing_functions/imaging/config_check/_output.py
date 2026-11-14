@@ -171,14 +171,20 @@ def check_kept_variables(
                 f"Requested variables {sorted(restored_products)} require restore=True."
             )
         # --- Restored beam ---
-        # Only a restore to a target beam records one.
-        if "beam_fit_params_sky_restored" in requested and (
-            ("restore" in config and not config["restore"])
-            or ("restoring_beam" in config and config["restoring_beam"] is None)
-        ):
-            raise ValueError(
-                "beam_fit_params_sky_restored requires restore=True and a restoring_beam."
-            )
+        # A cube restore records the beams it applied; a continuum restore
+        # records only a target.
+        if "beam_fit_params_sky_restored" in requested:
+            if "restore" in config and not config["restore"]:
+                raise ValueError("beam_fit_params_sky_restored requires restore=True.")
+            if (
+                mode.imaging_kind == "continuum"
+                and "restoring_beam" in config
+                and config["restoring_beam"] is None
+            ):
+                raise ValueError(
+                    "Continuum imaging keeps beam_fit_params_sky_restored only "
+                    "with a restoring_beam."
+                )
         # --- Selected cube restoration products ---
         if mode.imaging_kind == "cube" and "restoration_output" in config:
             for key, allowed in (

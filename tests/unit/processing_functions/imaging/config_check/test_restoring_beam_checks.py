@@ -202,20 +202,35 @@ def test_a_complete_configuration_with_a_target_is_read_only(mode):
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_the_restored_beam_is_kept_only_with_a_restore_to_a_target(mode):
+def test_the_restored_beam_is_kept_only_with_a_restore(mode):
+    """A cube restore records the beams it applied, with a target or without;
+    a continuum restore only a target."""
     kept = ["beam_fit_params_sky_restored"]
     check_driver_workflow(
         {"image_data_variables_keep": kept, "restore": True, "restoring_beam": BEAM},
         mode=mode,
     )
-    for config in (
-        {"restore": False, "restoring_beam": None},
-        {"restore": True, "restoring_beam": None},
+    with pytest.raises(
+        ValueError, match="beam_fit_params_sky_restored requires restore=True"
     ):
-        with pytest.raises(ValueError, match="requires restore=True and a restoring"):
-            check_driver_workflow(
-                {"image_data_variables_keep": kept, **config}, mode=mode
-            )
+        check_driver_workflow(
+            {
+                "image_data_variables_keep": kept,
+                "restore": False,
+                "restoring_beam": None,
+            },
+            mode=mode,
+        )
+    without_target = {
+        "image_data_variables_keep": kept,
+        "restore": True,
+        "restoring_beam": None,
+    }
+    if mode is CUBE_SINGLE_FIELD:
+        check_driver_workflow(without_target, mode=mode)
+    else:
+        with pytest.raises(ValueError, match="only with a restoring_beam"):
+            check_driver_workflow(without_target, mode=mode)
 
 
 def test_a_direct_writer_call_keeps_the_restored_beam():
