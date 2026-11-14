@@ -20,6 +20,7 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.numerics impor
     scaled_median_absolute_deviation,
 )
 from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
+    SPEED_OF_LIGHT,
     is_time_division_mode,
 )
 from astroviper.processing_functions.imaging.find_continuum_ultra.step_results import (
@@ -46,7 +47,6 @@ SIGNAL_RATIO_TIER_2 = 0.94  # fC 4874
 MAX_RANGES_FOR_MAX_TRIM_RESTORE = 3  # fC 6521
 HIGH_BASELINE_MAD_FACTOR = 1.5  # fC 6522
 LINE_SNR_THRESHOLD = 20  # fC 6523
-SPEED_OF_LIGHT = 2.99792458e8  # m/s, fC 5314
 # The rounds of an extra-mask spectrum (fC 6693, 6756).
 EXTRA_MASK_SPECTRUM_ROUNDS = (
     "only_extra_mask",

@@ -9,9 +9,6 @@ its primary beam and two-dimensional images, evaluated in CASA axis order
 ``(l, m, polarization, frequency)``.
 
 ``find_continuum`` reduces whole chunks (:func:`find_continuum_cube_reductions`).
-The imager's first round of findContinuum takes the primary-beam masks
-(:func:`primary_beam_masks`) and the per-channel statistics
-(:func:`first_round_statistics`) of every chunk it writes.
 """
 
 import re
@@ -42,10 +39,6 @@ CHANNEL_STATISTICS = (
     "quartile",
 )
 MERGEABLE_STATISTICS = ("npts", "sum", "sumsq", "min", "max")
-# The primary-beam level of findContinuum's spectrum mask ("pb">0.21).
-PROFILE_LEVEL = 0.21
-# Rows of the blocks that planes are reduced in; whole-cube sums depend on it.
-_BLOCK_ROWS = 625
 
 _TOKEN = re.compile(
     r"\s*(?:(?P<number>\d+\.?\d*(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?)"
@@ -369,45 +362,6 @@ def _profile_value(values, function):
     raise ValueError(f"getprofile function {function!r} is not supported")
 
 
-def plane_statistics(values, valid, rows=_BLOCK_ROWS):
-    """Count, sum, sum of squares, minimum and maximum of the valid pixels of a plane.
-
-    The plane is taken in blocks of ``rows`` rows, in order; the sums are float64
-    sums of the blocks' pairwise sums (no BLAS), so equal planes, validities
-    and ``rows`` give bitwise equal results.
-
-    Parameters
-    ----------
-    values : numpy.ndarray
-        Pixel values of one plane, ``(l, m)``.
-    valid : numpy.ndarray
-        Boolean plane of the pixels to include.
-    rows : int, default 625
-        Rows per block.
-
-    Returns
-    -------
-    numpy.ndarray
-        float64 ``[npts, sum, sumsq, min, max]``; min and max are ``inf`` and
-        ``-inf`` without a valid pixel.
-    """
-    statistics = np.array([0.0, 0.0, 0.0, np.inf, -np.inf])
-    for start in range(0, values.shape[0], rows):
-        block = slice(start, start + rows)
-        _add_statistics(statistics, values[block][valid[block]])
-    return statistics
-
-
-def _add_statistics(statistics, values):
-    if values.size:
-        values = values.astype(np.float64, copy=False)
-        statistics[0] += values.size
-        statistics[1] += values.sum()
-        statistics[2] += np.square(values).sum()
-        statistics[3] = min(statistics[3], values.min())
-        statistics[4] = max(statistics[4], values.max())
-
-
 def _whole_cube_statistics(sums):
     npts = sums["npts"]
     mean = sums["sum"] / npts if npts else np.nan
@@ -541,19 +495,17 @@ class FindContinuumMoments:
             fields.append("COUNT")
         return fields
 
-    def add_plane(self, channel, plane, valid, rows=slice(None), scratch=None):
-        """Add the valid pixels of one plane (or of a block of its rows).
+    def add_plane(self, channel, plane, valid, scratch=None):
+        """Add the valid pixels of one plane.
 
         Parameters
         ----------
         channel : int
             Index of the plane's channel in ``velocity_widths``.
         plane : numpy.ndarray
-            Pixel values of the maps' ``rows``.
+            Pixel values, shaped as the maps.
         valid : numpy.ndarray
             Boolean, same shape: the pixels to add (finite values only).
-        rows : slice or tuple of slice, default slice(None)
-            The part of the maps that ``plane`` covers.
         scratch : numpy.ndarray, optional
             Contiguous float64 work array of at least ``plane.size`` values.
         """
@@ -571,11 +523,9 @@ class FindContinuumMoments:
             }
         maps = self.maps
         if "COUNT" in maps:
-            count = maps["COUNT"][rows]
-            count += valid
+            maps["COUNT"] += valid
         if "SUM" in maps:
-            total = maps["SUM"][rows]
-            np.add(total, plane, out=total, where=valid)
+            np.add(maps["SUM"], plane, out=maps["SUM"], where=valid)
         if "INTEGRATED" in maps:
             product = (
                 np.empty(plane.shape)
@@ -585,14 +535,11 @@ class FindContinuumMoments:
             np.multiply(
                 plane, self.velocity_widths[channel], out=product, dtype=np.float64
             )
-            integrated = maps["INTEGRATED"][rows]
-            np.add(integrated, product, out=integrated, where=valid)
+            np.add(maps["INTEGRATED"], product, out=maps["INTEGRATED"], where=valid)
         if "MAXIMUM" in maps:
-            maximum = maps["MAXIMUM"][rows]
-            np.maximum(maximum, plane, out=maximum, where=valid)
+            np.maximum(maps["MAXIMUM"], plane, out=maps["MAXIMUM"], where=valid)
         if "MINIMUM" in maps:
-            minimum = maps["MINIMUM"][rows]
-            np.minimum(minimum, plane, out=minimum, where=valid)
+            np.minimum(maps["MINIMUM"], plane, out=maps["MINIMUM"], where=valid)
 
     def merge(self, other):
         """Add the maps of ``other`` (disjoint channels; ``None`` is the identity).
@@ -615,25 +562,6 @@ class FindContinuumMoments:
             combine = {"MAXIMUM": np.maximum, "MINIMUM": np.minimum}.get(field, np.add)
             combine(mine, other.maps[field], out=mine)
         return self
-
-    def state(self):
-        """The maps by field name (``INTEGRATED``, ``MAXIMUM``, ``MINIMUM``,
-        ``SUM``, ``COUNT``), or ``None`` before the first plane."""
-        return None if self.maps is None else dict(self.maps)
-
-    @classmethod
-    def from_state(cls, moments, velocity_widths, map_shape, state):
-        """An accumulator holding ``state`` (as :meth:`state` returns it).
-
-        The arrays are used as given, and :meth:`merge` and :meth:`add_plane`
-        update them in place.
-        """
-        moments_maps = cls(moments, velocity_widths, map_shape)
-        if state is not None:
-            moments_maps.maps = {
-                field: state[field] for field in moments_maps._fields()
-            }
-        return moments_maps
 
     def finalize(self):
         """CASA moment number to its float64 map, NaN where no channel
@@ -661,172 +589,6 @@ class FindContinuumMoments:
                 value[empty] = np.nan
                 results[moment] = value
         return results
-
-    @property
-    def nbytes(self):
-        """Bytes of the maps."""
-        return 0 if self.maps is None else sum(a.nbytes for a in self.maps.values())
-
-
-def merge_in_tree_order(leaves):
-    """Merge partial moments as GraphVIPER's binary tree reduce does.
-
-    The tree pairs neighbours level by level and carries an odd last node up.
-    The leaves are merged as they arrive, holding at most
-    ``ceil(log2(n)) + 1`` partials, with the same pairs and order
-    (``left += right``), so the result equals the tree's bit for bit.
-
-    Parameters
-    ----------
-    leaves : iterable
-        :class:`FindContinuumMoments` or ``None`` (a leaf without channels,
-        the identity) per slot, in slot order.
-
-    Returns
-    -------
-    FindContinuumMoments or None
-        The merged moments; ``None`` without a non-``None`` leaf.
-    """
-    stack = []
-
-    def merge_top():
-        size, right = stack.pop()
-        left = stack[-1][1]
-        stack[-1] = [stack[-1][0] + size, right if left is None else left.merge(right)]
-
-    for leaf in leaves:
-        stack.append([1, leaf])
-        while len(stack) > 1 and stack[-1][0] == stack[-2][0]:
-            merge_top()
-    while len(stack) > 1:
-        merge_top()
-    return stack[0][1] if stack else None
-
-
-def primary_beam_masks(primary_beam, primary_beam_limit, profile_level=PROFILE_LEVEL):
-    """The primary-beam limit mask and findContinuum's spectrum mask ``"pb">0.21``.
-
-    ``inside`` is ``~(primary_beam < limit)`` with the limit as a Python float,
-    which compares in the beam's dtype, as the cubes are blanked (a NaN beam is
-    inside). ``profile`` is ``inside & (primary_beam > float64(profile_level))``,
-    the lattice expression on the blanked float64 cube.
-
-    Parameters
-    ----------
-    primary_beam : numpy.ndarray
-        ``(time, frequency, polarization, l, m)``.
-    primary_beam_limit : float or None
-        Limit of the blanking; ``None``: every pixel is inside.
-    profile_level : float, default PROFILE_LEVEL
-        Level of the spectrum mask.
-
-    Returns
-    -------
-    inside, profile : numpy.ndarray
-        Boolean, shaped as ``primary_beam``.
-    """
-    if primary_beam_limit is None:
-        inside = np.ones(primary_beam.shape, dtype=bool)
-    else:
-        inside = np.less(primary_beam, float(primary_beam_limit))
-        np.logical_not(inside, out=inside)
-    profile = np.greater(primary_beam, np.float64(profile_level))
-    profile &= inside
-    return inside, profile
-
-
-def first_round_statistics(sky, primary_beam, inside):
-    """Per-channel statistics of the cube and of its primary beam inside the limit.
-
-    Parameters
-    ----------
-    sky, primary_beam : numpy.ndarray
-        ``(time, frequency, polarization, l, m)``, one time and polarization.
-    inside : numpy.ndarray
-        Boolean primary-beam limit mask, same shape.
-
-    Returns
-    -------
-    numpy.ndarray
-        float64 ``(frequency, 2, 5)``: (sky, primary beam) x
-        :func:`plane_statistics` over the finite pixels inside the limit.
-
-    Raises
-    ------
-    ValueError
-        If there is more than one time or polarization plane.
-    """
-    _check_planes(sky)
-    statistics = np.empty((sky.shape[1], 2, 5))
-    valid = np.empty(sky.shape[-2:], dtype=bool)
-    for channel in range(sky.shape[1]):
-        for index, cube in enumerate((sky, primary_beam)):
-            plane = cube[0, channel, 0]
-            np.isfinite(plane, out=valid)
-            valid &= inside[0, channel, 0]
-            statistics[channel, index] = plane_statistics(plane, valid)
-    return statistics
-
-
-def _check_planes(array):
-    if array.shape[0] != 1 or array.shape[2] != 1:
-        raise ValueError("find_continuum reduces one time and one polarization plane")
-
-
-def tile_occupancy(mask, tile_shape):
-    """Whether each tile of each plane holds a ``True`` pixel.
-
-    Parameters
-    ----------
-    mask : numpy.ndarray
-        Boolean ``(time, frequency, polarization, l, m)``.
-    tile_shape : tuple of int
-        ``(l, m)`` size of the tiles from the first pixel; edge tiles may be
-        smaller.
-
-    Returns
-    -------
-    numpy.ndarray
-        Boolean ``(time, frequency, polarization, n_tiles_l, n_tiles_m)``.
-    """
-    rows = np.logical_or.reduceat(
-        mask, np.arange(0, mask.shape[-2], tile_shape[0]), axis=-2
-    )
-    return np.logical_or.reduceat(
-        rows, np.arange(0, mask.shape[-1], tile_shape[1]), axis=-1
-    )
-
-
-def pack_plane_masks(mask):
-    """Boolean masks packed eight pixels per byte along ``m`` (``numpy.packbits``)."""
-    return np.packbits(mask, axis=-1)
-
-
-def unpack_plane_masks(packed, n_m, out=None):
-    """Masks of :func:`pack_plane_masks`.
-
-    Parameters
-    ----------
-    packed : numpy.ndarray
-        uint8 ``(..., l, ceil(n_m / 8))``.
-    n_m : int
-        Pixels along ``m``.
-    out : numpy.ndarray, optional
-        Boolean ``(..., l, n_m)`` to unpack into, a block of rows at a time.
-
-    Returns
-    -------
-    numpy.ndarray
-        Boolean ``(..., l, n_m)``.
-    """
-    if out is None:
-        return np.unpackbits(packed, axis=-1, count=n_m).view(bool)
-    for start in range(0, packed.shape[-2], _BLOCK_ROWS):
-        rows = slice(start, start + _BLOCK_ROWS)
-        out[..., rows, :] = np.unpackbits(
-            packed[..., rows, :], axis=-1, count=n_m
-        ).view(bool)
-    return out
 
 
 def find_continuum_cube_reductions(

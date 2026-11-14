@@ -9,7 +9,6 @@ from astroviper.processing_functions.imaging.find_continuum import (
     CASA_MOMENTS,
     CHANNEL_STATISTICS,
     MAD_TO_SIGMA,
-    PROFILE_LEVEL,
     SPEED_OF_LIGHT_KM_S,
     FindContinuumMoments,
     _profile_value,
@@ -22,17 +21,8 @@ from astroviper.processing_functions.imaging.find_continuum import (
     lattice_expression_names,
     linear_frequency_axis,
     merge_find_continuum_reductions,
-    merge_in_tree_order,
     moment_velocity_widths,
-    pack_plane_masks,
-    plane_statistics,
-    primary_beam_masks,
     radio_velocity_km_s,
-    tile_occupancy,
-    unpack_plane_masks,
-)
-from tests.unit.processing_functions.imaging.find_continuum_test_utils import (
-    graphviper_tree,
 )
 
 N_CHANNELS = 12
@@ -370,26 +360,6 @@ class TestStatistics:
         with pytest.raises(ValueError):
             _profile_value(np.ones(2), "sum")
 
-    def test_plane_statistics(self):
-        rng = np.random.default_rng(12)
-        values = rng.normal(size=(1400, 9)).astype(np.float32)
-        valid = rng.random(values.shape) < 0.7
-        valid[625:1250] = False
-        statistics = plane_statistics(values, valid)
-        selected = values[valid].astype(np.float64)
-        assert statistics[0] == selected.size
-        assert statistics[3] == selected.min() and statistics[4] == selected.max()
-        np.testing.assert_allclose(
-            statistics[1:3], [selected.sum(), np.square(selected).sum()], rtol=1e-12
-        )
-        total = 0.0
-        for start in (0, 1250):
-            block = values[start : start + 625][valid[start : start + 625]]
-            total += block.astype(np.float64).sum()
-        assert statistics[1] == total
-        empty = plane_statistics(values, np.zeros_like(valid))
-        np.testing.assert_array_equal(empty, [0.0, 0.0, 0.0, np.inf, -np.inf])
-
 
 class TestFrequencyAxis:
     def test_radio_velocity(self):
@@ -468,7 +438,7 @@ class TestFindContinuumMoments:
                 moments, mine, self._reference(moments, cube, masks, channels)
             )
             if 0 in moments:
-                integrated = mine.state()["INTEGRATED"]
+                integrated = mine.maps["INTEGRATED"]
                 assert not np.signbit(integrated[integrated == 0]).any()
 
     @pytest.mark.parametrize("moments", [[-1, 0, 8, 10], [0, 8]])
@@ -488,44 +458,17 @@ class TestFindContinuumMoments:
         expected = self._reference(moments, cube, masks, parts[2])
         self._assert_equal(moments, empty, expected)
 
-    def test_row_blocks_and_windows_equal_whole_planes(self):
-        rng = np.random.default_rng(23)
-        cube, masks = _moments_cube(rng)
-        moments = [-1, 0, 8, 10]
-        whole = self._moments(moments, cube, masks, range(24))
-        widths = moment_velocity_widths(self.axis, REST_FREQUENCY)
-        blocks = FindContinuumMoments(moments, widths, cube.shape[1:])
-        scratch = np.empty(64)
-        for channel in range(24):
-            valid = masks[channel] & np.isfinite(cube[channel])
-            for rows in (slice(0, 4), slice(4, 9)):
-                for columns in (slice(0, 3), slice(3, 7)):
-                    blocks.add_plane(
-                        channel,
-                        cube[channel][rows, columns],
-                        valid[rows, columns],
-                        rows=(rows, columns),
-                        scratch=scratch,
-                    )
-        for moment, values in whole.finalize().items():
-            np.testing.assert_array_equal(blocks.finalize()[moment], values)
-
     @pytest.mark.parametrize(
         "moments, bytes_per_pixel",
         [([0, 8], 12), ([0], 10), ([-1], 10), ([8], 4), ([10], 4), ([0, 8, 10], 16)],
     )
-    def test_state_and_slim_maps(self, moments, bytes_per_pixel):
+    def test_slim_maps(self, moments, bytes_per_pixel):
         rng = np.random.default_rng(24)
         cube, masks = _moments_cube(rng)
         mine = self._moments(moments, cube, masks, range(24))
-        assert mine.nbytes == bytes_per_pixel * cube[0].size
-        restored = FindContinuumMoments.from_state(
-            moments, np.ones(1), cube.shape[1:], mine.state()
-        )
-        for moment, values in mine.finalize().items():
-            np.testing.assert_array_equal(restored.finalize()[moment], values)
-        unallocated = FindContinuumMoments.from_state(moments, [], (3, 2), None)
-        assert unallocated.state() is None and unallocated.nbytes == 0
+        nbytes = sum(values.nbytes for values in mine.maps.values())
+        assert nbytes == bytes_per_pixel * cube[0].size
+        unallocated = FindContinuumMoments(moments, [], (3, 2))
         for values in unallocated.finalize().values():
             assert values.shape == (3, 2) and np.isnan(values).all()
 
@@ -534,134 +477,11 @@ class TestFindContinuumMoments:
         for n_channels, dtype in ((65535, np.uint16), (65536, np.uint32)):
             moments = FindContinuumMoments([0], np.ones(n_channels), (2, 2))
             moments.add_plane(0, plane, valid)
-            assert moments.state()["COUNT"].dtype == dtype
+            assert moments.maps["COUNT"].dtype == dtype
 
     def test_unsupported_moment(self):
         with pytest.raises(ValueError, match="not supported"):
             FindContinuumMoments([0, 1], np.ones(3), (2, 2))
-
-
-@pytest.mark.parametrize("n_leaves", range(1, 34))
-def test_merge_in_tree_order_equals_the_graphviper_tree(n_leaves):
-    rng = np.random.default_rng(100 + n_leaves)
-    n_channels = 3 * n_leaves
-    scale = 10.0 ** rng.uniform(-6, 6, (n_channels, 1, 1))
-    cube = (rng.normal(size=(n_channels, 5, 4)) * scale).astype(np.float32)
-    masks = rng.random(cube.shape) < 0.9
-    velocity = rng.uniform(-50.0, 50.0, n_channels).cumsum()
-    moments = [-1, 0, 8, 10]
-    missing = rng.random(n_leaves) < 0.3
-    references, leaves = [], []
-    for leaf in range(n_leaves):
-        accumulator = MomentsAccumulator(
-            [CASA_MOMENTS[m] for m in moments], velocity, (5, 4)
-        )
-        mine = None
-        if not missing[leaf]:
-            mine = FindContinuumMoments(moments, np.abs(np.gradient(velocity)), (5, 4))
-            for channel in range(3 * leaf, 3 * leaf + 3):
-                plane = cube[channel]
-                accumulator.add_plane(channel, plane.astype(np.float64), masks[channel])
-                mine.add_plane(channel, plane, masks[channel])
-        references.append(accumulator)
-        leaves.append(mine)
-    expected = graphviper_tree(references, lambda left, right: left.merge(right))
-    merged = merge_in_tree_order(iter(leaves))
-    if missing.all():
-        assert merged is None
-        return
-    maps = merged.finalize()
-    for moment in moments:
-        np.testing.assert_array_equal(
-            maps[moment], expected.finalize()[CASA_MOMENTS[moment]]
-        )
-
-
-def test_merge_in_tree_order_tells_trees_apart():
-    """A left fold of the same leaves differs from the tree in moment 0, so the
-    tree test above checks the order of the merges."""
-    rng = np.random.default_rng(7)
-    differs = 0
-    for n_leaves in range(3, 34):
-        states = []
-        for _ in range(n_leaves):
-            leaf = FindContinuumMoments([0], np.ones(1), (8, 8))
-            plane = rng.normal(size=(8, 8)) * 10.0 ** rng.uniform(-6, 6)
-            leaf.add_plane(0, plane.astype(np.float32), np.ones((8, 8), dtype=bool))
-            states.append(leaf.state())
-        tree = merge_in_tree_order(
-            FindContinuumMoments.from_state([0], [], (8, 8), dict(state))
-            for state in states
-        )
-        fold = FindContinuumMoments([0], [], (8, 8))
-        for state in states:
-            copied = {key: value.copy() for key, value in state.items()}
-            fold.merge(FindContinuumMoments.from_state([0], [], (8, 8), copied))
-        differs += not np.array_equal(tree.finalize()[0], fold.finalize()[0])
-    assert merge_in_tree_order([]) is None
-    assert differs > 0
-
-
-class TestPrimaryBeamMasks:
-    @staticmethod
-    def _port_masks(beam, limit):
-        """The port's blanking (a Python float limit) and its evaluation of
-        "pb">0.21 on the float64 blanked cube."""
-        blanked = beam.astype(np.float64)
-        inside = np.ones(beam.shape, dtype=bool)
-        if limit is not None:
-            blanked[beam < limit] = np.nan
-            inside = ~(beam < limit)
-        profile = evaluate_lattice_expression('"pb">0.21', {"pb": blanked})
-        return inside, profile
-
-    @pytest.mark.parametrize("limit", [0.2, 0.21, 0.25, 0.1999999, None])
-    def test_every_float32_beam_value(self, limit):
-        first, last = np.float32(0.15).view(np.int32), np.float32(0.30).view(np.int32)
-        beam = np.arange(first, last + 1, dtype=np.int32).view(np.float32)
-        beam = np.append(beam, np.float32([np.nan, 0.0, 1.0])).reshape(1, 1, 1, 1, -1)
-        expected_inside, expected_profile = self._port_masks(beam, limit)
-        for given in (limit, None if limit is None else np.float64(limit)):
-            inside, profile = primary_beam_masks(beam, given)
-            np.testing.assert_array_equal(inside, expected_inside)
-            np.testing.assert_array_equal(profile, expected_profile)
-        assert inside[..., -3] and not profile[..., -3]
-
-    def test_float64_beam(self):
-        levels = [0.2, 0.21, 0.25]
-        near = [np.nextafter(level, side) for level in levels for side in (0.0, 1.0)]
-        beam = np.array(near + levels + [np.nan]).reshape(1, 1, 1, 1, -1)
-        for limit in (0.2, 0.25, None):
-            inside, profile = primary_beam_masks(beam, limit)
-            expected_inside, expected_profile = self._port_masks(beam, limit)
-            np.testing.assert_array_equal(inside, expected_inside)
-            np.testing.assert_array_equal(profile, expected_profile)
-        assert PROFILE_LEVEL == 0.21
-
-
-class TestPlaneMasks:
-    @pytest.mark.parametrize("shape", [(1, 3, 1, 37, 21), (1, 1, 1, 1300, 13)])
-    def test_pack_round_trip(self, shape):
-        mask = np.random.default_rng(31).random(shape) < 0.3
-        packed = pack_plane_masks(mask)
-        assert packed.dtype == np.uint8
-        assert packed.shape == shape[:-1] + (-(-shape[-1] // 8),)
-        np.testing.assert_array_equal(unpack_plane_masks(packed, shape[-1]), mask)
-        out = np.ones(shape, dtype=bool)
-        assert unpack_plane_masks(packed, shape[-1], out=out) is out
-        np.testing.assert_array_equal(out, mask)
-
-    def test_tile_occupancy_with_ragged_tiles(self):
-        mask = np.random.default_rng(32).random((1, 2, 1, 37, 21)) < 0.004
-        tiles = tile_occupancy(mask, (8, 5))
-        assert tiles.shape == (1, 2, 1, 5, 5)
-        for i in range(5):
-            for j in range(5):
-                np.testing.assert_array_equal(
-                    tiles[..., i, j],
-                    mask[..., 8 * i : 8 * i + 8, 5 * j : 5 * j + 5].any(axis=(-2, -1)),
-                )
-        assert tile_occupancy(mask, (37, 21)).shape == (1, 2, 1, 1, 1)
 
 
 class TestCubeReductions:

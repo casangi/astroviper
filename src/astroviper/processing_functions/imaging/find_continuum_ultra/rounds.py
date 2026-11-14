@@ -18,6 +18,9 @@ polarization. ``fC`` line numbers are those of the pipeline's
 import numpy as np
 import xarray as xr
 
+from astroviper.processing_functions.imaging.find_continuum_ultra.channel_selection import (
+    MOMENT_DIFFERENCE_APPROACH_LEVEL,
+)
 from astroviper.processing_functions.imaging.find_continuum_ultra.first_round_maps import (
     count_in_primary_beam,
 )
@@ -54,7 +57,6 @@ EXTRA_ROUND_KINDS = ("only_extra_mask", "extra_mask", "auto_lower", "auto_lower_
 YES_DECISIONS = ("yes_moment", "yes_cube")
 
 PROCEEDING_LEVEL = 8.0  # fC 492
-APPROACH_LEVEL = 15.0  # fC 493
 DIFFERENCE_LEVEL = 8.5  # fC 1373, times sqrt(2) (2222)
 DIFFERENCE_BAD_ATMOSPHERE_LEVEL = 12  # fC 1374, times sqrt(2) (2220)
 CUBE_SIGMA_THRESHOLD = 7.5  # fC 487
@@ -977,7 +979,7 @@ def after_extra_round(
             )
             decisions.update(_decision_entries("auto_lower", auto_lower))
             if auto_lower.kind in YES_DECISIONS:
-                if statistics.moment_difference_snr < APPROACH_LEVEL:
+                if statistics.moment_difference_snr < MOMENT_DIFFERENCE_APPROACH_LEVEL:
                     lowered = final_threshold_sigma * 6 / 7.0
                 else:
                     lowered = final_threshold_sigma * 5 / 7.0

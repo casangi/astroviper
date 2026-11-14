@@ -21,7 +21,8 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.step_results i
 )
 from astroviper.utils.param_docs import shares_param_docs
 
-# The primary-beam level of findContinuum's spectrum mask, "pb">0.21 (fC 8453).
+# The primary-beam level of findContinuum's spectrum mask, "pb">0.21 (fC 8453),
+# pixel counts (fC 7672) and annulus (fC 8411), which its comments keep equal.
 SPECTRUM_PRIMARY_BEAM_LEVEL = 0.21
 # casacore's factor from the median absolute deviation to a Gaussian sigma, of
 # the scaled-MAD profile.

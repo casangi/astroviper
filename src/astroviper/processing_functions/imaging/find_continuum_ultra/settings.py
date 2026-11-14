@@ -21,8 +21,9 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.step_results i
 from astroviper.utils.param_docs import shares_param_docs
 
 ARCSEC_PER_RAD = 206264.80624709636  # fC 7368
-SPEED_OF_LIGHT = 2.99792458e8  # m/s (fC 7369)
-# km/s, of the radio velocity whose channel widths weight moment 0.
+SPEED_OF_LIGHT = 2.99792458e8  # m/s (fC 5314, 7369)
+# km/s, of the radio velocity whose channel widths weight moment 0, and of the
+# channel width in km/s (fC 1757).
 SPEED_OF_LIGHT_KM_S = 299792.458
 BASELINE_CHANNEL_FRACTION = 0.19  # nBaselineChannels (fC 450)
 MIN_BINS = 13  # fewest bins of n_bin channels [findContinuum minRegions] (fC 990)

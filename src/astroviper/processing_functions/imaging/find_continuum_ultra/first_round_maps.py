@@ -16,6 +16,9 @@ import numpy as np
 import scipy.ndimage
 import xarray as xr
 
+from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+    SPECTRUM_PRIMARY_BEAM_LEVEL,
+)
 from astroviper.processing_functions.imaging.find_continuum_ultra.numerics import (
     chauvenet_statistics,
     median_absolute_deviation,
@@ -44,7 +47,6 @@ MIN_PIXELS_IN_JOINT_MASK = 3  # fC 476
 MAD_TO_SIGMA = 1.4826  # of the first round's thresholds (fC 7942, 7986, 8076, 8115)
 MIN_BEAM_FRACTION = 0.3  # fC 447
 MIN_PRUNE_SIZE = 4  # fC 12023, 12047
-SPECTRUM_PRIMARY_BEAM_LEVEL = 0.21  # of the counts and the annulus (fC 7672, 8411)
 
 
 def add_primary_beam_planes(

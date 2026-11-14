@@ -15,11 +15,17 @@ import numpy as np
 import scipy.stats
 import xarray as xr
 
+from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+    SPECTRUM_PRIMARY_BEAM_LEVEL,
+)
 from astroviper.processing_functions.imaging.find_continuum_ultra.numerics import (
     MAD_DIVISOR,
     one_event_sigma,
     round_to_decimals,
     round_to_significant_digits,
+)
+from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
+    SPEED_OF_LIGHT_KM_S,
 )
 from astroviper.processing_functions.imaging.find_continuum_ultra.step_results import (
     AnnulusLevels,
@@ -30,12 +36,9 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.step_results i
     SelectionStatistics,
 )
 
-SPEED_OF_LIGHT_KM_S = 299792.458  # fC 1757
 # The mean primary beam above which the moment difference is valid (fC 1770;
 # the log lines fC 2323, 2662 and 2992 say 0.3).
 MOMENT_DIFFERENCE_PRIMARY_BEAM_LEVEL = 0.23
-# The mean primary beam above which findContinuum counts pixels (fC 7672).
-PIXEL_COUNT_PRIMARY_BEAM_LEVEL = 0.21
 # The moment-difference level drops by LOWERING_STEP when the moment
 # difference's signal-to-noise ratio is below LOWERING_RATIO times that of the
 # maximum map outside the joint mask (fC 1915-1920).
@@ -125,7 +128,7 @@ def round_zero_regions(
         "NOISE_ANNULUS": outside & _between(mean, *noise_levels),
         "CUBE_NOISE_ANNULUS": _between(mean, *cube_noise_levels) & outside,
         "MOMENT_DIFFERENCE_REGION": mean > MOMENT_DIFFERENCE_PRIMARY_BEAM_LEVEL,
-        "PRIMARY_BEAM_ABOVE_SPECTRUM_LEVEL": mean > PIXEL_COUNT_PRIMARY_BEAM_LEVEL,
+        "PRIMARY_BEAM_ABOVE_SPECTRUM_LEVEL": mean > SPECTRUM_PRIMARY_BEAM_LEVEL,
         "ONLY_EXTRA_MASK_NORMALIZATION_REGION": _between(mean, *normalization_levels),
         "PRIMARY_BEAM_FOOTPRINT": mean > 0,
     }
