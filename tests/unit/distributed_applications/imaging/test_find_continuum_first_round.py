@@ -47,6 +47,7 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.settings impor
 from astroviper.processing_functions.imaging.utils.spectral_windows import (
     linear_channel_ranges,
 )
+from astroviper.utils.data_group_tools import modify_data_groups_xds
 from astroviper.utils.io import (
     create_empty_data_variables_on_disk,
     write_zarr_image_store,
@@ -114,6 +115,14 @@ def cube(tmp_path_factory):
         frequency_coords=frequency,
         pol_coords=["I", "Q"],
         time_coords=[0.0],
+    )
+    modify_data_groups_xds(coords, "residual", dict(VARIABLES), "The residual.")
+    # Data variables of the cube other than those the stores are made from.
+    modify_data_groups_xds(
+        coords,
+        "swapped",
+        {"sky": "PRIMARY_BEAM", "primary_beam": "SKY_RESIDUAL"},
+        "The residual's roles swapped.",
     )
     store = write_zarr_image_store(
         coords, str(tmp_path_factory.mktemp("cube") / "cube.img.zarr")
@@ -944,6 +953,25 @@ def test_validation_refuses_a_store_of_other_settings(cube, tmp_path, options):
     bind_find_continuum_first_round_store(store, cube["store"])
     with pytest.raises(ValueError, match=next(iter(options))):
         validate_find_continuum_first_round(store, cube["store"], LIMIT, [0, 16])
+
+
+def test_validation_refuses_a_store_of_other_data_variables(cube, tmp_path):
+    """The store must have been made from the data variables of the call's
+    data group, as find_continuum_ultra requires, so that a caller choosing
+    the store by the validation is not refused later."""
+    store = _first_round(cube, tmp_path / "fr.zarr", run_id=None)
+    bind_find_continuum_first_round_store(store, cube["store"])
+    assert validate_find_continuum_first_round(
+        store, cube["store"], LIMIT, [0, 16], "residual"
+    ) == FirstRoundStoreInputs(store, 0, False, "image_cube_single_field")
+    with pytest.raises(ValueError, match="made with variables"):
+        validate_find_continuum_first_round(
+            store, cube["store"], LIMIT, [0, 16], "swapped"
+        )
+    with pytest.raises(ValueError, match="no sky or no primary_beam"):
+        validate_find_continuum_first_round(
+            store, cube["store"], LIMIT, [0, 16], "absent"
+        )
 
 
 def test_validation_refuses_a_rewritten_cube(cube, tmp_path):

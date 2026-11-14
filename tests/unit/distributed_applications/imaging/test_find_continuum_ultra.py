@@ -841,7 +841,7 @@ def test_refused_first_round_stores_and_an_earlier_run(small_store, tmp_path):
         first_round_store,
         variables={"sky": "POINT_SPREAD_FUNCTION", "primary_beam": "PRIMARY_BEAM"},
     )
-    with pytest.raises(ValueError, match="was made from"):
+    with pytest.raises(ValueError, match="was made with variables"):
         _run(small_store, tmp_path / "other", 12, first_round_store=first_round_store)
     _set_store_attributes(first_round_store, version=1)
     with pytest.raises(

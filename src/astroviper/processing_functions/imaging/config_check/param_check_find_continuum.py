@@ -407,6 +407,7 @@ def check_find_continuum_first_round_store(
     primary_beam_limit,
     polarization_index,
     tile_shape,
+    variables,
     channel_range,
 ):
     """Require a first-round store complete for a spectral window and made from
@@ -427,6 +428,9 @@ def check_find_continuum_first_round_store(
         Index of Stokes I in the cube.
     tile_shape : sequence of int
         Inner chunk shape of the cube along ``l`` and ``m``.
+    variables : mapping
+        ``{"sky": ..., "primary_beam": ...}``, the data variables of the
+        find_continuum call.
     channel_range : sequence of int
         ``[start, stop)``, channels of the cube that findContinuum sees.
 
@@ -435,9 +439,9 @@ def check_find_continuum_first_round_store(
     ValueError
         The store is missing or incomplete, has another version (a store of
         version 1 must be made again), was made with another primary beam
-        limit, Stokes index or tile shape, holds no window with every channel
-        of ``channel_range``, or a field of its binding differs from the
-        cube's: the cube was rewritten, or is another one.
+        limit, Stokes index, tile shape or data variables, holds no window
+        with every channel of ``channel_range``, or a field of its binding
+        differs from the cube's: the cube was rewritten, or is another one.
     """
     first_round = None if attrs is None else attrs.get("find_continuum_first_round")
     if first_round is None:
@@ -453,6 +457,7 @@ def check_find_continuum_first_round_store(
         ("primary_beam_limit", primary_beam_limit),
         ("polarization_index", polarization_index),
         ("tile_shape", list(tile_shape)),
+        ("variables", dict(variables)),
     ):
         if _plain(first_round.get(name)) != value:
             raise ValueError(

@@ -403,7 +403,7 @@ def find_continuum_ultra(
             input_image_store,
             primary_beam_limit,
             window_range,
-            {role: data_group[role] for role in ("sky", "primary_beam")},
+            image_data_group_in_name,
         )
     measures["T_load_first_round"] = time.perf_counter() - start
 
@@ -576,10 +576,14 @@ def _open_window(
 
 
 def _first_round_store_inputs(
-    first_round_store, input_image_store, primary_beam_limit, window_range, variables
+    first_round_store,
+    input_image_store,
+    primary_beam_limit,
+    window_range,
+    image_data_group_in_name,
 ):
-    """The first-round store validated for the spectral window, refused when
-    made from other data variables, and the imager's cost attributes in it."""
+    """The first-round store validated for the spectral window and the data
+    group, and the imager's cost attributes in it."""
     import zarr
 
     from astroviper.distributed_applications.imaging.find_continuum_first_round import (
@@ -587,16 +591,15 @@ def _first_round_store_inputs(
     )
 
     store_inputs = validate_find_continuum_first_round(
-        first_round_store, input_image_store, primary_beam_limit, window_range
+        first_round_store,
+        input_image_store,
+        primary_beam_limit,
+        window_range,
+        image_data_group_in_name,
     )
     attributes = zarr.open_group(first_round_store, mode="r").attrs[
         "find_continuum_first_round"
     ]
-    if attributes["variables"] != variables:
-        raise ValueError(
-            f"The first-round store {first_round_store} was made from "
-            f"{attributes['variables']}, not from {variables}."
-        )
     return store_inputs, attributes.get("imager")
 
 
