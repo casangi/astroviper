@@ -52,6 +52,14 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.numerics impor
     round_to_significant_digits,
     scaled_median_absolute_deviation,
 )
+from astroviper.processing_functions.imaging.find_continuum_ultra.products import (
+    bandwidth_warnings,
+    constant_cube,
+    continuum_frequency_ranges,
+    is_all_continuum,
+    selection_bandwidth,
+    single_range_channel_fraction,
+)
 from astroviper.processing_functions.imaging.find_continuum_ultra.selection_maps import (
     count_above_level,
     difference_map_snr,
@@ -177,4 +185,10 @@ __all__ = [
     "moment_difference_counts",
     "negative_pixel_fraction",
     "difference_map_snr",
+    "constant_cube",
+    "selection_bandwidth",
+    "bandwidth_warnings",
+    "is_all_continuum",
+    "continuum_frequency_ranges",
+    "single_range_channel_fraction",
 ]
