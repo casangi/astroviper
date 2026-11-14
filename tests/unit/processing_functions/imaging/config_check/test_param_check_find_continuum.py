@@ -43,6 +43,17 @@ def test_invalid_config(n_bin, primary_beam_limit, n_mapping_parallelism, error)
         check_find_continuum_config(n_bin, primary_beam_limit, n_mapping_parallelism)
 
 
+def test_first_round_of_the_imager():
+    first_round = {"primary_beam_limit": 0.2, "reductions": [{}, {}, {}, {}]}
+    check_find_continuum_config(1, 0.2, None, first_round)
+    with pytest.raises(ValueError, match="made with primary_beam_limit 0.2, not 0.3"):
+        check_find_continuum_config(1, 0.3, None, first_round)
+    with pytest.raises(ValueError, match="4 results"):
+        check_find_continuum_config(1, 0.2, None, dict(first_round, reductions=[{}]))
+    with pytest.raises(TypeError):
+        check_find_continuum_config(1, 0.2, None, [{}, {}, {}, {}])
+
+
 @pytest.fixture
 def img_xds():
     return make_find_continuum_image_xds(n_pixels=8, n_channels=N_CHANNELS)

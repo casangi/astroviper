@@ -543,6 +543,7 @@ def image_cube_single_field(
     output_image_format="zarr",
     task_time_kill_switch_seconds=None,
     report_statistics=False,
+    find_continuum_first_round_requests=None,
     *,
     input_checked: bool = False,
 ):
@@ -1123,6 +1124,14 @@ def image_cube_single_field(
         with the ``entropy_*`` settings of ``cycle_control_params``; not a
         number for a plane whose peak is above ``entropy_max_snr`` times its
         RMS). Default ``False``.
+    find_continuum_first_round_requests : list of dict, optional
+        Reductions of find_continuum's first round
+        (:func:`~astroviper.processing_functions.imaging.find_continuum.find_continuum_first_round_requests`,
+        with the cube named ``"sky"`` and the primary beam
+        ``"primary_beam"``), made of the Stokes I residual and primary beam of
+        every chunk before it is written, masked where the primary beam is
+        below the ``primary_beam_limit`` of ``cycle_control_params``. Default
+        ``None``: none.
 
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
@@ -1163,6 +1172,10 @@ def image_cube_single_field(
           exists, e.g. ``max_iter=0``); see
           :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`.
           The reduce concatenates the chunks along ``frequency``.
+        * ``"find_continuum_first_round"`` (with
+          ``find_continuum_first_round_requests``): the partial results for
+          this task's channels, which the reduce merges; ``None`` when a chunk
+          could not be written.
     """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
@@ -1357,6 +1370,8 @@ def image_cube_single_field(
     accumulator = None
     T_channel_bookkeeping = 0.0
     T_image_statistics = 0.0
+    T_find_continuum_first_round = 0.0
+    first_round = None
     T_write = 0.0
     for chan_index in range(n_chan):
         start = time.time()
@@ -1455,6 +1470,32 @@ def image_cube_single_field(
         statistics_chunks.append(statistics)
         T_image_statistics += time.time() - start
 
+        if find_continuum_first_round_requests is not None:
+            from astroviper.processing_functions.imaging.find_continuum import (
+                find_continuum_cube_reductions,
+                merge_find_continuum_reductions,
+            )
+
+            start = time.time()
+            group = chunk_xds.attrs["data_groups"]["residual"]
+            variables = {"sky": group["sky"], "primary_beam": group["primary_beam"]}
+            channels = chunk_task_coords["frequency"]["slice"]
+            partial = find_continuum_cube_reductions(
+                chunk_xds[list(variables.values())].sel(polarization=["I"]),
+                find_continuum_first_round_requests,
+                variables,
+                {},
+                range(channels.start, channels.stop),
+                variables["primary_beam"],
+                primary_beam_limit,
+            )
+            first_round = (
+                partial
+                if first_round is None
+                else merge_find_continuum_reductions(first_round, partial)
+            )
+            T_find_continuum_first_round += time.time() - start
+
         start = time.time()
         try:
             write_chunk(chunk_xds, chunk_task_coords)
@@ -1507,6 +1548,7 @@ def image_cube_single_field(
     timing_df["T_make_empty_image"] = T_make_empty_image
     timing_df["T_load"] = T_load
     timing_df["T_image_statistics"] = T_image_statistics
+    timing_df["T_find_continuum_first_round"] = T_find_continuum_first_round
     timing_df["T_write"] = T_write
     timing_df["T_image_cube_task"] = task_total_time
     # Wall-clock anchor so the task-stream analysis can place this task on the
@@ -1597,8 +1639,12 @@ def image_cube_single_field(
         printer=logger.debug,
     )
 
-    return {
+    result = {
         "timing_node_tasks": timing_df,
         "deconvolution": combined_imaging_dict,
         "image_statistics": image_statistics,
     }
+    if find_continuum_first_round_requests is not None:
+        # The first round describes the cube only if every chunk was written.
+        result["find_continuum_first_round"] = None if write_failures else first_round
+    return result

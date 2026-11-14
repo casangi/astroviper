@@ -8,7 +8,8 @@ findContinuum asks for next, as far as they are known by then:
 
 - the first pass adds the first-round reductions that need no earlier result:
   the moment 0 and 8 images of the cube, the statistics of the cube and of the
-  primary beam, and the mean primary beam;
+  primary beam, and the mean primary beam (unless the imager computed them
+  while it made the cube);
 - a pass for the moment 0 and 8 images of a channel selection adds the noise
   of the cube outside the joint mask in those channels (``cubeNoiseLevel``,
   with the arguments findContinuum has computed by then), the cube peak in
@@ -35,7 +36,10 @@ from astroviper.distributed_applications.imaging.find_continuum import (
     findContinuum,
 )
 from astroviper.node_tasks.imaging.find_continuum import read_small_image
-from astroviper.processing_functions.imaging.find_continuum import CHANNEL_STATISTICS
+from astroviper.processing_functions.imaging.find_continuum import (
+    CHANNEL_STATISTICS,
+    find_continuum_first_round_requests,
+)
 
 
 def _frozen(value):
@@ -76,20 +80,29 @@ class FusedReductions:
     cube, primary_beam : str
         Paths of the registered dirty cube and primary beam, as findContinuum
         names them.
+    first_round : list, optional
+        Results of the requests of
+        :func:`~astroviper.processing_functions.imaging.find_continuum.find_continuum_first_round_requests`,
+        already computed (by the imager); they fill the cache.
     """
 
-    def __init__(self, run_pass, cube, primary_beam):
+    def __init__(self, run_pass, cube, primary_beam, first_round=None):
         self.run_pass = run_pass
         self.cube = cube
         self.primary_beam = primary_beam
         self.cache = {}
         self.selections = []
         self.captured = None
+        self.first_round = first_round
 
     def __call__(self, requests):
         if self.captured is not None:
             self.captured.extend(requests)
             return [self._placeholder(request) for request in requests]
+        if self.first_round is not None:
+            keys = map(self._key, self._first_round())
+            self.cache.update(zip(keys, self.first_round, strict=True))
+            self.first_round = None
         keys = [self._key(request) for request in requests]
         batch = {
             key: request
@@ -165,32 +178,15 @@ class FusedReductions:
         return predicted
 
     def _first_round(self):
-        nchan = casa_image_tasks._cube(self.cube)["metadata"]["shape"][3]
-        # The channels of the mean primary beam, as findContinuum chooses them.
-        mean_beam_chans = (
-            ""
-            if nchan < 16
-            else ",".join(
-                str(c)
-                for c in (
-                    nchan // 8,
-                    nchan // 4,
-                    nchan // 2,
-                    3 * nchan // 4,
-                    7 * nchan // 8,
-                )
-            )
+        metadata = casa_image_tasks._cube(self.cube)["metadata"]
+        return find_continuum_first_round_requests(
+            metadata["shape"][3],
+            metadata["reference_value"][3],
+            metadata["increment"][3],
+            metadata["rest_frequency"],
+            self.cube,
+            self.primary_beam,
         )
-        return [
-            casa_image_tasks._moments_request(self.primary_beam, [-1], mean_beam_chans),
-            casa_image_tasks._moments_request(
-                self.cube, [0, 8], "", f'"{self.cube}"!=0'
-            ),
-            casa_image_tasks._cube_request(self.cube, "statistics", per_channel=False),
-            casa_image_tasks._cube_request(
-                self.primary_beam, "statistics", per_channel=False
-            ),
-        ]
 
     def _selection_round(self, request):
         channels = set(request["channels"])

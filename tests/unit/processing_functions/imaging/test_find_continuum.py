@@ -13,6 +13,7 @@ from astroviper.processing_functions.imaging.find_continuum import (
     evaluate_lattice_expression,
     finalize_find_continuum_reductions,
     find_continuum_cube_reductions,
+    find_continuum_first_round_requests,
     image_statistics,
     lattice_expression_names,
     merge_find_continuum_reductions,
@@ -364,3 +365,24 @@ class TestCubeReductions:
             find_continuum_cube_reductions(
                 _image_xds(), [request], VARIABLES, {}, np.arange(N_CHANNELS)
             )
+
+
+@pytest.mark.parametrize(
+    "n_channels, beam_channels", [(480, [60, 120, 240, 360, 420]), (10, None)]
+)
+def test_first_round_requests(n_channels, beam_channels):
+    requests = find_continuum_first_round_requests(
+        n_channels, 230.0e9, 1.0e6, 230.5e9, "sky", "beam"
+    )
+    mean_beam, moments, cube_statistics, beam_statistics = requests
+    assert mean_beam["image"] == "beam" and mean_beam["moments"] == [-1]
+    assert mean_beam["channels"] == beam_channels
+    assert moments["image"] == "sky" and moments["mask"] == '"sky"!=0'
+    assert moments["moments"] == [0, 8] and moments["channels"] is None
+    np.testing.assert_array_equal(
+        moments["frequency"], 230.0e9 + 1.0e6 * np.arange(n_channels)
+    )
+    assert cube_statistics == dict(
+        kind="statistics", image="sky", mask="", channels=None, per_channel=False
+    )
+    assert beam_statistics["image"] == "beam"

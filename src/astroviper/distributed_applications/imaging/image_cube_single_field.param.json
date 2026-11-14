@@ -57,6 +57,7 @@
         "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true },
         "msv2_open_options": { "type": ["dict"], "nullable": true },
         "parameters_file": { "type": ["str"], "nullable": true },
-        "report": { "type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"] }
+        "report": { "type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"] },
+        "find_continuum_first_round": { "type": "boolean" }
     }
 }

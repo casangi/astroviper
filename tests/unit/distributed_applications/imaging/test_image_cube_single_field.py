@@ -808,3 +808,92 @@ def test_cube_publishes_only_selected_restoration_products(
         else "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
     )
     assert np.isfinite(image[selected]).any()
+
+
+@pytest.mark.parametrize("n_frequency_chunks", [1, 2])
+def test_find_continuum_first_round(tmp_path, n_frequency_chunks):
+    """The imager returns the first round find_continuum_fused makes of the cube
+    written, and keeps the variables find_continuum reads."""
+    from astroviper.processing_functions.imaging.find_continuum import (
+        finalize_find_continuum_reductions,
+        find_continuum_cube_reductions,
+        find_continuum_first_round_requests,
+    )
+
+    ps_store = _simulate_point_source(tmp_path)
+    ps_xdt = open_processing_set(ps_store)
+    image_store = str(tmp_path / "cube.img.zarr")
+    result = distributed_applications.imaging.image_cube_single_field(
+        ps_store=ps_store,
+        image_store=image_store,
+        image_params={
+            "image_size": [64, 64],
+            "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600),
+            "phase_direction": PC,
+            "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
+            "polarization_coords": ["I", "V"],
+            "time_coords": [0],
+            "fft_padding": 1.2,
+            "cpp_gridder": True,
+        },
+        instrument_polarization_basis="circular",
+        imaging_weights_params={
+            "weighting": "natural",
+            "robust": 0.5,
+            "casa_weighting_implementation": True,
+        },
+        cycle_control_params={
+            "max_iter": 0,
+            "max_cycles": 0,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+        },
+        image_data_variables_keep=["sky_residual"],
+        processing_set_data_group_name="base",
+        n_mapping_parallelism={"frequency": n_frequency_chunks},
+        find_continuum_first_round=True,
+    )
+
+    img_xds = xr.open_zarr(image_store, chunks=None)
+    group = img_xds.attrs["data_groups"]["residual"]
+    for role in ("sky", "primary_beam", "point_spread_function"):
+        assert role in group
+    assert "beam_fit_params_point_spread_function" in group
+    frequency = img_xds.frequency.values
+    requests = find_continuum_first_round_requests(
+        frequency.size,
+        float(frequency[0]),
+        float(frequency[1] - frequency[0]),
+        float(img_xds.frequency.attrs["rest_frequency"]["data"]),
+        "sky",
+        "primary_beam",
+    )
+    variables = {"sky": group["sky"], "primary_beam": group["primary_beam"]}
+    expected = finalize_find_continuum_reductions(
+        find_continuum_cube_reductions(
+            img_xds[list(variables.values())].sel(polarization=["I"]).load(),
+            requests,
+            variables,
+            {},
+            np.arange(frequency.size),
+            group["primary_beam"],
+            0.2,
+        ),
+        requests,
+    )
+    assert result["find_continuum_first_round"]["primary_beam_limit"] == 0.2
+    first_round = result["find_continuum_first_round"]["reductions"]
+    np.testing.assert_allclose(first_round[0][-1], expected[0][-1], rtol=1e-12)
+    for moment in (0, 8):
+        np.testing.assert_allclose(
+            first_round[1][moment], expected[1][moment], rtol=1e-12
+        )
+    for statistics, reference in zip(first_round[2:], expected[2:], strict=True):
+        for key in ("npts", "sum", "sumsq", "min", "max", "mean", "rms"):
+            assert statistics[key] == pytest.approx(reference[key], rel=1e-12)
+    assert first_round[2]["npts"] == 64 * 64 * 2
+    assert (result["timing_node_tasks"]["T_find_continuum_first_round"] > 0).all()
