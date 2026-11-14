@@ -63,6 +63,16 @@ def _full_arrays(seed=7, n_chan=None):
     }
 
 
+def _casa_rows(beams):
+    """Beams ``[major, minor, pa]`` in radians as a ``BEAMS`` table holds them:
+    float32 arcsec, arcsec and degrees, the types and units of CASA's tables."""
+    beams = np.asarray(beams, dtype=np.float64)
+    degrees = np.degrees(beams)
+    return np.stack(
+        [degrees[..., 0] * 3600.0, degrees[..., 1] * 3600.0, degrees[..., 2]], -1
+    ).astype(np.float32)
+
+
 def _write_chunk(store, full, chan_slice, threads=1, keep=KEEP):
     """Write one simulated node task's channel chunk into the FITS store."""
     chunk_xds = _empty_image(frequency_coords=FREQS[chan_slice])
@@ -111,11 +121,30 @@ def test_astropy_round_trip(written_store):
         assert len(beams) == len(FREQS) * len(POLS)
         assert np.array_equal(beams["CHAN"][:4], [0, 0, 1, 1])
         assert np.array_equal(beams["POL"][:4], [0, 1, 0, 1])
-        for column, param in zip(("BMAJ", "BMIN", "BPA"), range(3), strict=False):
-            assert np.allclose(
-                beams[column].reshape(len(FREQS), len(POLS)),
-                full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0, :, :, param],
+        expected = _casa_rows(full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0])
+        for param, column in enumerate(("BMAJ", "BMIN", "BPA")):
+            np.testing.assert_array_equal(
+                beams[column].reshape(len(FREQS), len(POLS)), expected[..., param]
             )
+
+
+def test_beams_tables_have_the_types_and_units_casacore_reads(written_store):
+    """casacore's ImageFITSConverter::readBeamsTable reads BMAJ, BMIN and BPA
+    only as float32 ('E') with angular TUNITs and CHAN, POL as int32 ('J'),
+    with NCHAN and NPOL keywords; arcsec and degrees are the units of the
+    tables exportfits writes for tclean's images."""
+    from astropy.io import fits
+
+    store, _img_xds, _full = written_store
+    for key in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+        with fits.open(os.path.join(store, key + ".fits")) as hdulist:
+            table = hdulist["BEAMS"]
+            columns = table.columns
+            assert columns.names == ["BMAJ", "BMIN", "BPA", "CHAN", "POL"]
+            assert columns.formats == list("EEEJJ")
+            assert columns.units[:3] == ["arcsec", "arcsec", "deg"]
+            assert table.header["NAXIS1"] == 20
+            assert (table.header["NCHAN"], table.header["NPOL"]) == (5, 2)
 
 
 def test_mask_written_as_floats_and_no_beams(written_store):
@@ -171,7 +200,8 @@ TARGET = np.array([3.0e-5, 2.0e-5, 0.5])
 
 
 def _beams_table(store, key):
-    """The ``BEAMS`` rows of ``<KEY>.fits`` as (channel, polarization, 3), or None."""
+    """The ``BEAMS`` rows of ``<KEY>.fits`` as (channel, polarization, 3), as
+    stored (:func:`_casa_rows`), or None."""
     from astropy.io import fits
 
     with fits.open(os.path.join(store, key.upper() + ".fits")) as hdulist:
@@ -214,7 +244,7 @@ def test_without_a_restoring_beam_the_corrected_file_has_no_beams(tmp_path):
     _write_chunk(store, full, slice(0, 5), keep=keep)
     np.testing.assert_array_equal(
         _beams_table(store, "sky_restored"),
-        full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0],
+        _casa_rows(full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0]),
     )
     path = os.path.join(store, "SKY_RESTORED_PRIMARY_BEAM_CORRECTED.fits")
     with fits.open(path) as hdulist:
@@ -229,9 +259,8 @@ def test_without_a_restoring_beam_the_corrected_file_has_no_beams(tmp_path):
 
 def test_restored_files_carry_the_restoring_beam(tmp_path, monkeypatch):
     """The restored files carry the restoring beam as their header beam, in
-    degrees, as tclean writes it (CASA reads it, not BEAMS tables of float64
-    values), with no BEAMS table; the others the PSF beams, encoded once per
-    chunk."""
+    degrees, as tclean writes it, with no BEAMS table; the others the PSF
+    beams, encoded once per chunk."""
     import xradio.image
     from astropy.io import fits
 
@@ -272,7 +301,8 @@ def test_restored_files_carry_the_restoring_beam(tmp_path, monkeypatch):
     for key in ("sky_residual", "point_spread_function"):
         assert _header_beam(store, key) is None
         np.testing.assert_array_equal(
-            _beams_table(store, key), full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0]
+            _beams_table(store, key),
+            _casa_rows(full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][0]),
         )
 
 
@@ -316,6 +346,84 @@ def test_unwritten_beams_rows_hold_their_channel_and_polarization(tmp_path):
         assert not np.any([beams[column] for column in ("BMAJ", "BMIN", "BPA")])
     xds = xradio.image.open_image({"sky_residual": path})
     assert not xds["BEAM_FIT_PARAMS_SKY_RESIDUAL"].values.any()
+
+
+def test_rows_without_a_fit_take_the_beam_of_largest_area(tmp_path):
+    """After the run the rows of planes without a fit, the zeros of a flagged
+    channel and the NaN of a failed fit, which casacore refuses, hold the beam
+    of largest area, channel 4's, as tclean fills them, not the first fit's or
+    a neighbour's. The other rows, the indices and the files without a BEAMS
+    table stay as they are; XRADIO reads the filled beams."""
+    import xradio.image
+    from astropy.io import fits
+
+    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+        fill_fits_beams_without_fit,
+    )
+
+    store = str(tmp_path / "img.fits")
+    keep = KEEP + RESTORED + ["beam_fit_params_sky_restored"]
+    create_empty_fits_images(store, _empty_image(), keep, restoring_beam=TARGET)
+    full = _restored_arrays(keep)
+    psf = np.array(
+        [
+            [2.0, 1.0, 50.0],
+            [2.5, 1.5, 20.0],
+            [0.0, 0.0, 0.0],  # flagged
+            [2.2, 1.9, -40.0],
+            [3.0, 2.0, 30.0],
+        ]
+    )
+    psf = np.radians(psf / [3600.0, 3600.0, 1.0])
+    psf = np.repeat(psf[None, :, None], len(POLS), axis=2)
+    psf[0, 3, 1] = np.nan  # a failed fit
+    full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = psf
+    _write_chunk(store, full, slice(0, 2), keep=keep)
+    _write_chunk(store, full, slice(2, 5), keep=keep)
+
+    def file_bytes(key):
+        with open(os.path.join(store, key.upper() + ".fits"), "rb") as file:
+            return file.read()
+
+    without_table = {key: file_bytes(key) for key in RESTORED + ["mask"]}
+
+    fill_fits_beams_without_fit(store, keep)
+
+    filled = psf[0].copy()
+    filled[2, :] = psf[0, 4, 0]
+    filled[3, 1] = psf[0, 4, 0]
+    for key in ("sky_residual", "point_spread_function"):
+        np.testing.assert_array_equal(_beams_table(store, key), _casa_rows(filled))
+        path = os.path.join(store, key.upper() + ".fits")
+        with fits.open(path) as hdulist:
+            beams = hdulist["BEAMS"].data
+            np.testing.assert_array_equal(beams["CHAN"], np.repeat(range(5), 2))
+            np.testing.assert_array_equal(beams["POL"], np.tile(range(2), 5))
+        xds = xradio.image.open_image({key: path})
+        np.testing.assert_allclose(
+            xds[f"BEAM_FIT_PARAMS_{key.upper()}"].values[0],
+            filled,
+            rtol=np.finfo(np.float32).eps,
+        )
+    for key, content in without_table.items():
+        assert file_bytes(key) == content, key
+
+
+def test_without_any_fit_rows_take_the_tclean_default_beam(tmp_path):
+    """Without a fit in any plane (every channel flagged, or rows no task
+    wrote) every row takes tclean's circle of 1e-6 arcsec at 0 degrees."""
+    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+        fill_fits_beams_without_fit,
+    )
+
+    store = str(tmp_path / "img.fits")
+    create_empty_fits_images(store, _empty_image(), KEEP)
+    fill_fits_beams_without_fit(store, KEEP)
+    for key in ("sky_residual", "point_spread_function"):
+        np.testing.assert_array_equal(
+            _beams_table(store, key),
+            np.broadcast_to(np.float32([1e-6, 1e-6, 0.0]), (len(FREQS), len(POLS), 3)),
+        )
 
 
 PSF_BEAM = "beam_fit_params_point_spread_function"

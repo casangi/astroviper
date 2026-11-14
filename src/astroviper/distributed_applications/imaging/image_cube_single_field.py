@@ -794,7 +794,8 @@ def image_cube_single_field(
         range, since frequency is the slowest-varying FITS axis -- directly
         into the shared files (no locking, no file creation). Kept
         beam-fit-params variables become CASA-style multi-beam ``BEAMS`` table
-        extensions, except ``beam_fit_params_sky_restored``, the header beam
+        extensions, whose rows of planes without a fit hold the beam ``tclean``
+        gives them, except ``beam_fit_params_sky_restored``, the header beam
         (``BMAJ``, ``BMIN``, ``BPA``) of the restored images.
         uv-domain / complex variables cannot be written to FITS.
     task_time_kill_switch_seconds : float, optional
@@ -1012,8 +1013,7 @@ def image_cube_single_field(
         ]
     # The report draws the point spread function with its fitted Gaussian, and
     # the PSF beam of every channel against a restoring beam. Kept only for it:
-    # the zero beam of a flagged channel stops xradio's export to CASA, and
-    # CASA cannot read the BEAMS tables of FITS output.
+    # the zero beam of a flagged channel stops xradio's export to CASA.
     if (
         report is not None
         and (
@@ -1528,6 +1528,16 @@ def image_cube_single_field(
             image_data_variables_keep=image_data_variables_keep,
             thread_info=thread_info,
         )
+
+    # Planes without a fit (a flagged channel, a failed fit, a skipped task)
+    # take the beam tclean gives them, now that every task has written its
+    # beams; after the report, which finds them by their null beams.
+    if output_image_format == "fits":
+        from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+            fill_fits_beams_without_fit,
+        )
+
+        fill_fits_beams_without_fit(image_store, image_data_variables_keep)
     return imaging_dict
 
 
