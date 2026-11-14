@@ -303,12 +303,16 @@ def find_continuum_streamed_reductions(
     """Reductions of one chunk of channels of the dirty cube, streamed in batches of planes.
 
     The channels that a request selects are read at the Stokes I index in
-    batches of at most ``planes_per_batch`` planes within one shard, one read
-    per batch and variable, and only the inner chunks that a request can use:
-    inside the primary-beam limit, in the footprint of its two-dimensional
-    mask and, with the stored ``"pb">0.21`` mask, where that mask holds a
-    pixel. A background thread reads the next batch into a second buffer while
-    the planes of a batch are added to the partial results one by one
+    batches spanning at most ``planes_per_batch`` planes within one shard, one
+    read per batch and variable, and only the inner chunks that a request can
+    use: inside the primary-beam limit, in the footprint of its
+    two-dimensional mask and, with the stored ``"pb">0.21`` mask, where that
+    mask holds a pixel. The needed channels of a read unit (an inner chunk of
+    a sharded array, a chunk otherwise) are read in one batch when they span
+    at most ``planes_per_batch`` planes, the channels between them included,
+    so that the unit is decoded once per task. A background thread reads the
+    next batch into a second buffer while the planes of a batch are added to
+    the partial results one by one
     (:func:`~astroviper.processing_functions.imaging.find_continuum.find_continuum_batch_reductions`).
     The moment maps go to slot ``chunk_indices[0]`` of the scratch store; only
     per-channel rows are returned.
@@ -360,7 +364,7 @@ def find_continuum_streamed_reductions(
         partial (``FindContinuumMoments.state``); ``None`` without moments
         requests.
     planes_per_batch : int
-        Planes per read.
+        Planes a read spans at most.
     data_selection : dict, optional
         ``{"img": {"frequency": slice}}``, the chunk of this task in channels
         of the store; the whole store if not given.
@@ -434,17 +438,33 @@ def find_continuum_streamed_reductions(
     needed = np.full(chunk.size, compute_first_round)
     for chosen in selected:
         needed |= chosen
+    # Positions of the needed channels of each batch; a batch reads the planes
+    # from its first to its last position.
     batches = []
-    for position in np.flatnonzero(needed):
-        if (
-            batches
-            and position == batches[-1][-1] + 1
-            and len(batches[-1]) < planes_per_batch
-            and chunk[position] % shard
+    extendable = False
+    for _, group in itertools.groupby(
+        np.flatnonzero(needed).tolist(), key=lambda position: chunk[position] // unit[1]
+    ):
+        group = list(group)
+        if group[-1] - group[0] >= planes_per_batch:
+            # A read unit of more needed planes than a batch, read per batch.
+            batches.append([group[0]])
+            for position in group[1:]:
+                if position - batches[-1][0] < planes_per_batch:
+                    batches[-1].append(position)
+                else:
+                    batches.append([position])
+            extendable = False
+        elif (
+            extendable
+            and group[0] == batches[-1][-1] + 1
+            and group[-1] - batches[-1][0] < planes_per_batch
+            and chunk[group[0]] // shard == chunk[batches[-1][0]] // shard
         ):
-            batches[-1].append(position)
+            batches[-1].extend(group)
         else:
-            batches.append([position])
+            batches.append(group)
+            extendable = True
     uses_profile = [
         any(term[0] == "profile" for term in request["cube_terms"])
         for request in requests
@@ -493,10 +513,13 @@ def find_continuum_streamed_reductions(
                 tiles[p, k] = tile_occupancy(mask, unit[3:])[0, 0, 0]
         return packed, tiles
 
-    size = max(map(len, batches), default=0)
+    spans = [batch[-1] - batch[0] + 1 for batch in batches]
     buffers = {
         role: [
-            np.empty((cube.shape[0], size, 1, n_l, n_m), dtype=arrays[role].dtype)
+            np.empty(
+                (cube.shape[0], max(spans, default=0), 1, n_l, n_m),
+                dtype=arrays[role].dtype,
+            )
             for _ in range(min(2, len(batches)))
         ]
         for role in roles
@@ -506,14 +529,15 @@ def find_continuum_streamed_reductions(
 
     def read(batch, index):
         start = time.perf_counter()
-        channels = chunk[batch]
-        frequency = slice(int(channels[0]), int(channels[-1]) + 1)
+        span = np.arange(batch[0], batch[-1] + 1)
+        frequency = slice(int(chunk[span[0]]), int(chunk[span[-1]]) + 1)
         region = {
             "frequency": frequency,
             "polarization": slice(polarization_index, polarization_index + 1),
         }
-        data = {"channels": channels}
-        tiles = None if compute_first_round else needed_tiles(batch)
+        # The batch's planes in the buffers.
+        data = {"channels": chunk[batch], "offsets": np.subtract(batch, batch[0])}
+        tiles = None if compute_first_round else needed_tiles(span)
         masks_seconds = 0.0
         for role in roles:
             if role == "sky" and compute_first_round:
@@ -524,9 +548,9 @@ def find_continuum_streamed_reductions(
             data[role] = read_array_region(
                 paths[role],
                 region,
-                None if tiles is None else read_units(tiles, channels),
+                None if tiles is None else read_units(tiles, chunk[span]),
                 counters[role],
-                buffers[role][index][:, : len(batch)],
+                buffers[role][index][:, : span.size],
             )[0]
         if not compute_first_round:
             data["packed"] = [
@@ -569,35 +593,34 @@ def find_continuum_streamed_reductions(
             rows["channels"].append(channels)
             rows["tiles"].append(data["tiles"])
             seconds["T_first_round"] += time.perf_counter() - start
-        for p in range(channels.size):
+        for p, offset in enumerate(data["offsets"].tolist()):
+            plane = slice(offset, offset + 1)
             start = time.perf_counter()
             inside = profile = None
             if data["packed"][0] is not None:
                 inside = planes[0]
-                unpack_plane_masks(data["packed"][0][p], n_m, out=inside[0, 0, 0])
+                unpack_plane_masks(data["packed"][0][offset], n_m, out=inside[0, 0, 0])
             if read_profile:
                 profile = planes[1]
-                unpack_plane_masks(data["packed"][1][p], n_m, out=profile[0, 0, 0])
+                unpack_plane_masks(data["packed"][1][offset], n_m, out=profile[0, 0, 0])
             seconds["T_unpack"] += time.perf_counter() - start
             if compute_first_round:
                 start = time.perf_counter()
                 rows["statistics"].append(
                     first_round_statistics(
-                        sky[:, p : p + 1], primary_beam[:, p : p + 1], inside
+                        sky[:, plane], primary_beam[:, plane], inside
                     )
                 )
                 seconds["T_first_round"] += time.perf_counter() - start
             find_continuum_batch_reductions(
-                sky[:, p : p + 1],
+                sky[:, plane],
                 channels[p : p + 1],
                 requests,
                 partials,
                 inside=None if primary_beam_limit is None else inside,
                 profile=profile,
                 two_d_masks=two_d_masks,
-                primary_beam=None
-                if primary_beam is None
-                else primary_beam[:, p : p + 1],
+                primary_beam=None if primary_beam is None else primary_beam[:, plane],
                 images=images,
                 buffers=work,
             )
@@ -658,7 +681,7 @@ def find_continuum_streamed_reductions(
         "start_unixtime": start_unixtime,
         "end_unixtime": end_unixtime,
         **_execution_identity(),
-        "n_planes_read": int(processed.size) * len(roles),
+        "n_planes_read": sum(spans) * len(roles),
         "n_chunks_read": sum(c["units_read"] for c in counters.values()),
         "n_chunks_skipped": sum(c["units_skipped"] for c in counters.values()),
         "bytes_read_sky": read_bytes["sky"],

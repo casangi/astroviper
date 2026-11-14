@@ -472,6 +472,86 @@ def test_first_pass_equals_the_port(cube, first_pass):
     assert attributes["windows"][0]["channel_range"] == list(WINDOW)
 
 
+@pytest.fixture(scope="module")
+def unsharded_cube(cube, tmp_path_factory):
+    """The cube in an unsharded store whose chunks hold 12 channels of one
+    Stokes and 16 x 16 px, as stores converted from CASA images hold many."""
+    directory = tmp_path_factory.mktemp("unsharded_cube")
+    store = str(directory / "cube.img.zarr")
+    shutil.copytree(cube["store"], store)
+    for name in VARIABLES.values():
+        stored = zarr.open_array(os.path.join(store, name), mode="r")
+        values, attributes = stored[...], dict(stored.attrs)
+        dimension_names = stored.metadata.dimension_names
+        shutil.rmtree(os.path.join(store, name))
+        array = zarr.create_array(
+            os.path.join(store, name),
+            shape=values.shape,
+            chunks=(1, 12, 1, *TILE),
+            dtype=values.dtype,
+            fill_value=np.nan,
+            compressors=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+            dimension_names=dimension_names,
+            attributes=attributes,
+        )
+        array[...] = values
+    zarr.consolidate_metadata(store)
+    return dict(cube, store=store)
+
+
+def _read_units(ultra, frame, channels):
+    """Per frequency task, the read units (12-channel chunk x tile) holding a
+    needed channel, each counted once."""
+    n_tiles = (N_PIXELS // TILE[0]) * (N_PIXELS // TILE[1])
+    units = {}
+    for task in frame["task_id"]:
+        frequency = ultra.frequency_mapping[task]["data_selection"]["img"]["frequency"]
+        needed = [c for c in range(frequency.start, frequency.stop) if c in channels]
+        units[task] = len({c // 12 for c in needed}) * n_tiles
+    return units
+
+
+def test_a_read_unit_of_many_channels_is_read_once_per_task(unsharded_cube, tmp_path):
+    """On a store whose chunks hold 12 channels, a batch reads the needed
+    channels of a chunk at once, the ones it skips between them included: a
+    task decodes each chunk once, and the results equal the port's."""
+    cube = unsharded_cube
+    ultra = _ultra(cube, tmp_path / "work")
+    with dask.config.set(scheduler="threads"):
+        results = ultra.run_pass(cube["requests"], len(cube["requests"]))
+    _assert_results_equal(
+        results,
+        _port(cube, cube["requests"], ultra.frequency_mapping),
+        cube["requests"],
+    )
+    assert ultra.passes[0]["planes_per_batch"] == 11
+    frame = ultra.timing[0]
+    frame = frame[frame["family"] == "frequency"].set_index("task_id", drop=False)
+    units = _read_units(ultra, frame, range(*WINDOW))
+    for task, expected in units.items():
+        # Both cubes are read in the first pass.
+        row = frame.loc[task]
+        assert row["n_chunks_read"] + row["n_chunks_skipped"] == 2 * expected
+
+    # Moments and statistics of selected channels, with gaps in the chunks.
+    requests = cube["requests"][6:7] + cube["requests"][-2:]
+    store_pass = _ultra(cube, tmp_path / "selected", first_round=ultra.first_round)
+    with dask.config.set(scheduler="threads"):
+        results = store_pass.run_pass(requests, len(requests))
+    _assert_results_equal(
+        results, _port(cube, requests, store_pass.frequency_mapping), requests
+    )
+    frame = store_pass.timing[0]
+    frame = frame[frame["family"] == "frequency"].set_index("task_id", drop=False)
+    selected = {WINDOW[0] + c for request in requests for c in request["channels"]}
+    for task, expected in _read_units(store_pass, frame, selected).items():
+        row = frame.loc[task]
+        assert row["n_chunks_read"] + row["n_chunks_skipped"] == expected
+    first, last = frame["first_channel"], frame["last_channel"]
+    assert (frame["n_planes_read"] > frame["n_channels"]).any()
+    assert (frame["n_planes_read"] <= last - first + 1).all()
+
+
 def test_a_pass_with_the_store_equals_the_first_pass(cube, first_pass, tmp_path):
     requests = cube["requests"]
     ultra = _ultra(cube, tmp_path, first_round=first_pass["ultra"].first_round)

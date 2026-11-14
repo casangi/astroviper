@@ -339,6 +339,10 @@ class UltraReductions:
             {"frequency": chunks}, {"img": self.index_xds}
         )
         self.n_slots = len(chunks["data_chunks"])
+        # Planes of a read unit within a task, which a batch reads together.
+        self.read_unit_planes = min(
+            sky.chunks[1], max(map(len, chunks["data_chunks"].values()))
+        )
         tiles = {
             dim: make_parallel_coord(
                 coord=self.index_xds[dim], n_chunks=-(-n // (2 * chunk))
@@ -442,12 +446,15 @@ class UltraReductions:
     def memory_plan(self, requests, n_requested):
         """Plan a pass within the memory budget of its tasks.
 
-        At most 4 planes per batch (and at most a shard), halved while a task
-        is over budget; then predicted moments requests are dropped, the last
-        first; then the requested requests are split into sub-passes of whole
-        requests, each predicted request joining the first sub-pass it fits
-        (or dropped), each sub-pass with its own planes per batch. The first
-        sub-pass makes the first round when there is no first-round store.
+        At most 4 planes per batch (and at most a shard), or the planes of a
+        read unit within a task when it holds more channels (each unit is then
+        decoded once per task), halved while a task is over budget (a unit is
+        then decoded once per batch); then predicted moments requests are
+        dropped, the last first; then the requested requests are split into
+        sub-passes of whole requests, each predicted request joining the first
+        sub-pass it fits (or dropped), each sub-pass with its own planes per
+        batch. The first sub-pass makes the first round when there is no
+        first-round store.
 
         Parameters
         ----------
@@ -534,7 +541,7 @@ class UltraReductions:
                     dropped.append(k)
         planes = []
         for i, indices in enumerate(sub_passes):
-            planes_per_batch = min(4, self.shard_length)
+            planes_per_batch = max(min(4, self.shard_length), self.read_unit_planes)
             while planes_per_batch > 1 and not fits(indices, i == 0, planes_per_batch):
                 planes_per_batch //= 2
             planes.append(planes_per_batch)
