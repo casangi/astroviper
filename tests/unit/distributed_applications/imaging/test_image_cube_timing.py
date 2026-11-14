@@ -229,13 +229,21 @@ def test_combine_return_data_frames_concatenates_the_find_continuum_first_round(
     rows = [
         {
             "channels": np.array([4, 5], dtype=np.int32),
-            "statistics": np.arange(20, dtype=np.float64).reshape(2, 2, 5),
+            "sky_valid_count": np.array([7, 0]),
+            "sky_minimum": np.array([-1.5, np.nan]),
+            "sky_maximum": np.array([2.5, np.nan]),
+            "primary_beam_valid_count": np.array([9, 9]),
+            "primary_beam_minimum": np.array([0.2, 0.25]),
             "tiles": np.array([True, False] * 4).reshape(2, 2, 1, 2),
             "write_failed": False,
         },
         {
             "channels": np.array([0], dtype=np.int32),
-            "statistics": np.full((1, 2, 5), -1.0),
+            "sky_valid_count": np.array([3]),
+            "sky_minimum": np.array([-0.5]),
+            "sky_maximum": np.array([0.5]),
+            "primary_beam_valid_count": np.array([4]),
+            "primary_beam_minimum": np.array([0.3]),
             "tiles": np.ones((1, 2, 1, 2), dtype=bool),
             "write_failed": True,
         },
@@ -245,10 +253,12 @@ def test_combine_return_data_frames_concatenates_the_find_continuum_first_round(
     merged = combine_return_data_frames(leaves, input_params={})[
         "find_continuum_first_round"
     ]
-    for key in ("channels", "statistics", "tiles"):
+    assert set(merged) == set(rows[0])
+    for key in set(rows[0]) - {"write_failed"}:
         np.testing.assert_array_equal(
             merged[key], np.concatenate([row[key] for row in rows])
         )
+        assert merged[key].dtype == rows[0][key].dtype
     assert merged["write_failed"] is True
 
     del leaves[2]["find_continuum_first_round"]

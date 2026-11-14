@@ -15,6 +15,7 @@ from xradio.image import make_empty_sky_image
 import astroviper.node_tasks.imaging.find_continuum_first_round as node_tasks
 from astroviper.distributed_applications.imaging import find_continuum_first_round
 from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+    FirstRoundStoreInputs,
     bind_find_continuum_first_round_store,
     create_find_continuum_first_round_store,
     drain_first_round_moments,
@@ -25,18 +26,22 @@ from astroviper.distributed_applications.imaging.find_continuum_first_round impo
 )
 from astroviper.node_tasks.imaging.find_continuum_first_round import (
     find_continuum_first_round_chunk,
-    write_find_continuum_first_round_rows,
+    write_first_round_rows,
 )
 from astroviper.node_tasks.imaging.utils import (
     write_result_chunk_to_disk_sharded_skunk_works,
 )
-from astroviper.processing_functions.imaging.find_continuum import (
-    PROFILE_LEVEL,
-    FindContinuumMoments,
-    linear_frequency_axis,
-    merge_in_tree_order,
-    moment_velocity_widths,
+from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+    accumulate_moments,
+    finalize_moments,
+    merge_moment_partials_in_tree_order,
+    new_moment_partials,
     primary_beam_masks,
+    valid_voxels,
+)
+from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
+    linear_spectral_axis,
+    moment_channel_weights,
 )
 from astroviper.processing_functions.imaging.utils.spectral_windows import (
     linear_channel_ranges,
@@ -58,7 +63,13 @@ LIMIT = 0.2
 DIMS = ["time", "frequency", "polarization", "l", "m"]
 VARIABLES = {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
 VALUE_DTYPES = {"sky": "float32", "primary_beam": "float32"}
-IN_ORDER = [slice(start, min(start + 5, N_CHANNELS)) for start in range(0, 34, 5)]
+IN_ORDER = [np.arange(start, min(start + 5, N_CHANNELS)) for start in range(0, 34, 5)]
+MAP_SHAPE = (1, 1, 1, N_PIXELS, N_PIXELS)
+PACKED_DIMS, TILE_DIMS = (
+    ("frequency", "l", "m_packed"),
+    ("frequency", "l_tile", "m_tile"),
+)
+MAP_DIMS = ("window", "l", "m")
 
 
 @pytest.fixture(scope="module")
@@ -130,12 +141,18 @@ def cube(tmp_path_factory):
     rest_frequency = float(source.frequency.attrs["rest_frequency"]["data"])
     windows = []
     for start, stop in linear_channel_ranges(frequency):
-        axis = linear_frequency_axis(frequency[start:stop])
+        n_channels, first_frequency, _, channel_increment = linear_spectral_axis(
+            frequency[start:stop]
+        )
         windows.append(
             {
                 "channel_range": [start, stop],
-                "frequency_axis": axis,
-                "velocity_widths": moment_velocity_widths(axis, rest_frequency),
+                "first_frequency": first_frequency,
+                "channel_increment": channel_increment,
+                "n_channels": n_channels,
+                "moment_channel_weights": moment_channel_weights(
+                    first_frequency, channel_increment, n_channels, rest_frequency
+                ),
             }
         )
     return {
@@ -180,7 +197,7 @@ def _create(
 def _chunk(cube, store, channels, run_id, tile_shape=TILE, polarization_index=0):
     """The arguments of the imager's first round of one written chunk."""
     return (
-        cube["xds"].isel(frequency=channels),
+        cube["xds"].isel(frequency=slice(channels[0], channels[-1] + 1)),
         channels,
         store,
         VARIABLES,
@@ -197,9 +214,7 @@ def _chunk(cube, store, channels, run_id, tile_shape=TILE, polarization_index=0)
 
 def _write_rows(store, chunks):
     rows = {key: np.concatenate([chunk[key] for chunk in chunks]) for key in chunks[0]}
-    written = write_find_continuum_first_round_rows(
-        store, dict(rows, write_failed=False), N_CHANNELS
-    )
+    written = write_first_round_rows(store, dict(rows, write_failed=False), N_CHANNELS)
     assert written["complete"]
 
 
@@ -219,23 +234,29 @@ def _first_round(cube, path, chunks=IN_ORDER, run_id="run", windows=None, **opti
 
 
 def _moments(cube, window, channels):
-    """Moments 0 and 8 of channels of a window where the cube is finite,
+    """Moment partials of channels of a window where the cube is finite,
     nonzero and inside the limit, added in the order given."""
     start = cube["windows"][window]["channel_range"][0]
-    moments = FindContinuumMoments(
-        [0, 8], cube["windows"][window]["velocity_widths"], (N_PIXELS, N_PIXELS)
-    )
+    weights = cube["windows"][window]["moment_channel_weights"]
+    partials = new_moment_partials(MAP_SHAPE, np.float32)
     for channel in channels:
-        plane = cube["sky"][0, channel, 0]
+        sky = cube["sky"][:, channel : channel + 1]
         beam = cube["primary_beam"][:, channel : channel + 1]
-        valid = primary_beam_masks(beam, LIMIT)[0][0, 0, 0]
-        valid &= np.isfinite(plane) & (plane != 0)
-        moments.add_plane(channel - start, plane, valid)
-    return moments
+        valid = valid_voxels(sky, primary_beam_masks(beam, LIMIT)[0]) & (sky != 0)
+        index = channel - start
+        accumulate_moments(partials, sky, valid, weights[index : index + 1])
+    return partials
+
+
+def _finalized(partials):
+    """The integrated and maximum ``(l, m)`` maps of moment partials."""
+    return [
+        values[0, 0, 0] for values in finalize_moments(partials, MAP_SHAPE, np.float32)
+    ]
 
 
 def _direct(cube, window):
-    return _moments(cube, window, range(*WINDOW_RANGES[window])).finalize()
+    return _finalized(_moments(cube, window, range(*WINDOW_RANGES[window])))
 
 
 def _assert_reordered_sum(actual, expected):
@@ -247,8 +268,8 @@ def _assert_reordered_sum(actual, expected):
 
 def _stored_moments(store):
     return [
-        zarr.open_array(os.path.join(store, f"MOMENT_{moment}"), mode="r")[:]
-        for moment in (0, 8)
+        zarr.open_array(os.path.join(store, name), mode="r")[:]
+        for name in ("SKY_MOMENT_INTEGRATED", "SKY_MOMENT_MAXIMUM")
     ]
 
 
@@ -318,39 +339,60 @@ def test_create_store(cube, tmp_path):
     group = zarr.open_group(store, mode="r")
     assert group.metadata.zarr_format == 3
     packed, tiles = (N_CHANNELS, N_PIXELS, 3), (N_CHANNELS, 3, 3)
-    statistics, maps = (N_CHANNELS, 2, 5), (2, N_PIXELS, N_PIXELS)
+    rows, maps = (N_CHANNELS,), (2, N_PIXELS, N_PIXELS)
     assert {
-        name: (array.shape, array.chunks, array.dtype) for name, array in group.arrays()
+        name: (array.shape, array.chunks, array.dtype, array.metadata.dimension_names)
+        for name, array in group.arrays()
     } == {
-        "PRIMARY_BEAM_LIMIT_MASK": (packed, (1, N_PIXELS, 3), np.uint8),
-        "PRIMARY_BEAM_PROFILE_MASK": (packed, (1, N_PIXELS, 3), np.uint8),
-        "PRIMARY_BEAM_LIMIT_TILES": (tiles, tiles, bool),
-        "PRIMARY_BEAM_PROFILE_TILES": (tiles, tiles, bool),
-        "STATISTICS": (statistics, statistics, np.float64),
-        "MOMENT_0": (maps, (1, *MERGE_TILE), np.float64),
-        "MOMENT_8": (maps, (1, *MERGE_TILE), np.float32),
+        "PRIMARY_BEAM_LIMIT_MASK": (packed, (1, N_PIXELS, 3), np.uint8, PACKED_DIMS),
+        "PRIMARY_BEAM_SPECTRUM_MASK": (
+            packed,
+            (1, N_PIXELS, 3),
+            np.uint8,
+            PACKED_DIMS,
+        ),
+        "PRIMARY_BEAM_LIMIT_TILES": (tiles, tiles, bool, TILE_DIMS),
+        "PRIMARY_BEAM_SPECTRUM_TILES": (tiles, tiles, bool, TILE_DIMS),
+        "SKY_VALID_COUNT": (rows, rows, np.int64, ("frequency",)),
+        "SKY_MINIMUM": (rows, rows, np.float64, ("frequency",)),
+        "SKY_MAXIMUM": (rows, rows, np.float64, ("frequency",)),
+        "PRIMARY_BEAM_VALID_COUNT": (rows, rows, np.int64, ("frequency",)),
+        "PRIMARY_BEAM_MINIMUM": (rows, rows, np.float64, ("frequency",)),
+        "SKY_MOMENT_INTEGRATED": (maps, (1, *MERGE_TILE), np.float64, MAP_DIMS),
+        "SKY_MOMENT_MAXIMUM": (maps, (1, *MERGE_TILE), np.float32, MAP_DIMS),
     }
-    for name in ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_PROFILE_MASK"):
+    for name in ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_SPECTRUM_MASK"):
         assert group[name].fill_value == 0
-        assert group[name].metadata.dimension_names == ("frequency", "l", "m_packed")
-    for name in ("STATISTICS", "MOMENT_0", "MOMENT_8"):
+    for name in ("SKY_VALID_COUNT", "PRIMARY_BEAM_VALID_COUNT"):
+        assert group[name].fill_value == 0
+    for name in (
+        "SKY_MINIMUM",
+        "SKY_MAXIMUM",
+        "PRIMARY_BEAM_MINIMUM",
+        "SKY_MOMENT_INTEGRATED",
+        "SKY_MOMENT_MAXIMUM",
+    ):
         assert np.isnan(group[name].fill_value)
-    assert group["MOMENT_0"].compressors == group["MOMENT_8"].compressors == ()
+    assert group["SKY_MOMENT_INTEGRATED"].compressors == ()
+    assert group["SKY_MOMENT_MAXIMUM"].compressors == ()
+    assert dict(group.attrs) == {"find_continuum_first_round": _attributes(store)}
     assert _attributes(store) == {
-        "version": 1,
-        "written_by": "image_cube_single_field",
+        "version": 2,
         "run_id": "run",
+        "written_by": "image_cube_single_field",
         "primary_beam_limit": LIMIT,
-        "profile_level": PROFILE_LEVEL,
-        "variables": VARIABLES,
+        "spectrum_primary_beam_level": 0.21,
         "polarization_index": 0,
-        "value_dtypes": VALUE_DTYPES,
+        "variables": VARIABLES,
         "tile_shape": list(TILE),
-        "n_channels": N_CHANNELS,
+        "merge_tile_shape": list(MERGE_TILE),
+        "value_dtypes": VALUE_DTYPES,
         "windows": [
             {
                 "channel_range": window["channel_range"],
-                "frequency_axis": list(window["frequency_axis"]),
+                "first_frequency": window["first_frequency"],
+                "channel_increment": window["channel_increment"],
+                "n_channels": window["n_channels"],
             }
             for window in cube["windows"]
         ],
@@ -361,6 +403,7 @@ def test_create_store(cube, tmp_path):
         "n_duplicated": None,
     }
     assert [window["channel_range"] for window in cube["windows"]] == WINDOW_RANGES
+    assert [window["n_channels"] for window in cube["windows"]] == [16, 18]
 
 
 def test_drain_in_process(cube, tmp_path):
@@ -380,10 +423,10 @@ def test_drain_in_process(cube, tmp_path):
     assert attributes["n_missing"] == attributes["n_duplicated"] == [0, 0]
     assert not os.path.exists(find_continuum_first_round_partials_path(store))
     # One slot per window, filled in channel order: the maps of a direct sum.
-    moment_0, moment_8 = _stored_moments(store)
+    integral, maximum = _stored_moments(store)
     for window in (0, 1):
-        np.testing.assert_array_equal(moment_0[window], _direct(cube, window)[0])
-        np.testing.assert_array_equal(moment_8[window], _direct(cube, window)[8])
+        np.testing.assert_array_equal(integral[window], _direct(cube, window)[0])
+        np.testing.assert_array_equal(maximum[window], _direct(cube, window)[1])
     pop = {
         "stage": "first_round_pop",
         "n_slots": 2,
@@ -419,7 +462,7 @@ def test_drain_merges_the_slots_in_sequence_order(cube, tmp_path, monkeypatch):
     pairs = zip(range(6), range(16, 22), strict=True)
     order = [channel for pair in pairs for channel in pair]
     order += [*range(6, 16), *range(22, 34)]
-    store = _first_round(cube, tmp_path / "fr.zarr", [slice(c, c + 1) for c in order])
+    store = _first_round(cube, tmp_path / "fr.zarr", [[channel] for channel in order])
     result, _ = drain_first_round_moments("run", store, cube["windows"])
 
     assert result["moments_complete"] == [True, True]
@@ -441,14 +484,16 @@ def test_drain_merges_the_slots_in_sequence_order(cube, tmp_path, monkeypatch):
         0: [[channel] for channel in range(6)] + [range(6, 16)],
         1: [[channel] for channel in range(16, 22)] + [range(22, 34)],
     }
-    moment_0, moment_8 = _stored_moments(store)
+    integral, maximum = _stored_moments(store)
     for window, channel_lists in leaves.items():
-        merged = merge_in_tree_order(
-            _moments(cube, window, channels) for channels in channel_lists
-        ).finalize()
-        np.testing.assert_array_equal(moment_0[window], merged[0])
-        np.testing.assert_array_equal(moment_8[window], _direct(cube, window)[8])
-        _assert_reordered_sum(moment_0[window], _direct(cube, window)[0])
+        merged = _finalized(
+            merge_moment_partials_in_tree_order(
+                _moments(cube, window, channels) for channels in channel_lists
+            )
+        )
+        np.testing.assert_array_equal(integral[window], merged[0])
+        np.testing.assert_array_equal(maximum[window], _direct(cube, window)[1])
+        _assert_reordered_sum(integral[window], _direct(cube, window)[0])
 
 
 @pytest.mark.parametrize("change", ["missing", "duplicated"])
@@ -457,7 +502,7 @@ def test_drain_leaves_a_window_with_a_coverage_error_incomplete(cube, tmp_path, 
     the moments twice (a task rerun after its result was used): only that
     window is left incomplete."""
     store = _create(cube, tmp_path / "fr.zarr")
-    chunks = [slice(0, 3), slice(3, 4), slice(4, 16), slice(16, 34)]
+    chunks = [np.arange(0, 3), [3], np.arange(4, 16), np.arange(16, 34)]
     run_ids = ["run", None if change == "missing" else "run", "run", "run"]
     _write_rows(
         store,
@@ -467,7 +512,7 @@ def test_drain_leaves_a_window_with_a_coverage_error_incomplete(cube, tmp_path, 
         ],
     )
     if change == "duplicated":
-        find_continuum_first_round_chunk(*_chunk(cube, store, slice(18, 19), "run"))
+        find_continuum_first_round_chunk(*_chunk(cube, store, [18], "run"))
     result, records = drain_first_round_moments("run", store, cube["windows"])
 
     coverage = {
@@ -480,10 +525,10 @@ def test_drain_leaves_a_window_with_a_coverage_error_incomplete(cube, tmp_path, 
     for drained in (result, attributes):
         assert drained["moments_complete"] == complete
         assert {key: drained[key] for key in coverage} == coverage
-    moment_0, moment_8 = _stored_moments(store)
-    np.testing.assert_array_equal(moment_0[good], _direct(cube, good)[0])
-    np.testing.assert_array_equal(moment_8[good], _direct(cube, good)[8])
-    assert np.isnan(moment_0[1 - good]).all() and np.isnan(moment_8[1 - good]).all()
+    integral, maximum = _stored_moments(store)
+    np.testing.assert_array_equal(integral[good], _direct(cube, good)[0])
+    np.testing.assert_array_equal(maximum[good], _direct(cube, good)[1])
+    assert np.isnan(integral[1 - good]).all() and np.isnan(maximum[1 - good]).all()
     assert {record["window"] for record in records[1:]} == {good}
     assert not os.path.exists(find_continuum_first_round_partials_path(store))
 
@@ -510,7 +555,7 @@ def test_drain_merges_the_slots_of_processes_with_the_same_pid(
         for channels in (halves[0][k], halves[1][k]):
             chunks.append(
                 find_continuum_first_round_chunk(
-                    *_chunk(cube, store, slice(channels[0], channels[-1] + 1), "run")
+                    *_chunk(cube, store, np.asarray(channels), "run")
                 )
             )
         pops.append(
@@ -522,13 +567,15 @@ def test_drain_merges_the_slots_of_processes_with_the_same_pid(
     assert result["moments_complete"] == [True, True]
     names = [{name for _, name in pop["slots"]} for pop in pops]
     assert len(names[0]) == len(names[1]) == 2 and not names[0] & names[1]
-    moment_0, moment_8 = _stored_moments(store)
+    integral, maximum = _stored_moments(store)
     for window, channel_lists in enumerate(halves):
-        merged = merge_in_tree_order(
-            _moments(cube, window, channels) for channels in channel_lists
-        ).finalize()
-        np.testing.assert_array_equal(moment_0[window], merged[0])
-        np.testing.assert_array_equal(moment_8[window], _direct(cube, window)[8])
+        merged = _finalized(
+            merge_moment_partials_in_tree_order(
+                _moments(cube, window, channels) for channels in channel_lists
+            )
+        )
+        np.testing.assert_array_equal(integral[window], merged[0])
+        np.testing.assert_array_equal(maximum[window], _direct(cube, window)[1])
 
 
 def test_drain_leaves_a_window_with_a_slot_listed_twice_incomplete(
@@ -546,9 +593,9 @@ def test_drain_leaves_a_window_with_a_slot_listed_twice_incomplete(
     assert result["moments_complete"] == [False, True]
     assert result["n_missing"] == result["n_duplicated"] == [0, 0]
     assert {record["window"] for record in records[2:]} == {1}
-    moment_0, moment_8 = _stored_moments(store)
-    assert np.isnan(moment_0[0]).all() and np.isnan(moment_8[0]).all()
-    np.testing.assert_array_equal(moment_8[1], _direct(cube, 1)[8])
+    integral, maximum = _stored_moments(store)
+    assert np.isnan(integral[0]).all() and np.isnan(maximum[0]).all()
+    np.testing.assert_array_equal(maximum[1], _direct(cube, 1)[1])
 
 
 def test_drain_leaves_a_window_whose_slot_was_not_saved_incomplete(
@@ -569,9 +616,9 @@ def test_drain_leaves_a_window_whose_slot_was_not_saved_incomplete(
     assert result["n_missing"] == result["n_duplicated"] == [0, 0]
     assert records[0]["lost_windows"] == [0]
     assert _attributes(store)["moments_complete"] == [False, True]
-    moment_0, moment_8 = _stored_moments(store)
-    assert np.isnan(moment_0[0]).all() and np.isnan(moment_8[0]).all()
-    np.testing.assert_array_equal(moment_0[1], _direct(cube, 1)[0])
+    integral, maximum = _stored_moments(store)
+    assert np.isnan(integral[0]).all() and np.isnan(maximum[0]).all()
+    np.testing.assert_array_equal(integral[1], _direct(cube, 1)[0])
     assert not os.path.exists(find_continuum_first_round_partials_path(store))
 
 
@@ -604,9 +651,9 @@ def test_drain_leaves_a_window_with_a_tile_that_fails_to_merge_incomplete(
     assert result["moments_complete"] == [True, False]
     assert _attributes(store)["moments_complete"] == [True, False]
     assert [record["window"] for record in records[1:]] == [0] * 4 + [1] * 3
-    moment_0, moment_8 = _stored_moments(store)
-    np.testing.assert_array_equal(moment_0[0], _direct(cube, 0)[0])
-    np.testing.assert_array_equal(moment_8[0], _direct(cube, 0)[8])
+    integral, maximum = _stored_moments(store)
+    np.testing.assert_array_equal(integral[0], _direct(cube, 0)[0])
+    np.testing.assert_array_equal(maximum[0], _direct(cube, 0)[1])
     assert not os.path.exists(find_continuum_first_round_partials_path(store))
 
 
@@ -705,10 +752,10 @@ def test_drain_on_a_local_cluster(cube, tmp_path):
         pids = client.run(os.getpid)
         store = _create(cube, tmp_path / "fr.zarr")
         assignment = [
-            (first, slice(0, 8)),
-            (second, slice(8, 16)),
-            (first, slice(16, 25)),
-            (second, slice(25, 34)),
+            (first, np.arange(0, 8)),
+            (second, np.arange(8, 16)),
+            (first, np.arange(16, 25)),
+            (second, np.arange(25, 34)),
         ]
         image(client, store, assignment, "run")
         result, records = drain_first_round_moments("run", store, cube["windows"])
@@ -724,23 +771,25 @@ def test_drain_on_a_local_cluster(cube, tmp_path):
         merges = [record for record in records if record["stage"] != "first_round_pop"]
         assert len(merges) == 8
         assert {merge["process_pid"] for merge in merges} <= set(pids.values())
-        moment_0, moment_8 = _stored_moments(store)
+        integral, maximum = _stored_moments(store)
         halves = [(range(0, 8), range(8, 16)), (range(16, 25), range(25, 34))]
         for window, channel_lists in enumerate(halves):
-            merged = merge_in_tree_order(
-                _moments(cube, window, channels) for channels in channel_lists
-            ).finalize()
-            np.testing.assert_array_equal(moment_0[window], merged[0])
-            np.testing.assert_array_equal(moment_8[window], _direct(cube, window)[8])
-            _assert_reordered_sum(moment_0[window], _direct(cube, window)[0])
+            merged = _finalized(
+                merge_moment_partials_in_tree_order(
+                    _moments(cube, window, channels) for channels in channel_lists
+                )
+            )
+            np.testing.assert_array_equal(integral[window], merged[0])
+            np.testing.assert_array_equal(maximum[window], _direct(cube, window)[1])
+            _assert_reordered_sum(integral[window], _direct(cube, window)[0])
 
         # The moments of a restarted worker are lost; the pop of a busy worker
         # times out and is cancelled.
         for case in ("restarted", "busy"):
             idle, other = sorted(client.nthreads())
             store = _create(cube, tmp_path / f"{case}.zarr", case)
-            assignment = [(idle, slice(0, 16)), (idle, slice(16, 25))]
-            image(client, store, [*assignment, (other, slice(25, 34))], case)
+            assignment = [(idle, np.arange(0, 16)), (idle, np.arange(16, 25))]
+            image(client, store, [*assignment, (other, np.arange(25, 34))], case)
             if case == "restarted":
                 client.restart_workers([other])
                 result, _ = drain_first_round_moments(case, store, cube["windows"])
@@ -755,19 +804,19 @@ def test_drain_on_a_local_cluster(cube, tmp_path):
                 assert blocker.result()
             assert result["moments_complete"] == [True, False]
             assert result["n_missing"] == [0, 9] and result["n_duplicated"] == [0, 0]
-            moment_0, moment_8 = _stored_moments(store)
-            np.testing.assert_array_equal(moment_0[0], _direct(cube, 0)[0])
-            np.testing.assert_array_equal(moment_8[0], _direct(cube, 0)[8])
-            assert np.isnan(moment_0[1]).all() and np.isnan(moment_8[1]).all()
+            integral, maximum = _stored_moments(store)
+            np.testing.assert_array_equal(integral[0], _direct(cube, 0)[0])
+            np.testing.assert_array_equal(maximum[0], _direct(cube, 0)[1])
+            assert np.isnan(integral[1]).all() and np.isnan(maximum[1]).all()
 
 
 def test_binding_and_validation(cube, tmp_path):
     store = _first_round(cube, tmp_path / "fr.zarr", run_id=None)
     with pytest.raises(ValueError, match="not made from the cube"):
-        validate_find_continuum_first_round({"store": store}, cube["store"], LIMIT)
+        validate_find_continuum_first_round(store, cube["store"], LIMIT, [0, 16])
     bind_find_continuum_first_round_store(store, cube["store"])
 
-    binding = _attributes(store)["binding"]
+    binding = zarr.open_group(store, mode="r").attrs["image_binding"]
     assert binding["image_store_zarr_json_mtime_ns"] == (
         os.stat(os.path.join(cube["store"], "zarr.json")).st_mtime_ns
     )
@@ -779,16 +828,64 @@ def test_binding_and_validation(cube, tmp_path):
         "m_sha1",
         "shape",
     ]
-    validate_find_continuum_first_round({"store": store}, cube["store"], LIMIT)
+    for index, window in enumerate(WINDOW_RANGES):
+        assert validate_find_continuum_first_round(
+            store, cube["store"], LIMIT, window
+        ) == FirstRoundStoreInputs(store, index, False, "image_cube_single_field")
+    # A part of a window: its rows, not the window's moments.
+    assert validate_find_continuum_first_round(
+        store, cube["store"], LIMIT, np.array([18, 30])
+    ) == FirstRoundStoreInputs(store, None, False, "image_cube_single_field")
+    with pytest.raises(ValueError, match=r"holds channels \[\[0, 16\], \[16, 34\]\]"):
+        validate_find_continuum_first_round(store, cube["store"], LIMIT, [8, 24])
     with pytest.raises(ValueError, match="primary_beam_limit"):
-        validate_find_continuum_first_round({"store": store}, cube["store"], 0.3)
+        validate_find_continuum_first_round(store, cube["store"], 0.3, [0, 16])
     with pytest.raises(ValueError, match="missing"):
         validate_find_continuum_first_round(
-            {"store": str(tmp_path / "absent.zarr")}, cube["store"], LIMIT
+            str(tmp_path / "absent.zarr"), cube["store"], LIMIT, [0, 16]
         )
     incomplete = _create(cube, tmp_path / "incomplete.zarr", None)
     with pytest.raises(ValueError, match="incomplete"):
-        validate_find_continuum_first_round({"store": incomplete}, cube["store"], LIMIT)
+        validate_find_continuum_first_round(incomplete, cube["store"], LIMIT, [0, 16])
+
+
+def test_validation_tells_which_window_has_its_moments(cube, tmp_path):
+    """The drain completed the moments of window 1 only: the store serves the
+    rows of both windows and the moments of window 1."""
+    store = _create(cube, tmp_path / "fr.zarr")
+    chunks = [np.arange(0, 16), np.arange(16, 34)]
+    run_ids = [None, "run"]
+    _write_rows(
+        store,
+        [
+            find_continuum_first_round_chunk(*_chunk(cube, store, channels, run_id))
+            for channels, run_id in zip(chunks, run_ids, strict=True)
+        ],
+    )
+    result, _ = drain_first_round_moments("run", store, cube["windows"])
+    assert result["moments_complete"] == [False, True]
+    bind_find_continuum_first_round_store(store, cube["store"])
+
+    assert [
+        validate_find_continuum_first_round(store, cube["store"], LIMIT, window)
+        for window in WINDOW_RANGES
+    ] == [
+        FirstRoundStoreInputs(store, 0, False, "image_cube_single_field"),
+        FirstRoundStoreInputs(store, 1, True, "image_cube_single_field"),
+    ]
+
+
+def test_validation_refuses_a_store_of_version_1(cube, tmp_path):
+    """A complete store of the earlier format, bound to the cube, is refused
+    with the reason."""
+    store = _first_round(cube, tmp_path / "fr.zarr", run_id=None)
+    bind_find_continuum_first_round_store(store, cube["store"])
+    group = zarr.open_group(store, mode="r+")
+    group.attrs["find_continuum_first_round"] = dict(_attributes(store), version=1)
+    with pytest.raises(
+        ValueError, match="has version 1, not 2: make the first round again"
+    ):
+        validate_find_continuum_first_round(store, cube["store"], LIMIT, [0, 16])
 
 
 @pytest.mark.parametrize(
@@ -798,7 +895,7 @@ def test_validation_refuses_a_store_of_other_settings(cube, tmp_path, options):
     store = _first_round(cube, tmp_path / "fr.zarr", run_id=None, **options)
     bind_find_continuum_first_round_store(store, cube["store"])
     with pytest.raises(ValueError, match=next(iter(options))):
-        validate_find_continuum_first_round({"store": store}, cube["store"], LIMIT)
+        validate_find_continuum_first_round(store, cube["store"], LIMIT, [0, 16])
 
 
 def test_validation_refuses_a_rewritten_cube(cube, tmp_path):
@@ -806,9 +903,9 @@ def test_validation_refuses_a_rewritten_cube(cube, tmp_path):
     shutil.copytree(cube["store"], image_store)
     store = _first_round(cube, tmp_path / "fr.zarr", run_id=None)
     bind_find_continuum_first_round_store(store, image_store)
-    validate_find_continuum_first_round({"store": store}, image_store, LIMIT)
+    validate_find_continuum_first_round(store, image_store, LIMIT, [0, 16])
     zarr_json = os.path.join(image_store, "zarr.json")
     stat = os.stat(zarr_json)
     os.utime(zarr_json, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
     with pytest.raises(ValueError, match="image_store_zarr_json_mtime_ns differs"):
-        validate_find_continuum_first_round({"store": store}, image_store, LIMIT)
+        validate_find_continuum_first_round(store, image_store, LIMIT, [0, 16])

@@ -20,7 +20,7 @@ FIND_CONTINUUM_ROLES = (
     "beam_fit_params_point_spread_function",
 )
 # Format version of the first-round store made next to the cube.
-FIND_CONTINUUM_FIRST_ROUND_VERSION = 1
+FIND_CONTINUUM_FIRST_ROUND_VERSION = 2
 
 # ========================================================================
 # Supplied configuration, checked before opening the image
@@ -192,32 +192,42 @@ def check_find_continuum_channel_range(channel_range, frequency):
 
 
 def check_find_continuum_first_round_store(
-    attrs, image_binding, primary_beam_limit, polarization_index, tile_shape
+    attrs,
+    image_binding,
+    primary_beam_limit,
+    polarization_index,
+    tile_shape,
+    channel_range,
 ):
-    """Require a complete first-round store made from the cube as it is now.
+    """Require a first-round store complete for a spectral window and made from
+    the cube as it is now.
 
     Parameters
     ----------
     attrs : mapping or None
         Attributes of the first-round store (its ``find_continuum_first_round``
-        entry is checked), ``None`` if the store does not exist.
+        and ``image_binding`` entries are checked), ``None`` if the store does
+        not exist.
     image_binding : mapping
         The binding of the cube now: ``image_store_zarr_json_mtime_ns``,
         ``frequency_sha1``, ``l_sha1``, ``m_sha1`` and ``shape``.
-    primary_beam_limit : float or None
+    primary_beam_limit : float
         Primary beam limit of the find_continuum call.
     polarization_index : int
         Index of Stokes I in the cube.
     tile_shape : sequence of int
         Inner chunk shape of the cube along ``l`` and ``m``.
+    channel_range : sequence of int
+        ``[start, stop)``, channels of the cube that findContinuum sees.
 
     Raises
     ------
     ValueError
-        The store is missing or incomplete, has another version, was made with
-        another primary beam limit, Stokes index or tile shape, or a field of
-        its binding differs from the cube's: the cube was rewritten, or is
-        another one.
+        The store is missing or incomplete, has another version (a store of
+        version 1 must be made again), was made with another primary beam
+        limit, Stokes index or tile shape, holds no window with every channel
+        of ``channel_range``, or a field of its binding differs from the
+        cube's: the cube was rewritten, or is another one.
     """
     first_round = None if attrs is None else attrs.get("find_continuum_first_round")
     if first_round is None:
@@ -225,7 +235,7 @@ def check_find_continuum_first_round_store(
     if first_round.get("version") != FIND_CONTINUUM_FIRST_ROUND_VERSION:
         raise ValueError(
             f"The first-round store has version {first_round.get('version')}, "
-            f"not {FIND_CONTINUUM_FIRST_ROUND_VERSION}."
+            f"not {FIND_CONTINUUM_FIRST_ROUND_VERSION}: make the first round again."
         )
     if not first_round.get("complete"):
         raise ValueError("The first-round store is incomplete.")
@@ -239,7 +249,14 @@ def check_find_continuum_first_round_store(
                 f"The first-round store was made with {name} "
                 f"{first_round.get(name)}, not {value}."
             )
-    binding = first_round.get("binding") or {}
+    start, stop = channel_range
+    ranges = [window["channel_range"] for window in first_round["windows"]]
+    if not any(first <= start and stop <= last for first, last in ranges):
+        raise ValueError(
+            f"The first-round store holds channels {ranges} of the cube, not "
+            f"[{start}, {stop})."
+        )
+    binding = attrs.get("image_binding") or {}
     for name in sorted(set(binding) | set(image_binding)):
         if _plain(binding.get(name)) != _plain(image_binding.get(name)):
             raise ValueError(

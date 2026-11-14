@@ -4,13 +4,13 @@
 findContinuum's first round while it images the cube, in a store next to the
 cube (:func:`find_continuum_first_round_store_path`); ``find_continuum_ultra``
 makes it in its first pass, in its work directory, when it is given none.
-The store (:func:`create_find_continuum_first_round_store`) holds the
-bit-packed primary-beam masks of every channel, their tile occupancy, the
-per-channel statistics of the cube and of the primary beam, and moments 0 and
-8 of every spectral window. The imager's worker processes accumulate the
-moments; :func:`drain_first_round_moments` merges them after the imaging
-compute, for the windows whose every channel was added exactly once. The store
-is bound to the cube it was made from
+The store (:func:`create_find_continuum_first_round_store`, version 2) holds
+the bit-packed primary-beam limit and spectrum masks of every channel, their
+tile occupancy, the per-channel rows of the residual and of the primary beam,
+and the integrated and maximum moments of every spectral window. The imager's
+worker processes accumulate the moments; :func:`drain_first_round_moments`
+merges them after the imaging compute, for the windows whose every channel was
+added exactly once. The store is bound to the cube it was made from
 (:func:`bind_find_continuum_first_round_store`) and is used only on that cube
 (:func:`validate_find_continuum_first_round`).
 """
@@ -19,6 +19,7 @@ import contextlib
 import hashlib
 import os
 import shutil
+from typing import NamedTuple
 
 import numpy as np
 import toolviper.utils.logger as logger
@@ -33,18 +34,37 @@ from astroviper.processing_functions.imaging.config_check.param_check_find_conti
     FIND_CONTINUUM_FIRST_ROUND_VERSION,
     check_find_continuum_first_round_store,
 )
-from astroviper.processing_functions.imaging.find_continuum import PROFILE_LEVEL
+from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+    SPECTRUM_PRIMARY_BEAM_LEVEL,
+)
 
 #: Inner chunk (px) of which merge tiles are made along an axis that one chunk
 #: of the cube spans.
 MERGE_TILE_INNER_CHUNK = 625
 
 _IMAGE_DIMS = ("time", "frequency", "polarization", "l", "m")
+# The per-channel rows (FirstRoundRows in upper case): dtype and fill value.
+_ROWS = {
+    "SKY_VALID_COUNT": (np.int64, 0),
+    "SKY_MINIMUM": (np.float64, np.nan),
+    "SKY_MAXIMUM": (np.float64, np.nan),
+    "PRIMARY_BEAM_VALID_COUNT": (np.int64, 0),
+    "PRIMARY_BEAM_MINIMUM": (np.float64, np.nan),
+}
 # Shortest wait for the result of a finished pop.
 _POP_FETCH_SECONDS = 30.0
 
 
-def find_continuum_first_round_store_path(image_store):
+class FirstRoundStoreInputs(NamedTuple):
+    """What a validated first-round store gives a spectral window."""
+
+    store: str
+    window_index: int | None  # the stored window equal to the channel range
+    moments_usable: bool  # that window's moments are complete
+    written_by: str
+
+
+def find_continuum_first_round_store_path(image_store: str) -> str:
     """Path of the first-round store of an image store.
 
     Parameters
@@ -65,7 +85,7 @@ def find_continuum_first_round_store_path(image_store):
     return f"{path}_find_continuum_first_round.zarr"
 
 
-def find_continuum_first_round_partials_path(first_round_store):
+def find_continuum_first_round_partials_path(first_round_store: str) -> str:
     """Directory of the slots of the imager's first-round moments.
 
     Parameters
@@ -111,21 +131,22 @@ def find_continuum_merge_tile_counts(map_shape: tuple, tile_shape: tuple) -> lis
 
 
 def create_find_continuum_first_round_store(
-    first_round_store,
-    n_channels,
-    image_shape,
-    tile_shape,
-    merge_tile_shape,
-    primary_beam_limit,
-    variables,
-    polarization_index,
-    value_dtypes,
-    run_id,
-    written_by,
-    windows,
-    rest_frequency,
-):
-    """Create an empty first-round store (Zarr v3), replacing one of that path.
+    first_round_store: str,
+    n_channels: int,
+    image_shape: tuple,
+    tile_shape: tuple,
+    merge_tile_shape: tuple,
+    primary_beam_limit: float,
+    variables: dict,
+    polarization_index: int,
+    value_dtypes: dict,
+    run_id: str | None,
+    written_by: str,
+    windows: list,
+    rest_frequency: float,
+) -> None:
+    """Create an empty first-round store (Zarr v3, version 2), replacing one
+    of that path.
 
     Parameters
     ----------
@@ -133,14 +154,14 @@ def create_find_continuum_first_round_store(
         Path of the store.
     n_channels : int
         Channels of the cube.
-    image_shape : sequence of int
+    image_shape : tuple of int
         Shape of the cube; its last two axes are ``l`` and ``m``.
-    tile_shape : sequence of int
+    tile_shape : tuple of int
         ``(l, m)`` inner chunks of the cube, the tiles of the occupancy arrays.
-    merge_tile_shape : sequence of int
-        ``(l, m)`` chunks of ``MOMENT_0`` and ``MOMENT_8``, the tiles the
-        moments are merged in.
-    primary_beam_limit : float or None
+    merge_tile_shape : tuple of int
+        ``(l, m)`` chunks of ``SKY_MOMENT_INTEGRATED`` and
+        ``SKY_MOMENT_MAXIMUM``, the tiles the moments are merged in.
+    primary_beam_limit : float
         Level of the primary-beam limit mask.
     variables : dict
         ``{"sky": ..., "primary_beam": ...}``, the data variables of the cube
@@ -149,40 +170,45 @@ def create_find_continuum_first_round_store(
         Index of Stokes I along ``polarization``.
     value_dtypes : dict
         ``{"sky": ..., "primary_beam": ...}``, the dtypes of the cube's data
-        variables; ``MOMENT_8`` has the sky dtype, in which it is exact.
+        variables; ``SKY_MOMENT_MAXIMUM`` has the sky dtype, in which it is
+        exact.
     run_id : str or None
         Imaging run of the worker-local moments; ``None``: no moments.
     written_by : str
         ``"image_cube_single_field"`` or ``"find_continuum_ultra"``.
     windows : list of dict
         Spectral windows of the store in channel order: ``channel_range``
-        (``[start, stop)``) and ``frequency_axis``
-        (:func:`~astroviper.processing_functions.imaging.find_continuum.linear_frequency_axis`
-        of the window's frequencies); other keys are not stored.
+        (``[start, stop)``), ``first_frequency``, ``channel_increment`` and
+        ``n_channels`` (of
+        :func:`~astroviper.processing_functions.imaging.find_continuum_ultra.settings.linear_spectral_axis`
+        on the window's frequencies); other keys are not stored.
     rest_frequency : float
         Rest frequency of the cube (Hz).
 
     Notes
     -----
-    Arrays: ``PRIMARY_BEAM_LIMIT_MASK`` and ``PRIMARY_BEAM_PROFILE_MASK``
-    (uint8 ``(n_channels, l, ceil(m / 8))``, one chunk per channel),
-    ``PRIMARY_BEAM_LIMIT_TILES`` and ``PRIMARY_BEAM_PROFILE_TILES`` (bool
-    ``(n_channels, n_tiles_l, n_tiles_m)``), ``STATISTICS`` (float64
-    ``(n_channels, 2, 5)``, NaN until written), ``MOMENT_0`` (float64) and
-    ``MOMENT_8`` (``(n_windows, l, m)``, NaN until drained). Attributes
-    ``find_continuum_first_round``: ``version``, ``written_by``, ``run_id``,
-    ``primary_beam_limit``, ``profile_level``, ``variables``,
-    ``polarization_index``, ``value_dtypes``, ``tile_shape``, ``n_channels``,
-    ``windows``, ``rest_frequency``, ``complete`` and ``moments_complete`` (per
-    window) false, and ``n_missing`` and ``n_duplicated`` ``None`` until
-    drained.
+    Arrays: ``PRIMARY_BEAM_LIMIT_MASK`` and ``PRIMARY_BEAM_SPECTRUM_MASK``
+    (uint8 ``(n_channels, l, ceil(m / 8))``, bit-packed along ``m``, one chunk
+    per channel), ``PRIMARY_BEAM_LIMIT_TILES`` and
+    ``PRIMARY_BEAM_SPECTRUM_TILES`` (bool ``(n_channels, n_tiles_l,
+    n_tiles_m)``), ``SKY_VALID_COUNT`` and ``PRIMARY_BEAM_VALID_COUNT`` (int64
+    ``(n_channels,)``, 0 until written), ``SKY_MINIMUM``, ``SKY_MAXIMUM`` and
+    ``PRIMARY_BEAM_MINIMUM`` (float64 ``(n_channels,)``, NaN until written),
+    ``SKY_MOMENT_INTEGRATED`` (float64) and ``SKY_MOMENT_MAXIMUM`` (``(window,
+    l, m)``, NaN until drained). Attributes ``find_continuum_first_round``:
+    ``version``, ``written_by``, ``run_id``, ``primary_beam_limit``,
+    ``spectrum_primary_beam_level``, ``variables``, ``polarization_index``,
+    ``value_dtypes``, ``tile_shape``, ``merge_tile_shape``, ``windows``,
+    ``rest_frequency``, ``complete`` and ``moments_complete`` (per window)
+    false, and ``n_missing`` and ``n_duplicated`` ``None`` until drained;
+    :func:`bind_find_continuum_first_round_store` adds ``image_binding``.
     """
     n_l, n_m = (int(n) for n in image_shape[-2:])
     n_packed = -(-n_m // 8)
     n_tiles = (-(-n_l // tile_shape[0]), -(-n_m // tile_shape[1]))
     zstd = zarr.codecs.ZstdCodec(level=1)
     group = zarr.open_group(first_round_store, mode="w", zarr_format=3)
-    for name in ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_PROFILE_MASK"):
+    for name in ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_SPECTRUM_MASK"):
         group.create_array(
             name,
             shape=(n_channels, n_l, n_packed),
@@ -192,7 +218,7 @@ def create_find_continuum_first_round_store(
             compressors=zstd,
             dimension_names=("frequency", "l", "m_packed"),
         )
-    for name in ("PRIMARY_BEAM_LIMIT_TILES", "PRIMARY_BEAM_PROFILE_TILES"):
+    for name in ("PRIMARY_BEAM_LIMIT_TILES", "PRIMARY_BEAM_SPECTRUM_TILES"):
         group.create_array(
             name,
             shape=(n_channels, *n_tiles),
@@ -200,46 +226,50 @@ def create_find_continuum_first_round_store(
             dtype=bool,
             fill_value=False,
             compressors=zstd,
+            dimension_names=("frequency", "l_tile", "m_tile"),
         )
-    group.create_array(
-        "STATISTICS",
-        shape=(n_channels, 2, 5),
-        chunks=(n_channels, 2, 5),
-        dtype=np.float64,
-        fill_value=np.nan,
-        compressors=zstd,
-    )
-    for moment, dtype in ((0, np.float64), (8, value_dtypes["sky"])):
+    for name, (dtype, fill_value) in _ROWS.items():
         group.create_array(
-            f"MOMENT_{moment}",
+            name,
+            shape=(n_channels,),
+            chunks=(n_channels,),
+            dtype=dtype,
+            fill_value=fill_value,
+            compressors=zstd,
+            dimension_names=("frequency",),
+        )
+    for name, dtype in (
+        ("SKY_MOMENT_INTEGRATED", np.float64),
+        ("SKY_MOMENT_MAXIMUM", value_dtypes["sky"]),
+    ):
+        group.create_array(
+            name,
             shape=(len(windows), n_l, n_m),
             chunks=(1, *merge_tile_shape),
             dtype=dtype,
             fill_value=np.nan,
             compressors=None,
+            dimension_names=("window", "l", "m"),
         )
     group.attrs["find_continuum_first_round"] = {
         "version": FIND_CONTINUUM_FIRST_ROUND_VERSION,
         "written_by": written_by,
         "run_id": run_id,
-        "primary_beam_limit": None
-        if primary_beam_limit is None
-        else float(primary_beam_limit),
-        "profile_level": PROFILE_LEVEL,
+        "primary_beam_limit": float(primary_beam_limit),
+        "spectrum_primary_beam_level": SPECTRUM_PRIMARY_BEAM_LEVEL,
         "variables": dict(variables),
         "polarization_index": int(polarization_index),
         "value_dtypes": {
             role: np.dtype(dtype).name for role, dtype in value_dtypes.items()
         },
         "tile_shape": [int(size) for size in tile_shape],
-        "n_channels": int(n_channels),
+        "merge_tile_shape": [int(size) for size in merge_tile_shape],
         "windows": [
             {
                 "channel_range": [int(channel) for channel in window["channel_range"]],
-                "frequency_axis": [
-                    *(float(value) for value in window["frequency_axis"][:3]),
-                    int(window["frequency_axis"][3]),
-                ],
+                "first_frequency": float(window["first_frequency"]),
+                "channel_increment": float(window["channel_increment"]),
+                "n_channels": int(window["n_channels"]),
             }
             for window in windows
         ],
@@ -252,8 +282,11 @@ def create_find_continuum_first_round_store(
 
 
 def drain_first_round_moments(
-    run_id, first_round_store, windows, timeout_seconds=600.0
-):
+    run_id: str,
+    first_round_store: str,
+    windows: list,
+    timeout_seconds: float = 600.0,
+) -> tuple[dict, list]:
     """Merge the imager's worker-local moments into the first-round store.
 
     Every process that ran imaging tasks takes its moments of ``run_id`` off
@@ -267,7 +300,7 @@ def drain_first_round_moments(
     pops added each of its channels exactly once, listed each of its slots
     once and saved all of them. The slots of a complete
     window, sorted by worker address, process and sequence, are merged tile by
-    tile into ``MOMENT_0`` and ``MOMENT_8``
+    tile into ``SKY_MOMENT_INTEGRATED`` and ``SKY_MOMENT_MAXIMUM``
     (:func:`~astroviper.node_tasks.imaging.find_continuum_first_round.merge_first_round_moment_tile`,
     a task each with a distributed client); a window with a tile that fails to
     merge is left incomplete. The partials directory is then removed, also
@@ -348,7 +381,7 @@ def drain_first_round_moments(
             for pop in pops
         ]
         group = zarr.open_group(first_round_store, mode="r+")
-        tiles = _merge_tiles(group["MOMENT_0"])
+        tiles = _merge_tiles(group["SKY_MOMENT_INTEGRATED"])
         tasks = [
             (first_round_store, partials_directory, window, names[window], tile)
             for window, window_reasons in enumerate(reasons)
@@ -396,7 +429,7 @@ def drain_first_round_moments(
     return result, records
 
 
-def clear_first_round_moments(run_id, first_round_store):
+def clear_first_round_moments(run_id: str | None, first_round_store: str) -> None:
     """Drop the imager's worker-local moments of a run without merging them,
     and remove the directory of their slots (after a failed imaging compute
     or drain).
@@ -429,11 +462,13 @@ def clear_first_round_moments(run_id, first_round_store):
         )
 
 
-def bind_find_continuum_first_round_store(first_round_store, input_image_store):
+def bind_find_continuum_first_round_store(
+    first_round_store: str, input_image_store: str
+) -> None:
     """Bind a first-round store to its cube as the cube is now.
 
-    Sets ``binding`` in the store's attributes: the modification time of the
-    image store's ``zarr.json`` (ns), the sha1 digests of the float64
+    Sets the store's ``image_binding`` attribute: the modification time of
+    the image store's ``zarr.json`` (ns), the sha1 digests of the float64
     ``frequency``, ``l`` and ``m`` coordinates, and the image shape. Call it
     after the cube's metadata is consolidated.
 
@@ -445,28 +480,37 @@ def bind_find_continuum_first_round_store(first_round_store, input_image_store):
         Path of the xradio image store it was made from.
     """
     group = zarr.open_group(first_round_store, mode="r+")
-    group.attrs["find_continuum_first_round"] = dict(
-        group.attrs["find_continuum_first_round"],
-        binding=_image_binding(input_image_store),
-    )
+    group.attrs["image_binding"] = _image_binding(input_image_store)
 
 
 def validate_find_continuum_first_round(
-    first_round_reductions, input_image_store, primary_beam_limit
-):
-    """Require a complete first-round store made from the cube as it is now.
+    first_round_store: str,
+    input_image_store: str,
+    primary_beam_limit: float,
+    channel_range: list,
+) -> FirstRoundStoreInputs:
+    """Require a first-round store complete for a spectral window and made from
+    the cube as it is now.
 
     Reads the store's attributes and the cube's metadata only.
 
     Parameters
     ----------
-    first_round_reductions : dict
-        ``find_continuum_first_round`` of ``image_cube_single_field``: the path
-        of the first-round store as ``store``.
+    first_round_store : str
+        Path of the first-round store.
     input_image_store : str
         Path of the xradio image store of the cube.
-    primary_beam_limit : float or None
+    primary_beam_limit : float
         Primary beam limit of the find_continuum call.
+    channel_range : list of int
+        ``[start, stop)``, channels of the cube that findContinuum sees.
+
+    Returns
+    -------
+    FirstRoundStoreInputs
+        The store, the index of its window equal to ``channel_range``
+        (``None`` when no stored window equals it), whether that window's
+        moments are complete, and who wrote the store.
 
     Raises
     ------
@@ -475,9 +519,7 @@ def validate_find_continuum_first_round(
         (:func:`~astroviper.processing_functions.imaging.config_check.param_check_find_continuum.check_find_continuum_first_round_store`).
     """
     try:
-        attributes = dict(
-            zarr.open_group(first_round_reductions["store"], mode="r").attrs
-        )
+        attributes = dict(zarr.open_group(first_round_store, mode="r").attrs)
     except FileNotFoundError:
         attributes = None
     first_round = (attributes or {}).get("find_continuum_first_round")
@@ -490,6 +532,17 @@ def validate_find_continuum_first_round(
         ()
         if first_round is None
         else cube[first_round["variables"]["sky"]].chunks[-2:],
+        channel_range,
+    )
+    ranges = [window["channel_range"] for window in first_round["windows"]]
+    window_range = [int(channel) for channel in channel_range]
+    window_index = ranges.index(window_range) if window_range in ranges else None
+    return FirstRoundStoreInputs(
+        store=first_round_store,
+        window_index=window_index,
+        moments_usable=window_index is not None
+        and bool(first_round["moments_complete"][window_index]),
+        written_by=first_round["written_by"],
     )
 
 
@@ -559,7 +612,7 @@ def _pop_on_workers(client, run_id, partials_directory, timeout_seconds):
 
 
 def _merge_tiles(moments):
-    """``[[l0, l1], [m0, m1]]`` of every chunk of a ``MOMENT`` array."""
+    """``[[l0, l1], [m0, m1]]`` of every chunk of a moment array."""
     _, n_l, n_m = moments.shape
     _, tile_l, tile_m = moments.chunks
     return [

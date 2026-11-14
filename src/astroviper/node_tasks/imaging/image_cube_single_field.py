@@ -1128,9 +1128,10 @@ def image_cube_single_field(
         Make findContinuum's first round of every chunk once it is written:
         the keyword arguments of
         :func:`~astroviper.node_tasks.imaging.find_continuum_first_round.find_continuum_first_round_chunk`,
-        except that each of the ``windows`` carries its ``frequency_axis``
-        (:func:`~astroviper.processing_functions.imaging.find_continuum.linear_frequency_axis`)
-        instead of its velocity widths, which the task computes with
+        except that each of the ``windows`` carries its ``first_frequency``,
+        ``channel_increment`` and ``n_channels``
+        (:func:`~astroviper.processing_functions.imaging.find_continuum_ultra.settings.linear_spectral_axis`)
+        instead of its moment channel weights, which the task computes with
         ``rest_frequency``. Default ``None``: none.
 
     input_checked : bool, optional
@@ -1176,8 +1177,8 @@ def image_cube_single_field(
           The reduce concatenates the chunks along ``frequency``.
         * ``"find_continuum_first_round"`` (with
           ``find_continuum_first_round_params``, when a chunk was written):
-          the rows of the chunks written, concatenated (``channels``,
-          ``statistics`` and ``tiles``, see
+          the rows of the chunks written, concatenated (``channels``, the
+          per-channel rows and ``tiles``, see
           :func:`~astroviper.node_tasks.imaging.find_continuum_first_round.find_continuum_first_round_chunk`),
           and ``write_failed``, whether a chunk could not be written or its
           first round could not be made.
@@ -1380,22 +1381,27 @@ def image_cube_single_field(
     first_round_failures = []  # (exception, chunk task_coords) per failed chunk
     first_round_params = None
     if find_continuum_first_round_params is not None:
+        import numpy as np
+
         from astroviper.node_tasks.imaging.find_continuum_first_round import (
             find_continuum_first_round_chunk,
         )
-        from astroviper.processing_functions.imaging.find_continuum import (
-            moment_velocity_widths,
+        from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
+            moment_channel_weights,
         )
 
-        # The graph carries each window's axis, not its widths.
+        # The graph carries each window's axis, not its weights.
         rest_frequency = find_continuum_first_round_params["rest_frequency"]
         first_round_params = dict(
             find_continuum_first_round_params,
             windows=[
                 dict(
                     window,
-                    velocity_widths=moment_velocity_widths(
-                        window["frequency_axis"], rest_frequency
+                    moment_channel_weights=moment_channel_weights(
+                        window["first_frequency"],
+                        window["channel_increment"],
+                        window["n_channels"],
+                        rest_frequency,
                     ),
                 )
                 for window in find_continuum_first_round_params["windows"]
@@ -1517,10 +1523,11 @@ def image_cube_single_field(
         if first_round_params is not None and chunk_written:
             start = time.time()
             try:
+                channels = chunk_task_coords["frequency"]["slice"]
                 first_round_rows.append(
                     find_continuum_first_round_chunk(
                         chunk_xds,
-                        chunk_task_coords["frequency"]["slice"],
+                        np.arange(channels.start, channels.stop),
                         **first_round_params,
                     )
                 )
@@ -1682,7 +1689,7 @@ def image_cube_single_field(
         result["find_continuum_first_round"] = {
             **{
                 key: np.concatenate([rows[key] for rows in first_round_rows])
-                for key in ("channels", "statistics", "tiles")
+                for key in first_round_rows[0]
             },
             "write_failed": bool(write_failures or first_round_failures),
         }

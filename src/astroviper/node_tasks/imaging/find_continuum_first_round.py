@@ -1,11 +1,14 @@
 """Node tasks of findContinuum's first round, made by the imager.
 
-``image_cube_single_field`` writes the primary-beam masks and statistics of
-every chunk it images to the first-round store
-(:func:`find_continuum_first_round_chunk`) and keeps moments 0 and 8 in a
-registry of the worker process (:func:`add_first_round_moments`), drained after
-the imaging compute (:func:`pop_first_round_moments`,
-:func:`merge_first_round_moment_tile`).
+``image_cube_single_field`` writes the primary-beam masks of every chunk it
+images to the first-round store and returns their tile occupancy and the
+per-channel rows (:func:`find_continuum_first_round_chunk`,
+:func:`write_first_round_rows`), and keeps the integrated and maximum moments
+of each spectral window in a registry of the worker process
+(:func:`add_first_round_moments`), drained after the imaging compute
+(:func:`pop_first_round_moments`, :func:`merge_first_round_moment_tile`).
+find_continuum_ultra reads a window's rows and moments from the store
+(:func:`read_first_round_rows`, :func:`read_first_round_moment_maps`).
 """
 
 import bisect
@@ -16,19 +19,26 @@ import threading
 import time
 
 import numpy as np
+import xarray as xr
+
+from astroviper.processing_functions.imaging.find_continuum_ultra.step_results import (
+    FirstRoundRows,
+)
 
 # Windows of the imager's first round whose moments a worker process holds;
 # the least recently used one goes to a slot before another is allocated.
 FIRST_ROUND_WINDOWS_IN_MEMORY = 2
 
 _IMAGE_DIMS = ["time", "frequency", "polarization", "l", "m"]
-_MASKS = ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_PROFILE_MASK")
+_MASKS = ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_SPECTRUM_MASK")
+_TILES = ("PRIMARY_BEAM_LIMIT_TILES", "PRIMARY_BEAM_SPECTRUM_TILES")
+_MOMENT_MAPS = {"integrated": "SKY_MOMENT_INTEGRATED", "maximum": "SKY_MOMENT_MAXIMUM"}
 
 # Run id to the first-round moments of this process: "counts" (additions per
-# channel), "moments" (window to its FindContinuumMoments), "recent" (held
-# windows, least recently used first), "slots", "lost" (windows of which a
-# slot could not be saved), "token" (unique to the entry, so that slot names
-# differ across hosts), "sequence" and "slot_bytes".
+# channel), "moments" (window to its moment partials), "recent" (held windows,
+# least recently used first), "slots", "lost" (windows of which a slot could
+# not be saved), "token" (unique to the entry, so that slot names differ
+# across hosts), "sequence" and "slot_bytes".
 _FIRST_ROUND_MOMENTS = {}
 # Runs whose moments were discarded: tasks still running add nothing more.
 _DISCARDED_RUNS = set()
@@ -36,33 +46,34 @@ _FIRST_ROUND_LOCK = threading.Lock()
 
 
 def find_continuum_first_round_chunk(
-    chunk_xds,
-    channels,
-    first_round_store,
-    variables,
-    polarization_index,
-    primary_beam_limit,
-    tile_shape,
-    value_dtypes,
-    run_id,
-    windows,
-    partials_directory,
-    rest_frequency,
-):
+    chunk_xds: xr.Dataset,
+    channels: np.ndarray,
+    first_round_store: str,
+    variables: dict,
+    polarization_index: int,
+    primary_beam_limit: float,
+    tile_shape: tuple,
+    value_dtypes: dict,
+    run_id: str | None,
+    windows: list,
+    partials_directory: str,
+    rest_frequency: float,
+) -> dict:
     """findContinuum's first round of one chunk the imager has written.
 
     Plane by plane, at the Stokes I index and in the store dtypes: the
-    primary-beam masks (written to the first-round store), the statistics of
-    the cube and of the primary beam inside the limit, the tile occupancy of
-    the masks and, with a ``run_id``, moments 0 and 8 in the registry of the
-    worker process (:func:`add_first_round_moments`).
+    primary-beam limit and spectrum masks (written to the first-round store),
+    their tile occupancy, the per-channel rows of the residual and of the
+    primary beam inside the limit and, with a ``run_id``, the moments of the
+    finite, nonzero residual inside the limit in the registry of the worker
+    process (:func:`add_first_round_moments`).
 
     Parameters
     ----------
     chunk_xds : xarray.Dataset
-        The chunk, with the data variables of ``variables``.
-    channels : slice
-        Channels of the chunk in the cube.
+        The chunk, with the data variables of ``variables`` and one time.
+    channels : numpy.ndarray
+        Channel of every plane of the chunk in the cube.
     first_round_store : str
         Path of the first-round store.
     variables : dict
@@ -70,8 +81,8 @@ def find_continuum_first_round_chunk(
         and of its primary beam.
     polarization_index : int
         Index of Stokes I along ``polarization``.
-    primary_beam_limit : float or None
-        Level of the primary-beam limit mask; ``None``: every pixel is inside.
+    primary_beam_limit : float
+        Level of the primary-beam limit mask.
     tile_shape : tuple of int
         ``(l, m)`` tiles of the occupancy: the inner chunks of the cube.
     value_dtypes : dict
@@ -83,21 +94,24 @@ def find_continuum_first_round_chunk(
     partials_directory : str
         Directory of the registry's slots.
     rest_frequency : float
-        Rest frequency of the cube (Hz), with which the windows' velocity
-        widths were computed.
+        Rest frequency of the cube (Hz), with which the windows' moment
+        channel weights were computed.
 
     Returns
     -------
     dict
-        ``channels`` (int32, ``(n,)``), ``statistics`` (float64, ``(n, 2,
-        5)``: cube and primary beam x npts, sum, sumsq, min, max) and
-        ``tiles`` (bool, ``(n, 2, n_tiles_l, n_tiles_m)``: limit and spectrum
-        masks).
+        ``channels`` (int32, ``(n,)``), the rows of
+        :func:`~astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions.first_round_channel_rows`
+        (``sky_valid_count``, ``sky_minimum``, ``sky_maximum``,
+        ``primary_beam_valid_count``, ``primary_beam_minimum``, each
+        ``(n,)``) and ``tiles`` (bool, ``(n, 2, n_tiles_l, n_tiles_m)``:
+        limit and spectrum masks).
     """
-    from astroviper.processing_functions.imaging.find_continuum import (
-        first_round_statistics,
+    from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+        first_round_channel_rows,
         primary_beam_masks,
         tile_occupancy,
+        valid_voxels,
     )
 
     stokes_i = slice(polarization_index, polarization_index + 1)
@@ -108,45 +122,63 @@ def find_continuum_first_round_chunk(
         .values.astype(value_dtypes[role], copy=False)
         for role in ("sky", "primary_beam")
     )
-    channel_indices = np.arange(channels.start, channels.stop)
-    statistics, tiles = [], []
-    for k, channel in enumerate(channel_indices):
+    channels = np.asarray(channels)
+    map_shape = (1, 1, 1, *sky.shape[-2:])
+    rows, tiles = [], []
+    for k in range(channels.size):
         plane = (slice(None), slice(k, k + 1))
-        inside, profile = primary_beam_masks(primary_beam[plane], primary_beam_limit)
-        write_primary_beam_masks(first_round_store, [channel], inside, profile)
-        statistics.append(
-            first_round_statistics(sky[plane], primary_beam[plane], inside)
+        limit_mask, spectrum_mask = primary_beam_masks(
+            primary_beam[plane], primary_beam_limit
+        )
+        write_primary_beam_masks(
+            first_round_store, channels[k : k + 1], limit_mask, spectrum_mask
+        )
+        rows.append(
+            first_round_channel_rows(sky[plane], primary_beam[plane], limit_mask)
         )
         tiles.append(
-            [tile_occupancy(mask, tile_shape)[0, 0, 0] for mask in (inside, profile)]
+            [
+                tile_occupancy(mask, tile_shape)[0, 0, 0]
+                for mask in (limit_mask, spectrum_mask)
+            ]
         )
         if run_id is not None:
+            valid = valid_voxels(sky[plane], limit_mask)
+            valid &= sky[plane] != 0
             add_first_round_moments(
                 run_id,
                 windows,
-                sky.shape[-2:],
+                map_shape,
                 partials_directory,
-                [channel],
+                channels[k : k + 1],
                 sky[plane],
-                inside,
+                valid,
             )
     return {
-        "channels": channel_indices.astype(np.int32),
-        "statistics": np.concatenate(statistics),
+        "channels": channels.astype(np.int32),
+        **{
+            field: np.array([row[field][0, 0, 0] for row in rows])
+            for field in FirstRoundRows._fields
+        },
         "tiles": np.array(tiles, dtype=bool),
     }
 
 
-def write_primary_beam_masks(first_round_store, channels, inside, profile):
+def write_primary_beam_masks(
+    first_round_store: str,
+    channels: np.ndarray,
+    limit_mask: np.ndarray,
+    spectrum_mask: np.ndarray,
+) -> int:
     """Write the primary-beam masks of planes, bit-packed, to a first-round store.
 
     Parameters
     ----------
     first_round_store : str
         Path of the first-round store.
-    channels : sequence of int
+    channels : numpy.ndarray
         Channel of every plane in the cube.
-    inside, profile : numpy.ndarray
+    limit_mask, spectrum_mask : numpy.ndarray
         Boolean ``(time, frequency, polarization, l, m)`` primary-beam limit
         and spectrum masks, one time and polarization.
 
@@ -155,35 +187,35 @@ def write_primary_beam_masks(first_round_store, channels, inside, profile):
     int
         Bytes written.
     """
-    from astroviper.processing_functions.imaging.find_continuum import (
+    from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         pack_plane_masks,
     )
 
     return _write_packed_masks(
         first_round_store,
         channels,
-        pack_plane_masks(inside[0, :, 0]),
-        pack_plane_masks(profile[0, :, 0]),
+        pack_plane_masks(limit_mask[0, :, 0]),
+        pack_plane_masks(spectrum_mask[0, :, 0]),
     )
 
 
-def write_find_continuum_first_round_rows(first_round_store, rows, n_channels):
+def write_first_round_rows(first_round_store: str, rows: dict, n_channels: int) -> dict:
     """Write the per-channel rows of a first round to its store.
 
     The tile occupancy of the two masks goes to ``PRIMARY_BEAM_LIMIT_TILES``
-    and ``PRIMARY_BEAM_PROFILE_TILES`` and the statistics to ``STATISTICS``, at
-    the channels of the rows. The first round is complete when no chunk failed
-    to be written and the rows hold every channel of the store's windows once
-    and no other channel; ``complete`` is set in the store's attributes.
+    and ``PRIMARY_BEAM_SPECTRUM_TILES`` and each row to the array of its name
+    in upper case (``SKY_VALID_COUNT``, ...), at the channels of the rows. The
+    first round is complete when no chunk failed to be written and the rows
+    hold every channel of the store's windows once and no other channel;
+    ``complete`` is set in the store's attributes.
 
     Parameters
     ----------
     first_round_store : str
         Path of the first-round store.
     rows : dict
-        ``channels``, ``statistics``, ``tiles`` and ``write_failed``: the rows
-        of every chunk (:func:`find_continuum_first_round_chunk`)
-        concatenated.
+        ``channels``, the rows, ``tiles`` and ``write_failed``: the rows of
+        every chunk (:func:`find_continuum_first_round_chunk`) concatenated.
     n_channels : int
         Channels of the cube.
 
@@ -207,25 +239,29 @@ def write_find_continuum_first_round_rows(first_round_store, rows, n_channels):
     )
     written, first = np.unique(channels, return_index=True)
     if written.size:
-        for index, name in enumerate(
-            ("PRIMARY_BEAM_LIMIT_TILES", "PRIMARY_BEAM_PROFILE_TILES")
-        ):
+        for index, name in enumerate(_TILES):
             group[name].oindex[written] = rows["tiles"][first, index]
-        group["STATISTICS"].oindex[written] = rows["statistics"][first]
+        for field in FirstRoundRows._fields:
+            group[field.upper()].oindex[written] = rows[field][first]
     group.attrs["find_continuum_first_round"] = dict(attributes, complete=complete)
     return {"complete": complete, "written_channels": written.tolist()}
 
 
 def add_first_round_moments(
-    run_id, windows, map_shape, partials_directory, channels, sky, inside
-):
-    """Add planes of the imager's first round to the moments 0 and 8 of this process.
+    run_id: str,
+    windows: list,
+    map_shape: tuple,
+    partials_directory: str,
+    channels: np.ndarray,
+    sky: np.ndarray,
+    valid: np.ndarray,
+) -> None:
+    """Add planes of the imager's first round to the moments of this process.
 
-    Each channel goes to the accumulator of its spectral window, where the
-    plane is finite, nonzero and inside the primary-beam limit (findContinuum's
-    ``"cube"!=0`` on the blanked cube), a block of rows at a time. At most
-    ``FIRST_ROUND_WINDOWS_IN_MEMORY`` windows are held: before another is
-    allocated, the least recently used one is saved to a slot of
+    Each channel goes to the moment partials of its spectral window
+    (:func:`~astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions.accumulate_moments`).
+    At most ``FIRST_ROUND_WINDOWS_IN_MEMORY`` windows are held: before another
+    is allocated, the least recently used one is saved to a slot of
     ``partials_directory`` and dropped (a window that cannot be saved, after
     the retries of transient I/O errors, is recorded as lost). A new
     ``run_id`` drops the entries of earlier runs. Threads of a process add one
@@ -237,31 +273,32 @@ def add_first_round_moments(
         Imaging run.
     windows : list of dict
         Spectral windows of the cube, in channel order: ``channel_range``
-        (``[start, stop)``) and ``velocity_widths`` (float64, one per channel
-        of the window).
+        (``[start, stop)``) and ``moment_channel_weights`` (float64, one per
+        channel of the window).
     map_shape : tuple of int
-        ``(l, m)``.
+        ``(time, 1, polarization, l, m)`` of the moment partials.
     partials_directory : str
         Directory of the slots, saved as
-        ``W<window>/<pid>-<token>-<sequence>.<FIELD>.npy``, ``token`` a UUID
-        of the process's entry.
-    channels : sequence of int
+        ``W<window>/<pid>-<token>-<sequence>.<field>.npy``, ``token`` a UUID
+        of the process's entry and ``field`` ``integrated`` or ``maximum``.
+    channels : numpy.ndarray
         Channel of every plane in the cube.
     sky : numpy.ndarray
         ``(time, frequency, polarization, l, m)`` planes in the dtype of the
-        store, one time and polarization.
-    inside : numpy.ndarray
-        Boolean primary-beam limit mask, shaped as ``sky``.
+        store.
+    valid : numpy.ndarray
+        Boolean voxels to add, shaped as ``sky``: finite, nonzero and inside
+        the primary-beam limit (findContinuum's ``"cube"!=0`` on the blanked
+        cube).
     """
     import uuid
 
-    from astroviper.processing_functions.imaging.find_continuum import (
-        _BLOCK_ROWS,
-        FindContinuumMoments,
+    from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+        accumulate_moments,
+        new_moment_partials,
     )
 
     starts = [window["channel_range"][0] for window in windows]
-    scratch = np.empty(_BLOCK_ROWS * map_shape[1])
     with _FIRST_ROUND_LOCK:
         if run_id in _DISCARDED_RUNS:
             return
@@ -280,32 +317,32 @@ def add_first_round_moments(
             }
         for position, channel in enumerate(channels):
             window = bisect.bisect_right(starts, channel) - 1
-            moments = entry["moments"].get(window)
-            if moments is None:
+            partials = entry["moments"].get(window)
+            if partials is None:
                 while len(entry["moments"]) >= FIRST_ROUND_WINDOWS_IN_MEMORY:
                     _flush_first_round_window(
                         entry, entry["recent"][0], partials_directory
                     )
-                moments = entry["moments"][window] = FindContinuumMoments(
-                    [0, 8], windows[window]["velocity_widths"], map_shape
+                partials = entry["moments"][window] = new_moment_partials(
+                    map_shape, sky.dtype
                 )
             else:
                 entry["recent"].remove(window)
             entry["recent"].append(window)
-            plane, plane_inside = sky[0, position, 0], inside[0, position, 0]
-            for start in range(0, map_shape[0], _BLOCK_ROWS):
-                rows = slice(start, start + _BLOCK_ROWS)
-                block = plane[rows]
-                valid = np.isfinite(block)
-                valid &= plane_inside[rows]
-                valid &= block != 0
-                moments.add_plane(
-                    channel - starts[window], block, valid, rows=rows, scratch=scratch
-                )
+            index = channel - starts[window]
+            planes = slice(position, position + 1)
+            accumulate_moments(
+                partials,
+                sky[:, planes],
+                valid[:, planes],
+                windows[window]["moment_channel_weights"][index : index + 1],
+            )
             entry["counts"][channel] += 1
 
 
-def pop_first_round_moments(run_id, address, partials_directory):
+def pop_first_round_moments(
+    run_id: str, address: str | None, partials_directory: str
+) -> dict:
     """Take the first-round moments of a run off the registry of this process.
 
     The windows still held are saved to slots first, so all of the process's
@@ -359,7 +396,7 @@ def pop_first_round_moments(run_id, address, partials_directory):
     }
 
 
-def discard_first_round_moments(run_id):
+def discard_first_round_moments(run_id: str) -> bool:
     """Drop the first-round moments of a run from the registry of this
     process without saving them, and ignore its later additions (tasks of a
     failed imaging compute may still run).
@@ -380,11 +417,19 @@ def discard_first_round_moments(run_id):
 
 
 def merge_first_round_moment_tile(
-    first_round_store, partials_directory, window, slots, tile
-):
-    """Merge the slots of one spectral window over one tile and write moments 0 and 8.
+    first_round_store: str,
+    partials_directory: str,
+    window: int,
+    slots: list,
+    tile: list,
+) -> dict:
+    """Merge the slots of one spectral window over one tile and write its
+    integrated and maximum moments.
 
-    A transient I/O error repeats the whole merge of the tile.
+    The slots' moment partials are merged in GraphVIPER's binary-tree order
+    (:func:`~astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions.merge_moment_partials_in_tree_order`)
+    and finalized into ``SKY_MOMENT_INTEGRATED`` and ``SKY_MOMENT_MAXIMUM``. A
+    transient I/O error repeats the whole merge of the tile.
 
     Parameters
     ----------
@@ -393,12 +438,12 @@ def merge_first_round_moment_tile(
     partials_directory : str
         Directory of the slots.
     window : int
-        Index of the window along the first axis of ``MOMENT_0`` and
-        ``MOMENT_8``.
+        Index of the window along the first axis of ``SKY_MOMENT_INTEGRATED``
+        and ``SKY_MOMENT_MAXIMUM``.
     slots : list of str
         Slot names of the window (:func:`pop_first_round_moments`), in merge
         order.
-    tile : sequence
+    tile : list
         ``[[l0, l1], [m0, m1]]``.
 
     Returns
@@ -411,14 +456,13 @@ def merge_first_round_moment_tile(
     import zarr
 
     from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
-    from astroviper.processing_functions.imaging.find_continuum import (
-        FindContinuumMoments,
-        merge_in_tree_order,
+    from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+        finalize_moments,
+        merge_moment_partials_in_tree_order,
     )
 
     start_unixtime = time.time()
     (l0, l1), (m0, m1) = tile
-    shape = (l1 - l0, m1 - m0)
     directory = os.path.join(partials_directory, f"W{window}")
 
     def merge():
@@ -427,24 +471,26 @@ def merge_first_round_moment_tile(
         def leaves():
             nonlocal bytes_read
             for name in slots:
-                state = {}
-                for field in ("INTEGRATED", "MAXIMUM"):
+                partials = {}
+                for field in _MOMENT_MAPS:
                     stored = np.load(
                         os.path.join(directory, f"{name}.{field}.npy"), mmap_mode="r"
                     )
-                    state[field] = np.array(stored[l0:l1, m0:m1])
-                    bytes_read += state[field].nbytes
-                # Merges and finalize use no velocity widths.
-                yield FindContinuumMoments.from_state([0, 8], (), shape, state)
+                    partials[field] = np.array(stored[..., l0:l1, m0:m1])
+                    bytes_read += partials[field].nbytes
+                yield partials
 
-        merged = merge_in_tree_order(leaves())
-        if merged is None:
-            merged = FindContinuumMoments([0, 8], (), shape)
-        for moment, values in merged.finalize().items():
-            array = zarr.open_array(
-                os.path.join(first_round_store, f"MOMENT_{moment}"), mode="r+"
-            )
-            array[window, l0:l1, m0:m1] = values.astype(array.dtype)
+        arrays = {
+            field: zarr.open_array(os.path.join(first_round_store, name), mode="r+")
+            for field, name in _MOMENT_MAPS.items()
+        }
+        maps = finalize_moments(
+            merge_moment_partials_in_tree_order(leaves()),
+            (1, 1, 1, l1 - l0, m1 - m0),
+            arrays["maximum"].dtype,
+        )
+        for field, values in zip(_MOMENT_MAPS, maps, strict=True):
+            arrays[field][window, l0:l1, m0:m1] = values[0, 0, 0]
         return bytes_read
 
     bytes_read = _retry_transient_io(f"merge of window {window} tile {tile}", merge)
@@ -458,6 +504,83 @@ def merge_first_round_moment_tile(
         "T_reduce_node": end_unixtime - start_unixtime,
         **_execution_identity(),
     }
+
+
+def read_first_round_rows(
+    first_round_store: str, channel_range: list
+) -> tuple[FirstRoundRows, dict]:
+    """The per-channel rows of a spectral window, read from a first-round store.
+
+    Parameters
+    ----------
+    first_round_store : str
+        Path of the first-round store.
+    channel_range : list of int
+        ``[start, stop)``, channels of the cube.
+
+    Returns
+    -------
+    rows : FirstRoundRows
+        ``(stop - start,)`` arrays in channel order: int64 counts, float64
+        minima and maxima (NaN for a channel without a valid voxel).
+    counters : dict
+        The read counters of
+        :func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`.
+    """
+    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
+
+    start, stop = channel_range
+    counters = {}
+    rows = FirstRoundRows(
+        **{
+            field: read_array_region(
+                os.path.join(first_round_store, field.upper()),
+                {"frequency": slice(start, stop)},
+                counters=counters,
+            )[0]
+            for field in FirstRoundRows._fields
+        }
+    )
+    return rows, counters
+
+
+def read_first_round_moment_maps(
+    first_round_store: str, window_index: int
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """The integrated and maximum moments of one spectral window, read from a
+    first-round store.
+
+    Parameters
+    ----------
+    first_round_store : str
+        Path of the first-round store.
+    window_index : int
+        Index of the window in the store's ``windows``.
+
+    Returns
+    -------
+    integral : numpy.ndarray
+        float64 ``(l, m)`` ``SKY_MOMENT_INTEGRATED``, NaN where no channel
+        contributed.
+    maximum : numpy.ndarray
+        ``(l, m)`` ``SKY_MOMENT_MAXIMUM`` in the cube's dtype, NaN where no
+        channel contributed.
+    counters : dict
+        The read counters of
+        :func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`.
+    """
+    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
+
+    counters = {}
+    integral, maximum = (
+        read_array_region(
+            os.path.join(first_round_store, name),
+            {"window": slice(window_index, window_index + 1)},
+            counters=counters,
+        )[0][0]
+        for name in _MOMENT_MAPS.values()
+    )
+    return integral, maximum, counters
 
 
 def _execution_identity():
@@ -478,11 +601,11 @@ def _execution_identity():
     }
 
 
-def _write_packed_masks(first_round_store, channels, inside, profile):
+def _write_packed_masks(first_round_store, channels, limit_mask, spectrum_mask):
     """Write packed masks ``(n, l, ceil(m / 8))`` one channel (chunk) at a
     time; returns the bytes stored."""
     written = 0
-    for name, packed in zip(_MASKS, (inside, profile), strict=True):
+    for name, packed in zip(_MASKS, (limit_mask, spectrum_mask), strict=True):
         for channel, plane in zip(channels, packed, strict=True):
             channel = int(channel)
             written += _write_array_region(
@@ -557,7 +680,7 @@ def _flush_first_round_window(entry, window, partials_directory):
                 f"slot {name} of window {window}",
                 lambda field=field, values=values: save(field, values),
             )
-            for field, values in entry["moments"][window].state().items()
+            for field, values in entry["moments"][window].items()
         )
     except OSError as exc:
         logger.warning(

@@ -825,22 +825,24 @@ def image_cube_single_field(
     find_continuum_first_round : bool, optional
         Also make findContinuum's first round of the Stokes I cube as each
         chunk is written, into a store next to the image store
-        (``cube.img.zarr`` gives ``cube_find_continuum_first_round.zarr``):
-        per channel the primary-beam masks at the ``primary_beam_limit`` of
-        ``cycle_control_params`` (0.2, findContinuum's default, when the key
-        is absent, although cube imaging then cleans to a limit of 0) and at
-        0.21, their tile occupancy and the statistics of the residual and of
-        the primary beam inside the limit, and with the Dask backend the
-        moment 0 and 8 images of the residual of every spectral window (a
-        linear run of channels), accumulated in the worker processes and
-        merged after the imaging. The store is bound to the cube as written
-        and refused for any other. A part of the first round that cannot be
-        written (after the retries of transient I/O errors) leaves it, or a
-        window's moments, incomplete and is logged; the imaging goes on. If
-        the imaging compute raises, the worker processes drop the moments of
-        the run and their slots are removed. Keeps the variables
-        find_continuum reads (``sky_residual``, ``primary_beam`` and
-        ``beam_fit_params_point_spread_function``). Needs Stokes I and
+        (``cube.img.zarr`` gives ``cube_find_continuum_first_round.zarr``,
+        store version 2): per channel the primary-beam limit mask at the
+        ``primary_beam_limit`` of ``cycle_control_params`` (0.2,
+        findContinuum's default, when the key is absent, although cube
+        imaging then cleans to a limit of 0) and the spectrum mask above
+        0.21 inside it, their tile occupancy, the count, minimum and maximum
+        of the finite residual and the count and minimum of the finite
+        primary beam inside the limit, and with the Dask backend the
+        integrated and maximum moments of the residual of every spectral
+        window (a linear run of channels), accumulated in the worker
+        processes and merged after the imaging. The store is bound to the
+        cube as written and refused for any other. A part of the first round
+        that cannot be written (after the retries of transient I/O errors)
+        leaves it, or a window's moments, incomplete and is logged; the
+        imaging goes on. If the imaging compute raises, the worker processes
+        drop the moments of the run and their slots are removed. Keeps the
+        variables find_continuum reads (``sky_residual``, ``primary_beam``
+        and ``beam_fit_params_point_spread_function``). Needs Stokes I and
         ``output_image_format="zarr"``. Default ``False``.
     parameters_file : str, optional
         JSON file whose ``"image_cube_single_field"`` block gives the
@@ -1480,7 +1482,7 @@ def image_cube_single_field(
             drain_first_round_moments,
         )
         from astroviper.node_tasks.imaging.find_continuum_first_round import (
-            write_find_continuum_first_round_rows,
+            write_first_round_rows,
         )
 
         first_round_store = first_round_params["first_round_store"]
@@ -1490,7 +1492,7 @@ def image_cube_single_field(
         try:
             first_round_complete = (
                 rows is not None
-                and write_find_continuum_first_round_rows(
+                and write_first_round_rows(
                     first_round_store, rows, img_xds.sizes["frequency"]
                 )["complete"]
             )
@@ -1697,8 +1699,8 @@ def _create_find_continuum_first_round(
         find_continuum_first_round_store_path,
         find_continuum_merge_tile_counts,
     )
-    from astroviper.processing_functions.imaging.find_continuum import (
-        linear_frequency_axis,
+    from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
+        linear_spectral_axis,
     )
     from astroviper.processing_functions.imaging.utils.spectral_windows import (
         linear_channel_ranges,
@@ -1712,6 +1714,19 @@ def _create_find_continuum_first_round(
     }
     tile_shape = arrays["sky"].chunks[-2:]
     frequency = img_xds.frequency.values
+    windows = []
+    for start, stop in linear_channel_ranges(frequency):
+        n_channels, first_frequency, _, channel_increment = linear_spectral_axis(
+            frequency[start:stop]
+        )
+        windows.append(
+            {
+                "channel_range": [start, stop],
+                "first_frequency": first_frequency,
+                "channel_increment": channel_increment,
+                "n_channels": n_channels,
+            }
+        )
     store = find_continuum_first_round_store_path(image_store)
     params = {
         "first_round_store": store,
@@ -1721,13 +1736,7 @@ def _create_find_continuum_first_round(
         "tile_shape": tile_shape,
         "value_dtypes": {role: array.dtype.name for role, array in arrays.items()},
         "run_id": uuid.uuid4().hex if compute_backend == "dask" else None,
-        "windows": [
-            {
-                "channel_range": [start, stop],
-                "frequency_axis": linear_frequency_axis(frequency[start:stop]),
-            }
-            for start, stop in linear_channel_ranges(frequency)
-        ],
+        "windows": windows,
         "partials_directory": find_continuum_first_round_partials_path(store),
         "rest_frequency": float(img_xds.frequency.attrs["rest_frequency"]["data"]),
     }
@@ -1885,7 +1894,8 @@ def combine_return_data_frames(input_data, input_params):
         combined["find_continuum_first_round"] = {
             **{
                 key: np.concatenate([rows[key] for rows in first_rounds])
-                for key in ("channels", "statistics", "tiles")
+                for key in first_rounds[0]
+                if key != "write_failed"
             },
             "write_failed": any(rows["write_failed"] for rows in first_rounds),
         }

@@ -69,7 +69,7 @@ def test_first_round_needs_stokes_i_in_zarr():
         check_find_continuum_first_round({"polarization_coords": ["I"]}, "fits")
 
 
-def _store_attrs(**changes):
+def _store_attrs(binding=BINDING, **changes):
     first_round = {
         "version": FIND_CONTINUUM_FIRST_ROUND_VERSION,
         "written_by": "image_cube_single_field",
@@ -77,30 +77,67 @@ def _store_attrs(**changes):
         "primary_beam_limit": 0.2,
         "polarization_index": 0,
         "tile_shape": [625, 625],
-        "binding": dict(BINDING, shape=list(BINDING["shape"])),
+        "windows": [
+            {"channel_range": [0, 3840]},
+            {"channel_range": [3840, 7680]},
+        ],
     }
-    return {"find_continuum_first_round": dict(first_round, **changes)}
+    return {
+        "find_continuum_first_round": dict(first_round, **changes),
+        "image_binding": dict(binding, shape=list(binding["shape"])),
+    }
 
 
-def test_first_round_store_of_the_cube():
-    check_find_continuum_first_round_store(_store_attrs(), BINDING, 0.2, 0, (625, 625))
+@pytest.mark.parametrize("channel_range", [[0, 3840], [3840, 7680], [4000, 5000]])
+def test_first_round_store_of_the_cube(channel_range):
+    assert FIND_CONTINUUM_FIRST_ROUND_VERSION == 2
     check_find_continuum_first_round_store(
-        _store_attrs(primary_beam_limit=None), BINDING, None, 0, (625, 625)
+        _store_attrs(), BINDING, 0.2, 0, (625, 625), channel_range
     )
 
 
 @pytest.mark.parametrize(
-    "attrs, match",
+    "attrs, channel_range, match",
     [
-        (None, "missing"),
-        ({"other": 1}, "missing"),
-        (_store_attrs(version=2), "version 2, not 1"),
-        (_store_attrs(complete=False), "incomplete"),
-        (_store_attrs(primary_beam_limit=0.3), "primary_beam_limit 0.3, not 0.2"),
-        (_store_attrs(polarization_index=1), "polarization_index 1, not 0"),
-        (_store_attrs(tile_shape=[1250, 625]), r"tile_shape \[1250, 625\], not"),
+        (None, [0, 3840], "missing"),
+        ({"other": 1}, [0, 3840], "missing"),
+        (
+            _store_attrs(version=1),
+            [0, 3840],
+            "version 1, not 2: make the first round again",
+        ),
+        (_store_attrs(version=3), [0, 3840], "version 3, not 2"),
+        (_store_attrs(complete=False), [0, 3840], "incomplete"),
+        (
+            _store_attrs(primary_beam_limit=0.3),
+            [0, 3840],
+            "primary_beam_limit 0.3, not 0.2",
+        ),
+        (
+            _store_attrs(polarization_index=1),
+            [0, 3840],
+            "polarization_index 1, not 0",
+        ),
+        (
+            _store_attrs(tile_shape=[1250, 625]),
+            [0, 3840],
+            r"tile_shape \[1250, 625\], not",
+        ),
         *[
-            (_store_attrs(binding=dict(BINDING, **{name: value})), f"{name} differs")
+            (
+                _store_attrs(),
+                channel_range,
+                r"holds channels \[\[0, 3840\], \[3840, 7680\]\] of the cube, "
+                rf"not \[{channel_range[0]}, {channel_range[1]}\)",
+            )
+            for channel_range in ([3000, 4000], [7680, 11520], [0, 7680])
+        ],
+        *[
+            (
+                _store_attrs(binding=dict(BINDING, **{name: value})),
+                [0, 3840],
+                f"{name} differs",
+            )
             for name, value in (
                 (
                     "image_store_zarr_json_mtime_ns",
@@ -112,12 +149,27 @@ def test_first_round_store_of_the_cube():
                 ("shape", [1, 15360, 1, 11250, 11250]),
             )
         ],
-        (_store_attrs(binding={"shape": BINDING["shape"]}), "frequency_sha1 differs"),
+        (
+            _store_attrs(binding={"shape": BINDING["shape"]}),
+            [0, 3840],
+            "frequency_sha1 differs",
+        ),
+        (
+            {
+                "find_continuum_first_round": _store_attrs()[
+                    "find_continuum_first_round"
+                ]
+            },
+            [0, 3840],
+            "frequency_sha1 differs",
+        ),
     ],
 )
-def test_first_round_store_refused(attrs, match):
+def test_first_round_store_refused(attrs, channel_range, match):
     with pytest.raises(ValueError, match=match):
-        check_find_continuum_first_round_store(attrs, BINDING, 0.2, 0, (625, 625))
+        check_find_continuum_first_round_store(
+            attrs, BINDING, 0.2, 0, (625, 625), channel_range
+        )
 
 
 def test_ultra_task_memory():

@@ -16,19 +16,34 @@ from astroviper.node_tasks.imaging.find_continuum_first_round import (
     find_continuum_first_round_chunk,
     merge_first_round_moment_tile,
     pop_first_round_moments,
-    write_find_continuum_first_round_rows,
+    read_first_round_moment_maps,
+    read_first_round_rows,
+    write_first_round_rows,
 )
-from astroviper.processing_functions.imaging.find_continuum import (
-    FindContinuumMoments,
-    first_round_statistics,
+from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+    accumulate_moments,
+    finalize_moments,
+    first_round_channel_rows,
+    new_moment_partials,
     primary_beam_masks,
     tile_occupancy,
     unpack_plane_masks,
+    valid_voxels,
+)
+from astroviper.processing_functions.imaging.find_continuum_ultra.step_results import (
+    FirstRoundRows,
 )
 
 VARIABLES = {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
 DIMS = ["time", "frequency", "polarization", "l", "m"]
-MASKS = ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_PROFILE_MASK")
+MASKS = ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_SPECTRUM_MASK")
+ROWS = {
+    "SKY_VALID_COUNT": (np.int64, 0),
+    "SKY_MINIMUM": (np.float64, np.nan),
+    "SKY_MAXIMUM": (np.float64, np.nan),
+    "PRIMARY_BEAM_VALID_COUNT": (np.int64, 0),
+    "PRIMARY_BEAM_MINIMUM": (np.float64, np.nan),
+}
 
 
 def _first_round_store(path, n_channels, shape, tile, windows):
@@ -46,7 +61,7 @@ def _first_round_store(path, n_channels, shape, tile, windows):
             compressors=zarr.codecs.ZstdCodec(level=1),
             dimension_names=("frequency", "l", "m_packed"),
         )
-    for name in ("PRIMARY_BEAM_LIMIT_TILES", "PRIMARY_BEAM_PROFILE_TILES"):
+    for name in ("PRIMARY_BEAM_LIMIT_TILES", "PRIMARY_BEAM_SPECTRUM_TILES"):
         group.create_array(
             name,
             shape=(n_channels, *n_tiles),
@@ -54,72 +69,105 @@ def _first_round_store(path, n_channels, shape, tile, windows):
             dtype=bool,
             fill_value=False,
             compressors=zarr.codecs.ZstdCodec(level=1),
+            dimension_names=("frequency", "l_tile", "m_tile"),
         )
-    group.create_array(
-        "STATISTICS",
-        shape=(n_channels, 2, 5),
-        chunks=(n_channels, 2, 5),
-        dtype=np.float64,
-        fill_value=np.nan,
-    )
-    for moment, dtype in ((0, np.float64), (8, np.float32)):
+    for name, (dtype, fill_value) in ROWS.items():
         group.create_array(
-            f"MOMENT_{moment}",
+            name,
+            shape=(n_channels,),
+            chunks=(n_channels,),
+            dtype=dtype,
+            fill_value=fill_value,
+            compressors=zarr.codecs.ZstdCodec(level=1),
+            dimension_names=("frequency",),
+        )
+    for name, dtype in (
+        ("SKY_MOMENT_INTEGRATED", np.float64),
+        ("SKY_MOMENT_MAXIMUM", np.float32),
+    ):
+        group.create_array(
+            name,
             shape=(len(windows), *shape),
             chunks=(1, *tile),
             dtype=dtype,
             fill_value=np.nan,
             compressors=None,
+            dimension_names=("window", "l", "m"),
         )
     group.attrs["find_continuum_first_round"] = {
-        "version": 1,
+        "version": 2,
         "windows": [{"channel_range": list(window)} for window in windows],
         "complete": False,
     }
     return str(path)
 
 
+def _random_rows(rng, channels):
+    n = len(channels)
+    return {
+        "channels": np.asarray(channels, dtype=np.int32),
+        "sky_valid_count": rng.integers(0, 100, n),
+        "sky_minimum": rng.standard_normal(n),
+        "sky_maximum": rng.standard_normal(n),
+        "primary_beam_valid_count": rng.integers(0, 100, n),
+        "primary_beam_minimum": rng.standard_normal(n),
+        "tiles": rng.random((n, 2, 2, 2)) > 0.5,
+    }
+
+
 @pytest.mark.parametrize("change", [None, "duplicate", "missing", "failed"])
 def test_first_round_rows_are_complete_with_every_window_channel_once(tmp_path, change):
     store = _first_round_store(tmp_path / "fr.zarr", 30, (16, 16), (8, 8), [[10, 20]])
-    rng = np.random.default_rng(23)
-    rows = {
-        "channels": np.arange(10, 20, dtype=np.int32),
-        "statistics": rng.standard_normal((10, 2, 5)),
-        "tiles": rng.random((10, 2, 2, 2)) > 0.5,
-        "write_failed": change == "failed",
-    }
+    rows = _random_rows(np.random.default_rng(23), range(10, 20))
     if change == "duplicate":
-        rows = {
-            key: value if key == "write_failed" else np.concatenate([value, value[3:4]])
-            for key, value in rows.items()
-        }
+        rows = {key: np.concatenate([value, value[3:4]]) for key, value in rows.items()}
     elif change == "missing":
-        rows = {
-            key: value if key == "write_failed" else value[1:]
-            for key, value in rows.items()
-        }
-    result = write_find_continuum_first_round_rows(store, rows, 30)
+        rows = {key: value[1:] for key, value in rows.items()}
+    rows["write_failed"] = change == "failed"
+    result = write_first_round_rows(store, rows, 30)
     assert result["complete"] is (change is None)
     attributes = zarr.open_group(store, mode="r").attrs["find_continuum_first_round"]
     assert attributes["complete"] is (change is None)
     assert result["written_channels"] == sorted(set(rows["channels"].tolist()))
-    statistics = zarr.open_array(os.path.join(store, "STATISTICS"), mode="r")[:]
-    profile = zarr.open_array(
-        os.path.join(store, "PRIMARY_BEAM_PROFILE_TILES"), mode="r"
-    )[:]
     written = np.array(result["written_channels"])
     first = np.unique(rows["channels"], return_index=True)[1]
-    np.testing.assert_array_equal(statistics[written], rows["statistics"][first])
-    np.testing.assert_array_equal(profile[written], rows["tiles"][first, 1])
-    assert np.isnan(np.delete(statistics, written, axis=0)).all()
-    assert not np.delete(profile, written, axis=0).any()
+    for field in FirstRoundRows._fields:
+        stored = zarr.open_array(os.path.join(store, field.upper()), mode="r")[:]
+        np.testing.assert_array_equal(stored[written], rows[field][first])
+        unwritten = np.delete(stored, written)
+        if field.endswith("_count"):
+            assert stored.dtype == np.int64 and not unwritten.any()
+        else:
+            assert stored.dtype == np.float64 and np.isnan(unwritten).all()
+    spectrum = zarr.open_array(
+        os.path.join(store, "PRIMARY_BEAM_SPECTRUM_TILES"), mode="r"
+    )[:]
+    np.testing.assert_array_equal(spectrum[written], rows["tiles"][first, 1])
+    assert not np.delete(spectrum, written, axis=0).any()
+
+
+def test_read_first_round_rows_of_a_window(tmp_path):
+    store = _first_round_store(
+        tmp_path / "fr.zarr", 30, (16, 16), (8, 8), [[0, 10], [10, 30]]
+    )
+    rows = _random_rows(np.random.default_rng(5), range(30))
+    rows["sky_minimum"][12] = rows["sky_maximum"][12] = np.nan
+    write_first_round_rows(store, dict(rows, write_failed=False), 30)
+
+    window_rows, counters = read_first_round_rows(store, [10, 30])
+    assert isinstance(window_rows, FirstRoundRows)
+    for field in FirstRoundRows._fields:
+        values = getattr(window_rows, field)
+        assert values.shape == (20,) and values.dtype == rows[field].dtype
+        np.testing.assert_array_equal(values, rows[field][10:30])
+    assert counters["units_read"] == 5 and counters["bytes"] > 0
 
 
 # --------------------------------------------------------------------------
 # The imager's first round: chunks, worker-local moments per window
 # --------------------------------------------------------------------------
 N_REGISTRY, REGISTRY_SHAPE, REGISTRY_TILE = 12, (40, 24), (20, 12)
+MAP_SHAPE = (1, 1, 1, *REGISTRY_SHAPE)
 REGISTRY_TILES = [
     [[l0, l0 + 20], [m0, m0 + 12]] for l0, m0 in itertools.product((0, 20), (0, 12))
 ]
@@ -132,28 +180,47 @@ def registry_cube():
     sky[0, 2, 0, :5] = 0.0
     sky[0, 3, 0, 7, 7] = np.nan
     sky[0, 4, 0, 9, 9] = -0.0
-    inside = rng.random(sky.shape) > 0.2
+    valid = valid_voxels(sky, rng.random(sky.shape) > 0.2) & (sky != 0)
+    # A corner outside the limit in every channel.
+    valid[..., 35:, 20:] = False
     windows = [
         {
             "channel_range": [start, start + 6],
-            "velocity_widths": rng.uniform(0.5, 1.5, 6),
+            "moment_channel_weights": rng.uniform(0.5, 1.5, 6),
         }
         for start in (0, 6)
     ]
-    yield sky, inside, windows
+    yield sky, valid, windows
     node_tasks._FIRST_ROUND_MOMENTS.clear()
 
 
-def _window_moments(sky, inside, window):
-    """Moments 0 and 8 of a window's channels where the cube is finite,
-    nonzero and inside the limit, added in channel order."""
+def _window_moments(sky, valid, window):
+    """The integrated and maximum moments of a window's channels at the
+    voxels of ``valid``, added in channel order."""
     start, stop = window["channel_range"]
-    moments = FindContinuumMoments([0, 8], window["velocity_widths"], sky.shape[-2:])
-    for channel in range(start, stop):
-        plane = sky[0, channel, 0]
-        valid = inside[0, channel, 0] & np.isfinite(plane) & (plane != 0)
-        moments.add_plane(channel - start, plane, valid)
-    return moments.finalize()
+    partials = new_moment_partials(MAP_SHAPE, sky.dtype)
+    accumulate_moments(
+        partials,
+        sky[:, start:stop],
+        valid[:, start:stop],
+        window["moment_channel_weights"],
+    )
+    return [
+        values[0, 0, 0] for values in finalize_moments(partials, MAP_SHAPE, sky.dtype)
+    ]
+
+
+def _add(run_id, windows, partials, sky, valid, channels):
+    planes = slice(channels[0], channels[-1] + 1)
+    add_first_round_moments(
+        run_id,
+        windows,
+        MAP_SHAPE,
+        partials,
+        np.asarray(channels),
+        sky[:, planes],
+        valid[:, planes],
+    )
 
 
 def _drain(pops, path, partials_directory, windows):
@@ -175,8 +242,8 @@ def _drain(pops, path, partials_directory, windows):
         for tile in REGISTRY_TILES
     ]
     maps = [
-        zarr.open_array(os.path.join(store, f"MOMENT_{moment}"), mode="r")[:]
-        for moment in (0, 8)
+        zarr.open_array(os.path.join(store, name), mode="r")[:]
+        for name in ("SKY_MOMENT_INTEGRATED", "SKY_MOMENT_MAXIMUM")
     ]
     return maps, records
 
@@ -185,20 +252,11 @@ def _drain(pops, path, partials_directory, windows):
 def test_registry_holds_windows_and_flushes_the_least_recent(
     registry_cube, tmp_path, monkeypatch, windows_in_memory
 ):
-    sky, inside, windows = registry_cube
+    sky, valid, windows = registry_cube
     monkeypatch.setattr(node_tasks, "FIRST_ROUND_WINDOWS_IN_MEMORY", windows_in_memory)
     partials = str(tmp_path / "partials")
     for start in (0, 6, 2, 8, 4, 10):
-        planes = slice(start, start + 2)
-        add_first_round_moments(
-            "run",
-            windows,
-            REGISTRY_SHAPE,
-            partials,
-            range(start, start + 2),
-            sky[:, planes],
-            inside[:, planes],
-        )
+        _add("run", windows, partials, sky, valid, [start, start + 1])
     pop = pop_first_round_moments("run", None, partials)
     pid = os.getpid()
     assert pop["placement_ok"] and pop["process_pid"] == pid
@@ -216,61 +274,53 @@ def test_registry_holds_windows_and_flushes_the_least_recent(
     files = [
         os.path.join(partials, f"W{window}", f"{name}.{field}.npy")
         for window, name in pop["slots"]
-        for field in ("INTEGRATED", "MAXIMUM")
+        for field in ("integrated", "maximum")
     ]
     assert pop["slot_bytes"] == sum(os.path.getsize(path) for path in files)
     assert "run" not in node_tasks._FIRST_ROUND_MOMENTS
 
-    (moment_0, moment_8), records = _drain(
+    (integral, maximum), records = _drain(
         [pop], tmp_path / "fr.zarr", partials, windows
     )
     for index, window in enumerate(windows):
-        expected = _window_moments(sky, inside, window)
-        np.testing.assert_array_equal(moment_8[index], expected[8].astype(np.float32))
+        expected = _window_moments(sky, valid, window)
+        assert np.isfinite(expected[0]).any() and np.isnan(expected[0]).any()
+        np.testing.assert_array_equal(maximum[index], expected[1])
         if windows_in_memory == 2:
-            np.testing.assert_array_equal(moment_0[index], expected[0])
+            np.testing.assert_array_equal(integral[index], expected[0])
         else:
-            np.testing.assert_allclose(moment_0[index], expected[0], rtol=1e-12)
+            np.testing.assert_allclose(integral[index], expected[0], rtol=1e-12)
             np.testing.assert_array_equal(
-                np.isnan(moment_0[index]), np.isnan(expected[0])
+                np.isnan(integral[index]), np.isnan(expected[0])
             )
     assert {record["stage"] for record in records} == {"first_round_merge"}
     assert all(record["bytes_read"] > 0 for record in records)
 
 
+def test_merge_without_slots_writes_empty_maps(registry_cube, tmp_path):
+    _, _, windows = registry_cube
+    (integral, maximum), records = _drain(
+        [], tmp_path / "fr.zarr", str(tmp_path / "partials"), windows
+    )
+    assert np.isnan(integral).all() and np.isnan(maximum).all()
+    assert all(record["bytes_read"] == 0 for record in records)
+
+
 def test_registry_counts_duplicated_and_missing_channels(registry_cube, tmp_path):
-    sky, inside, windows = registry_cube
+    sky, valid, windows = registry_cube
     partials = str(tmp_path / "partials")
     for channel in [0, 1, 2, 3, 3, 5, 6, 7, 8, 9, 10, 11]:
-        planes = slice(channel, channel + 1)
-        add_first_round_moments(
-            "run",
-            windows,
-            REGISTRY_SHAPE,
-            partials,
-            [channel],
-            sky[:, planes],
-            inside[:, planes],
-        )
+        _add("run", windows, partials, sky, valid, [channel])
     counts = pop_first_round_moments("run", None, partials)["counts"]
     assert counts[3] == 2 and counts[4] == 0
     assert (np.delete(counts, [3, 4]) == 1).all()
 
 
 def test_a_new_run_drops_the_old_entry(registry_cube, tmp_path):
-    sky, inside, windows = registry_cube
+    sky, valid, windows = registry_cube
     partials = str(tmp_path / "partials")
     for run, channel in (("old", 0), ("new", 1)):
-        planes = slice(channel, channel + 1)
-        add_first_round_moments(
-            run,
-            windows,
-            REGISTRY_SHAPE,
-            partials,
-            [channel],
-            sky[:, planes],
-            inside[:, planes],
-        )
+        _add(run, windows, partials, sky, valid, [channel])
     old = pop_first_round_moments("old", "tcp://127.0.0.1:1", partials)
     assert old["counts"] is None and old["slots"] == [] and old["slot_bytes"] == 0
     assert not old["placement_ok"]
@@ -279,21 +329,12 @@ def test_a_new_run_drops_the_old_entry(registry_cube, tmp_path):
 
 
 def test_concurrent_additions_from_threads(registry_cube, tmp_path):
-    sky, inside, windows = registry_cube
+    sky, valid, windows = registry_cube
     partials = str(tmp_path / "partials")
 
     def add(first):
         for channel in range(first, N_REGISTRY, 4):
-            planes = slice(channel, channel + 1)
-            add_first_round_moments(
-                "run",
-                windows,
-                REGISTRY_SHAPE,
-                partials,
-                [channel],
-                sky[:, planes],
-                inside[:, planes],
-            )
+            _add("run", windows, partials, sky, valid, [channel])
 
     threads = [threading.Thread(target=add, args=(first,)) for first in range(4)]
     for thread in threads:
@@ -302,16 +343,17 @@ def test_concurrent_additions_from_threads(registry_cube, tmp_path):
         thread.join()
     pop = pop_first_round_moments("run", None, partials)
     np.testing.assert_array_equal(pop["counts"], np.ones(N_REGISTRY, np.uint16))
-    (moment_0, moment_8), _ = _drain([pop], tmp_path / "fr.zarr", partials, windows)
+    (integral, maximum), _ = _drain([pop], tmp_path / "fr.zarr", partials, windows)
     for index, window in enumerate(windows):
-        expected = _window_moments(sky, inside, window)
-        np.testing.assert_array_equal(moment_8[index], expected[8].astype(np.float32))
-        np.testing.assert_allclose(moment_0[index], expected[0], rtol=1e-12)
+        expected = _window_moments(sky, valid, window)
+        np.testing.assert_array_equal(maximum[index], expected[1])
+        np.testing.assert_allclose(integral[index], expected[0], rtol=1e-12)
 
 
 def test_first_round_chunks_write_masks_rows_and_moments(registry_cube, tmp_path):
     """The imager's chunks of two channels, Stokes I at index 1 of float64
-    planes, give the first round of the whole cube."""
+    planes, give the first round of the whole cube, and the store's rows and
+    moments read back."""
     sky, _, windows = registry_cube
     l_index, m_index = np.indices(REGISTRY_SHAPE)
     radius2 = (l_index - 19.5) ** 2 + (m_index - 11.5) ** 2
@@ -336,7 +378,7 @@ def test_first_round_chunks_write_masks_rows_and_moments(registry_cube, tmp_path
     chunks = [
         find_continuum_first_round_chunk(
             chunk_xds.isel(frequency=slice(start, start + 2)),
-            slice(start, start + 2),
+            np.arange(start, start + 2),
             store,
             VARIABLES,
             1,
@@ -351,29 +393,48 @@ def test_first_round_chunks_write_masks_rows_and_moments(registry_cube, tmp_path
         for start in range(0, N_REGISTRY, 2)
     ]
     rows = {key: np.concatenate([chunk[key] for chunk in chunks]) for key in chunks[0]}
-    rows["write_failed"] = False
     stokes_i, beam_i = values.astype(np.float32), beam.astype(np.float32)
-    inside, profile = primary_beam_masks(beam_i, 0.2)
+    limit_mask, spectrum_mask = primary_beam_masks(beam_i, 0.2)
+    assert rows["channels"].dtype == np.int32
     np.testing.assert_array_equal(rows["channels"], np.arange(N_REGISTRY))
-    np.testing.assert_array_equal(
-        rows["statistics"], first_round_statistics(stokes_i, beam_i, inside)
-    )
-    tiles = [tile_occupancy(mask, REGISTRY_TILE)[0, :, 0] for mask in (inside, profile)]
+    expected_rows = first_round_channel_rows(stokes_i, beam_i, limit_mask)
+    for field in FirstRoundRows._fields:
+        assert rows[field].dtype == expected_rows[field].dtype
+        np.testing.assert_array_equal(rows[field], expected_rows[field][0, :, 0])
+    tiles = [
+        tile_occupancy(mask, REGISTRY_TILE)[0, :, 0]
+        for mask in (limit_mask, spectrum_mask)
+    ]
     np.testing.assert_array_equal(rows["tiles"], np.stack(tiles, axis=1))
-    for name, mask in zip(MASKS, (inside, profile), strict=True):
+    for name, mask in zip(MASKS, (limit_mask, spectrum_mask), strict=True):
         stored = zarr.open_array(os.path.join(store, name), mode="r")[:]
         np.testing.assert_array_equal(
             unpack_plane_masks(stored, REGISTRY_SHAPE[1]), mask[0, :, 0]
         )
-    assert write_find_continuum_first_round_rows(store, rows, N_REGISTRY)["complete"]
+    assert write_first_round_rows(store, dict(rows, write_failed=False), N_REGISTRY)[
+        "complete"
+    ]
+    stored_rows, _ = read_first_round_rows(store, [0, N_REGISTRY])
+    for field in FirstRoundRows._fields:
+        np.testing.assert_array_equal(getattr(stored_rows, field), rows[field])
 
     pop = pop_first_round_moments("imager", None, partials)
     np.testing.assert_array_equal(pop["counts"], np.ones(N_REGISTRY, np.uint16))
-    (moment_0, moment_8), _ = _drain([pop], tmp_path / "drain.zarr", partials, windows)
+    (integral, maximum), _ = _drain([pop], tmp_path / "drain.zarr", partials, windows)
+    valid = valid_voxels(stokes_i, limit_mask) & (stokes_i != 0)
     for index, window in enumerate(windows):
-        expected = _window_moments(stokes_i, inside, window)
-        np.testing.assert_array_equal(moment_0[index], expected[0])
-        np.testing.assert_array_equal(moment_8[index], expected[8].astype(np.float32))
+        expected = _window_moments(stokes_i, valid, window)
+        np.testing.assert_array_equal(integral[index], expected[0])
+        np.testing.assert_array_equal(maximum[index], expected[1])
+        read_integral, read_maximum, counters = read_first_round_moment_maps(
+            str(tmp_path / "drain.zarr"), index
+        )
+        assert read_integral.shape == read_maximum.shape == REGISTRY_SHAPE
+        assert read_maximum.dtype == np.float32
+        np.testing.assert_array_equal(read_integral, expected[0])
+        np.testing.assert_array_equal(read_maximum, expected[1])
+        assert counters["units_read"] == 2 * len(REGISTRY_TILES)
+        assert counters["bytes"] == read_integral.nbytes + read_maximum.nbytes
 
 
 def test_a_transient_error_of_a_mask_write_is_retried(
@@ -384,7 +445,7 @@ def test_a_transient_error_of_a_mask_write_is_retried(
     from astroviper.node_tasks.imaging.utils import skunk_works
 
     monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
-    _, inside, windows = registry_cube
+    _, valid, windows = registry_cube
     store = _first_round_store(
         tmp_path / "fr.zarr",
         N_REGISTRY,
@@ -401,7 +462,7 @@ def test_a_transient_error_of_a_mask_write_is_retried(
         return open_array(path, *args, **kwargs)
 
     monkeypatch.setattr(zarr, "open_array", evicted_once)
-    planes = inside[:, 2:4]
+    planes = valid[:, 2:4]
     assert node_tasks.write_primary_beam_masks(store, [2, 3], planes, planes) > 0
     assert len(failures) == 1
     for name in MASKS:
@@ -416,7 +477,7 @@ def test_a_window_whose_slot_cannot_be_saved_is_lost(
 ):
     """No space for a slot of window 0: the window is dropped and reported
     lost, and the other window is saved."""
-    sky, inside, windows = registry_cube
+    sky, valid, windows = registry_cube
     monkeypatch.setattr(node_tasks, "FIRST_ROUND_WINDOWS_IN_MEMORY", 1)
     save = np.save
 
@@ -428,16 +489,7 @@ def test_a_window_whose_slot_cannot_be_saved_is_lost(
     monkeypatch.setattr(node_tasks.np, "save", save_or_fail)
     partials = str(tmp_path / "partials")
     for start in (0, 6, 2, 8):
-        planes = slice(start, start + 2)
-        add_first_round_moments(
-            "run",
-            windows,
-            REGISTRY_SHAPE,
-            partials,
-            range(start, start + 2),
-            sky[:, planes],
-            inside[:, planes],
-        )
+        _add("run", windows, partials, sky, valid, [start, start + 1])
     pop = pop_first_round_moments("run", None, partials)
     assert pop["lost_windows"] == [0]
     assert [window for window, _ in pop["slots"]] == [1, 1]
@@ -445,30 +497,17 @@ def test_a_window_whose_slot_cannot_be_saved_is_lost(
     files = [
         os.path.join(partials, "W1", f"{name}.{field}.npy")
         for _, name in pop["slots"]
-        for field in ("INTEGRATED", "MAXIMUM")
+        for field in ("integrated", "maximum")
     ]
     assert pop["slot_bytes"] == sum(os.path.getsize(path) for path in files)
 
 
 def test_a_discarded_run_adds_nothing_more(registry_cube, tmp_path):
-    sky, inside, windows = registry_cube
+    sky, valid, windows = registry_cube
     partials = str(tmp_path / "partials")
-
-    def add(channel):
-        planes = slice(channel, channel + 1)
-        add_first_round_moments(
-            "failed",
-            windows,
-            REGISTRY_SHAPE,
-            partials,
-            [channel],
-            sky[:, planes],
-            inside[:, planes],
-        )
-
-    add(0)
+    _add("failed", windows, partials, sky, valid, [0])
     assert node_tasks.discard_first_round_moments("failed")
-    add(1)
+    _add("failed", windows, partials, sky, valid, [1])
     assert "failed" not in node_tasks._FIRST_ROUND_MOMENTS
     assert not node_tasks.discard_first_round_moments("failed")
     assert not os.path.exists(partials)
