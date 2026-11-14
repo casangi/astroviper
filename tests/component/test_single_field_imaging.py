@@ -1868,12 +1868,8 @@ def test_without_a_restoring_beam_the_restored_fits_file_has_a_beam_per_plane(
             "E"
         ] * 3
         table = np.stack([rows[name] for name in ("BMAJ", "BMIN", "BPA")], -1)
-    degrees = np.degrees(expected[0])
     np.testing.assert_array_equal(
-        table.reshape(degrees.shape),
-        np.stack(
-            [degrees[..., 0] * 3600.0, degrees[..., 1] * 3600.0, degrees[..., 2]], -1
-        ).astype(np.float32),
+        table.reshape(expected[0].shape), expected[0].astype(np.float32)
     )
     beams = open_image({"sky_restored": path}).BEAM_FIT_PARAMS_SKY_RESTORED.values
     np.testing.assert_allclose(beams, expected, rtol=np.finfo(np.float32).eps)

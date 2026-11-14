@@ -27,8 +27,8 @@ Layout of each FITS file (conforming to what
 * Optional ``BEAMS`` binary-table extension (``CASAMBM = T`` in the primary
   header) carrying the per-channel/per-polarization beam-fit parameters
   (``BMAJ, BMIN, BPA, CHAN, POL`` -- CASA's multi-beam convention, as
-  casacore reads and writes it: float32 axes in arcsec and position angle in
-  degrees, int32 indices). Rows are fixed-size and channel-major, so node tasks
+  casacore reads it: float32 axes and position angle in radians, int32
+  indices). Rows are fixed-size and channel-major, so node tasks
   ``pwrite`` their channels' rows at disjoint offsets exactly like the image
   planes. casacore refuses a table with a zero or non-finite beam, so after
   the run :func:`fill_fits_beams_without_fit` gives the rows of planes without
@@ -95,15 +95,15 @@ _BEAM_CARRYING_VARIABLES = frozenset(
 _RESTORED_VARIABLES = frozenset({"sky_restored", "sky_restored_primary_beam_corrected"})
 
 # Fixed BEAMS-table row layout written by create_empty_fits_images and assumed
-# by the row writer, as casacore's ImageFITSConverter reads and writes it:
+# by the row writer, as casacore's ImageFITSConverter reads it:
 # BMAJ, BMIN, BPA as big-endian float32 in the units below, then CHAN, POL as
 # big-endian int32.
 _BEAMS_ROW_DTYPE = np.dtype(
     [("BMAJ", ">f4"), ("BMIN", ">f4"), ("BPA", ">f4"), ("CHAN", ">i4"), ("POL", ">i4")]
 )
-_BEAMS_UNITS = ("arcsec", "arcsec", "deg")
-# tclean's beam for every plane when no plane has a fit (arcsec, arcsec, deg).
-_NO_FIT_BEAM = (1e-6, 1e-6, 0.0)
+_BEAMS_UNITS = ("rad", "rad", "rad")
+# tclean's beam for every plane when no plane has a fit.
+_NO_FIT_BEAM = tuple(np.radians([1e-6 / 3600.0, 1e-6 / 3600.0, 0.0]))
 
 _FULL_DIMS_LM = ("time", "frequency", "polarization", "l", "m")
 _BEAM_PARAMS_DIMS = ("time", "frequency", "polarization", "beam_params_label")
@@ -571,15 +571,14 @@ def _encode_image_chunk(variable_key, image_store, chan_start, img_xds):
 
 
 def _encode_beam_rows(beam_variable_key, chan_start, img_xds):
-    """Encode this chunk's ``BEAMS`` rows (full rows, including CHAN/POL), the
-    beams converted from radians to ``_BEAMS_UNITS``."""
-    values = np.asarray(img_xds[beam_variable_key.upper()].values, dtype=np.float64)
+    """Encode this chunk's ``BEAMS`` rows (full rows, including CHAN/POL)."""
+    values = np.asarray(img_xds[beam_variable_key.upper()].values)
     n_chan, n_pol = values.shape[1:3]
     beams = values[0, :, :, :3].reshape(-1, 3)
     rows = np.empty(n_chan * n_pol, dtype=_BEAMS_ROW_DTYPE)
-    rows["BMAJ"] = np.degrees(beams[:, 0]) * 3600.0
-    rows["BMIN"] = np.degrees(beams[:, 1]) * 3600.0
-    rows["BPA"] = np.degrees(beams[:, 2])
+    rows["BMAJ"] = beams[:, 0]
+    rows["BMIN"] = beams[:, 1]
+    rows["BPA"] = beams[:, 2]
     rows["CHAN"] = chan_start + np.repeat(np.arange(n_chan), n_pol)
     rows["POL"] = np.tile(np.arange(n_pol), n_chan)
     return rows.tobytes()

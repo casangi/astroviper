@@ -373,7 +373,11 @@ def test_restoring_beam_section(tmp_path, output_image_format):
     assert text.count("data:image/png;base64,") == 1
     assert text.count("<td>no fit</td>") == 1
     assert text.count("<td>not contained</td>") == 1
-    assert "<td>1.333333333</td>" in text
+    # FITS output holds the PSF beams as float32 radians.
+    major = 2.0 * ARCSEC
+    if output_image_format == "fits":
+        major = float(np.float32(major))
+    assert f"<td>{major / (1.5 * ARCSEC):.10g}</td>" in text
 
 
 def test_restoring_beam_section_without_uncorrected_channels(tmp_path):

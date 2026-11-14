@@ -65,12 +65,8 @@ def _full_arrays(seed=7, n_chan=None):
 
 def _casa_rows(beams):
     """Beams ``[major, minor, pa]`` in radians as a ``BEAMS`` table holds them:
-    float32 arcsec, arcsec and degrees, the types and units of CASA's tables."""
-    beams = np.asarray(beams, dtype=np.float64)
-    degrees = np.degrees(beams)
-    return np.stack(
-        [degrees[..., 0] * 3600.0, degrees[..., 1] * 3600.0, degrees[..., 2]], -1
-    ).astype(np.float32)
+    float32 radians."""
+    return np.asarray(beams, dtype=np.float32)
 
 
 def _write_chunk(store, full, chan_slice, threads=1, keep=KEEP):
@@ -131,8 +127,8 @@ def test_astropy_round_trip(written_store):
 def test_beams_tables_have_the_types_and_units_casacore_reads(written_store):
     """casacore's ImageFITSConverter::readBeamsTable reads BMAJ, BMIN and BPA
     only as float32 ('E') with angular TUNITs and CHAN, POL as int32 ('J'),
-    with NCHAN and NPOL keywords; arcsec and degrees are the units of the
-    tables exportfits writes for tclean's images."""
+    with NCHAN and NPOL keywords; the beams are in radians, the unit of the
+    beam-fit-params variables."""
     from astropy.io import fits
 
     store, _img_xds, _full = written_store
@@ -142,7 +138,7 @@ def test_beams_tables_have_the_types_and_units_casacore_reads(written_store):
             columns = table.columns
             assert columns.names == ["BMAJ", "BMIN", "BPA", "CHAN", "POL"]
             assert columns.formats == list("EEEJJ")
-            assert columns.units[:3] == ["arcsec", "arcsec", "deg"]
+            assert columns.units[:3] == ["rad", "rad", "rad"]
             assert table.header["NAXIS1"] == 20
             assert (table.header["NCHAN"], table.header["NPOL"]) == (5, 2)
 
@@ -478,7 +474,10 @@ def test_without_any_fit_rows_take_the_tclean_default_beam(tmp_path):
     for key in ("sky_residual", "point_spread_function"):
         np.testing.assert_array_equal(
             _beams_table(store, key),
-            np.broadcast_to(np.float32([1e-6, 1e-6, 0.0]), (len(FREQS), len(POLS), 3)),
+            np.broadcast_to(
+                _casa_rows(np.radians([1e-6 / 3600, 1e-6 / 3600, 0.0])),
+                (len(FREQS), len(POLS), 3),
+            ),
         )
 
 
@@ -526,10 +525,10 @@ def test_xradio_open_image_round_trip(written_store):
     sky = xds.SKY.isel(time=0).transpose("frequency", "polarization", "l", "m").values
     assert np.allclose(sky, full["SKY_RESIDUAL"][0])
 
-    # The BEAMS table becomes the beam-fit-params variable (radians).
-    assert np.allclose(
+    # The BEAMS table becomes the beam-fit-params variable, the radians it holds.
+    np.testing.assert_array_equal(
         xds["BEAM_FIT_PARAMS_SKY"].values,
-        full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"],
+        _casa_rows(full["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"]),
     )
 
     assert xds.SKY.attrs["telescope"]["name"] == "ALMA"
