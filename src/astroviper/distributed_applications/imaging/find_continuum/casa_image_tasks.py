@@ -4,13 +4,17 @@ findContinuum addresses images by path, as CASA does. The dirty cube, its
 primary beam and its point spread function are registered with
 :func:`cube_session`; every reduction of a registered cube (``immoments``,
 ``imstat``, ``image.getprofile``) is a request to the session's ``reduce``
-callable, which runs it as a map-reduce over the image store. Every other path
-is a small image written here (:func:`astroviper.node_tasks.imaging.find_continuum.write_small_image`).
+callable, which runs it as a map-reduce over the image store; a box or a few
+channels of a registered cube are read directly. Every other path is a small
+image written here (:func:`astroviper.node_tasks.imaging.find_continuum.write_small_image`),
+kept in memory by the write id of its store, so that a read after a write, a
+rename or an earlier read decodes nothing; metadata comes from the attributes.
 The tools that read a Measurement Set or need CASA's atmosphere model are not
 provided: findContinuum takes the atmosphere from the caller and runs without
 a Measurement Set.
 """
 
+import collections
 import contextlib
 import os
 import re
@@ -21,11 +25,18 @@ from astropy import units
 
 from astroviper.node_tasks.imaging.find_continuum import (
     read_small_image,
+    small_image_attributes,
     write_small_image,
 )
-from astroviper.processing_functions.image_analysis.make_auto_mask import _prune
+from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
+from astroviper.processing_functions.image_analysis.make_auto_mask import (
+    _chauvenet_sample,
+    _prune,
+)
 from astroviper.processing_functions.imaging.find_continuum import (
     CASA_MOMENTS,
+    CHANNEL_STATISTICS,
+    channel_statistics,
     evaluate_lattice_expression,
     image_statistics,
     lattice_expression_names,
@@ -43,6 +54,7 @@ class _Session:
     def __init__(self, cubes, reduce):
         self.cubes = {path.rstrip("/"): cube for path, cube in cubes.items()}
         self.reduce = reduce
+        self.counters = {}
 
 
 @contextlib.contextmanager
@@ -53,15 +65,24 @@ def cube_session(cubes, reduce):
     ----------
     cubes : dict
         Path findContinuum uses to a dict with ``store`` (the image store),
-        ``variable`` (its data variable), ``metadata`` (CASA image metadata),
-        optionally ``primary_beam`` and ``primary_beam_limit`` (pixels where
-        that variable is below the limit are masked, as in the cubes of
-        ``tclean`` with ``pblimit``) and, for the dirty cube, ``atmosphere``
-        (``{"transmission": ..., "tsky": ...}``, one value per channel). Each
-        path must exist as a directory.
+        ``variable`` (its data variable), ``metadata`` (CASA image metadata
+        of the cube findContinuum sees), ``channel_offset`` (the channel of
+        the store that is findContinuum's channel 0), ``polarization_index``
+        (the index of Stokes I in the store), optionally ``primary_beam`` and
+        ``primary_beam_limit`` (pixels where that variable is below the limit
+        are masked, as in the cubes of ``tclean`` with ``pblimit``) and, for
+        the dirty cube, ``atmosphere`` (``{"transmission": ..., "tsky": ...}``,
+        one value per channel). Each path must exist as a directory.
     reduce : callable
         ``reduce(requests)`` returns the finalized results of a list of
         reduction requests over the registered cubes.
+
+    Yields
+    ------
+    _Session
+        The session; its ``counters`` accumulate the counters of
+        :func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`
+        over the direct reads of the registered cubes.
     """
     global _session
     _session = _Session(cubes, reduce)
@@ -69,6 +90,7 @@ def cube_session(cubes, reduce):
         yield _session
     finally:
         _session = None
+        _small_images.clear()
 
 
 def _cube(path):
@@ -117,30 +139,93 @@ def parse_channel_selection(chans, nchan):
     return np.array(sorted({c for c in channels if 0 <= c < nchan}), dtype=int)
 
 
+# Arrays of the small images this process wrote or read, keyed by the write id
+# of the store (findContinuum renames and removes stores itself), least
+# recently used first; at most _SMALL_IMAGE_BYTES. The arrays are read-only.
+_SMALL_IMAGE_BYTES = 4 * 2**30
+_small_images = collections.OrderedDict()
+
+
+def _remember(write_id, values, mask):
+    values.flags.writeable = False
+    mask.flags.writeable = False
+    _small_images[write_id] = values, mask
+    _small_images.move_to_end(write_id)
+    while len(_small_images) > 1 and _SMALL_IMAGE_BYTES < sum(
+        v.nbytes + m.nbytes for v, m in _small_images.values()
+    ):
+        _small_images.popitem(last=False)
+    return values, mask
+
+
 def _read(path):
-    """Values (masked pixels NaN), mask and metadata of a small image."""
-    values, mask, metadata = read_small_image(path.rstrip("/"))
-    return values, mask, metadata
+    """Values, mask (``True`` = valid; both read-only) and metadata of a small image."""
+    path = path.rstrip("/")
+    attributes = small_image_attributes(path)
+    write_id = attributes["write_id"]
+    if write_id in _small_images:
+        _small_images.move_to_end(write_id)
+        values, mask = _small_images[write_id]
+    else:
+        values, mask = _remember(write_id, *read_small_image(path)[:2])
+    return values, mask, attributes["casa_metadata"]
+
+
+def _write(path, values, mask, metadata):
+    """Write a small image and keep its arrays for the reads that follow."""
+    path = path.rstrip("/")
+    _remember(write_small_image(path, values, mask, metadata), values, mask)
+
+
+def _image_metadata(path):
+    """CASA metadata of a registered cube, or of a small image from its attributes."""
+    cube = _cube(path)
+    if cube is not None:
+        return cube["metadata"]
+    return small_image_attributes(path.rstrip("/"))["casa_metadata"]
 
 
 def _read_cube_channels(path, channels, spatial=(slice(None), slice(None))):
-    import xarray as xr
+    """Stokes I of channels (all if ``None``) and an ``(l, m)`` box of a cube.
 
+    The values are float64 in CASA axis order, NaN below the primary beam
+    limit; the store is read at ``channel_offset`` plus each channel, one
+    read per run of consecutive channels.
+    """
     cube = _cube(path)
-    lazy_xds = xr.open_zarr(cube["store"], chunks=None)
-    selection = dict(
-        frequency=slice(None) if channels is None else list(channels),
-        l=spatial[0],
-        m=spatial[1],
-    )
+    offset = cube["channel_offset"]
+    if channels is None:
+        runs = [(offset, offset + cube["metadata"]["shape"][3])]
+    else:
+        runs = [
+            (offset + run[0], offset + run[-1] + 1)
+            for run in np.split(channels, np.flatnonzero(np.diff(channels) != 1) + 1)
+        ]
+    index = cube["polarization_index"]
+    selection = {
+        "polarization": slice(index, index + 1),
+        "l": spatial[0],
+        "m": spatial[1],
+    }
 
-    def plane(variable):
-        planes = lazy_xds[variable].isel(selection).sel(polarization=["I"]).values[0]
-        return np.transpose(planes, (2, 3, 1, 0))
+    def read(variable, dtype=None):
+        planes = []
+        for start, stop in runs:
+            data, dims = read_array_region(
+                os.path.join(cube["store"], variable),
+                dict(selection, frequency=slice(start, stop)),
+                counters=_session.counters,
+            )
+            order = [
+                dims.index(dim)
+                for dim in ("time", "l", "m", "polarization", "frequency")
+            ]
+            planes.append(np.transpose(data, order)[0])
+        return np.concatenate(planes, axis=3, dtype=dtype)
 
-    values = plane(cube["variable"]).astype(np.float64)
+    values = read(cube["variable"], np.float64)
     if cube.get("primary_beam_limit") is not None:
-        values[plane(cube["primary_beam"]) < cube["primary_beam_limit"]] = np.nan
+        values[read(cube["primary_beam"]) < cube["primary_beam_limit"]] = np.nan
     return values, np.isfinite(values), dict(cube["metadata"], shape=list(values.shape))
 
 
@@ -193,11 +278,12 @@ def _moments_request(path, moments, chans="", mask=""):
         chans,
         mask,
         moments=list(moments),
-        frequency=(
-            metadata["reference_value"][3]
-            + metadata["increment"][3]
-            * (np.arange(metadata["shape"][3]) - metadata["reference_pixel"][3])
-        ).tolist(),
+        frequency_axis=(
+            metadata["reference_value"][3],
+            metadata["increment"][3],
+            metadata["reference_pixel"][3],
+            metadata["shape"][3],
+        ),
         rest_frequency=metadata["rest_frequency"],
     )
 
@@ -238,24 +324,73 @@ def immoments(
     for moment in moments:
         path = outfile + MOMENT_SUFFIXES[moment] if len(moments) > 1 else outfile
         values = maps[moment][:, :, None, None]
-        write_small_image(
-            path, values, np.isfinite(values), _small_image_metadata(metadata)
-        )
+        _write(path, values, np.isfinite(values), _small_image_metadata(metadata))
     return True
 
 
-def _statistics_dict(stats, maxpos=None, minpos=None):
+def _statistics_dict(stats):
     # CASA returns empty arrays when no pixel of the image is valid.
     if np.ndim(stats["npts"]) == 0 and not stats["npts"]:
         return {key: np.array([], dtype=np.float64) for key in stats}
-    result = {
+    return {
         key: np.atleast_1d(np.asarray(value, dtype=np.float64))
         for key, value in stats.items()
     }
-    if maxpos is not None:
-        result["maxpos"] = np.asarray(maxpos)
-        result["minpos"] = np.asarray(minpos)
-    return result
+
+
+_ORDER_STATISTICS = ("median", "medabsdevmed", "q1", "q3", "quartile")
+
+
+class _LazyStatistics(dict):
+    """Whole-image ``imstat`` results, one-element arrays as CASA gives them.
+
+    ``npts``, ``sum``, ``sumsq``, ``mean``, ``sigma``, ``rms``, ``min`` and
+    ``max`` are computed at once, with the expressions of
+    :func:`~astroviper.processing_functions.imaging.find_continuum.channel_statistics`;
+    the order statistics, and ``maxpos`` with ``minpos``, when first read.
+
+    Parameters
+    ----------
+    sample : numpy.ndarray
+        The float64 values of the statistics, at least one; the order
+        statistics overwrite it.
+    positions : callable
+        Returns ``maxpos`` and ``minpos``.
+    """
+
+    def __init__(self, sample, positions):
+        npts = sample.size
+        sumsq = float(np.dot(sample, sample))
+        super().__init__(
+            (key, np.array([value], dtype=np.float64))
+            for key, value in (
+                ("npts", npts),
+                ("sum", sample.sum()),
+                ("sumsq", sumsq),
+                ("mean", sample.mean()),
+                ("sigma", sample.std(ddof=1) if npts > 1 else 0.0),
+                ("rms", np.sqrt(sumsq / npts)),
+                ("min", sample.min()),
+                ("max", sample.max()),
+            )
+        )
+        self._sample = sample
+        self._positions = positions
+
+    def __missing__(self, key):
+        if key in _ORDER_STATISTICS and self._sample is not None:
+            stats = channel_statistics(self._sample, overwrite_input=True)
+            self._sample = None
+            for name in _ORDER_STATISTICS:
+                self.setdefault(name, np.array([stats[name]], dtype=np.float64))
+        elif key in ("maxpos", "minpos") and self._positions is not None:
+            maxpos, minpos = self._positions()
+            self._positions = None
+            self.setdefault("maxpos", maxpos)
+            self.setdefault("minpos", minpos)
+        else:
+            raise KeyError(key)
+        return self[key]
 
 
 def _box_slices(box, shape):
@@ -281,7 +416,11 @@ def imstat(
     verbose=True,
     **kwargs,
 ):
-    """CASA ``imstat``: whole-image or per-channel (``axes=[0,1,2]``) statistics."""
+    """CASA ``imstat``: whole-image or per-channel (``axes=[0,1,2]``) statistics.
+
+    The whole-image statistics of a small image or of a box of a cube are a
+    new :class:`_LazyStatistics` at every call.
+    """
     if kwargs:
         raise NotImplementedError(
             f"imstat arguments {sorted(kwargs)} are not supported"
@@ -289,6 +428,10 @@ def imstat(
     per_channel = axes not in (-1, None, [])
     if per_channel and list(axes) != [0, 1, 2]:
         raise NotImplementedError(f"imstat axes={axes} is not supported")
+    if algorithm != "classic" and (algorithm, maxiter) != ("chauvenet", 5):
+        raise NotImplementedError(
+            f"imstat algorithm={algorithm!r} with maxiter={maxiter} is not supported"
+        )
     if _cube(imagename) is not None and not box:
         if algorithm != "classic":
             raise NotImplementedError("Only classic statistics are supported on a cube")
@@ -296,6 +439,13 @@ def imstat(
             imagename, "statistics", chans, mask, per_channel=per_channel
         )
         return _statistics_dict(_reduce([request])[0])
+    return _image_statistics(
+        imagename, per_channel, box, chans, mask, algorithm, maxiter
+    )
+
+
+def _image_statistics(imagename, per_channel, box, chans, mask, algorithm, maxiter):
+    """imstat of a box of a cube, or of a small image."""
     if _cube(imagename) is not None:
         shape = _cube(imagename)["metadata"]["shape"]
         channels = parse_channel_selection(chans, shape[3])
@@ -325,20 +475,26 @@ def imstat(
             for c in range(values.shape[3])
         ]
         return {key: np.array([row[key] for row in rows]) for key in rows[0]}
-    stats = image_statistics(values[valid], algorithm, maxiter)
     if not valid.any():
-        return _statistics_dict(stats)
-    masked = np.where(valid, values, np.nan)
-    positions = []
-    # Pixel positions in the whole image, as CASA gives them.
-    for index in (np.nanargmax(masked), np.nanargmin(masked)):
-        position = [int(i) for i in np.unravel_index(index, values.shape)]
-        position[0] += spatial[0].start or 0
-        position[1] += spatial[1].start or 0
-        if channels is not None:
-            position[3] = int(channels[position[3]])
-        positions.append(position)
-    return _statistics_dict(stats, *positions)
+        return {key: np.array([], dtype=np.float64) for key in CHANNEL_STATISTICS}
+    sample = values[valid]
+    if algorithm == "chauvenet":
+        sample = _chauvenet_sample(sample)
+
+    def positions():
+        masked = np.where(valid, values, np.nan)
+        result = []
+        # Pixel positions in the whole image, as CASA gives them.
+        for index in (np.nanargmax(masked), np.nanargmin(masked)):
+            position = [int(i) for i in np.unravel_index(index, values.shape)]
+            position[0] += spatial[0].start or 0
+            position[1] += spatial[1].start or 0
+            if channels is not None:
+                position[3] = int(channels[position[3]])
+            result.append(np.asarray(position))
+        return result
+
+    return _LazyStatistics(sample, positions)
 
 
 def immath(
@@ -380,9 +536,7 @@ def immath(
             ),
             shape,
         )
-    write_small_image(
-        outfile, np.array(result), valid, _small_image_metadata(metadata, shape[3])
-    )
+    _write(outfile, np.array(result), valid, _small_image_metadata(metadata, shape[3]))
     return True
 
 
@@ -414,9 +568,7 @@ def imsubimage(imagename, outfile="", chans="", mask="", overwrite=False, **kwar
         )
     if os.path.exists(outfile) and not overwrite:
         raise FileExistsError(outfile)
-    write_small_image(
-        outfile, values, valid, _small_image_metadata(metadata, values.shape[3])
-    )
+    _write(outfile, values, valid, _small_image_metadata(metadata, values.shape[3]))
     return True
 
 
@@ -428,11 +580,7 @@ def makemask(
         raise NotImplementedError("makemask supports mode='copy' only")
     if ":" in os.path.basename(output):
         raise NotImplementedError("makemask into an internal mask is not supported")
-    _, _, metadata = (
-        _read(inpimage)
-        if _cube(inpimage) is None
-        else (None, None, _cube(inpimage)["metadata"])
-    )
+    metadata = _image_metadata(inpimage)
     combined = None
     for source in [inpmask] if isinstance(inpmask, str) else list(inpmask):
         if source.endswith(":mask0"):
@@ -444,7 +592,7 @@ def makemask(
         combined = selected if combined is None else combined | selected
     if os.path.exists(output) and not overwrite:
         raise FileExistsError(output)
-    write_small_image(
+    _write(
         output,
         combined.astype(np.float64),
         np.ones(combined.shape, dtype=bool),
@@ -457,9 +605,7 @@ def imhead(imagename, mode="summary", hdkey="", **kwargs):
     """CASA ``imhead``: ``mode='get'`` of the ``object`` keyword."""
     if mode != "get" or hdkey != "object" or kwargs:
         raise NotImplementedError("imhead supports mode='get', hdkey='object' only")
-    cube = _cube(imagename)
-    metadata = cube["metadata"] if cube is not None else _read(imagename)[2]
-    return metadata["object"]
+    return _image_metadata(imagename)["object"]
 
 
 def imcollapse(
@@ -476,7 +622,7 @@ def imcollapse(
     if os.path.exists(outfile) and not overwrite:
         raise FileExistsError(outfile)
     shape = list(result.shape)
-    write_small_image(outfile, result, np.isfinite(result), dict(metadata, shape=shape))
+    _write(outfile, result, np.isfinite(result), dict(metadata, shape=shape))
     return True
 
 
@@ -569,8 +715,7 @@ class iatool:
     done = close
 
     def _metadata(self):
-        cube = _cube(self.path)
-        return cube["metadata"] if cube is not None else _read(self.path)[2]
+        return _image_metadata(self.path)
 
     def shape(self):
         return np.array(self._metadata()["shape"], dtype=int)
@@ -606,8 +751,7 @@ class iatool:
             raise NotImplementedError("maskhandler supports op='default' only")
         if _cube(self.path) is not None:
             return [""]
-        _, valid, _ = _read(self.path)
-        return ["" if valid.all() else "mask0"]
+        return ["" if small_image_attributes(self.path)["all_valid"] else "mask0"]
 
     def getregion(self, region=None, getmask=False, axes=None, **kwargs):
         if region is not None or axes is not None or kwargs:
@@ -617,7 +761,7 @@ class iatool:
         if _cube(self.path) is not None:
             raise NotImplementedError("getregion of a whole cube is not supported")
         values, valid, _ = _read(self.path)
-        return valid if getmask else values
+        return (valid if getmask else values).copy()
 
     def getprofile(self, axis=3, function="mean", mask="", stretch=False, **kwargs):
         if kwargs or axis != 3:
@@ -672,7 +816,7 @@ class synthesismaskhandler:
             pruned[(slice(None), slice(None), *index)] = kept
             n_regions.append(scipy.ndimage.label(plane)[1])
             n_pruned.append(n_regions[-1] - scipy.ndimage.label(kept)[1])
-        write_small_image(
+        _write(
             outmaskname or inmaskname.rstrip("/") + ".pruned",
             pruned.astype(np.float64),
             np.ones(pruned.shape, dtype=bool),

@@ -19,6 +19,7 @@ import numpy as np
 __all__ = [
     "STOKES_STYLES",
     "plot_antenna_positions",
+    "plot_continuum_selection",
     "plot_deconvolution_summary",
     "plot_plane_deconvolution_summary",
     "plot_point_spread_function_cross_sections",
@@ -327,6 +328,67 @@ def plot_spectra(frequency, values, stokes, ylabel, title=None):
         ax.set_title(f"Stokes {label}", fontsize=10)
         ax.grid(True, **_GRID)
     axes[0, 0].set_ylabel(ylabel)
+    if title:
+        figure.suptitle(title, fontsize=11)
+    return figure
+
+
+def plot_continuum_selection(
+    frequency,
+    spectrum,
+    continuum_channel_ranges,
+    positive_threshold,
+    negative_threshold,
+    corrected_median,
+    title=None,
+):
+    """A spectrum with the continuum channels selected on it: the selected
+    ranges shaded, the thresholds of the selection and its corrected median.
+
+    Parameters
+    ----------
+    frequency : array_like, [n_channels]
+        Hz, at least two channels.
+    spectrum : array_like, [n_channels]
+        The spectrum the selection read.
+    continuum_channel_ranges : list of [start, stop)
+        Channel ranges of the selection.
+    positive_threshold, negative_threshold, corrected_median : float
+        The selection's thresholds and its corrected median, in the units of
+        ``spectrum``.
+    title : str, optional
+        Figure title.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    figure, axes = _figure(1, 1, panel_size=(8.0, 3.6))
+    ax = axes[0, 0]
+    x = _frequency_axis(ax, frequency)
+    # The channels' edges, half a channel from their centres.
+    edges = np.concatenate(
+        [[1.5 * x[0] - 0.5 * x[1]], (x[:-1] + x[1:]) / 2, [1.5 * x[-1] - 0.5 * x[-2]]]
+    )
+    for index, (start, stop) in enumerate(continuum_channel_ranges):
+        ax.axvspan(
+            edges[start],
+            edges[stop],
+            color=_COLORS[2],
+            alpha=0.2,
+            linewidth=0,
+            label="continuum" if index == 0 else None,
+        )
+    ax.plot(x, spectrum, color=_COLORS[0], linewidth=1.0, label="spectrum")
+    for level, label, color in (
+        (positive_threshold, "thresholds", _COLORS[4]),
+        (negative_threshold, None, _COLORS[4]),
+        (corrected_median, "corrected median", _INK),
+    ):
+        ax.axhline(level, color=color, linestyle="--", linewidth=1.0, label=label)
+    ax.set_ylabel("spectrum")
+    ax.grid(True, **_GRID)
+    ax.legend(fontsize=7)
     if title:
         figure.suptitle(title, fontsize=11)
     return figure

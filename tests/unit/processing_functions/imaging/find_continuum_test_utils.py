@@ -1,4 +1,4 @@
-"""Simulated dirty cubes for the find_continuum tests."""
+"""Simulated dirty cubes and reduction helpers for the find_continuum tests."""
 
 import numpy as np
 import xarray as xr
@@ -175,3 +175,123 @@ LINE_SET = (
         "size_fwhm_pixels": 4,
     },
 )
+COMPACT_LINE = dict(
+    channel=120,
+    fwhm_channels=14,
+    peak_jy=0.04,
+    offset_pixels=(0, 0),
+    size_fwhm_pixels=6,
+)
+# Channel selection, all-continuum flag and moment difference SNR of CASA
+# 6.7.6's findContinuum (pipeline 2026.3.0.7) on the same cubes, with CASA's
+# atmosphere model. The windows have no atmospheric line, and a flat atmosphere
+# selects the same channels. Last, the passes of find_continuum that read the
+# dirty cube.
+CASA_RESULTS = {
+    "no_lines": (dict(lines=()), "9~464", True, 4.4041, 7),
+    "line_set": (dict(lines=LINE_SET), "6~85;154~367;433~472", False, 6.2507, 7),
+    # The primary beam falls below 0.2 in the corners: masked there, as by
+    # tclean's pblimit in the pipeline (and in the CASA reference).
+    "small_beam": (
+        dict(lines=LINE_SET, primary_beam_fwhm_arcsec=8.0),
+        "6~85;154~367;433~467",
+        False,
+        7.3877,
+        7,
+    ),
+    # The ripple of the bright line's channels amends the joint mask.
+    "sidelobes": (
+        dict(
+            n_pixels=96,
+            lines=(
+                dict(COMPACT_LINE, sidelobe_fraction=0.2),
+                dict(
+                    channel=300,
+                    fwhm_channels=20,
+                    peak_jy=6e-3,
+                    offset_pixels=(22, -18),
+                    size_fwhm_pixels=24,
+                ),
+            ),
+        ),
+        "3~86;154~255;339~472",
+        False,
+        5.0069,
+        8,
+    ),
+}
+# Cubes of findContinuum's paths without rounds (time-division mode), with an
+# extra joint mask after round original and with the low-spread fix, with
+# CASA's results as in CASA_RESULTS.
+NATIVE_CASES = {
+    "tdm": (
+        dict(
+            lines=LINE_SET[:1],
+            n_channels=120,
+            channel_width=15.625e6,
+            beam_fwhm_arcsec=0.3,
+            cell_arcsec=0.06,
+        ),
+        "3~106",
+        False,
+        0.0,
+    ),
+    "only_extra_mask": (
+        dict(
+            n_pixels=96,
+            lines=(
+                dict(COMPACT_LINE, sidelobe_fraction=0.1),
+                dict(
+                    channel=300,
+                    fwhm_channels=20,
+                    peak_jy=6e-3,
+                    offset_pixels=(22, -18),
+                    size_fwhm_pixels=24,
+                ),
+            ),
+        ),
+        "7~95;172~260;325~473",
+        False,
+        4.8890,
+    ),
+    "eight_channels": (
+        dict(
+            n_channels=8,
+            lines=(
+                dict(
+                    channel=4,
+                    fwhm_channels=1.5,
+                    peak_jy=0.04,
+                    offset_pixels=(0, 0),
+                    size_fwhm_pixels=6,
+                ),
+            ),
+        ),
+        "1~1;6~7",
+        False,
+        4.1222,
+    ),
+}
+# The passes of find_continuum_ultra that read the dirty cube, without a
+# first-round store and with the imager's (design section 14.3 item 5).
+NATIVE_RESIDUAL_READS = {
+    "no_lines": (3, 2),
+    "line_set": (3, 2),
+    "small_beam": (3, 2),
+    "sidelobes": (5, 4),
+    "tdm": (2, 1),
+    "only_extra_mask": (5, 4),
+    "eight_channels": (4, 3),
+}
+
+
+def graphviper_tree(leaves, merge):
+    """GraphVIPER's binary tree reduce (``_tree_combine``): neighbours paired
+    level by level, an odd last node carried up, ``merge(left, right)``."""
+    level = list(leaves)
+    while len(level) > 1:
+        level = [
+            merge(level[i], level[i + 1]) if i + 1 < len(level) else level[i]
+            for i in range(0, len(level), 2)
+        ]
+    return level[0]

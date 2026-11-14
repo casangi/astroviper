@@ -17,6 +17,7 @@ from astroviper.processing_functions.image_analysis.point_spread_function_gaussi
 from astroviper.utils.report_plots import (
     _asinh_ticks,
     plot_antenna_positions,
+    plot_continuum_selection,
     plot_deconvolution_summary,
     plot_plane_deconvolution_summary,
     plot_point_spread_function_cross_sections,
@@ -165,6 +166,29 @@ def test_spectra_and_deconvolution_summary():
         {1: "Reached max_iter_per_cycle_updated", 2: "Reached threshold_per_cycle"},
     )
     _assert_pyplot_free(figure, 6)
+
+
+def test_continuum_selection():
+    frequency = 230.0e9 + 0.9765625e6 * np.arange(40)
+    spectrum = np.random.default_rng(1).standard_normal(40)
+    figure = plot_continuum_selection(
+        frequency, spectrum, [[0, 10], [25, 40]], 2.5, -2.0, 0.1, title="window 0"
+    )
+    _assert_pyplot_free(figure, 1)
+    ax = figure.axes[0]
+    spans = [patch for patch in ax.patches]
+    assert len(spans) == 2
+    # The spans reach the outer edges of the selected channels, in GHz.
+    x0, x1 = spans[1].get_x(), spans[1].get_x() + spans[1].get_width()
+    edges = (frequency[25] - 0.4882812e6) / 1e9, (frequency[39] + 0.4882812e6) / 1e9
+    np.testing.assert_allclose([x0, x1], edges, rtol=1e-12)
+    assert sorted(line.get_ydata()[0] for line in ax.lines[1:]) == [-2.0, 0.1, 2.5]
+    assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+        "continuum",
+        "spectrum",
+        "thresholds",
+        "corrected median",
+    ]
 
 
 def test_antenna_positions_and_uv_coverage():

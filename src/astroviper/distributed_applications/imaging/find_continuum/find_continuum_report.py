@@ -1,4 +1,4 @@
-"""Report of a :func:`~astroviper.distributed_applications.imaging.find_continuum.find_continuum.find_continuum` or ``find_continuum_fused`` run."""
+"""Report of a :func:`~astroviper.distributed_applications.imaging.find_continuum.find_continuum.find_continuum` run."""
 
 from __future__ import annotations
 
@@ -10,17 +10,15 @@ FIND_CONTINUUM_TASK_STREAM_COLUMNS = {
 }
 
 
-def find_continuum_report(
-    return_dict, report_store, report="html", application="find_continuum"
-):
-    """Make the report of a ``find_continuum`` or ``find_continuum_fused`` run.
+def find_continuum_report(return_dict, report_store, report="html"):
+    """Make the report of a ``find_continuum`` run.
 
     The processing section is the one of every distributed application
     (:func:`~astroviper.utils.report.add_processing_section`); the task stream
     has the node tasks of every pass over the image store, and the driver's
     work between the passes shows as the gaps between them. The results
-    section holds the channel selection and findContinuum's other results,
-    its summary plot, and one row per pass with the reductions it made.
+    section holds the channel selection and findContinuum's other results, its
+    summary plot, and one row per pass with the reductions it made.
 
     Parameters
     ----------
@@ -30,8 +28,6 @@ def find_continuum_report(
         The report is ``<report_store>_report.html`` (or ``.pdf``).
     report : str, optional
         ``"html"`` (default), ``"pdf"`` or ``"notebook"``.
-    application : str, optional
-        ``"find_continuum"`` (default) or ``"find_continuum_fused"``.
 
     Returns
     -------
@@ -53,7 +49,7 @@ def find_continuum_report(
     path = report_path(report_store, report)
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
     with Report(
-        f"{application} report",
+        "find_continuum report",
         report,
         path,
         subtitle=f"Work directory {os.path.dirname(report_store)}, report made {stamp}.",
@@ -67,10 +63,12 @@ def find_continuum_report(
         )
         document.section("Results")
         warnings = [warning for warning in return_dict["warnings"] if warning]
+        start, stop = return_dict["channel_range"]
         document.table(
             pd.DataFrame(
                 {
                     "value": [
+                        f"{start}~{stop - 1}",
                         return_dict["channel_selection"],
                         f"{return_dict['aggregate_bandwidth']:.4g} GHz",
                         str(return_dict["all_continuum"]),
@@ -84,6 +82,7 @@ def find_continuum_report(
                     ]
                 },
                 index=[
+                    "channels of the cube (spectral window)",
                     "channel selection",
                     "aggregate bandwidth",
                     "all continuum",
@@ -93,7 +92,8 @@ def find_continuum_report(
                     "passes reading each data variable",
                 ],
             ),
-            caption="findContinuum's results.",
+            caption="findContinuum's results; the channel selection counts the "
+            "channels of the spectral window.",
         )
         if return_dict["plot"] and os.path.isfile(return_dict["plot"]):
             image = matplotlib.image.imread(return_dict["plot"])
@@ -110,7 +110,9 @@ def find_continuum_report(
         passes = return_dict["passes"]
         if len(passes):
             document.table(
-                passes.drop(columns=["start_unixtime"]).set_index("pass"),
+                passes.drop(
+                    columns=[c for c in passes if c.endswith("_unixtime")]
+                ).set_index("pass"),
                 caption="The passes over the image store, in order, with the "
                 "reductions each made and its graph and compute times (seconds).",
             )
