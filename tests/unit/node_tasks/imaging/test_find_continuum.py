@@ -160,3 +160,28 @@ def test_whole_store_without_selection(cube_store):
     )
     assert output["reductions"][0]["npts"] == 16 * 16
     assert output["timing_node_tasks"]["n_channels"].item() == N_CHANNELS
+
+
+def test_merge_folds_resource_series_and_records_reduce_nodes():
+    import pandas as pd
+
+    def leaf(task_id):
+        return {
+            "reductions": [
+                {"npts": 1.0, "sum": 1.0, "sumsq": 1.0, "min": 0.0, "max": 1.0}
+            ],
+            "timing_node_tasks": pd.DataFrame({"task_id": [task_id], "T_load": [0.1]}),
+            "resource_usage": {
+                "time_seconds": [0.0, 0.1],
+                "cpu_percent": [50.0, 90.0],
+                "sample_interval_seconds": 0.1,
+            },
+        }
+
+    first = merge_find_continuum_cube_reductions([leaf(0), leaf(1)], {})
+    merged = merge_find_continuum_cube_reductions([first, leaf(2)], {})
+    timing = merged["timing_node_tasks"]
+    assert list(timing["task_id"]) == [0, 1, 2]
+    assert timing["cpu_percent"].iloc[2] == [50.0, 90.0]
+    assert merged["reductions"][0]["npts"] == 3.0
+    assert [record["n_inputs"] for record in merged["timing_reduce_nodes"]] == [2, 2]

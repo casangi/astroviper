@@ -199,3 +199,47 @@ def test_needs_stokes_i(small_cube, tmp_path):
             work_directory=str(tmp_path / "work"),
             **_flat_atmosphere(20),
         )
+
+
+@pytest.mark.parametrize("n_chunks", [None, 3])
+def test_profiling_and_report(tmp_path, n_chunks):
+    """The timing, resource series and report of image_cube_single_field."""
+    pytest.importorskip("psutil")
+    from astroviper.distributed_applications.imaging.find_continuum.find_continuum import (
+        DISTRIBUTED_APPLICATION_TIMING_PHASES,
+    )
+
+    store = _write_cube(
+        tmp_path / "line_set.img.zarr", make_find_continuum_image_xds(lines=LINE_SET)
+    )
+    result = find_continuum_fused(
+        input_image_store=store,
+        work_directory=str(tmp_path / "work"),
+        n_mapping_parallelism=None if n_chunks is None else {"frequency": n_chunks},
+        monitor_resources_seconds=0.05,
+        report="html",
+        **_flat_atmosphere(480),
+    )
+    assert os.path.isfile(result["report"])
+    assert result["report"].startswith(str(tmp_path / "work"))
+    timing = result["timing_distributed_application"]
+    for _, _, steps in DISTRIBUTED_APPLICATION_TIMING_PHASES:
+        for _, key in steps:
+            assert timing[key] >= 0.0
+    assert timing["T_total"] == pytest.approx(
+        sum(
+            timing[key]
+            for _, _, steps in DISTRIBUTED_APPLICATION_TIMING_PHASES
+            for _, key in steps
+        ),
+        rel=0.05,
+    )
+    assert timing["compute_start_unixtime"] <= timing["compute_end_unixtime"]
+    passes = result["passes"]
+    assert list(passes["pass"]) == list(range(result["n_cube_reductions"]))
+    assert passes["T_compute_dask_graph"].sum() == pytest.approx(
+        timing["T_compute_dask_graph"]
+    )
+    assert {"cpu_percent", "memory_rss_bytes"} <= set(result["timing_node_tasks"])
+    n_reduce_nodes = 0 if n_chunks is None else 2 * result["n_cube_reductions"]
+    assert len(result["timing_reduce_nodes"]) == n_reduce_nodes

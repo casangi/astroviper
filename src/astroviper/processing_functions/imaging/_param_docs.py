@@ -194,6 +194,21 @@ _FIND_CONTINUUM_PARAM_DOCS = {
         '``{"frequency": n}``, the number of frequency chunks of every\n'
         "map-reduce; one chunk if not given."
     ),
+    "monitor_resources_seconds": (
+        "If set, sample each node task's worker-process CPU, memory and I/O\n"
+        "every this many seconds (graphviper's resource monitor) and carry the\n"
+        "series into ``timing_node_tasks`` as list-valued columns, as\n"
+        "``image_cube_single_field`` does. Requires ``psutil``."
+    ),
+    "report": (
+        'Make a report of the run: ``"html"`` or ``"pdf"``, written in\n'
+        "``work_directory`` as ``<name>_report.html`` or ``.pdf``, or\n"
+        '``"notebook"``, displayed in the calling notebook. It has the\n'
+        "processing section of every distributed application (timing, task\n"
+        "stream and, with ``monitor_resources_seconds``, CPU, memory and I/O)\n"
+        "and the results of findContinuum. A failure while making it is logged\n"
+        "and leaves the results intact. ``None`` (default): no report."
+    ),
     "input_checked": (
         "Skip the configuration checks already done by the calling layer. The\n"
         "checks of the opened image and of the work directory always run."
