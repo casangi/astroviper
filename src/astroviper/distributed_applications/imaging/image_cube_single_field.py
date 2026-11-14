@@ -153,7 +153,7 @@ def image_cube_single_field(
     primary_beam_params: dict[str, Any] | None = None,
     clean_mask: str | None = None,
     auto_mask_params: dict[str, Any] | None = None,
-    io_engine: str = "xradio",
+    io_engine: str = "chunk",
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     reduce_mode: str = "tree",
@@ -719,7 +719,8 @@ def image_cube_single_field(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     compute_backend : str
         Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
         a ``dask.delayed`` graph with

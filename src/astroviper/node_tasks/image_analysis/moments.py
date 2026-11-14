@@ -201,7 +201,7 @@ def moments(
     graph_mode: bool = True,
     memory_budget_gb: float = 1.0,
     dimension_flags=None,
-    io_engine: str = "xradio",
+    io_engine: str = "chunk",
 ):
     """Compute the moment maps of one image chunk and write them to Zarr.
 
@@ -318,7 +318,8 @@ def moments(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
 
     Returns
     -------

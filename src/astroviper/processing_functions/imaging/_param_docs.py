@@ -693,7 +693,8 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "blobs (and FITS data blocks) directly by byte offset\n"
         '(:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO\'s\n'
         "loaders and xarray and writes with zarr-python. A Measurement Set v2\n"
-        "and CASA or FITS images are read through XRADIO by both."
+        "and CASA or FITS images are read through XRADIO by both. Default\n"
+        '``"chunk"``.'
     ),
     "processing_function_threads": (
         "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."

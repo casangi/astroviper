@@ -68,7 +68,7 @@ def feather(
     processing_function_threads: int = 1,
     fft_backend: str = "scipy",
     compressor=None,
-    io_engine: str = "xradio",
+    io_engine: str = "chunk",
     output_image_format: str = "zarr",
     *,
     input_checked=False,
@@ -115,7 +115,8 @@ def feather(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     output_image_format : {"zarr", "fits"}, optional
         Format of the output image: a Zarr store, or a directory with
         ``SKY.fits`` (``io_engine="chunk"`` only). Default ``"zarr"``.

@@ -62,7 +62,7 @@ def simulate_processing_set(
     sky_components: list | None = None,
     sky_model_image: str | None = None,
     sky_model_image_predict: dict | None = None,
-    io_engine: str = "xradio",
+    io_engine: str = "chunk",
 ):
     """Simulate the visibilities of one time/frequency chunk and write them to disk.
 
@@ -159,7 +159,8 @@ def simulate_processing_set(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list

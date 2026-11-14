@@ -883,6 +883,7 @@ def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
     params.update(
         input_data=None,
         data_group={"correlated_data": "VISIBILITY"},
+        io_engine="xradio",
     )
     result = continuum_node.grid_imaging_weight_density_continuum_node(**params)
     assert result["task_id"] == 4
@@ -929,6 +930,7 @@ def test_weight_degrid_node_extracts_only_registered_weight_arrays(monkeypatch):
     params["image_store"] = "unused-image"
     params["input_data"] = None
     params["data_group"] = {"correlated_data": "VISIBILITY"}
+    params["io_engine"] = "xradio"
     result = continuum_node.degrid_imaging_weights_continuum_node(**params)
     cached = result["weight_datasets"]["ms"]
     assert load_kwargs["drop_variables"] == ["VISIBILITY"]

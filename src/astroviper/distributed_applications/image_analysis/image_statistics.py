@@ -91,7 +91,7 @@ def image_statistics(
     working_memory_factor: float = 2.5,
     reduce_mode: str = "tree",
     reduce_n_batch: int = 2,
-    io_engine: str = "xradio",
+    io_engine: str = "chunk",
 ) -> xr.Dataset:
     """Calculate image statistics with partitioned on-disk loading.
 

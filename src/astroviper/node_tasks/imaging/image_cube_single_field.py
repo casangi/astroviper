@@ -504,7 +504,7 @@ def image_cube_single_field(
     clean_mask=None,
     auto_mask_params=None,
     memory_mode="in_memory",
-    io_engine="xradio",
+    io_engine="chunk",
     data_group=None,
     task_id=0,
     input_data=None,
@@ -1030,7 +1030,8 @@ def image_cube_single_field(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     data_group : dict, optional
         Resolved role->variable mapping for ``processing_set_data_group_name``
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), supplied

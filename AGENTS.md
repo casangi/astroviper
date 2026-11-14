@@ -283,9 +283,9 @@ all of them (no pseudo Stokes I), which gives every plane the same uv coverage
 and hence the same PSF.
 
 **Measurement Set v2 input.** `image_cube_single_field` also
-images a Measurement Set v2 directly when `io_engine="chunk"`
+images a Measurement Set v2 directly, with either I/O engine
 (`utils/measurement_set_v2.py::is_measurement_set_v2` detects it; guards in
-the driver refuse `io_engine="xradio"`, a missing engine, the write-back flags,
+the driver refuse a missing engine, the write-back flags,
 an empty `scan_intents` selection and an MSv4 without the data group (or one
 of its four roles; `check_data_group_msv2`) before anything is
 written). AstroVIPER has no MSv2 reader of its own: the driver opens the MS

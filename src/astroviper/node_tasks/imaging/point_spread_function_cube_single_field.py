@@ -25,7 +25,7 @@ def point_spread_function_cube_single_field(
     gridding_kernel_params=None,
     primary_beam_params=None,
     load_correlated_data=True,
-    io_engine="xradio",
+    io_engine="chunk",
     data_group=None,
     output_image_format="zarr",
     task_id=0,
@@ -196,7 +196,8 @@ def point_spread_function_cube_single_field(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     data_group : dict, optional
         Role->variable mapping of ``processing_set_data_group_name``; read from
         the processing set when ``None`` and needed.

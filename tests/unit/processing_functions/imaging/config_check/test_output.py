@@ -121,7 +121,7 @@ def test_unsupported_codec_rejected_only_for_direct_writer(monkeypatch):
         ZstdCodec, "to_dict", lambda self: {"name": "third_party_codec"}
     )
     config = {"compressor": ZstdCodec()}
-    check_driver_workflow(config, mode=CUBE_SINGLE_FIELD)
+    check_driver_workflow({**config, "io_engine": "xradio"}, mode=CUBE_SINGLE_FIELD)
     with pytest.raises(ValueError, match="direct writer"):
         check_driver_workflow({**config, "io_engine": "chunk"}, mode=CUBE_SINGLE_FIELD)
 

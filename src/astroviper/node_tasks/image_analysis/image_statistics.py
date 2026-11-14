@@ -826,7 +826,7 @@ def image_statistics(
     partition: dict[str, slice | np.ndarray] | None = None,
     data_selection: dict | None = None,
     finalize: bool = True,
-    io_engine: str = "xradio",
+    io_engine: str = "chunk",
 ) -> xr.Dataset:
     """Load one selected image block and calculate local image statistics.
 

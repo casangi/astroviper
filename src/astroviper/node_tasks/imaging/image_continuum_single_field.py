@@ -1107,7 +1107,7 @@ def residual_update_continuum_single_field(
     weight_memory_mode="in_place",
     visibility_memory_mode="recompute",
     wideband_primary_beam_memory_mode="recompute",
-    io_engine="xradio",
+    io_engine="chunk",
     data_group=None,
     is_first_cycle=True,
     make_primary_beam_taylor=True,
@@ -1327,7 +1327,8 @@ def residual_update_continuum_single_field(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
 
     data_group : dict, optional
         Role-to-variable mapping used by the chunk loader.
@@ -1889,7 +1890,7 @@ def grid_imaging_weight_density_continuum_node(
     instrument_polarization_basis="linear",
     single_precision_gridding=False,
     processing_function_threads=1,
-    io_engine="xradio",
+    io_engine="chunk",
     data_group=None,
     input_data=None,
     task_id=0,
@@ -1974,7 +1975,8 @@ def grid_imaging_weight_density_continuum_node(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     data_group : dict or None, optional
         Resolved data-group role mapping. Its correlated-data variable is
         omitted from ordinary loads because global density gridding uses only
@@ -2195,7 +2197,7 @@ def degrid_imaging_weights_continuum_node(
     instrument_polarization_basis="linear",
     processing_function_threads=1,
     weight_memory_mode="in_place",
-    io_engine="xradio",
+    io_engine="chunk",
     data_group=None,
     input_data=None,
     task_id=0,
@@ -2294,7 +2296,8 @@ def degrid_imaging_weights_continuum_node(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     data_group : dict or None, optional
         Resolved data-group role mapping. Its correlated-data variable is
         omitted from ordinary loads because weight degridding uses only UVW,
@@ -3373,7 +3376,7 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
             _write_mfs_visibility_grid_in_place(
                 observed_grid_xds,
                 image_store,
-                input_params.get("io_engine", "xradio"),
+                input_params.get("io_engine", "chunk"),
             )
             return None
         return observed_grid_xds

@@ -340,7 +340,7 @@ def test_timing_frame_records_strategy(input_image, tmp_path):
     out = moments_processing_function(img_xds, moments=moment_names)
     for v in out.variables:
         out[v].encoding = {}
-    out.to_zarr(store, mode="w")
+    out.drop_vars([key.upper() for key in keys]).to_zarr(store, mode="w")
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
 
     from astroviper.utils.io import create_empty_data_variables_on_disk

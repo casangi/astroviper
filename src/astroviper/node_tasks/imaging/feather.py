@@ -67,7 +67,7 @@ def feather(input_params, graph_mode=True):
     logger.debug("Memory at start of feather node task: " + str(get_rss_gb()) + " GB")
 
     selection = input_params.get("selection", {})
-    io_engine = input_params.get("io_engine", "xradio")
+    io_engine = input_params.get("io_engine", "chunk")
     output_image_format = input_params.get("output_image_format", "zarr")
 
     # Load this chunk's single-dish ("sd") and interferometer ("int") images.

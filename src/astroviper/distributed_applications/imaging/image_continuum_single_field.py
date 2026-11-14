@@ -2556,7 +2556,7 @@ def image_continuum_single_field(
     restore: bool = False,
     restoration_output: str = "primary_beam_corrected",
     gridding_kernel_params: dict[str, Any] | None = None,
-    io_engine: str = "xradio",
+    io_engine: str = "chunk",
     output_image_format: str = "zarr",
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -2823,7 +2823,8 @@ def image_continuum_single_field(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     output_image_format : {"zarr", "fits"}, optional
         Format of ``image_store``: a Zarr store, or (``io_engine="chunk"``) a
         directory with one FITS file per variable and Taylor term

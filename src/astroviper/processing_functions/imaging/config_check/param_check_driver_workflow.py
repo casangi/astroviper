@@ -241,7 +241,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
 
     # --- Concurrent sharded output ---
     # Partial shards need the direct writer; the standard writer cannot share them.
-    if config.get("image_sharding") and not config.get("io_engine") == "chunk":
+    if config.get("image_sharding") and not config.get("io_engine", "chunk") == "chunk":
         raise ValueError("image_sharding requires io_engine='chunk'.")
 
     # --- Output format and layout ---
@@ -250,7 +250,7 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     if output_format not in ("zarr", "fits"):
         raise ValueError("output_image_format must be 'zarr' or 'fits'.")
     if output_format == "fits":
-        if config.get("io_engine") != "chunk":
+        if config.get("io_engine", "chunk") != "chunk":
             raise ValueError("FITS output requires io_engine='chunk'.")
         if config.get("image_chunking") or config.get("image_sharding"):
             raise ValueError(

@@ -196,7 +196,7 @@ def moments(
     monitor_resources_seconds: float | None = None,
     dimension_flags: dict | None = None,
     image_data_group_in_role: str = "sky",
-    io_engine: str = "xradio",
+    io_engine: str = "chunk",
     output_image_format: str = "zarr",
 ):
     """Collapse an on-disk image along one axis into moment maps (CASA ``immoments``).
@@ -326,7 +326,8 @@ def moments(
         blobs (and FITS data blocks) directly by byte offset
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
-        and CASA or FITS images are read through XRADIO by both.
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     output_image_format : {"zarr", "fits"}, optional
         Format of ``moments_image_store``: a Zarr store, or a directory with one
         FITS file per moment map (``io_engine="chunk"`` only), written from the

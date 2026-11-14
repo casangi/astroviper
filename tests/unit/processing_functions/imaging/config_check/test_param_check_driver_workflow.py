@@ -177,9 +177,9 @@ def test_complete_workflow_requires_each_configuration_group(missing):
         ({"compute_backend": "gpu"}, "compute_backend"),
         ({"write_visibility_model_to_ps": True}, "write_visibility_model_to_ps"),
         ({"write_imaging_weights_to_ps": True}, "write_imaging_weights_to_ps"),
-        ({"image_sharding": {"frequency": 1}}, "io_engine"),
+        ({"image_sharding": {"frequency": 1}, "io_engine": "xradio"}, "io_engine"),
         ({"output_image_format": "hdf5"}, "output_image_format"),
-        ({"output_image_format": "fits"}, "FITS.*io_engine"),
+        ({"output_image_format": "fits", "io_engine": "xradio"}, "FITS.*io_engine"),
         (
             {
                 "output_image_format": "fits",

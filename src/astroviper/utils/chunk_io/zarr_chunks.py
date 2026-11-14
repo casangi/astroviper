@@ -606,8 +606,7 @@ def load_processing_set(
       coordinate (from ``frequency_coords`` for a single measurement set
       without one); every selected channel must lie within half a channel of
       a task frequency, onto the nearest of which it is imaged
-      (``map_frequencies``), and every task frequency must receive at least
-      one channel;
+      (``map_frequencies``); a task frequency may receive none;
     * ``polarization`` from ``instrument_polarization_basis`` and the data's
       correlation count;
     * ``time`` and ``baseline_id`` from the stored coordinates (when present);
@@ -654,10 +653,6 @@ def load_processing_set(
     import xarray as xr
 
     task_frequency_values = np.asarray(frequency_coords)
-    task_frequency_match_counts = np.zeros(
-        task_frequency_values.size,
-        dtype=np.int64,
-    )
     nodes = {}
     for ms_name, ms_sel in sel_parms.items():
         ms_path = os.path.join(input_data_store, ms_name)
@@ -739,17 +734,12 @@ def load_processing_set(
         # use: execution blocks converted to LSRK have channel centres a few
         # kHz apart, so their frequencies never equal the image's exactly.
         try:
-            frequency_map = map_frequencies(
-                child_frequency_values, task_frequency_values
-            )
+            map_frequencies(child_frequency_values, task_frequency_values)
         except ValueError as exc:
             raise ValueError(
                 f"Selected frequencies for {ms_name!r} do not map onto the task "
                 f"frequencies: {exc}"
             ) from exc
-        task_frequency_match_counts += np.bincount(
-            frequency_map, minlength=task_frequency_values.size
-        )
 
         # Select the requested correlations even when cached-grid cycles omit
         # observed visibilities. Weights and flags are always loaded.
@@ -793,11 +783,6 @@ def load_processing_set(
         ds = xr.Dataset(data_vars=data_vars, coords=coords)
         ds.attrs["data_groups"] = {processing_set_data_group_name: dict(data_group)}
         nodes[ms_name] = ds
-
-    if np.any(task_frequency_match_counts == 0):
-        raise ValueError(
-            "Selected processing-set children do not cover every task frequency."
-        )
 
     return xr.DataTree.from_dict(nodes)
 

@@ -217,7 +217,7 @@ def check_output_codec(config):
     # --- Supplied/planned direct-writer metadata ---
     # Validate known codec chains before dispatch; actual disk metadata is still
     # checked by the original reader/writer guards at the point of use.
-    if config.get("io_engine") == "chunk" and config.get("zarr_meta"):
+    if config.get("io_engine", "chunk") == "chunk" and config.get("zarr_meta"):
         metadata = require_mapping("zarr_meta", config["zarr_meta"])
         for name, meta in metadata.items():
             require_mapping(f"zarr_meta[{name!r}]", meta)
@@ -276,7 +276,7 @@ def check_output_codec(config):
 
     # --- Direct writer codec support ---
     # That writer implements a smaller codec set than the Zarr library itself.
-    if config.get("io_engine") == "chunk" and codec_name not in (
+    if config.get("io_engine", "chunk") == "chunk" and codec_name not in (
         "blosc",
         "zstd",
         "gzip",
