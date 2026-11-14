@@ -496,8 +496,9 @@ task called without `input_checked`.
 output (FITS is refused) when `image_cube_single_field` makes the first round.
 `check_find_continuum_first_round_store` refuses a first-round store that is
 missing, incomplete or of another version, that was made with another primary
-beam limit, Stokes I index or tile shape, that holds no spectral window with
-every channel of the call's `channel_range`, or whose binding (the
+beam limit, Stokes I index, tile shape or data variables than the call's, that
+holds no spectral window with every channel of the call's `channel_range`, or
+whose binding (the
 modification time of the cube's `zarr.json`, the digests of its coordinates
 and its shape) differs from the cube's: a rewritten cube needs a new first
 round.

@@ -278,10 +278,11 @@ _FIND_CONTINUUM_ULTRA_PARAM_DOCS = {
             ),
             "work_directory": (
                 "Directory in which the run makes its directory\n"
-                "``<cube>.find_continuum_ultra_<start>_<stop>`` (refused if it exists:\n"
-                "the products of an earlier run), with the stores of the passes while\n"
-                "they run, the first-round store when none is given and the\n"
-                "joint-mask store; the report is written next to it."
+                "``<cube>.find_continuum_ultra_<start>_<stop>``, ``<cube>`` the name of\n"
+                "the image store without ``.img.zarr`` or ``.zarr`` (refused if it\n"
+                "exists: the products of an earlier run), with the stores of the\n"
+                "passes while they run, the first-round store when none is given and\n"
+                "the joint-mask store; the report is written next to it."
             ),
             "image_data_group_in_name": (
                 "Image data group with the roles ``sky``, ``primary_beam`` and\n"
@@ -326,8 +327,11 @@ _FIND_CONTINUUM_ULTRA_PARAM_DOCS = {
             ),
             "n_mapping_parallelism": (
                 '``{"frequency": n}``, the frequency chunks of every pass; ``None``\n'
-                "(default): chunks of whole shards, about\n"
-                "``FREQUENCY_TASKS_PER_THREAD`` per thread."
+                "(default): ``ceil(n_channels / k)`` chunks of the window, ``k`` the\n"
+                "channels of a whole number of shards that gives about\n"
+                "``FREQUENCY_TASKS_PER_THREAD`` chunks per thread. GraphVIPER makes the\n"
+                "chunks of equal length, so they are whole shards only when the window\n"
+                "starts on a shard and ``k`` divides its channels."
             ),
             "thread_info": (
                 "``n_threads`` and ``memory_per_thread`` (GiB) of the cluster, which\n"

@@ -35,6 +35,7 @@ BINDING = {
     "m_sha1": "c" * 40,
     "shape": (1, 15360, 2, 11250, 11250),
 }
+VARIABLES = {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
 
 
 @pytest.mark.parametrize(
@@ -80,6 +81,7 @@ def _store_attrs(binding=BINDING, **changes):
         "primary_beam_limit": 0.2,
         "polarization_index": 0,
         "tile_shape": [625, 625],
+        "variables": VARIABLES,
         "windows": [
             {"channel_range": [0, 3840]},
             {"channel_range": [3840, 7680]},
@@ -95,7 +97,7 @@ def _store_attrs(binding=BINDING, **changes):
 def test_first_round_store_of_the_cube(channel_range):
     assert FIND_CONTINUUM_FIRST_ROUND_VERSION == 2
     check_find_continuum_first_round_store(
-        _store_attrs(), BINDING, 0.2, 0, (625, 625), channel_range
+        _store_attrs(), BINDING, 0.2, 0, (625, 625), VARIABLES, channel_range
     )
 
 
@@ -125,6 +127,11 @@ def test_first_round_store_of_the_cube(channel_range):
             _store_attrs(tile_shape=[1250, 625]),
             [0, 3840],
             r"tile_shape \[1250, 625\], not",
+        ),
+        (
+            _store_attrs(variables=dict(VARIABLES, sky="SKY_RESTORED")),
+            [0, 3840],
+            "made with variables .*SKY_RESTORED.*, not .*SKY_RESIDUAL",
         ),
         *[
             (
@@ -171,7 +178,7 @@ def test_first_round_store_of_the_cube(channel_range):
 def test_first_round_store_refused(attrs, channel_range, match):
     with pytest.raises(ValueError, match=match):
         check_find_continuum_first_round_store(
-            attrs, BINDING, 0.2, 0, (625, 625), channel_range
+            attrs, BINDING, 0.2, 0, (625, 625), VARIABLES, channel_range
         )
 
 

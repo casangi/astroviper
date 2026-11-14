@@ -540,9 +540,10 @@ def validate_find_continuum_first_round(
     input_image_store: str,
     primary_beam_limit: float,
     channel_range: list,
+    image_data_group_in_name: str = "residual",
 ) -> FirstRoundStoreInputs:
     """Require a first-round store complete for a spectral window and made from
-    the cube as it is now.
+    the cube as it is now and from the data variables of the call.
 
     Reads the store's attributes and the cube's metadata only.
 
@@ -556,6 +557,9 @@ def validate_find_continuum_first_round(
         Primary beam limit of the find_continuum call.
     channel_range : list of int
         ``[start, stop)``, channels of the cube that findContinuum sees.
+    image_data_group_in_name : str, default "residual"
+        Image data group of the find_continuum call, whose ``sky`` and
+        ``primary_beam`` the store must have been made from.
 
     Returns
     -------
@@ -567,7 +571,8 @@ def validate_find_continuum_first_round(
     Raises
     ------
     ValueError
-        The reason the store cannot be used
+        The data group has no ``sky`` or ``primary_beam``, or the reason the
+        store cannot be used
         (:func:`~astroviper.processing_functions.imaging.config_check.param_check_find_continuum.check_find_continuum_first_round_store`).
     """
     try:
@@ -576,14 +581,20 @@ def validate_find_continuum_first_round(
         attributes = None
     first_round = (attributes or {}).get("find_continuum_first_round")
     cube = zarr.open_group(input_image_store, mode="r")
+    data_group = cube.attrs.get("data_groups", {}).get(image_data_group_in_name, {})
+    variables = {role: data_group.get(role) for role in ("sky", "primary_beam")}
+    if None in variables.values():
+        raise ValueError(
+            f"The image data group {image_data_group_in_name!r} of "
+            f"{input_image_store} has no sky or no primary_beam."
+        )
     check_find_continuum_first_round_store(
         attributes,
         _image_binding(input_image_store),
         primary_beam_limit,
         cube["polarization"][...].tolist().index("I"),
-        ()
-        if first_round is None
-        else cube[first_round["variables"]["sky"]].chunks[-2:],
+        cube[variables["sky"]].chunks[-2:],
+        variables,
         channel_range,
     )
     ranges = [window["channel_range"] for window in first_round["windows"]]

@@ -215,7 +215,7 @@ def find_continuum(
         ``"a~b;c~d"``), ``aggregate_bandwidth`` (GHz), ``all_continuum``,
         ``warnings``, ``joint_mask`` (path of the final joint mask),
         ``moment_difference_snr``, ``plot`` (path of the summary plot),
-        ``channel_range`` (``[start, stop]`` in channels of the cube),
+        ``channel_range`` (``[start, stop)`` in channels of the cube),
         ``n_cube_reductions`` (map-reduce passes over the image store),
         ``cube_reads`` (data variable to the number of passes that read it),
         ``passes`` (one row per pass: the reductions asked for, the data

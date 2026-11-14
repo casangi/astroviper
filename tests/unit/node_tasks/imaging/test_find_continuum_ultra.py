@@ -830,6 +830,103 @@ def test_a_transient_error_of_a_slot_stat_is_retried(
     np.testing.assert_array_equal(maximum, first_round["maximum"])
 
 
+def test_transient_errors_of_metadata_reads_are_retried(
+    cube, first_round, tmp_path, monkeypatch
+):
+    """A Lustre eviction fails with EIO the first metadata read of the
+    residual, of the primary beam and of the partials arrays: each is read
+    again, and the first round is that of a pass without them."""
+    import pathlib
+
+    from astroviper.node_tasks.imaging.utils import skunk_works
+
+    store = str(tmp_path / "first_round.zarr")
+    create_find_continuum_first_round_store(
+        store,
+        N_CHANNELS,
+        (1, N_CHANNELS, 2, N_PIXELS, N_PIXELS),
+        TILE,
+        MERGE_TILE,
+        LIMIT,
+        VARIABLES,
+        STOKES_I,
+        {"sky": "float32", "primary_beam": "float32"},
+        None,
+        "find_continuum_ultra",
+        [cube["window"]],
+        cube["rest_frequency"],
+    )
+    partials_store, maps_store = _moment_stores(tmp_path / "pass")
+    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    targets = {
+        os.path.join(cube["store"], name, "zarr.json") for name in VARIABLES.values()
+    }
+    read_bytes, failed = pathlib.Path.read_bytes, set()
+
+    def evicted_once(path):
+        if os.fspath(path) in targets - failed:
+            failed.add(os.fspath(path))
+            raise OSError(errno.EIO, "Input/output error")
+        return read_bytes(path)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", evicted_once)
+    merged = _reduce(
+        _frequency_tasks(
+            find_continuum_first_round_task,
+            cube["store"],
+            primary_beam_limit=LIMIT,
+            moment_channel_weights=cube["weights"],
+            first_round_store=store,
+            compute_masks=True,
+            compute_moments=True,
+            partials_store=partials_store,
+            planes_per_batch=5,
+        )
+    )
+    # The merge's reads, not the slot writes before them.
+    targets |= {
+        os.path.join(partials_store, name, "zarr.json")
+        for name in ("SKY_MOMENT_INTEGRATED", "SKY_MOMENT_MAXIMUM")
+    }
+    integral, maximum, _ = _merge(partials_store, maps_store, merged["written_slots"])
+    assert failed == targets
+    for field in ("channels", *FirstRoundRows._fields, "tiles"):
+        np.testing.assert_array_equal(
+            merged["rows"][field], first_round["merged"]["rows"][field]
+        )
+    np.testing.assert_array_equal(integral, first_round["integral"])
+    np.testing.assert_array_equal(maximum, first_round["maximum"])
+
+
+def test_a_transient_error_of_the_regions_store_is_retried(tmp_path, monkeypatch):
+    """A Lustre eviction fails the creation of a regions store with EIO: the
+    store is made again and holds the regions."""
+    from astroviper.node_tasks.imaging.utils import skunk_works
+
+    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    store = str(tmp_path / "regions.zarr")
+    open_group, failures = zarr.open_group, []
+
+    def evicted_once(path, *args, **kwargs):
+        if os.fspath(path) == store and not failures:
+            failures.append(path)
+            raise OSError(errno.EIO, "Input/output error")
+        return open_group(path, *args, **kwargs)
+
+    monkeypatch.setattr(zarr, "open_group", evicted_once)
+    regions = _regions()
+    tiles, counters = write_region_masks(store, regions, TILE)
+    assert len(failures) == 1 and counters["bytes"] > 0
+    stored = open_group(store, mode="r")
+    for name, region in regions.items():
+        np.testing.assert_array_equal(
+            unpack_plane_masks(stored[name][...], N_PIXELS), region
+        )
+        np.testing.assert_array_equal(
+            tiles[name], tile_occupancy(region[None, None, None], TILE)[0, 0, 0]
+        )
+
+
 def test_reduce_concatenates_rows_and_folds_resource_series():
     def leaf(task_id, channels, slots):
         channels = np.array(channels, dtype=np.int32)

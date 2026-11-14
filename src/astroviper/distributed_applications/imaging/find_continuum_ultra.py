@@ -182,10 +182,11 @@ def find_continuum_ultra(
         window.
     work_directory : str
         Directory in which the run makes its directory
-        ``<cube>.find_continuum_ultra_<start>_<stop>`` (refused if it exists:
-        the products of an earlier run), with the stores of the passes while
-        they run, the first-round store when none is given and the
-        joint-mask store; the report is written next to it.
+        ``<cube>.find_continuum_ultra_<start>_<stop>``, ``<cube>`` the name of
+        the image store without ``.img.zarr`` or ``.zarr`` (refused if it
+        exists: the products of an earlier run), with the stores of the
+        passes while they run, the first-round store when none is given and
+        the joint-mask store; the report is written next to it.
     image_data_group_in_name : str, default "residual"
         Image data group with the roles ``sky``, ``primary_beam`` and
         ``beam_fit_params_point_spread_function``.
@@ -224,8 +225,11 @@ def find_continuum_ultra(
         of the run's directory.
     n_mapping_parallelism : dict, optional
         ``{"frequency": n}``, the frequency chunks of every pass; ``None``
-        (default): chunks of whole shards, about
-        ``FREQUENCY_TASKS_PER_THREAD`` per thread.
+        (default): ``ceil(n_channels / k)`` chunks of the window, ``k`` the
+        channels of a whole number of shards that gives about
+        ``FREQUENCY_TASKS_PER_THREAD`` chunks per thread. GraphVIPER makes the
+        chunks of equal length, so they are whole shards only when the window
+        starts on a shard and ``k`` divides its channels.
     thread_info : dict, optional
         ``n_threads`` and ``memory_per_thread`` (GiB) of the cluster, which
         set the frequency chunks and the memory budget of a task. ``None``
@@ -262,7 +266,7 @@ def find_continuum_ultra(
     dict
         Results: ``continuum_channel_ranges`` (``[start, stop)`` channel pairs
         of the spectral window in findContinuum's list order),
-        ``channel_range`` (``[start, stop]`` of the window in the cube),
+        ``channel_range`` (``[start, stop)`` of the window in the cube),
         ``continuum_frequency_ranges`` (per range the outer channel edges in
         Hz, the lower first), ``frequency_frame`` (of the cube's frequency
         coordinate), ``aggregate_bandwidth`` (Hz, the value findContinuum
@@ -399,7 +403,7 @@ def find_continuum_ultra(
             input_image_store,
             primary_beam_limit,
             window_range,
-            {role: data_group[role] for role in ("sky", "primary_beam")},
+            image_data_group_in_name,
         )
     measures["T_load_first_round"] = time.perf_counter() - start
 
@@ -538,7 +542,7 @@ def _open_window(
     atmospheric_sky_temperature,
 ):
     """The spectral window of the image store opened lazily and checked
-    (metadata only), its data group, its ``[start, stop]`` in channels of the
+    (metadata only), its data group, its ``[start, stop)`` in channels of the
     cube, the shape of the cube and the coordinates of the window's maps (one
     time, the mean frequency and Stokes I)."""
     from astroviper.processing_functions.image_analysis.moments import (
@@ -572,10 +576,14 @@ def _open_window(
 
 
 def _first_round_store_inputs(
-    first_round_store, input_image_store, primary_beam_limit, window_range, variables
+    first_round_store,
+    input_image_store,
+    primary_beam_limit,
+    window_range,
+    image_data_group_in_name,
 ):
-    """The first-round store validated for the spectral window, refused when
-    made from other data variables, and the imager's cost attributes in it."""
+    """The first-round store validated for the spectral window and the data
+    group, and the imager's cost attributes in it."""
     import zarr
 
     from astroviper.distributed_applications.imaging.find_continuum_first_round import (
@@ -583,16 +591,15 @@ def _first_round_store_inputs(
     )
 
     store_inputs = validate_find_continuum_first_round(
-        first_round_store, input_image_store, primary_beam_limit, window_range
+        first_round_store,
+        input_image_store,
+        primary_beam_limit,
+        window_range,
+        image_data_group_in_name,
     )
     attributes = zarr.open_group(first_round_store, mode="r").attrs[
         "find_continuum_first_round"
     ]
-    if attributes["variables"] != variables:
-        raise ValueError(
-            f"The first-round store {first_round_store} was made from "
-            f"{attributes['variables']}, not from {variables}."
-        )
     return store_inputs, attributes.get("imager")
 
 
@@ -600,7 +607,11 @@ def _new_run_directory(work_directory, input_image_store, window_range):
     """The new directory of the run in the work directory, named after the
     cube and the spectral window; refused if it exists."""
     start, stop = window_range
-    stem = os.path.basename(input_image_store).split(".")[0]
+    stem = os.path.basename(input_image_store)
+    for suffix in (".img.zarr", ".zarr"):
+        if stem.endswith(suffix):
+            stem = stem.removesuffix(suffix)
+            break
     run_directory = os.path.join(
         work_directory, f"{stem}.find_continuum_ultra_{start}_{stop}"
     )

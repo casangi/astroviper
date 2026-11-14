@@ -227,24 +227,32 @@ def write_first_round_rows(first_round_store: str, rows: dict, n_channels: int) 
     """
     import zarr
 
-    group = zarr.open_group(first_round_store, mode="r+")
-    attributes = dict(group.attrs["find_continuum_first_round"])
-    channels = np.asarray(rows["channels"], dtype=np.int64)
-    expected = np.zeros(n_channels, dtype=np.int64)
-    for start, stop in (window["channel_range"] for window in attributes["windows"]):
-        expected[start:stop] = 1
-    complete = bool(
-        not rows["write_failed"]
-        and np.array_equal(np.bincount(channels, minlength=n_channels), expected)
-    )
-    written, first = np.unique(channels, return_index=True)
-    if written.size:
-        for index, name in enumerate(_TILES):
-            group[name].oindex[written] = rows["tiles"][first, index]
-        for field in FirstRoundRows._fields:
-            group[field.upper()].oindex[written] = rows[field][first]
-    group.attrs["find_continuum_first_round"] = dict(attributes, complete=complete)
-    return {"complete": complete, "written_channels": written.tolist()}
+    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+
+    def write():
+        group = zarr.open_group(first_round_store, mode="r+")
+        attributes = dict(group.attrs["find_continuum_first_round"])
+        channels = np.asarray(rows["channels"], dtype=np.int64)
+        expected = np.zeros(n_channels, dtype=np.int64)
+        for start, stop in (
+            window["channel_range"] for window in attributes["windows"]
+        ):
+            expected[start:stop] = 1
+        complete = bool(
+            not rows["write_failed"]
+            and np.array_equal(np.bincount(channels, minlength=n_channels), expected)
+        )
+        written, first = np.unique(channels, return_index=True)
+        if written.size:
+            for index, name in enumerate(_TILES):
+                group[name].oindex[written] = rows["tiles"][first, index]
+            for field in FirstRoundRows._fields:
+                group[field.upper()].oindex[written] = rows[field][first]
+        group.attrs["find_continuum_first_round"] = dict(attributes, complete=complete)
+        return {"complete": complete, "written_channels": written.tolist()}
+
+    # A transient I/O error writes the rows again on a fresh open.
+    return _retry_transient_io(f"rows of {first_round_store}", write)
 
 
 def add_first_round_moments(
