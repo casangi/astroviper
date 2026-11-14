@@ -1026,16 +1026,11 @@ def image_cube_single_field(
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
     io_engine : {"chunk", "xradio"}, optional
-        ``"chunk"``: load only the data group's data variables straight from the
-        Zarr chunk blobs with
-        :func:`~astroviper.utils.chunk_io.load_processing_set`
-        (reconstructing coordinates from the inputs) and write each result chunk
-        with :func:`~astroviper.utils.chunk_io.write_zarr`; both spread their
-        per-array / per-variable I/O and (de)compression concurrently across
-        ``processing_function_threads`` threads, and require ``data_group``.
-        ``"xradio"``: XRADIO's ``load_processing_set`` and
-        :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.
-        Default ``"xradio"``.
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
     data_group : dict, optional
         Resolved role->variable mapping for ``processing_set_data_group_name``
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), supplied

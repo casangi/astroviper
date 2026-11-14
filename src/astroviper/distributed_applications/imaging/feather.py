@@ -68,6 +68,7 @@ def feather(
     processing_function_threads: int = 1,
     fft_backend: str = "scipy",
     compressor=None,
+    io_engine: str = "xradio",
     *,
     input_checked=False,
 ):
@@ -108,6 +109,12 @@ def feather(
         FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).
     compressor : numcodecs compressor
         Compressor applied to each on-disk ``SKY`` chunk.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
     input_checked : bool, optional
         Skip configuration checks already performed by the calling layer.
         Runtime checks on newly created data always remain active. For graph nodes
@@ -119,6 +126,9 @@ def feather(
     Supplied configuration is checked before opening images. Shape and dtype
     checks use the opened image metadata and always run before output creation.
     """
+    from astroviper.utils.node_task_io import check_io_engine
+
+    check_io_engine(io_engine)
     import dask
     import zarr
     from graphviper.graph_tools import generate_dask_workflow
@@ -263,6 +273,7 @@ def feather(
         "processing_function_threads": processing_function_threads,
         "to_disk": True,
         "compressor": compressor,
+        "io_engine": io_engine,
     }
 
     t0 = time.time()

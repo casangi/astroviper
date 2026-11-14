@@ -2736,9 +2736,11 @@ def image_continuum_single_field(
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
     io_engine : {"chunk", "xradio"}
-        I/O of the node tasks: ``"chunk"`` reads the data group's variables
-        straight from the Zarr chunk blobs; ``"xradio"`` uses XRADIO's
-        ``load_processing_set``. Default ``"xradio"``.
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
     cycle_control_params : dict
         CLEAN cycle controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual

@@ -15,35 +15,6 @@ mirrors the ``feather`` / ``image_cube_single_field`` node tasks.
 from astroviper.utils.param_docs import shares_param_docs
 
 
-def _open_image_lazy(input_image_store):
-    """Open an on-disk image lazily (metadata only; data stays on disk).
-
-    Parameters
-    ----------
-    input_image_store : str
-        Path to the input image (a ``.zarr`` store or any format
-        ``xradio.image.open_image`` understands).
-
-    Returns
-    -------
-    xarray.Dataset
-        Lazily opened image dataset.
-    """
-    if "zarr" in input_image_store:
-        import xarray as xr
-
-        # chunks=None -> zarr-backed lazy arrays WITHOUT dask, so .load()
-        # reads directly in this process. With the default (dask-backed)
-        # arrays, .load() inside a distributed worker ships the chunk-read
-        # graph to the ambient Client/scheduler -- tasks submitting tasks,
-        # whose inner futures get cancelled (FutureCancelledError) when the
-        # cluster is busy running the outer map tasks.
-        return xr.open_zarr(input_image_store, chunks=None)
-    from xradio.image import open_image
-
-    return open_image(input_image_store)
-
-
 def moment_axis_read_block(lazy_var, block_des, stream_axis, memory_budget_gb):
     """Number of ``stream_axis`` planes to read per request, from the on-disk
     chunk / shard geometry and a TOTAL memory budget for the read.
@@ -230,6 +201,7 @@ def moments(
     graph_mode: bool = True,
     memory_budget_gb: float = 1.0,
     dimension_flags=None,
+    io_engine: str = "xradio",
 ):
     """Compute the moment maps of one image chunk and write them to Zarr.
 
@@ -341,6 +313,12 @@ def moments(
         large read requests as the worker's memory allows; an explicit value
         is clamped to that same ceiling. Ignored by the ``median`` slab
         path.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
 
     Returns
     -------
@@ -394,7 +372,9 @@ def moments(
     )
 
     block_des = {**selection, **data_selection["img"]}
-    lazy_xds = _open_image_lazy(input_image_store)
+    from astroviper.utils.node_task_io import open_image
+
+    lazy_xds = open_image(io_engine, input_image_store)
     # dimension_flags are FULL-IMAGE flags (built once by the driver/caller);
     # restrict each dimension's flag vector to this task's chunk with the
     # same selection the data is loaded with.
@@ -492,9 +472,10 @@ def moments(
         moments_data_variables = [
             moment_data_variable_key(name) for name in normalize_moments(moments)
         ]
-    from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
+    from astroviper.utils.io import write_result_chunk
 
-    write_result_chunk_to_disk_using_zarr(
+    write_result_chunk(
+        io_engine,
         moments_image_store,
         moments_data_variables,
         task_coords,

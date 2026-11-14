@@ -31,6 +31,7 @@ def point_spread_function_cube_single_field(
     overwrite: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
+    io_engine: str = "xradio",
     *,
     input_checked=False,
 ):
@@ -202,6 +203,12 @@ def point_spread_function_cube_single_field(
         kernels.
     overwrite : bool
         Whether to overwrite an existing ``image_store``. Default is False.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
     compute_backend : str
         Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
         a ``dask.delayed`` graph with
@@ -417,16 +424,6 @@ def point_spread_function_cube_single_field(
             if task["data_selection"].get(ms_name) is not None:
                 task["data_selection"][ms_name]["polarization"] = selection
 
-    # The point spread function and the weight statistics read only the data
-    # group's weight, flag and uvw variables: VISIBILITY is never loaded.
-    load_data_variables = sorted(
-        {
-            ms_xdt.ds.attrs["data_groups"][processing_set_data_group_name][role]
-            for ms_xdt in ps_xdt.values()
-            for role in ("weight", "flag", "uvw")
-        }
-    )
-
     input_params = {}
     # frequency_coords is not used by the node tasks (they use
     # task_coords["frequency"]["data"]).
@@ -443,7 +440,13 @@ def point_spread_function_cube_single_field(
     input_params["psf_fitting_method"] = psf_fitting_method
     input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["primary_beam_params"] = primary_beam_params
-    input_params["load_data_variables"] = load_data_variables
+    # The point spread function and the weight statistics read only the data
+    # group's weight, flag and uvw variables: VISIBILITY is never loaded.
+    input_params["load_correlated_data"] = False
+    input_params["io_engine"] = io_engine
+    input_params["data_group"] = next(iter(ps_xdt.values())).ds.attrs["data_groups"][
+        processing_set_data_group_name
+    ]
     input_params["input_checked"] = True
 
     viper_graph = map(

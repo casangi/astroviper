@@ -196,6 +196,7 @@ def moments(
     monitor_resources_seconds: float | None = None,
     dimension_flags: dict | None = None,
     image_data_group_in_role: str = "sky",
+    io_engine: str = "xradio",
 ):
     """Collapse an on-disk image along one axis into moment maps (CASA ``immoments``).
 
@@ -319,6 +320,12 @@ def moments(
         Role of ``image_data_group_in_name`` whose data variable is collapsed,
         e.g. ``"sky_primary_beam_corrected"`` of the imager's ``"restored"``
         group.  Only the default ``"sky"`` falls back to ``"SKY"``.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
 
     Returns
     -------
@@ -697,6 +704,7 @@ def moments(
         "selection": selection,
         "moments_data_variables": moments_data_variables,
         "memory_budget_gb": memory_budget_gb,
+        "io_engine": io_engine,
         # Full-image flags, validated here once; each node task slices them to
         # its chunk. Normalized so index-range lists reach workers as compact
         # bool arrays.

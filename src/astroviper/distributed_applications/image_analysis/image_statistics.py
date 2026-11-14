@@ -91,6 +91,7 @@ def image_statistics(
     working_memory_factor: float = 2.5,
     reduce_mode: str = "tree",
     reduce_n_batch: int = 2,
+    io_engine: str = "xradio",
 ) -> xr.Dataset:
     """Calculate image statistics with partitioned on-disk loading.
 
@@ -161,6 +162,8 @@ def image_statistics(
         GraphVIPER reduction topology.
     reduce_n_batch : int, default 2
         Fan-in for ``tree_n`` reductions.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks.
 
     Returns
     -------
@@ -209,6 +212,9 @@ def image_statistics(
             n_partitions=4,
         )
     """
+    from astroviper.utils.node_task_io import check_io_engine
+
+    check_io_engine(io_engine)
     if not isinstance(image, str | Path):
         raise TypeError("The distributed application requires an on-disk image path")
     if mask is not None and not isinstance(mask, str):
@@ -234,7 +240,7 @@ def image_statistics(
         finalize_statistics_state,
     )
 
-    metadata, variable = _open_metadata(str(image), data_variable)
+    metadata, variable = _open_metadata(str(image), data_variable, io_engine)
     source = metadata[variable]
     selection = build_image_selection(
         source,
@@ -298,6 +304,7 @@ def image_statistics(
         "excludepix": excludepix,
         "statistics": statistics,
         "finalize": False,
+        "io_engine": io_engine,
     }
     graph = map(
         input_data=input_data,

@@ -567,10 +567,6 @@ def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
         raise ValueError(
             f"{store} is a Measurement Set v2; convert it with xradio.measurement_set.convert_msv2_to_processing_set and use the processing set."
         )
-    if not config.get("io_engine") == "chunk":
-        raise ValueError(
-            f"{store} is a Measurement Set v2, which is imaged with io_engine='chunk' only; or convert it with xradio.measurement_set.convert_msv2_to_processing_set and image the processing set."
-        )
     if config.get("write_visibility_model_to_ps", False) or config.get(
         "write_imaging_weights_to_ps", False
     ):

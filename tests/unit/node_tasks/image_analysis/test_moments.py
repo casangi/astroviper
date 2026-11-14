@@ -222,7 +222,8 @@ def test_read_block_covers_block_plus_decode_transient(tmp_path):
     import zarr
 
     node = importlib.import_module("astroviper.node_tasks.image_analysis.moments")
-    _open_image_lazy = node._open_image_lazy
+    from astroviper.utils.node_task_io import open_image
+
     moment_axis_read_block = node.moment_axis_read_block
 
     img_xds = make_test_image_xds(n_frequency=12, n_l=16, n_m=16)
@@ -243,7 +244,7 @@ def test_read_block_covers_block_plus_decode_transient(tmp_path):
                 "MASK": {"chunks": (1, 4, 2, 8, 8)},
             },
         )
-        lazy = _open_image_lazy(path)["SKY"]
+        lazy = open_image("xradio", path)["SKY"]
         # block(4) = 4096 + 2 chunks in flight x 2 x 2048 = 12288 B;
         # block(8) = 8192 + 4 x 2 x 2048 = 24576 B; block(12) = 36864 B.
         assert moment_axis_read_block(lazy, block_des, "frequency", 1.0) == 12
@@ -266,7 +267,7 @@ def test_read_block_covers_block_plus_decode_transient(tmp_path):
                 "MASK": {"chunks": (1, 1, 2, 8, 8), "shards": (1, 4, 2, 16, 16)},
             },
         )
-        lazy = _open_image_lazy(sharded)["SKY"]
+        lazy = open_image("xradio", sharded)["SKY"]
         # block(4) = 4096 + 8192 = 12288; block(8) = 8192 + 16384 = 24576;
         # block(12) = 12288 + 24576 = 36864.
         # An ample budget spans MULTIPLE shards (fewer, larger requests).

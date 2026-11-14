@@ -510,13 +510,24 @@ def stand_in_open_msv2(monkeypatch):
     return stand_in
 
 
-def test_msv2_requires_chunk_engine(tmp_path):
-    ms_path = _measurement_set_like(tmp_path)
-    with pytest.raises(ValueError, match="io_engine='chunk'"):
-        _image_cube(
-            ms_path, str(tmp_path / "cube.img.zarr"), [1e11], io_engine="xradio"
-        )
-    _assert_nothing_written(tmp_path)
+@requires_msv2_engine
+def test_msv2_images_equal_with_both_io_engines(
+    imageable_msv2, imageable_msv2_ps, tmp_path, synchronous_dask
+):
+    """Both I/O engines read a Measurement Set v2 through XRADIO's engine and
+    write the same images."""
+    frequencies = open_processing_set(imageable_msv2_ps)["imageable_2"].frequency
+    chunk_store = str(tmp_path / "chunk.img.zarr")
+    xradio_store = str(tmp_path / "xradio.img.zarr")
+
+    chunk = _image_cube(imageable_msv2, chunk_store, frequencies.values, max_iter=5)
+    xradio = _image_cube(
+        imageable_msv2, xradio_store, frequencies.values, max_iter=5, io_engine="xradio"
+    )
+
+    _assert_imaged(chunk)
+    _assert_imaged(xradio)
+    _assert_images_equal(chunk_store, xradio_store)
 
 
 def test_msv2_without_the_engine(tmp_path, monkeypatch):

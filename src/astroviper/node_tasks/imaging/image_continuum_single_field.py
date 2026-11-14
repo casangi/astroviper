@@ -1231,7 +1231,11 @@ def residual_update_continuum_single_field(
         for MFS.
 
     io_engine : {"chunk", "xradio"}, optional
-        I/O engine of the processing-set load.
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
 
     data_group : dict, optional
         Role-to-variable mapping used by the chunk loader.
@@ -1873,7 +1877,11 @@ def grid_imaging_weight_density_continuum_node(
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
     io_engine : {"chunk", "xradio"}, optional
-        I/O engine of the processing-set load.
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
     data_group : dict or None, optional
         Resolved data-group role mapping. Its correlated-data variable is
         omitted from ordinary loads because global density gridding uses only
@@ -2189,7 +2197,11 @@ def degrid_imaging_weights_continuum_node(
         This option remains separate from ``memory_mode`` for now; the policies
         may be unified later.
     io_engine : {"chunk", "xradio"}, optional
-        I/O engine of the processing-set load.
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
     data_group : dict or None, optional
         Resolved data-group role mapping. Its correlated-data variable is
         omitted from ordinary loads because weight degridding uses only UVW,

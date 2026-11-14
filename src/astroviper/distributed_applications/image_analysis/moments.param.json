@@ -25,6 +25,7 @@
         "overwrite": { "type": "boolean" },
         "memory_budget_gb": { "type": ["float", "int"], "nullable": true, "min": 0 },
         "monitor_resources_seconds": { "type": ["float", "int"], "nullable": true, "min": 0 },
-        "dimension_flags": { "type": ["dict"], "nullable": true }
+        "dimension_flags": { "type": ["dict"], "nullable": true },
+        "io_engine": { "type": ["str"], "allowed": ["chunk", "xradio"] }
     }
 }

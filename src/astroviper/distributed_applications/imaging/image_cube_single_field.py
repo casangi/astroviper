@@ -174,9 +174,9 @@ def image_cube_single_field(
     Parameters
     ----------
     ps_store : str
-        Path of the input visibilities: a processing set (Zarr store) or, with
-        ``io_engine="chunk"``, a Measurement Set v2 (a casacore table directory,
-        see :func:`~astroviper.utils.measurement_set_v2.is_measurement_set_v2`).
+        Path of the input visibilities: a processing set (Zarr store) or a
+        Measurement Set v2 (a casacore table directory, see
+        :func:`~astroviper.utils.measurement_set_v2.is_measurement_set_v2`).
         A Measurement Set v2 is imaged without converting it: the driver opens
         it with XRADIO's ``xradio_msv2`` engine
         (:func:`xradio.measurement_set.open_msv2`, in the XRADIO releases that
@@ -190,7 +190,7 @@ def image_cube_single_field(
         options the run never writes into the Measurement Set (a
         ``partition_cache`` that stores partitions writes them into it, see
         ``msv2_open_options``). These errors are raised before anything is
-        written: ``io_engine="xradio"``, no engine, a write-back flag, a
+        written: no engine, a write-back flag, a
         refused ``msv2_open_options`` key, no MSv4 left after
         ``scan_intents``, or an MSv4 without the data group
         ``processing_set_data_group_name`` or without one of the roles the
@@ -715,17 +715,11 @@ def image_cube_single_field(
           pixel inside ``primary_beam_limit``. ``False`` measures it outside the
           mask or, without a mask, on the pixels Chauvenet's criterion leaves.
     io_engine : {"chunk", "xradio"}
-        I/O of the node tasks. ``"chunk"``: load only the data group's data
-        variables straight from the Zarr chunk blobs (reconstructing
-        coordinates from the inputs, ignoring all sub-datasets) and write each
-        result chunk's blob directly to the pre-created image store, bypassing
-        the asyncio Zarr dataset API; the processing set and image are assumed
-        to share the same frequency coordinate. ``"xradio"``: XRADIO's
-        ``load_processing_set`` and zarr-python region writes. A Measurement
-        Set v2 ``ps_store`` requires ``"chunk"``: its node tasks read their data
-        through XRADIO's ``xradio_msv2`` engine instead, with the Measurement
-        Set's own frequencies (see ``ps_store``), and write with the chunk
-        writers. Default ``"xradio"``.
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
     compute_backend : str
         Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
         a ``dask.delayed`` graph with
@@ -944,9 +938,8 @@ def image_cube_single_field(
     if compressor is None:
         compressor = Blosc(cname="lz4", clevel=5)
 
-    # A Measurement Set v2 is read with io_engine="chunk" only
-    # (through XRADIO's xradio_msv2 engine); the production path loads Zarr
-    # processing sets. Checked here, before anything is written.
+    # A Measurement Set v2 is read through XRADIO's xradio_msv2 engine by both
+    # I/O engines. Checked here, before anything is written.
     input_is_msv2 = is_measurement_set_v2(ps_store)
     from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
         check_input_storage,

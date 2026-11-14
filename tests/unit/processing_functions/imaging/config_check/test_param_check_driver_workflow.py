@@ -34,7 +34,7 @@ def test_workflow_schema_rejected(options):
 @pytest.mark.parametrize(
     "options",
     [
-        {"io_engine": "xradio"},
+        {"io_engine": "xradio", "write_visibility_model_to_ps": True},
         {"io_engine": "chunk", "write_visibility_model_to_ps": True},
         {"io_engine": "chunk", "write_imaging_weights_to_ps": True},
     ],
@@ -57,6 +57,7 @@ def test_msv2_read_only_supported_path():
     )
 
     check_input_storage({"io_engine": "chunk"}, input_is_msv2=True)
+    check_input_storage({"io_engine": "xradio"}, input_is_msv2=True)
     with pytest.raises(ValueError, match="convert"):
         check_input_storage(
             {"io_engine": "chunk"}, input_is_msv2=True, allow_msv2=False
