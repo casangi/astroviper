@@ -1509,3 +1509,25 @@ def test_tile_read_takes_only_the_compressed_chunks(tmp_path, monkeypatch):
         if inode in expected:
             per_shard.setdefault(inode, []).append((offset, n))
     assert {inode: sorted(r) for inode, r in per_shard.items()} == expected
+
+
+def test_inner_chunks_of_a_shard_are_read_concurrently(tmp_path, monkeypatch):
+    from astroviper.utils.chunk_io import open_image, zarr_chunks
+
+    store, sky = _fixed_slot_image(tmp_path, image_chunking={"l": 8, "m": 8})
+    threads = set()
+    real = zarr_chunks._read_inner_chunk
+
+    def recording(*args, **kwargs):
+        threads.add(threading.get_ident())
+        time.sleep(0.01)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(zarr_chunks, "_read_inner_chunk", recording)
+    np.testing.assert_array_equal(open_image(store).SKY_RESIDUAL.values, sky)
+    assert len(threads) > 1
+
+    threads.clear()
+    monkeypatch.setattr(zarr_chunks, "_READ_CONCURRENCY", 1)
+    np.testing.assert_array_equal(open_image(store).SKY_RESIDUAL.values, sky)
+    assert threads == {threading.get_ident()}

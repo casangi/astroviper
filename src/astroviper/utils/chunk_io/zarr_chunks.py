@@ -64,6 +64,11 @@ _V3_DTYPE = {
 }
 
 # zarr v3 BloscCodec shuffle name -> numcodecs Blosc shuffle int.
+# Inner chunks of one shard read at the same time (zarr's default async
+# concurrency): ``os.pread`` on one descriptor is thread-safe and the decode
+# releases the GIL.
+_READ_CONCURRENCY = 10
+
 _BLOSC_SHUFFLE = {"noshuffle": 0, "shuffle": 1, "bitshuffle": 2, None: 1}
 
 _UINT64_MAX = (1 << 64) - 1
@@ -357,6 +362,10 @@ def read_array_region(array_path, sel):
             in_sl = tuple(slice(c[1], c[2]) for c in combo)
             by_shard.setdefault(shard_index, []).append((within, out_sl, in_sl))
 
+        from concurrent.futures import ThreadPoolExecutor
+
+        n_threads = min(_READ_CONCURRENCY, max(len(i) for i in by_shard.values()))
+        executor = ThreadPoolExecutor(max_workers=n_threads) if n_threads > 1 else None
         for shard_index, items in by_shard.items():
             path = _chunk_path(array_path, meta, shard_index)
 
@@ -377,16 +386,31 @@ def read_array_region(array_path, sel):
                     offsets = _read_shard_index(
                         fd, os.fstat(fd).st_size, meta, inner_per_shard, path
                     )
-                    for within, out_sl, in_sl in items:
+
+                    def _read_item(item):
+                        within, out_sl, in_sl = item
                         flat = int(np.ravel_multi_index(within, inner_per_shard))
                         arr = _read_inner_chunk(
                             fd, offsets, flat, inner, meta["sharding"], dtype, path
                         )
                         out[out_sl] = fill if arr is None else arr[in_sl]
+
+                    if executor is None or len(items) == 1:
+                        for item in items:
+                            _read_item(item)
+                    else:
+                        list(executor.map(_read_item, items))
                 finally:
                     os.close(fd)
 
-            _retry_transient_io(f"shard {path}", _read_shard)
+            try:
+                _retry_transient_io(f"shard {path}", _read_shard)
+            except BaseException:
+                if executor is not None:
+                    executor.shutdown(wait=True)
+                raise
+        if executor is not None:
+            executor.shutdown(wait=True)
         return _apply_relative_indices(out), dims
 
     per_axis = [
