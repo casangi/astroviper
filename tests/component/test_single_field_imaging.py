@@ -976,20 +976,22 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
         plot_prefix=f"niter0_t{processing_function_threads}",
     )
 
-    # Angular beam widths use the corrected resampled pixel-interval scale.
+    # Angular beam widths use the corrected resampled pixel-interval scale and
+    # FWHM = 2 sqrt(2 ln 2) sigma.
     psf_ref = [
         [
-            [2.971086828910649e-06, 2.227885477633231e-06, 2.2254373922920276],
-            [2.9709892169257772e-06, 2.227874275332764e-06, 2.225484062649881],
-            [2.9708749766051937e-06, 2.227856105453191e-06, 2.2253698081236335],
-            [2.970881030955093e-06, 2.2278465757259163e-06, 2.225357810302524],
-            [2.9708760545035416e-06, 2.2278426266917785e-06, 2.2253578827415383],
+            [2.9708597968209126e-06, 2.2277152358805473e-06, 2.2254373922920276],
+            [2.9707621917825434e-06, 2.227704034384182e-06, 2.225484062649881],
+            [2.9706479604750143e-06, 2.22768586552098e-06, 2.2253698081236335],
+            [2.9706540139336668e-06, 2.227676336657434e-06, 2.225357810302524],
+            [2.970649037239709e-06, 2.2276723886557226e-06, 2.2253578827415383],
         ]
     ]
     assert np.allclose(
         img_av_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.sel(polarization="I").values,
         psf_ref,
         rtol=1e-6,
+        atol=0.0,
     ), "Beam fit parameters for the point spread function differ from the reference."
 
     # The two airy-disk implementations should agree.

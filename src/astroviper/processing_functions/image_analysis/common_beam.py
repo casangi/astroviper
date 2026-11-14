@@ -13,12 +13,13 @@ import numpy as np
 import toolviper.utils.logger as logger
 import xarray as xr
 
+from astroviper.utils._gaussian_math import SIG2FWHM
+
 # casacore's C::arcsec and C::degree, the factors of its units "arcsec" and "deg". CASA keeps
 # its enclosing ellipses in arcsec; its unit conversions are part of its result.
 _ARCSEC = 0.00000484813681109535993589914098765
 _DEGREE = 0.0174532925199432957692369
 _AREA_FACTOR = math.pi / (4.0 * math.log(2.0))
-_FWHM_FACTOR = 2.0 * math.sqrt(2.0 * math.log(2.0))
 _MAX_GROWTH_STEPS = 1000
 _CONTAINMENT_TOLERANCE = 1e-6
 _MAX_PLANES_NAMED = 10
@@ -458,8 +459,8 @@ def _beam_covariance(beam_fit_params):
     so a beam and its :func:`common_beam` (pa in [0, pi) from the fit, (-pi/2, pi/2]
     from CASA's rule) have the same covariance."""
     beams = np.asarray(beam_fit_params, dtype=np.float64)
-    sigma_major = beams[..., 0] / _FWHM_FACTOR
-    sigma_minor = beams[..., 1] / _FWHM_FACTOR
+    sigma_major = beams[..., 0] / SIG2FWHM
+    sigma_minor = beams[..., 1] / SIG2FWHM
     return _covariance(
         sigma_major * sigma_major, sigma_minor * sigma_minor, _unwrap(beams[..., 2])
     )
@@ -489,8 +490,8 @@ def _beam_from_covariance(covariance):
     pa = np.where(smallest == largest, 0.0, _orientation(covariance))
     return np.stack(
         [
-            _FWHM_FACTOR * np.sqrt(np.maximum(largest, 0.0)),
-            _FWHM_FACTOR * np.sqrt(np.maximum(smallest, 0.0)),
+            SIG2FWHM * np.sqrt(np.maximum(largest, 0.0)),
+            SIG2FWHM * np.sqrt(np.maximum(smallest, 0.0)),
             pa,
         ],
         axis=-1,
