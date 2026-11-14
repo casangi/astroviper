@@ -197,6 +197,7 @@ def moments(
     dimension_flags: dict | None = None,
     image_data_group_in_role: str = "sky",
     io_engine: str = "xradio",
+    output_image_format: str = "zarr",
 ):
     """Collapse an on-disk image along one axis into moment maps (CASA ``immoments``).
 
@@ -326,6 +327,10 @@ def moments(
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
         and CASA or FITS images are read through XRADIO by both.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of ``moments_image_store``: a Zarr store, or a directory with one
+        FITS file per moment map (``io_engine="chunk"`` only), written from the
+        node tasks' Zarr maps at the end. Default ``"zarr"``.
 
     Returns
     -------
@@ -387,6 +392,13 @@ def moments(
         raise ValueError(
             "Only one of include_pixel_range and exclude_pixel_range may be given."
         )
+    if output_image_format not in ("zarr", "fits"):
+        raise ValueError("output_image_format must be 'zarr' or 'fits'.")
+    if output_image_format == "fits" and io_engine != "chunk":
+        raise ValueError("FITS output needs io_engine='chunk'.")
+    # With FITS output the node tasks write a Zarr store that the FITS files
+    # replace, at the path given.
+    fits_store = moments_image_store
     if not overwrite and os.path.exists(moments_image_store):
         raise RuntimeError(
             f"Already existing file {moments_image_store} will not be overwritten. "
@@ -735,7 +747,27 @@ def moments(
         + "s"
     )
 
-    zarr.consolidate_metadata(moments_image_store)
+    if output_image_format == "fits":
+        import shutil
+
+        from astroviper.utils.chunk_io import write_fits_image
+        from astroviper.utils.node_task_io import open_image
+
+        if os.path.lexists(fits_store):
+            shutil.rmtree(fits_store)
+        write_fits_image(
+            fits_store,
+            open_image(io_engine, moments_image_store).load(),
+            moments_data_variables,
+            data_variable_definitions=data_variable_definitions,
+            double_precision=any(
+                np.dtype(definition["dtype"]).itemsize == 8
+                for definition in data_variable_definitions.values()
+            ),
+        )
+        shutil.rmtree(moments_image_store)
+    else:
+        zarr.consolidate_metadata(moments_image_store)
 
     frames = []
     _collect_dataframes(results, frames)

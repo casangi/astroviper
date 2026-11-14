@@ -37,7 +37,8 @@ def feather(input_params, graph_mode=True):
         set by the driver: ``input_data_store`` (``{"sd": path, "int": path}``),
         ``image_store``, ``image_data_variables_keep`` (``["sky"]``),
         ``sdfactor``, ``axes``, ``selection``, ``fft_backend``,
-        ``processing_function_threads`` and ``io_engine``.
+        ``processing_function_threads``, ``io_engine`` and
+        ``output_image_format``.
     graph_mode : bool, optional
         If ``True`` (default) the ``SKY`` slice is written into the pre-allocated
         image store with :func:`~astroviper.utils.io.write_result_chunk`.  If
@@ -67,6 +68,7 @@ def feather(input_params, graph_mode=True):
 
     selection = input_params.get("selection", {})
     io_engine = input_params.get("io_engine", "xradio")
+    output_image_format = input_params.get("output_image_format", "zarr")
 
     # Load this chunk's single-dish ("sd") and interferometer ("int") images.
     # load_image with block_des reads only this task's frequency slice; .load()
@@ -94,12 +96,19 @@ def feather(input_params, graph_mode=True):
     if graph_mode:
         from astroviper.utils.io import write_result_chunk
 
+        if "beam_fit_params_sky" in input_params["image_data_variables_keep"]:
+            # The FITS BEAMS rows of the task's channels: the feathered image
+            # keeps the interferometer beam.
+            featherd_img_xds["BEAM_FIT_PARAMS_SKY"] = xdses["int"][
+                "BEAM_FIT_PARAMS_SKY"
+            ]
         write_result_chunk(
             io_engine,
             input_params["image_store"],
             input_params["image_data_variables_keep"],
             input_params["task_coords"],
             featherd_img_xds,
+            output_image_format=output_image_format,
         )
     else:
         featherd_img_xds.to_zarr(input_params["image_store"], consolidated=True)

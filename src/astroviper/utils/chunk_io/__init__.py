@@ -1,6 +1,10 @@
 """Chunk I/O engine: Zarr and FITS images read and written by byte offset."""
 
-from astroviper.utils.chunk_io.fits_blocks import create_empty_fits_images, write_fits
+from astroviper.utils.chunk_io.fits_blocks import (
+    create_empty_fits_images,
+    write_fits,
+    write_fits_image,
+)
 from astroviper.utils.chunk_io.zarr_chunks import (
     compute_shard_task_priorities,
     load_image,
@@ -23,6 +27,7 @@ __all__ = [
     "read_array_region",
     "record_shard_ost_map",
     "write_fits",
+    "write_fits_image",
     "write_zarr",
     "write_zarr_sharded",
 ]

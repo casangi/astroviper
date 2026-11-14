@@ -250,10 +250,8 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     if output_format not in ("zarr", "fits"):
         raise ValueError("output_image_format must be 'zarr' or 'fits'.")
     if output_format == "fits":
-        if mode.imaging_kind != "cube" or not config.get("io_engine") == "chunk":
-            raise ValueError(
-                "FITS output requires cube imaging with io_engine='chunk'."
-            )
+        if config.get("io_engine") != "chunk":
+            raise ValueError("FITS output requires io_engine='chunk'.")
         if config.get("image_chunking") or config.get("image_sharding"):
             raise ValueError(
                 "FITS output does not support image_chunking or image_sharding."
@@ -274,7 +272,12 @@ def check_driver_workflow(config, *, mode, require_complete=False):
             "continuum_mode must be supplied at the top level, not inside image_params."
         )
     if output_format == "fits":
-        check_fits_coordinates(image_params)
+        # A continuum image has one plane at the reference frequency.
+        check_fits_coordinates(
+            image_params
+            if mode.imaging_kind == "cube"
+            else {k: v for k, v in image_params.items() if k != "frequency_coords"}
+        )
     check_kept_variables(
         config, mode=mode, fits=output_format == "fits", distributed=require_complete
     )

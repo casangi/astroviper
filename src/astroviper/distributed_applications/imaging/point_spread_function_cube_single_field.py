@@ -32,6 +32,7 @@ def point_spread_function_cube_single_field(
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     io_engine: str = "xradio",
+    output_image_format: str = "zarr",
     *,
     input_checked=False,
 ):
@@ -209,6 +210,9 @@ def point_spread_function_cube_single_field(
         (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
         loaders and xarray and writes with zarr-python. A Measurement Set v2
         and CASA or FITS images are read through XRADIO by both.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of ``image_store``: a Zarr store, or a directory with one FITS
+        file per variable (``io_engine="chunk"`` only). Default ``"zarr"``.
     compute_backend : str
         Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
         a ``dask.delayed`` graph with
@@ -397,18 +401,44 @@ def point_spread_function_cube_single_field(
                 description="Created by the point_spread_function_cube_single_field "
                 "driver; populated by its node tasks.",
             )
-        image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
-        create_empty_data_variables_on_disk(
-            image_store,
-            POINT_SPREAD_FUNCTION_IMAGE_VARIABLES,
-            shape_dict=img_xds.sizes,
-            parallel_coords=parallel_coords,
-            compressor=Blosc(cname="lz4", clevel=5),
-            double_precision=not single_precision_image,
-            data_variable_definitions="imaging",
-        )
+        if output_image_format == "zarr":
+            image_store = write_zarr_image_store(
+                img_xds, image_store, overwrite=overwrite
+            )
+            create_empty_data_variables_on_disk(
+                image_store,
+                POINT_SPREAD_FUNCTION_IMAGE_VARIABLES,
+                shape_dict=img_xds.sizes,
+                parallel_coords=parallel_coords,
+                compressor=Blosc(cname="lz4", clevel=5),
+                double_precision=not single_precision_image,
+                data_variable_definitions="imaging",
+            )
 
     ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
+    if image_store is not None and output_image_format == "fits":
+        from astroviper.utils.chunk_io import create_empty_fits_images
+        from astroviper.utils.io import (
+            imaging_data_variables_and_dims_double_precision,
+            imaging_data_variables_and_dims_single_precision,
+        )
+
+        create_empty_fits_images(
+            image_store,
+            img_xds,
+            POINT_SPREAD_FUNCTION_IMAGE_VARIABLES,
+            double_precision=not single_precision_image,
+            telescope_name=next(iter(ps_xdt.values()))
+            .ds.attrs.get("observation_info", {})
+            .get("telescope_name")
+            or "UNKNOWN",
+            overwrite=overwrite,
+            data_variable_definitions=(
+                imaging_data_variables_and_dims_single_precision
+                if single_precision_image
+                else imaging_data_variables_and_dims_double_precision
+            ),
+        )
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, ps_xdt
     )
@@ -444,6 +474,7 @@ def point_spread_function_cube_single_field(
     # group's weight, flag and uvw variables: VISIBILITY is never loaded.
     input_params["load_correlated_data"] = False
     input_params["io_engine"] = io_engine
+    input_params["output_image_format"] = output_image_format
     input_params["data_group"] = next(iter(ps_xdt.values())).ds.attrs["data_groups"][
         processing_set_data_group_name
     ]
@@ -471,7 +502,7 @@ def point_spread_function_cube_single_field(
 
     release_data_tree(ps_xdt)
     ps_xdt = None
-    if image_store is not None:
+    if image_store is not None and output_image_format == "zarr":
         zarr.consolidate_metadata(image_store)
 
     # The reduce concatenates the chunks in graph order; put the channels in

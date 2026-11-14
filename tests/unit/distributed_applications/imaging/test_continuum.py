@@ -7,6 +7,7 @@ rather than retaining the frequency-cube NaN placeholders created at startup.
 
 import inspect
 import json
+import os
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -722,6 +723,7 @@ def _run_tw_hydra_continuum(
     primary_beam_limit=0.2,
     single_precision_image=False,
     io_engine="xradio",
+    output_image_format="zarr",
     disk_chunk_sizes=None,
     image_sharding=None,
     image_chunking=None,
@@ -800,6 +802,7 @@ def _run_tw_hydra_continuum(
             write_imaging_weights_to_ps=write_imaging_weights_to_ps,
             clear_cache=clear_cache,
             io_engine=io_engine,
+            output_image_format=output_image_format,
             disk_chunk_sizes=disk_chunk_sizes,
             image_sharding=image_sharding,
             image_chunking=image_chunking,
@@ -809,6 +812,8 @@ def _run_tw_hydra_continuum(
             reduce_mode=reduce_mode,
             reduce_n_batch=reduce_n_batch,
         )
+    if output_image_format == "fits":
+        return result, None
     return result, xr.open_zarr(output_store)
 
 
@@ -2870,4 +2875,45 @@ def test_tw_hydra_in_place_caches_equal_with_both_io_engines(
             rtol=1e-6,
             atol=1e-9,
             err_msg=name,
+        )
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_tw_hydra_fits_output_per_taylor_term(tmp_path, tw_hydra_store, continuum_mode):
+    """FITS output: one file per variable and Taylor term, holding the planes
+    of the Zarr image, with the PSF beam in the BEAMS tables."""
+    from xradio.image import open_image
+
+    processing_set = open_processing_set(str(tw_hydra_store))
+    common = dict(io_engine="chunk")
+    _, zarr_image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"{continuum_mode}.img.zarr",
+        processing_set,
+        None,
+        continuum_mode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        **common,
+    )
+    fits_store = tmp_path / f"{continuum_mode}_fits"
+    _run_tw_hydra_continuum(
+        tw_hydra_store,
+        fits_store,
+        processing_set,
+        None,
+        continuum_mode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        output_image_format="fits",
+        **common,
+    )
+    names = sorted(os.listdir(fits_store))
+    assert "SKY_RESIDUAL.tt0.fits" in names and "SKY_RESIDUAL.tt1.fits" in names
+    assert "PRIMARY_BEAM.fits" in names
+    for term in range(zarr_image.sizes["taylor_term"]):
+        fits = open_image({"sky": str(fits_store / f"SKY_RESIDUAL.tt{term}.fits")})
+        np.testing.assert_allclose(
+            fits.SKY.values[:, 0],
+            zarr_image.SKY_RESIDUAL.isel(taylor_term=term).values,
+            rtol=1e-6,
+            atol=1e-9,
         )

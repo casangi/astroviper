@@ -155,11 +155,11 @@ def simulate_processing_set(
         "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
         which has no w term and so needs ``uvw_params["w_term"]`` False.
     io_engine : {"chunk", "xradio"}, optional
-        I/O engine of the node tasks: ``"chunk"`` writes the visibilities with
-        :func:`astroviper.utils.chunk_io.write_zarr` and reads
-        ``sky_model_image`` by byte offset; ``"xradio"`` writes with
-        :func:`~astroviper.utils.measurement_set_tools.write_visibility_chunk_to_disk`
-        and reads with XRADIO.
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both.
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list

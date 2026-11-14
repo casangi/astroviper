@@ -740,3 +740,60 @@ def write_fits(
     # Phase 2: write the blobs serially (one open file at a time for this task).
     for path, offset, blob in writes:
         _pwrite_with_eio_retry(path, offset, blob)
+
+
+def write_fits_image(
+    image_store,
+    img_xds,
+    image_data_variables_keep,
+    *,
+    data_variable_definitions,
+    double_precision=False,
+    telescope_name="UNKNOWN",
+    overwrite=False,
+):
+    """Write a whole image dataset to FITS files.
+
+    :func:`create_empty_fits_images` followed by :func:`write_fits` of every
+    channel, for an image written once at the end of a run rather than by the
+    node tasks.
+
+    Parameters
+    ----------
+    image_store : str
+        Output directory holding one ``<VARIABLE>.fits`` per image variable.
+    img_xds : xarray.Dataset
+        The image, with its coordinates, attributes and the kept variables.
+    image_data_variables_keep : list of str
+        Keys of the variables to write (beam-fit-params variables go into the
+        ``BEAMS`` tables).
+    data_variable_definitions : dict
+        ``{key: {"dims": [...], ...}}`` of the kept variables.
+    double_precision : bool, optional
+        64-bit instead of 32-bit floats.
+    telescope_name : str, optional
+        ``TELESCOP`` keyword.
+    overwrite : bool, optional
+        Replace an existing ``image_store``.
+
+    Returns
+    -------
+    dict
+        ``{key: path}`` of the FITS files written.
+    """
+    paths = create_empty_fits_images(
+        image_store,
+        img_xds,
+        image_data_variables_keep,
+        double_precision=double_precision,
+        telescope_name=telescope_name,
+        overwrite=overwrite,
+        data_variable_definitions=data_variable_definitions,
+    )
+    write_fits(
+        image_store,
+        image_data_variables_keep,
+        {"frequency": {"slice": slice(0, img_xds.sizes["frequency"])}},
+        img_xds,
+    )
+    return paths

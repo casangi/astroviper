@@ -27,6 +27,7 @@ def point_spread_function_cube_single_field(
     load_correlated_data=True,
     io_engine="xradio",
     data_group=None,
+    output_image_format="zarr",
     task_id=0,
     input_data=None,
     *,
@@ -199,6 +200,8 @@ def point_spread_function_cube_single_field(
     data_group : dict, optional
         Role->variable mapping of ``processing_set_data_group_name``; read from
         the processing set when ``None`` and needed.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of ``image_store``. Default ``"zarr"``.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     input_data : dict, optional
@@ -382,6 +385,7 @@ def point_spread_function_cube_single_field(
             POINT_SPREAD_FUNCTION_IMAGE_VARIABLES,
             _chunk_task_coords(task_coords, data_selection, 0, n_chan),
             psf_xds,
+            output_image_format=output_image_format,
         )
     T_write = time.time() - start
 

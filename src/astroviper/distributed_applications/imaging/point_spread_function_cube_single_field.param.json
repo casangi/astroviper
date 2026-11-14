@@ -22,6 +22,7 @@
         "overwrite": { "type": "boolean" },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "io_engine": { "type": ["str"], "allowed": ["chunk", "xradio"] },
+        "output_image_format": { "type": ["str"], "allowed": ["zarr", "fits"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true }
     }
 }
