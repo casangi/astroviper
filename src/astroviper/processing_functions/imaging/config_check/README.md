@@ -6,7 +6,8 @@ A validator returns `None` on success and raises at the first invalid setting.
 Checks are grouped and described in their owning `param_check_*` module.
 
 Shared imaging rules live in `_predicates.py`: primary-beam cutoffs, Briggs
-robustness, and positive integer Taylor counts. The three parameter-check modules
+robustness, positive integer Taylor counts, the restoration selector and the
+restoring beam. The three parameter-check modules
 call these utilities independently. `_common.py` retains the basic type/numerical
 checks and imaging-mode definitions.
 
@@ -87,6 +88,30 @@ by the channel primary beam before convolution. MFS divides their Taylor
 polynomials, while MVC uses its common beam. Corrected-only output does not
 allocate an apparent restored cube. The selector controls intensity products;
 the separate spectral-product convention is described by the restoration API.
+
+`restoring_beam` is `None` (each plane keeps its own PSF fit) or a target
+`[major, minor, pa]` in radians with `major >= minor > 0` and `|pa| <= pi` (a
+larger position angle is in degrees). A string, tclean's `'common'` among them,
+is refused: at the drivers by their `param.json` schema, which names the
+accepted types, and below them by `check_restoring_beam`, with a pointer to
+`common_beam`. A target
+requires `restore=True`, and its major axis must be smaller than the image,
+`min(image_size) * min(|cell_size|)`: a larger one is arcseconds or degrees
+given as radians, or a common beam inflated by a failed PSF fit. The drivers
+check it against `image_params`, and direct calls of `restore_image` and
+`restore_continuum_image` against the image they restore. With primary-beam
+correction a target needs a restore cutoff of at least `1e-3`: the restore
+divides the residual by the primary beam before taking it to the target, and
+below that cutoff the float32 rounding of the large quotients near the nulls
+of the primary beam spreads over the corrected image. The cutoff is
+`primary_beam_limit` for continuum imaging and direct restore calls; cube
+imaging restores at `cycle_control_params['primary_beam_limit']`, or at 0.2
+for 0.
+`beam_fit_params_sky_restored` can be kept only with `restore=True`. Whether
+the target contains a plane's PSF beam, and whether that plane has a PSF fit,
+is known only after the PSF fit: the cube restore keeps the residual of such a
+plane unscaled and warns, and the continuum append node refuses the target
+right after its PSF fit.
 
 Output requests must match the selected workflow and restoration products.
 Restored images and spectral products require `restore=True`; alpha products

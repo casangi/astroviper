@@ -22,6 +22,8 @@ def image_cube_single_field_report(
     output_image_format="zarr",
     image_data_variables_keep=None,
     thread_info=None,
+    restoring_beam=None,
+    planes_without_fit=None,
 ):
     """Make the report of an ``image_cube_single_field`` run.
 
@@ -30,7 +32,10 @@ def image_cube_single_field_report(
     timing and phase times grouped by the phases of the imaging node task
     (``IMAGING_TIMING_PHASES``). The results section holds the cross sections of the point spread function (Stokes I,
     centre channel) along the major axis, the minor axis and the diagonal
-    between them with the fitted Gaussian; the maximum over frequency (the
+    between them with the fitted Gaussian; the restoring beam of a run with
+    ``restoring_beam``, the axes of the PSF fit of every channel against it,
+    the ratios of its axes to them and the channels whose residual was left
+    unconvolved and unscaled; the maximum over frequency (the
     ``"maximum"`` moment of
     :func:`~astroviper.distributed_applications.image_analysis.moments.moments`)
     of the residual, the model and the primary beam corrected restored image
@@ -54,9 +59,21 @@ def image_cube_single_field_report(
         ``"zarr"`` (default) or ``"fits"``, as in the run.
     image_data_variables_keep : list of str, optional
         The image variables the run kept; ``None`` takes the variables found
-        in ``image_store``.
+        in ``image_store``. FITS output has no file of a beam-fit-params
+        variable, so the PSF beams of its restoring-beam section are found
+        only with the list; the restoring beam is the header beam of the
+        restored images.
     thread_info : dict, optional
         Passed to ``moments``.
+    restoring_beam : list of float, optional
+        The run's ``restoring_beam``; ``None`` (default) for a run without one,
+        whose planes were each restored with their own PSF fit.
+    planes_without_fit : dict, optional
+        FITS output: which planes ``(frequency, polarization)`` of the file of
+        each image variable had no beam fit before the run filled its
+        ``BEAMS`` rows, as
+        :func:`~astroviper.node_tasks.imaging.utils.skunk_works_fits.fill_fits_beams_without_fit`
+        returns them. ``None`` (default) takes the rows as they are.
 
     Returns
     -------
@@ -99,7 +116,15 @@ def image_cube_single_field_report(
         )
         document.section("Results")
         _add_point_spread_function(
-            document, image_store, output_image_format, available
+            document, image_store, output_image_format, available, planes_without_fit
+        )
+        _add_restoring_beam(
+            document,
+            image_store,
+            output_image_format,
+            available,
+            restoring_beam,
+            planes_without_fit,
         )
         _add_moment_maximum(
             document,
@@ -129,25 +154,38 @@ def _available_variables(image_store, output_image_format, image_data_variables_
     return {str(name).lower() for name in xr.open_zarr(image_store).data_vars}
 
 
-def _open_variable(image_store, output_image_format, key):
-    """The image dataset holding the variable ``key`` (lazily opened)."""
+def _open_variable(image_store, output_image_format, key, planes_without_fit=None):
+    """The image dataset holding the variable ``key`` (lazily opened); the
+    beams of a FITS file NaN in its planes without a fit."""
+    import xarray as xr
+
     if output_image_format == "fits":
         from xradio.image import open_image
 
-        return open_image({key: os.path.join(image_store, key.upper() + ".fits")})
-    import xarray as xr
-
+        img_xds = open_image({key: os.path.join(image_store, key.upper() + ".fits")})
+        if planes_without_fit is not None and key in planes_without_fit:
+            beam_name = "BEAM_FIT_PARAMS_" + key.upper()
+            img_xds[beam_name] = img_xds[beam_name].where(
+                ~xr.DataArray(
+                    planes_without_fit[key], dims=("frequency", "polarization")
+                )
+            )
+        return img_xds
     return xr.open_zarr(image_store)
 
 
-def _add_point_spread_function(document, image_store, output_image_format, available):
+def _add_point_spread_function(
+    document, image_store, output_image_format, available, planes_without_fit=None
+):
     from astroviper.utils.report_plots import plot_point_spread_function_cross_sections
 
     document.subsection("Point spread function")
     if "point_spread_function" not in available:
         document.note("The point spread function was not kept (point_spread_function).")
         return
-    img_xds = _open_variable(image_store, output_image_format, "point_spread_function")
+    img_xds = _open_variable(
+        image_store, output_image_format, "point_spread_function", planes_without_fit
+    )
     beam_name = "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
     if beam_name not in img_xds:
         document.note(
@@ -187,6 +225,173 @@ def _add_point_spread_function(document, image_store, output_image_format, avail
         caption="The point spread function through its peak (solid) and the "
         "fitted Gaussian (dashed) along the major axis, the minor axis and the "
         "diagonal between them.",
+    )
+
+
+def _open_beam_fit_params(
+    image_store, output_image_format, available, key, planes_without_fit=None
+):
+    """The beam-fit-params variable ``key`` (lazily opened), ``None`` when it
+    was not written. FITS output holds the restoring beam in the header of the
+    restored images, and the others in the ``BEAMS`` tables of the image files
+    they label."""
+    if output_image_format != "fits":
+        if key not in available:
+            return None
+        return _open_variable(image_store, output_image_format, key)[key.upper()]
+    from astropy.io import fits
+
+    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+        _RESTORED_VARIABLES,
+        _beams_table_variable,
+    )
+
+    if key == "beam_fit_params_sky_restored":
+        image_keys = [
+            image_key
+            for image_key in sorted(_RESTORED_VARIABLES & available)
+            if "BMAJ"
+            in fits.getheader(os.path.join(image_store, image_key.upper() + ".fits"))
+        ]
+    elif key in available:
+        beam_variables = [
+            name for name in available if name.startswith("beam_fit_params")
+        ]
+        image_keys = [
+            image_key
+            for image_key in sorted(available)
+            if _beams_table_variable(image_key, beam_variables) == key
+        ]
+    else:
+        image_keys = []
+    if not image_keys:
+        return None
+    img_xds = _open_variable(
+        image_store, output_image_format, image_keys[0], planes_without_fit
+    )
+    return img_xds["BEAM_FIT_PARAMS_" + image_keys[0].upper()]
+
+
+def _add_restoring_beam(
+    document,
+    image_store,
+    output_image_format,
+    available,
+    restoring_beam,
+    planes_without_fit=None,
+):
+    import pandas as pd
+
+    from astroviper.processing_functions.image_analysis.common_beam import (
+        _correcting_covariance,
+        _growth_factor,
+    )
+    from astroviper.utils.report_plots import plot_restoring_beam_axes
+
+    document.subsection("Restoring beam")
+    restored_beam = _open_beam_fit_params(
+        image_store, output_image_format, available, "beam_fit_params_sky_restored"
+    )
+    if restored_beam is None:
+        document.note(
+            "No restoring beam: "
+            + (
+                "no restored FITS image has a header beam (it needs restore=True "
+                "and a restoring_beam)."
+                if output_image_format == "fits"
+                else "beam_fit_params_sky_restored was not written (it needs "
+                "restore=True)."
+            )
+        )
+        return
+    # A target is in every plane, but a plane of a skipped task holds none.
+    planes = np.asarray(restored_beam.values, dtype=np.float64).reshape(-1, 3)
+    planes = planes[
+        np.isfinite(planes).all(axis=1) & (planes[:, 0] > 0.0) & (planes[:, 1] > 0.0)
+    ]
+    if not len(planes):
+        document.note(
+            "No restoring beam: beam_fit_params_sky_restored holds no beam (no "
+            "task wrote it, or no plane has a PSF fit)."
+        )
+        return
+    if restoring_beam is None:
+        document.note(
+            "No restoring beam: every plane was restored with the PSF fit of its "
+            "first Stokes plane, as beam_fit_params_sky_restored records."
+        )
+        return
+    target = planes[0]
+    arcsec = 180.0 / np.pi * 3600.0
+    document.text(
+        f'Every plane was restored to the beam {target[0] * arcsec:.4g}" x '
+        f'{target[1] * arcsec:.4g}", position angle {np.degrees(target[2]):.1f} deg.'
+    )
+    psf_beam = _open_beam_fit_params(
+        image_store,
+        output_image_format,
+        available,
+        "beam_fit_params_point_spread_function",
+        planes_without_fit,
+    )
+    if psf_beam is None:
+        document.note(
+            "The beam fit of the point spread function was not kept "
+            "(beam_fit_params_point_spread_function)"
+            + (
+                ", or no FITS file carries it: FITS output holds it in the BEAMS "
+                "tables of the point spread function, residual, model and "
+                "deconvolved images, found with the list of the kept variables."
+                if output_image_format == "fits"
+                else "."
+            )
+        )
+        return
+    # The restore applies the beam of the first polarization to every plane.
+    psf_beam = psf_beam.isel(time=0, polarization=0).transpose(
+        "frequency", "beam_params_label"
+    )
+    beams = np.asarray(psf_beam.values, dtype=np.float64)
+    frequency = psf_beam["frequency"].values
+    _, _, state = _correcting_covariance(beams, target)
+    no_fit = state == "no fit"
+    not_contained = state == "not contained"
+    document.figure(
+        plot_restoring_beam_axes(frequency, beams, target, not_contained),
+        caption="The major and the minor axis of the PSF fit of every channel "
+        "(of the first Stokes plane, whose beam the restore applies to all of "
+        "them) and of the restoring beam (dashed); crosses mark the channels "
+        "whose PSF beam the restoring beam does not contain.",
+    )
+    if not no_fit.all():
+        ratios = target[:2] / beams[~no_fit, :2]
+        document.text(
+            "The restoring beam's axes are "
+            f"{ratios[:, 0].min():.4f} to {ratios[:, 0].max():.4f} times the "
+            "major axes and "
+            f"{ratios[:, 1].min():.4f} to {ratios[:, 1].max():.4f} times the "
+            "minor axes of the PSF fits."
+        )
+    uncorrected = no_fit | not_contained
+    if not uncorrected.any():
+        document.text("The restoring beam contains the PSF beam of every channel.")
+        return
+    growth = np.full(len(beams), np.nan)
+    growth[not_contained] = _growth_factor(beams[not_contained], target)
+    document.table(
+        pd.DataFrame(
+            {
+                "frequency (GHz)": frequency[uncorrected] / 1e9,
+                "PSF beam": np.where(no_fit[uncorrected], "no fit", "not contained"),
+                "growth factor": growth[uncorrected],
+            },
+            index=pd.Index(np.flatnonzero(uncorrected), name="channel"),
+        ),
+        caption="The channels whose residual was left unconvolved and "
+        "unscaled: without a PSF fit, or with a PSF beam the restoring beam "
+        "does not contain; the restoring beam would have to grow by the growth "
+        "factor to contain it.",
+        float_format="{:.10g}",
     )
 
 

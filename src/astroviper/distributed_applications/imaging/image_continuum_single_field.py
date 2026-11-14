@@ -2474,6 +2474,7 @@ def image_continuum_single_field(
     fft_backend: str = "pyfftw",
     restore: bool = False,
     restoration_output: str = "primary_beam_corrected",
+    restoring_beam: list[float] | None = None,
     gridding_kernel_params: dict[str, Any] | None = None,
     skunk_works: bool = False,
     compute_backend: str = "dask",
@@ -2704,7 +2705,10 @@ def image_continuum_single_field(
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
         Restoration automatically retains its selected restored Taylor
-        products and the derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.
+        products, the derived ``"alpha"``, ``"alpha_error"``, and, when
+        available, ``"beta"``, and ``"beam_fit_params_sky_restored"``, the beam
+        the restore applied; with a ``restoring_beam`` also
+        ``"beam_fit_params_point_spread_function"``.
         Restored and spectral products require ``restore=True``. Alpha products
         require at least two Taylor terms; beta requires at least three.
         MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;
@@ -3000,6 +3004,28 @@ def image_continuum_single_field(
         by its common power primary beam. Corrected pixels below
         ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
         selector only when ``restore=True``.
+    restoring_beam : list of float or None, optional
+        ``None`` restores each plane with its own PSF fit [CASA ``tclean``
+        ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
+        in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,
+        ``|pa| <= pi``) restores every plane to that beam as ``tclean`` does
+        since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
+        target beam, and the residual with the Gaussian that takes the plane's
+        PSF beam to the target, times the ratio of the beam areas, so it is in
+        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        beam the target does not contain, or that has no PSF fit, keeps its
+        residual unconvolved and unscaled, as ``tclean`` does, and is named in a
+        warning. The continuum imager refuses a target that does not contain its
+        PSF beam, and any target when its PSF fit failed, right after that fit
+        in its first imaging cycle: the residual update has run, but no model
+        update. With primary-beam correction a restore cutoff below 1e-3 is
+        refused (``primary_beam_limit``; in cube imaging that of
+        ``cycle_control_params``, where 0 restores at 0.2): in the transform to
+        the target, the float32 rounding of the residual divided by the primary
+        beam, large near its nulls, would spread over the corrected image. The
+        beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        ``tclean``'s ``restoringbeam='common'``, see
+        :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
 
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
@@ -3387,6 +3413,11 @@ def image_continuum_single_field(
             "primary_beam_corrected": ("sky_restored_flat_sky",),
             "both": ("sky_restored_flat_noise", "sky_restored_flat_sky"),
         }[restoration_output]
+        # A restore records the beam it applied, a restore to a target beside
+        # the PSF beam.
+        restored_products += ("beam_fit_params_sky_restored",)
+        if restoring_beam is not None:
+            restored_products += ("beam_fit_params_point_spread_function",)
         image_data_variables_keep = list(image_data_variables_keep) + [
             key for key in restored_products if key not in image_data_variables_keep
         ]
@@ -3570,6 +3601,9 @@ def image_continuum_single_field(
     input_params["is_first_cycle"] = True
     input_params["deconvolver"] = deconvolver
     input_params["restoration_output"] = restoration_output
+    input_params["restoring_beam"] = (
+        None if restoring_beam is None else [float(value) for value in restoring_beam]
+    )
     input_params["primary_beam_limit"] = float(primary_beam_limit)
     input_params["continuum_mode"] = continuum_mode
     input_params["mvc_model_update_approximation"] = mvc_model_update_approximation
@@ -3954,6 +3988,7 @@ def image_continuum_single_field(
                 "spectral_diagnostics": spectral_diagnostics,
                 "restore": restore,
                 "restoration_output": restoration_output,
+                "restoring_beam": input_params["restoring_beam"],
                 "cycle_acceleration": cycle_acceleration,
                 "momentum_coefficient": momentum_coefficient,
             }
@@ -4244,6 +4279,7 @@ def image_continuum_single_field(
                 "deconvolver": deconvolver,
                 "restore": restore,
                 "restoration_output": restoration_output,
+                "restoring_beam": input_params["restoring_beam"],
                 "primary_beam_limit": primary_beam_limit,
                 "processing_function_threads": processing_function_threads,
             }

@@ -7,12 +7,12 @@ import xarray as xr
 from scipy.interpolate import interpn
 from scipy.ndimage import label
 
+from astroviper.utils._gaussian_math import SIG2FWHM
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
 
-FWHM_factor = 2.355  # approx 2*sqrt(2*ln(2))
 beam_initial_guess = [2.5, 2.5, 0.0]  # initial guess for [bmaj, bmin, pa]
 expand_pixel = 5  # expand the fitting window by this many pixels on each side
 
@@ -298,8 +298,8 @@ def _max_sidelobe_2d(psf_2d, beam, delta):
     theta = 0.5 * np.pi - beam[2]
     cos_theta = np.cos(theta)
     sin_theta = np.sin(theta)
-    sigma_major = beam[0] / FWHM_factor
-    sigma_minor = beam[1] / FWHM_factor
+    sigma_major = beam[0] / SIG2FWHM
+    sigma_minor = beam[1] / SIG2FWHM
 
     # (major / sigma_major)**2 with major = l cos(theta) - m sin(theta)
     work = np.subtract.outer(l_offset * cos_theta, m_offset * sin_theta)
@@ -645,7 +645,7 @@ def psf_gaussian_fit_core(
         major_direction = directions[:, -1]
 
         ellipse_params[time, chan, pol, :2] = (
-            np.sqrt(np.maximum(variances[::-1], 0.0)) * FWHM_factor
+            np.sqrt(np.maximum(variances[::-1], 0.0)) * SIG2FWHM
         )
         # Match restoration: the major axis is (sin(pa), -cos(pa)) in (l, m).
         ellipse_params[time, chan, pol, 2] = (

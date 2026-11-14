@@ -4,7 +4,8 @@
 metadata of the processing set (telescope, dish diameters, antenna positions,
 correlations, frequencies, phase centre), runs one PSF pass
 (:func:`~astroviper.distributed_applications.imaging.point_spread_function_cube_single_field.point_spread_function_cube_single_field`)
-and derives from them every argument of
+and two refits of the PSF of its highest channel, and derives from them every
+argument of
 :func:`~astroviper.distributed_applications.imaging.image_cube_single_field.image_cube_single_field`.
 The arguments are written to a JSON parameters file, from which
 ``image_cube_single_field(parameters_file=...)`` reproduces the run, and the
@@ -97,10 +98,18 @@ def image_cube_single_field_delphi(
       primary beam of the imager falls to ``image_edge_primary_beam_limit`` at
       the lowest frequency. The PSF pass uses the cell ``1 / (3 u_max)``, with
       ``u_max`` the longest antenna separation at the highest frequency, so
-      that no sample falls off the uv grid; the cube then uses the cell that
-      puts ``pixels_per_beam`` pixels across the fitted minor axis of the
-      Stokes I PSF of the highest frequency. Each image size is the next even
-      2, 3, 5 smooth size that covers the field of view.
+      that no sample falls off the uv grid. Its fits sample the minor axis
+      with about 2 to 3 pixels, too few for a reliable fit, so the Stokes I
+      PSF of the highest frequency with data is made and fitted twice more,
+      at cells of 5 and 6.25 pixels across the minor axis that the plausible
+      fits of the pass predict
+      (:func:`~astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics.beam_refit_cells`).
+      The cube uses the cell that puts ``pixels_per_beam`` pixels across the
+      minor axis of these refits; a refit counts only when it is plausible
+      and agrees with the other refit or with the prediction
+      (:func:`~astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics.refitted_minor_axis`).
+      Each image size is the next even 2, 3, 5 smooth size that covers the
+      field of view.
     * Imaging weights: ``weighting`` with ``robust`` (``None``: 0.5 for ALMA
       and ACA, 2.0 for the VLA, the CASA pipeline values of a cube; the ngVLA
       has none, so Briggs weighting needs ``robust``, 0.5 in RADPS Memo 13).
@@ -162,8 +171,8 @@ def image_cube_single_field_delphi(
     scan_intents : list[str] or None
         The scan intents to image. ``None`` images every scan intent.
     calculate_parameters_only : bool, optional
-        If ``True``, run only the PSF pass and the derivations, write the
-        parameters file and return the parameters without imaging.
+        If ``True``, run only the PSF pass, its refits and the derivations,
+        write the parameters file and return the parameters without imaging.
     parameters_file : str, optional
         Path of the JSON parameters file; ``None`` (default) is
         ``f"{image_store}.parameters.json"``. An existing file is refused
@@ -195,8 +204,10 @@ def image_cube_single_field_delphi(
         With ``calculate_parameters_only`` the parameters: the content of the
         parameters file, ``{"image_cube_single_field": {every argument of
         image_cube_single_field but parameters_file}, "derived": {the
-        observables of the PSF pass per channel and Stokes plane and the
-        derived geometry}, "provenance": {"astroviper": version,
+        observables of the PSF pass per channel and Stokes plane, the refits
+        (``frequency_refit``, ``minor_axis_estimate``, ``cell_size_refit``,
+        ``image_size_refit`` and the Stokes I ``beam_fit_params_refit``) and
+        the derived geometry}, "provenance": {"astroviper": version,
         "delphi_inputs": {the arguments of this call}}}``. Otherwise the result
         of :func:`~astroviper.distributed_applications.imaging.image_cube_single_field.image_cube_single_field`
         with the parameters added under ``"parameters"``.
@@ -207,8 +218,8 @@ def image_cube_single_field_delphi(
         For an existing parameters file without ``overwrite``.
     ValueError
         For a telescope without a primary beam model (or without a pipeline
-        robust when ``robust`` is ``None``), or correlations the imager cannot
-        image.
+        robust when ``robust`` is ``None``), correlations the imager cannot
+        image, or refits of the PSF that give no plausible minor axis.
     """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
@@ -233,7 +244,8 @@ def image_cube_single_field_delphi(
         noisy_cycle_control_params,
     )
     from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics import (
-        cell_size_from_beam_fit,
+        beam_refit_cells,
+        cell_size_from_beam,
         cell_size_guess,
         default_robust,
         field_of_view,
@@ -241,6 +253,7 @@ def image_cube_single_field_delphi(
         longest_antenna_separation,
         max_cell_size_for_uv_coverage,
         primary_beam_telescope,
+        refitted_minor_axis,
         stokes_for_correlations,
     )
 
@@ -291,34 +304,79 @@ def image_cube_single_field_delphi(
         "time_coords": [0],
         "fft_padding": FFT_PADDING,
     }
-    point_spread_function_xds = point_spread_function_cube_single_field(
-        ps_store,
-        image_params,
-        imaging_weights_params,
-        image_store=None,
-        instrument_polarization_basis=instrument_polarization_basis,
-        scan_intents=scan_intents,
-        field_name=field_name,
-        processing_set_data_group_name=processing_set_data_group_name,
-        gridding_kernel_params=GRIDDING_KERNEL_PARAMS,
-        primary_beam_params=primary_beam_params,
-        psf_fitting_method=PSF_FITTING_METHOD,
-        n_mapping_parallelism=n_mapping_parallelism,
-        processing_function_threads=processing_function_threads,
-        compute_backend=compute_backend,
-        # graphviper arms teardown_force_exit_seconds at the end of a compute
-        # and never disarms it, so only the last compute gets it.
-        mpi_cluster_setup=mpi_cluster_setup
-        if mpi_cluster_setup is None or calculate_parameters_only
+    point_spread_function_arguments = {
+        "image_store": None,
+        "instrument_polarization_basis": instrument_polarization_basis,
+        "scan_intents": scan_intents,
+        "field_name": field_name,
+        "processing_set_data_group_name": processing_set_data_group_name,
+        "gridding_kernel_params": GRIDDING_KERNEL_PARAMS,
+        "primary_beam_params": primary_beam_params,
+        "psf_fitting_method": PSF_FITTING_METHOD,
+        "processing_function_threads": processing_function_threads,
+        "compute_backend": compute_backend,
+    }
+    # graphviper arms teardown_force_exit_seconds at the end of a compute and
+    # never disarms it, so only the last compute gets it.
+    mpi_cluster_setup_before_last = (
+        None
+        if mpi_cluster_setup is None
         else {
             k: v
             for k, v in mpi_cluster_setup.items()
             if k != "teardown_force_exit_seconds"
-        },
+        }
+    )
+    point_spread_function_xds = point_spread_function_cube_single_field(
+        ps_store,
+        image_params,
+        imaging_weights_params,
+        n_mapping_parallelism=n_mapping_parallelism,
+        mpi_cluster_setup=mpi_cluster_setup_before_last,
+        **point_spread_function_arguments,
     )
 
-    cell = cell_size_from_beam_fit(
-        point_spread_function_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"],
+    # The pass samples the minor axis with 2 to 3 pixels, too few for a
+    # reliable fit: the PSF of its highest channel is fitted again at 5 and
+    # 6.25 pixels across the minor axis.
+    refit_frequency, minor_axis_estimate, refit_cell_sizes = beam_refit_cells(
+        point_spread_function_xds
+    )
+    refit_image_sizes = [
+        image_size_for_field_of_view(fov, refit_cell) for refit_cell in refit_cell_sizes
+    ]
+    refits = []
+    for index, refit_cell in enumerate(refit_cell_sizes):
+        last_compute = calculate_parameters_only and index == len(refit_cell_sizes) - 1
+        refits.append(
+            point_spread_function_cube_single_field(
+                ps_store,
+                {
+                    **image_params,
+                    "image_size": [refit_image_sizes[index]] * 2,
+                    "cell_size": np.array([-refit_cell, refit_cell]),
+                    "frequency_coords": np.array([refit_frequency]),
+                },
+                imaging_weights_params,
+                n_mapping_parallelism={"frequency": 1},
+                mpi_cluster_setup=mpi_cluster_setup
+                if last_compute
+                else mpi_cluster_setup_before_last,
+                **point_spread_function_arguments,
+            )
+        )
+    beam_fit_params_refit = [
+        refit["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].sel(polarization="I").values[0]
+        for refit in refits
+    ]
+    logger.info(
+        f"Stokes I PSF at {refit_frequency:.6g} Hz refitted at cells "
+        f"{refit_cell_sizes} rad: [major, minor, pa] "
+        f"{[beam.tolist() for beam in beam_fit_params_refit]} rad, minor axis "
+        f"expected from the PSF pass {minor_axis_estimate} rad."
+    )
+    cell = cell_size_from_beam(
+        refitted_minor_axis(refits, minor_axis_estimate),
         pixels_per_beam,
         input_checked=True,
     )
@@ -379,6 +437,11 @@ def image_cube_single_field_delphi(
         "longest_antenna_separation": max_antenna_separation,
         "cell_size_guess": cell_guess,
         "image_size_guess": image_size_guess,
+        "frequency_refit": refit_frequency,
+        "minor_axis_estimate": minor_axis_estimate,
+        "cell_size_refit": refit_cell_sizes,
+        "image_size_refit": refit_image_sizes,
+        "beam_fit_params_refit": beam_fit_params_refit,
         "cell_size": cell,
         "image_size": image_size,
         "beam_params_label": point_spread_function_xds["beam_params_label"].values,

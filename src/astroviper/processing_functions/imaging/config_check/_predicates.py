@@ -4,6 +4,10 @@ Callers decide when a rule applies and whether a value must be supplied. These
 predicates validate original values without converting or changing configuration.
 """
 
+import math
+
+import numpy as np
+
 from astroviper.processing_functions.imaging.config_check._common import (
     require_boolean,
     require_finite_real,
@@ -152,4 +156,93 @@ def check_restoration_output(value):
     ):
         raise ValueError(
             "restoration_output must be 'apparent', 'primary_beam_corrected', or 'both'."
+        )
+
+
+def check_restoring_beam(value):
+    """Require an explicit target beam ``[major, minor, pa]`` in radians.
+
+    Parameters
+    ----------
+    value : sequence of float
+        FWHM of the major and minor axes and the position angle, in radians,
+        as ``BEAM_FIT_PARAMS``, with ``major >= minor > 0`` and
+        ``|pa| <= pi``. The caller handles ``None`` (no target).
+
+    Raises
+    ------
+    TypeError
+        The values are not real numbers.
+    ValueError
+        A string (tclean's ``'common'`` among them), not three values, a value
+        that is not finite, an axis that is not positive, ``minor > major``, or
+        ``|pa| > pi`` (a position angle in degrees).
+    """
+    if isinstance(value, str):
+        raise ValueError(
+            f"restoring_beam={value!r} is not supported; give [major, minor, pa] "
+            "in radians. For tclean's 'common', pass common_beam of the Stokes I "
+            "PSF beams (astroviper.processing_functions.image_analysis.common_beam)."
+        )
+    beam = require_finite_real("restoring_beam", value)
+    if beam.shape != (3,):
+        raise ValueError("restoring_beam must be [major, minor, pa] in radians.")
+    if not beam[0] >= beam[1] > 0:
+        raise ValueError("restoring_beam must have major >= minor > 0.")
+    # Both PSF fits and common_beam give |pa| < pi: a larger one is in degrees.
+    if not abs(beam[2]) <= math.pi:
+        raise ValueError(
+            f"restoring_beam position angle {beam[2]} is not in [-pi, pi]; give it "
+            "in radians."
+        )
+
+
+def check_restoring_beam_within_image(restoring_beam, image_size, cell_size):
+    """Require the major axis of a target beam to be smaller than the image.
+
+    A larger one is arcseconds or degrees given as radians, or a common beam
+    inflated by a failed PSF fit.
+
+    Parameters
+    ----------
+    restoring_beam : sequence of float
+        A target that :func:`check_restoring_beam` accepts.
+    image_size : sequence of int
+        Pixels along ``l`` and ``m``.
+    cell_size : sequence of float
+        Cell sizes along ``l`` and ``m`` in radians; their signs are ignored.
+    """
+    major = np.asarray(restoring_beam)[0]
+    extent = np.min(image_size) * np.min(np.abs(cell_size))
+    if major >= extent:
+        raise ValueError(
+            f"The restoring_beam major axis ({major} rad) is not smaller "
+            f"than the image ({extent} rad); give the beam in radians."
+        )
+
+
+def check_restoring_beam_primary_beam_limit(value):
+    """Require a cutoff of at least 1e-3 for a corrected restore to a target.
+
+    The restore divides the residual by the primary beam before the transform
+    to the target; near the nulls of the primary beam the quotients are large,
+    and their float32 rounding spreads over the corrected image. Inside the 0.2
+    region of an Airy beam the float32 corrected image differs from the
+    float64 one by 2e-7 of its peak without a target, at any cutoff, and with
+    one by 7e-7 at 1e-3, 4e-6 at 1e-4 and 6e-4 at 0. Callers apply the rule
+    only with a target and primary-beam correction.
+
+    Parameters
+    ----------
+    value : float
+        Primary-beam cutoff of the restore, a fraction of the beam peak.
+    """
+    limit = require_finite_real("primary_beam_limit", value, scalar=True)
+    if limit < 1e-3:
+        raise ValueError(
+            f"primary_beam_limit {limit} is below 1e-3: a primary-beam corrected "
+            "restore to a restoring_beam divides the residual by the primary beam "
+            "before taking it to the target, and the float32 rounding of the large "
+            "quotients near the nulls of the primary beam spreads over the corrected "
+            "image. Give primary_beam_limit >= 1e-3, or restoration_output='apparent'."
         )
