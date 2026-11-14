@@ -73,7 +73,8 @@
             "allowed": ["apparent", "primary_beam_corrected", "both"]
         },
         "gridding_kernel_params": { "type": ["dict"], "nullable": true },
-        "skunk_works": { "type": "boolean" },
+        "io_engine": { "type": ["str"], "allowed": ["chunk", "xradio"] },
+        "output_image_format": { "type": ["str"], "allowed": ["zarr", "fits"] },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
         "reduce_mode": {

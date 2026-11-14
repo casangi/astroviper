@@ -1,4 +1,4 @@
-"""Unit tests for the ``_skunk_works`` FITS output path.
+"""Unit tests for the FITS output of the chunk I/O engine.
 
 Creates empty XRADIO-conformant FITS files from a tiny empty image dataset,
 writes frequency chunks into them the way independent node tasks would
@@ -16,9 +16,9 @@ import os
 import numpy as np
 import pytest
 
-from astroviper.node_tasks.imaging.utils import (
+from astroviper.utils.chunk_io import (
     create_empty_fits_images,
-    write_result_chunk_to_fits_skunk_works,
+    write_fits,
 )
 
 IMAGE_SIZE = [16, 12]  # (l, m) -> FITS (NAXIS1, NAXIS2)
@@ -34,6 +34,16 @@ KEEP = [
     "point_spread_function",
     "beam_fit_params_point_spread_function",
 ]
+
+
+def _create_empty_fits_images(*args, **kwargs):
+    from astroviper.utils.io import imaging_data_variables_and_dims_single_precision
+
+    return create_empty_fits_images(
+        *args,
+        data_variable_definitions=imaging_data_variables_and_dims_single_precision,
+        **kwargs,
+    )
 
 
 def _empty_image(frequency_coords=FREQS, pol_coords=POLS, time_coords=(60000.0,)):
@@ -70,9 +80,7 @@ def _write_chunk(store, full, chan_slice, threads=1, keep=KEEP):
         dims = FULL_DIMS if array.ndim == 5 else BEAM_DIMS
         chunk_xds[name] = (dims, array[:, chan_slice])
     task_coords = {"frequency": {"data": FREQS[chan_slice], "slice": chan_slice}}
-    write_result_chunk_to_fits_skunk_works(
-        store, keep, task_coords, chunk_xds, processing_function_threads=threads
-    )
+    write_fits(store, keep, task_coords, chunk_xds, processing_function_threads=threads)
 
 
 @pytest.fixture
@@ -80,7 +88,7 @@ def written_store(tmp_path):
     """Empty FITS store + full cube written as two independent chunks."""
     store = str(tmp_path / "img.fits")
     img_xds = _empty_image()
-    create_empty_fits_images(store, img_xds, KEEP, telescope_name="ALMA")
+    _create_empty_fits_images(store, img_xds, KEEP, telescope_name="ALMA")
     full = _full_arrays()
     _write_chunk(store, full, slice(0, 2), threads=2)
     _write_chunk(store, full, slice(2, 5), threads=1)
@@ -137,7 +145,7 @@ def test_unwritten_channels_read_as_zero(tmp_path):
     from astropy.io import fits
 
     store = str(tmp_path / "img.fits")
-    create_empty_fits_images(store, _empty_image(), KEEP)
+    _create_empty_fits_images(store, _empty_image(), KEEP)
     full = _full_arrays()
     _write_chunk(store, full, slice(2, 5))  # channels 0-1 never written
     with fits.open(os.path.join(store, "SKY_RESIDUAL.fits")) as hdulist:
@@ -150,7 +158,7 @@ def test_double_precision(tmp_path):
     from astropy.io import fits
 
     store = str(tmp_path / "img.fits")
-    create_empty_fits_images(
+    _create_empty_fits_images(
         store, _empty_image(), ["sky_residual"], double_precision=True
     )
     full = {"SKY_RESIDUAL": _full_arrays()["SKY_RESIDUAL"].astype("f8")}
@@ -203,7 +211,7 @@ def test_xradio_open_image_round_trip(written_store):
 # --------------------------------------------------------------------------- #
 def test_unsupported_variable_raises(tmp_path):
     with pytest.raises(ValueError, match="no FITS representation"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(),
             ["sky_residual", "visibility_normalization"],
@@ -212,7 +220,7 @@ def test_unsupported_variable_raises(tmp_path):
 
 def test_non_consecutive_stokes_raises(tmp_path):
     with pytest.raises(ValueError, match="consecutive polarization codes"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(pol_coords=["I", "V"]),
             ["sky_residual"],
@@ -223,7 +231,7 @@ def test_non_uniform_frequency_rejected(tmp_path):
     """Direct FITS creation follows the preflight policy without approximating."""
     freqs = np.concatenate([FREQS, 2e7 + FREQS])
     with pytest.raises(ValueError, match="uniformly spaced frequency_coords"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(frequency_coords=freqs),
             ["sky_residual"],
@@ -232,7 +240,7 @@ def test_non_uniform_frequency_rejected(tmp_path):
 
 def test_zero_span_frequency_raises(tmp_path):
     with pytest.raises(ValueError, match="zero overall span"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(frequency_coords=[1e9, 1e9]),
             ["sky_residual"],
@@ -241,7 +249,7 @@ def test_zero_span_frequency_raises(tmp_path):
 
 def test_multiple_time_planes_raise(tmp_path):
     with pytest.raises(ValueError, match="single time plane"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(time_coords=[60000.0, 60001.0]),
             ["sky_residual"],
@@ -250,10 +258,10 @@ def test_multiple_time_planes_raise(tmp_path):
 
 def test_overwrite_semantics(tmp_path):
     store = str(tmp_path / "img.fits")
-    create_empty_fits_images(store, _empty_image(), ["sky_residual"])
+    _create_empty_fits_images(store, _empty_image(), ["sky_residual"])
     with pytest.raises(FileExistsError):
-        create_empty_fits_images(store, _empty_image(), ["sky_residual"])
-    paths = create_empty_fits_images(
+        _create_empty_fits_images(store, _empty_image(), ["sky_residual"])
+    paths = _create_empty_fits_images(
         store, _empty_image(), ["sky_residual"], overwrite=True
     )
     assert os.path.exists(paths["sky_residual"])

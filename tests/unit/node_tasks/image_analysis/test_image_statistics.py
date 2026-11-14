@@ -168,6 +168,7 @@ def test_on_disk_selection_loads_only_required_variables(image_store, monkeypatc
         mask="MASK_SKY",
         stretch=True,
         statistics=("mean", "n_pixels"),
+        io_engine="xradio",
     )
 
     assert loaded["indexers"]["frequency"] == slice(1, 3, 1)

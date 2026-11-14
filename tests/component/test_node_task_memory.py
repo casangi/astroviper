@@ -207,13 +207,9 @@ CYCLE_CONTROL_PARAMS = {
 #                                            3.8 planes here; CI installs
 #                                            numcodecs 0.16.5 and 0.17.0
 PHASES = [
-    # xradio's loader, imported by the node task at every call, so the module
-    # attribute wrapped here is what it calls
-    (
-        "xradio.measurement_set.load_processing_set",
-        "load_processing_set",
-        2.5,
-    ),
+    # the node task's loader and writer (both I/O engines), imported at every
+    # call, so the module attributes wrapped here are what it calls
+    ("astroviper.utils.node_task_io", "load_processing_set", 2.5),
     (
         "astroviper.processing_functions.imaging.residual_update",
         "imaging_setup_single_field",
@@ -235,7 +231,7 @@ PHASES = [
         "calculate_plane_statistics",
         3.7,
     ),
-    ("astroviper.utils.io", "write_result_chunk_to_disk_using_zarr", 2.5),
+    ("astroviper.utils.io", "write_result_chunk", 2.5),
 ]
 # The whole node task: the peak of the traced memory above its value at the
 # start of the node task, the largest of (traced memory held at the start of
@@ -1001,7 +997,7 @@ def image_params_of(ps_store):
     }
 
 
-def image(work_dir, ps_store, image_params):
+def image(work_dir, ps_store, image_params, io_engine):
     """Image the field the way the point source component test does, one
     node task per channel."""
     image_store = f"{work_dir}/memory.img.zarr"
@@ -1036,11 +1032,13 @@ def image(work_dir, ps_store, image_params):
             restore=True,
             restoration_output="both",
             overwrite=True,
+            io_engine=io_engine,
         )
     return image_store
 
 
-def test_node_task_memory(tmp_path, monkeypatch):
+@pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
+def test_node_task_memory(tmp_path, monkeypatch, io_engine):
     pytest.importorskip("psutil")
     work_dir = str(tmp_path)
     ps_store = simulate(work_dir)
@@ -1069,7 +1067,7 @@ def test_node_task_memory(tmp_path, monkeypatch):
         # the application's other node tasks are recorded, not run
         imports.watch(monkeypatch)
         driver_start = monitor.state()
-        image_store = image(work_dir, ps_store, image_params)
+        image_store = image(work_dir, ps_store, image_params, io_engine)
         driver_left = monitor.state()
         assert len(captured) == N_TASKS, (
             f"{len(captured)} node tasks, expected {N_TASKS}"

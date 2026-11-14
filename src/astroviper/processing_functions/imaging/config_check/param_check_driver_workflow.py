@@ -107,7 +107,6 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         "prepared_continuum_image",
         "single_precision_image",
         "restore",
-        "skunk_works",
         "calculate_parameters_only",
         "overwrite",
         "clear_cache",
@@ -117,6 +116,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     ):
         if name in config:
             require_boolean(name, config[name])
+
+    # --- I/O engine of the node tasks ---
+    if "io_engine" in config and config["io_engine"] not in ("chunk", "xradio"):
+        raise ValueError("io_engine must be 'chunk' or 'xradio'.")
 
     # --- Supported graph backend ---
     # Cube supports Dask and MPI; continuum is restricted to its Dask path above.
@@ -208,12 +211,6 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         for name, allowed in policies.items():
             if name in config and config[name] not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}.")
-        if config.get("weight_memory_mode", "in_place") == "in_place" and config.get(
-            "skunk_works", False
-        ):
-            raise ValueError(
-                "weight_memory_mode='in_place' is not supported with skunk_works=True."
-            )
         if (
             config.get("write_imaging_weights_to_ps", False)
             and config.get("weight_memory_mode", "in_place") != "in_place"
@@ -244,8 +241,8 @@ def check_driver_workflow(config, *, mode, require_complete=False):
 
     # --- Concurrent sharded output ---
     # Partial shards need the direct writer; the standard writer cannot share them.
-    if config.get("image_sharding") and not config.get("skunk_works", False):
-        raise ValueError("image_sharding requires skunk_works=True.")
+    if config.get("image_sharding") and not config.get("io_engine", "chunk") == "chunk":
+        raise ValueError("image_sharding requires io_engine='chunk'.")
 
     # --- Output format and layout ---
     # FITS requires the direct cube writer and cannot use Zarr chunk/shard options.
@@ -253,8 +250,8 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     if output_format not in ("zarr", "fits"):
         raise ValueError("output_image_format must be 'zarr' or 'fits'.")
     if output_format == "fits":
-        if mode.imaging_kind != "cube" or not config.get("skunk_works", False):
-            raise ValueError("FITS output requires cube imaging with skunk_works=True.")
+        if config.get("io_engine", "chunk") != "chunk":
+            raise ValueError("FITS output requires io_engine='chunk'.")
         if config.get("image_chunking") or config.get("image_sharding"):
             raise ValueError(
                 "FITS output does not support image_chunking or image_sharding."
@@ -263,11 +260,11 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # --- Output representation ---
     # Check known coordinates, variable roles and codecs before creating files.
     from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
         check_kept_variables,
         check_output_codec,
         check_output_layout,
     )
+    from astroviper.utils.chunk_io.fits_blocks import check_fits_coordinates
 
     image_params = require_mapping("image_params", config.get("image_params", {}))
     if mode.imaging_kind == "continuum" and "continuum_mode" in image_params:
@@ -275,7 +272,12 @@ def check_driver_workflow(config, *, mode, require_complete=False):
             "continuum_mode must be supplied at the top level, not inside image_params."
         )
     if output_format == "fits":
-        check_fits_coordinates(image_params)
+        # A continuum image has one plane at the reference frequency.
+        check_fits_coordinates(
+            image_params
+            if mode.imaging_kind == "cube"
+            else {k: v for k, v in image_params.items() if k != "frequency_coords"}
+        )
     check_kept_variables(
         config, mode=mode, fits=output_format == "fits", distributed=require_complete
     )
@@ -550,7 +552,7 @@ def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
 
     Notes
     -----
-    MSv2 is read through the skunk-works engine and is never written by an
+    MSv2 is read through XRADIO's xradio_msv2 engine and is never written by an
     imaging run. Keep format detection and optional-engine imports at the
     calling layer; this validator performs no I/O.
     """
@@ -560,10 +562,6 @@ def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
     if not allow_msv2:
         raise ValueError(
             f"{store} is a Measurement Set v2; convert it with xradio.measurement_set.convert_msv2_to_processing_set and use the processing set."
-        )
-    if not config.get("skunk_works", False):
-        raise ValueError(
-            f"{store} is a Measurement Set v2, which is imaged with skunk_works=True only; or convert it with xradio.measurement_set.convert_msv2_to_processing_set and image the processing set."
         )
     if config.get("write_visibility_model_to_ps", False) or config.get(
         "write_imaging_weights_to_ps", False

@@ -1,11 +1,13 @@
-"""Unit tests for the ``_skunk_works`` performance I/O variants.
+"""Unit tests for the Zarr reads and writes of the chunk I/O engine.
 
 Builds tiny synthetic Zarr stores (v3 sharded, v3 plain, v2, v3 fixed-length
 strings) and checks that the low-level reader matches ``zarr.open_array`` for
 multi-channel selections, that the direct chunk writer round-trips through Zarr
 (uncompressed, Blosc, and partial/edge chunks), and that
-``load_processing_set_skunk_works`` reconstructs a usable, mutable processing
-set from the chunk blobs alone.
+``load_processing_set`` reconstructs a usable, mutable processing
+set from the chunk blobs alone. The lazy image readers ``open_image`` and
+``load_image`` match ``xarray.open_zarr`` and XRADIO's ``load_image`` and read
+only the shard index and the compressed chunks of a selection.
 """
 
 from __future__ import annotations
@@ -21,11 +23,14 @@ import pytest
 import xarray as xr
 import zarr
 
-from astroviper.node_tasks.imaging.utils import (
-    load_processing_set_skunk_works,
+from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+    map_visibility_frequencies_to_image,
+)
+from astroviper.utils.chunk_io import (
+    load_processing_set,
     read_array_region,
-    write_result_chunk_to_disk_sharded_skunk_works,
-    write_result_chunk_to_disk_using_zarr_skunk_works,
+    write_zarr,
+    write_zarr_sharded,
 )
 from astroviper.utils.io import create_empty_data_variables_on_disk
 
@@ -126,12 +131,13 @@ def test_load_processing_set_supports_descending_frequency_selection(tmp_path):
     frequencies = np.array([4.0e9, 3.0e9, 2.0e9, 1.0e9])
     arrays = _write_minimal_processing_set_child(store, "ms0", frequencies)
 
-    loaded = load_processing_set_skunk_works(
+    loaded = load_processing_set(
         store,
         {"ms0": {"frequency": np.array([3, 2])}},
         _minimal_data_group(),
         "base",
         np.array([1.0e9, 2.0e9]),
+        map_frequencies=map_visibility_frequencies_to_image,
     )["ms0"]
 
     np.testing.assert_array_equal(loaded.frequency, [1.0e9, 2.0e9])
@@ -147,7 +153,7 @@ def test_load_processing_set_labels_each_child_in_a_multi_child_task(tmp_path):
     _write_minimal_processing_set_child(store, "lower", [1.0e9, 2.0e9])
     _write_minimal_processing_set_child(store, "upper", [3.0e9, 4.0e9], offset=100)
 
-    loaded = load_processing_set_skunk_works(
+    loaded = load_processing_set(
         store,
         {
             "lower": {"frequency": slice(0, 2)},
@@ -156,6 +162,7 @@ def test_load_processing_set_labels_each_child_in_a_multi_child_task(tmp_path):
         _minimal_data_group(),
         "base",
         np.array([1.0e9, 2.0e9, 3.0e9, 4.0e9]),
+        map_frequencies=map_visibility_frequencies_to_image,
     )
 
     np.testing.assert_array_equal(loaded["lower"].frequency, [1.0e9, 2.0e9])
@@ -174,12 +181,13 @@ def test_load_processing_set_maps_children_onto_the_nearest_task_frequency(tmp_p
     _write_minimal_processing_set_child(store, "eb0", task_frequencies)
     arrays = _write_minimal_processing_set_child(store, "eb1", shifted, offset=100)
 
-    loaded = load_processing_set_skunk_works(
+    loaded = load_processing_set(
         store,
         {"eb0": {"frequency": slice(0, 2)}, "eb1": {"frequency": slice(0, 2)}},
         _minimal_data_group(),
         "base",
         task_frequencies,
+        map_frequencies=map_visibility_frequencies_to_image,
     )
 
     np.testing.assert_array_equal(loaded["eb0"].frequency, task_frequencies)
@@ -196,12 +204,13 @@ def test_load_processing_set_refuses_a_channel_far_from_every_task_frequency(
     _write_minimal_processing_set_child(store, "ms0", [1.0e9, 2.6e9])
 
     with pytest.raises(ValueError, match="half an image channel width"):
-        load_processing_set_skunk_works(
+        load_processing_set(
             store,
             {"ms0": {"frequency": slice(0, 2)}},
             _minimal_data_group(),
             "base",
             np.array([1.0e9, 2.0e9]),
+            map_frequencies=map_visibility_frequencies_to_image,
         )
 
 
@@ -408,16 +417,17 @@ def test_read_short_pread_is_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(time, "sleep", lambda s: None)
     real_pread = os.pread
     state = {"calls": 0, "truncated": 0}
+    lock = threading.Lock()
 
     def flaky_pread(fd, n, off):
-        state["calls"] += 1
         raw = real_pread(fd, n, off)
-        # Truncate the 2nd pread overall (the first inner-chunk read; call 1
-        # is the shard index) once; every retry pread after that is honest.
-        if state["calls"] == 2 and not state["truncated"]:
-            state["truncated"] = 1
-            return raw[:-1]
-        return raw
+        # Truncate one inner-chunk read (call 1 is the shard index) once;
+        # every pread after that is honest. Inner chunks are read concurrently.
+        with lock:
+            state["calls"] += 1
+            truncate = state["calls"] >= 2 and not state["truncated"]
+            state["truncated"] |= truncate
+        return raw[:-1] if truncate else raw
 
     monkeypatch.setattr(os, "pread", flaky_pread)
     got, _ = read_array_region(path, {"frequency": slice(0, 4)})
@@ -536,7 +546,7 @@ def test_write_roundtrip(tmp_path, compressor, processing_function_threads):
         }
     )
     task_coords = {"frequency": {"slice": slice(2, 4), "data": [0, 1]}}
-    write_result_chunk_to_disk_using_zarr_skunk_works(
+    write_zarr(
         store,
         variables,
         task_coords,
@@ -557,9 +567,7 @@ def test_write_roundtrip_edge_chunk(tmp_path):
         {"SKY_RESIDUAL": (["time", "frequency", "polarization", "l", "m"], vals)}
     )
     task_coords = {"frequency": {"slice": slice(4, 5), "data": [0]}}
-    write_result_chunk_to_disk_using_zarr_skunk_works(
-        store, ["sky_residual"], task_coords, img
-    )
+    write_zarr(store, ["sky_residual"], task_coords, img)
     back = zarr.open_array(store + "/SKY_RESIDUAL")[:, 4:5, :, :, :]
     assert _equal(back, vals)
 
@@ -603,7 +611,7 @@ def test_write_roundtrip_sharded(tmp_path, compressor, processing_function_threa
                 for v in variables
             }
         )
-        write_result_chunk_to_disk_sharded_skunk_works(
+        write_zarr_sharded(
             store,
             variables,
             {"frequency": {"slice": slice(k, k + 1)}},
@@ -637,7 +645,7 @@ def test_write_roundtrip_sharded(tmp_path, compressor, processing_function_threa
 def test_sharded_slot_overflow_raises(tmp_path):
     """A compressed inner chunk that would exceed its fixed slot raises clearly
     rather than corrupting the shard (guarded in _encode_one_variable_sharded)."""
-    from astroviper.node_tasks.imaging.utils import skunk_works as sw
+    from astroviper.utils.chunk_io import zarr_chunks
 
     store = _make_image_store(
         tmp_path, None, [[0], [1]], ["sky_residual"], image_sharding={"frequency": 2}
@@ -647,15 +655,15 @@ def test_sharded_slot_overflow_raises(tmp_path):
         {"SKY_RESIDUAL": (["time", "frequency", "polarization", "l", "m"], vals)}
     )
     # Force a tiny slot so the (uncompressed) chunk cannot fit.
-    orig = sw._shard_slot_size
-    sw._shard_slot_size = lambda meta: 16
+    orig = zarr_chunks._shard_slot_size
+    zarr_chunks._shard_slot_size = lambda meta: 16
     try:
         with pytest.raises(ValueError, match="shard slot"):
-            write_result_chunk_to_disk_sharded_skunk_works(
+            write_zarr_sharded(
                 store, ["sky_residual"], {"frequency": {"slice": slice(0, 1)}}, img
             )
     finally:
-        sw._shard_slot_size = orig
+        zarr_chunks._shard_slot_size = orig
 
 
 # --------------------------------------------------------------------------- #
@@ -707,7 +715,7 @@ def test_load_processing_set_reconstruction(
     freq_values = np.linspace(1.0e9, 1.3e9, nfreq)[1:3]  # task selects channels 1:3
     sel = {ms_name: {"frequency": slice(1, 3)}}
 
-    ps = load_processing_set_skunk_works(
+    ps = load_processing_set(
         store,
         sel,
         data_group,
@@ -716,6 +724,7 @@ def test_load_processing_set_reconstruction(
         "linear",
         processing_function_threads=processing_function_threads,
         load_correlated_data=load_correlated_data,
+        map_frequencies=map_visibility_frequencies_to_image,
     )
     ms = ps[ms_name]
     if load_correlated_data:
@@ -783,24 +792,26 @@ def test_load_processing_set_selects_the_needed_correlations(
     }
     freq_values = np.linspace(1.0e9, 1.3e9, nfreq)[1:3]
 
-    everything = load_processing_set_skunk_works(
+    everything = load_processing_set(
         store,
         {ms_name: {"frequency": slice(1, 3)}},
         data_group,
         "base",
         freq_values,
         load_correlated_data=load_correlated_data,
+        map_frequencies=map_visibility_frequencies_to_image,
     )[ms_name]
     assert list(everything.polarization.values) == ["XX", "XY", "YX", "YY"]
 
     selection = {ms_name: {"frequency": slice(1, 3), "polarization": [0, 3]}}
-    ms = load_processing_set_skunk_works(
+    ms = load_processing_set(
         store,
         selection,
         data_group,
         "base",
         freq_values,
         load_correlated_data=load_correlated_data,
+        map_frequencies=map_visibility_frequencies_to_image,
     )[ms_name]
     assert list(ms.polarization.values) == ["XX", "YY"]
     assert ("VISIBILITY" in everything) == load_correlated_data
@@ -840,7 +851,7 @@ def test_pwrite_eio_retry_recovers(tmp_path, monkeypatch):
     import errno
     import struct
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import (
+    from astroviper.utils.chunk_io.zarr_chunks import (
         _pwrite_shard_slot_with_eio_retry,
     )
 
@@ -861,7 +872,7 @@ def test_pwrite_eio_retry_exhausts_and_raises(tmp_path, monkeypatch):
     """Persistent EIO raises after the retry schedule is exhausted."""
     import errno
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import (
+    from astroviper.utils.chunk_io.zarr_chunks import (
         _EIO_RETRY_BACKOFF_SECONDS,
         _pwrite_shard_slot_with_eio_retry,
     )
@@ -882,7 +893,7 @@ def test_pwrite_non_eio_oserror_propagates_immediately(tmp_path, monkeypatch):
     """Only EIO is retried; e.g. ENOSPC must fail fast."""
     import errno
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import (
+    from astroviper.utils.chunk_io.zarr_chunks import (
         _pwrite_shard_slot_with_eio_retry,
     )
 
@@ -898,7 +909,7 @@ def test_pwrite_non_eio_oserror_propagates_immediately(tmp_path, monkeypatch):
 
 
 def test_pwrite_missing_shard_keeps_actionable_error(tmp_path):
-    from astroviper.node_tasks.imaging.utils.skunk_works import (
+    from astroviper.utils.chunk_io.zarr_chunks import (
         _pwrite_shard_slot_with_eio_retry,
     )
 
@@ -933,7 +944,7 @@ def test_close_eio_after_successful_pwrites_retries(tmp_path, monkeypatch):
     import errno
     import struct
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import (
+    from astroviper.utils.chunk_io.zarr_chunks import (
         _pwrite_shard_slot_with_eio_retry,
     )
 
@@ -954,7 +965,7 @@ def test_close_non_transient_error_propagates_immediately(tmp_path, monkeypatch)
     """A non-eviction close error (e.g. EDQUOT) must fail fast, not retry."""
     import errno
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import (
+    from astroviper.utils.chunk_io.zarr_chunks import (
         _pwrite_shard_slot_with_eio_retry,
     )
 
@@ -977,7 +988,7 @@ def test_compute_shard_task_priorities_wave_order(tmp_path):
     interleave shards: rank = within * n_shards + shard, priority = -rank, so
     the dispatch order (descending priority) steps through every shard once
     before revisiting one -- exactly the writer's shard arithmetic."""
-    from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
+    from astroviper.utils.chunk_io import compute_shard_task_priorities
 
     freq_chunks = [[c] for c in range(6)]
     store = _make_image_store(
@@ -1002,7 +1013,7 @@ def test_compute_shard_task_priorities_wave_order(tmp_path):
 
 def test_compute_shard_task_priorities_unsharded_returns_none(tmp_path):
     """A plain (non-sharded) array has no shard layout -> None (no reordering)."""
-    from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
+    from astroviper.utils.chunk_io import compute_shard_task_priorities
 
     freq_chunks = [[c] for c in range(4)]
     store = _make_image_store(tmp_path, None, freq_chunks, image_sharding=None)
@@ -1034,7 +1045,7 @@ def _fake_getstripe_output(paths, ost_of):
 
 
 def test_parse_lfs_getstripe():
-    from astroviper.node_tasks.imaging.utils.skunk_works import _parse_lfs_getstripe
+    from astroviper.utils.chunk_io.zarr_chunks import _parse_lfs_getstripe
 
     paths = ["/scratch/store/VAR/c/0/0", "/scratch/store/VAR/c/0/1"]
     text = _fake_getstripe_output(paths, ost_of=lambda p: 40 + int(p[-1]))
@@ -1053,7 +1064,7 @@ def test_record_shard_ost_map(tmp_path, monkeypatch):
 
     import pandas as pd
 
-    from astroviper.node_tasks.imaging.utils import record_shard_ost_map
+    from astroviper.utils.chunk_io import record_shard_ost_map
 
     def fake_run(cmd, **kwargs):
         assert cmd[:2] == ["lfs", "getstripe"]
@@ -1098,7 +1109,7 @@ def test_record_shard_ost_map(tmp_path, monkeypatch):
 
 def test_record_shard_ost_map_without_lfs(tmp_path, monkeypatch):
     """No ``lfs`` on PATH (any non-Lustre host) -> returns None, writes nothing."""
-    from astroviper.node_tasks.imaging.utils import record_shard_ost_map
+    from astroviper.utils.chunk_io import record_shard_ost_map
 
     # Patch BEFORE creating the store (store creation triggers the io-level
     # record_shard_ost_map call, which on a Lustre host would write the sibling).
@@ -1114,7 +1125,7 @@ def test_record_shard_ost_map_without_lfs(tmp_path, monkeypatch):
 def test_parse_lfs_getstripe_composite_pfl_layout():
     """PFL/composite output: OSTs live in ``l_ost_idx:`` object rows and
     ``lmm_stripe_count`` appears once per component (first one must win)."""
-    from astroviper.node_tasks.imaging.utils.skunk_works import _parse_lfs_getstripe
+    from astroviper.utils.chunk_io.zarr_chunks import _parse_lfs_getstripe
 
     path = "/scratch/store/VAR/c/0/0"
     text = (
@@ -1170,7 +1181,7 @@ def test_write_roundtrip_image_chunking(tmp_path, processing_function_threads):
         }
     )
     task_coords = {"frequency": {"slice": slice(2, 4), "data": [0, 1]}}
-    write_result_chunk_to_disk_using_zarr_skunk_works(
+    write_zarr(
         store,
         variables,
         task_coords,
@@ -1224,7 +1235,7 @@ def test_write_roundtrip_sharded_image_chunking(tmp_path, processing_function_th
                 for v in variables
             }
         )
-        write_result_chunk_to_disk_sharded_skunk_works(
+        write_zarr_sharded(
             store,
             variables,
             {"frequency": {"slice": slice(k, k + 1)}},
@@ -1289,7 +1300,7 @@ def test_write_roundtrip_sharded_on_l_and_m(tmp_path, processing_function_thread
                 for v in variables
             }
         )
-        write_result_chunk_to_disk_sharded_skunk_works(
+        write_zarr_sharded(
             store,
             variables,
             {"frequency": {"slice": slice(k, k + 1)}},
@@ -1322,6 +1333,283 @@ def test_write_misaligned_region_raises(tmp_path):
     )
     task_coords = {"frequency": {"slice": slice(1, 3), "data": [0, 1]}}
     with pytest.raises(ValueError, match="not aligned"):
-        write_result_chunk_to_disk_using_zarr_skunk_works(
-            store, ["sky_residual"], task_coords, img
+        write_zarr(store, ["sky_residual"], task_coords, img)
+
+
+# --------------------------------------------------------------------------- #
+# Lazy image reads
+# --------------------------------------------------------------------------- #
+_IMAGE_SELECTIONS = [
+    {},
+    {"frequency": slice(1, 4), "l": slice(2, 15, 3), "m": [9, 1, 5]},
+    {"frequency": 2, "polarization": 1},
+    {"l": slice(None, None, -2)},
+    {"frequency": slice(3, 3)},
+]
+
+
+def _fixed_slot_image(tmp_path, n_frequency=8, shard=4, image_chunking=None):
+    """A fixed-slot sharded image store written by :func:`write_zarr_sharded`."""
+    from astroviper.utils.chunk_io import write_zarr_sharded
+
+    store = str(tmp_path / "fixed_slot.img.zarr")
+    zarr.open_group(store, mode="w")
+    create_empty_data_variables_on_disk(
+        store,
+        ["sky_residual"],
+        shape_dict={
+            "time": 1,
+            "frequency": n_frequency,
+            "polarization": 2,
+            "l": 16,
+            "m": 16,
+        },
+        parallel_coords={
+            "frequency": {"data_chunks": [[k] for k in range(n_frequency)]}
+        },
+        compressor=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        double_precision=False,
+        data_variable_definitions="imaging",
+        image_chunking=image_chunking,
+        image_sharding={"frequency": shard},
+    )
+    dims = ["time", "frequency", "polarization", "l", "m"]
+    sky = (
+        np.random.default_rng(3)
+        .standard_normal((1, n_frequency, 2, 16, 16))
+        .astype("<f4")
+    )
+    for k in range(n_frequency):
+        write_zarr_sharded(
+            store,
+            ["sky_residual"],
+            {"frequency": {"slice": slice(k, k + 1)}},
+            xr.Dataset({"SKY_RESIDUAL": (dims, sky[:, k : k + 1])}),
         )
+    return store, sky
+
+
+@pytest.mark.parametrize("selection", _IMAGE_SELECTIONS)
+def test_open_image_matches_open_zarr(tmp_path, selection):
+    from astroviper.utils.chunk_io import open_image
+
+    store, _ = _fixed_slot_image(tmp_path, image_chunking={"l": 8, "m": 8})
+    ours = open_image(store).isel(selection)
+    reference = xr.open_zarr(store, chunks=None).isel(selection)
+    xr.testing.assert_identical(ours.load(), reference.load())
+    for key in ("chunks", "shards", "preferred_chunks", "dtype"):
+        assert ours.SKY_RESIDUAL.encoding.get(key) == (
+            reference.SKY_RESIDUAL.encoding.get(key)
+        )
+
+
+@pytest.mark.parametrize("selection", _IMAGE_SELECTIONS[:3])
+def test_load_image_matches_xradio(tmp_path, selection):
+    from xradio.image import load_image as xradio_load_image
+
+    from astroviper.utils.chunk_io import load_image
+    from tests.unit.processing_functions.image_analysis.moments_test_utils import (
+        make_test_image_xds,
+        write_test_image,
+    )
+
+    store = str(tmp_path / "image.img.zarr")
+    write_test_image(make_test_image_xds(n_frequency=6, n_l=16, n_m=16), store)
+    xradio_selection = {
+        dim: sel for dim, sel in selection.items() if dim in ("frequency", "l", "m")
+    }
+    ours = load_image(store, xradio_selection)
+    reference = xradio_load_image(store, block_des=xradio_selection)
+    xr.testing.assert_identical(ours.load(), reference.load())
+
+
+def test_open_image_reads_only_what_is_indexed(tmp_path, monkeypatch):
+    from astroviper.utils.chunk_io import open_image, zarr_chunks
+
+    store, sky = _fixed_slot_image(tmp_path)
+    calls = []
+    real = zarr_chunks.read_array_region
+
+    def counting(array_path, sel):
+        calls.append(dict(sel))
+        return real(array_path, sel)
+
+    monkeypatch.setattr(zarr_chunks, "read_array_region", counting)
+    tile = open_image(store).SKY_RESIDUAL.isel(frequency=slice(2, 5), l=0)
+    assert calls == []
+    np.testing.assert_array_equal(tile.values, sky[:, 2:5, :, 0])
+    assert len(calls) == 1
+
+
+def test_tile_read_takes_only_the_compressed_chunks(tmp_path, monkeypatch):
+    """On a file system whose ``st_blksize`` is 4 MiB (Lustre), a tile read
+    from a fixed-slot sharded image store reads the shard index and each inner
+    chunk's compressed bytes, not the 4 MiB a buffered ``open()`` reads."""
+    import glob
+    import io
+    from pathlib import Path
+
+    from astroviper.utils.chunk_io import open_image
+
+    shard = 4
+    store, sky = _fixed_slot_image(
+        tmp_path, shard=shard, image_chunking={"l": 8, "m": 8}
+    )
+    # Expected reads per shard for the tile l 0..7, m 8..15: the index and
+    # inner chunk (l 0, m 1) of each channel, at the lengths the index records.
+    index_nbytes = 16 * shard * 2 * 2
+    expected = {}
+    paths = sorted(
+        p
+        for p in glob.glob(store + "/SKY_RESIDUAL/c/**", recursive=True)
+        if os.path.isfile(p)
+    )
+    for path in paths:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(size - index_nbytes)
+            index = np.frombuffer(f.read(), dtype="<u8").reshape(shard, 2, 2, 2)
+        expected[os.stat(path).st_ino] = sorted(
+            [(size - index_nbytes, index_nbytes)]
+            + [tuple(int(v) for v in index[f, 0, 1]) for f in range(shard)]
+        )
+
+    blksize = 4 << 20
+    reads = []
+    real_open, real_pread = io.open, os.pread
+
+    class LustreFileIO(io.FileIO):
+        def readinto(self, buffer):
+            offset = self.tell()
+            n = super().readinto(buffer)
+            reads.append((os.fstat(self.fileno()).st_ino, offset, n))
+            return n
+
+        def readall(self):
+            offset = self.tell()
+            data = super().readall()
+            reads.append((os.fstat(self.fileno()).st_ino, offset, len(data)))
+            return data
+
+    def lustre_open(file, mode="r", buffering=-1, *args, **kwargs):
+        if mode == "rb" and buffering == -1:
+            return io.BufferedReader(LustreFileIO(file), blksize)
+        return real_open(file, mode, buffering, *args, **kwargs)
+
+    def counting_pread(fd, n, offset):
+        data = real_pread(fd, n, offset)
+        reads.append((os.fstat(fd).st_ino, offset, len(data)))
+        return data
+
+    monkeypatch.setattr(io, "open", lustre_open)
+    monkeypatch.setattr(os, "pread", counting_pread)
+
+    # A read the way zarr's LocalStore makes it fills the whole buffer.
+    inode = os.stat(paths[0]).st_ino
+    offset, nbytes = expected[inode][0]
+    with Path(paths[0]).open("rb") as f:
+        f.seek(offset)
+        f.read(nbytes)
+    assert reads == [(inode, offset, blksize)]
+    reads.clear()
+
+    tile = open_image(store).SKY_RESIDUAL.isel(l=slice(0, 8), m=slice(8, 16)).values
+    np.testing.assert_array_equal(tile, sky[..., 0:8, 8:16])
+    per_shard = {}
+    for inode, offset, n in reads:
+        if inode in expected:
+            per_shard.setdefault(inode, []).append((offset, n))
+    assert {inode: sorted(r) for inode, r in per_shard.items()} == expected
+
+
+def test_inner_chunks_of_a_shard_are_read_concurrently(tmp_path, monkeypatch):
+    from astroviper.utils.chunk_io import open_image, zarr_chunks
+
+    store, sky = _fixed_slot_image(tmp_path, image_chunking={"l": 8, "m": 8})
+    threads = set()
+    real = zarr_chunks._read_inner_chunk
+
+    def recording(*args, **kwargs):
+        threads.add(threading.get_ident())
+        time.sleep(0.01)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(zarr_chunks, "_read_inner_chunk", recording)
+    np.testing.assert_array_equal(open_image(store).SKY_RESIDUAL.values, sky)
+    assert len(threads) > 1
+
+    threads.clear()
+    monkeypatch.setattr(zarr_chunks, "_READ_CONCURRENCY", 1)
+    np.testing.assert_array_equal(open_image(store).SKY_RESIDUAL.values, sky)
+    assert threads == {threading.get_ident()}
+
+
+@pytest.mark.parametrize("processing_function_threads", [1, 2])
+@pytest.mark.parametrize("sharded", [False, True])
+def test_write_holds_one_batch_of_variables(
+    tmp_path, processing_function_threads, sharded
+):
+    """The writers encode and write processing_function_threads variables at a
+    time: the traced memory they add stays near that many chunks (each one
+    compressed buffer at its uncompressed size), not one per kept variable."""
+    import tracemalloc
+
+    from astroviper.utils.chunk_io import write_zarr, write_zarr_sharded
+
+    n = 256
+    keep = ["sky_model", "sky_residual", "primary_beam", "point_spread_function"]
+    store = str(tmp_path / "img.zarr")
+    zarr.open_group(store, mode="w")
+    create_empty_data_variables_on_disk(
+        store,
+        keep,
+        shape_dict={"time": 1, "frequency": 2, "polarization": 2, "l": n, "m": n},
+        parallel_coords={"frequency": {"data_chunks": [[0], [1]]}},
+        compressor=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        double_precision=True,
+        data_variable_definitions="imaging",
+        image_sharding={"frequency": 2} if sharded else None,
+    )
+    dims = ["time", "frequency", "polarization", "l", "m"]
+    rng = np.random.default_rng(0)
+    xds = xr.Dataset(
+        {key.upper(): (dims, rng.standard_normal((1, 1, 2, n, n))) for key in keep}
+    )
+    chunk_bytes = 2 * n * n * 8
+    writer = write_zarr_sharded if sharded else write_zarr
+    tracemalloc.start()
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        writer(
+            store,
+            keep,
+            {"frequency": {"slice": slice(1, 2)}},
+            xds,
+            processing_function_threads=processing_function_threads,
+        )
+        added = (tracemalloc.get_traced_memory()[1] - start) / chunk_bytes
+    finally:
+        tracemalloc.stop()
+    assert added <= processing_function_threads + 0.25, added
+    back = zarr.open_array(store + "/SKY_RESIDUAL")[:, 1:2]
+    np.testing.assert_array_equal(back, xds.SKY_RESIDUAL.values)
+
+
+def test_bool_encoded_array_reads_as_bool(tmp_path):
+    """An int8 array with the attribute dtype "bool" (xarray's encoding of a
+    boolean variable) reads as booleans, as xarray decodes it."""
+    flags = np.random.default_rng(1).random((3, 4, 5)) > 0.5
+    path = str(tmp_path / "FLAG")
+    array = zarr.create_array(
+        path,
+        shape=flags.shape,
+        dtype="int8",
+        chunks=(3, 4, 2),
+        dimension_names=("time", "baseline_id", "frequency"),
+        attributes={"dtype": "bool"},
+    )
+    array[:] = flags.astype("int8")
+    values, _ = read_array_region(path, {"frequency": slice(1, 4)})
+    assert values.dtype == np.bool_
+    np.testing.assert_array_equal(values, flags[:, :, 1:4])

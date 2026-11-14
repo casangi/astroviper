@@ -205,7 +205,7 @@ def test_pdf_report_of_fits_output(processing_set, tmp_path):
     result = _image(
         processing_set,
         str(tmp_path / "cube.img.fits"),
-        skunk_works=True,
+        io_engine="chunk",
         output_image_format="fits",
         report="pdf",
     )

@@ -36,12 +36,12 @@ def feather(input_params, graph_mode=True):
         ``data_selection``, ``task_id``, ...) merged with the feather parameters
         set by the driver: ``input_data_store`` (``{"sd": path, "int": path}``),
         ``image_store``, ``image_data_variables_keep`` (``["sky"]``),
-        ``sdfactor``, ``axes``, ``selection``, ``fft_backend`` and
-        ``processing_function_threads``.
+        ``sdfactor``, ``axes``, ``selection``, ``fft_backend``,
+        ``processing_function_threads``, ``io_engine`` and
+        ``output_image_format``.
     graph_mode : bool, optional
         If ``True`` (default) the ``SKY`` slice is written into the pre-allocated
-        Zarr store with
-        :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.  If
+        image store with :func:`~astroviper.utils.io.write_result_chunk`.  If
         ``False`` the whole chunk image is written with ``to_zarr``.
 
     Returns
@@ -55,9 +55,9 @@ def feather(input_params, graph_mode=True):
     import pandas as pd
     import toolviper.utils.logger as logger
     from toolviper.utils.memory_management import free_memory, get_rss_gb
-    from xradio.image import load_image
 
     import astroviper.processing_functions as pf
+    from astroviper.utils.node_task_io import load_image
 
     task_start = time.time()
     # No per-task allocator tuning (mirrors the image_cube node task): mallopt
@@ -67,6 +67,8 @@ def feather(input_params, graph_mode=True):
     logger.debug("Memory at start of feather node task: " + str(get_rss_gb()) + " GB")
 
     selection = input_params.get("selection", {})
+    io_engine = input_params.get("io_engine", "chunk")
+    output_image_format = input_params.get("output_image_format", "zarr")
 
     # Load this chunk's single-dish ("sd") and interferometer ("int") images.
     # load_image with block_des reads only this task's frequency slice; .load()
@@ -75,7 +77,7 @@ def feather(input_params, graph_mode=True):
     xdses = {}
     for key in ("sd", "int"):
         block_des = {**selection, **input_params["data_selection"][key]}
-        xds = load_image(input_params["input_data_store"][key], block_des=block_des)
+        xds = load_image(io_engine, input_params["input_data_store"][key], block_des)
         xdses[key] = _rename_beam_to_convention(xds).load()
     T_load = time.time() - start
 
@@ -92,13 +94,21 @@ def feather(input_params, graph_mode=True):
 
     start = time.time()
     if graph_mode:
-        from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
+        from astroviper.utils.io import write_result_chunk
 
-        write_result_chunk_to_disk_using_zarr(
+        if "beam_fit_params_sky" in input_params["image_data_variables_keep"]:
+            # The FITS BEAMS rows of the task's channels: the feathered image
+            # keeps the interferometer beam.
+            featherd_img_xds["BEAM_FIT_PARAMS_SKY"] = xdses["int"][
+                "BEAM_FIT_PARAMS_SKY"
+            ]
+        write_result_chunk(
+            io_engine,
             input_params["image_store"],
             input_params["image_data_variables_keep"],
             input_params["task_coords"],
             featherd_img_xds,
+            output_image_format=output_image_format,
         )
     else:
         featherd_img_xds.to_zarr(input_params["image_store"], consolidated=True)

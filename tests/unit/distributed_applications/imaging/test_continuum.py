@@ -7,6 +7,7 @@ rather than retaining the frequency-cube NaN placeholders created at startup.
 
 import inspect
 import json
+import os
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -721,7 +722,8 @@ def _run_tw_hydra_continuum(
     restore=False,
     primary_beam_limit=0.2,
     single_precision_image=False,
-    skunk_works=False,
+    io_engine="xradio",
+    output_image_format="zarr",
     disk_chunk_sizes=None,
     image_sharding=None,
     image_chunking=None,
@@ -799,7 +801,8 @@ def _run_tw_hydra_continuum(
             write_visibility_model_to_ps=write_visibility_model_to_ps,
             write_imaging_weights_to_ps=write_imaging_weights_to_ps,
             clear_cache=clear_cache,
-            skunk_works=skunk_works,
+            io_engine=io_engine,
+            output_image_format=output_image_format,
             disk_chunk_sizes=disk_chunk_sizes,
             image_sharding=image_sharding,
             image_chunking=image_chunking,
@@ -809,6 +812,8 @@ def _run_tw_hydra_continuum(
             reduce_mode=reduce_mode,
             reduce_n_batch=reduce_n_batch,
         )
+    if output_image_format == "fits":
+        return result, None
     return result, xr.open_zarr(output_store)
 
 
@@ -1453,8 +1458,8 @@ def test_tw_hydra_failed_in_place_run_removes_its_weights(
     contents = _store_snapshot(store, parse_metadata=True)
     write_weights = node_module._write_continuum_weights_in_place
 
-    def write_then_fail(ps_xdt, image_store):
-        write_weights(ps_xdt, image_store)
+    def write_then_fail(ps_xdt, image_store, io_engine):
+        write_weights(ps_xdt, image_store, io_engine)
         raise RuntimeError("injected failure")
 
     monkeypatch.setattr(
@@ -2184,20 +2189,18 @@ def test_tw_hydra_additional_weighting_paths(
     assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
 
 
-def test_tw_hydra_auto_chunked_single_precision_skunk_works_path(
-    tmp_path, tw_hydra_store
-):
+def test_tw_hydra_auto_chunked_single_precision_chunk_engine(tmp_path, tw_hydra_store):
     """Automatic chunking and direct loading support float32 continuum imaging."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, image = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / "tw_hydra_auto_float32_skunk.img.zarr",
+        tmp_path / "tw_hydra_auto_float32_chunk.img.zarr",
         processing_set,
         None,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
         single_precision_image=True,
-        skunk_works=True,
+        io_engine="chunk",
         disk_chunk_sizes="Auto",
     )
 
@@ -2563,7 +2566,7 @@ def test_tw_hydra_alternate_reduction_and_direct_io(
         5,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
-        skunk_works=True,
+        io_engine="chunk",
         disk_chunk_sizes="Auto",
         reduce_mode=reduce_mode,
         reduce_n_batch=reduce_n_batch,
@@ -2637,7 +2640,7 @@ def test_continuum_rejects_output_layout_options_until_final_node_writes(
             5,
             "mfs",
             {"weighting": "natural", "weighting_scope": "local"},
-            skunk_works=True,
+            io_engine="chunk",
             **layout,
         )
     assert not output.exists()
@@ -2849,3 +2852,75 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     assert result["controller"].total_iter_done > 0
     assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8
     assert result["residual_statistics"].data
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_tw_hydra_in_place_caches_equal_with_both_io_engines(
+    tmp_path, tw_hydra_store, continuum_mode
+):
+    """With the in-place weight, visibility-grid and primary-beam caches, the
+    chunk I/O engine gives the images of the xradio engine."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    images = {}
+    for io_engine in ("chunk", "xradio"):
+        _, images[io_engine] = _run_tw_hydra_continuum(
+            tw_hydra_store,
+            tmp_path / f"tw_hydra_in_place_{io_engine}.img.zarr",
+            processing_set,
+            None,
+            continuum_mode,
+            {"weighting": "briggs", "robust": 0.5, "weighting_scope": "global"},
+            io_engine=io_engine,
+            weight_memory_mode="in_place",
+            visibility_memory_mode="in_place",
+            wideband_primary_beam_memory_mode="in_place",
+        )
+    for name in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+        np.testing.assert_allclose(
+            images["chunk"][name].values,
+            images["xradio"][name].values,
+            rtol=1e-6,
+            atol=1e-9,
+            err_msg=name,
+        )
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_tw_hydra_fits_output_per_taylor_term(tmp_path, tw_hydra_store, continuum_mode):
+    """FITS output: one file per variable and Taylor term, holding the planes
+    of the Zarr image, with the PSF beam in the BEAMS tables."""
+    from xradio.image import open_image
+
+    processing_set = open_processing_set(str(tw_hydra_store))
+    common = dict(io_engine="chunk")
+    _, zarr_image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"{continuum_mode}.img.zarr",
+        processing_set,
+        None,
+        continuum_mode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        **common,
+    )
+    fits_store = tmp_path / f"{continuum_mode}_fits"
+    _run_tw_hydra_continuum(
+        tw_hydra_store,
+        fits_store,
+        processing_set,
+        None,
+        continuum_mode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        output_image_format="fits",
+        **common,
+    )
+    names = sorted(os.listdir(fits_store))
+    assert "SKY_RESIDUAL.tt0.fits" in names and "SKY_RESIDUAL.tt1.fits" in names
+    assert "PRIMARY_BEAM.fits" in names
+    for term in range(zarr_image.sizes["taylor_term"]):
+        fits = open_image({"sky": str(fits_store / f"SKY_RESIDUAL.tt{term}.fits")})
+        np.testing.assert_allclose(
+            fits.SKY.values[:, 0],
+            zarr_image.SKY_RESIDUAL.isel(taylor_term=term).values,
+            rtol=1e-6,
+            atol=1e-9,
+        )

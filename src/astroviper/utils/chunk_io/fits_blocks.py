@@ -1,7 +1,7 @@
-"""Performance-oriented (``_skunk_works``) FITS output for cube imaging.
+"""FITS output of the chunk I/O engine (``io_engine="chunk"``) for cube imaging.
 
 FITS counterpart of the direct-Zarr writers in
-:mod:`astroviper.node_tasks.imaging.utils.skunk_works`, following the same
+:mod:`astroviper.utils.chunk_io.zarr_chunks`, following the same
 two-phase pattern the Zarr image store uses:
 
 1. The **driver** (``distributed_applications`` layer) calls
@@ -11,7 +11,7 @@ two-phase pattern the Zarr image store uses:
    (:func:`xradio.image.open_image`) reconstructs the same coordinates and
    attributes as the Zarr store -- and a **sparse** (``ftruncate``\\ d) data
    area sized for the full cube.
-2. Each **node task** calls :func:`write_result_chunk_to_fits_skunk_works` to
+2. Each **node task** calls :func:`write_fits` to
    ``pwrite`` its frequency chunk directly into the pre-created files. The
    frequency axis is deliberately the *last* (slowest-varying) FITS axis, so a
    task's block of consecutive channels is one contiguous byte range: parallel
@@ -49,10 +49,11 @@ import struct
 import numpy as np
 
 # The FITS writers share the transient-I/O (Lustre eviction) retry machinery
-# with the direct-Zarr skunk-works module.
-from astroviper.node_tasks.imaging.utils.skunk_works import (
+# with the Zarr chunk writers.
+from astroviper.utils.chunk_io.zarr_chunks import (
     _EIO_RETRY_BACKOFF_SECONDS,
     _TRANSIENT_IO_ERRNOS,
+    _encode_and_write,
     _retry_transient_io,
 )
 
@@ -92,6 +93,96 @@ _FULL_DIMS_LM = ("time", "frequency", "polarization", "l", "m")
 _BEAM_PARAMS_DIMS = ("time", "frequency", "polarization", "beam_params_label")
 
 
+def _require_finite_positive(name, value):
+    """Nonempty, finite, strictly positive real values, not coerced."""
+    if hasattr(value, "unit"):
+        raise TypeError(
+            f"{name} must use plain numerical SI values, not a unit-bearing quantity."
+        )
+    values = np.asarray(value)
+    if values.dtype.kind not in "iuf":
+        raise TypeError(f"{name} must contain real numbers.")
+    if not values.size or not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must be nonempty and finite.")
+    if np.any(values <= 0):
+        raise ValueError(f"{name} must be strictly positive.")
+    return values
+
+
+def check_fits_coordinates(image_params):
+    """Require image coordinates exactly representable by the cube FITS writer.
+
+    Parameters
+    ----------
+    image_params : mapping
+        Supplied image coordinates. Only available keys are checked.
+    """
+    # --- Number of axes ---
+    # The implemented four-axis FITS image has no independent time axis.
+    if "time_coords" in image_params and np.size(image_params["time_coords"]) != 1:
+        raise ValueError("FITS output supports a single time plane.")
+    if "image_size" in image_params and np.any(
+        np.asarray(image_params["image_size"]) < 2
+    ):
+        raise ValueError("FITS output needs at least 2 pixels per direction axis.")
+
+    # --- Polarization axis ---
+    # A linear FITS axis can encode consecutive Stokes/correlation codes only.
+    if "polarization_coords" in image_params:
+        codes_by_label = {
+            "I": 1,
+            "Q": 2,
+            "U": 3,
+            "V": 4,
+            "RR": -1,
+            "LL": -2,
+            "RL": -3,
+            "LR": -4,
+            "XX": -5,
+            "YY": -6,
+            "XY": -7,
+            "YX": -8,
+        }
+        labels = image_params["polarization_coords"]
+        if (
+            not isinstance(labels, list | tuple | np.ndarray)
+            or np.ndim(labels) != 1
+            or not len(labels)
+        ):
+            raise ValueError("FITS polarization_coords must be a nonempty vector.")
+        if any(label not in codes_by_label for label in labels):
+            raise ValueError("FITS polarization_coords contains an unknown label.")
+        codes = [codes_by_label[label] for label in labels]
+        if codes != list(range(codes[0], codes[0] + len(codes))):
+            raise ValueError("FITS output requires consecutive polarization codes.")
+
+    # --- Spectral axis ---
+    # Do not substitute the first-to-last linear approximation for real centres.
+    # Use the writer's tolerance (one millionth of a channel) for round-off.
+    if "frequency_coords" in image_params:
+        frequencies = _require_finite_positive(
+            "FITS frequency_coords", image_params["frequency_coords"]
+        )
+        if frequencies.ndim != 1:
+            raise ValueError("FITS frequency_coords must be one-dimensional.")
+        if frequencies.size > 1:
+            increment = (frequencies[-1] - frequencies[0]) / (frequencies.size - 1)
+            if increment == 0:
+                raise ValueError("FITS frequency coordinates have zero overall span.")
+            linear = frequencies[0] + increment * np.arange(frequencies.size)
+            if np.max(np.abs(frequencies - linear)) > 1e-6 * abs(increment):
+                raise ValueError(
+                    "FITS output requires uniformly spaced frequency_coords; use Zarr to preserve the channel centres."
+                )
+
+    # --- Direction frame ---
+    # The writer/reader pair supports RA/DEC in these two reference frames.
+    if "direction_reference" in image_params:
+        frame = image_params["direction_reference"]
+        if not isinstance(frame, str) or frame.upper() not in ("FK5", "ICRS"):
+            raise ValueError("FITS direction_reference must be FK5 or ICRS.")
+
+
 def _pad_to_block(nbytes):
     """Round ``nbytes`` up to a whole number of 2880-byte FITS blocks."""
     return -(-nbytes // _FITS_BLOCK) * _FITS_BLOCK
@@ -112,10 +203,6 @@ def _stokes_axis(pol_labels):
     """
     from xradio.measurement_set._utils._utils.stokes_types import stokes_types
 
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
-    )
-
     check_fits_coordinates({"polarization_coords": pol_labels})
     label_to_code = {label: code for code, label in stokes_types.items()}
     return float(label_to_code[pol_labels[0]]), 1.0, 1.0
@@ -129,9 +216,6 @@ def _frequency_axis(freq_values):
     shared round-off tolerance. Nonuniform axes raise rather than replacing
     the frequencies with a first-to-last approximation.
     """
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
-    )
 
     check_fits_coordinates({"frequency_coords": freq_values})
     freq_values = np.asarray(freq_values, dtype=np.float64)
@@ -163,10 +247,6 @@ def _build_primary_header(
     """
     from astropy.io import fits
     from astropy.time import Time
-
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
-    )
 
     csys = img_xds.attrs["coordinate_system_info"]
     reference_direction = csys["reference_direction"]
@@ -292,39 +372,22 @@ def _build_beams_extension_bytes(n_chan, n_pol):
     )
 
 
-def _classify_kept_variables(image_data_variables_keep, double_precision):
+def _classify_kept_variables(image_data_variables_keep, data_variable_definitions):
     """Split the keep list into image variables and beam-fit-params variables.
 
-    Uses the imaging variable registry in :mod:`astroviper.utils.io` (the
-    single source of truth for names/dims/dtypes) and rejects variables with no
-    FITS representation (uv-domain / complex normalization variables).
+    ``data_variable_definitions`` maps each key to its ``"dims"``; a variable
+    with other dimensions (uv-domain or normalization variables) has no FITS
+    representation and raises ``ValueError``.
     """
-    from astroviper.utils.io import (
-        imaging_data_variables_and_dims_double_precision,
-        imaging_data_variables_and_dims_single_precision,
-    )
-
-    definitions = (
-        imaging_data_variables_and_dims_double_precision
-        if double_precision
-        else imaging_data_variables_and_dims_single_precision
-    )
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_kept_variables,
-    )
-
-    check_kept_variables(
-        {"image_data_variables_keep": image_data_variables_keep},
-        fits=True,
-        require_image=False,
-    )
     image_variables, beam_variables = [], []
     for key in image_data_variables_keep:
-        dims = tuple(definitions[key]["dims"])
+        dims = tuple(data_variable_definitions[key]["dims"])
         if dims == _FULL_DIMS_LM:
             image_variables.append(key)
         elif dims == _BEAM_PARAMS_DIMS:
             beam_variables.append(key)
+        else:
+            raise ValueError(f"{key!r} has no FITS representation (dims {dims}).")
     return image_variables, beam_variables
 
 
@@ -335,6 +398,8 @@ def create_empty_fits_images(
     double_precision=False,
     telescope_name="UNKNOWN",
     overwrite=False,
+    *,
+    data_variable_definitions,
 ):
     """Pre-create one XRADIO-conformant FITS file per kept image variable.
 
@@ -353,7 +418,7 @@ def create_empty_fits_images(
       variables, whose fixed-size rows the node tasks later overwrite in place.
 
     The concurrent write phase then creates no files and writes only disjoint
-    byte ranges (:func:`write_result_chunk_to_fits_skunk_works`).
+    byte ranges (:func:`write_fits`).
 
     Parameters
     ----------
@@ -366,8 +431,7 @@ def create_empty_fits_images(
         time plane (FITS has 4 image axes).
     image_data_variables_keep : list of str
         Logical image-variable keys to create (e.g. ``"sky_residual"``); each
-        is upper-cased to the FITS file name. Variables with no FITS
-        representation (uv-domain / complex) raise ``ValueError``.
+        is upper-cased to the FITS file name.
     double_precision : bool, optional
         If ``True`` write 64-bit floats (``BITPIX`` -64), else 32-bit
         (``BITPIX`` -32). Default ``False``.
@@ -377,6 +441,9 @@ def create_empty_fits_images(
     overwrite : bool, optional
         Replace an existing ``image_store``. Default ``False`` (raise
         ``FileExistsError``).
+    data_variable_definitions : dict
+        ``{key: {"dims": [...], ...}}`` of the kept variables; a variable
+        without the image or beam-fit-params dimensions raises ``ValueError``.
 
     Returns
     -------
@@ -384,14 +451,7 @@ def create_empty_fits_images(
         ``{variable_key: fits_path}`` of the created files.
     """
     image_variables, beam_variables = _classify_kept_variables(
-        image_data_variables_keep, double_precision
-    )
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_kept_variables,
-    )
-
-    check_kept_variables(
-        {"image_data_variables_keep": image_data_variables_keep}, fits=True
+        image_data_variables_keep, data_variable_definitions
     )
 
     if os.path.exists(image_store):
@@ -580,7 +640,7 @@ def _pwrite_with_eio_retry(path, offset, blob):
     raise last_exc
 
 
-def write_result_chunk_to_fits_skunk_works(
+def write_fits(
     image_store,
     image_data_variables_keep,
     task_coords,
@@ -590,12 +650,13 @@ def write_result_chunk_to_fits_skunk_works(
     """Write this task's frequency chunk directly into the pre-created FITS files.
 
     FITS counterpart of
-    :func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_using_zarr_skunk_works`,
-    with the same two decoupled phases:
+    :func:`~astroviper.utils.chunk_io.write_zarr`,
+    with the same batches of ``processing_function_threads`` variables and two
+    decoupled phases per batch:
 
-    1. **Encode** each kept image variable's chunk (transpose to FITS axis
-       order + convert to the file's big-endian float type) concurrently
-       across up to ``processing_function_threads`` threads. There is no
+    1. **Encode** each image variable's chunk of the batch (transpose to FITS
+       axis order + convert to the file's big-endian float type) concurrently,
+       one thread per variable. There is no
        compression -- FITS image data is raw -- so this phase is much cheaper
        than the Zarr encode.
     2. **Write** the blobs serially, one ``pwrite`` per file at this chunk's
@@ -639,45 +700,85 @@ def write_result_chunk_to_fits_skunk_works(
         else (beam_variables[0] if beam_variables else None)
     )
 
-    # Phase 1: encode each image variable's chunk (optionally concurrent).
-    if processing_function_threads <= 1 or len(image_variables) <= 1:
-        encoded = [
-            _encode_image_chunk(dv, image_store, chan_start, img_xds)
-            for dv in image_variables
-        ]
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(
-            max_workers=min(processing_function_threads, len(image_variables))
-        ) as executor:
-            futures = [
-                executor.submit(
-                    _encode_image_chunk, dv, image_store, chan_start, img_xds
-                )
-                for dv in image_variables
-            ]
-            encoded = [f.result() for f in futures]  # order matches; re-raises
-
-    writes = [(path, offset, blob) for path, offset, blob, _structure in encoded]
-
-    # Beam rows go into every kept image file that carries a BEAMS extension.
-    if beam_variable is not None:
-        for path, _offset, _blob, structure in encoded:
-            beams = structure["beams"]
-            if beams is None:
-                continue
-            if beams["row_bytes"] != _BEAMS_ROW_STRUCT.size:
-                raise ValueError(
-                    f"{path}: BEAMS rows are {beams['row_bytes']} B; expected "
-                    f"{_BEAMS_ROW_STRUCT.size} (BMAJ,BMIN,BPA,CHAN,POL)."
-                )
-            rows = _encode_beam_rows(beam_variable, chan_start, img_xds)
-            offset = (
-                beams["data_start"] + chan_start * beams["n_pol"] * beams["row_bytes"]
-            )
-            writes.append((path, offset, rows))
-
-    # Phase 2: write the blobs serially (one open file at a time for this task).
-    for path, offset, blob in writes:
+    def write(encoded):
+        path, offset, blob, structure = encoded
         _pwrite_with_eio_retry(path, offset, blob)
+        # Beam rows go into every kept image file that carries a BEAMS extension.
+        beams = structure["beams"]
+        if beam_variable is None or beams is None:
+            return
+        if beams["row_bytes"] != _BEAMS_ROW_STRUCT.size:
+            raise ValueError(
+                f"{path}: BEAMS rows are {beams['row_bytes']} B; expected "
+                f"{_BEAMS_ROW_STRUCT.size} (BMAJ,BMIN,BPA,CHAN,POL)."
+            )
+        rows = _encode_beam_rows(beam_variable, chan_start, img_xds)
+        _pwrite_with_eio_retry(
+            path,
+            beams["data_start"] + chan_start * beams["n_pol"] * beams["row_bytes"],
+            rows,
+        )
+
+    _encode_and_write(
+        image_variables,
+        lambda dv: _encode_image_chunk(dv, image_store, chan_start, img_xds),
+        write,
+        processing_function_threads,
+    )
+
+
+def write_fits_image(
+    image_store,
+    img_xds,
+    image_data_variables_keep,
+    *,
+    data_variable_definitions,
+    double_precision=False,
+    telescope_name="UNKNOWN",
+    overwrite=False,
+):
+    """Write a whole image dataset to FITS files.
+
+    :func:`create_empty_fits_images` followed by :func:`write_fits` of every
+    channel, for an image written once at the end of a run rather than by the
+    node tasks.
+
+    Parameters
+    ----------
+    image_store : str
+        Output directory holding one ``<VARIABLE>.fits`` per image variable.
+    img_xds : xarray.Dataset
+        The image, with its coordinates, attributes and the kept variables.
+    image_data_variables_keep : list of str
+        Keys of the variables to write (beam-fit-params variables go into the
+        ``BEAMS`` tables).
+    data_variable_definitions : dict
+        ``{key: {"dims": [...], ...}}`` of the kept variables.
+    double_precision : bool, optional
+        64-bit instead of 32-bit floats.
+    telescope_name : str, optional
+        ``TELESCOP`` keyword.
+    overwrite : bool, optional
+        Replace an existing ``image_store``.
+
+    Returns
+    -------
+    dict
+        ``{key: path}`` of the FITS files written.
+    """
+    paths = create_empty_fits_images(
+        image_store,
+        img_xds,
+        image_data_variables_keep,
+        double_precision=double_precision,
+        telescope_name=telescope_name,
+        overwrite=overwrite,
+        data_variable_definitions=data_variable_definitions,
+    )
+    write_fits(
+        image_store,
+        image_data_variables_keep,
+        {"frequency": {"slice": slice(0, img_xds.sizes["frequency"])}},
+        img_xds,
+    )
+    return paths

@@ -1,11 +1,10 @@
-"""Performance-oriented (``_skunk_works``) I/O variants for cube imaging.
+"""Zarr reads and writes of the chunk I/O engine (``io_engine="chunk"``).
 
-These are **experimental test variants** of the two I/O bottlenecks in the
-single-field cube imaging node task, written for running at scale (thousands of
-cores, ~15000 single/few-channel ``image_cube_single_field`` tasks). They trade
-generality for speed:
+Node tasks read and write Zarr chunk blobs directly by byte offset, written for
+running at scale (thousands of cores, ~15000 single/few-channel
+``image_cube_single_field`` tasks). They trade generality for speed:
 
-* :func:`load_processing_set_skunk_works` reads **only** the data variables of
+* :func:`load_processing_set` reads **only** the data variables of
   the requested data group, going straight to the on-disk Zarr chunk blobs
   instead of opening a dataset/datatree through the asyncio Zarr array API. For
   a sharded array it reads the shard index and then ``pread``\\ s only the byte
@@ -15,7 +14,7 @@ generality for speed:
   threads. Every other coordinate is *reconstructed* from the node-task inputs
   (the processing set and the image are assumed to share the same frequency
   coordinate); all sub-datasets are ignored.
-* :func:`write_result_chunk_to_disk_using_zarr_skunk_works` writes **only** this
+* :func:`write_zarr` writes **only** this
   task's chunk by encoding each kept variable's array to its compressed blob and
   writing the file directly -- no ``open_group``/``open_zarr`` and no metadata
   round trip. The empty image (and its Zarr metadata) was already created by the
@@ -25,14 +24,13 @@ generality for speed:
 Nothing here uses dask: the node task is already wrapped in dask, and each task
 owns a disjoint set of chunks, so reads and writes are embarrassingly parallel.
 
-The functions deliberately do not remove or replace the production
-:func:`astroviper.utils.io.write_result_chunk_to_disk_using_zarr` /
-``load_processing_set`` paths; they are selected by the ``skunk_works`` flag.
+The xradio I/O engine (``io_engine="xradio"``) uses
+:func:`astroviper.utils.io.write_result_chunk_to_disk_using_zarr` and XRADIO's
+``load_processing_set`` instead.
 
-A Measurement Set v2 input of this path (``ps_store`` a Measurement Set v2,
-``skunk_works=True``) is read by the sibling module
-:mod:`astroviper.node_tasks.imaging.utils.skunk_works_msv2` instead, through
-XRADIO's ``xradio_msv2`` engine; the writers here serve both inputs.
+A Measurement Set v2 is read through XRADIO's ``xradio_msv2`` engine
+(:mod:`astroviper.utils.measurement_set_v2_input`) by both engines; the writers
+here serve both inputs.
 """
 
 from __future__ import annotations
@@ -45,6 +43,7 @@ from itertools import product
 
 import numcodecs
 import numpy as np
+from xarray.backends import BackendArray
 
 # Zarr v3 ``data_type`` -> little-endian NumPy dtype string.
 _V3_DTYPE = {
@@ -65,6 +64,11 @@ _V3_DTYPE = {
 }
 
 # zarr v3 BloscCodec shuffle name -> numcodecs Blosc shuffle int.
+# Inner chunks of one shard read at the same time (zarr's default async
+# concurrency): ``os.pread`` on one descriptor is thread-safe and the decode
+# releases the GIL.
+_READ_CONCURRENCY = 10
+
 _BLOSC_SHUFFLE = {"noshuffle": 0, "shuffle": 1, "bitshuffle": 2, None: 1}
 
 _UINT64_MAX = (1 << 64) - 1
@@ -118,12 +122,14 @@ def _read_array_meta(array_path):
             "codecs": codecs,
             "sharding": sharding["configuration"] if sharding else None,
             "fill_value": m.get("fill_value"),
+            "bool_encoded": m.get("attributes", {}).get("dtype") == "bool",
         }
 
     with open(os.path.join(array_path, ".zarray")) as fh:
         m = json.load(fh)
     with open(os.path.join(array_path, ".zattrs")) as fh:
-        dims = json.load(fh)["_ARRAY_DIMENSIONS"]
+        attrs = json.load(fh)
+    dims = attrs["_ARRAY_DIMENSIONS"]
     return {
         "format": 2,
         "shape": tuple(m["shape"]),
@@ -136,6 +142,7 @@ def _read_array_meta(array_path):
         "filters": m.get("filters"),
         "order": m.get("order", "C"),
         "fill_value": m.get("fill_value"),
+        "bool_encoded": attrs.get("dtype") == "bool",
     }
 
 
@@ -330,7 +337,11 @@ def read_array_region(array_path, sel):
             a, b = int(indices.min()), int(indices.max()) + 1
             relative_indices[ax] = indices - a
         ranges.append((a, b))
-    out = np.empty(tuple(b - a for a, b in ranges), dtype=dtype)
+    # An array stored as integers with the attribute dtype "bool" (xarray's
+    # encoding of booleans) is read as booleans, as xarray decodes it.
+    out = np.empty(
+        tuple(b - a for a, b in ranges), dtype=bool if meta["bool_encoded"] else dtype
+    )
     fill = meta["fill_value"] if meta["fill_value"] is not None else 0
 
     def _apply_relative_indices(data):
@@ -358,6 +369,10 @@ def read_array_region(array_path, sel):
             in_sl = tuple(slice(c[1], c[2]) for c in combo)
             by_shard.setdefault(shard_index, []).append((within, out_sl, in_sl))
 
+        from concurrent.futures import ThreadPoolExecutor
+
+        n_threads = min(_READ_CONCURRENCY, max(len(i) for i in by_shard.values()))
+        executor = ThreadPoolExecutor(max_workers=n_threads) if n_threads > 1 else None
         for shard_index, items in by_shard.items():
             path = _chunk_path(array_path, meta, shard_index)
 
@@ -378,16 +393,31 @@ def read_array_region(array_path, sel):
                     offsets = _read_shard_index(
                         fd, os.fstat(fd).st_size, meta, inner_per_shard, path
                     )
-                    for within, out_sl, in_sl in items:
+
+                    def _read_item(item):
+                        within, out_sl, in_sl = item
                         flat = int(np.ravel_multi_index(within, inner_per_shard))
                         arr = _read_inner_chunk(
                             fd, offsets, flat, inner, meta["sharding"], dtype, path
                         )
                         out[out_sl] = fill if arr is None else arr[in_sl]
+
+                    if executor is None or len(items) == 1:
+                        for item in items:
+                            _read_item(item)
+                    else:
+                        list(executor.map(_read_item, items))
                 finally:
                     os.close(fd)
 
-            _retry_transient_io(f"shard {path}", _read_shard)
+            try:
+                _retry_transient_io(f"shard {path}", _read_shard)
+            except BaseException:
+                if executor is not None:
+                    executor.shutdown(wait=True)
+                raise
+        if executor is not None:
+            executor.shutdown(wait=True)
         return _apply_relative_indices(out), dims
 
     per_axis = [
@@ -426,8 +456,113 @@ def read_array_region(array_path, sel):
     return _apply_relative_indices(out), dims
 
 
+class _ChunkArray(BackendArray):
+    """Lazily indexed Zarr array whose reads go through :func:`read_array_region`."""
+
+    def __init__(self, array_path, shape, dtype, dims):
+        self.array_path = array_path
+        self.shape = tuple(shape)
+        self.dtype = np.dtype(dtype)
+        self.dims = tuple(dims)
+
+    def __getitem__(self, key):
+        from xarray.core import indexing
+
+        return indexing.explicit_indexing_adapter(
+            key, self.shape, indexing.IndexingSupport.OUTER, self._getitem
+        )
+
+    def _getitem(self, key):
+        sel, out_shape, squeeze = {}, [], []
+        for axis, (dim, n, k) in enumerate(
+            zip(self.dims, self.shape, key, strict=True)
+        ):
+            if isinstance(k, slice):
+                size = len(range(*k.indices(n)))
+            elif np.ndim(k) == 0:
+                start = int(k) + n if int(k) < 0 else int(k)
+                k, size = slice(start, start + 1), 1
+                squeeze.append(axis)
+            else:
+                size = np.size(k)
+            sel[dim] = k
+            out_shape.append(size)
+        if 0 in out_shape:
+            values = np.empty(out_shape, dtype=self.dtype)
+        else:
+            values, _ = read_array_region(self.array_path, sel)
+        return np.squeeze(values, axis=tuple(squeeze)) if squeeze else values
+
+
+def open_image(image_store):
+    """Open a Zarr image store lazily, its data variables read by byte offset.
+
+    The dataset is the one ``xarray.open_zarr(image_store, chunks=None)``
+    gives (coordinates, attributes, encoding), without dask; each data
+    variable is read with :func:`read_array_region` when it is indexed or
+    loaded. A variable that xarray decodes to another dtype keeps xarray's
+    reader.
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the Zarr image store.
+
+    Returns
+    -------
+    xarray.Dataset
+    """
+    import xarray as xr
+    from xarray.core import indexing
+
+    xds = xr.open_zarr(image_store, chunks=None)
+    for name, var in xds.data_vars.items():
+        array_path = os.path.join(image_store, name)
+        meta = _read_array_meta(array_path)
+        if (np.dtype(bool) if meta["bool_encoded"] else meta["dtype"]) != var.dtype:
+            continue
+        data = indexing.LazilyIndexedArray(
+            _ChunkArray(array_path, var.shape, var.dtype, var.dims)
+        )
+        xds[name] = xr.Variable(var.dims, data, var.attrs, var.encoding)
+    return xds
+
+
+def load_image(image_store, selection=None):
+    """Select part of a Zarr image lazily, with XRADIO's image conventions.
+
+    The counterpart of :func:`xradio.image.load_image` for a Zarr store:
+    :func:`open_image`, the selection (an integer keeps its dimension), then
+    XRADIO's upgrade of legacy attributes and canonical polarization order.
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the Zarr image store.
+    selection : dict, optional
+        ``{dimension: int, slice or integer array}`` in the order of the store.
+
+    Returns
+    -------
+    xarray.Dataset
+    """
+    from xradio.image._util.common import _to_canonical_polarization_order
+    from xradio.image._util.legacy import upgrade_legacy_image_attrs
+
+    selection = {
+        dim: (
+            slice(int(sel), int(sel) + 1 or None)
+            if isinstance(sel, int | np.integer)
+            else sel
+        )
+        for dim, sel in (selection or {}).items()
+    }
+    xds = open_image(image_store).isel(selection)
+    return _to_canonical_polarization_order(upgrade_legacy_image_attrs(xds))
+
+
 # ---------------------------------------------------------------------------
-# Public skunk-works load
+# Public chunk-engine load
 # ---------------------------------------------------------------------------
 def _read_arrays_concurrently(reads, processing_function_threads):
     """Read several Zarr arrays at once via :func:`read_array_region`.
@@ -457,7 +592,7 @@ def _read_arrays_concurrently(reads, processing_function_threads):
     return results
 
 
-def load_processing_set_skunk_works(
+def load_processing_set(
     input_data_store,
     sel_parms,
     data_group,
@@ -466,6 +601,8 @@ def load_processing_set_skunk_works(
     instrument_polarization_basis="linear",
     processing_function_threads=1,
     load_correlated_data=True,
+    *,
+    map_frequencies,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -476,13 +613,12 @@ def load_processing_set_skunk_works(
     * ``frequency`` from each measurement set's own on-disk ``frequency``
       coordinate (from ``frequency_coords`` for a single measurement set
       without one); every selected channel must lie within half a channel of
-      a task frequency, onto the nearest of which it is imaged (see
-      :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`),
-      and every task frequency must receive at least one channel;
+      a task frequency, onto the nearest of which it is imaged
+      (``map_frequencies``); a task frequency may receive none;
     * ``polarization`` from ``instrument_polarization_basis`` and the data's
       correlation count;
-    * ``time`` / ``baseline_id`` / ``uvw_label`` as plain index ranges (the
-      imaging only uses their sizes and the ``UVW`` values).
+    * ``time`` and ``baseline_id`` from the stored coordinates (when present);
+      ``uvw_label`` as a plain index range.
 
     All sub-datasets are ignored. Returns an :class:`xarray.DataTree` whose
     children are the selected measurement sets, with ``attrs["data_groups"]``
@@ -515,18 +651,16 @@ def load_processing_set_skunk_works(
         If false, omit the observed correlated-data array. This is used by
         cached-grid MFS residual updates, which require only UVW, flags, and
         imaging weights to predict and grid the model contribution.
+    map_frequencies : callable
+        ``map_frequencies(visibility_frequencies, task_frequencies)`` returns
+        the index of the task frequency each selected channel is imaged onto
+        and raises ``ValueError`` for a channel that maps onto none (for
+        imaging,
+        :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`).
     """
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-        map_visibility_frequencies_to_image,
-    )
-
     task_frequency_values = np.asarray(frequency_coords)
-    task_frequency_match_counts = np.zeros(
-        task_frequency_values.size,
-        dtype=np.int64,
-    )
     nodes = {}
     for ms_name, ms_sel in sel_parms.items():
         ms_path = os.path.join(input_data_store, ms_name)
@@ -564,7 +698,12 @@ def load_processing_set_skunk_works(
                 os.path.join(ms_path, data_group["correlated_data"]),
                 {"frequency": freq_sel},
             )
-        for coord_name in ("baseline_antenna1_name", "baseline_antenna2_name"):
+        for coord_name in (
+            "baseline_antenna1_name",
+            "baseline_antenna2_name",
+            "time",
+            "baseline_id",
+        ):
             if os.path.isdir(os.path.join(ms_path, coord_name)):
                 reads[coord_name] = (os.path.join(ms_path, coord_name), {})
 
@@ -603,17 +742,12 @@ def load_processing_set_skunk_works(
         # use: execution blocks converted to LSRK have channel centres a few
         # kHz apart, so their frequencies never equal the image's exactly.
         try:
-            frequency_map = map_visibility_frequencies_to_image(
-                child_frequency_values, task_frequency_values
-            )
+            map_frequencies(child_frequency_values, task_frequency_values)
         except ValueError as exc:
             raise ValueError(
                 f"Selected frequencies for {ms_name!r} do not map onto the task "
                 f"frequencies: {exc}"
             ) from exc
-        task_frequency_match_counts += np.bincount(
-            frequency_map, minlength=task_frequency_values.size
-        )
 
         # Select the requested correlations even when cached-grid cycles omit
         # observed visibilities. Weights and flags are always loaded.
@@ -642,8 +776,14 @@ def load_processing_set_skunk_works(
             "polarization": ("polarization", pol_labels),
         }
         # The per-baseline antenna names cannot be reconstructed from the imaging
-        # inputs and were read above (when present) to drop auto-correlations.
-        for coord_name in ("baseline_antenna1_name", "baseline_antenna2_name"):
+        # inputs and were read above (when present) to drop auto-correlations;
+        # the time and baseline_id values index the in-place weight cache.
+        for coord_name in (
+            "baseline_antenna1_name",
+            "baseline_antenna2_name",
+            "time",
+            "baseline_id",
+        ):
             if coord_name in results:
                 values, c_dims = results[coord_name]
                 coords[coord_name] = (c_dims, values)
@@ -652,22 +792,17 @@ def load_processing_set_skunk_works(
         ds.attrs["data_groups"] = {processing_set_data_group_name: dict(data_group)}
         nodes[ms_name] = ds
 
-    if np.any(task_frequency_match_counts == 0):
-        raise ValueError(
-            "Selected processing-set children do not cover every task frequency."
-        )
-
     return xr.DataTree.from_dict(nodes)
 
 
 # ---------------------------------------------------------------------------
-# Public skunk-works write
+# Public chunk-engine write
 # ---------------------------------------------------------------------------
 def _encode_chunk_blob(chunk, meta):
     """Encode a full-chunk array to the on-disk blob for ``meta``'s codecs."""
     if meta["format"] == 3:
         b = np.ascontiguousarray(chunk, dtype=meta["dtype"])
-        out = b.tobytes()
+        out = memoryview(b).cast("B")
         for codec in meta["codecs"]:
             name = codec["name"]
             if name in ("bytes", "sharding_indexed"):
@@ -757,7 +892,7 @@ def _encode_one_variable(dv, image_store, task_coords, img_xds):
     is safe to run for several variables concurrently.  Splitting encode from
     the disk write lets the CPU-bound compression run concurrently while the
     writes stay serial (see
-    :func:`write_result_chunk_to_disk_using_zarr_skunk_works`).
+    :func:`write_zarr`).
     """
     name = dv.upper()
     array_path = os.path.join(image_store, name)
@@ -790,7 +925,30 @@ def _write_blob(path, blob):
         fh.write(blob)
 
 
-def write_result_chunk_to_disk_using_zarr_skunk_works(
+def _encode_and_write(variables, encode, write, processing_function_threads):
+    """Encode and write ``variables`` in batches of ``processing_function_threads``.
+
+    A batch is encoded concurrently and written serially before the next one
+    is encoded, so a task holds the blobs of one batch at a time, not of every
+    variable.
+    """
+    batch = max(1, int(processing_function_threads))
+    if batch == 1 or len(variables) <= 1:
+        for dv in variables:
+            write(encode(dv))
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    def write_batch(executor, batch_variables):
+        for encoded in executor.map(encode, batch_variables):
+            write(encoded)
+
+    with ThreadPoolExecutor(max_workers=min(batch, len(variables))) as executor:
+        for start in range(0, len(variables), batch):
+            write_batch(executor, variables[start : start + batch])
+
+
+def write_zarr(
     image_store,
     image_data_variables_keep,
     task_coords,
@@ -799,11 +957,13 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
 ):
     """Write this task's image chunk(s) directly to their Zarr chunk file(s).
 
-    Two phases, deliberately decoupled:
+    The variables are taken in batches of ``processing_function_threads``,
+    each in two phases, deliberately decoupled, so a task holds the blobs of
+    one batch at a time:
 
-    1. **Encode (compress)** each kept variable's chunk with its on-disk codecs.
-       This is the dominant, CPU-bound, GIL-releasing cost and runs concurrently
-       across up to ``processing_function_threads`` threads (one per variable).
+    1. **Encode (compress)** each variable's chunk of the batch with its on-disk
+       codecs. This is the dominant, CPU-bound, GIL-releasing cost and runs
+       concurrently (one thread per variable).
     2. **Write** the resulting blobs to disk **serially** -- one open file at a
        time for this task.
 
@@ -833,36 +993,17 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
         concurrently (the disk writes are always serial).  Default ``1`` (serial
         encode).
     """
-    variables = list(image_data_variables_keep)
 
-    # Phase 1: encode/compress (optionally concurrent across variables). Each
-    # variable yields one blob per on-disk chunk its region covers (several
-    # when image_chunking subdivides the chunk grid).
-    if processing_function_threads <= 1 or len(variables) <= 1:
-        encoded_per_variable = [
-            _encode_one_variable(dv, image_store, task_coords, img_xds)
-            for dv in variables
-        ]
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(
-            max_workers=min(processing_function_threads, len(variables))
-        ) as executor:
-            futures = [
-                executor.submit(
-                    _encode_one_variable, dv, image_store, task_coords, img_xds
-                )
-                for dv in variables
-            ]
-            encoded_per_variable = [
-                f.result() for f in futures
-            ]  # order matches variables; re-raises
-
-    # Phase 2: write the blobs serially (one open file at a time for this task).
-    for encoded in encoded_per_variable:
+    def write(encoded):
         for path, blob in encoded:
             _write_blob(path, blob)
+
+    _encode_and_write(
+        list(image_data_variables_keep),
+        lambda dv: _encode_one_variable(dv, image_store, task_coords, img_xds),
+        write,
+        processing_function_threads,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -929,7 +1070,7 @@ def _encode_inner_chunk(chunk, meta):
     (``meta["sharding"]["codecs"]`` -- e.g. bytes -> blosc), not the array's
     top-level codec (which for a sharded array is just the sharding codec)."""
     b = np.ascontiguousarray(chunk, dtype=meta["dtype"])
-    out = b.tobytes()
+    out = memoryview(b).cast("B")
     did_transform = False  # a byte-transform codec has run
     for codec in meta["sharding"]["codecs"]:
         name = codec["name"]
@@ -1057,7 +1198,7 @@ def _encode_one_variable_sharded(dv, image_store, task_coords, img_xds):
     return encoded
 
 
-def write_result_chunk_to_disk_sharded_skunk_works(
+def write_zarr_sharded(
     image_store,
     image_data_variables_keep,
     task_coords,
@@ -1073,39 +1214,23 @@ def write_result_chunk_to_disk_sharded_skunk_works(
     concurrently (``processing_function_threads``); the ``pwrite``\\ s are serial per task. The
     shard files must already exist (:func:`precreate_sharded_files`).
 
-    Parameters mirror :func:`write_result_chunk_to_disk_using_zarr_skunk_works`.
+    Parameters mirror :func:`write_zarr`.
     """
-    variables = list(image_data_variables_keep)
 
-    # Phase 1: encode/compress each variable's inner chunk(s) (optionally
-    # concurrent across variables; several inner chunks per variable when
-    # image_chunking subdivides the inner-chunk grid).
-    if processing_function_threads <= 1 or len(variables) <= 1:
-        encoded_per_variable = [
-            _encode_one_variable_sharded(dv, image_store, task_coords, img_xds)
-            for dv in variables
-        ]
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(
-            max_workers=min(processing_function_threads, len(variables))
-        ) as executor:
-            futures = [
-                executor.submit(
-                    _encode_one_variable_sharded, dv, image_store, task_coords, img_xds
-                )
-                for dv in variables
-            ]
-            encoded_per_variable = [f.result() for f in futures]
-
-    # Phase 2: pwrite each inner chunk + its index entry into the shared shard
-    # file (serial per task; disjoint offsets across tasks -> concurrency-safe).
-    for encoded in encoded_per_variable:
+    def write(encoded):
+        # pwrite each inner chunk + its index entry into the shared shard file
+        # (serial per task; disjoint offsets across tasks -> concurrency-safe).
         for shard_path, slot_offset, index_offset, blob in encoded:
             _pwrite_shard_slot_with_eio_retry(
                 shard_path, slot_offset, index_offset, blob
             )
+
+    _encode_and_write(
+        list(image_data_variables_keep),
+        lambda dv: _encode_one_variable_sharded(dv, image_store, task_coords, img_xds),
+        write,
+        processing_function_threads,
+    )
 
 
 # Transient-I/O retry schedule for the direct chunk reads and sharded pwrites:
@@ -1151,14 +1276,14 @@ def _retry_transient_io(description, func):
                 raise
             last_exc = exc
             logger.warning(
-                f"skunk-works reader: transient "
+                f"chunk reader: transient "
                 f"{errno.errorcode.get(exc.errno, exc.errno)} on {description} "
                 f"(attempt {attempt + 1}/{n_attempts}); reopening and retrying."
             )
             continue
         if attempt:
             logger.warning(
-                f"skunk-works reader: {description} succeeded on attempt "
+                f"chunk reader: {description} succeeded on attempt "
                 f"{attempt + 1} after transient I/O error."
             )
         return result

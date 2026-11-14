@@ -154,7 +154,7 @@ def image_cube_single_field(
     primary_beam_params: dict[str, Any] | None = None,
     clean_mask: str | None = None,
     auto_mask_params: dict[str, Any] | None = None,
-    skunk_works: bool = False,
+    io_engine: str = "chunk",
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     reduce_mode: str = "tree",
@@ -175,9 +175,9 @@ def image_cube_single_field(
     Parameters
     ----------
     ps_store : str
-        Path of the input visibilities: a processing set (Zarr store) or, with
-        ``skunk_works=True``, a Measurement Set v2 (a casacore table directory,
-        see :func:`~astroviper.utils.measurement_set_v2.is_measurement_set_v2`).
+        Path of the input visibilities: a processing set (Zarr store) or a
+        Measurement Set v2 (a casacore table directory, see
+        :func:`~astroviper.utils.measurement_set_v2.is_measurement_set_v2`).
         A Measurement Set v2 is imaged without converting it: the driver opens
         it with XRADIO's ``xradio_msv2`` engine
         (:func:`xradio.measurement_set.open_msv2`, in the XRADIO releases that
@@ -191,7 +191,7 @@ def image_cube_single_field(
         options the run never writes into the Measurement Set (a
         ``partition_cache`` that stores partitions writes them into it, see
         ``msv2_open_options``). These errors are raised before anything is
-        written: ``skunk_works=False``, no engine, a write-back flag, a
+        written: no engine, a write-back flag, a
         refused ``msv2_open_options`` key, no MSv4 left after
         ``scan_intents``, or an MSv4 without the data group
         ``processing_set_data_group_name`` or without one of the roles the
@@ -715,17 +715,13 @@ def image_cube_single_field(
         - ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every
           pixel inside ``primary_beam_limit``. ``False`` measures it outside the
           mask or, without a mask, on the pixels Chauvenet's criterion leaves.
-    skunk_works : bool
-        If ``True`` use the experimental performance I/O path in each node task:
-        load only the data group's data variables straight from the Zarr chunk
-        blobs (reconstructing coordinates from the inputs, ignoring all
-        sub-datasets) and write each result chunk's blob directly to the
-        pre-created image store, bypassing the asyncio Zarr dataset API. The
-        processing set and image are assumed to share the same frequency
-        coordinate. A Measurement Set v2 ``ps_store`` requires ``True``: its
-        node tasks read their data through XRADIO's ``xradio_msv2`` engine
-        instead, with the Measurement Set's own frequencies (see
-        ``ps_store``), and write with this path. Default ``False``.
+    io_engine : {"chunk", "xradio"}
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     compute_backend : str
         Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
         a ``dask.delayed`` graph with
@@ -749,7 +745,7 @@ def image_cube_single_field(
         Fan-in per reduce node when ``reduce_mode="tree_n"`` (must be ``>= 2``).
         Ignored for the other modes.
     image_sharding : dict, optional
-        If set (requires ``skunk_works=True``), write the output image as Zarr v3
+        If set (requires ``io_engine="chunk"``), write the output image as Zarr v3
         **sharded** arrays with shard shape ``{dimension_name: shard_size}``,
         e.g. ``{"frequency": 200}`` packs 200 channels into each shard file and
         ``{"frequency": 32, "l": 2048, "m": 2048}`` also tiles the sky plane.
@@ -763,7 +759,7 @@ def image_cube_single_field(
         server. ``None`` (default) keeps one file per written chunk.
     output_image_format : str
         On-disk format of the output image: ``"zarr"`` (default) or ``"fits"``
-        (requires ``skunk_works=True``; incompatible with
+        (requires ``io_engine="chunk"``; incompatible with
         ``image_sharding``). With ``"fits"`` the driver pre-creates one
         XRADIO-conformant FITS file per kept image variable
         (``<image_store>/<VARIABLE>.fits``, readable with
@@ -949,9 +945,8 @@ def image_cube_single_field(
     if compressor is None:
         compressor = Blosc(cname="lz4", clevel=5)
 
-    # A Measurement Set v2 is read by the skunk-works node-task path only
-    # (through XRADIO's xradio_msv2 engine); the production path loads Zarr
-    # processing sets. Checked here, before anything is written.
+    # A Measurement Set v2 is read through XRADIO's xradio_msv2 engine by both
+    # I/O engines. Checked here, before anything is written.
     input_is_msv2 = is_measurement_set_v2(ps_store)
     from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
         check_input_storage,
@@ -959,7 +954,7 @@ def image_cube_single_field(
 
     check_input_storage(locals(), input_is_msv2=input_is_msv2)
     if input_is_msv2:
-        from astroviper.node_tasks.imaging.utils import require_msv2_engine
+        from astroviper.utils.measurement_set_v2_input import require_msv2_engine
 
         require_msv2_engine()
 
@@ -1006,17 +1001,17 @@ def image_cube_single_field(
     # cannot read, an MSv4 without the data group or one of the roles the
     # imaging reads) leave no image behind. Lazy: only the metadata is read.
     if input_is_msv2:
-        from astroviper.node_tasks.imaging.utils import (
-            check_data_group_skunk_works_msv2,
-            open_processing_set_skunk_works_msv2,
+        from astroviper.utils.measurement_set_v2_input import (
+            check_data_group_msv2,
+            open_processing_set_msv2,
         )
 
         start = time.time()
-        ps_xdt = open_processing_set_skunk_works_msv2(
+        ps_xdt = open_processing_set_msv2(
             ps_store, scan_intents=scan_intents, msv2_open_options=msv2_open_options
         )
         timing_distributed_application["T_open_processing_set"] = time.time() - start
-        check_data_group_skunk_works_msv2(ps_xdt, processing_set_data_group_name)
+        check_data_group_msv2(ps_xdt, processing_set_data_group_name)
 
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()
@@ -1136,7 +1131,7 @@ def image_cube_single_field(
     input_params["primary_beam_params"] = primary_beam_params
     input_params["clean_mask"] = clean_mask_array
     input_params["auto_mask_params"] = auto_mask_params
-    input_params["skunk_works"] = skunk_works
+    input_params["io_engine"] = io_engine
     input_params["image_chunking"] = image_chunking
     input_params["image_sharding"] = image_sharding
     input_params["output_image_format"] = output_image_format
@@ -1155,12 +1150,12 @@ def image_cube_single_field(
     if len(ps_xdt) == 0:
         raise ValueError("The Processing Set is empty after the requested selection.")
 
-    # The skunk-works node-task I/O path reconstructs the processing set from the
+    # The chunk engine's node-task loader reconstructs the processing set from the
     # data group's variables only, so it needs the resolved role->variable
     # mapping. Read it once here (from the first MS) and forward it to every
     # node task rather than re-reading it per task. (The lazy inputs of a
     # Measurement Set v2 carry each MSv4's own data group instead.)
-    if skunk_works and not input_is_msv2:
+    if io_engine == "chunk" and not input_is_msv2:
         first_ms = next(iter(ps_xdt.values()))
         input_params["data_group"] = first_ms.ds.attrs["data_groups"][
             processing_set_data_group_name
@@ -1192,7 +1187,7 @@ def image_cube_single_field(
     # through XRADIO's engine. Nothing is read here.
     timing_distributed_application["T_add_lazy_input_data"] = 0.0
     if input_is_msv2:
-        from astroviper.node_tasks.imaging.utils import add_lazy_input_data
+        from astroviper.utils.measurement_set_v2_input import add_lazy_input_data
 
         start = time.time()
         add_lazy_input_data(
@@ -1255,7 +1250,11 @@ def image_cube_single_field(
     # here -- after the processing set is open -- so TELESCOP can be read from
     # it; timed into the same slot the Zarr path uses for its empty variables.
     if output_image_format == "fits":
-        from astroviper.node_tasks.imaging.utils import create_empty_fits_images
+        from astroviper.utils.chunk_io import create_empty_fits_images
+        from astroviper.utils.io import (
+            imaging_data_variables_and_dims_double_precision,
+            imaging_data_variables_and_dims_single_precision,
+        )
 
         start = time.time()
         first_ms = next(iter(ps_xdt.values()))
@@ -1270,6 +1269,11 @@ def image_cube_single_field(
             double_precision=not single_precision_image,
             telescope_name=telescope_name,
             overwrite=overwrite,
+            data_variable_definitions=(
+                imaging_data_variables_and_dims_single_precision
+                if single_precision_image
+                else imaging_data_variables_and_dims_double_precision
+            ),
         )
         timing_distributed_application["T_create_empty_data_variables"] += (
             time.time() - start
@@ -1285,8 +1289,8 @@ def image_cube_single_field(
     # few shards that consecutive task_ids share. Derived from the on-disk shard
     # layout of the first kept variable, for any combination of sharded dims.
     task_priorities = None
-    if skunk_works and image_sharding:
-        from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
+    if io_engine == "chunk" and image_sharding:
+        from astroviper.utils.chunk_io import compute_shard_task_priorities
 
         task_priorities = compute_shard_task_priorities(
             image_store, image_data_variables_keep[0], node_task_data_mapping
