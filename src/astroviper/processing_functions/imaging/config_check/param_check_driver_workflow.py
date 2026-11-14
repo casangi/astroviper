@@ -108,6 +108,29 @@ def check_driver_workflow(config, *, mode, require_complete=False):
                 image_params["cell_size"],
             )
 
+    # --- Cutoff of a primary-beam corrected restore to a target ---
+    # Below 1e-3 the float32 rounding of the residual divided by the primary
+    # beam spreads over the corrected image. The cube restores at its cycle
+    # control cutoff, or at 0.2 for 0, as image_cube_single_field does.
+    if config.get("restoring_beam") is not None and config.get(
+        "restoration_output", "apparent"
+    ) in ("primary_beam_corrected", "both"):
+        from astroviper.processing_functions.imaging.config_check._predicates import (
+            check_restoring_beam_primary_beam_limit,
+        )
+
+        if mode.imaging_kind == "cube":
+            controls = require_mapping(
+                "cycle_control_params", config.get("cycle_control_params", {})
+            )
+            check_restoring_beam_primary_beam_limit(
+                controls.get("primary_beam_limit", 0.0) or 0.2
+            )
+        else:
+            check_restoring_beam_primary_beam_limit(
+                config.get("primary_beam_limit", 0.2)
+            )
+
     # ========================================================================
     # 2. Configuration structure and backend settings
     # ========================================================================

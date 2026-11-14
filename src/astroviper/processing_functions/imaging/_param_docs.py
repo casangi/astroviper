@@ -737,7 +737,12 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "warning. The continuum imager refuses a target that does not contain its\n"
         "PSF beam, and any target when its PSF fit failed, right after that fit\n"
         "in its first imaging cycle: the residual update has run, but no model\n"
-        "update. The beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For\n"
+        "update. With primary-beam correction a restore cutoff below 1e-3 is\n"
+        "refused (``primary_beam_limit``; in cube imaging that of\n"
+        "``cycle_control_params``, where 0 restores at 0.2): in the transform to\n"
+        "the target, the float32 rounding of the residual divided by the primary\n"
+        "beam, large near its nulls, would spread over the corrected image. The\n"
+        "beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For\n"
         "``tclean``'s ``restoringbeam='common'``, see\n"
         ":func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`."
     ),

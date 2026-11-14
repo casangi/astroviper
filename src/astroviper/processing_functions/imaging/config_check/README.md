@@ -99,7 +99,14 @@ requires `restore=True`, and its major axis must be smaller than the image,
 `min(image_size) * min(|cell_size|)`: a larger one is arcseconds or degrees
 given as radians, or a common beam inflated by a failed PSF fit. The drivers
 check it against `image_params`, and direct calls of `restore_image` and
-`restore_continuum_image` against the image they restore.
+`restore_continuum_image` against the image they restore. With primary-beam
+correction a target needs a restore cutoff of at least `1e-3`: the restore
+divides the residual by the primary beam before taking it to the target, and
+below that cutoff the float32 rounding of the large quotients near the nulls
+of the primary beam spreads over the corrected image. The cutoff is
+`primary_beam_limit` for continuum imaging and direct restore calls; cube
+imaging restores at `cycle_control_params['primary_beam_limit']`, or at 0.2
+for 0.
 `beam_fit_params_sky_restored` can be kept only with `restore=True` and a
 target. Whether the target contains a plane's PSF beam, and whether that plane
 has a PSF fit, is known only after the PSF fit: the cube restore keeps the

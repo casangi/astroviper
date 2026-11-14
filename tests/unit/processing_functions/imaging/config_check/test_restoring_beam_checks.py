@@ -147,6 +147,46 @@ def test_the_major_axis_must_be_smaller_than_the_image(mode):
             )
 
 
+def _restore_cutoff(mode, limit):
+    """The cutoff where the restore of each mode takes it."""
+    if mode is CUBE_SINGLE_FIELD:
+        return {"cycle_control_params": {"primary_beam_limit": limit}}
+    return {"primary_beam_limit": limit}
+
+
+@pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
+@pytest.mark.parametrize("mode", MODES)
+def test_a_corrected_restore_to_a_target_needs_a_cutoff_of_at_least_1e_3(mode, output):
+    """Below it the float32 rounding of the residual divided by the primary
+    beam spreads over the corrected image. Neither the apparent image alone
+    nor a restore without a target transforms that quotient."""
+    target = {"restore": True, "restoring_beam": BEAM, "restoration_output": output}
+    check_driver_workflow(target, mode=mode)
+    check_driver_workflow({**target, **_restore_cutoff(mode, 1e-3)}, mode=mode)
+    for limit in (1e-4, np.nextafter(1e-3, 0.0)):
+        config = {**target, **_restore_cutoff(mode, limit)}
+        with pytest.raises(
+            ValueError, match=r"below 1e-3: .* float32 .* primary_beam_limit >= 1e-3"
+        ):
+            check_driver_workflow(config, mode=mode)
+        check_driver_workflow({**config, "restoration_output": "apparent"}, mode=mode)
+        check_driver_workflow({**config, "restoring_beam": None}, mode=mode)
+
+
+def test_the_cube_restores_at_0_2_for_a_cutoff_of_0():
+    """A cube cutoff of 0, or none, restores at 0.2 in image_cube_single_field;
+    the continuum restores at 0 and is refused."""
+    target = {"restore": True, "restoring_beam": BEAM, "restoration_output": "both"}
+    for controls in ({}, {"primary_beam_limit": 0.0}):
+        check_driver_workflow(
+            {**target, "cycle_control_params": controls}, mode=CUBE_SINGLE_FIELD
+        )
+    with pytest.raises(ValueError, match="below 1e-3"):
+        check_driver_workflow(
+            {**target, "primary_beam_limit": 0.0}, mode=CONTINUUM_SINGLE_FIELD
+        )
+
+
 @pytest.mark.parametrize("mode", MODES)
 def test_a_complete_configuration_with_a_target_is_read_only(mode):
     config = configuration()
@@ -239,5 +279,27 @@ def test_the_drivers_refuse_before_reading_input(
             restore=restore,
             restoring_beam=beam,
             **_configuration(kind),
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("kind", ["cube", "continuum"])
+def test_the_drivers_refuse_a_corrected_cutoff_below_1e_3_before_reading_input(
+    unopened_input, tmp_path, kind
+):
+    config = _configuration(kind)
+    if kind == "cube":
+        config["cycle_control_params"]["primary_beam_limit"] = 1e-4
+    else:
+        config["primary_beam_limit"] = 1e-4
+    output = tmp_path / "refused.img.zarr"
+    with pytest.raises(ValueError, match="below 1e-3"):
+        DRIVERS[kind](
+            ps_store="unopened.ps.zarr",
+            image_store=str(output),
+            restore=True,
+            restoration_output="both",
+            restoring_beam=BEAM,
+            **config,
         )
     assert not output.exists()

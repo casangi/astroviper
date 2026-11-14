@@ -895,6 +895,34 @@ def test_continuum_restoring_beam_in_arcseconds_is_refused_on_a_direct_call():
         )
 
 
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
+def test_continuum_corrected_restore_to_a_target_refuses_a_cutoff_below_1e_3(
+    continuum_mode, output
+):
+    """Accepted: the cutoff 1e-3, the apparent image alone and no target."""
+
+    def restore(**kwargs):
+        return restore_continuum_image(
+            _continuum_target_image(np.float64, continuum_mode),
+            continuum_mode=continuum_mode,
+            **kwargs,
+        )
+
+    for limit in (0.0, 1e-4, np.nextafter(1e-3, 0.0)):
+        with pytest.raises(ValueError, match="below 1e-3"):
+            restore(
+                restoration_output=output,
+                restoring_beam=TARGET_BEAM,
+                primary_beam_limit=limit,
+            )
+        restore(restoring_beam=TARGET_BEAM, primary_beam_limit=limit)
+        restore(restoration_output=output, primary_beam_limit=limit)
+    restore(
+        restoration_output=output, restoring_beam=TARGET_BEAM, primary_beam_limit=1e-3
+    )
+
+
 def _restore_memory_image(n, n_polarizations):
     """One Taylor term of float32 n x n planes in every polarization, with a
     primary beam that crosses the 0.2 cutoff."""

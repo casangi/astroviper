@@ -4612,7 +4612,12 @@ def restore_continuum_image(
         warning. The continuum imager refuses a target that does not contain its
         PSF beam, and any target when its PSF fit failed, right after that fit
         in its first imaging cycle: the residual update has run, but no model
-        update. The beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        update. With primary-beam correction a restore cutoff below 1e-3 is
+        refused (``primary_beam_limit``; in cube imaging that of
+        ``cycle_control_params``, where 0 restores at 0.2): in the transform to
+        the target, the float32 rounding of the residual divided by the primary
+        beam, large near its nulls, would spread over the corrected image. The
+        beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
         ``tclean``'s ``restoringbeam='common'``, see
         :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
 

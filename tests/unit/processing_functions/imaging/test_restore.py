@@ -950,9 +950,10 @@ def test_a_nan_residual_pixel_is_the_only_nonfinite_pixel(output, dtype, consume
 
 @pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
 def test_an_overflowing_quotient_is_the_only_nonfinite_pixel(output):
-    """At ``primary_beam_limit=0`` a residual of 10 over a primary beam of
-    1e-38 overflows ``R / P`` in single precision. That pixel is left out of
-    the transform and NaN, as a non-finite residual pixel; the rest of the
+    """At ``primary_beam_limit=0`` (with a target it passes only with
+    ``input_checked=True``) a residual of 10 over a primary beam of 1e-38
+    overflows ``R / P`` in single precision. That pixel is left out of the
+    transform and NaN, as a non-finite residual pixel; the rest of the
     corrected plane stays finite."""
     xds = _target_inputs(np.float32)
     xds.PRIMARY_BEAM.values[0, 0, 0, 30, 30] = 1e-38
@@ -965,6 +966,7 @@ def test_an_overflowing_quotient_is_the_only_nonfinite_pixel(output):
             restoration_output=output,
             restoring_beam=TARGET,
             primary_beam_limit=0.0,
+            input_checked=True,
         )
     corrected = out.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values
     np.testing.assert_array_equal(np.isnan(corrected), expected)
@@ -1171,3 +1173,30 @@ def test_restoring_beam_in_arcseconds_is_refused_on_a_direct_call():
     target would contain every PSF beam and pass without a warning."""
     with pytest.raises(ValueError, match=r"not smaller than the image \(0.064"):
         restore_image(_target_inputs(np.float32), restoring_beam=[1.2, 1.0, 0.5])
+
+
+@pytest.mark.parametrize("output", ["primary_beam_corrected", "both"])
+def test_a_corrected_restore_to_a_target_refuses_a_cutoff_below_1e_3(output):
+    """Accepted: the cutoff 1e-3, the apparent image alone and no target."""
+    for limit in (0.0, 1e-4, np.nextafter(1e-3, 0.0)):
+        with pytest.raises(ValueError, match="below 1e-3"):
+            restore_image(
+                _target_inputs(np.float32),
+                restoration_output=output,
+                restoring_beam=TARGET,
+                primary_beam_limit=limit,
+            )
+        restore_image(
+            _target_inputs(np.float32), restoring_beam=TARGET, primary_beam_limit=limit
+        )
+        restore_image(
+            _target_inputs(np.float32),
+            restoration_output=output,
+            primary_beam_limit=limit,
+        )
+    restore_image(
+        _target_inputs(np.float32),
+        restoration_output=output,
+        restoring_beam=TARGET,
+        primary_beam_limit=1e-3,
+    )

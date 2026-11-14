@@ -219,3 +219,30 @@ def check_restoring_beam_within_image(restoring_beam, image_size, cell_size):
             f"The restoring_beam major axis ({major} rad) is not smaller "
             f"than the image ({extent} rad); give the beam in radians."
         )
+
+
+def check_restoring_beam_primary_beam_limit(value):
+    """Require a cutoff of at least 1e-3 for a corrected restore to a target.
+
+    The restore divides the residual by the primary beam before the transform
+    to the target; near the nulls of the primary beam the quotients are large,
+    and their float32 rounding spreads over the corrected image. Inside the 0.2
+    region of an Airy beam the float32 corrected image differs from the
+    float64 one by 2e-7 of its peak without a target, at any cutoff, and with
+    one by 7e-7 at 1e-3, 4e-6 at 1e-4 and 6e-4 at 0. Callers apply the rule
+    only with a target and primary-beam correction.
+
+    Parameters
+    ----------
+    value : float
+        Primary-beam cutoff of the restore, a fraction of the beam peak.
+    """
+    limit = require_finite_real("primary_beam_limit", value, scalar=True)
+    if limit < 1e-3:
+        raise ValueError(
+            f"primary_beam_limit {limit} is below 1e-3: a primary-beam corrected "
+            "restore to a restoring_beam divides the residual by the primary beam "
+            "before taking it to the target, and the float32 rounding of the large "
+            "quotients near the nulls of the primary beam spreads over the corrected "
+            "image. Give primary_beam_limit >= 1e-3, or restoration_output='apparent'."
+        )
