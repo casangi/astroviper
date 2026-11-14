@@ -186,6 +186,7 @@ TASK_COLUMNS = {
     "n_shard_opens",
     "bytes_written",
     "T_read",
+    "T_read_masks",
     "T_read_wait",
     "T_masks",
     "T_moments",
