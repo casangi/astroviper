@@ -1778,6 +1778,10 @@ def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
         assert "timing_node_tasks" not in result["timing_graphs"][-1]
     else:
         assert "T_install_final_model" in result["timing_distributed_application"]
+    assert result["timing_distributed_application"]["T_get_compute_resources"] >= 0
+    assert result["compute_resources"]["compute_backend"] == "dask"
+    assert result["compute_resources"]["scheduler"] == "synchronous"
+    assert result["compute_resources"]["processing_function_threads"] == 1
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.SKY_MODEL.values).all()
@@ -2751,6 +2755,9 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
     # ordinary Dask computations without this test's now-closed client.
     assert dask.delayed(sum)([1, 2, 3]).compute() == 6
     assert result["n_cycles"] == 2
+    assert result["compute_resources"]["scheduler"] == "distributed"
+    assert result["compute_resources"]["n_workers"] == 2
+    assert result["compute_resources"]["n_worker_slots"] == 2
     # The helper reopens the output store lazily; read it locally after the
     # distributed client has closed.
     with dask.config.set(scheduler="synchronous"):

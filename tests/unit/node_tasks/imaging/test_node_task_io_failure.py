@@ -57,6 +57,13 @@ def _minimal_task_inputs(tmp_path):
         input_data_store=str(tmp_path / "does_not_exist.ps.zarr"),
         skunk_works=True,
         task_id=7,
+        image_frequency_attrs={
+            "rest_frequency": {
+                "data": 1.1e9,
+                "dims": [],
+                "attrs": {"units": "Hz", "type": "quantity"},
+            }
+        },
     )
 
 

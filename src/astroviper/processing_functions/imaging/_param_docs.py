@@ -828,13 +828,14 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``\n"
         'gives ``cube_report.html``), or ``"notebook"``, displayed in the\n'
         "calling Jupyter notebook. The report has a processing section common\n"
-        "to all distributed applications (timing, task stream and, with\n"
-        "``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a\n"
-        "results section of the application's own; the products it makes with\n"
-        "other distributed applications are kept in ``<name>_report_files``\n"
-        "next to the output store. It is made after the output is written: a\n"
-        "failure while making it is logged and leaves the results intact.\n"
-        "``None`` (default): no report."
+        "to all distributed applications (performance measures, timing, task\n"
+        "stream, task times and, with ``monitor_resources_seconds``, the CPU,\n"
+        "memory and I/O of the cluster, of every worker slot and of the tasks)\n"
+        "and a results section of the application's own; the products it\n"
+        "makes with other distributed applications are kept in\n"
+        "``<name>_report_files`` next to the output store. It is made after\n"
+        "the output is written: a failure while making it is logged and leaves\n"
+        "the results intact. ``None`` (default): no report."
     ),
     "task_id": "Identifier of the parallel chunk being processed.",
     "task_coords": (
