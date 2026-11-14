@@ -371,46 +371,24 @@ def _select_chunk_writer(
     the kept variables a chunk holds are written, and the others keep the
     fill value of the image store.
     """
-    if graph_mode and output_image_format == "fits":
-        # FITS performance path: pwrite the chunk's contiguous channel block
-        # (and its BEAMS-table rows) directly into the pre-created
-        # XRADIO-conformant FITS files -- disjoint byte ranges across tasks,
-        # no locking, no file creation.
-        from astroviper.utils.chunk_io import write_fits as writer
-    elif graph_mode and io_engine == "chunk" and image_sharding:
-        # Sharded performance path: write the chunk's inner-chunk blob(s) into
-        # shared, pre-created Zarr v3 shard files (far fewer files ->
-        # metadata-server relief; the "single parallel file" pattern).
-        from astroviper.utils.chunk_io import write_zarr_sharded as writer
-    elif graph_mode and io_engine == "chunk":
-        # Experimental performance path: encode and write only the chunk's
-        # blob(s) directly to the pre-created Zarr image store (no open_group).
-        from astroviper.utils.chunk_io import write_zarr as writer
-    elif graph_mode:
-        from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
-
-        def write(chunk_xds, chunk_task_coords):
-            write_result_chunk_to_disk_using_zarr(
-                image_store,
-                _variables_made(image_data_variables_keep, chunk_xds),
-                chunk_task_coords,
-                chunk_xds,
-            )
-
-        return write
-    else:
+    if not graph_mode:
 
         def write(chunk_xds, chunk_task_coords):
             chunk_xds.to_zarr(image_store, consolidated=True)
 
         return write
 
+    from astroviper.utils.io import write_result_chunk
+
     def write(chunk_xds, chunk_task_coords):
-        writer(
+        write_result_chunk(
+            io_engine,
             image_store,
             _variables_made(image_data_variables_keep, chunk_xds),
             chunk_task_coords,
             chunk_xds,
+            output_image_format=output_image_format,
+            image_sharding=image_sharding,
             processing_function_threads=processing_function_threads,
         )
 
