@@ -43,10 +43,10 @@ FIELD_OF_VIEW_MARGIN = 1.1
 # assumed margin.
 CELL_GUESS_SAMPLES_PER_U_MAX = 3.0
 # Pixels across the minor axis of the first refit of the PSF. Measured on simulated
-# ALMA cubes (dev/COMMON_BEAM/delphi_sampling_fix): with 2 to 3.25 pixels 12 of 60
-# fits are junk, with 3.5 to 10 pixels 8 of 150, and the others at 3.5 to 10 pixels
-# are within 1.5 percent of their median; 5 keeps the refit above 4.3 pixels for an
-# estimate 14 percent too large, the worst measured.
+# ALMA cubes near 100 GHz (a point source, 10 and 43 antennas): with 2 to 3.25
+# pixels 12 of 60 fits are junk, with 3.5 to 10 pixels 8 of 150, and the others at
+# 3.5 to 10 pixels are within 1.5 percent of their median; 5 keeps the refit above
+# 4.3 pixels for an estimate 14 percent too large, the worst measured.
 REFIT_PIXELS_PER_BEAM = 5.0
 # The second refit samples the minor axis this many times as finely (assumed); of
 # the 190 pairs of those fits from 3.5 pixels sampled 1.2 to 1.3 times as finely as
