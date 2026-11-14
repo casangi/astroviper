@@ -643,6 +643,19 @@ def test_ultra_with_a_first_round_store_on_a_window(two_windows, tmp_path):
     assert results[1]["first_round"]["moments"] == "imager"
 
 
+@pytest.mark.parametrize("backend", APPLICATIONS)
+def test_a_window_without_two_edge_channels_is_refused(two_windows, tmp_path, backend):
+    """findContinuum finds no result on 7 channels: the reason it gives."""
+    with pytest.raises(
+        ValueError,
+        match=r"no result for channels \[0, 7\) .* \(7 channels\): You must have at "
+        r"least 2 edge channels",
+    ):
+        _run(
+            backend, two_windows["store"], tmp_path, n_channels=7, channel_range=[0, 7]
+        )
+
+
 def test_a_cube_of_several_windows_needs_a_channel_range(two_windows, tmp_path):
     with pytest.raises(ValueError, match=r"\[\[0, 12\], \[12, 24\]\]"):
         _run("fused", two_windows["store"], tmp_path / "work", n_channels=24)

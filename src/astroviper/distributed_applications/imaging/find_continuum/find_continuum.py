@@ -83,16 +83,19 @@ NODE_TASK_TIMING_TOTAL_KEY = "T_find_continuum_task"
 
 
 class _LogStream(io.TextIOBase):
-    """Sends findContinuum's printed lines to the logger at debug level."""
+    """Sends findContinuum's printed lines to the logger at debug level and
+    keeps the last one."""
 
     def __init__(self):
         self.pending = ""
+        self.last = ""
 
     def write(self, text):
         *lines, self.pending = (self.pending + text).split("\n")
         for line in lines:
             if line.strip():
                 logger.debug(line)
+                self.last = line.strip()
         return len(text)
 
 
@@ -277,7 +280,10 @@ def find_continuum(
     ValueError
         If the configuration or the image fails the checks of
         :mod:`~astroviper.processing_functions.imaging.config_check.param_check_find_continuum`,
-        or ``work_directory`` holds the products of an earlier run.
+        ``work_directory`` holds the products of an earlier run, or
+        findContinuum finds no result, with the reason it gave (for example a
+        window of 7 channels or fewer, which gives no two edge channels at its
+        ``nBaselineChannels`` of 0.19).
 
     Notes
     -----
@@ -962,6 +968,13 @@ def _find_continuum(
         log_stream.write("\n")
         for number in set(plt.get_fignums()) - figures:
             plt.close(number)
+    if output["result"] is None:
+        # findContinuum prints its reason before it returns None.
+        raise ValueError(
+            f"findContinuum found no result for channels [{window_start}, "
+            f"{window_stop}) of {input_image_store} ({window_stop - window_start} "
+            "channels)" + (f": {log_stream.last}" if log_stream.last else "")
+        )
     find_continuum_seconds = time.time() - find_continuum_start
     if backend == "ultra":
         timing, cube_reads, passes, reduce_records = (
