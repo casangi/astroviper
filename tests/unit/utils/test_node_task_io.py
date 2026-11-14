@@ -74,9 +74,9 @@ def test_load_processing_set_engines_agree(tmp_path):
     )
     group = ps[ms_name].attrs["data_groups"]["base"]
     for role in ("correlated_data", "weight", "flag", "uvw"):
-        np.testing.assert_array_equal(
-            chunk[ms_name][group[role]].values, xradio[ms_name][group[role]].values
-        )
+        ours, reference = chunk[ms_name][group[role]], xradio[ms_name][group[role]]
+        assert ours.dtype == reference.dtype, role
+        np.testing.assert_array_equal(ours.values, reference.values)
     without = node_task_io.load_processing_set(
         "xradio", store, selection, "base", load_correlated_data=False, **common
     )

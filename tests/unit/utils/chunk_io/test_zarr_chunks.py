@@ -1594,3 +1594,22 @@ def test_write_holds_one_batch_of_variables(
     assert added <= processing_function_threads + 0.25, added
     back = zarr.open_array(store + "/SKY_RESIDUAL")[:, 1:2]
     np.testing.assert_array_equal(back, xds.SKY_RESIDUAL.values)
+
+
+def test_bool_encoded_array_reads_as_bool(tmp_path):
+    """An int8 array with the attribute dtype "bool" (xarray's encoding of a
+    boolean variable) reads as booleans, as xarray decodes it."""
+    flags = np.random.default_rng(1).random((3, 4, 5)) > 0.5
+    path = str(tmp_path / "FLAG")
+    array = zarr.create_array(
+        path,
+        shape=flags.shape,
+        dtype="int8",
+        chunks=(3, 4, 2),
+        dimension_names=("time", "baseline_id", "frequency"),
+        attributes={"dtype": "bool"},
+    )
+    array[:] = flags.astype("int8")
+    values, _ = read_array_region(path, {"frequency": slice(1, 4)})
+    assert values.dtype == np.bool_
+    np.testing.assert_array_equal(values, flags[:, :, 1:4])

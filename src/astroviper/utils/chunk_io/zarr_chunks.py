@@ -122,12 +122,14 @@ def _read_array_meta(array_path):
             "codecs": codecs,
             "sharding": sharding["configuration"] if sharding else None,
             "fill_value": m.get("fill_value"),
+            "bool_encoded": m.get("attributes", {}).get("dtype") == "bool",
         }
 
     with open(os.path.join(array_path, ".zarray")) as fh:
         m = json.load(fh)
     with open(os.path.join(array_path, ".zattrs")) as fh:
-        dims = json.load(fh)["_ARRAY_DIMENSIONS"]
+        attrs = json.load(fh)
+    dims = attrs["_ARRAY_DIMENSIONS"]
     return {
         "format": 2,
         "shape": tuple(m["shape"]),
@@ -140,6 +142,7 @@ def _read_array_meta(array_path):
         "filters": m.get("filters"),
         "order": m.get("order", "C"),
         "fill_value": m.get("fill_value"),
+        "bool_encoded": attrs.get("dtype") == "bool",
     }
 
 
@@ -334,7 +337,11 @@ def read_array_region(array_path, sel):
             a, b = int(indices.min()), int(indices.max()) + 1
             relative_indices[ax] = indices - a
         ranges.append((a, b))
-    out = np.empty(tuple(b - a for a, b in ranges), dtype=dtype)
+    # An array stored as integers with the attribute dtype "bool" (xarray's
+    # encoding of booleans) is read as booleans, as xarray decodes it.
+    out = np.empty(
+        tuple(b - a for a, b in ranges), dtype=bool if meta["bool_encoded"] else dtype
+    )
     fill = meta["fill_value"] if meta["fill_value"] is not None else 0
 
     def _apply_relative_indices(data):
@@ -511,7 +518,8 @@ def open_image(image_store):
     xds = xr.open_zarr(image_store, chunks=None)
     for name, var in xds.data_vars.items():
         array_path = os.path.join(image_store, name)
-        if np.dtype(_read_array_meta(array_path)["dtype"]) != var.dtype:
+        meta = _read_array_meta(array_path)
+        if (np.dtype(bool) if meta["bool_encoded"] else meta["dtype"]) != var.dtype:
             continue
         data = indexing.LazilyIndexedArray(
             _ChunkArray(array_path, var.shape, var.dtype, var.dims)
