@@ -11,6 +11,9 @@ import xarray as xr
 import zarr
 from xradio.image import make_empty_sky_image
 
+from astroviper.distributed_applications.imaging.find_continuum import (
+    ultra_reductions,
+)
 from astroviper.distributed_applications.imaging.find_continuum.casa_image_tasks import (
     cube_session,
 )
@@ -343,10 +346,51 @@ def test_ultra_frequency_tasks():
         ((4, 60, 2, 0.19, False), 13.4),  # P3, k = 4
         ((4, 84, 2, 0.19, False), 16.3),  # P3, k = 6 at B = 4
         ((1, 84, 2, 0.19, False), 13.4),  # P3, k = 6 at B = 1
+        # P1 without a store, with the first round's transients and the
+        # medium cube's inner chunks
+        ((4, 12, 0, 0.0, True, 4, 4, 625 * 625 * 4, True), 12.2),
+        ((4, 16, 0, 0.0, True, 8, 8, 625 * 625 * 8, True), 20.2),  # float64
     ],
 )
 def test_task_memory_bounds_of_the_design(arguments, gib):
     assert round(ultra_task_memory_bytes(11250, 11250, *arguments) / GiB, 1) == gib
+
+
+def test_task_memory_counts_dtypes_read_units_and_the_first_round():
+    n = 1000
+    base = ultra_task_memory_bytes(n, n, 4, 12, 0, 0.0, True)
+    float64 = ultra_task_memory_bytes(n, n, 4, 12, 0, 0.0, True, 8, 8)
+    assert float64 - base == 2 * 4 * (4 + 4) * n * n
+    sky_only = ultra_task_memory_bytes(n, n, 4, 12, 0, 0.0, False, 8, 8)
+    assert sky_only - ultra_task_memory_bytes(n, n, 4, 12, 0, 0.0, False) == (
+        2 * 4 * 4 * n * n
+    )
+    unit = ultra_task_memory_bytes(n, n, 4, 12, 0, 0.0, True, read_unit_bytes=10**6)
+    assert unit - base == 2 * 10**6
+    first_round = ultra_task_memory_bytes(
+        n, n, 4, 12, 0, 0.0, True, compute_first_round=True
+    )
+    assert first_round - base == (8 + 4 / 2) * n * n
+
+
+def test_the_plan_takes_the_store_layout(cube, tmp_path, monkeypatch):
+    """The plan of a pass gives the task memory the dtypes and the read unit
+    of the arrays it reads, and the first round to the first sub-pass."""
+    calls = []
+
+    def recorded(*arguments):
+        calls.append(arguments)
+        return ultra_task_memory_bytes(*arguments)
+
+    monkeypatch.setattr(ultra_reductions, "ultra_task_memory_bytes", recorded)
+    ultra = _ultra(cube, tmp_path / "work")
+    ultra.memory_plan(cube["requests"], len(cube["requests"]))
+
+    assert calls and {arguments[7:9] for arguments in calls} == {(4, 4)}
+    unit_bytes = TILE[0] * TILE[1] * 4
+    assert {arguments[9] for arguments in calls} == {unit_bytes}
+    assert any(arguments[10] for arguments in calls)
+    assert all(arguments[6] for arguments in calls if arguments[10])
 
 
 def test_stored_map_loads_a_new_float64_array(tmp_path):
@@ -499,8 +543,11 @@ def test_memory_plan_with_a_small_budget(cube, first_pass, tmp_path):
     assert plan["planes_per_batch"] == [2]
     assert plan["sub_passes"] == [[0, 1, 2, 3]] and plan["dropped"] == []
 
-    # Request 1 alone at one plane per batch: [-1, 0, 10] (22 B/px) and its mask.
-    budget = ultra_task_memory_bytes(N_PIXELS, N_PIXELS, 1, 22, 1, 0.0, False)
+    # Request 1 alone at one plane per batch: [-1, 0, 10] (22 B/px), its mask
+    # and a decoded inner chunk.
+    budget = ultra_task_memory_bytes(
+        N_PIXELS, N_PIXELS, 1, 22, 1, 0.0, False, read_unit_bytes=TILE[0] * TILE[1] * 4
+    )
     small = _ultra(cube, tmp_path / "small", store, budget)
     plan = small.memory_plan(planned, 2)
     assert plan["sub_passes"] == [[0, 3], [1]] and plan["dropped"] == [2]

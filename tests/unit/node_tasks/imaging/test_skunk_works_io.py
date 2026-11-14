@@ -1534,6 +1534,36 @@ def test_read_into_out_allocates_no_buffer_of_its_size(tmp_path, sharded):
     np.testing.assert_array_equal(out.view(np.uint32), arr[:].view(np.uint32))
 
 
+@pytest.mark.parametrize("sharded", [True, False], ids=["sharded", "plain"])
+def test_read_holds_one_decoded_unit_at_a_time(tmp_path, sharded):
+    """A read holds the stored and decoded bytes of one unit at a time: each
+    unit is freed before the next is read and decoded."""
+    import tracemalloc
+
+    shape = (1, 4, 1, 256, 256)
+    unit_bytes = 256 * 256 * 4
+    path = str(tmp_path / "SKY_RESIDUAL")
+    arr = zarr.create_array(
+        path,
+        shape=shape,
+        chunks=(1, 1, 1, 256, 256),
+        shards=shape if sharded else None,
+        dtype="float32",
+        dimension_names=IMAGE_DIMS,
+        compressors=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+    )
+    arr[:] = np.random.default_rng(34).standard_normal(shape).astype("<f4")
+    out = np.empty(shape, dtype=np.float32)
+    tracemalloc.start()
+    try:
+        read_array_region(path, {}, out=out)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 2.5 * unit_bytes
+    np.testing.assert_array_equal(out.view(np.uint32), arr[:].view(np.uint32))
+
+
 def test_read_refuses_a_bad_chunk_mask_or_out(tmp_path):
     array_path = _written_image_store(tmp_path, 1, True)
     sel = {"frequency": slice(0, 2)}  # unit grid (1, 2, 2, 3, 3)

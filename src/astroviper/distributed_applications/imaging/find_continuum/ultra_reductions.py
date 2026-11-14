@@ -59,6 +59,9 @@ ULTRA_TASKS_PER_THREAD = 4
 
 # Node-task baseline of the moments application (interpreter, worker, zarr).
 _TASK_BASELINE_BYTES = 1.5 * 2**30
+# The first round's transients beside its packed masks, per pixel (traced at
+# 512 x 512 and 1024 x 1024, sharded and unsharded, float32 and float64).
+_FIRST_ROUND_BYTES_PER_PIXEL = 8
 _ROLES = ("sky", "primary_beam")
 # Request fields that FusedReductions leaves out of its cache keys.
 _AXIS_FIELDS = ("frequency_axis", "rest_frequency")
@@ -111,15 +114,20 @@ def ultra_task_memory_bytes(
     n_two_d_masks,
     gather_fraction,
     read_primary_beam,
+    sky_itemsize=4,
+    primary_beam_itemsize=4,
+    read_unit_bytes=0,
+    compute_first_round=False,
 ):
     """Memory of a find_continuum_ultra frequency task.
 
-    The baseline of a node task, two buffers of ``planes_per_batch`` float32
-    planes (the batch and the one read ahead) per cube read, four boolean
-    planes (primary-beam masks and validities) and one per two-dimensional
-    mask, the moment accumulators, the values gathered for per-channel
-    statistics and spectra (12 bytes per pixel) and two float64 blocks of
-    rows.
+    The baseline of a node task, two buffers of ``planes_per_batch`` planes
+    (the batch and the one read ahead) per cube read, in its dtype, four
+    boolean planes (primary-beam masks and validities) and one per
+    two-dimensional mask, the moment accumulators, the values gathered for
+    per-channel statistics and spectra (12 bytes per pixel), two float64
+    blocks of rows, the read unit being decoded with its stored bytes and,
+    for the first round, its transients.
 
     Parameters
     ----------
@@ -135,6 +143,15 @@ def ultra_task_memory_bytes(
         Largest fraction of a plane that a request gathers in a channel.
     read_primary_beam : bool
         The task reads the primary beam as well as the cube.
+    sky_itemsize, primary_beam_itemsize : int, default 4
+        Bytes per pixel of the cube and of the primary beam in the store.
+    read_unit_bytes : int, default 0
+        Decoded bytes of the largest read unit (an inner chunk of a sharded
+        array, a chunk otherwise, all of its channels and polarizations) of
+        the arrays the task reads; a read holds one with its stored bytes.
+    compute_first_round : bool, default False
+        The task makes the first round: its transients (8 bytes per pixel,
+        measured) and the bit-packed masks of two batches.
 
     Returns
     -------
@@ -142,14 +159,21 @@ def ultra_task_memory_bytes(
         Bytes.
     """
     pixels = n_l * n_m
-    planes = 2 * planes_per_batch * (2 if read_primary_beam else 1)
+    plane_bytes = sky_itemsize + (primary_beam_itemsize if read_primary_beam else 0)
+    first_round = (
+        (_FIRST_ROUND_BYTES_PER_PIXEL + planes_per_batch / 2) * pixels
+        if compute_first_round
+        else 0
+    )
     return int(
         _TASK_BASELINE_BYTES
-        + 4 * planes * pixels
+        + 2 * planes_per_batch * plane_bytes * pixels
         + (4 + n_two_d_masks) * pixels
         + moments_bytes_per_pixel * pixels
         + 12 * gather_fraction * pixels
         + 2 * 8 * _BLOCK_ROWS * n_m
+        + 2 * read_unit_bytes
+        + first_round
     )
 
 
@@ -289,6 +313,10 @@ class UltraReductions:
         }
         sky = arrays["sky"]
         self.dtypes = {role: array.dtype for role, array in arrays.items()}
+        self.read_unit_bytes = {
+            role: int(np.prod(array.chunks)) * array.dtype.itemsize
+            for role, array in arrays.items()
+        }
         self.n_channels = sky.shape[1]
         self.map_shape = tuple(sky.shape[-2:])
         self.tile_shape = tuple(sky.chunks[-2:])
@@ -452,13 +480,23 @@ class UltraReductions:
         first_round = self.first_round is None
 
         def task_bytes(indices, planes_per_batch, first):
+            read_primary_beam = (first and first_round) or any(
+                costs[k][2] for k in indices
+            )
             return ultra_task_memory_bytes(
                 *self.map_shape,
                 planes_per_batch,
                 sum(costs[k][0] for k in indices),
                 len({encoded[k]["two_d_mask"] for k in indices} - {None}),
                 max((costs[k][1] for k in indices), default=0.0),
-                (first and first_round) or any(costs[k][2] for k in indices),
+                read_primary_beam,
+                self.dtypes["sky"].itemsize,
+                self.dtypes["primary_beam"].itemsize,
+                max(
+                    self.read_unit_bytes[role]
+                    for role in _ROLES[: 2 if read_primary_beam else 1]
+                ),
+                first and first_round,
             )
 
         def fits(indices, first, planes_per_batch=1):

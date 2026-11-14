@@ -474,6 +474,8 @@ def read_array_region(array_path, sel, chunk_mask=None, counters=None, out=None)
                         else:
                             buffer[out_sl] = arr[in_sl]
                             nbytes += offsets[2 * flat + 1]
+                        # Freed before the next unit is read and decoded.
+                        arr = None
                     return index_nbytes, nbytes
                 finally:
                     os.close(fd)
@@ -515,6 +517,8 @@ def read_array_region(array_path, sel, chunk_mask=None, counters=None, out=None)
             continue
         buffer[out_sl] = read[0][in_sl]
         tally["bytes"] += read[1]
+        # Freed before the next chunk is read and decoded.
+        read = None
     return _finish()
 
 
