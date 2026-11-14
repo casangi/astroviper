@@ -911,16 +911,30 @@ def _restore_image_arrays(
 
 # tclean's beam for every plane when no plane has a fit: a circle of 1e-6
 # arcsec at 0 deg (SIImageStore::makeImageBeamSet).
-_NO_FIT_BEAM = (np.radians(1e-6 / 3600.0), np.radians(1e-6 / 3600.0), 0.0)
+NO_FIT_BEAM = (np.radians(1e-6 / 3600.0), np.radians(1e-6 / 3600.0), 0.0)
 
 
-def _fill_planes_without_fit(beams, no_fit_beam=None):
-    """``beams`` (``[major, minor, pa]`` along the last axis, planes in C order)
-    with every plane without a fit, a non-finite beam or an axis that is not
-    positive, given the beam ``tclean`` gives it
-    (``SIImageStore::makeImageBeamSet``): the first beam of largest area of the
-    planes with a fit, else ``no_fit_beam``. ``beams`` itself when there is
-    nothing to fill."""
+def fill_planes_without_fit(beams, no_fit_beam=None):
+    """Give every plane without a fit the beam ``tclean`` gives it.
+
+    A plane without a fit has a beam that is not finite or an axis that is not
+    positive. ``tclean`` (``SIImageStore::makeImageBeamSet``) gives it the first
+    beam of largest area of the planes with a fit, else ``no_fit_beam``.
+
+    Parameters
+    ----------
+    beams : numpy.ndarray
+        ``[major, minor, pa]`` along the last axis, the planes in C order.
+    no_fit_beam : sequence of float, optional
+        The beam of every plane when no plane has a fit, in the units of
+        ``beams`` (:data:`NO_FIT_BEAM` in radians). ``None`` (default) leaves
+        such beams as they are.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``beams`` itself when there is nothing to fill, else a filled copy.
+    """
     planes = np.reshape(beams, (-1, 3))
     fitted = np.isfinite(planes).all(axis=1) & (planes[:, 0] > 0) & (planes[:, 1] > 0)
     if fitted.all() or (not fitted.any() and no_fit_beam is None):
@@ -1300,7 +1314,7 @@ def restore_image(
         del img_xds[model_sky_name]
 
     if restoring_beam is None:
-        restored_beams = _fill_planes_without_fit(
+        restored_beams = fill_planes_without_fit(
             beam[:, :, beam_polarization_index : beam_polarization_index + 1]
         )
         description = "Restored image: clean-beam-convolved model plus residual."

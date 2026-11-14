@@ -264,6 +264,104 @@ def test_fits_rows_without_a_fit_hold_the_tclean_beam(flagged_processing_set, tm
         assert "BMAJ" not in hdulist[0].header
 
 
+def _record_at_report(monkeypatch, read):
+    """What ``read()`` returns when the driver starts its report."""
+    import astroviper.distributed_applications.imaging.image_cube_single_field_report as report_module
+
+    recorded = []
+    report_function = report_module.image_cube_single_field_report
+
+    def recording_report(*args, **kwargs):
+        recorded.append(read())
+        return report_function(*args, **kwargs)
+
+    monkeypatch.setattr(
+        report_module, "image_cube_single_field_report", recording_report
+    )
+    return recorded
+
+
+def test_zarr_restored_beams_are_filled_before_the_report(
+    flagged_processing_set, tmp_path, monkeypatch
+):
+    """The report, which an exit of the process can cut short, starts once the
+    flagged channel, imaged by a task of its own, holds the tclean beam; told
+    that the run had no restoring_beam, the report does not take the now equal
+    restored beams for one."""
+    import html
+
+    import zarr
+
+    image_store = str(tmp_path / "none.img.zarr")
+    recorded = _record_at_report(
+        monkeypatch,
+        lambda: zarr.open_group(image_store, mode="r")["BEAM_FIT_PARAMS_SKY_RESTORED"][
+            ...
+        ],
+    )
+    with dask.config.set(scheduler="synchronous"):
+        result = image_cube_single_field(
+            ps_store=flagged_processing_set,
+            image_store=image_store,
+            image_params=_image_params(flagged_processing_set),
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params=CYCLE_CONTROL_PARAMS,
+            image_data_variables_keep=["sky_residual"],
+            processing_set_data_group_name="base",
+            n_mapping_parallelism={"frequency": 2},
+            restore=True,
+            report="html",
+        )
+    assert len(recorded) == 1
+    np.testing.assert_array_equal(recorded[0][0, 1], recorded[0][0, 0])
+    assert np.all(recorded[0][..., :2] > 0)
+    with open(result["report"], encoding="utf-8") as file:
+        text = html.unescape(file.read())
+    assert "No restoring beam: every plane was restored with the PSF fit" in text
+
+
+def test_fits_rows_are_filled_before_the_report(
+    flagged_processing_set, tmp_path, monkeypatch
+):
+    """With a restoring beam: the report starts once the rows of the flagged
+    channel are filled, and names that channel as without a PSF fit in the
+    section of the point spread function (its centre channel) and in that of
+    the restoring beam."""
+    import html
+
+    from astropy.io import fits
+
+    image_store = tmp_path / "target_fits"
+
+    def read_rows():
+        with fits.open(image_store / "SKY_RESIDUAL.fits") as hdulist:
+            beams = hdulist["BEAMS"].data
+            return np.stack([beams[column] for column in ("BMAJ", "BMIN")], -1)
+
+    recorded = _record_at_report(monkeypatch, read_rows)
+    with dask.config.set(scheduler="synchronous"):
+        result = image_cube_single_field(
+            ps_store=flagged_processing_set,
+            image_store=str(image_store),
+            image_params=_image_params(flagged_processing_set),
+            imaging_weights_params={"weighting": "natural"},
+            cycle_control_params=CYCLE_CONTROL_PARAMS,
+            image_data_variables_keep=["sky_residual", "point_spread_function"],
+            processing_set_data_group_name="base",
+            n_mapping_parallelism={"frequency": 2},
+            restore=True,
+            restoring_beam=[300 * ARCSEC, 300 * ARCSEC, 0.0],
+            skunk_works=True,
+            output_image_format="fits",
+            report="html",
+        )
+    assert len(recorded) == 1 and np.all(recorded[0] > 0)
+    with open(result["report"], encoding="utf-8") as file:
+        text = html.unescape(file.read())
+    assert "The beam fit of the centre channel failed" in text
+    assert text.count("<td>no fit</td>") == 1
+
+
 def test_a_continuum_target_equal_to_the_psf_beam_restores_bit_for_bit(
     processing_set, tmp_path, monkeypatch
 ):

@@ -323,7 +323,14 @@ def _beam_store(tmp_path, output_image_format, psf_beams, restoring_beam):
     return store, keep
 
 
-def _restoring_beam_section(tmp_path, store, output_image_format, available):
+def _restoring_beam_section(
+    tmp_path,
+    store,
+    output_image_format,
+    available,
+    restoring_beam,
+    planes_without_fit=None,
+):
     import html
 
     from astroviper.distributed_applications.imaging.image_cube_single_field_report import (
@@ -333,7 +340,14 @@ def _restoring_beam_section(tmp_path, store, output_image_format, available):
 
     path = str(tmp_path / "section.html")
     with Report("restoring beam", "html", path) as document:
-        _add_restoring_beam(document, store, output_image_format, available)
+        _add_restoring_beam(
+            document,
+            store,
+            output_image_format,
+            available,
+            restoring_beam,
+            planes_without_fit,
+        )
     return html.unescape(_text(path))
 
 
@@ -347,10 +361,11 @@ def test_restoring_beam_section(tmp_path, output_image_format):
         [[1.2, 1.0, 0.3], [np.nan, np.nan, np.nan], [2.0, 1.0, 0.0], [1.4, 1.1, 1.0]]
     )
     psf_beams[:, :2] *= ARCSEC
-    store, keep = _beam_store(
-        tmp_path, output_image_format, psf_beams, [1.5 * ARCSEC, 1.5 * ARCSEC, 0.0]
+    target = [1.5 * ARCSEC, 1.5 * ARCSEC, 0.0]
+    store, keep = _beam_store(tmp_path, output_image_format, psf_beams, target)
+    text = _restoring_beam_section(
+        tmp_path, store, output_image_format, set(keep), target
     )
-    text = _restoring_beam_section(tmp_path, store, output_image_format, set(keep))
     assert ">Restoring beam</h3>" in text
     assert 'restored to the beam 1.5" x 1.5", position angle 0.0 deg' in text
     assert "0.7500 to 1.2500 times the major axes" in text
@@ -364,13 +379,14 @@ def test_restoring_beam_section(tmp_path, output_image_format):
 def test_restoring_beam_section_without_uncorrected_channels(tmp_path):
     psf_beams = np.array([[1.2, 1.0, 0.3], [1.4, 1.1, 1.0]])
     psf_beams[:, :2] *= ARCSEC
-    store, keep = _beam_store(tmp_path, "zarr", psf_beams, [2 * ARCSEC, 2 * ARCSEC, 0])
-    text = _restoring_beam_section(tmp_path, store, "zarr", set(keep))
+    target = [2 * ARCSEC, 2 * ARCSEC, 0]
+    store, keep = _beam_store(tmp_path, "zarr", psf_beams, target)
+    text = _restoring_beam_section(tmp_path, store, "zarr", set(keep), target)
     assert "The restoring beam contains the PSF beam of every channel." in text
     assert "<table" not in text
     # without the PSF fits only the restoring beam is shown
     available = set(keep) - {"beam_fit_params_point_spread_function"}
-    text = _restoring_beam_section(tmp_path, store, "zarr", available)
+    text = _restoring_beam_section(tmp_path, store, "zarr", available, target)
     assert 'restored to the beam 2" x 2"' in text
     assert "The beam fit of the point spread function was not kept" in text
 
@@ -382,7 +398,7 @@ def test_restoring_beam_section_without_a_restoring_beam(tmp_path):
     psf_beams[:, :2] *= ARCSEC
     psf = np.repeat(psf_beams[None, :, None], 2, axis=2)
     store, keep = _beam_store(tmp_path, "zarr", psf_beams, psf)
-    text = _restoring_beam_section(tmp_path, store, "zarr", set(keep))
+    text = _restoring_beam_section(tmp_path, store, "zarr", set(keep), None)
     assert (
         "No restoring beam: every plane was restored with the PSF fit of its "
         "first Stokes plane" in text
@@ -391,19 +407,58 @@ def test_restoring_beam_section_without_a_restoring_beam(tmp_path):
     assert "<table" not in text
 
 
+def test_restoring_beam_section_of_one_channel_without_a_restoring_beam(tmp_path):
+    """The restored beams of one channel restored without a target are all
+    equal, as a target would be."""
+    psf_beams = np.array([[1.2 * ARCSEC, 1.0 * ARCSEC, 0.3]])
+    store, keep = _beam_store(tmp_path, "zarr", psf_beams, psf_beams[0])
+    text = _restoring_beam_section(tmp_path, store, "zarr", set(keep), None)
+    assert (
+        "No restoring beam: every plane was restored with the PSF fit of its "
+        "first Stokes plane" in text
+    )
+    assert "Every plane was restored to the beam" not in text
+
+
 def test_restoring_beam_section_of_fits_output_without_the_kept_variables(tmp_path):
     """The restoring beam is the header beam of the restored FITS image; the
     PSF beams of the BEAMS tables are found only with the kept variables."""
     psf_beams = np.array([[1.2, 1.0, 0.3], [1.4, 1.1, 1.0]])
     psf_beams[:, :2] *= ARCSEC
-    store, _ = _beam_store(tmp_path, "fits", psf_beams, [2 * ARCSEC, 2 * ARCSEC, 0])
+    target = [2 * ARCSEC, 2 * ARCSEC, 0]
+    store, _ = _beam_store(tmp_path, "fits", psf_beams, target)
     available = {"sky_residual", "sky_restored"}  # the FITS files
-    text = _restoring_beam_section(tmp_path, store, "fits", available)
+    text = _restoring_beam_section(tmp_path, store, "fits", available, target)
     assert 'restored to the beam 2" x 2", position angle 0.0 deg' in text
     assert "or no FITS file carries it" in text
     available = {"sky_residual"}
-    text = _restoring_beam_section(tmp_path, store, "fits", available)
+    text = _restoring_beam_section(tmp_path, store, "fits", available, target)
     assert "No restoring beam: no restored FITS image has a header beam" in text
+
+
+def test_restoring_beam_section_of_fits_output_with_filled_rows(tmp_path):
+    """Once the run has filled the BEAMS rows of a channel without a fit, the
+    report knows the channel from the planes the fill returned."""
+    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+        fill_fits_beams_without_fit,
+    )
+
+    psf_beams = np.array([[1.2, 1.0, 0.3], [np.nan, np.nan, np.nan], [1.4, 1.1, 1.0]])
+    psf_beams[:, :2] *= ARCSEC
+    target = [2 * ARCSEC, 2 * ARCSEC, 0.0]
+    store, keep = _beam_store(tmp_path, "fits", psf_beams, target)
+    planes_without_fit = fill_fits_beams_without_fit(store, keep)
+    np.testing.assert_array_equal(
+        planes_without_fit["sky_residual"],
+        [[False, False], [True, True], [False, False]],
+    )
+    text = _restoring_beam_section(
+        tmp_path, store, "fits", set(keep), target, planes_without_fit
+    )
+    assert text.count("<td>no fit</td>") == 1
+    # The filled rows alone hold a fit.
+    text = _restoring_beam_section(tmp_path, store, "fits", set(keep), target)
+    assert "<td>no fit</td>" not in text
 
 
 def test_restoring_beam_section_after_a_skipped_first_task(tmp_path):
@@ -413,16 +468,15 @@ def test_restoring_beam_section_after_a_skipped_first_task(tmp_path):
 
     psf_beams = np.array([[1.2, 1.0, 0.3], [2.0, 1.0, 0.0], [1.4, 1.1, 1.0]])
     psf_beams[:, :2] *= ARCSEC
-    store, keep = _beam_store(
-        tmp_path, "zarr", psf_beams, [1.5 * ARCSEC, 1.5 * ARCSEC, 0.0]
-    )
+    target = [1.5 * ARCSEC, 1.5 * ARCSEC, 0.0]
+    store, keep = _beam_store(tmp_path, "zarr", psf_beams, target)
     group = zarr.open_group(store, mode="r+")
     for name in (
         "BEAM_FIT_PARAMS_SKY_RESTORED",
         "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
     ):
         group[name][:, 0] = np.nan
-    text = _restoring_beam_section(tmp_path, store, "zarr", set(keep))
+    text = _restoring_beam_section(tmp_path, store, "zarr", set(keep), target)
     assert 'restored to the beam 1.5" x 1.5", position angle 0.0 deg' in text
     assert text.count("<td>no fit</td>") == 1
     assert text.count("<td>not contained</td>") == 1

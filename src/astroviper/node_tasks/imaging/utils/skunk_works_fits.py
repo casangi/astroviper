@@ -772,23 +772,35 @@ def fill_fits_beams_without_fit(image_store, image_data_variables_keep):
     image_data_variables_keep : list of str
         The run's kept variables; the ``BEAMS`` tables of the files of its image
         variables are filled.
+
+    Returns
+    -------
+    dict
+        ``{image variable key: numpy.ndarray}``: for the file of every image
+        variable with a ``BEAMS`` table, which of its planes ``(frequency,
+        polarization)`` had no fit.
     """
+    planes_without_fit = {}
     for key in image_data_variables_keep:
         if not key.startswith("beam_fit_params"):
-            _fill_beams_table_without_fit(
+            without_fit = _fill_beams_table_without_fit(
                 os.path.join(image_store, key.upper() + ".fits")
             )
+            if without_fit is not None:
+                planes_without_fit[key] = without_fit
+    return planes_without_fit
 
 
 def _fill_beams_table_without_fit(path):
-    """:func:`fill_fits_beams_without_fit` for the file ``path``."""
+    """:func:`fill_fits_beams_without_fit` for the file ``path``: which of its
+    planes had no fit, ``None`` for a file without a ``BEAMS`` table."""
     import toolviper.utils.logger as logger
 
     beams = _retry_transient_io(
         f"FITS structure of {path}", lambda: _fits_file_structure(path)
     )["beams"]
     if beams is None:
-        return
+        return None
 
     def read_rows():
         with open(path, "rb") as file:
@@ -801,8 +813,9 @@ def _fill_beams_table_without_fit(path):
     rows = _retry_transient_io(f"BEAMS rows of {path}", read_rows)
     values = np.stack([rows[name] for name in ("BMAJ", "BMIN", "BPA")], axis=-1)
     fitted = np.isfinite(values).all(axis=1) & (values[:, 0] > 0) & (values[:, 1] > 0)
+    without_fit = (~fitted).reshape(-1, beams["n_pol"])
     if fitted.all():
-        return
+        return without_fit
     if fitted.any():
         area = np.full(len(rows), -np.inf)
         area[fitted] = values[fitted, 0].astype(np.float64) * values[fitted, 1]
@@ -816,3 +829,4 @@ def _fill_beams_table_without_fit(path):
         f"{[float(value) for value in fill]} ({', '.join(_BEAMS_UNITS)})."
     )
     _pwrite_with_eio_retry(path, beams["data_start"], rows.tobytes())
+    return without_fit

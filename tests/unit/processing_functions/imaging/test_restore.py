@@ -1172,20 +1172,20 @@ def test_planes_without_a_fit_take_the_tclean_beam():
     at 0 degrees, else the beams as they are; the beams themselves when every
     plane has a fit."""
     from astroviper.processing_functions.imaging.restore import (
-        _NO_FIT_BEAM,
-        _fill_planes_without_fit,
+        NO_FIT_BEAM,
+        fill_planes_without_fit,
     )
 
     fitted = np.array([[[[2.0, 1.0, 0.1]], [[3.0, 2.0, 0.2]]]])
-    assert _fill_planes_without_fit(fitted, _NO_FIT_BEAM) is fitted
+    assert fill_planes_without_fit(fitted, NO_FIT_BEAM) is fitted
     null = np.array([[[[0.0, 0.0, 0.0]], [[np.nan, np.nan, np.nan]]]])
-    assert _fill_planes_without_fit(null) is null
+    assert fill_planes_without_fit(null) is null
     np.testing.assert_array_equal(
-        _fill_planes_without_fit(null, _NO_FIT_BEAM),
-        np.broadcast_to(_NO_FIT_BEAM, null.shape),
+        fill_planes_without_fit(null, NO_FIT_BEAM),
+        np.broadcast_to(NO_FIT_BEAM, null.shape),
     )
     np.testing.assert_allclose(
-        np.degrees(_NO_FIT_BEAM) * [3600.0, 3600.0, 1.0], [1e-6, 1e-6, 0.0]
+        np.degrees(NO_FIT_BEAM) * [3600.0, 3600.0, 1.0], [1e-6, 1e-6, 0.0]
     )
 
 

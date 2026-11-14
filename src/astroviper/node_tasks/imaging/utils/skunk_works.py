@@ -21,6 +21,8 @@ generality for speed:
   round trip. The empty image (and its Zarr metadata) was already created by the
   distributed graph. The variables are compressed and written concurrently
   across ``processing_function_threads`` threads (the compression is the dominant write cost).
+* :func:`fill_zarr_restored_beams_without_fit`, run once by the driver after the
+  tasks of any Zarr image store, completes their restored beams.
 
 Nothing here uses dask: the node task is already wrapped in dask, and each task
 owns a disjoint set of chunks, so reads and writes are embarrassingly parallel.
@@ -863,6 +865,38 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
     for encoded in encoded_per_variable:
         for path, blob in encoded:
             _write_blob(path, blob)
+
+
+def fill_zarr_restored_beams_without_fit(image_store):
+    """Give the planes of ``BEAM_FIT_PARAMS_SKY_RESTORED`` without a fit the beam
+    ``tclean`` gives them.
+
+    Run ONCE in the driver, after every node task has written its beams, for
+    every Zarr image store, whichever writer made it. The planes without a fit
+    (a flagged channel, a failed fit, a skipped task) take the first beam of
+    largest area of the planes with one, or a circle of 1e-6 arcsec at 0
+    degrees when no plane has one
+    (:func:`~astroviper.processing_functions.imaging.restore.fill_planes_without_fit`).
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the Zarr image store, which holds ``BEAM_FIT_PARAMS_SKY_RESTORED``.
+    """
+    import zarr
+
+    from astroviper.processing_functions.imaging.restore import (
+        NO_FIT_BEAM,
+        fill_planes_without_fit,
+    )
+
+    restored_beam = zarr.open_group(image_store, mode="r+")[
+        "BEAM_FIT_PARAMS_SKY_RESTORED"
+    ]
+    beams = restored_beam[...]
+    filled = fill_planes_without_fit(beams, NO_FIT_BEAM)
+    if filled is not beams:
+        restored_beam[...] = filled
 
 
 # ---------------------------------------------------------------------------

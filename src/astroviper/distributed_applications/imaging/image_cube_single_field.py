@@ -1440,6 +1440,27 @@ def image_cube_single_field(
         # Same absolute compute-call anchors as the MPI branch (see above).
         timing_distributed_application["compute_start_unixtime"] = start
         timing_distributed_application["compute_end_unixtime"] = end
+
+    # Planes without a fit (a flagged channel, a failed fit, a skipped task)
+    # take the beam tclean gives them, now that every task has written its
+    # beams, and before the report, during which the teardown watchdog that
+    # processes_with_mpi arms can end the process.
+    planes_without_fit = None
+    if output_image_format == "fits":
+        from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+            fill_fits_beams_without_fit,
+        )
+
+        planes_without_fit = fill_fits_beams_without_fit(
+            image_store, image_data_variables_keep
+        )
+    elif "beam_fit_params_sky_restored" in image_data_variables_keep:
+        from astroviper.node_tasks.imaging.utils.skunk_works import (
+            fill_zarr_restored_beams_without_fit,
+        )
+
+        fill_zarr_restored_beams_without_fit(image_store)
+
     # A graph of one map task has no reduce node: its result is the node
     # task's own dict, whose monitor series are folded in here as the reduce
     # folds them in.
@@ -1527,30 +1548,9 @@ def image_cube_single_field(
             output_image_format=output_image_format,
             image_data_variables_keep=image_data_variables_keep,
             thread_info=thread_info,
+            restoring_beam=restoring_beam,
+            planes_without_fit=planes_without_fit,
         )
-
-    # Planes without a fit (a flagged channel, a failed fit, a skipped task)
-    # take the beam tclean gives them, now that every task has written its
-    # beams; after the report, which finds them by their null beams.
-    if output_image_format == "fits":
-        from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
-            fill_fits_beams_without_fit,
-        )
-
-        fill_fits_beams_without_fit(image_store, image_data_variables_keep)
-    elif "beam_fit_params_sky_restored" in image_data_variables_keep:
-        from astroviper.processing_functions.imaging.restore import (
-            _NO_FIT_BEAM,
-            _fill_planes_without_fit,
-        )
-
-        restored_beam = zarr.open_group(image_store, mode="r+")[
-            "BEAM_FIT_PARAMS_SKY_RESTORED"
-        ]
-        beams = restored_beam[...]
-        filled = _fill_planes_without_fit(beams, _NO_FIT_BEAM)
-        if filled is not beams:
-            restored_beam[...] = filled
     return imaging_dict
 
 

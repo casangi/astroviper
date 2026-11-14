@@ -22,6 +22,8 @@ def image_cube_single_field_report(
     output_image_format="zarr",
     image_data_variables_keep=None,
     thread_info=None,
+    restoring_beam=None,
+    planes_without_fit=None,
 ):
     """Make the report of an ``image_cube_single_field`` run.
 
@@ -62,6 +64,15 @@ def image_cube_single_field_report(
         restored images.
     thread_info : dict, optional
         Passed to ``moments``.
+    restoring_beam : list of float, optional
+        The run's ``restoring_beam``; ``None`` (default) for a run without one,
+        whose planes were each restored with their own PSF fit.
+    planes_without_fit : dict, optional
+        FITS output: which planes ``(frequency, polarization)`` of the file of
+        each image variable had no beam fit before the run filled its
+        ``BEAMS`` rows, as
+        :func:`~astroviper.node_tasks.imaging.utils.skunk_works_fits.fill_fits_beams_without_fit`
+        returns them. ``None`` (default) takes the rows as they are.
 
     Returns
     -------
@@ -102,9 +113,16 @@ def image_cube_single_field_report(
         )
         document.section("Results")
         _add_point_spread_function(
-            document, image_store, output_image_format, available
+            document, image_store, output_image_format, available, planes_without_fit
         )
-        _add_restoring_beam(document, image_store, output_image_format, available)
+        _add_restoring_beam(
+            document,
+            image_store,
+            output_image_format,
+            available,
+            restoring_beam,
+            planes_without_fit,
+        )
         _add_moment_maximum(
             document,
             image_store,
@@ -133,25 +151,38 @@ def _available_variables(image_store, output_image_format, image_data_variables_
     return {str(name).lower() for name in xr.open_zarr(image_store).data_vars}
 
 
-def _open_variable(image_store, output_image_format, key):
-    """The image dataset holding the variable ``key`` (lazily opened)."""
+def _open_variable(image_store, output_image_format, key, planes_without_fit=None):
+    """The image dataset holding the variable ``key`` (lazily opened); the
+    beams of a FITS file NaN in its planes without a fit."""
+    import xarray as xr
+
     if output_image_format == "fits":
         from xradio.image import open_image
 
-        return open_image({key: os.path.join(image_store, key.upper() + ".fits")})
-    import xarray as xr
-
+        img_xds = open_image({key: os.path.join(image_store, key.upper() + ".fits")})
+        if planes_without_fit is not None and key in planes_without_fit:
+            beam_name = "BEAM_FIT_PARAMS_" + key.upper()
+            img_xds[beam_name] = img_xds[beam_name].where(
+                ~xr.DataArray(
+                    planes_without_fit[key], dims=("frequency", "polarization")
+                )
+            )
+        return img_xds
     return xr.open_zarr(image_store)
 
 
-def _add_point_spread_function(document, image_store, output_image_format, available):
+def _add_point_spread_function(
+    document, image_store, output_image_format, available, planes_without_fit=None
+):
     from astroviper.utils.report_plots import plot_point_spread_function_cross_sections
 
     document.subsection("Point spread function")
     if "point_spread_function" not in available:
         document.note("The point spread function was not kept (point_spread_function).")
         return
-    img_xds = _open_variable(image_store, output_image_format, "point_spread_function")
+    img_xds = _open_variable(
+        image_store, output_image_format, "point_spread_function", planes_without_fit
+    )
     beam_name = "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
     if beam_name not in img_xds:
         document.note(
@@ -194,7 +225,9 @@ def _add_point_spread_function(document, image_store, output_image_format, avail
     )
 
 
-def _open_beam_fit_params(image_store, output_image_format, available, key):
+def _open_beam_fit_params(
+    image_store, output_image_format, available, key, planes_without_fit=None
+):
     """The beam-fit-params variable ``key`` (lazily opened), ``None`` when it
     was not written. FITS output holds the restoring beam in the header of the
     restored images, and the others in the ``BEAMS`` tables of the image files
@@ -230,11 +263,20 @@ def _open_beam_fit_params(image_store, output_image_format, available, key):
         image_keys = []
     if not image_keys:
         return None
-    img_xds = _open_variable(image_store, output_image_format, image_keys[0])
+    img_xds = _open_variable(
+        image_store, output_image_format, image_keys[0], planes_without_fit
+    )
     return img_xds["BEAM_FIT_PARAMS_" + image_keys[0].upper()]
 
 
-def _add_restoring_beam(document, image_store, output_image_format, available):
+def _add_restoring_beam(
+    document,
+    image_store,
+    output_image_format,
+    available,
+    restoring_beam,
+    planes_without_fit=None,
+):
     import pandas as pd
 
     from astroviper.processing_functions.image_analysis.common_beam import (
@@ -270,7 +312,7 @@ def _add_restoring_beam(document, image_store, output_image_format, available):
             "task wrote it, or no plane has a PSF fit)."
         )
         return
-    if np.any(planes != planes[0]):
+    if restoring_beam is None:
         document.note(
             "No restoring beam: every plane was restored with the PSF fit of its "
             "first Stokes plane, as beam_fit_params_sky_restored records."
@@ -287,6 +329,7 @@ def _add_restoring_beam(document, image_store, output_image_format, available):
         output_image_format,
         available,
         "beam_fit_params_point_spread_function",
+        planes_without_fit,
     )
     if psf_beam is None:
         document.note(
