@@ -87,13 +87,13 @@ PS_STORE = "twhya_selfcal_lsrk_5chans.ps.zarr"
 # processing_function_threads=1, n_mapping_parallelism=1, skunk_works=False (see
 # ``_regenerate_truth_images``); double-precision variants compare against the
 # double truth, single-precision variants against the single truth.
-TRUTH_IMAGE_NITER0 = "twhya_selfcal_5chans_lsrk_niter0_truth_v8.img.zarr"
-TRUTH_IMAGE_NITER100 = "twhya_selfcal_5chans_lsrk_niter100_truth_v8.img.zarr"
+TRUTH_IMAGE_NITER0 = "twhya_selfcal_5chans_lsrk_niter0_truth_v9.img.zarr"
+TRUTH_IMAGE_NITER100 = "twhya_selfcal_5chans_lsrk_niter100_truth_v9.img.zarr"
 TRUTH_IMAGE_MULTI_CYCLE_DOUBLE = (
-    "twhya_selfcal_5chans_lsrk_multi_cycle_double_truth_v8.img.zarr"
+    "twhya_selfcal_5chans_lsrk_multi_cycle_double_truth_v9.img.zarr"
 )
 TRUTH_IMAGE_MULTI_CYCLE_SINGLE = (
-    "twhya_selfcal_5chans_lsrk_multi_cycle_single_truth_v8.img.zarr"
+    "twhya_selfcal_5chans_lsrk_multi_cycle_single_truth_v9.img.zarr"
 )
 
 # Google Drive file IDs for the zipped truth images above. Each is a zipped
@@ -102,6 +102,11 @@ TRUTH_IMAGE_MULTI_CYCLE_SINGLE = (
 # paste the resulting file ids here. (Until then, a locally regenerated copy is
 # used directly -- the download is a no-op when the directory already exists.)
 _TRUTH_IMAGE_DRIVE_IDS = {
+    # v9, regenerated 2026-11-14 for the restoring beam (issue 429): the PSF fit
+    # uses the exact FWHM factor 2 sqrt(2 ln 2) instead of 2.355, which scales
+    # the beam axes by 0.9999236 and moves SKY_RESTORED by 7.1e-5 to 1.1e-4 of
+    # its peak, and the restored group records BEAM_FIT_PARAMS_SKY_RESTORED.
+    # Uploaded 2026-11-14.
     # v8, regenerated 2026-10-26 for the new default gridding kernel (RADPS
     # Memo 13a): no imager call here passes gridding_kernel_params, so the
     # images are gridded with the least misfit kernel of support 9,
@@ -124,10 +129,10 @@ _TRUTH_IMAGE_DRIVE_IDS = {
     # primary_beam_limit mask shrinks and the CLEAN of niter100 and multi_cycle
     # changes. A new version keeps main's truths (the unversioned names)
     # untouched.
-    TRUTH_IMAGE_NITER0: "1XZcfXiSs8n_dRmVrElOxiupCo5fd96Hd",
-    TRUTH_IMAGE_NITER100: "16TDgMucqAFMINkX0PxnKbH6Qy92YQVxJ",
-    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: "1vDINEZ5cewer7p0ncitmBFGdC6ej1WdD",
-    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "1D_0KyA-2PlqOOSg-9JD40uMkYd0-ZtcI",
+    TRUTH_IMAGE_NITER0: "1bO75DQ7nyWHuR2pE7E8bs_9JUS8IPe2t",
+    TRUTH_IMAGE_NITER100: "1V4mfH4E1rCscuTCFIFQ9zrFkXzLBwMvl",
+    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: "1a4DswlBOzN5G-r2YS0iOMlvW2eDFgVV8",
+    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "1CH78OFSBV6brmEBw8VCx7EV_rLQIB5Ua",
 }
 
 # Default (tight) per-channel relative-difference ceiling for the reproducible
