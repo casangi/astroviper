@@ -12,6 +12,7 @@ from astroviper.processing_functions.image_analysis.moments import moments
 from astroviper.processing_functions.image_analysis.plane_statistics import (
     calculate_plane_statistics,
     concatenate_plane_statistics,
+    plane_statistics_from_dataframe,
     plane_statistics_to_dataframe,
 )
 from astroviper.processing_functions.image_analysis.statistics import (
@@ -62,4 +63,5 @@ __all__ = [
     "calculate_plane_statistics",
     "concatenate_plane_statistics",
     "plane_statistics_to_dataframe",
+    "plane_statistics_from_dataframe",
 ]

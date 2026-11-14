@@ -1,7 +1,8 @@
 """Figures of the distributed application reports (:mod:`astroviper.utils.report`).
 
-Every plotting function takes plain arrays (an :class:`xarray.DataArray`, or the
-convergence record of a deconvolution) and returns a
+Every plotting function takes plain arrays (an :class:`xarray.DataArray`, the
+convergence record of a deconvolution, or for the image statistics the return
+dict of an imaging run) and returns a
 :class:`matplotlib.figure.Figure` made without pyplot, so that a report can
 draw and close its figures in any process. Images follow the orientation of
 :func:`~astroviper.utils.plotting.generate_plot`: ``data[l, m]`` drawn as
@@ -19,7 +20,9 @@ import numpy as np
 __all__ = [
     "STOKES_STYLES",
     "plot_antenna_positions",
+    "plane_maximum_detections",
     "plot_deconvolution_summary",
+    "plot_image_statistics",
     "plot_plane_deconvolution_summary",
     "plot_point_spread_function_cross_sections",
     "plot_restoring_beam_axes",
@@ -414,6 +417,674 @@ def _per_stokes_panel(ax, x, values, stokes, ylabel, title):
         ax.legend(fontsize=7)
 
 
+# The panels of the "statistics" layout of plot_image_statistics, in drawing
+# order: statistic -> (panel title, y label). ``n_pixels`` is left out.
+_IMAGE_STATISTIC_PANELS = {
+    "peak": ("Signed peak (pixel of max |value|)", "Jy/beam"),
+    "max": ("Max", "Jy/beam"),
+    "min": ("Min", "Jy/beam"),
+    "mean": ("Mean", "Jy/beam"),
+    "median": ("Median", "Jy/beam"),
+    "rms": ("RMS", "Jy/beam"),
+    "std": ("Std", "Jy/beam"),
+    "mad_sigma": ("MAD sigma (robust noise)", "Jy/beam"),
+    "sum": ("Sum over pixels", "Jy/beam * pixels"),
+}
+_IMAGE_STATISTICS_LAYOUTS = ("statistics", "spectral_windows", "consistency")
+
+
+def _image_statistics_planes(return_dict, image_variable, time_index):
+    """The plane statistics of ``image_variable`` at ``time_index`` with dims
+    ``(frequency, polarization)``, or None when the run has none."""
+    statistics = (return_dict.get("image_statistics") or {}).get(image_variable)
+    if statistics is None:
+        return None
+    return statistics.isel(time=time_index).transpose("frequency", "polarization")
+
+
+def _plane_statistic(statistics, name):
+    """``[n_frequency, n_stokes]`` values of the statistic ``name``, or None
+    when it is absent or all NaN."""
+    if name not in statistics:
+        return None
+    values = np.asarray(statistics[name].values, dtype=np.float64)
+    return None if np.all(np.isnan(values)) else values
+
+
+def _spectral_windows(frequency, spectral_window_gap_factor):
+    """Index arrays of the spectral windows of a sorted frequency axis: a
+    window ends where the channel spacing exceeds ``spectral_window_gap_factor``
+    times the median spacing."""
+    frequency = np.asarray(frequency, dtype=np.float64)
+    if len(frequency) < 2:
+        return [np.arange(len(frequency))]
+    spacing = np.diff(frequency)
+    boundaries = (
+        np.where(spacing > spectral_window_gap_factor * np.median(spacing))[0] + 1
+    )
+    return np.split(np.arange(len(frequency)), boundaries)
+
+
+def _gaps_broken(frequency, spectral_window_gap_factor=3.0):
+    """A function that inserts a NaN row (along the first axis) between the
+    spectral windows of ``frequency``, so that lines do not span the gaps."""
+    windows = _spectral_windows(frequency, spectral_window_gap_factor)
+    starts = [window[0] for window in windows[1:]]
+    return lambda values: np.insert(
+        np.asarray(values, dtype=np.float64), starts, np.nan, axis=0
+    )
+
+
+def _spectral_window_detections(
+    statistics,
+    statistic,
+    masked,
+    detection_margin_sigma,
+    flagged_frequency_ranges,
+    flagged_edge_channels,
+    spectral_window_gap_factor,
+):
+    """The spectral windows, flagged channels, the statistic and, with
+    ``detection_margin_sigma``, the detection threshold and the detections
+    of every plane; None when the statistic (or the ``mad_sigma`` of the
+    threshold) is absent.
+
+    The masked twins are used when ``masked`` and recorded. The threshold of
+    a plane maximum is ``mad_sigma * (sqrt(2 ln N) + detection_margin_sigma)``
+    with ``N`` the ``n_pixels`` of the plane (e where it is not above 1): the
+    expected maximum of ``N`` noise pixels plus the margin.
+    """
+    for suffix in ("_masked", "") if masked else ("",):
+        values = _plane_statistic(statistics, statistic + suffix)
+        mad_sigma = _plane_statistic(statistics, "mad_sigma" + suffix)
+        if values is not None and (
+            detection_margin_sigma is None or mad_sigma is not None
+        ):
+            break
+    else:
+        return None
+    frequency = np.asarray(statistics["frequency"].values, dtype=np.float64)
+    windows = _spectral_windows(frequency, spectral_window_gap_factor)
+    flagged = np.zeros(len(frequency), dtype=bool)
+    if flagged_edge_channels:
+        for window in windows:
+            flagged[window[:flagged_edge_channels]] = True
+            flagged[window[-flagged_edge_channels:]] = True
+    for low, high in (flagged_frequency_ranges or {}).values():
+        flagged |= (frequency >= low) & (frequency <= high)
+    threshold = detected = None
+    if detection_margin_sigma is not None:
+        n_pixels = _plane_statistic(statistics, "n_pixels" + suffix)
+        if n_pixels is None:
+            n_pixels = np.full(values.shape, np.nan)
+        noise_maximum = np.sqrt(2.0 * np.log(np.where(n_pixels > 1, n_pixels, np.e)))
+        threshold = mad_sigma * (noise_maximum + detection_margin_sigma)
+        detected = (values > threshold) & ~flagged[:, None]
+    return {
+        "frequency": frequency,
+        "stokes": [str(label) for label in statistics["polarization"].values],
+        "windows": windows,
+        "flagged": flagged,
+        "statistic": statistic + suffix,
+        "values": values,
+        "mad_sigma": mad_sigma,
+        "threshold": threshold,
+        "detected": detected,
+    }
+
+
+def plane_maximum_detections(
+    return_dict,
+    image_variable,
+    detection_margin_sigma,
+    masked=True,
+    time_index=0,
+    spectral_lines=None,
+    line_match_hz=5e6,
+    flagged_frequency_ranges=None,
+    flagged_edge_channels=0,
+    spectral_window_gap_factor=3.0,
+):
+    """The planes whose maximum is above the expected noise maximum.
+
+    A plane (channel and Stokes plane) is a detection when its ``max``
+    exceeds ``mad_sigma * (sqrt(2 ln n_pixels) + detection_margin_sigma)``:
+    the maximum of ``n_pixels`` independent noise pixels is expected near
+    ``sqrt(2 ln n_pixels)`` times the noise, which the robust ``mad_sigma``
+    measures. Flagged channels are never detections. This is the table of
+    the ``"spectral_windows"`` layout of :func:`plot_image_statistics`.
+
+    Parameters
+    ----------
+    return_dict : dict
+        The return dict of an imaging run; ``image_statistics[image_variable]``
+        is read.
+    image_variable : str
+        The image variable key, e.g. ``"sky_restored"``.
+    detection_margin_sigma : float
+        The margin above the expected noise maximum, in units of
+        ``mad_sigma``.
+    masked : bool, optional
+        Use the statistics inside the mask (``max_masked``,
+        ``mad_sigma_masked``, ``n_pixels_masked``) when they are recorded.
+        Default True.
+    time_index : int, optional
+        The time plane. Default 0.
+    spectral_lines : dict, optional
+        ``{label: frequency}`` of known lines at their sky frequencies (Hz);
+        a detection within ``line_match_hz`` of one carries its label (the
+        nearest).
+    line_match_hz : float, optional
+        Default 5 MHz.
+    flagged_frequency_ranges : dict, optional
+        ``{label: (low, high)}`` frequency ranges (Hz, inclusive) of flagged
+        channels.
+    flagged_edge_channels : int, optional
+        Channels flagged at both edges of every spectral window. Default 0.
+    spectral_window_gap_factor : float, optional
+        A spectral window ends where the channel spacing exceeds this factor
+        times the median spacing. Default 3.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per detection, sorted by ``frequency`` and ``polarization``,
+        with the columns ``spectral_window`` (its index), ``frequency`` (Hz),
+        ``polarization``, ``max``, ``mad_sigma``, ``significance`` (``max /
+        mad_sigma``, inf for a ``mad_sigma`` of 0), ``line_id`` (empty when
+        no line matches) and ``statistics`` (``"masked"`` or ``"all"``).
+
+    Raises
+    ------
+    ValueError
+        If the run has no ``max`` and ``mad_sigma`` statistics of
+        ``image_variable``.
+    """
+    import pandas as pd
+
+    statistics = _image_statistics_planes(return_dict, image_variable, time_index)
+    detections = (
+        None
+        if statistics is None
+        else _spectral_window_detections(
+            statistics,
+            "max",
+            masked,
+            detection_margin_sigma,
+            flagged_frequency_ranges,
+            flagged_edge_channels,
+            spectral_window_gap_factor,
+        )
+    )
+    if detections is None:
+        raise ValueError(
+            f"plane_maximum_detections: no max and mad_sigma statistics of "
+            f"{image_variable} were recorded"
+        )
+    channel, pol = np.nonzero(detections["detected"])
+    window_of_channel = np.empty(len(detections["frequency"]), dtype=int)
+    for index, window in enumerate(detections["windows"]):
+        window_of_channel[window] = index
+    frequency = detections["frequency"][channel]
+    maximum = detections["values"][channel, pol]
+    mad_sigma = detections["mad_sigma"][channel, pol]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        significance = np.where(mad_sigma > 0, maximum / mad_sigma, np.inf)
+
+    def line_id(value):
+        best, best_offset = "", line_match_hz
+        for label, line_frequency in (spectral_lines or {}).items():
+            if abs(value - line_frequency) < best_offset:
+                best, best_offset = label, abs(value - line_frequency)
+        return best
+
+    frame = pd.DataFrame(
+        {
+            "spectral_window": window_of_channel[channel],
+            "frequency": frequency,
+            "polarization": [detections["stokes"][index] for index in pol],
+            "max": maximum,
+            "mad_sigma": mad_sigma,
+            "significance": significance,
+            "line_id": [line_id(value) for value in frequency],
+            "statistics": "masked"
+            if detections["statistic"].endswith("_masked")
+            else "all",
+        }
+    )
+    return frame.sort_values(["frequency", "polarization"], ignore_index=True)
+
+
+def plot_image_statistics(
+    source,
+    image_variable,
+    statistics=None,
+    layout="statistics",
+    masked=True,
+    time_index=0,
+    labels=None,
+    ylabel=None,
+    detection_margin_sigma=None,
+    spectral_lines=None,
+    telluric_lines=None,
+    flagged_frequency_ranges=None,
+    flagged_edge_channels=0,
+    spectral_window_gap_factor=3.0,
+    title=None,
+):
+    """The per-plane statistics of an image variable against frequency.
+
+    Layouts:
+
+    - ``"statistics"``: one panel per statistic (default every statistic of
+      :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`
+      but ``n_pixels``), one line per Stokes plane over the image (solid)
+      and, with ``masked``, inside the mask (dashed). A statistic that is
+      absent or all NaN is left out; the lines do not span the gaps between
+      spectral windows.
+    - ``"spectral_windows"``: one panel per spectral window of one statistic
+      (default ``max``; inside the mask when ``masked`` and recorded), with
+      the detection threshold and the detections of
+      :func:`plane_maximum_detections` when ``detection_margin_sigma`` is
+      given, the known and the telluric lines and the flagged channels
+      (shaded, drawn faint, never detections). The y axis is logarithmic when
+      every value of the window is positive.
+    - ``"consistency"``: ``source`` is a sequence of return dicts of runs of
+      the same image; per statistic (and its masked twin, with ``masked``)
+      the largest absolute difference of every other run from the first
+      over the planes they share, relative to the largest absolute value of
+      the first. 0 is an identical cube.
+
+    Parameters
+    ----------
+    source : dict or sequence of dict
+        The return dict of an imaging run (``image_statistics`` is read), a
+        sequence of them for ``"consistency"``.
+    image_variable : str
+        The image variable key, e.g. ``"sky_residual"``.
+    statistics : sequence of str, optional
+        The statistics (names without ``_masked``); one name for
+        ``"spectral_windows"``.
+    layout : str, optional
+        ``"statistics"`` (default), ``"spectral_windows"`` or
+        ``"consistency"``.
+    masked : bool, optional
+        Draw (or use) the statistics inside the mask. Default True.
+    time_index : int, optional
+        The time plane. Default 0.
+    labels : sequence of str, optional
+        ``"consistency"``: one label per return dict. Default ``run <i>``.
+    ylabel : str, optional
+        ``"spectral_windows"``: label of the statistic.
+    detection_margin_sigma : float, optional
+        ``"spectral_windows"``: draw the detection threshold and the
+        detections with this margin (see :func:`plane_maximum_detections`).
+    spectral_lines : dict, optional
+        ``"spectral_windows"``: ``{label: frequency}`` of known lines at
+        their sky frequencies (Hz), drawn dotted with their labels.
+    telluric_lines : dict, optional
+        ``"spectral_windows"``: ``{label: frequency}`` of atmospheric lines
+        (Hz, topocentric), drawn dash-dotted in green.
+    flagged_frequency_ranges : dict, optional
+        ``"spectral_windows"``: ``{label: (low, high)}`` frequency ranges
+        (Hz, inclusive) of flagged channels.
+    flagged_edge_channels : int, optional
+        ``"spectral_windows"``: channels flagged at both edges of every
+        spectral window. Default 0.
+    spectral_window_gap_factor : float, optional
+        A spectral window ends where the channel spacing exceeds this factor
+        times the median spacing. Default 3.
+    title : str, optional
+        Figure title.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        None when the run has no statistics of ``image_variable`` or none of
+        the statistics asked for (fewer than two runs with them for
+        ``"consistency"``).
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``layout``, more than one statistic for
+        ``"spectral_windows"``, or ``labels`` not aligned with ``source``.
+    """
+    if layout not in _IMAGE_STATISTICS_LAYOUTS:
+        raise ValueError(
+            f"plot_image_statistics: layout {layout!r} is none of "
+            f"{_IMAGE_STATISTICS_LAYOUTS}"
+        )
+    if layout == "consistency":
+        return _plot_image_statistics_consistency(
+            source, image_variable, statistics, masked, time_index, labels, title
+        )
+    planes = _image_statistics_planes(source, image_variable, time_index)
+    if planes is None:
+        return None
+    if layout == "spectral_windows":
+        statistics = tuple(statistics or ("max",))
+        if len(statistics) != 1:
+            raise ValueError(
+                "plot_image_statistics: the spectral_windows layout draws one "
+                f"statistic, not {statistics}"
+            )
+        detections = _spectral_window_detections(
+            planes,
+            statistics[0],
+            masked,
+            detection_margin_sigma,
+            flagged_frequency_ranges,
+            flagged_edge_channels,
+            spectral_window_gap_factor,
+        )
+        if detections is None:
+            return None
+        return _plot_spectral_windows(
+            detections,
+            image_variable,
+            ylabel,
+            detection_margin_sigma,
+            spectral_lines,
+            telluric_lines,
+            title,
+        )
+
+    panels = [
+        (name, values)
+        for name in statistics or tuple(_IMAGE_STATISTIC_PANELS)
+        if (values := _plane_statistic(planes, name)) is not None
+    ]
+    if not panels:
+        return None
+    stokes = [str(label) for label in planes["polarization"].values]
+    frequency = planes["frequency"].values
+    figure, axes = _figure(
+        int(np.ceil(len(panels) / 3)), 3, panel_size=(4.4, 3.0), sharex=True
+    )
+    gapped = _gaps_broken(frequency, spectral_window_gap_factor)
+    x = gapped(frequency) / 1e9
+    for index, (ax, (name, values)) in enumerate(
+        zip(axes.ravel(), panels, strict=False)
+    ):
+        panel_title, unit = _IMAGE_STATISTIC_PANELS.get(name, (name, ""))
+        _per_stokes_panel(ax, x, gapped(values), stokes, unit, panel_title)
+        twin = _plane_statistic(planes, name + "_masked") if masked else None
+        for stokes_index, label in enumerate(stokes if twin is not None else ()):
+            ax.plot(
+                x,
+                gapped(twin)[:, stokes_index],
+                color=_stokes_style(label, stokes_index)["color"],
+                linestyle="--",
+                linewidth=1.0,
+                label=f"Stokes {label} inside the mask",
+            )
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
+        if index + 3 >= len(panels):  # the lowest panel of its column
+            _frequency_axis(ax, frequency)
+            ax.tick_params(axis="x", labelbottom=True)
+    for ax in axes.ravel()[len(panels) :]:
+        ax.set_visible(False)
+    axes[0, 0].legend(fontsize=7)
+    figure.suptitle(
+        title
+        or f"Per-plane statistics of {image_variable} ({len(frequency)} channels)",
+        fontsize=11,
+    )
+    return figure
+
+
+def _plot_spectral_windows(
+    detections,
+    image_variable,
+    ylabel,
+    detection_margin_sigma,
+    spectral_lines,
+    telluric_lines,
+    title,
+):
+    """The ``"spectral_windows"`` layout of :func:`plot_image_statistics`."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    frequency, stokes = detections["frequency"], detections["stokes"]
+    values, threshold = detections["values"], detections["threshold"]
+    flagged, windows = detections["flagged"], detections["windows"]
+    statistic = detections["statistic"]
+    n_columns = min(2, len(windows))
+    figure, axes = _figure(
+        int(np.ceil(len(windows) / n_columns)), n_columns, panel_size=(6.0, 3.0)
+    )
+    for index, (ax, window) in enumerate(zip(axes.ravel(), windows, strict=False)):
+        x = _frequency_axis(ax, frequency[window])
+        window_flagged = flagged[window]
+        for stokes_index, label in enumerate(stokes):
+            color = _stokes_style(label, stokes_index)["color"]
+            y = values[window, stokes_index]
+            ax.plot(x, np.where(window_flagged, np.nan, y), color=color, linewidth=0.9)
+            if window_flagged.any():
+                ax.plot(
+                    x,
+                    np.where(window_flagged, y, np.nan),
+                    color=color,
+                    linewidth=0.7,
+                    alpha=0.25,
+                )
+            if threshold is None:
+                continue
+            ax.plot(
+                x,
+                np.where(window_flagged, np.nan, threshold[window, stokes_index]),
+                color=color,
+                linestyle="--",
+                linewidth=0.9,
+                alpha=0.7,
+            )
+            hit = detections["detected"][window, stokes_index]
+            if hit.any():
+                ax.plot(
+                    x[hit],
+                    y[hit],
+                    color=color,
+                    linestyle="none",
+                    marker="o",
+                    markersize=4,
+                    markerfacecolor="none",
+                )
+        low, high = frequency[window[0]], frequency[window[-1]]
+        # Labels of lines closer than 2 % of the window alternate in height.
+        previous, label_top = None, 0.985
+        for line_frequency, label in sorted(
+            (value, label)
+            for label, value in (spectral_lines or {}).items()
+            if low <= value <= high
+        ):
+            ax.axvline(
+                line_frequency / 1e9, color=_INK, linestyle=":", linewidth=0.9, zorder=0
+            )
+            crowded = previous is not None and line_frequency - previous < 0.02 * (
+                high - low
+            )
+            label_top = 0.70 if crowded and label_top == 0.985 else 0.985
+            ax.annotate(
+                label,
+                xy=(line_frequency / 1e9, label_top),
+                xycoords=("data", "axes fraction"),
+                rotation=90,
+                ha="right",
+                va="top",
+                fontsize=7,
+                color=_INK,
+            )
+            previous = line_frequency
+        start = None
+        for position, is_flagged in enumerate([*window_flagged, False]):
+            if is_flagged and start is None:
+                start = position
+            elif not is_flagged and start is not None:
+                ax.axvspan(
+                    x[start], x[min(position, len(x) - 1)], color="0.85", zorder=0
+                )
+                start = None
+        for label, line_frequency in (telluric_lines or {}).items():
+            if low <= line_frequency <= high:
+                ax.axvline(
+                    line_frequency / 1e9,
+                    color="seagreen",
+                    linestyle="-.",
+                    linewidth=0.9,
+                    alpha=0.8,
+                    zorder=0,
+                )
+                ax.annotate(
+                    label,
+                    xy=(line_frequency / 1e9, 0.985),
+                    xycoords=("data", "axes fraction"),
+                    rotation=90,
+                    ha="right",
+                    va="top",
+                    fontsize=7,
+                    color="seagreen",
+                )
+        ax.set_title(
+            f"spectral window {index}: {low / 1e9:.3f}-{high / 1e9:.3f} GHz "
+            f"({len(window)} channels)",
+            fontsize=10,
+        )
+        ax.set_ylabel(ylabel or statistic)
+        finite = values[window][np.isfinite(values[window])]
+        if finite.size and finite.min() > 0:
+            ax.set_yscale("log")
+        ax.grid(True, **_GRID)
+    for ax in axes.ravel()[len(windows) :]:
+        ax.set_visible(False)
+
+    handles = [
+        Line2D(
+            [], [], color=_stokes_style(label, index)["color"], label=f"Stokes {label}"
+        )
+        for index, label in enumerate(stokes)
+    ]
+    if threshold is not None:
+        handles += [
+            Line2D([], [], color=_INK, linestyle="--", label="detection threshold"),
+            Line2D(
+                [],
+                [],
+                color=_INK,
+                linestyle="none",
+                marker="o",
+                markerfacecolor="none",
+                label="detection",
+            ),
+        ]
+    if spectral_lines:
+        handles.append(Line2D([], [], color=_INK, linestyle=":", label="known line"))
+    if telluric_lines:
+        handles.append(
+            Line2D([], [], color="seagreen", linestyle="-.", label="telluric line")
+        )
+    if flagged.any():
+        handles.append(Patch(facecolor="0.85", label="flagged channels"))
+    figure.legend(
+        handles=handles,
+        loc="outside lower center",
+        ncol=min(len(handles), 6),
+        fontsize=8,
+        frameon=False,
+    )
+    if title is None:
+        title = f"{statistic} of {image_variable} per spectral window"
+        if threshold is not None:
+            title += (
+                f"; detection: above mad_sigma (sqrt(2 ln n_pixels) + "
+                f"{detection_margin_sigma:g})"
+            )
+        if flagged.any():
+            title += f"; {int(flagged.sum())} channels flagged"
+    figure.suptitle(title, fontsize=11)
+    return figure
+
+
+def _plot_image_statistics_consistency(
+    source, image_variable, statistics, masked, time_index, labels, title
+):
+    """The ``"consistency"`` layout of :func:`plot_image_statistics`."""
+    import xarray as xr
+
+    source = list(source)
+    labels = (
+        [f"run {index}" for index in range(len(source))]
+        if labels is None
+        else list(labels)
+    )
+    if len(labels) != len(source):
+        raise ValueError(
+            f"plot_image_statistics: {len(labels)} labels for {len(source)} runs"
+        )
+    runs = [
+        (label, planes)
+        for label, return_dict in zip(labels, source, strict=True)
+        if (planes := _image_statistics_planes(return_dict, image_variable, time_index))
+        is not None
+    ]
+    if len(runs) < 2:
+        return None
+    names = list(statistics or _IMAGE_STATISTIC_PANELS)
+    if masked:
+        names += [name + "_masked" for name in names]
+    (reference_label, reference), others = runs[0], runs[1:]
+    relative = np.full((len(others), len(names)), np.nan)
+    for name_index, name in enumerate(names):
+        if _plane_statistic(reference, name) is None:
+            continue
+        for other_index, (_, planes) in enumerate(others):
+            if _plane_statistic(planes, name) is None:
+                continue
+            first, second = xr.align(reference[name], planes[name], join="inner")
+            if first.size == 0:
+                continue
+            first = np.asarray(first.values, dtype=np.float64)
+            difference = np.nanmax(np.abs(first - second.values))
+            scale = np.nanmax(np.abs(first))
+            relative[other_index, name_index] = difference / scale if scale > 0 else 0.0
+    present = ~np.all(np.isnan(relative), axis=0)
+    if not present.any():
+        return None
+    figure, axes = _figure(1, 1, panel_size=(11.0, 6.0))
+    ax = axes[0, 0]
+    x = np.arange(int(present.sum()))
+    width = 0.8 / len(others)
+    for other_index, (label, _) in enumerate(others):
+        ax.bar(
+            x + (other_index - (len(others) - 1) / 2) * width,
+            relative[other_index, present],
+            width,
+            color=_COLORS[other_index % len(_COLORS)],
+            label=label,
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [name for name, kept in zip(names, present, strict=True) if kept],
+        rotation=45,
+        ha="right",
+        fontsize=8,
+    )
+    ax.set_yscale("symlog", linthresh=1e-12)
+    ax.set_ylabel("max |difference| / max |value| (over channels and Stokes)")
+    ax.set_title(
+        title
+        or f"Image statistics of {image_variable} against {reference_label} "
+        "(0: identical cube)",
+        fontsize=10,
+    )
+    ax.grid(True, axis="y", **_GRID)
+    ax.set_axisbelow(True)
+    ax.legend(fontsize=8)
+    return figure
+
+
 def plot_deconvolution_summary(
     frequency,
     stokes,
@@ -421,12 +1092,20 @@ def plot_deconvolution_summary(
     model_update_stop_code_counts,
     iterations,
     imaging_cycles,
+    peakres_start,
+    peakres_final,
     entropy,
     residual_rms,
     imaging_stop_descriptions,
     model_update_stop_descriptions,
+    threshold=None,
+    title=None,
 ):
-    """Six panels of the per channel record of a cube's deconvolution.
+    """Seven panels of the per channel record of a cube's deconvolution.
+
+    Channels whose first Stokes plane did no iteration are shaded on every
+    panel; the lines do not span the gaps between spectral windows. The arrays of a run are those of
+    :func:`~astroviper.processing_functions.imaging.utils.imaging_dict.deconvolution_per_channel`.
 
     Parameters
     ----------
@@ -443,10 +1122,20 @@ def plot_deconvolution_summary(
         Total iterations of every plane.
     imaging_cycles : array_like, [n_frequency]
         Imaging cycles of every channel.
+    peakres_start, peakres_final : array_like, [n_frequency, n_stokes]
+        The peak residual inside the clean mask at the start of the first
+        model update and at the end, drawn as absolute values on a
+        logarithmic axis.
     entropy, residual_rms : array_like, [n_frequency, n_stokes]
         Final residual entropy and RMS of every plane.
     imaging_stop_descriptions, model_update_stop_descriptions : dict
         ``{code: description}`` of the two kinds of stop code.
+    threshold : float or array_like, [n_frequency, n_stokes], optional
+        The threshold, drawn with the peak residual: one horizontal line
+        when its positive values are equal, a line per Stokes plane
+        otherwise. None, NaN or 0 draws none.
+    title : str, optional
+        Figure title.
 
     Returns
     -------
@@ -454,8 +1143,11 @@ def plot_deconvolution_summary(
     """
     shape = (len(frequency), len(stokes))
     imaging_stop_code = np.asarray(imaging_stop_code, dtype=np.float64).reshape(shape)
-    figure, axes = _figure(3, 2, panel_size=(5.4, 2.9), sharex=True)
+    iterations = np.asarray(iterations, dtype=np.float64).reshape(shape)
+    figure, axes = _figure(4, 2, panel_size=(5.4, 2.9), sharex=True)
     x = np.asarray(frequency, dtype=np.float64) / 1e9
+    gapped = _gaps_broken(frequency)
+    x_gapped = gapped(x)
 
     ax = axes[0, 0]
     for index, label in enumerate(stokes):
@@ -487,8 +1179,8 @@ def plot_deconvolution_summary(
     for code in sorted(model_update_stop_code_counts):
         index = known.index(code) if code in known else len(known) + code
         ax.plot(
-            x,
-            np.asarray(model_update_stop_code_counts[code], dtype=np.float64),
+            x_gapped,
+            gapped(model_update_stop_code_counts[code]),
             color=_COLORS[index % len(_COLORS)],
             marker=_MARKERS[index % len(_MARKERS)],
             markersize=4,
@@ -501,18 +1193,21 @@ def plot_deconvolution_summary(
     if model_update_stop_code_counts:
         ax.legend(fontsize=7)
 
+    recorded = np.isfinite(iterations)
     _per_stokes_panel(
         axes[1, 0],
-        x,
-        np.asarray(iterations, dtype=np.float64).reshape(shape),
+        x_gapped,
+        gapped(iterations),
         stokes,
         "iterations",
-        "total iterations",
+        f"total iterations ({int(np.sum(iterations[recorded] > 0))} of "
+        f"{int(recorded.sum())} planes deconvolved)",
     )
+    axes[1, 0].set_yscale("symlog", linthresh=1)
     ax = axes[1, 1]
     ax.plot(
-        x,
-        np.asarray(imaging_cycles, dtype=np.float64),
+        x_gapped,
+        gapped(imaging_cycles),
         color=_COLORS[0],
         marker="o",
         markersize=4,
@@ -522,24 +1217,89 @@ def plot_deconvolution_summary(
     ax.set_title("imaging cycles", fontsize=10)
     ax.grid(True, **_GRID)
 
+    ax = axes[2, 0]
+    peaks = {
+        "start": np.abs(np.asarray(peakres_start, dtype=np.float64).reshape(shape)),
+        "final": np.abs(np.asarray(peakres_final, dtype=np.float64).reshape(shape)),
+    }
+    for index, label in enumerate(stokes):
+        style = _stokes_style(label, index)
+        for when, alpha in (("start", 0.45), ("final", 1.0)):
+            ax.plot(
+                x_gapped,
+                gapped(peaks[when])[:, index],
+                color=style["color"],
+                marker=style["marker"],
+                markersize=3,
+                linewidth=1.0,
+                alpha=alpha,
+                label=f"{when}, Stokes {label}",
+            )
+    thresholds = np.broadcast_to(
+        np.asarray(np.nan if threshold is None else threshold, dtype=np.float64), shape
+    )
+    positive = thresholds[np.isfinite(thresholds) & (thresholds > 0)]
+    if positive.size and np.all(positive == positive[0]):
+        ax.axhline(
+            positive[0],
+            color="0.2",
+            linestyle="--",
+            linewidth=1.0,
+            label=f"threshold {positive[0] * 1e3:g} mJy",
+        )
+    elif positive.size:
+        for index, label in enumerate(stokes):
+            ax.plot(
+                x_gapped,
+                gapped(np.where(thresholds > 0, thresholds, np.nan))[:, index],
+                color=_stokes_style(label, index)["color"],
+                linestyle="--",
+                linewidth=1.0,
+                label=f"threshold, Stokes {label}",
+            )
+    if np.any(np.concatenate([peaks["start"].ravel(), peaks["final"].ravel()]) > 0):
+        ax.set_yscale("log")
+    ax.set_ylabel("|peak residual|")
+    ax.set_title("peak residual: start of the first model update, final", fontsize=10)
+    ax.grid(True, **_GRID)
+    ax.legend(fontsize=7)
+
     _per_stokes_panel(
-        axes[2, 0],
-        x,
-        np.asarray(entropy, dtype=np.float64).reshape(shape),
+        axes[2, 1],
+        x_gapped,
+        gapped(np.reshape(entropy, shape)),
         stokes,
         "entropy",
         "final residual entropy",
     )
     _per_stokes_panel(
-        axes[2, 1],
-        x,
-        np.asarray(residual_rms, dtype=np.float64).reshape(shape),
+        axes[3, 0],
+        x_gapped,
+        gapped(np.reshape(residual_rms, shape)),
         stokes,
         "RMS",
         "residual RMS",
     )
-    for ax in axes[-1]:
+    axes[3, 1].axis("off")
+    axes[2, 1].tick_params(axis="x", labelbottom=True)
+    for ax in (axes[2, 1], axes[3, 0]):
         _frequency_axis(ax, frequency)
+
+    idle = iterations[:, 0] == 0 if shape[1] else np.zeros(shape[0], dtype=bool)
+    if idle.any():
+        for ax in axes.ravel()[:-1]:
+            ax.fill_between(
+                x,
+                0,
+                1,
+                where=idle,
+                transform=ax.get_xaxis_transform(),
+                color=_INK,
+                alpha=0.12,
+                linewidth=0,
+            )
+    if title:
+        figure.suptitle(title, fontsize=11)
     return figure
 
 

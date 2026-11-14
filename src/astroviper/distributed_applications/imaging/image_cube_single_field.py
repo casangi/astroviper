@@ -39,6 +39,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             # Measurement Set v2 input only (0.0 for a processing set).
             ("add lazy input data", "T_add_lazy_input_data"),
             ("create map/reduce graph", "T_create_map_reduce_graph"),
+            ("get compute resources", "T_get_compute_resources"),
             ("generate dask graph", "T_generate_dask_graph"),
             ("compute dask graph", "T_compute_dask_graph"),
             ("consolidate metadata", "T_consolidate_metadata"),
@@ -837,13 +838,14 @@ def image_cube_single_field(
         ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
         gives ``cube_report.html``), or ``"notebook"``, displayed in the
         calling Jupyter notebook. The report has a processing section common
-        to all distributed applications (timing, task stream and, with
-        ``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a
-        results section of the application's own; the products it makes with
-        other distributed applications are kept in ``<name>_report_files``
-        next to the output store. It is made after the output is written: a
-        failure while making it is logged and leaves the results intact.
-        ``None`` (default): no report.
+        to all distributed applications (performance measures, timing, task
+        stream, task times and, with ``monitor_resources_seconds``, the CPU,
+        memory and I/O of the cluster, of every worker slot and of the tasks)
+        and a results section of the application's own; the products it
+        makes with other distributed applications are kept in
+        ``<name>_report_files`` next to the output store. It is made after
+        the output is written: a failure while making it is logged and leaves
+        the results intact. ``None`` (default): no report.
     parameters_file : str, optional
         JSON file whose ``"image_cube_single_field"`` block gives the
         arguments, as
@@ -864,7 +866,7 @@ def image_cube_single_field(
     -------
     dict
         ``{"timing_node_tasks", "deconvolution", "image_statistics",
-        "timing_distributed_application", "report"}``:
+        "timing_distributed_application", "compute_resources", "report"}``:
 
         * ``"timing_node_tasks"`` is a :class:`pandas.DataFrame` with one row per
           frequency chunk and a ``T_*`` column per processing function (the
@@ -890,6 +892,8 @@ def image_cube_single_field(
           opening the input, building the graph, computing it, consolidating
           metadata; ``T_add_lazy_input_data`` is ``0.0`` for a processing set)
           plus the grand total ``T_total``.
+        * ``"compute_resources"``: what the graphs ran on, see
+          :func:`astroviper.utils.data_partitioning.get_compute_resources`.
         * ``"report"`` is the path of the report file written (``None``
           without one, for ``report="notebook"`` and when the report failed).
           With a report the image statistics of the residual also hold
@@ -904,10 +908,12 @@ def image_cube_single_field(
     of the PSF fit of every channel against it and the channels whose
     residual was left unconvolved and unscaled; the maximum over frequency
     (``moments``) of the residual, the model and the primary beam corrected
-    restored image per Stokes plane, the spectrum of the peak inside the clean
-    mask, and per channel the cycle control stop codes, the occurrences of the
-    model update stop codes, the iterations, the imaging cycles, the final
-    residual entropy and the residual RMS. With a report and a kept
+    restored image per Stokes plane, every per-plane statistic of the
+    residual and of the restored image, and per channel the cycle control
+    stop codes, the occurrences of the model update stop codes, the
+    iterations, the imaging cycles, the peak residual at the start of the
+    first model update and at the end, the final residual entropy and the
+    residual RMS. With a report and a kept
     ``point_spread_function``, or a report and a ``restoring_beam``,
     ``beam_fit_params_point_spread_function`` is kept too. With
     ``restore=True``, ``beam_fit_params_sky_restored`` is kept: the beams the
@@ -967,6 +973,7 @@ def image_cube_single_field(
     )
     from astroviper.utils.clean_mask import load_clean_mask
     from astroviper.utils.data_group_tools import modify_data_groups_xds
+    from astroviper.utils.data_partitioning import get_compute_resources
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
@@ -1141,6 +1148,9 @@ def image_cube_single_field(
         for name, value in image_params.items()
         if name != "frequency_coords"
     }
+    # Each task's image covers its own channels; the whole image's spectral
+    # reference keeps its velocities equal to the image store's.
+    input_params["image_frequency_attrs"] = dict(img_xds.frequency.attrs)
     input_params["imaging_weights_params"] = imaging_weights_params
     input_params["zarr_meta"] = zarr_meta
     input_params["to_disk"] = True
@@ -1407,6 +1417,11 @@ def image_cube_single_field(
     # pool, selected with compute_backend="mpi" and launched via
     # `python -m mpi4py.futures`). The MPI backend builds no dask.delayed graph, so
     # there is no separate "generate" step (T_generate_dask_graph = 0).
+    start = time.time()
+    compute_resources = get_compute_resources(
+        compute_backend, processing_function_threads
+    )
+    timing_distributed_application["T_get_compute_resources"] = time.time() - start
     if compute_backend == "mpi":
         if vizualize_graph:
             logger.warning(
@@ -1465,6 +1480,7 @@ def image_cube_single_field(
     # task's own dict, whose monitor series are folded in here as the reduce
     # folds them in.
     imaging_dict["input_validation"] = spectral_diagnostics
+    imaging_dict["compute_resources"] = compute_resources
     usage = imaging_dict.pop("resource_usage", None)
     if usage is not None:
         imaging_dict["timing_node_tasks"] = _with_resource_usage(
@@ -1500,7 +1516,7 @@ def image_cube_single_field(
         IMAGING_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
     )
-    from astroviper.utils.timing import format_timing_summary
+    from astroviper.utils.timing import format_timing_summary, node_task_timing_table
 
     # Driver-level ("distributed application") timing breakdown.
     logger.info(
@@ -1513,24 +1529,14 @@ def image_cube_single_field(
         )
     )
 
-    # Per-node-task timing summarized across all frequency chunks: the mean of
-    # each timing column over all chunks, then the max (the slowest chunk).
+    # Node-task timing over all frequency chunks, as in the report.
     timing_node_tasks = imaging_dict["timing_node_tasks"]
     logger.info(
-        format_timing_summary(
-            timing_node_tasks.mean(numeric_only=True).to_dict(),
-            IMAGING_TIMING_PHASES,
-            total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER node-task timing: MEAN over frequency chunks (seconds)",
-        )
-    )
-    logger.info(
-        format_timing_summary(
-            timing_node_tasks.max(numeric_only=True).to_dict(),
-            IMAGING_TIMING_PHASES,
-            total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER node-task timing: MAX over frequency chunks (seconds)",
-        )
+        f"AstroVIPER node-task timing over the {len(timing_node_tasks)} frequency "
+        "chunks (seconds)\n"
+        + node_task_timing_table(
+            timing_node_tasks, IMAGING_TIMING_PHASES, total_key=IMAGING_TIMING_TOTAL_KEY
+        ).to_string(float_format="{:.3f}".format)
     )
 
     imaging_dict["report"] = None
