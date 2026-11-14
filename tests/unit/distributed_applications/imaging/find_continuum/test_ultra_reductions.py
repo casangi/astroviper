@@ -788,6 +788,34 @@ def test_a_failed_pass_removes_its_scratch(
     assert os.path.isdir(pass_directory) and os.listdir(pass_directory) == []
 
 
+def test_a_transient_error_of_a_scratch_write_is_retried(
+    cube, first_pass, tmp_path, monkeypatch
+):
+    """A Lustre eviction fails one write of a slot with EIO: the write is
+    repeated on a fresh open, and the results are those of a pass without
+    the error."""
+    from astroviper.node_tasks.imaging.utils import skunk_works
+
+    requests = cube["requests"][-2:]
+    store = first_pass["ultra"].first_round
+    with dask.config.set(scheduler="synchronous"):
+        expected = _ultra(cube, tmp_path / "expected", store).run_pass(requests, 2)
+    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    open_array, failures = zarr.open_array, []
+
+    def evicted_once(path, *args, **kwargs):
+        if kwargs.get("mode") == "r+" and "partials.zarr" in str(path) and not failures:
+            failures.append(path)
+            raise OSError(errno.EIO, "Input/output error")
+        return open_array(path, *args, **kwargs)
+
+    monkeypatch.setattr(zarr, "open_array", evicted_once)
+    with dask.config.set(scheduler="synchronous"):
+        results = _ultra(cube, tmp_path / "evicted", store).run_pass(requests, 2)
+    assert len(failures) == 1
+    _assert_results_equal(results, expected, requests, exact=True)
+
+
 def test_a_moments_request_without_channels_is_refused(cube, first_pass, tmp_path):
     ultra = _ultra(cube, tmp_path, first_round=first_pass["ultra"].first_round)
     request = dict(cube["requests"][8], channels=[])

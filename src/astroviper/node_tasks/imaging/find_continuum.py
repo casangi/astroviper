@@ -651,13 +651,11 @@ def find_continuum_streamed_reductions(
             continue
         slot = int(chunk_indices[0])
         for field, values in partial.state().items():
-            path = os.path.join(partials_store, f"R{k}_{field}")
-            array = zarr.open_array(
-                path, mode="r+", config={"write_empty_chunks": True}
-            )
-            array[slot] = values
-            bytes_written += _stored_bytes(
-                array, path, (slice(slot, slot + 1), slice(0, n_l), slice(0, n_m))
+            bytes_written += _write_array_region(
+                os.path.join(partials_store, f"R{k}_{field}"),
+                (slice(slot, slot + 1), slice(0, n_l), slice(0, n_m)),
+                values[None],
+                {"write_empty_chunks": True},
             )
         written[k] = [slot]
         partials[k] = None
@@ -868,10 +866,11 @@ def merge_find_continuum_partial_maps(
         )
         start, bytes_written = time.perf_counter(), 0
         for moment, values in maps.items():
-            path = os.path.join(results_store, f"R{index}_MOMENT_{moment}")
-            array = zarr.open_array(path, mode="r+")
-            array[rows, columns] = values
-            bytes_written += _stored_bytes(array, path, (rows, columns))
+            bytes_written += _write_array_region(
+                os.path.join(results_store, f"R{index}_MOMENT_{moment}"),
+                (rows, columns),
+                values,
+            )
         seconds["T_write_results"] += time.perf_counter() - start
         return bytes_written
 
@@ -1443,35 +1442,37 @@ def _concatenate_rows(mine, theirs):
 
 def _write_packed_masks(first_round_store, channels, inside, profile):
     """Write packed masks ``(n, l, ceil(m / 8))`` one channel (chunk) at a
-    time, retrying transient I/O errors; returns the bytes stored."""
+    time; returns the bytes stored."""
+    written = 0
+    for name, packed in zip(_MASKS, (inside, profile), strict=True):
+        for channel, plane in zip(channels, packed, strict=True):
+            channel = int(channel)
+            written += _write_array_region(
+                os.path.join(first_round_store, name),
+                (
+                    slice(channel, channel + 1),
+                    slice(0, plane.shape[0]),
+                    slice(0, plane.shape[1]),
+                ),
+                plane[None],
+            )
+    return written
+
+
+def _write_array_region(path, region, values, config=None):
+    """Write ``values`` to ``region`` (a slice with start and stop per
+    dimension) of a Zarr array, repeated on a fresh open after a transient
+    I/O error; returns the bytes stored in the chunks (shards) it overlaps."""
     import zarr
 
     from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
 
-    def write(path, channel, plane):
-        array = zarr.open_array(path, mode="r+")
-        array[channel] = plane
-        return _stored_bytes(
-            array,
-            path,
-            (
-                slice(channel, channel + 1),
-                slice(0, plane.shape[0]),
-                slice(0, plane.shape[1]),
-            ),
-        )
+    def write():
+        array = zarr.open_array(path, mode="r+", config=config)
+        array[region] = values
+        return _stored_bytes(array, path, region)
 
-    written = 0
-    for name, packed in zip(_MASKS, (inside, profile), strict=True):
-        path = os.path.join(first_round_store, name)
-        for channel, plane in zip(channels, packed, strict=True):
-            written += _retry_transient_io(
-                f"{name} of channel {channel}",
-                lambda path=path, channel=int(channel), plane=plane: write(
-                    path, channel, plane
-                ),
-            )
-    return written
+    return _retry_transient_io(f"write of {path}", write)
 
 
 def _stored_bytes(array, path, region):
