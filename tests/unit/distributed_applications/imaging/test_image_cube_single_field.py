@@ -48,6 +48,9 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.settings impor
 from astroviper.processing_functions.imaging.find_continuum_ultra.step_results import (
     FirstRoundRows,
 )
+from astroviper.processing_functions.imaging.utils.spectral_windows import (
+    window_rest_frequency,
+)
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.telescope_layout import read_telescope_layout
 
@@ -905,7 +908,7 @@ def _first_round_array(store, name):
 def test_find_continuum_first_round(
     tmp_path, threaded_dask, monkeypatch, windows_in_memory
 ):
-    """The imager writes findContinuum's first round (store version 2) of the
+    """The imager writes findContinuum's first round (store version 3) of the
     cube it wrote into a store bound to it: the masks and rows of every
     channel, and the moments of both spectral windows from the registry of the
     worker process (holding both windows, or one and saving the other). Each
@@ -938,7 +941,7 @@ def test_find_continuum_first_round(
     img_xds = xr.open_zarr(image_store, chunks=None)
     frequency = img_xds.frequency.values
     attributes = zarr.open_group(store, mode="r").attrs["find_continuum_first_round"]
-    assert attributes["version"] == 2
+    assert attributes["version"] == 3
     assert attributes["written_by"] == "image_cube_single_field"
     assert attributes["spectrum_primary_beam_level"] == 0.21
     assert attributes["windows"] == [
@@ -1002,7 +1005,10 @@ def test_find_continuum_first_round(
         assert stored.dtype == rows[field].dtype
         np.testing.assert_array_equal(stored, rows[field][0, :, 0])
 
+    # The moments of each window are weighted at its own rest frequency, its
+    # middle channel, not at the cube's.
     rest_frequency = float(img_xds.frequency.attrs["rest_frequency"]["data"])
+    assert rest_frequency == frequency[3]
     maps = [
         _first_round_array(store, name)
         for name in ("SKY_MOMENT_INTEGRATED", "SKY_MOMENT_MAXIMUM")
@@ -1019,7 +1025,7 @@ def test_find_continuum_first_round(
                 float(frequency[start]),
                 float(frequency[start + 1] - frequency[start]),
                 stop - start,
-                rest_frequency,
+                window_rest_frequency(frequency, [start, stop], rest_frequency),
             ),
         )
         integral, maximum = (

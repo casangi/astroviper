@@ -452,8 +452,9 @@ def find_continuum_settings(
     l, m : numpy.ndarray
         Image coordinates (rad), at least two pixels each.
     rest_frequency : float
-        Rest frequency of the cube (Hz), of the radio velocity that weights
-        moment 0.
+        Rest frequency of the window (Hz), of the radio velocity that weights
+        moment 0
+        (:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`).
     beam_fit_params_point_spread_function : xarray.DataArray
         Gaussian fits of the point spread function in the window's channels,
         dims ``(time, frequency, polarization, beam_params_label)``, ``[major,

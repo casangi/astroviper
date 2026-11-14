@@ -826,7 +826,7 @@ def image_cube_single_field(
         Also make findContinuum's first round of the Stokes I cube as each
         chunk is written, into a store next to the image store
         (``cube.img.zarr`` gives ``cube_find_continuum_first_round.zarr``,
-        store version 2): per channel the primary-beam limit mask at the
+        store version 3): per channel the primary-beam limit mask at the
         ``primary_beam_limit`` of ``cycle_control_params`` (0.2,
         findContinuum's default, when the key is absent, although cube
         imaging then cleans to a limit of 0) and the spectrum mask above
@@ -1718,6 +1718,7 @@ def _create_find_continuum_first_round(
     )
     from astroviper.processing_functions.imaging.utils.spectral_windows import (
         linear_channel_ranges,
+        window_rest_frequency,
     )
 
     residual = img_xds.attrs["data_groups"]["residual"]
@@ -1728,6 +1729,7 @@ def _create_find_continuum_first_round(
     }
     tile_shape = arrays["sky"].chunks[-2:]
     frequency = img_xds.frequency.values
+    rest_frequency = float(img_xds.frequency.attrs["rest_frequency"]["data"])
     windows = []
     for start, stop in linear_channel_ranges(frequency):
         n_channels, first_frequency, _, channel_increment = linear_spectral_axis(
@@ -1739,6 +1741,9 @@ def _create_find_continuum_first_round(
                 "first_frequency": first_frequency,
                 "channel_increment": channel_increment,
                 "n_channels": n_channels,
+                "rest_frequency": window_rest_frequency(
+                    frequency, [start, stop], rest_frequency
+                ),
             }
         )
     store = find_continuum_first_round_store_path(image_store)
@@ -1752,7 +1757,7 @@ def _create_find_continuum_first_round(
         "run_id": uuid.uuid4().hex if compute_backend == "dask" else None,
         "windows": windows,
         "partials_directory": find_continuum_first_round_partials_path(store),
-        "rest_frequency": float(img_xds.frequency.attrs["rest_frequency"]["data"]),
+        "rest_frequency": rest_frequency,
     }
     # The merge tiles of find_continuum_ultra's moments.
     merge_tile_shape = [

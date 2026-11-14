@@ -44,6 +44,7 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.step_results i
 )
 from astroviper.processing_functions.imaging.utils.spectral_windows import (
     linear_channel_ranges,
+    window_rest_frequency,
 )
 from astroviper.utils.data_group_tools import modify_data_groups_xds
 from tests.unit.processing_functions.imaging.find_continuum_test_utils import (
@@ -51,6 +52,7 @@ from tests.unit.processing_functions.imaging.find_continuum_test_utils import (
     NATIVE_CASES,
     NATIVE_RESIDUAL_READS,
     make_find_continuum_image_xds,
+    window_cube,
 )
 
 # The modules, not the functions the packages export under their names.
@@ -328,7 +330,10 @@ def _imager_first_round_store(store, chunk_channels=160):
                 "channel_increment": channel_increment,
                 "n_channels": n_channels,
                 "moment_channel_weights": moment_channel_weights(
-                    first_frequency, channel_increment, n_channels, rest_frequency
+                    first_frequency,
+                    channel_increment,
+                    n_channels,
+                    window_rest_frequency(frequency, [start, stop], rest_frequency),
                 ),
             }
         )
@@ -569,7 +574,7 @@ def test_with_the_imager_store_without_its_moments(runs, cube_stores, tmp_path):
 @pytest.fixture(scope="module")
 def two_windows(tmp_path_factory):
     """A cube of two spectral windows of 12 channels with a gap, and a cube of
-    each window alone."""
+    each window alone, with the rest frequency of a cube of its channels."""
     directory = tmp_path_factory.mktemp("two_windows")
     line = dict(
         channel=2,
@@ -589,7 +594,7 @@ def two_windows(tmp_path_factory):
         "single": [
             _write_cube(
                 directory / f"window_{w}" / "cube.img.zarr",
-                img_xds.isel(frequency=slice(*window)),
+                window_cube(img_xds, window),
             )
             for w, window in enumerate(windows)
         ],
@@ -624,9 +629,14 @@ def test_each_window_equals_a_cube_of_that_window(two_windows, tmp_path):
         assert os.path.basename(os.path.dirname(result["joint_mask"])) == (
             f"cube.find_continuum_ultra_{window[0]}_{window[1]}"
         )
-        xr.testing.assert_identical(
-            _joint_mask(result["joint_mask"]), _joint_mask(expected["joint_mask"])
+        joint_mask, expected_joint_mask = (
+            _joint_mask(run["joint_mask"]) for run in (result, expected)
         )
+        # The maps keep the coordinates of their cube, whose rest frequencies
+        # differ.
+        for key in ("rest_frequency", "rest_frequencies"):
+            expected_joint_mask.frequency.attrs[key] = joint_mask.frequency.attrs[key]
+        xr.testing.assert_identical(joint_mask, expected_joint_mask)
         port = find_continuum(
             input_image_store=two_windows["store"],
             work_directory=str(tmp_path / f"port_{window[0]}"),
@@ -845,7 +855,7 @@ def test_refused_first_round_stores_and_an_earlier_run(small_store, tmp_path):
         _run(small_store, tmp_path / "other", 12, first_round_store=first_round_store)
     _set_store_attributes(first_round_store, version=1)
     with pytest.raises(
-        ValueError, match="version 1, not 2: make the first round again"
+        ValueError, match="version 1, not 3: make the first round again"
     ):
         _run(small_store, tmp_path / "other", 12, first_round_store=first_round_store)
     assert not (tmp_path / "other").exists()

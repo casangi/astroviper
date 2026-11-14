@@ -201,7 +201,9 @@ _FIND_CONTINUUM_PARAM_DOCS = {
         "``[start, stop)``, the channels of the cube that findContinuum sees as\n"
         "its cube: one spectral window, on which the frequencies are linear (a\n"
         "run of\n"
-        ":func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`).\n"
+        ":func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`);\n"
+        "in a cube of several windows its middle channel is the rest frequency\n"
+        "(:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`).\n"
         "``None`` (default): every channel, refused for a cube of several\n"
         "spectral windows."
     ),
@@ -292,8 +294,11 @@ _FIND_CONTINUUM_ULTRA_PARAM_DOCS = {
                 "``[start, stop)``, the channels of the cube in the spectral window: a\n"
                 "run of linear frequencies\n"
                 "(:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`),\n"
-                "increasing, of at least 8 channels. ``None`` (default): every channel,\n"
-                "refused for a cube of several spectral windows."
+                "increasing, of at least 8 channels; in a cube of several windows its\n"
+                "middle channel is the rest frequency of moment 0\n"
+                "(:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`).\n"
+                "``None`` (default): every channel, refused for a cube of several\n"
+                "spectral windows."
             ),
             "telescope_name": (
                 '``"ALMA"`` or ``"VLA"``, whose time-division-mode rule sets the number\n'

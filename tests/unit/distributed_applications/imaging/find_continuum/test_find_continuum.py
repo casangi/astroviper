@@ -14,6 +14,7 @@ from tests.unit.processing_functions.imaging.find_continuum_test_utils import (
     CASA_RESULTS,
     LINE_SET,
     make_find_continuum_image_xds,
+    window_cube,
 )
 
 # The keys and columns of section 7 of the design.
@@ -136,8 +137,8 @@ def test_selection_matches_casa(case, tmp_path, monkeypatch):
 @pytest.fixture(scope="module")
 def two_windows(tmp_path_factory):
     """A cube of two spectral windows of 12 channels with a gap, and a cube of
-    each window alone (findContinuum needs two edge channels, which 6 channels
-    do not give)."""
+    each window alone, with the rest frequency of a cube of its channels
+    (findContinuum needs two edge channels, which 6 channels do not give)."""
     directory = tmp_path_factory.mktemp("two_windows")
     line = dict(
         channel=2,
@@ -157,7 +158,7 @@ def two_windows(tmp_path_factory):
         "single": [
             _write_cube(
                 directory / f"window_{w}" / "cube.img.zarr",
-                img_xds.isel(frequency=slice(*window)),
+                window_cube(img_xds, window),
             )
             for w, window in enumerate(windows)
         ],

@@ -95,7 +95,7 @@ def _first_round_store(path, n_channels, shape, tile, windows):
             dimension_names=("window", "l", "m"),
         )
     group.attrs["find_continuum_first_round"] = {
-        "version": 2,
+        "version": 3,
         "windows": [{"channel_range": list(window)} for window in windows],
         "complete": False,
     }

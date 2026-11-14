@@ -194,8 +194,11 @@ def find_continuum_ultra(
         ``[start, stop)``, the channels of the cube in the spectral window: a
         run of linear frequencies
         (:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`),
-        increasing, of at least 8 channels. ``None`` (default): every channel,
-        refused for a cube of several spectral windows.
+        increasing, of at least 8 channels; in a cube of several windows its
+        middle channel is the rest frequency of moment 0
+        (:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`).
+        ``None`` (default): every channel, refused for a cube of several
+        spectral windows.
     telescope_name : str, default "ALMA"
         ``"ALMA"`` or ``"VLA"``, whose time-division-mode rule sets the number
         of rounds; every other step takes ALMA's rule, as findContinuum does.
@@ -370,7 +373,14 @@ def find_continuum_ultra(
     # Node tasks may run in other processes and working directories.
     input_image_store = os.path.abspath(input_image_store)
     work_directory = os.path.abspath(work_directory)
-    window_xds, data_group, window_range, image_shape, map_coords = _open_window(
+    (
+        window_xds,
+        data_group,
+        window_range,
+        image_shape,
+        map_coords,
+        rest_frequency,
+    ) = _open_window(
         input_image_store,
         image_data_group_in_name,
         channel_range,
@@ -384,7 +394,7 @@ def find_continuum_ultra(
         window_xds.frequency.values,
         window_xds.l.values,
         window_xds.m.values,
-        float(window_xds.frequency.attrs["rest_frequency"]["data"]),
+        rest_frequency,
         window_xds[data_group["beam_fit_params_point_spread_function"]],
         np.asarray(atmospheric_transmission, dtype=np.float64),
         np.asarray(atmospheric_sky_temperature, dtype=np.float64),
@@ -543,13 +553,16 @@ def _open_window(
 ):
     """The spectral window of the image store opened lazily and checked
     (metadata only), its data group, its ``[start, stop)`` in channels of the
-    cube, the shape of the cube and the coordinates of the window's maps (one
-    time, the mean frequency and Stokes I)."""
+    cube, the shape of the cube, the coordinates of the window's maps (one
+    time, the mean frequency and Stokes I) and the window's rest frequency."""
     from astroviper.processing_functions.image_analysis.moments import (
         collapsed_moment_axis_coords,
     )
     from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
         check_find_continuum_ultra_inputs,
+    )
+    from astroviper.processing_functions.imaging.utils.spectral_windows import (
+        window_rest_frequency,
     )
 
     cube_xds = xr.open_zarr(input_image_store, chunks=None)
@@ -572,6 +585,11 @@ def _open_window(
         window_range,
         cube_xds[data_group["sky"]].shape,
         map_coords,
+        window_rest_frequency(
+            cube_xds.frequency.values,
+            window_range,
+            float(cube_xds.frequency.attrs["rest_frequency"]["data"]),
+        ),
     )
 
 
@@ -688,7 +706,7 @@ def _first_round(
                     "n_channels": settings.n_channels,
                 }
             ],
-            settings.rest_frequency,
+            float(window_xds.frequency.attrs["rest_frequency"]["data"]),
         )
     else:
         store = store_inputs.store
