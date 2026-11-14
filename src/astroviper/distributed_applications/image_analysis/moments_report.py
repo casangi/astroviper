@@ -196,13 +196,25 @@ def _add_read_rate(document, return_dict):
 
 def _add_moment_maps(document, store):
     import math
+    import os
 
     import xarray as xr
 
     from astroviper.utils.report_plots import plot_stokes_images
 
     document.subsection("Moment maps")
-    moment_xds = xr.open_zarr(store)
+    fits_files = sorted(f for f in os.listdir(store) if f.endswith(".fits"))
+    if fits_files:
+        from xradio.image import open_image
+
+        moment_xds = xr.Dataset(
+            {
+                f[: -len(".fits")]: open_image({"sky": os.path.join(store, f)})["SKY"]
+                for f in fits_files
+            }
+        )
+    else:
+        moment_xds = xr.open_zarr(store)
     n_frequency, n_l, n_m = (moment_xds.sizes[dim] for dim in ("frequency", "l", "m"))
     if n_frequency != 1 or n_l < 2 or n_m < 2:
         document.note(
@@ -212,11 +224,15 @@ def _add_moment_maps(document, store):
         return
     step = max(1, math.ceil(max(n_l, n_m) / MAX_MOMENT_IMAGE_SIZE))
     n_time = moment_xds.sizes["time"]
-    names = [
-        group["sky"]
-        for name, group in moment_xds.attrs["data_groups"].items()
-        if name.startswith("moment_")
-    ]
+    names = (
+        [f[: -len(".fits")] for f in fits_files]
+        if fits_files
+        else [
+            group["sky"]
+            for name, group in moment_xds.attrs["data_groups"].items()
+            if name.startswith("moment_")
+        ]
+    )
     for name in names:
         planes = (
             moment_xds[name]

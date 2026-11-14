@@ -646,3 +646,38 @@ def test_unknown_report_format_is_refused(tmp_path):
     with pytest.raises(AssertionError):  # the param.json schema
         run(tmp_path, report="docx")
     assert not (tmp_path / "vla_sim.ps.zarr").exists()
+
+
+def test_io_engines_write_the_same_visibilities(tmp_path):
+    """The chunk and xradio I/O engines write the same MSv4 (point source,
+    sky image and noise), the chunk engine reading the sky image by offset."""
+    from xradio.image import make_empty_sky_image, write_image
+
+    arcsec = np.pi / (180 * 3600)
+    image = make_empty_sky_image(
+        phase_center=PC[0],
+        image_size=[32, 32],
+        cell_size=[-10 * arcsec, 10 * arcsec],
+        frequency_coords=[3.2e9],
+        pol_coords=["I"],
+        time_coords=[0],
+    )
+    sky = np.zeros((1, 1, 1, 32, 32))
+    sky[0, 0, 0, 20, 10] = 0.5
+    image["SKY"] = (("time", "frequency", "polarization", "l", "m"), sky)
+    store = str(tmp_path / "model.img.zarr")
+    write_image(image, store, out_format="zarr", overwrite=True)
+    loaded = {}
+    for io_engine in ("chunk", "xradio"):
+        result, _ = run(
+            tmp_path,
+            ps_store=str(tmp_path / f"{io_engine}.ps.zarr"),
+            sky_model_image=store,
+            noise_params={"random_seed": 3},
+            io_engine=io_engine,
+        )
+        loaded[io_engine] = load_processing_set(result["ps_store"])["VLA_SBand"].ds
+    for name in ("VISIBILITY", "UVW", "WEIGHT", "FLAG"):
+        np.testing.assert_array_equal(
+            loaded["chunk"][name].values, loaded["xradio"][name].values, err_msg=name
+        )

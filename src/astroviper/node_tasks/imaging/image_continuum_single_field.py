@@ -86,15 +86,6 @@ def _single_leaf_cache_mapping(
     return {int(input_data["task_id"]): input_data[leaf_key]}
 
 
-def _weighting_drop_variables(data_group, node_name):
-    """Return the correlated-data variable omitted by a weighting node load."""
-    if not isinstance(data_group, dict) or "correlated_data" not in data_group:
-        raise ValueError(
-            f"{node_name} requires the resolved processing-set data_group mapping."
-        )
-    return [data_group["correlated_data"]]
-
-
 def _add_task_execution_metadata(timing_df, task_start):
     """Add the common wall-clock and worker identity columns in place."""
     import os
@@ -146,8 +137,62 @@ def _stored_coordinate_indexer(stored_values, selected_values, dimension):
     return indices
 
 
-def _write_continuum_weights_in_place(ps_xdt, image_store):
+def _write_cache_region(io_engine, target, array_path, indexers, values):
+    """Write ``values`` at ``indexers`` of the cache array ``target``.
+
+    ``"xradio"`` writes the orthogonal selection with zarr-python. ``"chunk"``
+    writes whole chunks with :func:`astroviper.utils.chunk_io.write_zarr`: the
+    task owns the contiguous positions it writes along ``frequency`` (one chunk
+    per channel), every other dimension is written in full and positions the
+    task does not hold keep the cache's fill value.
+    """
+    import os
+
+    import numpy as np
+
+    if io_engine != "chunk":
+        target.oindex[tuple(indexers)] = values
+        return
+
+    import xarray as xr
+
+    from astroviper.utils import chunk_io
+
+    dims = (
+        tuple(target.metadata.dimension_names)
+        if target.metadata.zarr_format == 3
+        else tuple(target.attrs["_ARRAY_DIMENSIONS"])
+    )
+    axis = dims.index("frequency")
+    index = [
+        np.arange(n)[ix] if isinstance(ix, slice) else np.asarray(ix)
+        for ix, n in zip(indexers, target.shape, strict=True)
+    ]
+    owned = index[axis]
+    start, stop = int(owned.min()), int(owned.min()) + owned.size
+    if not np.array_equal(np.sort(owned), np.arange(start, stop)):
+        raise ValueError(
+            f"{array_path}: the task's frequency positions are not contiguous."
+        )
+    values = np.asarray(values)
+    shape = list(target.shape)
+    shape[axis] = stop - start
+    block = np.full(shape, target.fill_value, dtype=values.dtype)
+    index[axis] = owned - start
+    block[np.ix_(*index)] = values
+    store, name = os.path.split(array_path)
+    chunk_io.write_zarr(
+        store,
+        [name.lower()],
+        {"frequency": {"slice": slice(start, stop)}},
+        xr.Dataset({name: (dims, block)}),
+    )
+
+
+def _write_continuum_weights_in_place(ps_xdt, image_store, io_engine):
     """Write task-local imaging weights into the output-store cache."""
+    import os
+
     import numpy as np
     import zarr
 
@@ -206,7 +251,18 @@ def _write_continuum_weights_in_place(ps_xdt, image_store):
                 )
             )
 
-        target.oindex[tuple(indexers)] = np.asarray(weight.values)
+        _write_cache_region(
+            io_engine,
+            target,
+            os.path.join(
+                image_store,
+                _CONTINUUM_WEIGHT_CACHE_GROUP,
+                ms_name,
+                _CONTINUUM_WEIGHT_CACHE_VARIABLE,
+            ),
+            indexers,
+            np.asarray(weight.values),
+        )
 
 
 def _load_continuum_weights_in_place(
@@ -323,8 +379,10 @@ def _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id):
     )
 
 
-def _write_wideband_primary_beam_in_place(primary_beam_xds, image_store):
+def _write_wideband_primary_beam_in_place(primary_beam_xds, image_store, io_engine):
     """Write one task's MVC primary beam into its disjoint cache channels."""
+    import os
+
     import numpy as np
     import zarr
 
@@ -353,15 +411,17 @@ def _write_wideband_primary_beam_in_place(primary_beam_xds, image_store):
         primary_beam.coords["frequency"].values,
         "frequency",
     )
-    target.oindex[
-        (
-            slice(None),
-            frequency_indexer,
-            slice(None),
-            slice(None),
-            slice(None),
-        )
-    ] = np.asarray(primary_beam.values)
+    _write_cache_region(
+        io_engine,
+        target,
+        os.path.join(
+            image_store,
+            _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP,
+            _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+        ),
+        (slice(None), frequency_indexer, slice(None), slice(None), slice(None)),
+        np.asarray(primary_beam.values),
+    )
 
 
 def _load_wideband_primary_beam_in_place(img_xds, image_store):
@@ -407,8 +467,10 @@ def _load_wideband_primary_beam_in_place(img_xds, image_store):
     )
 
 
-def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store):
+def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store, io_engine):
     """Write the globally reduced observed MFS grid into its prepared cache."""
+    import os
+
     import xarray as xr
     import zarr
 
@@ -422,6 +484,16 @@ def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store):
     if _MFS_VISIBILITY_GRID_CACHE_GROUP not in root:
         raise KeyError("The in-place MFS visibility-grid cache is not initialized.")
 
+    if io_engine == "chunk":
+        from astroviper.utils import chunk_io
+
+        chunk_io.write_zarr(
+            os.path.join(image_store, _MFS_VISIBILITY_GRID_CACHE_GROUP),
+            [str(name).lower() for name in observed_grid_xds.data_vars],
+            {},
+            observed_grid_xds,
+        )
+        return
     observed_grid_xds.to_zarr(
         image_store,
         group=_MFS_VISIBILITY_GRID_CACHE_GROUP,
@@ -485,8 +557,10 @@ def _extract_mvc_observed_visibility_grid(img_xds):
     return img_xds, observed_grid_xds
 
 
-def _write_mvc_visibility_grid_in_place(observed_grid_xds, image_store):
+def _write_mvc_visibility_grid_in_place(observed_grid_xds, image_store, io_engine):
     """Write one task's disjoint MVC observed UV planes into the cache store."""
+    import os
+
     import numpy as np
     import zarr
 
@@ -499,12 +573,21 @@ def _write_mvc_visibility_grid_in_place(observed_grid_xds, image_store):
         observed_grid_xds.coords["frequency"].values,
         "frequency",
     )
-    cache["VISIBILITY"].oindex[
-        (slice(None), frequency_indexer, slice(None), slice(None), slice(None))
-    ] = np.asarray(observed_grid_xds["VISIBILITY"].values)
-    cache["VISIBILITY_NORMALIZATION"].oindex[
-        (slice(None), frequency_indexer, slice(None))
-    ] = np.asarray(observed_grid_xds["VISIBILITY_NORMALIZATION"].values)
+    group_path = os.path.join(image_store, _MVC_VISIBILITY_GRID_CACHE_GROUP)
+    _write_cache_region(
+        io_engine,
+        cache["VISIBILITY"],
+        os.path.join(group_path, "VISIBILITY"),
+        (slice(None), frequency_indexer, slice(None), slice(None), slice(None)),
+        np.asarray(observed_grid_xds["VISIBILITY"].values),
+    )
+    _write_cache_region(
+        io_engine,
+        cache["VISIBILITY_NORMALIZATION"],
+        os.path.join(group_path, "VISIBILITY_NORMALIZATION"),
+        (slice(None), frequency_indexer, slice(None)),
+        np.asarray(observed_grid_xds["VISIBILITY_NORMALIZATION"].values),
+    )
 
 
 def _load_mvc_visibility_grid_in_place(img_xds, image_store):
@@ -1024,7 +1107,7 @@ def residual_update_continuum_single_field(
     weight_memory_mode="in_place",
     visibility_memory_mode="recompute",
     wideband_primary_beam_memory_mode="recompute",
-    skunk_works=False,
+    io_engine="chunk",
     data_group=None,
     is_first_cycle=True,
     make_primary_beam_taylor=True,
@@ -1239,11 +1322,16 @@ def residual_update_continuum_single_field(
         the driver but passes each map only its local beam. The setting is ignored
         for MFS.
 
-    skunk_works : bool, optional
-        Use the experimental direct-Zarr loading path.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
 
     data_group : dict, optional
-        Role-to-variable mapping used by the skunk-works loader.
+        Role-to-variable mapping used by the chunk loader.
 
     is_first_cycle : bool, optional
         Indicates whether this is the first imaging cycle.
@@ -1439,38 +1527,19 @@ def residual_update_continuum_single_field(
         # task-level sub-selection.
         ps_xdt = input_data
 
-    elif skunk_works:
-        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
-
-        ps_xdt = load_processing_set_skunk_works(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group=data_group,
-            processing_set_data_group_name=processing_set_data_group_name,
-            frequency_coords=task_coords["frequency"]["data"],
-            instrument_polarization_basis=instrument_polarization_basis,
-            processing_function_threads=processing_function_threads,
-            load_correlated_data=not omit_observed_visibility,
-        )
-
     else:
-        from xradio.measurement_set.load_processing_set import load_processing_set
-
-        drop_variables = None
-        if omit_observed_visibility:
-            if not isinstance(data_group, dict) or "correlated_data" not in data_group:
-                raise ValueError(
-                    "Cached-grid loading requires the resolved processing-set "
-                    "data_group mapping."
-                )
-            drop_variables = [data_group["correlated_data"]]
+        from astroviper.utils.node_task_io import load_processing_set
 
         ps_xdt = load_processing_set(
+            io_engine,
             input_data_store,
-            sel_parms=data_selection,
-            data_group_name=processing_set_data_group_name,
-            drop_variables=drop_variables,
-            load_sub_datasets=False,
+            data_selection,
+            processing_set_data_group_name,
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=instrument_polarization_basis,
+            data_group=data_group,
+            load_correlated_data=not omit_observed_visibility,
+            processing_function_threads=processing_function_threads,
         )
 
     T_load = time.time() - start
@@ -1653,7 +1722,7 @@ def residual_update_continuum_single_field(
     ):
         pb_xds = _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id)
         if wideband_primary_beam_memory_mode == "in_place":
-            _write_wideband_primary_beam_in_place(pb_xds, image_store)
+            _write_wideband_primary_beam_in_place(pb_xds, image_store, io_engine)
             pb_xds = None
 
     if continuum_mode == "mvc":
@@ -1665,6 +1734,7 @@ def residual_update_continuum_single_field(
                 _write_mvc_visibility_grid_in_place(
                     mvc_observed_visibility_grid_xds,
                     image_store,
+                    io_engine,
                 )
                 mvc_observed_visibility_grid_xds = None
 
@@ -1723,7 +1793,7 @@ def residual_update_continuum_single_field(
 
         if weight_memory_mode == "in_place":
             start = time.time()
-            _write_continuum_weights_in_place(ps_xdt, image_store)
+            _write_continuum_weights_in_place(ps_xdt, image_store, io_engine)
             T_write_imaging_weights = time.time() - start
             return_weight_datasets = {}
 
@@ -1820,7 +1890,7 @@ def grid_imaging_weight_density_continuum_node(
     instrument_polarization_basis="linear",
     single_precision_gridding=False,
     processing_function_threads=1,
-    skunk_works=False,
+    io_engine="chunk",
     data_group=None,
     input_data=None,
     task_id=0,
@@ -1900,12 +1970,17 @@ def grid_imaging_weight_density_continuum_node(
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
-    skunk_works : bool, optional
-        Use the experimental direct Measurement Set loader.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     data_group : dict or None, optional
         Resolved data-group role mapping. Its correlated-data variable is
         omitted from ordinary loads because global density gridding uses only
-        UVW, weights, and flags. It also configures the experimental loader.
+        UVW, weights, and flags. It also configures the chunk loader.
     input_data : xarray.DataTree or mapping or None, optional
         Preloaded Processing Set partition; when supplied, skip disk loading.
     task_id : int, optional
@@ -1973,31 +2048,19 @@ def grid_imaging_weight_density_continuum_node(
         # processing-set partition.
         ps_xdt = input_data
 
-    elif skunk_works:
-        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
-
-        ps_xdt = load_processing_set_skunk_works(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group=data_group,
-            processing_set_data_group_name=(processing_set_data_group_name),
-            frequency_coords=task_coords["frequency"]["data"],
-            instrument_polarization_basis=(instrument_polarization_basis),
-            processing_function_threads=(processing_function_threads),
-            load_correlated_data=False,
-        )
-
     else:
-        from xradio.measurement_set.load_processing_set import load_processing_set
+        from astroviper.utils.node_task_io import load_processing_set
 
         ps_xdt = load_processing_set(
+            io_engine,
             input_data_store,
-            sel_parms=data_selection,
-            data_group_name=processing_set_data_group_name,
-            drop_variables=_weighting_drop_variables(
-                data_group, "grid_imaging_weight_density_continuum_node"
-            ),
-            load_sub_datasets=False,
+            data_selection,
+            processing_set_data_group_name,
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=instrument_polarization_basis,
+            data_group=data_group,
+            load_correlated_data=False,
+            processing_function_threads=processing_function_threads,
         )
 
     T_load = time.time() - start
@@ -2134,7 +2197,7 @@ def degrid_imaging_weights_continuum_node(
     instrument_polarization_basis="linear",
     processing_function_threads=1,
     weight_memory_mode="in_place",
-    skunk_works=False,
+    io_engine="chunk",
     data_group=None,
     input_data=None,
     task_id=0,
@@ -2228,12 +2291,17 @@ def degrid_imaging_weights_continuum_node(
         is copied into the input only when ``write_imaging_weights_to_ps=True``.
         This option remains separate from ``memory_mode`` for now; the policies
         may be unified later.
-    skunk_works : bool, optional
-        Use the experimental direct Measurement Set loader.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     data_group : dict or None, optional
         Resolved data-group role mapping. Its correlated-data variable is
         omitted from ordinary loads because weight degridding uses only UVW,
-        weights, and flags. It also configures the experimental loader.
+        weights, and flags. It also configures the chunk loader.
     input_data : xarray.DataTree or mapping or None, optional
         Preloaded Processing Set partition; when supplied, skip disk loading.
     task_id : int, optional
@@ -2297,31 +2365,19 @@ def degrid_imaging_weights_continuum_node(
     if input_data is not None:
         ps_xdt = input_data
 
-    elif skunk_works:
-        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
-
-        ps_xdt = load_processing_set_skunk_works(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group=data_group,
-            processing_set_data_group_name=(processing_set_data_group_name),
-            frequency_coords=task_coords["frequency"]["data"],
-            instrument_polarization_basis=(instrument_polarization_basis),
-            processing_function_threads=(processing_function_threads),
-            load_correlated_data=False,
-        )
-
     else:
-        from xradio.measurement_set.load_processing_set import load_processing_set
+        from astroviper.utils.node_task_io import load_processing_set
 
         ps_xdt = load_processing_set(
+            io_engine,
             input_data_store,
-            sel_parms=data_selection,
-            data_group_name=processing_set_data_group_name,
-            drop_variables=_weighting_drop_variables(
-                data_group, "degrid_imaging_weights_continuum_node"
-            ),
-            load_sub_datasets=False,
+            data_selection,
+            processing_set_data_group_name,
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=instrument_polarization_basis,
+            data_group=data_group,
+            load_correlated_data=False,
+            processing_function_threads=processing_function_threads,
         )
 
     T_load = time.time() - start
@@ -2443,7 +2499,7 @@ def degrid_imaging_weights_continuum_node(
 
     if weight_memory_mode == "in_place":
         start = time.time()
-        _write_continuum_weights_in_place(ps_xdt, image_store)
+        _write_continuum_weights_in_place(ps_xdt, image_store, io_engine)
         T_write_imaging_weights = time.time() - start
         weight_datasets = {}
 
@@ -3347,7 +3403,11 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
                     "In-place MFS visibility caching requires "
                     "input_params['image_store']."
                 )
-            _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store)
+            _write_mfs_visibility_grid_in_place(
+                observed_grid_xds,
+                image_store,
+                input_params.get("io_engine", "chunk"),
+            )
             return None
         return observed_grid_xds
 

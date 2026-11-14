@@ -114,7 +114,7 @@ def _target_files():
         "distributed_applications/imaging/image_continuum_single_field.py",
         "node_tasks/imaging/image_cube_single_field.py",
         "node_tasks/imaging/image_continuum_single_field.py",
-        "node_tasks/imaging/utils/skunk_works_msv2.py",
+        "utils/measurement_set_v2_input.py",
         "processing_functions/image_analysis/common_beam.py",
         "processing_functions/image_analysis/make_auto_mask.py",
         "processing_functions/imaging/image_cube_single_field.py",

@@ -227,7 +227,7 @@ def write_first_round_rows(first_round_store: str, rows: dict, n_channels: int) 
     """
     import zarr
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+    from astroviper.utils.chunk_io.zarr_chunks import _retry_transient_io
 
     def write():
         group = zarr.open_group(first_round_store, mode="r+")
@@ -463,11 +463,11 @@ def merge_first_round_moment_tile(
     """
     import zarr
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
     from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         finalize_moments,
         merge_moment_partials_in_tree_order,
     )
+    from astroviper.utils.chunk_io.zarr_chunks import _retry_transient_io
 
     start_unixtime = time.time()
     (l0, l1), (m0, m1) = tile
@@ -533,9 +533,9 @@ def read_first_round_rows(
         minima and maxima (NaN for a channel without a valid voxel).
     counters : dict
         The read counters of
-        :func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`.
+        :func:`~astroviper.utils.chunk_io.read_array_region`.
     """
-    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
+    from astroviper.utils.chunk_io import read_array_region
 
     start, stop = channel_range
     counters = {}
@@ -575,9 +575,9 @@ def read_first_round_moment_maps(
         channel contributed.
     counters : dict
         The read counters of
-        :func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`.
+        :func:`~astroviper.utils.chunk_io.read_array_region`.
     """
-    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
+    from astroviper.utils.chunk_io import read_array_region
 
     counters = {}
     integral, maximum = (
@@ -634,7 +634,7 @@ def _write_array_region(path, region, values, config=None):
     I/O error; returns the bytes stored in the chunks (shards) it overlaps."""
     import zarr
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+    from astroviper.utils.chunk_io.zarr_chunks import _retry_transient_io
 
     def write():
         array = zarr.open_array(path, mode="r+", config=config)
@@ -668,7 +668,7 @@ def _flush_first_round_window(entry, window, partials_directory):
     them; a window whose slot cannot be saved is recorded as lost."""
     import toolviper.utils.logger as logger
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+    from astroviper.utils.chunk_io.zarr_chunks import _retry_transient_io
 
     name = f"{os.getpid()}-{entry['token']}-{entry['sequence']}"
     entry["sequence"] += 1

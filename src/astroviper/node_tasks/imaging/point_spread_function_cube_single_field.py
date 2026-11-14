@@ -24,7 +24,10 @@ def point_spread_function_cube_single_field(
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
-    load_data_variables=None,
+    load_correlated_data=True,
+    io_engine="chunk",
+    data_group=None,
+    output_image_format="zarr",
     task_id=0,
     input_data=None,
     *,
@@ -34,7 +37,7 @@ def point_spread_function_cube_single_field(
     cube, with its beam fit and the weight statistics of every channel.
 
     Thin node task: loads this chunk's weights, flags and uvw (``VISIBILITY``
-    is never read when ``load_data_variables`` leaves it out), then, **once
+    is never read when ``load_correlated_data`` is false), then, **once
     per frequency channel**, runs
     :func:`~astroviper.processing_functions.imaging.residual_update.imaging_setup_single_field`
     (imaging weights, point spread function, primary beam, Stokes basis and
@@ -185,10 +188,21 @@ def point_spread_function_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
         Zernike aperture models and Jones images are not supported: they are
         not azimuthally symmetric and depend on the parallactic angle.
-    load_data_variables : list of str, optional
-        Data variables to load (XRADIO ``include_variables``), for example the
-        data group's weight, flag and uvw variables; ``None`` (default) loads
-        every variable of the data group, ``VISIBILITY`` included.
+    load_correlated_data : bool, optional
+        If false, the data group's correlated data are not read. Default
+        ``True``.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
+    data_group : dict, optional
+        Role->variable mapping of ``processing_set_data_group_name``; read from
+        the processing set when ``None`` and needed.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of ``image_store``. Default ``"zarr"``.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     input_data : dict, optional
@@ -270,14 +284,18 @@ def point_spread_function_cube_single_field(
     if input_data is not None:
         ps_xdt = input_data
     else:
-        from xradio.measurement_set.load_processing_set import load_processing_set
+        from astroviper.utils.node_task_io import load_processing_set
 
         ps_xdt = load_processing_set(
+            io_engine,
             input_data_store,
-            sel_parms=data_selection,
-            data_group_name=processing_set_data_group_name,
-            include_variables=load_data_variables,
-            load_sub_datasets=False,
+            data_selection,
+            processing_set_data_group_name,
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=instrument_polarization_basis,
+            data_group=data_group,
+            load_correlated_data=load_correlated_data,
+            processing_function_threads=processing_function_threads,
         )
     T_load = time.time() - start
 
@@ -360,13 +378,15 @@ def point_spread_function_cube_single_field(
 
     start = time.time()
     if image_store is not None:
-        from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
+        from astroviper.utils.io import write_result_chunk
 
-        write_result_chunk_to_disk_using_zarr(
+        write_result_chunk(
+            io_engine,
             image_store,
             POINT_SPREAD_FUNCTION_IMAGE_VARIABLES,
             _chunk_task_coords(task_coords, data_selection, 0, n_chan),
             psf_xds,
+            output_image_format=output_image_format,
         )
     T_write = time.time() - start
 

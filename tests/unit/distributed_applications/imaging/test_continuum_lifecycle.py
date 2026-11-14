@@ -119,11 +119,12 @@ def test_continuum_finalization_exposes_only_the_flat_sky(continuum_mode):
     assert "sky_flat_sky" not in restored.attrs["data_groups"]["restored"]
 
 
+@pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
 @pytest.mark.parametrize("zarr_format", [2, 3])
 @pytest.mark.parametrize("kind", ["mfs", "mvc", "pb"])
 @pytest.mark.parametrize("single_precision", [False, True])
 def test_image_cache_replacement_and_repeated_cleanup(
-    tmp_path, zarr_format, kind, single_precision
+    tmp_path, zarr_format, kind, single_precision, io_engine
 ):
     store = str(tmp_path / "image.zarr")
     root = zarr.open_group(store, mode="w", zarr_format=zarr_format)
@@ -177,7 +178,7 @@ def test_image_cache_replacement_and_repeated_cleanup(
                 single_precision,
                 None,
             )
-            node._write_mfs_visibility_grid_in_place(cache, store)
+            node._write_mfs_visibility_grid_in_place(cache, store, io_engine)
             assert zarr.open_group(store).metadata.zarr_format == zarr_format
             np.testing.assert_array_equal(zarr.open_group(store)["PUBLIC"][:], [42.0])
             xr.testing.assert_equal(
@@ -201,7 +202,7 @@ def test_image_cache_replacement_and_repeated_cleanup(
             blank.VISIBILITY.data[:] = value + 2j
             blank.VISIBILITY_NORMALIZATION.data[:] = value
             node._write_mvc_visibility_grid_in_place(
-                blank.isel(frequency=[1, 0]), store
+                blank.isel(frequency=[1, 0]), store, io_engine
             )
             loaded = node._load_mvc_visibility_grid_in_place(image, store)
             np.testing.assert_array_equal(loaded.VISIBILITY, value + 2j)
@@ -224,7 +225,7 @@ def test_image_cache_replacement_and_repeated_cleanup(
             blank = node._load_wideband_primary_beam_in_place(image, store)
             assert np.isnan(blank.PRIMARY_BEAM).all()
             blank.PRIMARY_BEAM.data[:] = value
-            node._write_wideband_primary_beam_in_place(blank, store)
+            node._write_wideband_primary_beam_in_place(blank, store, io_engine)
             np.testing.assert_array_equal(
                 node._load_wideband_primary_beam_in_place(image, store).PRIMARY_BEAM,
                 value,
@@ -238,10 +239,11 @@ def test_image_cache_replacement_and_repeated_cleanup(
     np.testing.assert_array_equal(root["PUBLIC"][:], [42.0])
 
 
+@pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
 @pytest.mark.parametrize("zarr_format", [2, 3])
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_weight_cache_activation_replacement_and_cleanup(
-    tmp_path, zarr_format, interrupted
+    tmp_path, zarr_format, interrupted, io_engine
 ):
     ps_store = str(tmp_path / "input.zarr")
     image_store = str(tmp_path / "image.zarr")
@@ -278,7 +280,7 @@ def test_weight_cache_activation_replacement_and_cleanup(
         task_child["CALCULATED"] = ("frequency", [value, value + 1])
         task_child.attrs["data_groups"]["base"]["weight_imaging"] = "CALCULATED"
         node._write_continuum_weights_in_place(
-            xr.DataTree.from_dict({"child": task_child}), image_store
+            xr.DataTree.from_dict({"child": task_child}), image_store, io_engine
         )
         root = zarr.open_group(image_store, mode="r", use_consolidated=False)
         cache = root["_CONTINUUM_WEIGHT_CACHE"]["child"]

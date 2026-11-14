@@ -142,7 +142,7 @@ def find_continuum_first_round_task_priorities(
     allocates another
     (:func:`~astroviper.node_tasks.imaging.find_continuum_first_round.add_first_round_moments`).
     The waves of
-    :func:`~astroviper.node_tasks.imaging.utils.skunk_works.compute_shard_task_priorities`
+    :func:`~astroviper.utils.chunk_io.compute_shard_task_priorities`
     step through every shard of the cube, so a worker would take tasks of
     every window in every wave and save a slot at each change of window. Here
     the waves step through the shards of one window before those of the next,

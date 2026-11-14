@@ -335,7 +335,7 @@ def two_hand_images(tmp_path_factory, processing_sets):
         ("four", {}),
         ("four_cross_hand_flagged", {}),
         ("reversed", {}),
-        ("reversed", {"skunk_works": True, "weight_memory_mode": "in_memory"}),
+        ("reversed", {"io_engine": "chunk", "weight_memory_mode": "in_memory"}),
     ],
 )
 def test_parallel_hands_are_loaded_alone(

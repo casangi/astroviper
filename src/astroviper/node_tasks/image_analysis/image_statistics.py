@@ -553,7 +553,7 @@ def _choose_data_array(
     return image, candidates[0]
 
 
-def _open_metadata(image, data_variable):
+def _open_metadata(image, data_variable, io_engine):
     """Open lazy Zarr metadata or normalize an in-memory image.
 
     Parameters
@@ -562,6 +562,8 @@ def _open_metadata(image, data_variable):
         On-disk Zarr image or in-memory image object.
     data_variable : str, optional
         Explicit image-variable name.
+    io_engine : {"chunk", "xradio"}
+        I/O engine of an on-disk image.
 
     Returns
     -------
@@ -571,7 +573,9 @@ def _open_metadata(image, data_variable):
         Resolved image-variable name.
     """
     if isinstance(image, str | Path):
-        dataset = xr.open_zarr(str(image))
+        from astroviper.utils.node_task_io import open_image
+
+        dataset = open_image(io_engine, str(image))
     else:
         dataset = image
     return _choose_data_array(dataset, data_variable)
@@ -822,6 +826,7 @@ def image_statistics(
     partition: dict[str, slice | np.ndarray] | None = None,
     data_selection: dict | None = None,
     finalize: bool = True,
+    io_engine: str = "chunk",
 ) -> xr.Dataset:
     """Load one selected image block and calculate local image statistics.
 
@@ -869,6 +874,8 @@ def image_statistics(
         ``partition``.
     finalize : bool, default True
         Return public statistics when true, otherwise a mergeable partial state.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of an on-disk image.
 
     Returns
     -------
@@ -911,7 +918,7 @@ def image_statistics(
         finalize_statistics_state,
     )
 
-    metadata, variable = _open_metadata(image, data_variable)
+    metadata, variable = _open_metadata(image, data_variable, io_engine)
     data = metadata[variable]
     graph_partition = None
     if data_selection:
@@ -932,9 +939,9 @@ def image_statistics(
     required = _required_variables(metadata, variable, mask)
 
     if isinstance(image, str | Path):
-        from xradio.image import load_image
+        from astroviper.utils.node_task_io import load_image
 
-        lazy_selection = load_image(str(image), block_des=selection.effective_indexers)
+        lazy_selection = load_image(io_engine, str(image), selection.effective_indexers)
         missing = set(required) - set(lazy_selection.data_vars)
         if missing:
             raise KeyError(f"Loaded image is missing variables: {sorted(missing)}")

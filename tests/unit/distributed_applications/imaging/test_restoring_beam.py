@@ -246,7 +246,7 @@ def test_fits_rows_without_a_fit_hold_the_tclean_beam(flagged_processing_set, tm
             n_mapping_parallelism={"frequency": 2},
             restore=True,
             restoration_output="both",
-            skunk_works=True,
+            io_engine="chunk",
             output_image_format="fits",
         )
     for name in ("SKY_RESTORED", "SKY_RESIDUAL"):
@@ -351,7 +351,7 @@ def test_fits_rows_are_filled_before_the_report(
             n_mapping_parallelism={"frequency": 2},
             restore=True,
             restoring_beam=[300 * ARCSEC, 300 * ARCSEC, 0.0],
-            skunk_works=True,
+            io_engine="chunk",
             output_image_format="fits",
             report="html",
         )

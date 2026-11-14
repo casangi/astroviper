@@ -819,7 +819,7 @@ def _run_graphs(
     import dask
     from graphviper.graph_tools import generate_dask_workflow, map, reduce
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+    from astroviper.utils.chunk_io.zarr_chunks import _retry_transient_io
 
     graph_start = time.time()
     if moments:
@@ -1094,7 +1094,7 @@ def _rss_peak(frame):
 def _stored_bytes(store):
     """Bytes of the chunk and shard files of a Zarr store, counted again after
     a transient I/O error."""
-    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+    from astroviper.utils.chunk_io.zarr_chunks import _retry_transient_io
 
     return _retry_transient_io(
         f"sizes of {store}",

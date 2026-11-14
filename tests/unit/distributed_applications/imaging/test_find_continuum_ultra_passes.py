@@ -1,6 +1,6 @@
 """Tests of the passes of find_continuum_ultra and their layout.
 
-The passes run on a cube written channel by channel by the sharded skunk_works
+The passes run on a cube written channel by channel by the sharded chunk
 writer, through GraphVIPER's map and reduce on the synchronous scheduler, and
 their results are compared bit for bit with the processing functions of
 ``find_continuum_ultra.cube_reductions`` applied to the whole cube.
@@ -38,9 +38,6 @@ from astroviper.node_tasks.imaging.find_continuum_ultra import (
     find_continuum_ultra_merge_task_bytes,
     find_continuum_ultra_task_bytes,
 )
-from astroviper.node_tasks.imaging.utils import (
-    write_result_chunk_to_disk_sharded_skunk_works,
-)
 from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
     accumulate_moments,
     finalize_moments,
@@ -62,6 +59,7 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.step_results i
     FirstRoundRows,
     SpectrumRegions,
 )
+from astroviper.utils.chunk_io import write_zarr_sharded
 from astroviper.utils.io import (
     create_empty_data_variables_on_disk,
     write_zarr_image_store,
@@ -126,7 +124,7 @@ ROW_COLUMNS = [
 
 @pytest.fixture(scope="module")
 def cube(tmp_path_factory):
-    """Stokes I and Q written channel by channel by the sharded skunk_works
+    """Stokes I and Q written channel by channel by the sharded chunk
     writer, metadata consolidated; the primary beam is below the limit in the
     corner chunks."""
     directory = tmp_path_factory.mktemp("cube")
@@ -178,7 +176,7 @@ def cube(tmp_path_factory):
         image_sharding={"frequency": SHARD},
     )
     for channel in range(N_CHANNELS):
-        write_result_chunk_to_disk_sharded_skunk_works(
+        write_zarr_sharded(
             store,
             ["sky_residual", "primary_beam"],
             {"frequency": {"slice": slice(channel, channel + 1)}},
@@ -985,10 +983,10 @@ def test_transient_errors_of_the_drivers_stores_are_retried(
     """A Lustre eviction fails with EIO the creation of the pass's partials
     store and the write of the first-round rows, once each: each is
     repeated, and the pass gives the results of one without them."""
-    from astroviper.node_tasks.imaging.utils import skunk_works
+    from astroviper.utils.chunk_io import zarr_chunks
 
     store = _new_store(cube, layout, str(tmp_path / "first_round.zarr"))
-    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(zarr_chunks, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
     targets = {
         "partials store": lambda path, mode: (
             path.endswith("partials.zarr") and mode == "w"
@@ -1031,14 +1029,14 @@ def test_transient_errors_of_the_drivers_stores_are_retried(
 
 def test_stored_bytes_retries_a_transient_error(tmp_path, monkeypatch):
     """The sizes of a store's files are counted again after a transient EIO."""
-    from astroviper.node_tasks.imaging.utils import skunk_works
+    from astroviper.utils.chunk_io import zarr_chunks
 
     store = tmp_path / "store.zarr"
     (store / "c").mkdir(parents=True)
     (store / "zarr.json").write_bytes(b"{}")
     (store / "c" / "0").write_bytes(b"0" * 10)
     (store / "c" / "1").write_bytes(b"0" * 5)
-    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(zarr_chunks, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
     getsize, failures = os.path.getsize, []
 
     def evicted_once(path):

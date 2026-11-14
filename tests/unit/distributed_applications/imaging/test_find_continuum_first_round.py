@@ -29,9 +29,6 @@ from astroviper.node_tasks.imaging.find_continuum_first_round import (
     find_continuum_first_round_chunk,
     write_first_round_rows,
 )
-from astroviper.node_tasks.imaging.utils import (
-    write_result_chunk_to_disk_sharded_skunk_works,
-)
 from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
     accumulate_moments,
     finalize_moments,
@@ -47,6 +44,7 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.settings impor
 from astroviper.processing_functions.imaging.utils.spectral_windows import (
     linear_channel_ranges,
 )
+from astroviper.utils.chunk_io import write_zarr_sharded
 from astroviper.utils.data_group_tools import modify_data_groups_xds
 from astroviper.utils.io import (
     create_empty_data_variables_on_disk,
@@ -141,7 +139,7 @@ def cube(tmp_path_factory):
         image_sharding={"frequency": 4},
     )
     for channel in range(N_CHANNELS):
-        write_result_chunk_to_disk_sharded_skunk_works(
+        write_zarr_sharded(
             store,
             ["sky_residual", "primary_beam"],
             {"frequency": {"slice": slice(channel, channel + 1)}},
@@ -513,7 +511,7 @@ def test_task_priorities_run_the_shard_waves_one_window_at_a_time(
     a process holding one window that takes the tasks in priority order saves
     one slot per window, where the waves over the whole cube make it save one
     at every change of window."""
-    from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
+    from astroviper.utils.chunk_io import compute_shard_task_priorities
 
     monkeypatch.setattr(node_tasks, "FIRST_ROUND_WINDOWS_IN_MEMORY", 1)
     mapping = {

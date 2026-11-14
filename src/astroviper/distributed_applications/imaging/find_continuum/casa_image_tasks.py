@@ -28,7 +28,6 @@ from astroviper.node_tasks.imaging.find_continuum import (
     small_image_attributes,
     write_small_image,
 )
-from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
 from astroviper.processing_functions.image_analysis.make_auto_mask import (
     _chauvenet_sample,
     _prune,
@@ -41,6 +40,7 @@ from astroviper.processing_functions.imaging.find_continuum import (
     image_statistics,
     lattice_expression_names,
 )
+from astroviper.utils.chunk_io import read_array_region
 
 # The CASA version whose findContinuum behaviour is reproduced.
 casaVersion = "6.7.6"
@@ -81,7 +81,7 @@ def cube_session(cubes, reduce):
     ------
     _Session
         The session; its ``counters`` accumulate the counters of
-        :func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`
+        :func:`~astroviper.utils.chunk_io.read_array_region`
         over the direct reads of the registered cubes.
     """
     global _session

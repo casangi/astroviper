@@ -442,9 +442,9 @@ def test_a_transient_error_of_a_mask_write_is_retried(
 ):
     """A Lustre eviction fails one write of a mask with EIO; the write is
     repeated on a fresh open of the array."""
-    from astroviper.node_tasks.imaging.utils import skunk_works
+    from astroviper.utils.chunk_io import zarr_chunks
 
-    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(zarr_chunks, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
     _, valid, windows = registry_cube
     store = _first_round_store(
         tmp_path / "fr.zarr",

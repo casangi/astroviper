@@ -86,7 +86,7 @@ task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True
 4. Write every finished on-disk frequency chunk (`image_chunking["frequency"]`
    channels; by default the whole task) as soon as its channels are imaged, via
    `astroviper.utils.io.write_result_chunk_to_disk_using_zarr(...)` (or the
-   skunk-works, sharded or FITS writer), taking its plane statistics first. At
+   chunk, sharded or FITS writer), taking its plane statistics first. At
    most one chunk is held next to the channel being imaged, and a one-channel
    chunk is written without any copy. `image_sharding` (a `{dimension: size}`
    dict, any dimension) selects the sharded writer.

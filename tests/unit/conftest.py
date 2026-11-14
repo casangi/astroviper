@@ -158,7 +158,7 @@ def make_imageable_msv2(ms_path, seed=0):
 
 def _skip_without_msv2_engine():
     """Skip the requesting test without XRADIO's engine or arcae."""
-    from astroviper.node_tasks.imaging.utils import msv2_engine_available
+    from astroviper.utils.measurement_set_v2_input import msv2_engine_available
 
     available, reason = msv2_engine_available()
     if not available:

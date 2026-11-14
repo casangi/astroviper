@@ -44,7 +44,7 @@
         "primary_beam_params": { "type": ["dict"], "nullable": true },
         "clean_mask": { "type": ["str"], "nullable": true },
         "auto_mask_params": { "type": ["dict"], "nullable": true },
-        "skunk_works": { "type": "boolean" },
+        "io_engine": { "type": ["str"], "allowed": ["chunk", "xradio"] },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
         "reduce_mode": {

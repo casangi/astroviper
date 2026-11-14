@@ -33,7 +33,6 @@ from astroviper.distributed_applications.imaging.find_continuum_first_round impo
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
     DISTRIBUTED_APPLICATION_TIMING_PHASES,
 )
-from astroviper.node_tasks.imaging.utils import msv2_engine_available
 from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
     accumulate_moments,
     finalize_moments,
@@ -50,6 +49,7 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.step_results i
 )
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.data_partitioning import COMPUTE_RESOURCES_KEYS
+from astroviper.utils.measurement_set_v2_input import msv2_engine_available
 from astroviper.utils.telescope_layout import read_telescope_layout
 
 _ENGINE_AVAILABLE, _ENGINE_REASON = msv2_engine_available()
@@ -379,14 +379,14 @@ def _add_shifted_execution_block(ps_store, offset=EXECUTION_BLOCK_FREQUENCY_OFFS
 
 
 @pytest.mark.parametrize("n_tasks", [1, 2])
-@pytest.mark.parametrize("skunk_works", [True, False])
+@pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
 def test_execution_blocks_with_offset_frequencies_are_all_imaged(
-    tmp_path, skunk_works, n_tasks
+    tmp_path, io_engine, n_tasks
 ):
     """Two execution blocks whose channel centres differ by a few kHz, imaged
     on the first one's frequencies in one node task or one per channel: every
     task selects and images both (each channel maps onto its nearest image
-    channel), with the direct Zarr loader (``skunk_works=True``) as with the
+    channel), with the direct Zarr loader (``io_engine="chunk"``) as with the
     standard one, and the two loaders give the same images. The direct loader
     used to require every selected frequency to equal an image frequency to
     1e-12, so it failed the load and, as a load failure is logged and
@@ -395,7 +395,7 @@ def test_execution_blocks_with_offset_frequencies_are_all_imaged(
     ps_store = _simulate_point_source(tmp_path)
     frequencies = _add_shifted_execution_block(ps_store)
 
-    def image(store_name, use_skunk_works):
+    def image(store_name, image_io_engine):
         return distributed_applications.imaging.image_cube_single_field(
             ps_store=ps_store,
             image_store=str(tmp_path / store_name),
@@ -424,10 +424,10 @@ def test_execution_blocks_with_offset_frequencies_are_all_imaged(
             processing_set_data_group_name="base",
             single_precision_image=False,
             n_mapping_parallelism={"frequency": n_tasks},
-            skunk_works=use_skunk_works,
+            io_engine=image_io_engine,
         )
 
-    result = image("cube.img.zarr", skunk_works)
+    result = image("cube.img.zarr", io_engine)
     _assert_imaged(result, n_tasks=n_tasks)
     img = load_image(str(tmp_path / "cube.img.zarr"))
     # The natural-weighted dirty image of the source at the phase centre, 1 Jy
@@ -437,8 +437,8 @@ def test_execution_blocks_with_offset_frequencies_are_all_imaged(
     np.testing.assert_allclose(np.nanmax(stokes_i, axis=(1, 2)), [2.0, 2.0], rtol=1e-3)
     assert np.isfinite(img.POINT_SPREAD_FUNCTION.values).all()
 
-    if skunk_works:
-        reference = image("standard.img.zarr", False)
+    if io_engine == "chunk":
+        reference = image("standard.img.zarr", "xradio")
         _assert_imaged(reference, n_tasks=n_tasks)
         _assert_images_equal(
             str(tmp_path / "cube.img.zarr"), str(tmp_path / "standard.img.zarr")
@@ -493,7 +493,7 @@ def _image_cube(ps_store, image_store, frequency_coords, **overrides):
         processing_set_data_group_name="base",
         single_precision_image=False,
         n_mapping_parallelism={"frequency": 3},
-        skunk_works=True,
+        io_engine="chunk",
     )
     arguments.update(overrides)
     return distributed_applications.imaging.image_cube_single_field(**arguments)
@@ -539,11 +539,24 @@ def stand_in_open_msv2(monkeypatch):
     return stand_in
 
 
-def test_msv2_requires_skunk_works(tmp_path):
-    ms_path = _measurement_set_like(tmp_path)
-    with pytest.raises(ValueError, match="skunk_works=True"):
-        _image_cube(ms_path, str(tmp_path / "cube.img.zarr"), [1e11], skunk_works=False)
-    _assert_nothing_written(tmp_path)
+@requires_msv2_engine
+def test_msv2_images_equal_with_both_io_engines(
+    imageable_msv2, imageable_msv2_ps, tmp_path, synchronous_dask
+):
+    """Both I/O engines read a Measurement Set v2 through XRADIO's engine and
+    write the same images."""
+    frequencies = open_processing_set(imageable_msv2_ps)["imageable_2"].frequency
+    chunk_store = str(tmp_path / "chunk.img.zarr")
+    xradio_store = str(tmp_path / "xradio.img.zarr")
+
+    chunk = _image_cube(imageable_msv2, chunk_store, frequencies.values, max_iter=5)
+    xradio = _image_cube(
+        imageable_msv2, xradio_store, frequencies.values, max_iter=5, io_engine="xradio"
+    )
+
+    _assert_imaged(chunk)
+    _assert_imaged(xradio)
+    _assert_images_equal(chunk_store, xradio_store)
 
 
 def test_msv2_without_the_engine(tmp_path, monkeypatch):
@@ -736,7 +749,7 @@ def test_msv2_images_equal_production_on_the_conversion(
 
     result = _image_cube(imageable_msv2, msv2_store, frequencies, **common)
     production = _image_cube(
-        imageable_msv2_ps, production_store, frequencies, skunk_works=False, **common
+        imageable_msv2_ps, production_store, frequencies, io_engine="xradio", **common
     )
 
     _assert_imaged(result, n_tasks=5)
@@ -750,26 +763,24 @@ def test_msv2_images_equal_production_on_the_conversion(
 
 
 @requires_msv2_engine
-def test_msv2_images_equal_skunk_works_on_the_conversion(
+def test_msv2_images_equal_chunk_engine_on_the_conversion(
     imageable_msv2, imageable_msv2_ps, tmp_path, synchronous_dask
 ):
-    """The same against the Zarr skunk-works path, on the decreasing spectral
+    """The same against the Zarr chunk loader, on the decreasing spectral
     window's channels only: that loader assumes the image's frequencies, so a
     task that straddles two spectral windows is skipped there."""
     converted = open_processing_set(imageable_msv2_ps)
     frequencies = converted["imageable_2"].frequency.values
     assert frequencies.size == 16
     msv2_store = str(tmp_path / "msv2.img.zarr")
-    skunk_works_store = str(tmp_path / "skunk_works.img.zarr")
+    chunk_store = str(tmp_path / "chunk.img.zarr")
 
     result = _image_cube(imageable_msv2, msv2_store, frequencies, max_iter=20)
-    skunk_works = _image_cube(
-        imageable_msv2_ps, skunk_works_store, frequencies, max_iter=20
-    )
+    chunk = _image_cube(imageable_msv2_ps, chunk_store, frequencies, max_iter=20)
 
     _assert_imaged(result)
-    _assert_imaged(skunk_works)
-    _assert_images_equal(msv2_store, skunk_works_store)
+    _assert_imaged(chunk)
+    _assert_images_equal(msv2_store, chunk_store)
 
 
 @requires_msv2_engine
@@ -1061,7 +1072,7 @@ def test_find_continuum_first_round_shard_waves_one_window_at_a_time(
         tmp_path,
         n_channels=4,
         n_tasks=8,
-        skunk_works=True,
+        io_engine="chunk",
         image_sharding={"frequency": 2},
     )
 
@@ -1293,7 +1304,7 @@ def test_find_continuum_first_round_refuses_fits(tmp_path):
                 "min_psf_fraction": 0.05,
                 "max_psf_fraction": 0.8,
             },
-            skunk_works=True,
+            io_engine="chunk",
             output_image_format="fits",
             find_continuum_first_round=True,
         )

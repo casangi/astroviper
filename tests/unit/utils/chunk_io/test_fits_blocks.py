@@ -1,4 +1,4 @@
-"""Unit tests for the ``_skunk_works`` FITS output path.
+"""Unit tests for the FITS output of the chunk I/O engine.
 
 Creates empty XRADIO-conformant FITS files from a tiny empty image dataset,
 writes frequency chunks into them the way independent node tasks would
@@ -16,9 +16,9 @@ import os
 import numpy as np
 import pytest
 
-from astroviper.node_tasks.imaging.utils import (
+from astroviper.utils.chunk_io import (
     create_empty_fits_images,
-    write_result_chunk_to_fits_skunk_works,
+    write_fits,
 )
 
 IMAGE_SIZE = [16, 12]  # (l, m) -> FITS (NAXIS1, NAXIS2)
@@ -34,6 +34,16 @@ KEEP = [
     "point_spread_function",
     "beam_fit_params_point_spread_function",
 ]
+
+
+def _create_empty_fits_images(*args, **kwargs):
+    from astroviper.utils.io import imaging_data_variables_and_dims_single_precision
+
+    return create_empty_fits_images(
+        *args,
+        data_variable_definitions=imaging_data_variables_and_dims_single_precision,
+        **kwargs,
+    )
 
 
 def _empty_image(frequency_coords=FREQS, pol_coords=POLS, time_coords=(60000.0,)):
@@ -76,9 +86,7 @@ def _write_chunk(store, full, chan_slice, threads=1, keep=KEEP):
         dims = FULL_DIMS if array.ndim == 5 else BEAM_DIMS
         chunk_xds[name] = (dims, array[:, chan_slice])
     task_coords = {"frequency": {"data": FREQS[chan_slice], "slice": chan_slice}}
-    write_result_chunk_to_fits_skunk_works(
-        store, keep, task_coords, chunk_xds, processing_function_threads=threads
-    )
+    write_fits(store, keep, task_coords, chunk_xds, processing_function_threads=threads)
 
 
 @pytest.fixture
@@ -86,7 +94,7 @@ def written_store(tmp_path):
     """Empty FITS store + full cube written as two independent chunks."""
     store = str(tmp_path / "img.fits")
     img_xds = _empty_image()
-    create_empty_fits_images(store, img_xds, KEEP, telescope_name="ALMA")
+    _create_empty_fits_images(store, img_xds, KEEP, telescope_name="ALMA")
     full = _full_arrays()
     _write_chunk(store, full, slice(0, 2), threads=2)
     _write_chunk(store, full, slice(2, 5), threads=1)
@@ -162,7 +170,7 @@ def test_unwritten_channels_read_as_zero(tmp_path):
     from astropy.io import fits
 
     store = str(tmp_path / "img.fits")
-    create_empty_fits_images(store, _empty_image(), KEEP)
+    _create_empty_fits_images(store, _empty_image(), KEEP)
     full = _full_arrays()
     _write_chunk(store, full, slice(2, 5))  # channels 0-1 never written
     with fits.open(os.path.join(store, "SKY_RESIDUAL.fits")) as hdulist:
@@ -175,7 +183,7 @@ def test_double_precision(tmp_path):
     from astropy.io import fits
 
     store = str(tmp_path / "img.fits")
-    create_empty_fits_images(
+    _create_empty_fits_images(
         store, _empty_image(), ["sky_residual"], double_precision=True
     )
     full = {"SKY_RESIDUAL": _full_arrays()["SKY_RESIDUAL"].astype("f8")}
@@ -235,7 +243,7 @@ def test_without_a_restoring_beam_the_corrected_file_has_no_beams(tmp_path):
 
     store = str(tmp_path / "img.fits")
     keep = KEEP + RESTORED
-    create_empty_fits_images(store, _empty_image(), keep)
+    _create_empty_fits_images(store, _empty_image(), keep)
     full = _restored_arrays(keep)
     _write_chunk(store, full, slice(0, 5), keep=keep)
     np.testing.assert_array_equal(
@@ -260,7 +268,7 @@ def test_restored_files_carry_the_restoring_beam(tmp_path, monkeypatch):
     import xradio.image
     from astropy.io import fits
 
-    import astroviper.node_tasks.imaging.utils.skunk_works_fits as module
+    import astroviper.utils.chunk_io.fits_blocks as module
 
     encode_beam_rows = module._encode_beam_rows
     encoded = []
@@ -272,7 +280,7 @@ def test_restored_files_carry_the_restoring_beam(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_encode_beam_rows", counting_encode_beam_rows)
     store = str(tmp_path / "img.fits")
     keep = KEEP + RESTORED + ["beam_fit_params_sky_restored"]
-    create_empty_fits_images(store, _empty_image(), keep, restoring_beam=TARGET)
+    _create_empty_fits_images(store, _empty_image(), keep, restoring_beam=TARGET)
     full = _restored_arrays(keep)
     _write_chunk(store, full, slice(0, 2), keep=keep)
     _write_chunk(store, full, slice(2, 5), keep=keep)
@@ -305,7 +313,7 @@ def test_restored_files_carry_the_restoring_beam(tmp_path, monkeypatch):
 def test_restoring_beam_labels_no_other_file(tmp_path):
     store = str(tmp_path / "img.fits")
     keep = ["sky_residual", "beam_fit_params_sky_restored", *RESTORED]
-    create_empty_fits_images(store, _empty_image(), keep, restoring_beam=TARGET)
+    _create_empty_fits_images(store, _empty_image(), keep, restoring_beam=TARGET)
     full = _restored_arrays(keep)
     _write_chunk(store, full, slice(0, 5), keep=keep)
     assert _beams_table(store, "sky_residual") is None
@@ -327,13 +335,13 @@ def test_without_a_restoring_beam_the_restored_file_carries_the_restored_beam(
     import xradio.image
     from astropy.io import fits
 
-    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+    from astroviper.utils.chunk_io.fits_blocks import (
         fill_fits_beams_without_fit,
     )
 
     store = str(tmp_path / "img.fits")
     keep = KEEP + RESTORED + ["beam_fit_params_sky_restored"]
-    create_empty_fits_images(store, _empty_image(), keep)
+    _create_empty_fits_images(store, _empty_image(), keep)
     full = _restored_arrays(keep)
     restored = np.array(
         [
@@ -389,7 +397,7 @@ def test_unwritten_beams_rows_hold_their_channel_and_polarization(tmp_path):
     from astropy.io import fits
 
     store = str(tmp_path / "img.fits")
-    create_empty_fits_images(store, _empty_image(), KEEP)
+    _create_empty_fits_images(store, _empty_image(), KEEP)
     path = os.path.join(store, "SKY_RESIDUAL.fits")
     with fits.open(path) as hdulist:
         beams = hdulist["BEAMS"].data
@@ -409,13 +417,13 @@ def test_rows_without_a_fit_take_the_beam_of_largest_area(tmp_path):
     import xradio.image
     from astropy.io import fits
 
-    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+    from astroviper.utils.chunk_io.fits_blocks import (
         fill_fits_beams_without_fit,
     )
 
     store = str(tmp_path / "img.fits")
     keep = KEEP + RESTORED + ["beam_fit_params_sky_restored"]
-    create_empty_fits_images(store, _empty_image(), keep, restoring_beam=TARGET)
+    _create_empty_fits_images(store, _empty_image(), keep, restoring_beam=TARGET)
     full = _restored_arrays(keep)
     psf = np.array(
         [
@@ -464,12 +472,12 @@ def test_rows_without_a_fit_take_the_beam_of_largest_area(tmp_path):
 def test_without_any_fit_rows_take_the_tclean_default_beam(tmp_path):
     """Without a fit in any plane (every channel flagged, or rows no task
     wrote) every row takes tclean's circle of 1e-6 arcsec at 0 degrees."""
-    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+    from astroviper.utils.chunk_io.fits_blocks import (
         fill_fits_beams_without_fit,
     )
 
     store = str(tmp_path / "img.fits")
-    create_empty_fits_images(store, _empty_image(), KEEP)
+    _create_empty_fits_images(store, _empty_image(), KEEP)
     fill_fits_beams_without_fit(store, KEEP)
     for key in ("sky_residual", "point_spread_function"):
         np.testing.assert_array_equal(
@@ -493,6 +501,8 @@ RESIDUAL_BEAM = "beam_fit_params_sky_residual"
         ("sky_restored", [RESTORED_BEAM, PSF_BEAM], RESTORED_BEAM),
         ("sky_restored_primary_beam_corrected", [PSF_BEAM], None),
         ("sky_restored_primary_beam_corrected", [RESTORED_BEAM, PSF_BEAM], None),
+        ("sky_restored_flat_noise", [RESTORED_BEAM, PSF_BEAM], RESTORED_BEAM),
+        ("sky_restored_flat_sky", [RESTORED_BEAM, PSF_BEAM], None),
         ("sky_residual", [RESTORED_BEAM, PSF_BEAM], PSF_BEAM),
         ("sky_residual", [RESTORED_BEAM, RESIDUAL_BEAM], RESIDUAL_BEAM),
         ("sky_residual", [RESTORED_BEAM], None),
@@ -500,7 +510,7 @@ RESIDUAL_BEAM = "beam_fit_params_sky_residual"
     ],
 )
 def test_beams_table_variable(image_variable, beam_variables, expected):
-    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+    from astroviper.utils.chunk_io.fits_blocks import (
         _beams_table_variable,
     )
 
@@ -547,7 +557,7 @@ def test_xradio_open_image_round_trip(written_store):
 # --------------------------------------------------------------------------- #
 def test_unsupported_variable_raises(tmp_path):
     with pytest.raises(ValueError, match="no FITS representation"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(),
             ["sky_residual", "visibility_normalization"],
@@ -556,7 +566,7 @@ def test_unsupported_variable_raises(tmp_path):
 
 def test_non_consecutive_stokes_raises(tmp_path):
     with pytest.raises(ValueError, match="consecutive polarization codes"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(pol_coords=["I", "V"]),
             ["sky_residual"],
@@ -567,7 +577,7 @@ def test_non_uniform_frequency_rejected(tmp_path):
     """Direct FITS creation follows the preflight policy without approximating."""
     freqs = np.concatenate([FREQS, 2e7 + FREQS])
     with pytest.raises(ValueError, match="uniformly spaced frequency_coords"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(frequency_coords=freqs),
             ["sky_residual"],
@@ -576,7 +586,7 @@ def test_non_uniform_frequency_rejected(tmp_path):
 
 def test_zero_span_frequency_raises(tmp_path):
     with pytest.raises(ValueError, match="zero overall span"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(frequency_coords=[1e9, 1e9]),
             ["sky_residual"],
@@ -585,7 +595,7 @@ def test_zero_span_frequency_raises(tmp_path):
 
 def test_multiple_time_planes_raise(tmp_path):
     with pytest.raises(ValueError, match="single time plane"):
-        create_empty_fits_images(
+        _create_empty_fits_images(
             str(tmp_path / "img.fits"),
             _empty_image(time_coords=[60000.0, 60001.0]),
             ["sky_residual"],
@@ -594,10 +604,10 @@ def test_multiple_time_planes_raise(tmp_path):
 
 def test_overwrite_semantics(tmp_path):
     store = str(tmp_path / "img.fits")
-    create_empty_fits_images(store, _empty_image(), ["sky_residual"])
+    _create_empty_fits_images(store, _empty_image(), ["sky_residual"])
     with pytest.raises(FileExistsError):
-        create_empty_fits_images(store, _empty_image(), ["sky_residual"])
-    paths = create_empty_fits_images(
+        _create_empty_fits_images(store, _empty_image(), ["sky_residual"])
+    paths = _create_empty_fits_images(
         store, _empty_image(), ["sky_residual"], overwrite=True
     )
     assert os.path.exists(paths["sky_residual"])

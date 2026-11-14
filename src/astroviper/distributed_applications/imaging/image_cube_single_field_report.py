@@ -72,7 +72,7 @@ def image_cube_single_field_report(
         FITS output: which planes ``(frequency, polarization)`` of the file of
         each image variable had no beam fit before the run filled its
         ``BEAMS`` rows, as
-        :func:`~astroviper.node_tasks.imaging.utils.skunk_works_fits.fill_fits_beams_without_fit`
+        :func:`~astroviper.utils.chunk_io.fill_fits_beams_without_fit`
         returns them. ``None`` (default) takes the rows as they are.
 
     Returns
@@ -241,7 +241,7 @@ def _open_beam_fit_params(
         return _open_variable(image_store, output_image_format, key)[key.upper()]
     from astropy.io import fits
 
-    from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
+    from astroviper.utils.chunk_io.fits_blocks import (
         _RESTORED_VARIABLES,
         _beams_table_variable,
     )

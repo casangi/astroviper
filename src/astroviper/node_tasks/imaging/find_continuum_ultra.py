@@ -810,13 +810,13 @@ def merge_find_continuum_moment_partials(
         _execution_identity,
         _write_array_region,
     )
-    from astroviper.node_tasks.imaging.utils.skunk_works import (
-        _retry_transient_io,
-        read_array_region,
-    )
     from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         finalize_moments,
         merge_moment_partials_in_tree_order,
+    )
+    from astroviper.utils.chunk_io.zarr_chunks import (
+        _retry_transient_io,
+        read_array_region,
     )
 
     start_unixtime, cpu_start = time.time(), time.process_time()
@@ -928,12 +928,12 @@ def read_primary_beam_plane(
         (:func:`~astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions.primary_beam_masks`).
     counters : dict
         The read counters of
-        :func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`.
+        :func:`~astroviper.utils.chunk_io.read_array_region`.
     """
-    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
     from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         primary_beam_masks,
     )
+    from astroviper.utils.chunk_io import read_array_region
 
     counters = {}
     plane = read_array_region(
@@ -982,12 +982,12 @@ def read_primary_beam_edge_lines(
         Their boolean limit masks.
     counters : dict
         The read counters of
-        :func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`.
+        :func:`~astroviper.utils.chunk_io.read_array_region`.
     """
-    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
     from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         primary_beam_masks,
     )
+    from astroviper.utils.chunk_io import read_array_region
 
     path = os.path.join(input_image_store, primary_beam_variable)
     plane = {
@@ -1025,9 +1025,9 @@ def read_moment_maps(maps_store: str) -> tuple[np.ndarray, np.ndarray, dict]:
         channel contributed.
     counters : dict
         The read counters of
-        :func:`~astroviper.node_tasks.imaging.utils.skunk_works.read_array_region`.
+        :func:`~astroviper.utils.chunk_io.read_array_region`.
     """
-    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
+    from astroviper.utils.chunk_io import read_array_region
 
     counters = {}
     integral, maximum = (
@@ -1071,11 +1071,11 @@ def write_region_masks(
     from astroviper.node_tasks.imaging.find_continuum_first_round import (
         _write_array_region,
     )
-    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
     from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         pack_plane_masks,
         tile_occupancy,
     )
+    from astroviper.utils.chunk_io.zarr_chunks import _retry_transient_io
 
     def write():
         group = zarr.open_group(regions_store, mode="w", zarr_format=3)
@@ -1125,7 +1125,7 @@ def write_joint_mask_store(path: str, joint_mask: xr.Dataset) -> dict:
     dict
         ``bytes``: the bytes stored in the chunks.
     """
-    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+    from astroviper.utils.chunk_io.zarr_chunks import _retry_transient_io
 
     _retry_transient_io(
         f"write of {path}",
@@ -1166,8 +1166,10 @@ def find_continuum_ultra_task_bytes(
     it reads the primary beam) and one per region; the moment partials (a
     float64 integral and a maximum in the residual's dtype); the values a
     masked reduction gathers, in the residual's dtype and in float64; two
-    float64 blocks of rows; and a read unit being decoded with its stored
-    bytes.
+    float64 blocks of rows; and up to ``_READ_CONCURRENCY`` read units being
+    decoded with their stored bytes
+    (:func:`~astroviper.utils.chunk_io.read_array_region` reads the inner
+    chunks of a shard concurrently).
 
     Parameters
     ----------
@@ -1201,6 +1203,8 @@ def find_continuum_ultra_task_bytes(
     ValueError
         If ``pass_kind`` is not one of the three.
     """
+    from astroviper.utils.chunk_io.zarr_chunks import _READ_CONCURRENCY
+
     if pass_kind not in _PASS_KINDS:
         raise ValueError(f"pass_kind is one of {_PASS_KINDS}, not {pass_kind!r}")
     pixels = n_l * n_m
@@ -1219,7 +1223,7 @@ def find_continuum_ultra_task_bytes(
         + value_bytes * pixels * moments
         + value_bytes * gather_fraction * pixels
         + 2 * 8 * _BLOCK_ROWS * n_m
-        + 2 * read_unit_bytes
+        + 2 * _READ_CONCURRENCY * read_unit_bytes
     )
 
 
@@ -1302,7 +1306,7 @@ def _stream_batches(
     import itertools
     from concurrent.futures import ThreadPoolExecutor
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
+    from astroviper.utils.chunk_io import read_array_region
 
     arrays = {role: _open_array(paths[role]) for role in role_tiles}
     cube = arrays["sky"]
@@ -1431,7 +1435,7 @@ def _open_array(path):
     read is retried."""
     import zarr
 
-    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+    from astroviper.utils.chunk_io.zarr_chunks import _retry_transient_io
 
     return _retry_transient_io(
         f"metadata of {path}", lambda: zarr.open_array(path, mode="r")
@@ -1464,10 +1468,10 @@ def _new_counters():
 
 def _read_region(regions_store, name, n_m, counters):
     """A boolean ``(l, m)`` region of a regions store."""
-    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
     from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         unpack_plane_masks,
     )
+    from astroviper.utils.chunk_io import read_array_region
 
     packed = read_array_region(
         os.path.join(regions_store, name), {}, counters=counters

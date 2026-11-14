@@ -360,7 +360,7 @@ def _channel_cycle_control_params(
 
 def _select_chunk_writer(
     graph_mode,
-    skunk_works,
+    io_engine,
     image_sharding,
     output_image_format,
     image_store,
@@ -375,52 +375,24 @@ def _select_chunk_writer(
     the kept variables a chunk holds are written, and the others keep the
     fill value of the image store.
     """
-    if graph_mode and output_image_format == "fits":
-        # FITS performance path: pwrite the chunk's contiguous channel block
-        # (and its BEAMS-table rows) directly into the pre-created
-        # XRADIO-conformant FITS files -- disjoint byte ranges across tasks,
-        # no locking, no file creation.
-        from astroviper.node_tasks.imaging.utils import (
-            write_result_chunk_to_fits_skunk_works as writer,
-        )
-    elif graph_mode and skunk_works and image_sharding:
-        # Sharded performance path: write the chunk's inner-chunk blob(s) into
-        # shared, pre-created Zarr v3 shard files (far fewer files ->
-        # metadata-server relief; the "single parallel file" pattern).
-        from astroviper.node_tasks.imaging.utils import (
-            write_result_chunk_to_disk_sharded_skunk_works as writer,
-        )
-    elif graph_mode and skunk_works:
-        # Experimental performance path: encode and write only the chunk's
-        # blob(s) directly to the pre-created Zarr image store (no open_group).
-        from astroviper.node_tasks.imaging.utils import (
-            write_result_chunk_to_disk_using_zarr_skunk_works as writer,
-        )
-    elif graph_mode:
-        from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
-
-        def write(chunk_xds, chunk_task_coords):
-            write_result_chunk_to_disk_using_zarr(
-                image_store,
-                _variables_made(image_data_variables_keep, chunk_xds),
-                chunk_task_coords,
-                chunk_xds,
-            )
-
-        return write
-    else:
+    if not graph_mode:
 
         def write(chunk_xds, chunk_task_coords):
             chunk_xds.to_zarr(image_store, consolidated=True)
 
         return write
 
+    from astroviper.utils.io import write_result_chunk
+
     def write(chunk_xds, chunk_task_coords):
-        writer(
+        write_result_chunk(
+            io_engine,
             image_store,
             _variables_made(image_data_variables_keep, chunk_xds),
             chunk_task_coords,
             chunk_xds,
+            output_image_format=output_image_format,
+            image_sharding=image_sharding,
             processing_function_threads=processing_function_threads,
         )
 
@@ -553,7 +525,7 @@ def image_cube_single_field(
     clean_mask=None,
     auto_mask_params=None,
     memory_mode="in_memory",
-    skunk_works=False,
+    io_engine="chunk",
     data_group=None,
     task_id=0,
     input_data=None,
@@ -1098,20 +1070,17 @@ def image_cube_single_field(
           mask or, without a mask, on the pixels Chauvenet's criterion leaves.
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
-    skunk_works : bool, optional
-        If ``True`` use the experimental performance I/O path: load only the
-        data group's data variables straight from the Zarr chunk blobs with
-        :func:`~astroviper.node_tasks.imaging.utils.load_processing_set_skunk_works`
-        (reconstructing coordinates from the inputs) and write each result chunk
-        with
-        :func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_using_zarr_skunk_works`.
-        Both the skunk-works load and write spread their per-array / per-variable
-        I/O and (de)compression concurrently across ``processing_function_threads``
-        threads.  Requires ``data_group``.  Default ``False`` (production I/O).
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     data_group : dict, optional
         Resolved role->variable mapping for ``processing_set_data_group_name``
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), supplied
-        by the distributed graph; only used when ``skunk_works`` is ``True``.
+        by the distributed graph; only used when ``io_engine`` is ``"chunk"``.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     input_data : dict, optional
@@ -1123,10 +1092,10 @@ def image_cube_single_field(
         Measurement Set with XRADIO's ``xradio_msv2`` engine and gives every
         task, per MSv4 of its ``data_selection``, the data group's variables
         already restricted to that selection (lazily indexed arrays; see
-        :func:`~astroviper.node_tasks.imaging.utils.add_lazy_input_data`).
+        :func:`~astroviper.utils.measurement_set_v2_input.add_lazy_input_data`).
         The task reads them with
-        :func:`~astroviper.node_tasks.imaging.utils.load_processing_set_skunk_works_msv2`
-        (used only when ``input_data`` is ``None``; ``skunk_works`` and
+        :func:`~astroviper.utils.measurement_set_v2_input.load_processing_set_msv2`
+        (used only when ``input_data`` is ``None``; ``io_engine`` and
         ``data_group`` are not consulted for the read). Any read error skips
         the chunk, as for the other inputs, except
         ``xradio.measurement_set.MSv2ChangedError``: the Measurement Set
@@ -1148,17 +1117,17 @@ def image_cube_single_field(
         ``None`` (default) writes the whole task as one chunk.
     image_sharding : dict, optional
         Shard shape of the (Zarr v3 sharded) image store as ``{dimension_name:
-        shard_size}``; when set together with ``skunk_works`` the chunks are
+        shard_size}``; when set together with ``io_engine="chunk"`` the chunks are
         written with
-        :func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_sharded_skunk_works`.
+        :func:`~astroviper.utils.chunk_io.write_zarr_sharded`.
         ``None`` (default) selects the unsharded writer.
     output_image_format : str, optional
         On-disk format of the image store this task writes into: ``"zarr"``
         (default) or ``"fits"``.  With ``"fits"`` the chunk is ``pwrite``-en
         directly into the pre-created XRADIO-conformant FITS files
-        (:func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_fits_skunk_works`;
+        (:func:`~astroviper.utils.chunk_io.write_fits`;
         the driver created them with
-        :func:`~astroviper.node_tasks.imaging.utils.create_empty_fits_images`).
+        :func:`~astroviper.utils.chunk_io.create_empty_fits_images`).
     report_statistics : bool, optional
         The statistics only a report of the run needs; the distributed
         application sets it when it makes one. With ``True`` the image
@@ -1295,46 +1264,27 @@ def image_cube_single_field(
             # I/O coalescing). The framework has already applied the task-level
             # sub-selection, so use the dict directly.
             ps_xdt = input_data
-        elif lazy_input_data is not None:
-            # Measurement Set v2: read the lazily indexed selection that the
-            # distributed application attached to this task (the values are
-            # read by XRADIO's xradio_msv2 engine).
-            from astroviper.node_tasks.imaging.utils import (
-                load_processing_set_skunk_works_msv2,
-            )
-
-            ps_xdt = load_processing_set_skunk_works_msv2(lazy_input_data)
-        elif skunk_works:
-            # Experimental performance path: read only this chunk's data-group
-            # variables straight from the Zarr chunk blobs and reconstruct the
-            # coordinates from the inputs (no datatree/coords/sub-datasets open).
-            from astroviper.node_tasks.imaging.utils import (
-                load_processing_set_skunk_works,
-            )
-
-            ps_xdt = load_processing_set_skunk_works(
-                input_data_store,
-                sel_parms=data_selection,
-                data_group=data_group,
-                processing_set_data_group_name=processing_set_data_group_name,
-                frequency_coords=task_coords["frequency"]["data"],
-                instrument_polarization_basis=instrument_polarization_basis,
-                processing_function_threads=processing_function_threads,
-            )
         else:
-            from xradio.measurement_set.load_processing_set import load_processing_set
+            # A Measurement Set v2's lazily indexed selection (attached by the
+            # distributed application) is read by XRADIO's xradio_msv2 engine.
+            from astroviper.utils.node_task_io import load_processing_set
 
             ps_xdt = load_processing_set(
+                io_engine,
                 input_data_store,
-                sel_parms=data_selection,
-                data_group_name=processing_set_data_group_name,
-                load_sub_datasets=False,
+                data_selection,
+                processing_set_data_group_name,
+                frequency_coords=task_coords["frequency"]["data"],
+                instrument_polarization_basis=instrument_polarization_basis,
+                data_group=data_group,
+                processing_function_threads=processing_function_threads,
+                lazy_input_data=lazy_input_data,
             )
     except Exception as exc:
         # A Measurement Set v2 that changed after the distributed application
         # opened it no longer matches the graph: every remaining task would be
         # inconsistent, which a skipped chunk would hide, so the run aborts.
-        from astroviper.node_tasks.imaging.utils import is_fatal_load_error
+        from astroviper.utils.measurement_set_v2_input import is_fatal_load_error
 
         if is_fatal_load_error(exc):
             raise
@@ -1398,7 +1348,7 @@ def image_cube_single_field(
         chunk_channels = n_chan
     write_chunk = _select_chunk_writer(
         graph_mode,
-        skunk_works,
+        io_engine,
         image_sharding,
         output_image_format,
         image_store,

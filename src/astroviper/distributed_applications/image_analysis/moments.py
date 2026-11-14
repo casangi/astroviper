@@ -139,6 +139,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             ("get compute resources", "T_get_compute_resources"),
             ("compute dask graph", "T_compute_dask_graph"),
             ("consolidate metadata", "T_consolidate_metadata"),
+            ("write FITS images", "T_write_fits"),
             ("collect node task timing", "T_collect_timing_node_tasks"),
         ],
     ),
@@ -222,6 +223,8 @@ def moments(
     monitor_resources_seconds: float | None = None,
     dimension_flags: dict | None = None,
     image_data_group_in_role: str = "sky",
+    io_engine: str = "chunk",
+    output_image_format: str = "zarr",
     report: str | None = None,
 ):
     """Collapse an on-disk image along one axis into moment maps (CASA ``immoments``).
@@ -346,6 +349,17 @@ def moments(
         Role of ``image_data_group_in_name`` whose data variable is collapsed,
         e.g. ``"sky_primary_beam_corrected"`` of the imager's ``"restored"``
         group.  Only the default ``"sky"`` falls back to ``"SKY"``.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of ``moments_image_store``: a Zarr store, or a directory with one
+        FITS file per moment map (``io_engine="chunk"`` only), written from the
+        node tasks' Zarr maps at the end. Default ``"zarr"``.
     report : str, optional
         Make a report of the run: ``"html"`` (one self contained file) or
         ``"pdf"``, written next to the output store as
@@ -456,6 +470,13 @@ def moments(
         raise ValueError(
             "Only one of include_pixel_range and exclude_pixel_range may be given."
         )
+    if output_image_format not in ("zarr", "fits"):
+        raise ValueError("output_image_format must be 'zarr' or 'fits'.")
+    if output_image_format == "fits" and io_engine != "chunk":
+        raise ValueError("FITS output needs io_engine='chunk'.")
+    # With FITS output the node tasks write a Zarr store that the FITS files
+    # replace, at the path given.
+    fits_store = moments_image_store
     if not overwrite and os.path.exists(moments_image_store):
         raise RuntimeError(
             f"Already existing file {moments_image_store} will not be overwritten. "
@@ -785,6 +806,7 @@ def moments(
         "selection": selection,
         "moments_data_variables": moments_data_variables,
         "memory_budget_gb": memory_budget_gb,
+        "io_engine": io_engine,
         # Full-image flags, validated here once; each node task slices them to
         # its chunk. Normalized so index-range lists reach workers as compact
         # bool arrays.
@@ -817,8 +839,32 @@ def moments(
     timing_distributed_application["compute_end_unixtime"] = end
 
     start = time.time()
-    zarr.consolidate_metadata(moments_image_store)
-    timing_distributed_application["T_consolidate_metadata"] = time.time() - start
+    if output_image_format == "fits":
+        import shutil
+
+        from astroviper.utils.chunk_io import write_fits_image
+        from astroviper.utils.node_task_io import open_image
+
+        if os.path.lexists(fits_store):
+            shutil.rmtree(fits_store)
+        write_fits_image(
+            fits_store,
+            open_image(io_engine, moments_image_store).load(),
+            moments_data_variables,
+            data_variable_definitions=data_variable_definitions,
+            double_precision=any(
+                np.dtype(definition["dtype"]).itemsize == 8
+                for definition in data_variable_definitions.values()
+            ),
+        )
+        shutil.rmtree(moments_image_store)
+        moments_image_store = fits_store
+        timing_distributed_application["T_consolidate_metadata"] = 0.0
+        timing_distributed_application["T_write_fits"] = time.time() - start
+    else:
+        zarr.consolidate_metadata(moments_image_store)
+        timing_distributed_application["T_consolidate_metadata"] = time.time() - start
+        timing_distributed_application["T_write_fits"] = 0.0
 
     start = time.time()
     frames = []

@@ -1,6 +1,6 @@
 """Tests of the node tasks of find_continuum_ultra.
 
-The tasks run on a cube written channel by channel by the sharded skunk_works
+The tasks run on a cube written channel by channel by the sharded chunk
 writer and are compared with the processing functions of
 ``find_continuum_ultra.cube_reductions`` applied to the whole cube.
 """
@@ -44,9 +44,6 @@ from astroviper.node_tasks.imaging.find_continuum_ultra import (
     write_joint_mask_store,
     write_region_masks,
 )
-from astroviper.node_tasks.imaging.utils import (
-    write_result_chunk_to_disk_sharded_skunk_works,
-)
 from astroviper.processing_functions.imaging.config_check import (
     param_check_find_continuum,
 )
@@ -71,6 +68,7 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.settings impor
 from astroviper.processing_functions.imaging.find_continuum_ultra.step_results import (
     FirstRoundRows,
 )
+from astroviper.utils.chunk_io import write_zarr_sharded
 from astroviper.utils.io import (
     create_empty_data_variables_on_disk,
     write_zarr_image_store,
@@ -154,7 +152,7 @@ MERGE_COLUMNS = {
     scope="module", params=[1, 2], ids=["polarization_chunk_1", "polarization_chunk_2"]
 )
 def cube(request, tmp_path_factory):
-    """Stokes I and Q written channel by channel by the sharded skunk_works
+    """Stokes I and Q written channel by channel by the sharded chunk
     writer; the primary beam is below the limit in the corner chunks."""
     directory = tmp_path_factory.mktemp("cube")
     line = dict(
@@ -204,7 +202,7 @@ def cube(request, tmp_path_factory):
         image_sharding={"frequency": SHARD},
     )
     for channel in range(N_CHANNELS):
-        write_result_chunk_to_disk_sharded_skunk_works(
+        write_zarr_sharded(
             store,
             ["sky_residual", "primary_beam"],
             {"frequency": {"slice": slice(channel, channel + 1)}},
@@ -798,7 +796,7 @@ def test_a_transient_error_of_a_slot_stat_is_retried(
     """A Lustre eviction fails the stat of a listed slot with EIO: the stat is
     repeated instead of taken for a missing slot, and the maps are those of a
     merge without it."""
-    from astroviper.node_tasks.imaging.utils import skunk_works
+    from astroviper.utils.chunk_io import zarr_chunks
 
     partials_store, maps_store = _moment_stores(tmp_path)
     outputs = _frequency_tasks(
@@ -813,7 +811,7 @@ def test_a_transient_error_of_a_slot_stat_is_retried(
         planes_per_batch=3,
     )
     written_slots = _reduce(outputs)["written_slots"]
-    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(zarr_chunks, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
     stat, failures = os.stat, []
 
     def evicted_once(path, *args, **kwargs):
@@ -838,7 +836,7 @@ def test_transient_errors_of_metadata_reads_are_retried(
     again, and the first round is that of a pass without them."""
     import pathlib
 
-    from astroviper.node_tasks.imaging.utils import skunk_works
+    from astroviper.utils.chunk_io import zarr_chunks
 
     store = str(tmp_path / "first_round.zarr")
     create_find_continuum_first_round_store(
@@ -857,7 +855,7 @@ def test_transient_errors_of_metadata_reads_are_retried(
         cube["rest_frequency"],
     )
     partials_store, maps_store = _moment_stores(tmp_path / "pass")
-    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(zarr_chunks, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
     targets = {
         os.path.join(cube["store"], name, "zarr.json") for name in VARIABLES.values()
     }
@@ -901,9 +899,9 @@ def test_transient_errors_of_metadata_reads_are_retried(
 def test_a_transient_error_of_the_regions_store_is_retried(tmp_path, monkeypatch):
     """A Lustre eviction fails the creation of a regions store with EIO: the
     store is made again and holds the regions."""
-    from astroviper.node_tasks.imaging.utils import skunk_works
+    from astroviper.utils.chunk_io import zarr_chunks
 
-    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(zarr_chunks, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
     store = str(tmp_path / "regions.zarr")
     open_group, failures = zarr.open_group, []
 
@@ -1096,12 +1094,12 @@ def test_a_transient_error_of_a_slot_write_is_retried(
 ):
     """A Lustre eviction fails one write of a slot with EIO: the write is
     repeated on a fresh open, and the maps are those of a pass without it."""
-    from astroviper.node_tasks.imaging.utils import skunk_works
+    from astroviper.utils.chunk_io import zarr_chunks
 
     _, expected = _selection_pass(
         cube, first_round, selection, cube["store"], tmp_path / "expected", 5
     )
-    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(zarr_chunks, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
     open_array, failures = zarr.open_array, []
 
     def evicted_once(path, *args, **kwargs):
@@ -1215,13 +1213,14 @@ def test_refusals(cube, first_round, tmp_path):
         (("first_round", False, 0, True, 0.0), 7.3),  # store without moments
         (("spectrum", False, 1, False, 0.30), 6.5),
         (("spectrum", True, 2, False, 0.30), 10.4),  # with normalization
-        (("selection_moments", False, 1, True, 0.19), 7.5),  # round original
-        (("selection_moments", False, 0, True, 0.0), 7.1),
+        (("selection_moments", False, 1, True, 0.19), 7.6),  # round original
+        (("selection_moments", False, 0, True, 0.0), 7.2),
     ],
 )
 def test_task_memory_bounds_at_the_medium_scale(arguments, gib):
     """The bounds at 11250^2, 4 planes per batch and 625^2 read units, within
-    0.1 GiB of design section 9.2, below the task budget of 15.6 GiB."""
+    0.1 GiB of design section 9.2 (which decodes one read unit at a time, not
+    ``_READ_CONCURRENCY``), below the task budget of 15.6 GiB."""
     pass_kind, read_primary_beam, n_regions, moments, gather_fraction = arguments
     task_bytes = find_continuum_ultra_task_bytes(
         pass_kind,
@@ -1240,6 +1239,8 @@ def test_task_memory_bounds_at_the_medium_scale(arguments, gib):
 
 
 def test_task_memory_counts_its_terms():
+    from astroviper.utils.chunk_io.zarr_chunks import _READ_CONCURRENCY
+
     n = 1000
 
     def task_bytes(pass_kind="selection_moments", **changes):
@@ -1271,7 +1272,7 @@ def test_task_memory_counts_its_terms():
         == 16 * n * n
     )
     assert task_bytes(gather_fraction=0.5) - base == 6 * n * n
-    assert task_bytes(read_unit_bytes=10**6) - base == 2 * 10**6
+    assert task_bytes(read_unit_bytes=10**6) - base == 2 * _READ_CONCURRENCY * 10**6
     assert task_bytes("spectrum") - base == 2 * 4 * packed + n * n
     first_round = task_bytes("first_round", read_primary_beam=True, moments=True)
     assert first_round - task_bytes(read_primary_beam=True, moments=True) == 3 * n * n
