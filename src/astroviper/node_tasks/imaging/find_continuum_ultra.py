@@ -814,7 +814,10 @@ def merge_find_continuum_moment_partials(
         _execution_identity,
         _write_array_region,
     )
-    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
+    from astroviper.node_tasks.imaging.utils.skunk_works import (
+        _retry_transient_io,
+        read_array_region,
+    )
     from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         finalize_moments,
         merge_moment_partials_in_tree_order,
@@ -847,11 +850,16 @@ def merge_find_continuum_moment_partials(
                 key = arrays[field].metadata.encode_chunk_key(
                     (slot, rows.start // grid[1], columns.start // grid[2])
                 )
-                if not os.path.exists(os.path.join(path, key)):
-                    raise FileNotFoundError(
-                        f"Slot {slot} is listed as written, but "
-                        f"{os.path.join(path, key)} is absent"
+                # A transient error of the stat is retried, not taken for absence.
+                shard = os.path.join(path, key)
+                try:
+                    _retry_transient_io(
+                        f"stat of {shard}", lambda shard=shard: os.stat(shard)
                     )
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"Slot {slot} is listed as written, but {shard} is absent"
+                    ) from None
                 partials[field] = read_array_region(
                     path,
                     {"slot": slice(slot, slot + 1), "l": rows, "m": columns},

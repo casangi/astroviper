@@ -729,6 +729,44 @@ def test_merge_of_unwritten_and_missing_slots(cube, tmp_path):
         )
 
 
+def test_a_transient_error_of_a_slot_stat_is_retried(
+    cube, first_round, tmp_path, monkeypatch
+):
+    """A Lustre eviction fails the stat of a listed slot with EIO: the stat is
+    repeated instead of taken for a missing slot, and the maps are those of a
+    merge without it."""
+    from astroviper.node_tasks.imaging.utils import skunk_works
+
+    partials_store, maps_store = _moment_stores(tmp_path)
+    outputs = _frequency_tasks(
+        find_continuum_first_round_task,
+        cube["store"],
+        primary_beam_limit=LIMIT,
+        moment_channel_weights=cube["weights"],
+        first_round_store=first_round["store"],
+        compute_masks=False,
+        compute_moments=True,
+        partials_store=partials_store,
+        planes_per_batch=3,
+    )
+    written_slots = _reduce(outputs)["written_slots"]
+    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    stat, failures = os.stat, []
+
+    def evicted_once(path, *args, **kwargs):
+        shard = os.path.join(partials_store, "SKY_MOMENT_INTEGRATED", "c", "")
+        if os.fspath(path).startswith(shard) and not failures:
+            failures.append(path)
+            raise OSError(errno.EIO, "Input/output error")
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", evicted_once)
+    integral, maximum, _ = _merge(partials_store, maps_store, written_slots)
+    assert len(failures) == 1
+    np.testing.assert_array_equal(integral, first_round["integral"])
+    np.testing.assert_array_equal(maximum, first_round["maximum"])
+
+
 def test_reduce_concatenates_rows_and_folds_resource_series():
     def leaf(task_id, channels, slots):
         channels = np.array(channels, dtype=np.int32)
