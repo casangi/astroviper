@@ -235,8 +235,9 @@ def drain_first_round_moments(
     with a distributed client, one pop per worker, pinned to it, in sorted
     address order (a pop not finished after ``timeout_seconds`` is cancelled,
     so the channels of its worker count as missing); otherwise the driver's own
-    process. A window is complete when every pop ran where it was sent and the
-    pops added each of its channels exactly once. The slots of a complete
+    process. A window is complete when every pop ran where it was sent, the
+    pops added each of its channels exactly once and listed each of its slots
+    once. The slots of a complete
     window, sorted by worker address, process and sequence, are merged tile by
     tile into ``MOMENT_0`` and ``MOMENT_8``
     (:func:`~astroviper.node_tasks.imaging.find_continuum.merge_first_round_moment_tile`,
@@ -279,14 +280,19 @@ def drain_first_round_moments(
         if pop["counts"] is not None:
             counts += pop["counts"]
         for window, name in pop["slots"]:
-            pid, sequence = (int(part) for part in name.split("-"))
-            slots[window].append((pop["address"] or "", pid, sequence, name))
+            pid, _, sequence = name.split("-")
+            slots[window].append((pop["address"] or "", int(pid), int(sequence), name))
     placement_ok = all(pop["placement_ok"] for pop in pops)
     n_missing = [int(np.sum(counts[start:stop] == 0)) for start, stop in ranges]
     n_duplicated = [int(np.sum(counts[start:stop] > 1)) for start, stop in ranges]
+    names = [[name for *_, name in sorted(window_slots)] for window_slots in slots]
+    # Two pops listing one slot would merge one file twice.
+    distinct = [len(set(window_names)) == len(window_names) for window_names in names]
     moments_complete = [
-        placement_ok and missing == 0 and duplicated == 0
-        for missing, duplicated in zip(n_missing, n_duplicated, strict=True)
+        placement_ok and missing == 0 and duplicated == 0 and unique
+        for missing, duplicated, unique in zip(
+            n_missing, n_duplicated, distinct, strict=True
+        )
     ]
     records = [
         {
@@ -302,7 +308,6 @@ def drain_first_round_moments(
     ]
     group = zarr.open_group(first_round_store, mode="r+")
     tiles = _merge_tiles(group["MOMENT_0"])
-    names = [[name for *_, name in sorted(window_slots)] for window_slots in slots]
     tasks = [
         (first_round_store, partials_directory, window, names[window], tile)
         for window, complete in enumerate(moments_complete)
@@ -333,7 +338,8 @@ def drain_first_round_moments(
             logger.warning(
                 f"The imager's moments of channels {ranges[window]} are incomplete "
                 f"({n_missing[window]} channels missing, {n_duplicated[window]} "
-                f"added twice or more, placement {'ok' if placement_ok else 'failed'})"
+                f"added twice or more, placement {'ok' if placement_ok else 'failed'}"
+                f"{'' if distinct[window] else ', a slot listed twice'})"
                 ": find_continuum computes them."
             )
     result = {

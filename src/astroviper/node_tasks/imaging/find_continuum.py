@@ -35,7 +35,8 @@ _MASKS = ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_PROFILE_MASK")
 
 # Run id to the first-round moments of this process: "counts" (additions per
 # channel), "moments" (window to its FindContinuumMoments), "recent" (held
-# windows, least recently used first), "slots", "sequence" and "slot_bytes".
+# windows, least recently used first), "slots", "token" (unique to the entry,
+# so that slot names differ across hosts), "sequence" and "slot_bytes".
 _FIRST_ROUND_MOMENTS = {}
 _FIRST_ROUND_LOCK = threading.Lock()
 
@@ -1074,7 +1075,8 @@ def add_first_round_moments(
         ``(l, m)``.
     partials_directory : str
         Directory of the slots, saved as
-        ``W<window>/<pid>-<sequence>.<FIELD>.npy``.
+        ``W<window>/<pid>-<token>-<sequence>.<FIELD>.npy``, ``token`` a UUID
+        of the process's entry.
     channels : sequence of int
         Channel of every plane in the cube.
     sky : numpy.ndarray
@@ -1083,6 +1085,8 @@ def add_first_round_moments(
     inside : numpy.ndarray
         Boolean primary-beam limit mask, shaped as ``sky``.
     """
+    import uuid
+
     from astroviper.processing_functions.imaging.find_continuum import (
         _BLOCK_ROWS,
         FindContinuumMoments,
@@ -1099,6 +1103,7 @@ def add_first_round_moments(
                 "moments": {},
                 "recent": [],
                 "slots": [],
+                "token": uuid.uuid4().hex,
                 "sequence": 0,
                 "slot_bytes": 0,
             }
@@ -1422,7 +1427,7 @@ def _flush_first_round_window(entry, window, partials_directory):
     """Save the moments of a window of a registry entry to a slot and drop them."""
     moments = entry["moments"].pop(window)
     entry["recent"].remove(window)
-    name = f"{os.getpid()}-{entry['sequence']}"
+    name = f"{os.getpid()}-{entry['token']}-{entry['sequence']}"
     entry["sequence"] += 1
     directory = os.path.join(partials_directory, f"W{window}")
     os.makedirs(directory, exist_ok=True)

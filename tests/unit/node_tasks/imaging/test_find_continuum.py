@@ -1116,8 +1116,10 @@ def test_registry_holds_windows_and_flushes_the_least_recent(
     assert 0 <= pop["T_reduce_node"] == pop["end_unixtime"] - pop["start_unixtime"]
     np.testing.assert_array_equal(pop["counts"], np.ones(N_REGISTRY, np.uint16))
     expected_windows = [0, 1] if windows_in_memory == 2 else [0, 1, 0, 1, 0, 1]
+    token = pop["slots"][0][1].split("-")[1]
+    assert len(token) == 32
     assert pop["slots"] == [
-        [window, f"{pid}-{sequence}"]
+        [window, f"{pid}-{token}-{sequence}"]
         for sequence, window in enumerate(expected_windows)
     ]
     files = [

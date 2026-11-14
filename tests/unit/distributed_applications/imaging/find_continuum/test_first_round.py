@@ -3,6 +3,7 @@
 import os
 import shutil
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -254,6 +255,33 @@ def _attributes(store):
     return zarr.open_group(store, mode="r").attrs["find_continuum_first_round"]
 
 
+class _InProcessClient:
+    """A distributed client that runs what is submitted at once."""
+
+    def submit(self, function, *args, pure=True):
+        try:
+            value = SimpleNamespace(value=function(*args), error=None)
+        except Exception as exc:
+            value = SimpleNamespace(value=None, error=exc)
+
+        def result(timeout=None):
+            if value.error is not None:
+                raise value.error
+            return value.value
+
+        return SimpleNamespace(result=result)
+
+    def gather(self, futures):
+        return [future.result() for future in futures]
+
+
+def _drain_pops(monkeypatch, store, pops, windows):
+    """The drain of a distributed client whose workers popped ``pops``."""
+    monkeypatch.setattr(first_round, "_distributed_client", _InProcessClient)
+    monkeypatch.setattr(first_round, "_pop_on_workers", lambda *args: pops)
+    return drain_first_round_moments("run", store, windows)
+
+
 def test_store_paths():
     assert (
         find_continuum_first_round_store_path("/d/2019.1.01463.S_v3_medium.img.zarr/")
@@ -381,8 +409,16 @@ def test_drain_merges_the_slots_in_sequence_order(cube, tmp_path, monkeypatch):
     assert result["moments_complete"] == [True, True]
     assert result["n_slots"] == 14
     sequences = {0: [0, 2, 4, 6, 8, 10, 12], 1: [1, 3, 5, 7, 9, 11, 13]}
-    assert slot_names == {
-        window: [f"{os.getpid()}-{sequence}" for sequence in numbers]
+    names = [name.split("-") for window in (0, 1) for name in slot_names[window]]
+    tokens = {token for _, token, _ in names}
+    assert len(tokens) == 1 and len(tokens.pop()) == 32
+    assert {
+        window: [(int(pid), int(sequence)) for pid, _, sequence in parts]
+        for window, parts in (
+            (w, [n.split("-") for n in slot_names[w]]) for w in (0, 1)
+        )
+    } == {
+        window: [(os.getpid(), sequence) for sequence in numbers]
         for window, numbers in sequences.items()
     }
     leaves = {
@@ -434,6 +470,69 @@ def test_drain_leaves_a_window_with_a_coverage_error_incomplete(cube, tmp_path, 
     assert np.isnan(moment_0[1 - good]).all() and np.isnan(moment_8[1 - good]).all()
     assert {record["window"] for record in records[1:]} == {good}
     assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+
+def test_drain_merges_the_slots_of_processes_with_the_same_pid(
+    cube, tmp_path, monkeypatch
+):
+    """Worker processes on two hosts (or in two PID namespaces) can have the
+    same pid; their slots in the shared directory have different names, and
+    the slots of both are merged in address order."""
+    import dask.distributed
+
+    store = _create(cube, tmp_path / "fr.zarr")
+    partials_directory = find_continuum_first_round_partials_path(store)
+    os.makedirs(partials_directory)
+    monkeypatch.setattr(node_tasks.os, "getpid", lambda: 4242)
+    halves = [(range(0, 8), range(8, 16)), (range(16, 25), range(25, 34))]
+    chunks, pops = [], []
+    for k, address in enumerate(("tcp://a", "tcp://b")):
+        worker = SimpleNamespace(address=address, name=address)
+        monkeypatch.setattr(
+            dask.distributed, "get_worker", lambda worker=worker: worker
+        )
+        for channels in (halves[0][k], halves[1][k]):
+            chunks.append(
+                find_continuum_first_round_chunk(
+                    *_chunk(cube, store, slice(channels[0], channels[-1] + 1), "run")
+                )
+            )
+        pops.append(
+            node_tasks.pop_first_round_moments("run", address, partials_directory)
+        )
+    _write_rows(store, chunks)
+    result, _ = _drain_pops(monkeypatch, store, pops, cube["windows"])
+
+    assert result["moments_complete"] == [True, True]
+    names = [{name for _, name in pop["slots"]} for pop in pops]
+    assert len(names[0]) == len(names[1]) == 2 and not names[0] & names[1]
+    moment_0, moment_8 = _stored_moments(store)
+    for window, channel_lists in enumerate(halves):
+        merged = merge_in_tree_order(
+            _moments(cube, window, channels) for channels in channel_lists
+        ).finalize()
+        np.testing.assert_array_equal(moment_0[window], merged[0])
+        np.testing.assert_array_equal(moment_8[window], _direct(cube, window)[8])
+
+
+def test_drain_leaves_a_window_with_a_slot_listed_twice_incomplete(
+    cube, tmp_path, monkeypatch
+):
+    """A slot that two pops list is not merged twice: its window is left
+    incomplete."""
+    store = _first_round(cube, tmp_path / "fr.zarr")
+    pop = node_tasks.pop_first_round_moments(
+        "run", None, find_continuum_first_round_partials_path(store)
+    )
+    copy = dict(pop, counts=np.zeros_like(pop["counts"]), slots=pop["slots"][:1])
+    result, records = _drain_pops(monkeypatch, store, [pop, copy], cube["windows"])
+
+    assert result["moments_complete"] == [False, True]
+    assert result["n_missing"] == result["n_duplicated"] == [0, 0]
+    assert {record["window"] for record in records[2:]} == {1}
+    moment_0, moment_8 = _stored_moments(store)
+    assert np.isnan(moment_0[0]).all() and np.isnan(moment_8[0]).all()
+    np.testing.assert_array_equal(moment_8[1], _direct(cube, 1)[8])
 
 
 def test_drain_refuses_pops_that_ran_elsewhere(cube, tmp_path, monkeypatch):
