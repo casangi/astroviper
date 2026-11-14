@@ -62,6 +62,7 @@ def simulate_processing_set(
     sky_components: list | None = None,
     sky_model_image: str | None = None,
     sky_model_image_predict: dict | None = None,
+    io_engine: str = "xradio",
 ):
     """Simulate the visibilities of one time/frequency chunk and write them to disk.
 
@@ -153,6 +154,12 @@ def simulate_processing_set(
         ``{"predict": "gridded", "gridding_kernel_params": ...,
         "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
         which has no w term and so needs ``uvw_params["w_term"]`` False.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks: ``"chunk"`` writes the visibilities with
+        :func:`astroviper.utils.chunk_io.write_zarr` and reads
+        ``sky_model_image`` by byte offset; ``"xradio"`` writes with
+        :func:`~astroviper.utils.measurement_set_tools.write_visibility_chunk_to_disk`
+        and reads with XRADIO.
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -267,9 +274,9 @@ def simulate_processing_set(
         )
     model_image = None
     if sky_model_image is not None:
-        from xradio.image import open_image
+        from astroviper.utils.node_task_io import load_image
 
-        model_image = open_image(sky_model_image).load()
+        model_image = load_image(io_engine, sky_model_image).load()
     phase_center_chunk = _slice_time_axis(phase_center_ra_dec, 0, time_slice)
     pointing_chunk = _slice_time_axis(pointing_ra_dec, 0, time_slice)
 
@@ -322,7 +329,18 @@ def simulate_processing_set(
     variables = ["VISIBILITY", "WEIGHT", "FLAG"]
     if (frequency_slice.start or 0) == 0:
         variables.append("UVW")
-    write_visibility_chunk_to_disk(ms_path, task_coords, xds[variables])
+    if io_engine == "chunk":
+        from astroviper.utils import chunk_io
+
+        chunk_io.write_zarr(
+            ms_path,
+            [name.lower() for name in variables],
+            task_coords,
+            xds[variables],
+            processing_function_threads=processing_function_threads,
+        )
+    else:
+        write_visibility_chunk_to_disk(ms_path, task_coords, xds[variables])
     timing["T_write"] = _time.time() - start
     timing["T_simulate_task"] = _time.time() - task_start
 
