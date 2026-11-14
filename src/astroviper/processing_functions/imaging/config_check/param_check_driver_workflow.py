@@ -212,13 +212,6 @@ def check_driver_workflow(config, *, mode, require_complete=False):
             if name in config and config[name] not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}.")
         if (
-            config.get("weight_memory_mode", "in_place") == "in_place"
-            and config.get("io_engine") == "chunk"
-        ):
-            raise ValueError(
-                "weight_memory_mode='in_place' is not supported with io_engine='chunk'."
-            )
-        if (
             config.get("write_imaging_weights_to_ps", False)
             and config.get("weight_memory_mode", "in_place") != "in_place"
         ):

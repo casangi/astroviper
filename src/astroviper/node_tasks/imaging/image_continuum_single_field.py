@@ -137,8 +137,62 @@ def _stored_coordinate_indexer(stored_values, selected_values, dimension):
     return indices
 
 
-def _write_continuum_weights_in_place(ps_xdt, image_store):
+def _write_cache_region(io_engine, target, array_path, indexers, values):
+    """Write ``values`` at ``indexers`` of the cache array ``target``.
+
+    ``"xradio"`` writes the orthogonal selection with zarr-python. ``"chunk"``
+    writes whole chunks with :func:`astroviper.utils.chunk_io.write_zarr`: the
+    task owns the contiguous positions it writes along ``frequency`` (one chunk
+    per channel), every other dimension is written in full and positions the
+    task does not hold keep the cache's fill value.
+    """
+    import os
+
+    import numpy as np
+
+    if io_engine != "chunk":
+        target.oindex[tuple(indexers)] = values
+        return
+
+    import xarray as xr
+
+    from astroviper.utils import chunk_io
+
+    dims = (
+        tuple(target.metadata.dimension_names)
+        if target.metadata.zarr_format == 3
+        else tuple(target.attrs["_ARRAY_DIMENSIONS"])
+    )
+    axis = dims.index("frequency")
+    index = [
+        np.arange(n)[ix] if isinstance(ix, slice) else np.asarray(ix)
+        for ix, n in zip(indexers, target.shape, strict=True)
+    ]
+    owned = index[axis]
+    start, stop = int(owned.min()), int(owned.min()) + owned.size
+    if not np.array_equal(np.sort(owned), np.arange(start, stop)):
+        raise ValueError(
+            f"{array_path}: the task's frequency positions are not contiguous."
+        )
+    values = np.asarray(values)
+    shape = list(target.shape)
+    shape[axis] = stop - start
+    block = np.full(shape, target.fill_value, dtype=values.dtype)
+    index[axis] = owned - start
+    block[np.ix_(*index)] = values
+    store, name = os.path.split(array_path)
+    chunk_io.write_zarr(
+        store,
+        [name.lower()],
+        {"frequency": {"slice": slice(start, stop)}},
+        xr.Dataset({name: (dims, block)}),
+    )
+
+
+def _write_continuum_weights_in_place(ps_xdt, image_store, io_engine):
     """Write task-local imaging weights into the output-store cache."""
+    import os
+
     import numpy as np
     import zarr
 
@@ -197,7 +251,18 @@ def _write_continuum_weights_in_place(ps_xdt, image_store):
                 )
             )
 
-        target.oindex[tuple(indexers)] = np.asarray(weight.values)
+        _write_cache_region(
+            io_engine,
+            target,
+            os.path.join(
+                image_store,
+                _CONTINUUM_WEIGHT_CACHE_GROUP,
+                ms_name,
+                _CONTINUUM_WEIGHT_CACHE_VARIABLE,
+            ),
+            indexers,
+            np.asarray(weight.values),
+        )
 
 
 def _load_continuum_weights_in_place(
@@ -314,8 +379,10 @@ def _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id):
     )
 
 
-def _write_wideband_primary_beam_in_place(primary_beam_xds, image_store):
+def _write_wideband_primary_beam_in_place(primary_beam_xds, image_store, io_engine):
     """Write one task's MVC primary beam into its disjoint cache channels."""
+    import os
+
     import numpy as np
     import zarr
 
@@ -344,15 +411,17 @@ def _write_wideband_primary_beam_in_place(primary_beam_xds, image_store):
         primary_beam.coords["frequency"].values,
         "frequency",
     )
-    target.oindex[
-        (
-            slice(None),
-            frequency_indexer,
-            slice(None),
-            slice(None),
-            slice(None),
-        )
-    ] = np.asarray(primary_beam.values)
+    _write_cache_region(
+        io_engine,
+        target,
+        os.path.join(
+            image_store,
+            _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP,
+            _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+        ),
+        (slice(None), frequency_indexer, slice(None), slice(None), slice(None)),
+        np.asarray(primary_beam.values),
+    )
 
 
 def _load_wideband_primary_beam_in_place(img_xds, image_store):
@@ -398,8 +467,10 @@ def _load_wideband_primary_beam_in_place(img_xds, image_store):
     )
 
 
-def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store):
+def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store, io_engine):
     """Write the globally reduced observed MFS grid into its prepared cache."""
+    import os
+
     import xarray as xr
     import zarr
 
@@ -413,6 +484,16 @@ def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store):
     if _MFS_VISIBILITY_GRID_CACHE_GROUP not in root:
         raise KeyError("The in-place MFS visibility-grid cache is not initialized.")
 
+    if io_engine == "chunk":
+        from astroviper.utils import chunk_io
+
+        chunk_io.write_zarr(
+            os.path.join(image_store, _MFS_VISIBILITY_GRID_CACHE_GROUP),
+            [str(name).lower() for name in observed_grid_xds.data_vars],
+            {},
+            observed_grid_xds,
+        )
+        return
     observed_grid_xds.to_zarr(
         image_store,
         group=_MFS_VISIBILITY_GRID_CACHE_GROUP,
@@ -476,8 +557,10 @@ def _extract_mvc_observed_visibility_grid(img_xds):
     return img_xds, observed_grid_xds
 
 
-def _write_mvc_visibility_grid_in_place(observed_grid_xds, image_store):
+def _write_mvc_visibility_grid_in_place(observed_grid_xds, image_store, io_engine):
     """Write one task's disjoint MVC observed UV planes into the cache store."""
+    import os
+
     import numpy as np
     import zarr
 
@@ -490,12 +573,21 @@ def _write_mvc_visibility_grid_in_place(observed_grid_xds, image_store):
         observed_grid_xds.coords["frequency"].values,
         "frequency",
     )
-    cache["VISIBILITY"].oindex[
-        (slice(None), frequency_indexer, slice(None), slice(None), slice(None))
-    ] = np.asarray(observed_grid_xds["VISIBILITY"].values)
-    cache["VISIBILITY_NORMALIZATION"].oindex[
-        (slice(None), frequency_indexer, slice(None))
-    ] = np.asarray(observed_grid_xds["VISIBILITY_NORMALIZATION"].values)
+    group_path = os.path.join(image_store, _MVC_VISIBILITY_GRID_CACHE_GROUP)
+    _write_cache_region(
+        io_engine,
+        cache["VISIBILITY"],
+        os.path.join(group_path, "VISIBILITY"),
+        (slice(None), frequency_indexer, slice(None), slice(None), slice(None)),
+        np.asarray(observed_grid_xds["VISIBILITY"].values),
+    )
+    _write_cache_region(
+        io_engine,
+        cache["VISIBILITY_NORMALIZATION"],
+        os.path.join(group_path, "VISIBILITY_NORMALIZATION"),
+        (slice(None), frequency_indexer, slice(None)),
+        np.asarray(observed_grid_xds["VISIBILITY_NORMALIZATION"].values),
+    )
 
 
 def _load_mvc_visibility_grid_in_place(img_xds, image_store):
@@ -1629,7 +1721,7 @@ def residual_update_continuum_single_field(
     ):
         pb_xds = _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id)
         if wideband_primary_beam_memory_mode == "in_place":
-            _write_wideband_primary_beam_in_place(pb_xds, image_store)
+            _write_wideband_primary_beam_in_place(pb_xds, image_store, io_engine)
             pb_xds = None
 
     if continuum_mode == "mvc":
@@ -1641,6 +1733,7 @@ def residual_update_continuum_single_field(
                 _write_mvc_visibility_grid_in_place(
                     mvc_observed_visibility_grid_xds,
                     image_store,
+                    io_engine,
                 )
                 mvc_observed_visibility_grid_xds = None
 
@@ -1699,7 +1792,7 @@ def residual_update_continuum_single_field(
 
         if weight_memory_mode == "in_place":
             start = time.time()
-            _write_continuum_weights_in_place(ps_xdt, image_store)
+            _write_continuum_weights_in_place(ps_xdt, image_store, io_engine)
             T_write_imaging_weights = time.time() - start
             return_weight_datasets = {}
 
@@ -2403,7 +2496,7 @@ def degrid_imaging_weights_continuum_node(
 
     if weight_memory_mode == "in_place":
         start = time.time()
-        _write_continuum_weights_in_place(ps_xdt, image_store)
+        _write_continuum_weights_in_place(ps_xdt, image_store, io_engine)
         T_write_imaging_weights = time.time() - start
         weight_datasets = {}
 
@@ -3277,7 +3370,11 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
                     "In-place MFS visibility caching requires "
                     "input_params['image_store']."
                 )
-            _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store)
+            _write_mfs_visibility_grid_in_place(
+                observed_grid_xds,
+                image_store,
+                input_params.get("io_engine", "xradio"),
+            )
             return None
         return observed_grid_xds
 

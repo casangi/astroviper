@@ -216,6 +216,7 @@ def test_in_place_mfs_writer_requires_driver_created_cache(tmp_path):
         continuum_node._write_mfs_visibility_grid_in_place(
             _mfs_uv_grid(5.0),
             str(image_store),
+            "xradio",
         )
 
     assert "_MFS_VISIBILITY_GRID_CACHE" not in zarr.open_group(image_store)
@@ -964,7 +965,9 @@ def test_weight_degrid_node_writes_in_place_and_returns_no_array_cache(monkeypat
     monkeypatch.setattr(
         continuum_node,
         "_write_continuum_weights_in_place",
-        lambda ps_xdt, ps_store: written.update(processing_set=ps_xdt, store=ps_store),
+        lambda ps_xdt, ps_store, io_engine: written.update(
+            processing_set=ps_xdt, store=ps_store
+        ),
     )
     params = _weight_node_params()
     params.update(global_weighting_xds=xr.Dataset(), image_store="image.zarr")

@@ -1453,8 +1453,8 @@ def test_tw_hydra_failed_in_place_run_removes_its_weights(
     contents = _store_snapshot(store, parse_metadata=True)
     write_weights = node_module._write_continuum_weights_in_place
 
-    def write_then_fail(ps_xdt, image_store):
-        write_weights(ps_xdt, image_store)
+    def write_then_fail(ps_xdt, image_store, io_engine):
+        write_weights(ps_xdt, image_store, io_engine)
         raise RuntimeError("injected failure")
 
     monkeypatch.setattr(
@@ -2840,3 +2840,34 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     assert result["controller"].total_iter_done > 0
     assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8
     assert result["residual_statistics"].data
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_tw_hydra_in_place_caches_equal_with_both_io_engines(
+    tmp_path, tw_hydra_store, continuum_mode
+):
+    """With the in-place weight, visibility-grid and primary-beam caches, the
+    chunk I/O engine gives the images of the xradio engine."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    images = {}
+    for io_engine in ("chunk", "xradio"):
+        _, images[io_engine] = _run_tw_hydra_continuum(
+            tw_hydra_store,
+            tmp_path / f"tw_hydra_in_place_{io_engine}.img.zarr",
+            processing_set,
+            None,
+            continuum_mode,
+            {"weighting": "briggs", "robust": 0.5, "weighting_scope": "global"},
+            io_engine=io_engine,
+            weight_memory_mode="in_place",
+            visibility_memory_mode="in_place",
+            wideband_primary_beam_memory_mode="in_place",
+        )
+    for name in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+        np.testing.assert_allclose(
+            images["chunk"][name].values,
+            images["xradio"][name].values,
+            rtol=1e-6,
+            atol=1e-9,
+            err_msg=name,
+        )

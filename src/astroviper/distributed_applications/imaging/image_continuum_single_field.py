@@ -3750,14 +3750,8 @@ def image_continuum_single_field(
             "weight_memory_mode": weight_memory_mode,
             "image_store": image_store,
             "data_group": input_params["data_group"],
+            "io_engine": io_engine,
         }
-
-        if io_engine == "chunk":
-            # The preparation node shown above currently uses the standard loader.
-            logger.warning(
-                "Imaging-weight preparation currently uses the standard "
-                "processing-set loader even though io_engine='chunk'."
-            )
 
         if weighting in ("natural", "briggs", "briggs_abs", "uniform"):
             if weighting_scope == "global":

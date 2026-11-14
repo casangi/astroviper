@@ -610,8 +610,8 @@ def load_processing_set(
       one channel;
     * ``polarization`` from ``instrument_polarization_basis`` and the data's
       correlation count;
-    * ``time`` / ``baseline_id`` / ``uvw_label`` as plain index ranges (the
-      imaging only uses their sizes and the ``UVW`` values).
+    * ``time`` and ``baseline_id`` from the stored coordinates (when present);
+      ``uvw_label`` as a plain index range.
 
     All sub-datasets are ignored. Returns an :class:`xarray.DataTree` whose
     children are the selected measurement sets, with ``attrs["data_groups"]``
@@ -695,7 +695,12 @@ def load_processing_set(
                 os.path.join(ms_path, data_group["correlated_data"]),
                 {"frequency": freq_sel},
             )
-        for coord_name in ("baseline_antenna1_name", "baseline_antenna2_name"):
+        for coord_name in (
+            "baseline_antenna1_name",
+            "baseline_antenna2_name",
+            "time",
+            "baseline_id",
+        ):
             if os.path.isdir(os.path.join(ms_path, coord_name)):
                 reads[coord_name] = (os.path.join(ms_path, coord_name), {})
 
@@ -773,8 +778,14 @@ def load_processing_set(
             "polarization": ("polarization", pol_labels),
         }
         # The per-baseline antenna names cannot be reconstructed from the imaging
-        # inputs and were read above (when present) to drop auto-correlations.
-        for coord_name in ("baseline_antenna1_name", "baseline_antenna2_name"):
+        # inputs and were read above (when present) to drop auto-correlations;
+        # the time and baseline_id values index the in-place weight cache.
+        for coord_name in (
+            "baseline_antenna1_name",
+            "baseline_antenna2_name",
+            "time",
+            "baseline_id",
+        ):
             if coord_name in results:
                 values, c_dims = results[coord_name]
                 coords[coord_name] = (c_dims, values)
