@@ -165,15 +165,15 @@ def test_task_io_mean_holds_finished_tasks():
     assert write_mean[-1] == pytest.approx(expected, rel=1e-9)
 
 
-def test_cluster_plots_require_start_unixtime(capsys):
+def test_cluster_plots_require_start_unixtime(logged):
     assert plot_cluster_resource_usage(_monitored_frame(with_start=False)) is None
-    assert "start_unixtime" in capsys.readouterr().out
+    assert "start_unixtime" in logged.read()
 
 
-def test_cluster_plots_skip_unmonitored(capsys):
+def test_cluster_plots_skip_unmonitored(logged):
     df = pd.DataFrame([{"task_id": 0, "T_image_cube_task": 1.0}])
     assert plot_cluster_resource_usage(df) is None
-    assert "no resource series" in capsys.readouterr().out
+    assert "no resource series" in logged.read()
 
 
 def _slot_frame(tasks):
@@ -310,19 +310,19 @@ def test_core_plots_bin_seconds():
     assert "(10 s bin means)" in axes["cpu"].get_ylabel()
 
 
-def test_core_plots_without_io_or_start(capsys):
+def test_core_plots_without_io_or_start(logged):
     axes = plot_core_resource_usage(_monitored_frame(with_io=False))
     assert axes["cpu"] is not None and axes["io"] is None
     assert plot_core_resource_usage(_monitored_frame(with_start=False)) is None
-    assert "plot_core_resource_usage: no start_unixtime" in capsys.readouterr().out
+    assert "plot_core_resource_usage: no start_unixtime" in logged.read()
 
 
-def test_wall_clock_plots_skip_tasks_without_start(capsys):
+def test_wall_clock_plots_skip_tasks_without_start(logged):
     df = _two_slot_frame()
     df.loc[1, "start_unixtime"] = np.nan
     assert plot_core_resource_usage(df) is None
     assert plot_cluster_resource_usage(df) is None
-    assert capsys.readouterr().out.count("1 of 3 tasks have no start_unixtime") == 2
+    assert logged.read().count("1 of 3 tasks have no start_unixtime") == 2
 
 
 def test_rejects_wrong_source_type():
@@ -418,12 +418,12 @@ def test_application_task_stream_plots_every_graph(tmp_path):
     assert output.exists()
 
 
-def test_application_task_stream_keeps_old_results_optional(capsys):
+def test_application_task_stream_keeps_old_results_optional(logged):
     """Results recorded before timing_graphs fail gracefully."""
     assert (
         plot_application_task_stream({"timing_node_tasks": _monitored_frame()}) is None
     )
-    assert "no timing_graphs" in capsys.readouterr().out
+    assert "no timing_graphs" in logged.read()
 
 
 # --- driver strip ---------------------------------------------------------- #
@@ -543,25 +543,25 @@ def _stream_dict():
     }
 
 
-def test_task_stream_without_timing_phases_has_no_driver_strip(capsys):
+def test_task_stream_without_timing_phases_has_no_driver_strip(logged):
     figure = plot_task_stream(_stream_dict())
     assert len(figure.axes) == 2
-    assert "no timing_phases given" in capsys.readouterr().out
+    assert "no timing_phases given" in logged.read()
     plt.close(figure)
     figure = plot_task_stream(_stream_dict(), timing_phases=DRIVER_PHASES)
     assert len(figure.axes) == 3
-    out = capsys.readouterr().out
+    out = logged.read()
     assert "no timing_phases given" not in out
     assert "E end-to-end" in out and "application total" in out
     plt.close(figure)
 
 
-def test_task_stream_prints_the_recorded_or_packed_parallelism(capsys, tmp_path):
+def test_task_stream_logs_the_recorded_or_packed_parallelism(logged, tmp_path):
     html = tmp_path / "stream.html"
     figure = plot_task_stream(
         _stream_dict(), compute_resources={"n_worker_slots": 4}, html_path=str(html)
     )
-    out = capsys.readouterr().out
+    out = logged.read()
     assert "4 worker slots (recorded; 1 host, 2 reconstructed lanes)" in out
     assert "E map-reduce               :     43.0 %" in out  # 43 / 25 / 4
     assert "p = 4 worker slots" in [
@@ -572,28 +572,26 @@ def test_task_stream_prints_the_recorded_or_packed_parallelism(capsys, tmp_path)
     recorded = _stream_dict()
     del recorded["compute_resources"]
     figure = plot_task_stream(recorded)
-    out = capsys.readouterr().out
+    out = logged.read()
     assert "2 worker slots (lane packing" in out
     assert "ramp to 95% busy           :      1.0 s" in out
     assert "straggler tail (p95->last) :      0.3 s" in out
     plt.close(figure)
 
 
-def test_task_stream_refuses_tasks_without_start(capsys):
+def test_task_stream_refuses_tasks_without_start(logged):
     source = _stream_dict()
     source["timing_node_tasks"].loc[1, "start_unixtime"] = np.nan
     assert plot_task_stream(source) is None
-    assert "1 of 4 tasks have no start_unixtime" in capsys.readouterr().out
+    assert "1 of 4 tasks have no start_unixtime" in logged.read()
 
 
-def test_imaging_task_columns_leave_out_absent_load_columns(capsys):
+def test_imaging_task_columns_leave_out_absent_load_columns(logged):
     tasks = _stream_dict()["timing_node_tasks"]
     mapped = _with_imaging_task_columns(
         tasks, {"load": ("T_load", "T_stream_read"), "write": None}
     )
-    assert "no T_stream_read column; left out of the load segment" in (
-        capsys.readouterr().out
-    )
+    assert "no T_stream_read column; left out of the load segment" in (logged.read())
     np.testing.assert_allclose(mapped["T_load"], 1.0)
     np.testing.assert_allclose(mapped["T_write"], 0.0)
     # the imager's load columns, T_make_empty_image included, sum before it is zeroed
@@ -792,7 +790,7 @@ def _bar_data(ax):
     }
 
 
-def test_scaling_total_time(tmp_path, capsys):
+def test_scaling_total_time(tmp_path, logged):
     open_figures = plt.get_fignums()
     runs = _scaling_runs()
     figure = plot_scaling(
@@ -827,7 +825,7 @@ def test_scaling_total_time(tmp_path, capsys):
     assert ax.get_xlabel() == "Number of Nodes (total parallel workers)"
     assert [text.get_text() for text in figure.texts] == ["occupancy 90 %"]
     assert (tmp_path / "x_total_time.png").exists()
-    assert "wrote" in capsys.readouterr().out
+    assert "wrote" in logged.read()
     # the harness wall clock, minutes, weak scaling from 0, value ticks
     figure = plot_scaling(
         runs[::2],
@@ -921,7 +919,7 @@ def test_scaling_weak_and_several_sweeps():
     assert lines[r"b, end to end ($S^{e2e,rel}$)"].get_marker() == "s"
 
 
-def test_scaling_skips_unusable_runs(capsys):
+def test_scaling_skips_unusable_runs(logged):
     runs = _scaling_runs()
     del runs[2]["timing_distributed_application"]["compute_end_unixtime"]
     figure = plot_scaling(runs, "parallel_efficiency")
@@ -934,14 +932,14 @@ def test_scaling_skips_unusable_runs(capsys):
             columns="start_unixtime"
         )
     assert plot_scaling(runs, "speedup") is None
-    assert "no run has a finite map reduce window" in capsys.readouterr().out
+    assert "no run has a finite map reduce window" in logged.read()
     for run in runs:
         run["timing_distributed_application"]["T_total"] = np.nan
     assert plot_scaling(runs, "total_time") is None
-    assert "no run has a finite total time" in capsys.readouterr().out
+    assert "no run has a finite total time" in logged.read()
 
 
-def test_scaling_throughput(capsys):
+def test_scaling_throughput(logged):
     open_figures = plt.get_fignums()
     runs = _scaling_runs()
     figure = plot_scaling(runs, "throughput", total_time=[100.0, 50.0, 25.0])
@@ -966,7 +964,7 @@ def test_scaling_throughput(capsys):
     for run in runs:
         run["timing_node_tasks"] = run["timing_node_tasks"].drop(columns="n_channels")
     assert plot_scaling(runs, "throughput") is None
-    assert "no run has the n_channels column" in capsys.readouterr().out
+    assert "no run has the n_channels column" in logged.read()
 
 
 def test_scaling_refuses():
@@ -998,7 +996,7 @@ def test_scaling_refuses():
     np.testing.assert_allclose(figure.axes[0].get_lines()[2].get_ydata(), [2, 4, 8])
 
 
-def test_efficiency_loss_decomposition_losses(tmp_path, capsys):
+def test_efficiency_loss_decomposition_losses(tmp_path, logged):
     open_figures = plt.get_fignums()
     runs = _scaling_runs()
     del runs[2]["timing_node_tasks"]["start_unixtime"]
@@ -1006,9 +1004,7 @@ def test_efficiency_loss_decomposition_losses(tmp_path, capsys):
         runs, notes="occupancy", save_path=str(tmp_path / "loss.png")
     )
     assert plt.get_fignums() == open_figures
-    assert "skipping run 2 (4 hosts): no start_unixtime anchor" in (
-        capsys.readouterr().out
-    )
+    assert "skipping run 2 (4 hosts): no start_unixtime anchor" in (logged.read())
     assert (tmp_path / "loss.png").exists()
     ax_time, ax_percent = figure.axes
     measures = performance_measures(runs[:2])
@@ -1047,10 +1043,10 @@ def test_efficiency_loss_decomposition_losses(tmp_path, capsys):
     for run in runs[:2]:
         del run["timing_node_tasks"]["start_unixtime"]
     assert plot_efficiency_loss_decomposition(runs) is None
-    assert "nothing to plot" in capsys.readouterr().out
+    assert "nothing to plot" in logged.read()
 
 
-def test_efficiency_loss_decomposition_driver_steps(capsys):
+def test_efficiency_loss_decomposition_driver_steps(logged):
     runs = _scaling_runs()
     del runs[2]["timing_distributed_application"]["T_graph"]
     runs[2]["timing_distributed_application"]["T_ideal"] = 21.5
@@ -1087,7 +1083,7 @@ def test_efficiency_loss_decomposition_driver_steps(capsys):
         )
         is None
     )
-    assert "no run records a driver step" in capsys.readouterr().out
+    assert "no run records a driver step" in logged.read()
 
 
 def test_efficiency_loss_decomposition_refuses():
@@ -1193,7 +1189,7 @@ def _shared_worker_frame():
     )
 
 
-def test_worker_share_divisors(capsys):
+def test_worker_share_divisors(logged):
     df = _shared_worker_frame()
     one_worker = {"n_hosts": 1, "n_workers": 1, "n_worker_slots": 14}
     divisors = _worker_share_divisors(df, one_worker)
@@ -1207,11 +1203,11 @@ def test_worker_share_divisors(capsys):
         )
         is None
     )
-    assert capsys.readouterr().out == ""
+    assert logged.read() == ""
     assert _worker_share_divisors(df, {"n_workers": 1, "n_worker_slots": 14}) is None
-    assert "14 task threads share each worker process" in capsys.readouterr().out
+    assert "14 task threads share each worker process" in logged.read()
     assert _worker_share_divisors(df.drop(columns="start_unixtime"), one_worker) is None
-    assert "start_unixtime" in capsys.readouterr().out
+    assert "start_unixtime" in logged.read()
 
 
 def test_binned_series_count_a_shared_worker_once():
@@ -1252,7 +1248,7 @@ def test_performance_and_wall_clock_figures():
     assert plt.get_fignums() == open_figures
 
 
-def test_save_figures(tmp_path, capsys):
+def test_save_figures(tmp_path, logged):
     figure, _ = _performance_figure((3, 2))
     with pytest.raises(ValueError, match=r"needs the field \{figure\}"):
         _figure_save_paths(str(tmp_path / "x.png"), ["cpu", "memory"])
@@ -1261,7 +1257,7 @@ def test_save_figures(tmp_path, capsys):
     assert (tmp_path / "x_cpu.png").exists() and not (tmp_path / "x_io.png").exists()
     _save_figures({"cpu": figure}, str(tmp_path / "single.png"))
     assert (tmp_path / "single.png").exists()
-    assert capsys.readouterr().out.count("wrote") == 2
+    assert logged.read().count("wrote") == 2
 
 
 def test_add_notes():
@@ -1308,15 +1304,15 @@ def test_band_helpers():
     np.testing.assert_allclose(ax.get_ylim(), (78.78, 123.22))  # +-22 % of 101
 
 
-def test_task_stream_without_compute_anchors(capsys):
+def test_task_stream_without_compute_anchors(logged):
     """Without the compute anchors the time after the task window is all post
-    map, the driver strip cannot be placed and no efficiency is printed."""
+    map, the driver strip cannot be placed and no efficiency is logged."""
     source = _stream_dict()
     timing = source["timing_distributed_application"]
     for key in ("compute_start_unixtime", "compute_end_unixtime"):
         del timing[key]
     figure = plot_task_stream(source, timing_phases=DRIVER_PHASES, title="run")
-    out = capsys.readouterr().out
+    out = logged.read()
     assert len(figure.axes) == 2
     assert "no absolute compute anchors" in out
     assert "30.0 s (+8.0 s outside the task window)" in out  # 30 - 22

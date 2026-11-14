@@ -272,7 +272,7 @@ def test_cluster_resource_usage_line_rules():
         plot_cluster_resource_usage(df, per_host=True)
 
 
-def test_cluster_resource_usage_node_samples_and_footers(capsys):
+def test_cluster_resource_usage_node_samples_and_footers(logged):
     df = _two_host_frame()
     t0 = df["start_unixtime"].min()
     samples = pd.DataFrame(
@@ -294,13 +294,13 @@ def test_cluster_resource_usage_node_samples_and_footers(capsys):
     io_text = axes["io"].figure.texts[0].get_text().split("\n")
     assert io_text[0].startswith("read: ") and io_text[1].startswith("write: ")
     assert io_text[2] == "Lustre health: 32 OSTs"
-    assert "in all" in capsys.readouterr().out
+    assert "in all" in logged.read()
     # node samples of one host are not drawn for a run on two hosts
     axes = plot_cluster_resource_usage(
         df, compute_resources={"n_hosts": 2}, node_samples=samples, per_host=True
     )
     assert len(axes["cpu"].get_lines()) == 1
-    assert "not drawn" in capsys.readouterr().out
+    assert "not drawn" in logged.read()
 
 
 def test_cluster_resource_usage_counts_a_shared_worker_once(tmp_path):
@@ -580,7 +580,7 @@ def test_fault_time_correlation_fit(tmp_path):
     assert ax.get_ylim() == (0.0, 100.0)
 
 
-def test_fault_time_correlation_of_several_sources(capsys):
+def test_fault_time_correlation_of_several_sources(logged):
     a, b = _timing_frame(seed=1), _timing_frame(n_tasks=200, seed=2)
     few = _timing_frame(n_tasks=5)
     figure = plot_fault_time_correlation(
@@ -593,7 +593,7 @@ def test_fault_time_correlation_of_several_sources(capsys):
     labels = [line.get_label() for line in ax.get_lines()]
     assert labels == ["A: 1.50 s/Mfault, r=1.00", "B: 1.50 s/Mfault, r=1.00"]
     assert ax.get_lines()[1].get_color() == "C1"
-    assert "fewer than 10" in capsys.readouterr().out
+    assert "fewer than 10" in logged.read()
     assert plot_fault_time_correlation(few) is None
 
 
@@ -918,15 +918,15 @@ def test_task_maps_place_tasks_by_their_chunks(tmp_path):
     assert len(figure.axes) == 2  # the panel and its colour bar
 
 
-def test_task_maps_refuse(capsys):
+def test_task_maps_refuse(logged):
     tasks = pd.DataFrame({"task_id": range(4), "T_image_cube_task": 1.0})
     assert plot_task_maps(tasks) is None
     assert plot_task_maps({"timing_node_tasks": tasks}) is None
     assert plot_task_maps(tasks, n_mapping_parallelism={"l": None, "m": None}) is None
     assert plot_task_maps(tasks, n_mapping_parallelism={"frequency": 4}) is None
-    assert "two parallel axes" in capsys.readouterr().out
+    assert "two parallel axes" in logged.read()
     assert plot_task_maps(tasks, n_mapping_parallelism={"l": 1, "m": 2}) is None
-    assert "do not fit" in capsys.readouterr().out
+    assert "do not fit" in logged.read()
     assert (
         plot_task_maps(
             tasks.drop(columns="task_id"), n_mapping_parallelism={"l": 2, "m": 2}

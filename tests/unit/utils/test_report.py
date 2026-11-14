@@ -14,6 +14,7 @@ from matplotlib.figure import Figure
 
 from astroviper.utils.report import (
     Report,
+    _captured,
     add_processing_section,
     make_report,
     report_files_directory,
@@ -168,6 +169,31 @@ def test_make_report_returns_the_path_or_logs_a_failure():
         raise RuntimeError("no report")
 
     assert make_report(failing) is None
+
+
+def test_captured_returns_the_logged_note():
+    import toolviper.utils.logger as logger
+
+    def plot(value):
+        logger.info("plot: no column; skipping.")
+        logger.warning("plot: 1 of 3 tasks have no start_unixtime")
+        logger.debug("plot: not a note")
+        return value
+
+    handlers = list(logger.get_logger().handlers)
+    assert _captured(plot, None) == (
+        None,
+        "plot: no column; skipping.\nplot: 1 of 3 tasks have no start_unixtime",
+    )
+    assert _captured(lambda: 1) == (1, "")
+
+    def failing():
+        logger.info("plot: failing")
+        raise RuntimeError("no figure")
+
+    with pytest.raises(RuntimeError):
+        _captured(failing)
+    assert logger.get_logger().handlers == handlers
 
 
 def test_processing_section_of_a_monitored_run(tmp_path):

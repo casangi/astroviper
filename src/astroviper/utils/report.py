@@ -489,17 +489,33 @@ class _PdfFlow:
 
 
 def _captured(function, *args, **kwargs):
-    """``function(*args, **kwargs)`` and what it printed: ``(result, text)``.
+    """``function(*args, **kwargs)`` and the messages it logged at INFO and
+    above, one per line: ``(result, text)``.
 
-    The plot functions print their notes and summaries; the report shows the
-    figure, or the printed reason as a note when there is none.
+    The plot functions log their notes and summaries to the toolviper logger;
+    the report shows the figure, or the logged reason as a note when there is
+    none.
     """
-    import contextlib
+    import logging
 
-    printed = io.StringIO()
-    with contextlib.redirect_stdout(printed):
+    import toolviper.utils.logger as logger
+
+    messages = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            messages.append(record.getMessage())
+
+    # The logger the toolviper functions log to (a worker plugin's on a Dask
+    # worker).
+    target = logger.get_logger()
+    handler = _Collect(logging.INFO)
+    target.addHandler(handler)
+    try:
         result = function(*args, **kwargs)
-    return result, printed.getvalue().strip()
+    finally:
+        target.removeHandler(handler)
+    return result, "\n".join(messages).strip()
 
 
 # The rows of the performance-measures table: (label, key of

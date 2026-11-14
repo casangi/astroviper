@@ -26,7 +26,7 @@ Four complementary views:
   evenly were the cores loaded?"
 * :func:`plot_task_stream` -- a Dask-dashboard-style per-worker-process
   timeline: one lane per worker slot, each task drawn as load / science /
-  write segments, plus a running-task utilization panel, a printed
+  write segments, plus a running-task utilization panel, a logged
   efficiency decomposition and -- given the application's own step list
   (``timing_phases``) -- a strip of the distributed application's setup
   (every driver step before the compute call), compute and finalize steps,
@@ -44,10 +44,10 @@ run, with the worker state and the page faults),
 :func:`plot_task_maps` (per task on the grid of its chunks).
 
 All accept the full return dict or the ``timing_node_tasks`` frame directly,
-and skip gracefully (with a printed note) when the needed columns are absent.
+and skip gracefully (with a logged note) when the needed columns are absent.
 :func:`performance_measures` gives the performance measures of a run (the
 RADPS benchmarking memo's speedups and parallel efficiencies), which the task
-stream prints. The worker slots, hosts and memory come from the run's
+stream logs. The worker slots, hosts and memory come from the run's
 ``return_dict["compute_resources"]``
 (:func:`~astroviper.utils.data_partitioning.get_compute_resources`), or from
 a ``compute_resources`` argument, which replaces it.
@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import toolviper.utils.logger as logger
 
 __all__ = [
     "performance_measures",
@@ -99,7 +100,7 @@ _DRIVER_SETUP_LABEL = "setup"
 _DRIVER_COMPUTE_LABEL = "compute (task stream below)"
 _DRIVER_UNTIMED_LABEL = "driver (untimed)"
 # Everything before compute is drawn as ONE light-red "setup" segment (its
-# per-step breakdown goes to the printed summary and the HTML tooltip); the
+# per-step breakdown goes to the logged summary and the HTML tooltip); the
 # compute window is near-white so it reads as "see the panels below", the
 # finalize steps get pale colors from the palette, untimed gaps gray.
 _DRIVER_SETUP_COLOR = "#fbb4ae"
@@ -286,11 +287,13 @@ def _task_columns(task_columns):
 def _with_imaging_task_columns(tasks, task_columns):
     """A copy of ``tasks`` with the ``task_columns`` timings under the imager's
     column names, which the task stream draws. A load column the frame lacks
-    is left out of the load segment, with a printed note."""
+    is left out of the load segment, with a logged note."""
     columns = _task_columns(task_columns)
     for column in columns["load"]:
         if column not in tasks.columns:
-            print(f"task stream: no {column} column; left out of the load segment")
+            logger.info(
+                f"task stream: no {column} column; left out of the load segment"
+            )
     load = [column for column in columns["load"] if column in tasks.columns]
     task = tasks[columns["task"]]
     load_time = tasks[load].sum(axis=1) if load else 0.0
@@ -560,7 +563,7 @@ def _worker_share_divisors(df, compute_resources):
 
     Returns None when no correction is needed (every host has one slot per
     worker) or none is possible (layout of a host unknown, no hostname or no
-    ``start_unixtime``), printing a warning when the threads per worker
+    ``start_unixtime``), logging a warning when the threads per worker
     exceed 1.
     """
     n_workers = compute_resources.get("n_workers")
@@ -574,7 +577,7 @@ def _worker_share_divisors(df, compute_resources):
         }
     if not layouts or any(layout is None for layout in layouts.values()):
         if threads is not None and threads > 1:
-            print(
+            logger.warning(
                 f"WARNING: {threads:g} task threads share each worker process, "
                 "but the compute resources give no layout of the workers on "
                 "every host: the sums count each worker process once per "
@@ -584,7 +587,7 @@ def _worker_share_divisors(df, compute_resources):
     if all(s / w <= 1 for w, s in layouts.values()):
         return None
     if "start_unixtime" not in df.columns or df["start_unixtime"].isna().any():
-        print(
+        logger.warning(
             "WARNING: task threads share each worker process but not every "
             "task has a start_unixtime to estimate its share: the series are "
             "the raw, process-wide (overcounted) ones."
@@ -673,11 +676,11 @@ def _figure_save_paths(save_path, keys):
 
 def _save_figures(figures, save_path):
     """Save the figures ``{key: Figure or None}`` as PNG (dpi 150, tight box)
-    at the paths of :func:`_figure_save_paths` and print each path."""
+    at the paths of :func:`_figure_save_paths` and log each path."""
     for key, path in _figure_save_paths(save_path, figures).items():
         if figures[key] is not None:
             figures[key].savefig(path, dpi=150, bbox_inches="tight")
-            print("wrote", path)
+            logger.info(f"wrote {path}")
 
 
 def _add_notes(figure, notes):
@@ -777,16 +780,16 @@ def _band_or_minimum_span(ax, values, band):
 
 
 def _placed_on_wall_clock(df, caller):
-    """Whether the tasks' series can be placed on the run's wall clock; prints
+    """Whether the tasks' series can be placed on the run's wall clock; logs
     why not."""
     if "cpu_percent" not in df.columns:
-        print(
+        logger.info(
             f"{caller}: no resource series recorded "
             "(monitoring off or psutil missing); skipping."
         )
         return False
     if "start_unixtime" not in df.columns or df["start_unixtime"].isna().all():
-        print(
+        logger.info(
             f"{caller}: no start_unixtime column (recorded "
             "with an older graphviper); tasks cannot be placed on the run's "
             "wall clock -- use plot_task_resource_usage instead."
@@ -794,7 +797,7 @@ def _placed_on_wall_clock(df, caller):
         return False
     n_missing = int(df["start_unixtime"].isna().sum())
     if n_missing:
-        print(
+        logger.warning(
             f"{caller}: {n_missing} of {len(df)} tasks have no start_unixtime "
             "and cannot be placed on the run's wall clock; skipping."
         )
@@ -882,7 +885,7 @@ def _plot_task_series(
     the average's peak if larger).
     """
     if column not in df or df[column].isna().all():
-        print(
+        logger.info(
             f"No {column!r} series recorded (monitoring off, psutil missing, "
             "or counter unavailable on this platform)."
         )
@@ -1158,7 +1161,7 @@ def plot_cluster_resource_usage(
     when different). A value that is not known is not drawn. The I/O figure's
     footer gives, per direction, the total moved, the mean rate while at
     least 95 % of the peak number of tasks run and the largest bin mean in
-    that window; it is printed too.
+    that window; it is logged too.
 
     Parameters
     ----------
@@ -1242,7 +1245,7 @@ def plot_cluster_resource_usage(
             node_cpu = np.diff(np.interp(edges, ut, cumulative)) / width
             node_cpu[(edges[:-1] < ut[0]) | (edges[1:] > ut[-1])] = np.nan
         else:
-            print(
+            logger.info(
                 "plot_cluster_resource_usage: node_samples describe one host; "
                 f"this run's n_hosts is {n_hosts}, so they are not drawn."
             )
@@ -1358,7 +1361,7 @@ def plot_cluster_resource_usage(
             )
             for name in ("read", "write")
         ]
-        print(
+        logger.info(
             f"plot_cluster_resource_usage: I/O{per_host_unit}\n    "
             + "\n    ".join(io_footer)
         )
@@ -1378,7 +1381,7 @@ def plot_cluster_resource_usage(
         )
     else:
         axes["io"] = None
-        print("(no read_chars/write_chars series; skipping the cluster I/O plot)")
+        logger.info("(no read_chars/write_chars series; skipping the cluster I/O plot)")
 
     _save_figures(
         {key: None if ax is None else ax.figure for key, ax in axes.items()}, save_path
@@ -1778,7 +1781,9 @@ def plot_core_resource_usage(
                 ],
             )
         else:
-            print("(no read_chars/write_chars series; skipping the per-slot I/O plot)")
+            logger.info(
+                "(no read_chars/write_chars series; skipping the per-slot I/O plot)"
+            )
 
     for key in keys:
         if axes[key] is not None:
@@ -1938,7 +1943,7 @@ def plot_task_time_drift(
             "start_unixtime" not in tasks.columns
             or tasks["start_unixtime"].isna().all()
         ):
-            print(
+            logger.info(
                 "plot_task_time_drift: no start_unixtime; "
                 f"{label or 'the run'} is skipped."
             )
@@ -1954,7 +1959,9 @@ def plot_task_time_drift(
             "minor_page_faults" not in tasks.columns
             or tasks["minor_page_faults"].isna().all()
         ):
-            print("plot_task_time_drift: no minor_page_faults recorded; skipping.")
+            logger.info(
+                "plot_task_time_drift: no minor_page_faults recorded; skipping."
+            )
             return None
         faults = _task_start_bins(
             tasks, tasks["minor_page_faults"].to_numpy(dtype=float), n_bins
@@ -2176,7 +2183,7 @@ def plot_fault_time_correlation(
     for src, label in entries:
         tasks = _as_timing_frame(src)
         if "minor_page_faults" not in tasks.columns:
-            print(
+            logger.info(
                 f"plot_fault_time_correlation: {label or 'the run'} has no "
                 "minor_page_faults; skipped."
             )
@@ -2185,7 +2192,7 @@ def plot_fault_time_correlation(
         times = _non_io_task_time(tasks, task_columns)
         ok = np.isfinite(faults) & np.isfinite(times)
         if ok.sum() < 10:
-            print(
+            logger.info(
                 f"plot_fault_time_correlation: {label or 'the run'} has fewer "
                 "than 10 tasks with page faults; skipped."
             )
@@ -2377,7 +2384,7 @@ def plot_task_time_distribution(
         if len(values):
             runs.append((label, panel, values))
     if not runs:
-        print(f"plot_task_time_distribution: no {quantity} values; skipping.")
+        logger.info(f"plot_task_time_distribution: no {quantity} values; skipping.")
         return None
     default_title = (
         f"Read throughput per task (total {total_read_gib / 1024:.1f} TiB read)"
@@ -2545,7 +2552,9 @@ def plot_task_phase_times(
     names = [name for name in columns if all(name in v for v in values)]
     for name in columns:
         if name not in names:
-            print(f"plot_task_phase_times: no {columns[name]} column; {name} left out.")
+            logger.info(
+                f"plot_task_phase_times: no {columns[name]} column; {name} left out."
+            )
     if not names:
         return None
     label_of = [label if label is not None else "" for _, label in entries]
@@ -2704,7 +2713,7 @@ def plot_task_times_per_host(
     for i, (src, _) in enumerate(entries):
         tasks = _as_timing_frame(src)
         if "hostname" not in tasks.columns:
-            print("plot_task_times_per_host: no hostname column; skipping.")
+            logger.info("plot_task_times_per_host: no hostname column; skipping.")
             return None
         frames.append(tasks.assign(__source=i))
     tasks = pd.concat(frames, ignore_index=True)
@@ -2721,7 +2730,7 @@ def plot_task_times_per_host(
     for name, spec in columns.items():
         values = _column_values(tasks, spec, task_columns)
         if values is None:
-            print(f"plot_task_times_per_host: no {spec} column; {name} left out.")
+            logger.info(f"plot_task_times_per_host: no {spec} column; {name} left out.")
             continue
         table[name] = values
         names.append(name)
@@ -2872,7 +2881,7 @@ def plot_task_maps(
     Returns
     -------
     matplotlib.figure.Figure or None
-        None (with a printed reason) when the grid is not recorded or has
+        None (with a logged reason) when the grid is not recorded or has
         other than two axes, or no quantity is recorded.
 
     Raises
@@ -2889,22 +2898,24 @@ def plot_task_maps(
     if not n_mapping_parallelism or any(
         n is None for n in n_mapping_parallelism.values()
     ):
-        print("plot_task_maps: the chunk grid (n_mapping_parallelism) is not recorded.")
+        logger.info(
+            "plot_task_maps: the chunk grid (n_mapping_parallelism) is not recorded."
+        )
         return None
     if len(n_mapping_parallelism) != 2:
-        print(
+        logger.info(
             "plot_task_maps: task maps need two parallel axes; this run was "
             f"mapped over {list(n_mapping_parallelism)}."
         )
         return None
     tasks = _as_timing_frame(source)
     if "task_id" not in tasks.columns:
-        print("plot_task_maps: the tasks have no task_id column.")
+        logger.info("plot_task_maps: the tasks have no task_id column.")
         return None
     (axis_0, n_0), (axis_1, n_1) = n_mapping_parallelism.items()
     task_id = tasks["task_id"].to_numpy(dtype=int)
     if task_id.min() < 0 or task_id.max() >= n_0 * n_1:
-        print(
+        logger.warning(
             f"plot_task_maps: task ids {task_id.min()}-{task_id.max()} do not fit "
             f"the {n_0} x {n_1} chunk grid."
         )
@@ -2930,7 +2941,7 @@ def plot_task_maps(
         if series.get(key) is not None and np.isfinite(series[key]).any()
     ]
     if not panels:
-        print("plot_task_maps: none of the quantities is recorded.")
+        logger.info("plot_task_maps: none of the quantities is recorded.")
         return None
     figure, axes = _performance_figure(
         (4.6 * len(panels), 4.4), 1, len(panels), squeeze=False
@@ -2970,7 +2981,7 @@ def assign_task_stream_lanes(tasks):
     """
     t = tasks.copy()
     if "task_failed_phase" in t.columns and t["task_failed_phase"].notna().any():
-        print(
+        logger.info(
             f"note: {t['task_failed_phase'].notna().sum()} failed tasks included "
             "in the stream (their spans are real wall time)"
         )
@@ -3365,7 +3376,7 @@ def plot_application_task_stream(source, title=None, save_path=None):
         )
     graph_records = source.get("timing_graphs")
     if not graph_records:
-        print("plot_application_task_stream: no timing_graphs records; skipping.")
+        logger.info("plot_application_task_stream: no timing_graphs records; skipping.")
         return None
 
     prepared = []
@@ -3377,7 +3388,7 @@ def plot_application_task_stream(source, title=None, save_path=None):
         if not isinstance(tasks, pd.DataFrame) or tasks.empty:
             continue
         if not required.issubset(tasks.columns):
-            print(
+            logger.info(
                 "plot_application_task_stream: graph "
                 f"{record.get('stage', '<unnamed>')!r} lacks "
                 f"{sorted(required - set(tasks.columns))}; skipping."
@@ -3492,7 +3503,7 @@ def plot_application_task_stream(source, title=None, save_path=None):
     fig.suptitle(title or "Continuum application task streams by graph", fontsize=14)
     if save_path is not None:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print("wrote", save_path)
+        logger.info(f"wrote {save_path}")
     return fig
 
 
@@ -3823,7 +3834,7 @@ document.querySelector('svg').addEventListener('mouseleave',
 
     with open(html_path, "w") as f:
         f.write("\n".join(out))
-    print("wrote", html_path)
+    logger.info(f"wrote {html_path}")
     return html_path
 
 
@@ -3844,7 +3855,7 @@ def plot_task_stream(
     ``start_unixtime`` and the ``T_*`` phase durations, draws each task as
     load (blue) / science (green) / write (orange) segments -- white gaps are
     worker slots with nothing to do -- with a running-task utilization panel
-    on top, and prints the efficiency decomposition (the performance measures
+    on top, and logs the efficiency decomposition (the performance measures
     of :func:`performance_measures`: ideal time, ramp-up, straggler tail,
     pre/post-map regions, parallel efficiencies). Works for both compute
     backends.
@@ -3853,7 +3864,7 @@ def plot_task_stream(
     is added above the utilization panel: one light-red SETUP segment
     covering everything before the compute call (the steps of
     ``timing_phases`` before ``T_compute_dask_graph`` -- broken down per step
-    in the printed summary and in the HTML tooltip), the compute window, and
+    in the logged summary and in the HTML tooltip), the compute window, and
     the finalize steps after it, placed on the same wall clock, so the plot
     accounts for the ENTIRE time the distributed application was running, not
     just the task window.
@@ -3883,7 +3894,7 @@ def plot_task_stream(
         a run that did not record ``application_start_unixtime``. ``None``
         (default): no driver strip.
     anchor_source : str, optional
-        Provenance note for the compute anchors, echoed in the printout.
+        Provenance note for the compute anchors, echoed in the log.
     add_time_labels : bool, optional
         Annotate the timeline with the bold time marks used when deriving the
         efficiencies: below the x-axis ``t_0`` (start of the driver setup;
@@ -3898,7 +3909,7 @@ def plot_task_stream(
     title : str, optional
         Figure title prefix (e.g. a run name); default "task stream".
     save_path : str, optional
-        If set, save the figure there (PNG) and print the path.
+        If set, save the figure there (PNG) and log the path.
     html_path : str, optional
         If set, also write a standalone INTERACTIVE version there: the same
         two panels as inline SVG with a hover tooltip giving each bar's
@@ -3926,7 +3937,7 @@ def plot_task_stream(
 
     tasks = _as_timing_frame(source)
     if "start_unixtime" not in tasks.columns or tasks["start_unixtime"].isna().all():
-        print(
+        logger.info(
             "plot_task_stream: no start_unixtime column (run recorded before "
             "the wall-clock anchor was added); cannot place tasks on the run "
             "timeline -- skipping."
@@ -3934,7 +3945,7 @@ def plot_task_stream(
         return None
     n_missing = int(tasks["start_unixtime"].isna().sum())
     if n_missing:
-        print(
+        logger.warning(
             f"plot_task_stream: {n_missing} of {len(tasks)} tasks have no "
             "start_unixtime and cannot be placed on the run's wall clock; skipping."
         )
@@ -4034,23 +4045,23 @@ def plot_task_stream(
     t3_rel = post_end_rel if post_end_rel is not None else (T_compute or None)
     if driver_timing and driver is None:
         if timing_phases is None:
-            print(
+            logger.info(
                 "plot_task_stream: no timing_phases given; the driver strip is "
                 "left out."
             )
         elif compute_start is None:
-            print(
+            logger.info(
                 "plot_task_stream: driver timings given but no absolute compute "
                 "anchors; cannot place the driver strip on the run timeline."
             )
-    summary = []  # the printed decomposition, echoed at the top of the figure
+    summary = []  # the logged decomposition, echoed at the top of the figure
 
     def _p(line):
-        print(line)
+        logger.info(line)
         summary.append(line)
 
     if title:
-        print(f"run: {title}")
+        logger.info(f"run: {title}")
     provenance = (
         "lane packing" if measures["n_worker_slots_reconstructed"] else "recorded"
     )
@@ -4413,7 +4424,7 @@ def plot_task_stream(
     )
     if save_path is not None:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print("wrote", save_path)
+        logger.info(f"wrote {save_path}")
     if html_path is not None:
         _write_task_stream_html(
             t,
@@ -4579,13 +4590,13 @@ def plot_scaling(
         The figure title; default a title naming the quantity.
     save_path : str, optional
         If set, the figure is saved there (PNG, dpi 150, tight bounding box)
-        and the path printed; the field ``{figure}`` in it is replaced by
+        and the path logged; the field ``{figure}`` in it is replaced by
         ``quantity``.
 
     Returns
     -------
     matplotlib.figure.Figure or None
-        The figure, or None (with a printed note) when no run has the
+        The figure, or None (with a logged note) when no run has the
         quantity: a speedup or efficiency needs a finite map reduce window
         (the tasks' ``start_unixtime`` and the ``compute_end_unixtime``
         anchor), the throughput the ``n_channels`` column.
@@ -4668,7 +4679,7 @@ def plot_scaling(
         node_hours = np.asarray(n_hosts, dtype=float) * seconds / 3600
         drawn = np.isfinite(throughput) & np.isfinite(node_hours) & np.isfinite(x_plot)
         if not drawn.any():
-            print(
+            logger.info(
                 "plot_scaling: no run has the n_channels column and a finite "
                 "total time; no throughput figure."
             )
@@ -4715,7 +4726,7 @@ def plot_scaling(
         y = (seconds - shift) / _TIME_UNIT_SECONDS[time_unit]
         drawn = np.isfinite(y) & np.isfinite(x_plot)
         if not drawn.any():
-            print("plot_scaling: no run has a finite total time; no figure.")
+            logger.info("plot_scaling: no run has a finite total time; no figure.")
             return None
         figure, ax = _performance_figure((8, 8))
         for sweep, index in sweeps.items():
@@ -4749,7 +4760,7 @@ def plot_scaling(
         usable = np.isfinite(measures["map_reduce_window"].to_numpy(dtype=float))
         usable &= np.isfinite(x_plot)
         if not usable.any():
-            print(
+            logger.info(
                 "plot_scaling: no run has a finite map reduce window (tasks "
                 "with start_unixtime and the compute_end_unixtime anchor); "
                 f"no {quantity} figure."
@@ -4880,13 +4891,13 @@ def plot_efficiency_loss_decomposition(
         The figure title; default a title naming the breakdown.
     save_path : str, optional
         If set, the figure is saved there (PNG, dpi 150, tight bounding box)
-        and the path printed; the field ``{figure}`` in it is replaced by
+        and the path logged; the field ``{figure}`` in it is replaced by
         ``breakdown``.
 
     Returns
     -------
     matplotlib.figure.Figure or None
-        The figure, or None (with a printed note) when no run can be drawn:
+        The figure, or None (with a logged note) when no run can be drawn:
         the losses need the tasks' ``start_unixtime``, the driver steps a
         recorded step.
 
@@ -4928,12 +4939,12 @@ def plot_efficiency_loss_decomposition(
             if np.isfinite(measures.at[i, "task_window"]):
                 drawn.append(i)
             else:
-                print(
+                logger.info(
                     f"plot_efficiency_loss_decomposition: skipping run {i} "
                     f"({n_hosts[i]} hosts): no start_unixtime anchor."
                 )
         if not drawn:
-            print("plot_efficiency_loss_decomposition: nothing to plot.")
+            logger.info("plot_efficiency_loss_decomposition: nothing to plot.")
             return None
         m = measures.loc[drawn]
         parts = [
@@ -4997,7 +5008,7 @@ def plot_efficiency_loss_decomposition(
         ).reshape(len(keys), len(runs))
         recorded = [k for k in range(len(keys)) if np.isfinite(values[k]).any()]
         if not recorded:
-            print(
+            logger.info(
                 "plot_efficiency_loss_decomposition: no run records a driver "
                 "step of timing_phases; nothing to plot."
             )
