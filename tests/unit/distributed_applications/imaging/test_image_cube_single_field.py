@@ -25,6 +25,7 @@ from astroviper.distributed_applications.imaging.image_cube_single_field import 
     DISTRIBUTED_APPLICATION_TIMING_PHASES,
 )
 from astroviper.utils.beam_models import airy_disk_model
+from astroviper.utils.data_partitioning import COMPUTE_RESOURCES_KEYS
 from astroviper.utils.measurement_set_v2_input import msv2_engine_available
 from astroviper.utils.telescope_layout import read_telescope_layout
 
@@ -129,6 +130,10 @@ def test_image_store_name_without_img_zarr_extension(tmp_path):
     timing = result["timing_distributed_application"]
     assert TIMING_KEYS <= set(timing)
     assert timing["T_add_lazy_input_data"] == 0.0
+    resources = result["compute_resources"]
+    assert tuple(resources) == COMPUTE_RESOURCES_KEYS
+    assert resources["compute_backend"] == "dask"
+    assert resources["processing_function_threads"] == 1
 
 
 def test_kept_variables_the_run_does_not_make_are_skipped(tmp_path):
@@ -729,6 +734,8 @@ def test_msv2_images_equal_production_on_the_conversion(
     timing = result["timing_distributed_application"]
     assert TIMING_KEYS <= set(timing)
     assert timing["T_add_lazy_input_data"] > 0.0
+    assert result["compute_resources"]["scheduler"] == "synchronous"
+    assert result["compute_resources"]["n_worker_slots"] == 1
 
 
 @requires_msv2_engine

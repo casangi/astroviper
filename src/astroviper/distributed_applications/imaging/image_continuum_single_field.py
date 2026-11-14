@@ -62,6 +62,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             ("interpolate data coords", "T_interpolate_data_coords"),
             ("input preflight", "T_input_preflight"),
             ("write empty image", "T_write_empty_image"),
+            ("get compute resources", "T_get_compute_resources"),
         ],
     ),
     (
@@ -3391,6 +3392,9 @@ def image_continuum_single_field(
             Node, model-update, PSF-fit, restoration, graph, and driver timing
             records. Optional cache mappings may also be present for the
             selected memory policies.
+        ``compute_resources``
+            What the graphs ran on, see
+            :func:`astroviper.utils.data_partitioning.get_compute_resources`.
     """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
@@ -3437,12 +3441,13 @@ def image_continuum_single_field(
     )
     from astroviper.utils.clean_mask import load_clean_mask
     from astroviper.utils.data_group_tools import modify_data_groups_xds
+    from astroviper.utils.data_partitioning import get_compute_resources
     from astroviper.utils.io import (
         image_data_groups_for_kept_variables,
         write_zarr_image_store,
     )
     from astroviper.utils.measurement_set_v2 import is_measurement_set_v2
-    from astroviper.utils.timing import format_timing_summary
+    from astroviper.utils.timing import format_timing_summary, node_task_timing_table
 
     if compressor is None:
         compressor = BloscCodec(cname="lz4", clevel=5)
@@ -3628,6 +3633,11 @@ def image_continuum_single_field(
     start = time.time()
     image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
     timing_distributed_application["T_write_empty_image"] = time.time() - start
+
+    # Every continuum graph is computed with Dask.
+    start = time.time()
+    compute_resources = get_compute_resources("dask", processing_function_threads)
+    timing_distributed_application["T_get_compute_resources"] = time.time() - start
 
     zarr_meta = {}
 
@@ -4362,6 +4372,7 @@ def image_continuum_single_field(
 
         return_dict["static_xds"] = static_xds
         return_dict["n_cycles"] = n_cycles
+        return_dict["compute_resources"] = compute_resources
 
         # The initial on-disk arrays are cube-shaped NaN placeholders.  Continuum
         # finalization instead produces Taylor-term products, so replace the store
@@ -4470,20 +4481,13 @@ def image_continuum_single_field(
     if timing_node_tasks is None:
         timing_node_tasks = return_dict["timing_node_tasks"]
     logger.info(
-        format_timing_summary(
-            timing_node_tasks.mean(numeric_only=True).to_dict(),
+        f"AstroVIPER continuum task timing over all {len(timing_node_tasks)} graph "
+        "tasks (seconds)\n"
+        + node_task_timing_table(
+            timing_node_tasks,
             CONTINUUM_IMAGING_TIMING_PHASES,
             total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER continuum task timing: MEAN over all graph tasks (seconds)",
-        )
-    )
-    logger.info(
-        format_timing_summary(
-            timing_node_tasks.max(numeric_only=True).to_dict(),
-            CONTINUUM_IMAGING_TIMING_PHASES,
-            total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER continuum task timing: MAX over all graph tasks (seconds)",
-        )
+        ).to_string(float_format="{:.3f}".format)
     )
 
     timing_model_updates = _combine_graph_timing_frames(

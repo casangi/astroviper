@@ -122,15 +122,28 @@ def test_html_report_of_a_monitored_single_task_run(processing_set, tmp_path):
     text = _text(result["report"])
     for heading in (
         "Processing",
+        "Performance",
+        "Timing",
+        "Task stream",
+        "Task times",
+        "Resources",
         "Results",
         "Point spread function",
         "Maximum over frequency",
-        "Spectrum",
+        "Image statistics",
         "Deconvolution",
     ):
         assert f">{heading}</h" in text, heading
-    assert "Cluster CPU" in text
-    assert text.count("data:image/png;base64,") >= 8
+    assert "parallelism p" in text and "compute resources" in text
+    assert "grouped by phase" in text and "(outside the phases)" in text
+    assert "PREPARATION (once per chunk)" in text
+    assert "Cluster CPU" in text and "CPU per worker slot" in text
+    assert "CPU per task" in text
+    # processing (9 without I/O counters), point spread function, 3 maxima,
+    # deconvolution and the image statistics drawn
+    assert text.count("data:image/png;base64,") >= 9 + 5 + sum(
+        key in result["image_statistics"] for key in ("sky_residual", "sky_restored")
+    )
     files = tmp_path / "cube_report_files"
     for key in ("sky_residual", "sky_model", "sky_restored_primary_beam_corrected"):
         assert (files / f"moment_maximum_{key}.img.zarr").exists(), key
@@ -228,9 +241,62 @@ def test_report_after_the_run(processing_set, tmp_path):
     # the stop test of the dirty image is recorded; the entropy only with a report
     assert "Per channel: the cycle control stop code" in text
     assert "The final residual entropy is not a number for every plane" in text
+    assert "Every per-plane statistic of the residual" in text
 
 
 def test_unknown_report_format_is_refused(processing_set, tmp_path):
     with pytest.raises(AssertionError):  # the param.json schema
         _image(processing_set, str(tmp_path / "cube.img.zarr"), report="docx")
     assert not (tmp_path / "cube.img.zarr").exists()
+
+
+class _Document:
+    """The calls a report section makes, without rendering."""
+
+    def __init__(self):
+        self.calls = []
+
+    def subsection(self, title):
+        self.calls.append(("subsection", title))
+
+    def note(self, text):
+        self.calls.append(("note", text))
+
+    def figure(self, figure, caption):
+        self.calls.append(("figure", caption))
+
+
+def test_results_notes_without_statistics_or_record():
+    from astroviper.distributed_applications.imaging.image_cube_single_field_report import (
+        _add_deconvolution,
+        _add_image_statistics,
+    )
+    from astroviper.processing_functions.imaging.utils import ImagingDict
+
+    document = _Document()
+    _add_image_statistics(document, {"image_statistics": {}})
+    _add_deconvolution(document, {"image_statistics": {}})
+    assert [kind for kind, _ in document.calls] == [
+        "subsection",
+        "note",
+        "subsection",
+        "note",
+    ]
+    assert "of the residual or the restored image" in document.calls[1][1]
+    assert document.calls[3][1] == "No image statistics of the residual were recorded."
+
+    statistics = xr.Dataset(
+        {"rms": (("time", "frequency", "polarization"), np.ones((1, 2, 1)))},
+        coords={"time": [0.0], "frequency": [1e9, 2e9], "polarization": ["I"]},
+    )
+    return_dict = {
+        "image_statistics": {"sky_residual": statistics, "sky_model": statistics},
+        "deconvolution": ImagingDict(),
+    }
+    document = _Document()
+    _add_image_statistics(document, return_dict)
+    _add_deconvolution(document, return_dict)
+    kinds = [kind for kind, _ in document.calls]
+    assert kinds == ["subsection", "figure", "note", "subsection", "note"]
+    assert "sky_model" in document.calls[2][1]
+    assert document.calls[4][1].startswith("No deconvolution (max_iter=0")
