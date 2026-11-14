@@ -284,7 +284,9 @@ class UltraReductions:
         Index of Stokes I along ``polarization``.
     work_directory : str
         findContinuum's work directory; the stores and mask files of the passes
-        go to its subdirectory ``.find_continuum_ultra``.
+        go to its subdirectory ``<cube>.find_continuum_ultra``, named after
+        the cube as findContinuum's products are (the name of the cube's entry
+        of ``cubes`` up to its first dot).
     primary_beam_limit : float or None
         Pixels where the primary beam is below this level are masked in both
         cubes; ``None``: no limit.
@@ -350,7 +352,6 @@ class UltraReductions:
         self.input_image_store = input_image_store
         self.variables = dict(variables)
         self.polarization_index = polarization_index
-        self.directory = os.path.join(work_directory, ".find_continuum_ultra")
         self.primary_beam_limit = primary_beam_limit
         self.first_round = first_round
         self.budget_bytes = budget_bytes
@@ -370,6 +371,10 @@ class UltraReductions:
             if cube["variable"] == variable
         }
         paths = {role: path for path, role in self.roles.items()}
+        self.directory = os.path.join(
+            work_directory,
+            f"{os.path.basename(paths['sky']).split('.')[0]}.find_continuum_ultra",
+        )
         self.start = int(cubes[paths["sky"]]["channel_offset"])
         self.stop = self.start + int(self.frequency_axis[3])
         self.first_round_requests = find_continuum_first_round_requests(
@@ -865,7 +870,11 @@ class UltraReductions:
         graph_end = time.time()
         dask_graph = generate_dask_workflow(viper_graph)
         compute_start = time.time()
-        output = dask.compute(dask_graph)[0]
+        try:
+            output = dask.compute(dask_graph)[0]
+        except BaseException:
+            _remove_stores(partials_store, results_store)
+            raise
         compute_end = time.time()
         frame = _with_usage(output)
         self.timing.append(frame.assign(reduction=index))
@@ -878,6 +887,7 @@ class UltraReductions:
                 first_round_store, output["first_round"], self.n_channels
             )
             if not written["complete"]:
+                _remove_stores(partials_store, results_store)
                 raise RuntimeError(
                     f"The first round of channels [{self.start}, {self.stop}) is "
                     f"incomplete in {first_round_store}"
@@ -937,7 +947,11 @@ class UltraReductions:
             merge_graph_end = time.time()
             dask_graph = generate_dask_workflow(viper_graph)
             merge_compute_start = time.time()
-            merged = dask.compute(dask_graph)[0]
+            try:
+                merged = dask.compute(dask_graph)[0]
+            except BaseException:
+                _remove_stores(partials_store, results_store)
+                raise
             merge_end = time.time()
             merge_frame = pd.concat(
                 [_with_usage(item) for item in merged], ignore_index=True
@@ -1187,6 +1201,13 @@ def _rss_peak(frame):
         if isinstance(series, list) and series
     ]
     return max(peaks) if peaks else np.nan
+
+
+def _remove_stores(*stores):
+    """Remove the scratch and results stores of a pass that failed."""
+    for store in stores:
+        if store is not None:
+            shutil.rmtree(store, ignore_errors=True)
 
 
 def _stored_bytes(store):

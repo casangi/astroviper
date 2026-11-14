@@ -657,6 +657,32 @@ def test_a_window_without_two_edge_channels_is_refused(two_windows, tmp_path, ba
         )
 
 
+def test_ultra_keeps_the_scratch_of_each_cube_apart(two_windows, tmp_path):
+    """Cubes of other names share a work directory: each keeps its first-round
+    store and pass stores in its own directory, named after it."""
+    import shutil
+
+    stores = []
+    for name, single in zip(("cube_a", "cube_b"), two_windows["single"], strict=True):
+        stores.append(str(tmp_path / f"{name}.img.zarr"))
+        shutil.copytree(single, stores[-1])
+    work = tmp_path / "work"
+    first = _run("ultra", stores[0], work, n_channels=12)
+    store = first["first_round"]["store"]
+    assert store == str(work / "cube_a.find_continuum_ultra" / "first_round.zarr")
+    statistics = zarr.open_array(os.path.join(store, "STATISTICS"), mode="r")[:]
+    second = _run("ultra", stores[1], work, n_channels=12)
+
+    assert second["first_round"]["store"] == str(
+        work / "cube_b.find_continuum_ultra" / "first_round.zarr"
+    )
+    np.testing.assert_array_equal(
+        zarr.open_array(os.path.join(store, "STATISTICS"), mode="r")[:], statistics
+    )
+    with pytest.raises(ValueError, match="earlier run on cube_a"):
+        _run("ultra", stores[0], work, n_channels=12)
+
+
 def test_a_cube_of_several_windows_needs_a_channel_range(two_windows, tmp_path):
     with pytest.raises(ValueError, match=r"\[\[0, 12\], \[12, 24\]\]"):
         _run("fused", two_windows["store"], tmp_path / "work", n_channels=24)

@@ -1,5 +1,6 @@
 """Tests of the pass planner of find_continuum_ultra."""
 
+import errno
 import os
 import shutil
 
@@ -763,6 +764,28 @@ def test_a_request_over_the_budget_runs_within_the_memory_of_a_thread(
             None,
             memory_per_thread_bytes=needed - 1,
         ).memory_plan(requests, 2)
+
+
+@pytest.mark.parametrize(
+    "failing",
+    ["find_continuum_streamed_reductions", "merge_find_continuum_partial_maps"],
+)
+def test_a_failed_pass_removes_its_scratch(
+    cube, first_pass, tmp_path, monkeypatch, failing
+):
+    """A frequency or merge task that fails leaves no scratch slots (up to
+    terabytes at full scale) and no results store in the work directory."""
+
+    def fail(**kwargs):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(ultra_reductions, failing, fail)
+    ultra = _ultra(cube, tmp_path / "work", first_round=first_pass["ultra"].first_round)
+    requests = cube["requests"][-2:]
+    with dask.config.set(scheduler="synchronous"), pytest.raises(OSError):
+        ultra.run_pass(requests, len(requests))
+    pass_directory = os.path.join(ultra.directory, "pass_0")
+    assert os.path.isdir(pass_directory) and os.listdir(pass_directory) == []
 
 
 def test_a_moments_request_without_channels_is_refused(cube, first_pass, tmp_path):

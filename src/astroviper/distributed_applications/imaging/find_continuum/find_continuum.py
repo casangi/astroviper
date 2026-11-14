@@ -601,8 +601,10 @@ def find_continuum_ultra(
     As :func:`find_continuum`, a process runs one call at a time. The stores
     of the passes, the bit-packed two-dimensional masks and, without
     ``first_round_reductions``, the first-round store of the spectral window
-    are kept in the subdirectory ``.find_continuum_ultra`` of
-    ``work_directory``.
+    are kept in the subdirectory ``<cube>.find_continuum_ultra`` of
+    ``work_directory``, named after the cube as findContinuum's products; the
+    scratch store of a pass is removed after its merge, or when the pass
+    fails.
     """
     return _find_continuum(
         input_image_store,
