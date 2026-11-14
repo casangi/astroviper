@@ -1,5 +1,6 @@
 """Tests of the find_continuum first-round store and the drain of the imager's moments."""
 
+import errno
 import os
 import shutil
 import threading
@@ -533,6 +534,63 @@ def test_drain_leaves_a_window_with_a_slot_listed_twice_incomplete(
     moment_0, moment_8 = _stored_moments(store)
     assert np.isnan(moment_0[0]).all() and np.isnan(moment_8[0]).all()
     np.testing.assert_array_equal(moment_8[1], _direct(cube, 1)[8])
+
+
+def test_drain_leaves_a_window_whose_slot_was_not_saved_incomplete(
+    cube, tmp_path, monkeypatch
+):
+    save = np.save
+
+    def save_or_fail(stream, values):
+        if f"{os.sep}W0{os.sep}" in stream.name:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        save(stream, values)
+
+    monkeypatch.setattr(node_tasks.np, "save", save_or_fail)
+    store = _first_round(cube, tmp_path / "fr.zarr")
+    result, records = drain_first_round_moments("run", store, cube["windows"])
+
+    assert result["moments_complete"] == [False, True]
+    assert result["n_missing"] == result["n_duplicated"] == [0, 0]
+    assert records[0]["lost_windows"] == [0]
+    assert _attributes(store)["moments_complete"] == [False, True]
+    moment_0, moment_8 = _stored_moments(store)
+    assert np.isnan(moment_0[0]).all() and np.isnan(moment_8[0]).all()
+    np.testing.assert_array_equal(moment_0[1], _direct(cube, 1)[0])
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+
+@pytest.mark.parametrize("with_client", [False, True])
+def test_drain_leaves_a_window_with_a_tile_that_fails_to_merge_incomplete(
+    cube, tmp_path, monkeypatch, with_client
+):
+    """A Lustre error in one merge task of window 1: the other window is
+    merged, window 1 is left incomplete, the slots are removed."""
+
+    def merge(store, partials_directory, window, slots, tile):
+        if window == 1 and tile == [[12, 20], [0, 12]]:
+            raise OSError(errno.EIO, "Input/output error")
+        return node_tasks.merge_first_round_moment_tile(
+            store, partials_directory, window, slots, tile
+        )
+
+    monkeypatch.setattr(first_round, "merge_first_round_moment_tile", merge)
+    store = _first_round(cube, tmp_path / "fr.zarr")
+    if with_client:
+        pop = node_tasks.pop_first_round_moments(
+            "run", None, find_continuum_first_round_partials_path(store)
+        )
+        result, records = _drain_pops(monkeypatch, store, [pop], cube["windows"])
+    else:
+        result, records = drain_first_round_moments("run", store, cube["windows"])
+
+    assert result["moments_complete"] == [True, False]
+    assert _attributes(store)["moments_complete"] == [True, False]
+    assert [record["window"] for record in records[1:]] == [0] * 4 + [1] * 3
+    moment_0, moment_8 = _stored_moments(store)
+    np.testing.assert_array_equal(moment_0[0], _direct(cube, 0)[0])
+    np.testing.assert_array_equal(moment_8[0], _direct(cube, 0)[8])
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
 
 
 def test_drain_refuses_pops_that_ran_elsewhere(cube, tmp_path, monkeypatch):

@@ -1,5 +1,6 @@
 """Tests of the find_continuum node tasks."""
 
+import errno
 import itertools
 import json
 import os
@@ -1283,3 +1284,101 @@ def test_first_round_chunks_write_masks_rows_and_moments(registry_cube, tmp_path
         expected = _window_moments(stokes_i, inside, window)
         np.testing.assert_array_equal(moment_0[index], expected[0])
         np.testing.assert_array_equal(moment_8[index], expected[8].astype(np.float32))
+
+
+def test_a_transient_error_of_a_mask_write_is_retried(
+    registry_cube, tmp_path, monkeypatch
+):
+    """A Lustre eviction fails one write of a mask with EIO; the write is
+    repeated on a fresh open of the array."""
+    from astroviper.node_tasks.imaging.utils import skunk_works
+
+    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    _, inside, windows = registry_cube
+    store = _first_round_store(
+        tmp_path / "fr.zarr",
+        N_REGISTRY,
+        REGISTRY_SHAPE,
+        REGISTRY_TILE,
+        [window["channel_range"] for window in windows],
+    )
+    open_array, failures = zarr.open_array, []
+
+    def evicted_once(path, *args, **kwargs):
+        if kwargs.get("mode") == "r+" and not failures:
+            failures.append(path)
+            raise OSError(errno.EIO, "Input/output error")
+        return open_array(path, *args, **kwargs)
+
+    monkeypatch.setattr(zarr, "open_array", evicted_once)
+    planes = inside[:, 2:4]
+    assert node_tasks.write_primary_beam_masks(store, [2, 3], planes, planes) > 0
+    assert len(failures) == 1
+    for name in MASKS:
+        stored = open_array(os.path.join(store, name), mode="r")[2:4]
+        np.testing.assert_array_equal(
+            unpack_plane_masks(stored, REGISTRY_SHAPE[1]), planes[0, :, 0]
+        )
+
+
+def test_a_window_whose_slot_cannot_be_saved_is_lost(
+    registry_cube, tmp_path, monkeypatch
+):
+    """No space for a slot of window 0: the window is dropped and reported
+    lost, and the other window is saved."""
+    sky, inside, windows = registry_cube
+    monkeypatch.setattr(node_tasks, "FIRST_ROUND_WINDOWS_IN_MEMORY", 1)
+    save = np.save
+
+    def save_or_fail(stream, values):
+        if f"{os.sep}W0{os.sep}" in stream.name:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        save(stream, values)
+
+    monkeypatch.setattr(node_tasks.np, "save", save_or_fail)
+    partials = str(tmp_path / "partials")
+    for start in (0, 6, 2, 8):
+        planes = slice(start, start + 2)
+        add_first_round_moments(
+            "run",
+            windows,
+            REGISTRY_SHAPE,
+            partials,
+            range(start, start + 2),
+            sky[:, planes],
+            inside[:, planes],
+        )
+    pop = pop_first_round_moments("run", None, partials)
+    assert pop["lost_windows"] == [0]
+    assert [window for window, _ in pop["slots"]] == [1, 1]
+    np.testing.assert_array_equal(pop["counts"][:4], 1)
+    files = [
+        os.path.join(partials, "W1", f"{name}.{field}.npy")
+        for _, name in pop["slots"]
+        for field in ("INTEGRATED", "MAXIMUM")
+    ]
+    assert pop["slot_bytes"] == sum(os.path.getsize(path) for path in files)
+
+
+def test_a_discarded_run_adds_nothing_more(registry_cube, tmp_path):
+    sky, inside, windows = registry_cube
+    partials = str(tmp_path / "partials")
+
+    def add(channel):
+        planes = slice(channel, channel + 1)
+        add_first_round_moments(
+            "failed",
+            windows,
+            REGISTRY_SHAPE,
+            partials,
+            [channel],
+            sky[:, planes],
+            inside[:, planes],
+        )
+
+    add(0)
+    assert node_tasks.discard_first_round_moments("failed")
+    add(1)
+    assert "failed" not in node_tasks._FIRST_ROUND_MOMENTS
+    assert not node_tasks.discard_first_round_moments("failed")
+    assert not os.path.exists(partials)

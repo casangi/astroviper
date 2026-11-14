@@ -35,9 +35,12 @@ _MASKS = ("PRIMARY_BEAM_LIMIT_MASK", "PRIMARY_BEAM_PROFILE_MASK")
 
 # Run id to the first-round moments of this process: "counts" (additions per
 # channel), "moments" (window to its FindContinuumMoments), "recent" (held
-# windows, least recently used first), "slots", "token" (unique to the entry,
-# so that slot names differ across hosts), "sequence" and "slot_bytes".
+# windows, least recently used first), "slots", "lost" (windows of which a
+# slot could not be saved), "token" (unique to the entry, so that slot names
+# differ across hosts), "sequence" and "slot_bytes".
 _FIRST_ROUND_MOMENTS = {}
+# Runs whose moments were discarded: tasks still running add nothing more.
+_DISCARDED_RUNS = set()
 _FIRST_ROUND_LOCK = threading.Lock()
 
 
@@ -1060,8 +1063,10 @@ def add_first_round_moments(
     ``"cube"!=0`` on the blanked cube), a block of rows at a time. At most
     ``FIRST_ROUND_WINDOWS_IN_MEMORY`` windows are held: before another is
     allocated, the least recently used one is saved to a slot of
-    ``partials_directory`` and dropped. A new ``run_id`` drops the entries of
-    earlier runs. Threads of a process add one at a time.
+    ``partials_directory`` and dropped (a window that cannot be saved, after
+    the retries of transient I/O errors, is recorded as lost). A new
+    ``run_id`` drops the entries of earlier runs. Threads of a process add one
+    at a time.
 
     Parameters
     ----------
@@ -1095,6 +1100,8 @@ def add_first_round_moments(
     starts = [window["channel_range"][0] for window in windows]
     scratch = np.empty(_BLOCK_ROWS * map_shape[1])
     with _FIRST_ROUND_LOCK:
+        if run_id in _DISCARDED_RUNS:
+            return
         entry = _FIRST_ROUND_MOMENTS.get(run_id)
         if entry is None:
             _FIRST_ROUND_MOMENTS.clear()
@@ -1103,6 +1110,7 @@ def add_first_round_moments(
                 "moments": {},
                 "recent": [],
                 "slots": [],
+                "lost": set(),
                 "token": uuid.uuid4().hex,
                 "sequence": 0,
                 "slot_bytes": 0,
@@ -1156,7 +1164,8 @@ def pop_first_round_moments(run_id, address, partials_directory):
         ``address``, ``placement_ok`` (the pop ran on ``address``), ``counts``
         (uint16 additions per channel; ``None`` when the process holds no
         entry of the run), ``slots`` (``[[window, slot name], ...]`` in the
-        order saved), ``slot_bytes``, ``start_unixtime``, ``end_unixtime``,
+        order saved), ``lost_windows`` (sorted windows of which a slot could
+        not be saved), ``slot_bytes``, ``start_unixtime``, ``end_unixtime``,
         ``T_reduce_node`` and where the pop ran (``hostname``,
         ``process_pid``, ``thread_native_id``, ``worker_name``).
     """
@@ -1178,6 +1187,7 @@ def pop_first_round_moments(run_id, address, partials_directory):
         "placement_ok": current == address,
         "counts": None if entry is None else entry["counts"],
         "slots": [] if entry is None else entry["slots"],
+        "lost_windows": [] if entry is None else sorted(entry["lost"]),
         "slot_bytes": 0 if entry is None else entry["slot_bytes"],
         "start_unixtime": start_unixtime,
         "end_unixtime": end_unixtime,
@@ -1186,10 +1196,32 @@ def pop_first_round_moments(run_id, address, partials_directory):
     }
 
 
+def discard_first_round_moments(run_id):
+    """Drop the first-round moments of a run from the registry of this
+    process without saving them, and ignore its later additions (tasks of a
+    failed imaging compute may still run).
+
+    Parameters
+    ----------
+    run_id : str
+        Imaging run.
+
+    Returns
+    -------
+    bool
+        Whether the process held moments of the run.
+    """
+    with _FIRST_ROUND_LOCK:
+        _DISCARDED_RUNS.add(run_id)
+        return _FIRST_ROUND_MOMENTS.pop(run_id, None) is not None
+
+
 def merge_first_round_moment_tile(
     first_round_store, partials_directory, window, slots, tile
 ):
     """Merge the slots of one spectral window over one tile and write moments 0 and 8.
+
+    A transient I/O error repeats the whole merge of the tile.
 
     Parameters
     ----------
@@ -1215,6 +1247,7 @@ def merge_first_round_moment_tile(
     """
     import zarr
 
+    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
     from astroviper.processing_functions.imaging.find_continuum import (
         FindContinuumMoments,
         merge_in_tree_order,
@@ -1224,29 +1257,34 @@ def merge_first_round_moment_tile(
     (l0, l1), (m0, m1) = tile
     shape = (l1 - l0, m1 - m0)
     directory = os.path.join(partials_directory, f"W{window}")
-    bytes_read = 0
 
-    def leaves():
-        nonlocal bytes_read
-        for name in slots:
-            state = {}
-            for field in ("INTEGRATED", "MAXIMUM"):
-                stored = np.load(
-                    os.path.join(directory, f"{name}.{field}.npy"), mmap_mode="r"
-                )
-                state[field] = np.array(stored[l0:l1, m0:m1])
-                bytes_read += state[field].nbytes
-            # Merges and finalize use no velocity widths.
-            yield FindContinuumMoments.from_state([0, 8], (), shape, state)
+    def merge():
+        bytes_read = 0
 
-    merged = merge_in_tree_order(leaves())
-    if merged is None:
-        merged = FindContinuumMoments([0, 8], (), shape)
-    for moment, values in merged.finalize().items():
-        array = zarr.open_array(
-            os.path.join(first_round_store, f"MOMENT_{moment}"), mode="r+"
-        )
-        array[window, l0:l1, m0:m1] = values.astype(array.dtype)
+        def leaves():
+            nonlocal bytes_read
+            for name in slots:
+                state = {}
+                for field in ("INTEGRATED", "MAXIMUM"):
+                    stored = np.load(
+                        os.path.join(directory, f"{name}.{field}.npy"), mmap_mode="r"
+                    )
+                    state[field] = np.array(stored[l0:l1, m0:m1])
+                    bytes_read += state[field].nbytes
+                # Merges and finalize use no velocity widths.
+                yield FindContinuumMoments.from_state([0, 8], (), shape, state)
+
+        merged = merge_in_tree_order(leaves())
+        if merged is None:
+            merged = FindContinuumMoments([0, 8], (), shape)
+        for moment, values in merged.finalize().items():
+            array = zarr.open_array(
+                os.path.join(first_round_store, f"MOMENT_{moment}"), mode="r+"
+            )
+            array[window, l0:l1, m0:m1] = values.astype(array.dtype)
+        return bytes_read
+
+    bytes_read = _retry_transient_io(f"merge of window {window} tile {tile}", merge)
     end_unixtime = time.time()
     return {
         "stage": "first_round_merge",
@@ -1382,23 +1420,32 @@ def _concatenate_rows(mine, theirs):
 
 def _write_packed_masks(first_round_store, channels, inside, profile):
     """Write packed masks ``(n, l, ceil(m / 8))`` one channel (chunk) at a
-    time; returns the bytes stored."""
+    time, retrying transient I/O errors; returns the bytes stored."""
     import zarr
+
+    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+
+    def write(path, channel, plane):
+        array = zarr.open_array(path, mode="r+")
+        array[channel] = plane
+        return _stored_bytes(
+            array,
+            path,
+            (
+                slice(channel, channel + 1),
+                slice(0, plane.shape[0]),
+                slice(0, plane.shape[1]),
+            ),
+        )
 
     written = 0
     for name, packed in zip(_MASKS, (inside, profile), strict=True):
         path = os.path.join(first_round_store, name)
-        array = zarr.open_array(path, mode="r+")
         for channel, plane in zip(channels, packed, strict=True):
-            channel = int(channel)
-            array[channel] = plane
-            written += _stored_bytes(
-                array,
-                path,
-                (
-                    slice(channel, channel + 1),
-                    slice(0, plane.shape[0]),
-                    slice(0, plane.shape[1]),
+            written += _retry_transient_io(
+                f"{name} of channel {channel}",
+                lambda path=path, channel=int(channel), plane=plane: write(
+                    path, channel, plane
                 ),
             )
     return written
@@ -1424,17 +1471,40 @@ def _stored_bytes(array, path, region):
 
 
 def _flush_first_round_window(entry, window, partials_directory):
-    """Save the moments of a window of a registry entry to a slot and drop them."""
-    moments = entry["moments"].pop(window)
-    entry["recent"].remove(window)
+    """Save the moments of a window of a registry entry to a slot and drop
+    them; a window whose slot cannot be saved is recorded as lost."""
+    import toolviper.utils.logger as logger
+
+    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+
     name = f"{os.getpid()}-{entry['token']}-{entry['sequence']}"
     entry["sequence"] += 1
     directory = os.path.join(partials_directory, f"W{window}")
-    os.makedirs(directory, exist_ok=True)
-    for field, values in moments.state().items():
+
+    def save(field, values):
         path = os.path.join(directory, f"{name}.{field}.npy")
         with open(f"{path}.tmp", "wb") as stream:
             np.save(stream, values)
         os.replace(f"{path}.tmp", path)
-        entry["slot_bytes"] += os.path.getsize(path)
-    entry["slots"].append([window, name])
+        return os.path.getsize(path)
+
+    try:
+        os.makedirs(directory, exist_ok=True)
+        slot_bytes = sum(
+            _retry_transient_io(
+                f"slot {name} of window {window}",
+                lambda field=field, values=values: save(field, values),
+            )
+            for field, values in entry["moments"][window].state().items()
+        )
+    except OSError as exc:
+        logger.warning(
+            f"The imager's moments of window {window} could not be saved to "
+            f"{directory} ({exc!r}): find_continuum computes them."
+        )
+        entry["lost"].add(window)
+    else:
+        entry["slot_bytes"] += slot_bytes
+        entry["slots"].append([window, name])
+    del entry["moments"][window]
+    entry["recent"].remove(window)

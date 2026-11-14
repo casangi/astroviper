@@ -1,3 +1,4 @@
+import contextlib
 import functools
 import inspect
 import json
@@ -826,18 +827,23 @@ def image_cube_single_field(
         chunk is written, into a store next to the image store
         (``cube.img.zarr`` gives ``cube_find_continuum_first_round.zarr``):
         per channel the primary-beam masks at the ``primary_beam_limit`` of
-        ``cycle_control_params`` and at 0.21, their tile occupancy and the
-        statistics of the residual and of the primary beam inside the limit,
-        and with the Dask backend the moment 0 and 8 images of the residual
-        of every spectral window (a linear run of channels), accumulated in
-        the worker processes and merged after the imaging. Passed as
-        ``first_round_reductions``, the returned
-        ``"find_continuum_first_round"`` gives ``find_continuum_ultra`` and
-        ``find_continuum_fused`` this first round, bound to the cube as
-        written (refused for any other). Keeps the variables find_continuum
-        reads (``sky_residual``, ``primary_beam`` and
-        ``beam_fit_params_point_spread_function``). Needs Stokes I and
-        ``output_image_format="zarr"``. Default ``False``.
+        ``cycle_control_params`` (0.2, findContinuum's default, when the key
+        is absent, although cube imaging then cleans to a limit of 0) and at
+        0.21, their tile occupancy and the statistics of the residual and of
+        the primary beam inside the limit, and with the Dask backend the
+        moment 0 and 8 images of the residual of every spectral window (a
+        linear run of channels), accumulated in the worker processes and
+        merged after the imaging. Passed as ``first_round_reductions``, the
+        returned ``"find_continuum_first_round"`` gives
+        ``find_continuum_ultra`` and ``find_continuum_fused`` this first
+        round, bound to the cube as written (refused for any other). A part of
+        the first round that cannot be written (after the retries of
+        transient I/O errors) leaves it, or a window's moments, incomplete and
+        is logged; the imaging goes on. If the imaging compute raises, the
+        worker processes drop the moments of the run and their slots are
+        removed. Keeps the variables find_continuum reads (``sky_residual``,
+        ``primary_beam`` and ``beam_fit_params_point_spread_function``).
+        Needs Stokes I and ``output_image_format="zarr"``. Default ``False``.
     parameters_file : str, optional
         JSON file whose ``"image_cube_single_field"`` block gives the
         arguments, as
@@ -894,11 +900,13 @@ def image_cube_single_field(
           ``find_continuum_first_round=True``) is ``{"store",
           "primary_beam_limit", "complete", "moments_complete"}``: the path of
           the first-round store, the ``primary_beam_limit`` of
-          ``cycle_control_params``, ``True``, and per spectral window whether
-          its moments are in the store (every channel added exactly once;
-          never with MPI); ``None`` when a chunk could not be written. The
-          records of the moments' drain (``stage`` ``"first_round_pop"`` and
-          ``"first_round_merge"``) are added to ``"timing_reduce_nodes"``.
+          ``cycle_control_params`` (0.2 when the key is absent), ``True``, and
+          per spectral window whether its moments are in the store (every
+          channel added exactly once, every slot saved and merged; never with
+          MPI); ``None`` when a chunk or its first round could not be
+          written. The records of the moments' drain (``stage``
+          ``"first_round_pop"`` and ``"first_round_merge"``) are added to
+          ``"timing_reduce_nodes"``.
 
     Notes
     -----
@@ -1426,7 +1434,8 @@ def image_cube_single_field(
             )
         timing_distributed_application["T_generate_dask_graph"] = 0.0
         start = time.time()
-        imaging_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
+        with _first_round_cleared_on_failure(first_round_params):
+            imaging_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
         end = time.time()
         timing_distributed_application["T_compute_dask_graph"] = end - start
         # ABSOLUTE anchors of the compute call, saved with the overall row so
@@ -1445,7 +1454,8 @@ def image_cube_single_field(
             dask.visualize(dask_graph, filename="cube_imaging.png")
 
         start = time.time()
-        imaging_dict = dask.compute(dask_graph)[0]
+        with _first_round_cleared_on_failure(first_round_params):
+            imaging_dict = dask.compute(dask_graph)[0]
         end = time.time()
         timing_distributed_application["T_compute_dask_graph"] = end - start
         # Same absolute compute-call anchors as the MPI branch (see above).
@@ -1463,9 +1473,12 @@ def image_cube_single_field(
 
     timing_distributed_application["T_find_continuum_first_round_write"] = 0.0
     timing_distributed_application["T_find_continuum_first_round_drain"] = 0.0
+    # A failure of the first round after the compute leaves it incomplete (or
+    # its moments) and is logged; the imaging results are returned.
     if first_round_params is not None:
         from astroviper.distributed_applications.imaging.find_continuum.first_round import (
             bind_find_continuum_first_round_store,
+            clear_first_round_moments,
             drain_first_round_moments,
         )
         from astroviper.node_tasks.imaging.find_continuum import (
@@ -1476,12 +1489,18 @@ def image_cube_single_field(
         run_id = first_round_params["run_id"]
         start = time.time()
         rows = imaging_dict.pop("find_continuum_first_round", None)
-        first_round_complete = (
-            rows is not None
-            and write_find_continuum_first_round_rows(
-                first_round_store, rows, img_xds.sizes["frequency"]
-            )["complete"]
-        )
+        try:
+            first_round_complete = (
+                rows is not None
+                and write_find_continuum_first_round_rows(
+                    first_round_store, rows, img_xds.sizes["frequency"]
+                )["complete"]
+            )
+        except Exception as exc:
+            logger.error(
+                f"The find_continuum first round could not be written: {exc!r}"
+            )
+            first_round_complete = False
         timing_distributed_application["T_find_continuum_first_round_write"] = (
             time.time() - start
         )
@@ -1489,11 +1508,17 @@ def image_cube_single_field(
         start = time.time()
         moments_complete = [False] * len(first_round_params["windows"])
         if run_id is not None:
-            drained, records = drain_first_round_moments(
-                run_id, first_round_store, first_round_params["windows"]
-            )
-            moments_complete = drained["moments_complete"]
-            imaging_dict.setdefault("timing_reduce_nodes", []).extend(records)
+            try:
+                drained, records = drain_first_round_moments(
+                    run_id, first_round_store, first_round_params["windows"]
+                )
+                moments_complete = drained["moments_complete"]
+                imaging_dict.setdefault("timing_reduce_nodes", []).extend(records)
+            except Exception as exc:
+                logger.error(
+                    f"The imager's find_continuum moments could not be drained: {exc!r}"
+                )
+                clear_first_round_moments(run_id, first_round_store)
         timing_distributed_application["T_find_continuum_first_round_drain"] = (
             time.time() - start
         )
@@ -1517,27 +1542,34 @@ def image_cube_single_field(
         task_seconds = imaging_dict["timing_node_tasks"].get(
             "T_find_continuum_first_round"
         )
-        group = zarr.open_group(first_round_store, mode="r+")
-        group.attrs["find_continuum_first_round"] = dict(
-            group.attrs["find_continuum_first_round"],
-            imager={
-                "n_tasks": n_map_tasks,
-                "T_find_continuum_first_round_sum": 0.0
-                if task_seconds is None
-                else float(task_seconds.sum()),
-                "T_drain": timing_distributed_application[
-                    "T_find_continuum_first_round_drain"
-                ],
-            },
-        )
-        bind_find_continuum_first_round_store(first_round_store, image_store)
+        try:
+            group = zarr.open_group(first_round_store, mode="r+")
+            group.attrs["find_continuum_first_round"] = dict(
+                group.attrs["find_continuum_first_round"],
+                imager={
+                    "n_tasks": n_map_tasks,
+                    "T_find_continuum_first_round_sum": 0.0
+                    if task_seconds is None
+                    else float(task_seconds.sum()),
+                    "T_drain": timing_distributed_application[
+                        "T_find_continuum_first_round_drain"
+                    ],
+                },
+            )
+            bind_find_continuum_first_round_store(first_round_store, image_store)
+        except Exception as exc:
+            logger.error(
+                "The find_continuum first-round store could not be bound to the "
+                f"cube: {exc!r}"
+            )
+            first_round_complete = False
         timing_distributed_application["T_find_continuum_first_round_write"] += (
             time.time() - start
         )
         if not first_round_complete:
             logger.warning(
                 "The find_continuum first round was not made: a chunk of the "
-                "cube could not be written."
+                "cube or its first round could not be written."
             )
         imaging_dict["find_continuum_first_round"] = (
             {
@@ -1626,6 +1658,24 @@ def _with_resource_usage(timing, usage):
     for key, value in usage.items():
         timing[key] = [value] if isinstance(value, list) else value
     return timing
+
+
+@contextlib.contextmanager
+def _first_round_cleared_on_failure(first_round_params):
+    """When the imaging compute raises, no worker keeps the moments of the run
+    and its slots are removed."""
+    try:
+        yield
+    except BaseException:
+        if first_round_params is not None:
+            from astroviper.distributed_applications.imaging.find_continuum.first_round import (
+                clear_first_round_moments,
+            )
+
+            clear_first_round_moments(
+                first_round_params["run_id"], first_round_params["first_round_store"]
+            )
+        raise
 
 
 def _create_find_continuum_first_round(

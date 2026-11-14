@@ -25,6 +25,7 @@ import toolviper.utils.logger as logger
 import zarr
 
 from astroviper.node_tasks.imaging.find_continuum import (
+    discard_first_round_moments,
     merge_first_round_moment_tile,
     pop_first_round_moments,
     primary_beam_channel_mean,
@@ -236,14 +237,15 @@ def drain_first_round_moments(
     address order (a pop not finished after ``timeout_seconds`` is cancelled,
     so the channels of its worker count as missing); otherwise the driver's own
     process. A window is complete when every pop ran where it was sent, the
-    pops added each of its channels exactly once and listed each of its slots
-    once. The slots of a complete
+    pops added each of its channels exactly once, listed each of its slots
+    once and saved all of them. The slots of a complete
     window, sorted by worker address, process and sequence, are merged tile by
     tile into ``MOMENT_0`` and ``MOMENT_8``
     (:func:`~astroviper.node_tasks.imaging.find_continuum.merge_first_round_moment_tile`,
-    a task each with a distributed client). The partials directory is then
-    removed, and ``moments_complete``, ``n_missing`` and ``n_duplicated`` (per
-    window) are set in the store's attributes.
+    a task each with a distributed client); a window with a tile that fails to
+    merge is left incomplete. The partials directory is then removed, also
+    when the drain fails, and ``moments_complete``, ``n_missing`` and
+    ``n_duplicated`` (per window) are set in the store's attributes.
 
     Parameters
     ----------
@@ -269,78 +271,93 @@ def drain_first_round_moments(
     """
     partials_directory = find_continuum_first_round_partials_path(first_round_store)
     client = _distributed_client()
-    if client is None:
-        pops = [pop_first_round_moments(run_id, None, partials_directory)]
-    else:
-        pops = _pop_on_workers(client, run_id, partials_directory, timeout_seconds)
-    ranges = [window["channel_range"] for window in windows]
-    counts = np.zeros(ranges[-1][1], dtype=np.int64)
-    slots = [[] for _ in windows]
-    for pop in pops:
-        if pop["counts"] is not None:
-            counts += pop["counts"]
-        for window, name in pop["slots"]:
-            pid, _, sequence = name.split("-")
-            slots[window].append((pop["address"] or "", int(pid), int(sequence), name))
-    placement_ok = all(pop["placement_ok"] for pop in pops)
-    n_missing = [int(np.sum(counts[start:stop] == 0)) for start, stop in ranges]
-    n_duplicated = [int(np.sum(counts[start:stop] > 1)) for start, stop in ranges]
-    names = [[name for *_, name in sorted(window_slots)] for window_slots in slots]
-    # Two pops listing one slot would merge one file twice.
-    distinct = [len(set(window_names)) == len(window_names) for window_names in names]
-    moments_complete = [
-        placement_ok and missing == 0 and duplicated == 0 and unique
-        for missing, duplicated, unique in zip(
-            n_missing, n_duplicated, distinct, strict=True
-        )
-    ]
-    records = [
-        {
-            "stage": "first_round_pop",
-            "n_slots": len(pop["slots"]),
-            **{
-                key: value
-                for key, value in pop.items()
-                if key not in ("counts", "slots")
-            },
-        }
-        for pop in pops
-    ]
-    group = zarr.open_group(first_round_store, mode="r+")
-    tiles = _merge_tiles(group["MOMENT_0"])
-    tasks = [
-        (first_round_store, partials_directory, window, names[window], tile)
-        for window, complete in enumerate(moments_complete)
-        if complete
-        for tile in tiles
-    ]
     try:
         if client is None:
-            records += [merge_first_round_moment_tile(*task) for task in tasks]
+            pops = [pop_first_round_moments(run_id, None, partials_directory)]
         else:
-            records += client.gather(
-                [
-                    client.submit(merge_first_round_moment_tile, *task, pure=False)
-                    for task in tasks
-                ]
-            )
+            pops = _pop_on_workers(client, run_id, partials_directory, timeout_seconds)
+        ranges = [window["channel_range"] for window in windows]
+        counts = np.zeros(ranges[-1][1], dtype=np.int64)
+        slots = [[] for _ in windows]
+        lost = set()
+        for pop in pops:
+            if pop["counts"] is not None:
+                counts += pop["counts"]
+            for window, name in pop["slots"]:
+                pid, _, sequence = name.split("-")
+                slots[window].append(
+                    (pop["address"] or "", int(pid), int(sequence), name)
+                )
+            lost.update(pop["lost_windows"])
+        placement_ok = all(pop["placement_ok"] for pop in pops)
+        n_missing = [int(np.sum(counts[start:stop] == 0)) for start, stop in ranges]
+        n_duplicated = [int(np.sum(counts[start:stop] > 1)) for start, stop in ranges]
+        names = [[name for *_, name in sorted(window_slots)] for window_slots in slots]
+        reasons = [[] for _ in windows]
+        for window, window_names in enumerate(names):
+            if n_missing[window]:
+                reasons[window].append(f"{n_missing[window]} channels missing")
+            if n_duplicated[window]:
+                reasons[window].append(
+                    f"{n_duplicated[window]} channels added twice or more"
+                )
+            if not placement_ok:
+                reasons[window].append("a pop ran on another worker")
+            # Two pops listing one slot would merge one file twice.
+            if len(set(window_names)) != len(window_names):
+                reasons[window].append("a slot listed twice")
+            if window in lost:
+                reasons[window].append("a slot could not be saved")
+        records = [
+            {
+                "stage": "first_round_pop",
+                "n_slots": len(pop["slots"]),
+                **{
+                    key: value
+                    for key, value in pop.items()
+                    if key not in ("counts", "slots")
+                },
+            }
+            for pop in pops
+        ]
+        group = zarr.open_group(first_round_store, mode="r+")
+        tiles = _merge_tiles(group["MOMENT_0"])
+        tasks = [
+            (first_round_store, partials_directory, window, names[window], tile)
+            for window, window_reasons in enumerate(reasons)
+            if not window_reasons
+            for tile in tiles
+        ]
+        if client is None:
+            merges = [
+                (task, _call(merge_first_round_moment_tile, *task)) for task in tasks
+            ]
+        else:
+            merges = [
+                (task, client.submit(merge_first_round_moment_tile, *task, pure=False))
+                for task in tasks
+            ]
+        for task, merge in merges:
+            try:
+                records.append(merge.result())
+            except Exception as exc:
+                if not reasons[task[2]]:
+                    reasons[task[2]].append(f"a tile failed to merge ({exc!r})")
     finally:
         # A cancelled pop may still be writing slots.
         shutil.rmtree(partials_directory, ignore_errors=True)
+    moments_complete = [not window_reasons for window_reasons in reasons]
     group.attrs["find_continuum_first_round"] = dict(
         group.attrs["find_continuum_first_round"],
         moments_complete=moments_complete,
         n_missing=n_missing,
         n_duplicated=n_duplicated,
     )
-    for window, complete in enumerate(moments_complete):
-        if not complete:
+    for window, window_reasons in enumerate(reasons):
+        if window_reasons:
             logger.warning(
                 f"The imager's moments of channels {ranges[window]} are incomplete "
-                f"({n_missing[window]} channels missing, {n_duplicated[window]} "
-                f"added twice or more, placement {'ok' if placement_ok else 'failed'}"
-                f"{'' if distinct[window] else ', a slot listed twice'})"
-                ": find_continuum computes them."
+                f"({', '.join(window_reasons)}): find_continuum computes them."
             )
     result = {
         "moments_complete": moments_complete,
@@ -350,6 +367,39 @@ def drain_first_round_moments(
         "n_slots": sum(len(pop["slots"]) for pop in pops),
     }
     return result, records
+
+
+def clear_first_round_moments(run_id, first_round_store):
+    """Drop the imager's worker-local moments of a run without merging them,
+    and remove the directory of their slots (after a failed imaging compute
+    or drain).
+
+    Every worker process of the distributed client (otherwise this process)
+    discards its moments of the run
+    (:func:`~astroviper.node_tasks.imaging.find_continuum.discard_first_round_moments`).
+    An error is logged, not raised.
+
+    Parameters
+    ----------
+    run_id : str or None
+        Imaging run; ``None``: no moments (only the directory is removed).
+    first_round_store : str
+        Path of the first-round store.
+    """
+    try:
+        if run_id is not None:
+            client = _distributed_client()
+            if client is None:
+                discard_first_round_moments(run_id)
+            else:
+                client.run(discard_first_round_moments, run_id, on_error="ignore")
+    except Exception as exc:
+        logger.error(f"The imager's find_continuum moments were not cleared: {exc!r}")
+    finally:
+        shutil.rmtree(
+            find_continuum_first_round_partials_path(first_round_store),
+            ignore_errors=True,
+        )
 
 
 def bind_find_continuum_first_round_store(first_round_store, input_image_store):
@@ -514,6 +564,18 @@ def load_find_continuum_first_round(
         requests[2:],
     )
     return [{-1: primary_beam_mean}, moments, *statistics]
+
+
+def _call(function, *args):
+    """A call made in this process, as a finished future."""
+    import concurrent.futures
+
+    future = concurrent.futures.Future()
+    try:
+        future.set_result(function(*args))
+    except Exception as exc:
+        future.set_exception(exc)
+    return future
 
 
 def _distributed_client():

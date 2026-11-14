@@ -1155,7 +1155,9 @@ def image_cube_single_field(
           on-disk chunks) and the total ``T_image_cube_task``. A write failure
           marks the row with ``task_failed_phase``, ``task_error``,
           ``failed_channel_start``, ``failed_n_channels`` (the first failed
-          chunk) and ``n_failed_chunks``.
+          chunk) and ``n_failed_chunks``; chunks whose find_continuum first
+          round failed are logged and counted in
+          ``n_failed_first_round_chunks``.
         * ``"deconvolution"`` : the per-plane deconvolution
           :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`,
           with channels remapped to global channel numbers.
@@ -1177,7 +1179,8 @@ def image_cube_single_field(
           the rows of the chunks written, concatenated (``channels``,
           ``statistics`` and ``tiles``, see
           :func:`~astroviper.node_tasks.imaging.find_continuum.find_continuum_first_round_chunk`),
-          and ``write_failed``, whether a chunk could not be written.
+          and ``write_failed``, whether a chunk could not be written or its
+          first round could not be made.
     """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
@@ -1374,6 +1377,7 @@ def image_cube_single_field(
     T_image_statistics = 0.0
     T_find_continuum_first_round = 0.0
     first_round_rows = []
+    first_round_failures = []  # (exception, chunk task_coords) per failed chunk
     first_round_params = None
     if find_continuum_first_round_params is not None:
         from astroviper.node_tasks.imaging.find_continuum import (
@@ -1507,16 +1511,21 @@ def image_cube_single_field(
             write_failures.append((exc, chunk_task_coords))
             chunk_written = False
         T_write += time.time() - start
-        # The first round describes only what is on disk.
+        # The first round describes only what is on disk. A chunk whose first
+        # round fails gives no rows, which leaves the first round incomplete,
+        # and the run continues.
         if first_round_params is not None and chunk_written:
             start = time.time()
-            first_round_rows.append(
-                find_continuum_first_round_chunk(
-                    chunk_xds,
-                    chunk_task_coords["frequency"]["slice"],
-                    **first_round_params,
+            try:
+                first_round_rows.append(
+                    find_continuum_first_round_chunk(
+                        chunk_xds,
+                        chunk_task_coords["frequency"]["slice"],
+                        **first_round_params,
+                    )
                 )
-            )
+            except Exception as exc:
+                first_round_failures.append((exc, chunk_task_coords))
             T_find_continuum_first_round += time.time() - start
         clear_cached_accessors(chunk_xds)
         chunk_xds = None
@@ -1607,6 +1616,17 @@ def image_cube_single_field(
         ):
             timing_df[key] = markers[0][key]
         timing_df["n_failed_chunks"] = len(write_failures)
+    for exc, chunk_coords in first_round_failures:
+        _log_task_io_failure(
+            "find_continuum first round",
+            exc,
+            task_id,
+            image_store,
+            data_selection,
+            chunk_coords,
+        )
+    if first_round_failures:
+        timing_df["n_failed_first_round_chunks"] = len(first_round_failures)
 
     # Timing kill switch: if this task overran the watchdog threshold, dump its
     # full timing breakdown to an error log and raise -- aborting the whole
@@ -1664,6 +1684,6 @@ def image_cube_single_field(
                 key: np.concatenate([rows[key] for rows in first_round_rows])
                 for key in ("channels", "statistics", "tiles")
             },
-            "write_failed": bool(write_failures),
+            "write_failed": bool(write_failures or first_round_failures),
         }
     return result

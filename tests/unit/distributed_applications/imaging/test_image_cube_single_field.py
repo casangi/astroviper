@@ -9,6 +9,7 @@
   leaves the Measurement Set unwritten.
 """
 
+import errno
 import importlib
 import os
 import shutil
@@ -841,7 +842,7 @@ def threaded_dask():
         yield
 
 
-def _image_first_round(tmp_path, n_channels=3, offset=SECOND_WINDOW_OFFSET):
+def _image_first_round(tmp_path, n_channels=3, offset=SECOND_WINDOW_OFFSET, **kwargs):
     """The dirty cube of the point source in two spectral windows of
     ``n_channels`` channels (the second ``offset`` Hz above the first and
     three times brighter), with find_continuum's first round: three node
@@ -879,6 +880,7 @@ def _image_first_round(tmp_path, n_channels=3, offset=SECOND_WINDOW_OFFSET):
         n_mapping_parallelism={"frequency": 3},
         image_chunking={"frequency": 1, "l": FIRST_ROUND_TILE, "m": FIRST_ROUND_TILE},
         find_continuum_first_round=True,
+        **kwargs,
     )
 
 
@@ -1028,6 +1030,101 @@ def test_find_continuum_first_round_of_a_chunk_not_written(
     assert attributes["moments_complete"] == [True, False]
     assert attributes["n_missing"] == [0, 1]
     assert not find_continuum_node_tasks._FIRST_ROUND_MOMENTS
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+
+def test_find_continuum_first_round_of_a_chunk_that_fails(
+    tmp_path, threaded_dask, monkeypatch
+):
+    """The first round of a chunk that cannot be written (after the retries of
+    transient errors) is logged and leaves the first round incomplete; the
+    imaging goes on, and no process keeps moments or slots."""
+    write_masks = find_continuum_node_tasks.write_primary_beam_masks
+
+    def write_or_fail(first_round_store, channels, inside, profile):
+        if channels == [4]:
+            raise OSError(errno.EIO, "Input/output error")
+        return write_masks(first_round_store, channels, inside, profile)
+
+    monkeypatch.setattr(
+        find_continuum_node_tasks, "write_primary_beam_masks", write_or_fail
+    )
+    result = _image_first_round(tmp_path)
+
+    _assert_imaged(result)
+    assert result["find_continuum_first_round"] is None
+    assert result["timing_node_tasks"]["n_failed_first_round_chunks"].sum() == 1
+    store = str(tmp_path / "cube_find_continuum_first_round.zarr")
+    assert not zarr.open_group(store, mode="r").attrs["find_continuum_first_round"][
+        "complete"
+    ]
+    assert not find_continuum_node_tasks._FIRST_ROUND_MOMENTS
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+
+def test_find_continuum_first_round_with_a_tile_that_fails_to_merge(
+    tmp_path, threaded_dask, monkeypatch
+):
+    """A merge of the moments that fails after the imaging leaves only that
+    window's moments incomplete; the first round is bound and returned."""
+    from astroviper.distributed_applications.imaging.find_continuum import (
+        first_round,
+    )
+
+    merge = first_round.merge_first_round_moment_tile
+
+    def merge_or_fail(store, partials_directory, window, slots, tile):
+        if window == 1:
+            raise OSError(errno.EIO, "Input/output error")
+        return merge(store, partials_directory, window, slots, tile)
+
+    monkeypatch.setattr(first_round, "merge_first_round_moment_tile", merge_or_fail)
+    result = _image_first_round(tmp_path)
+
+    _assert_imaged(result)
+    store = str(tmp_path / "cube_find_continuum_first_round.zarr")
+    assert result["find_continuum_first_round"] == {
+        "store": store,
+        "primary_beam_limit": 0.2,
+        "complete": True,
+        "moments_complete": [True, False],
+    }
+    validate_find_continuum_first_round(
+        result["find_continuum_first_round"], str(tmp_path / "cube.img.zarr"), 0.2
+    )
+    assert not os.path.exists(find_continuum_first_round_partials_path(store))
+
+
+def test_a_failed_imaging_compute_drops_the_first_round_moments(
+    tmp_path, threaded_dask, monkeypatch
+):
+    """The compute fails after every task added its moments (here in the
+    reduce): the call raises, no process keeps the moments of the run and
+    their slots are removed."""
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_cube_single_field"
+    )
+    monkeypatch.setattr(find_continuum_node_tasks, "FIRST_ROUND_WINDOWS_IN_MEMORY", 1)
+    flushed = []
+    flush = find_continuum_node_tasks._flush_first_round_window
+
+    def recorded_flush(entry, window, partials_directory):
+        flush(entry, window, partials_directory)
+        flushed.append(window)
+
+    def failing_reduce(input_data, input_params):
+        raise RuntimeError("reduce failed")
+
+    monkeypatch.setattr(
+        find_continuum_node_tasks, "_flush_first_round_window", recorded_flush
+    )
+    monkeypatch.setattr(driver, "combine_return_data_frames", failing_reduce)
+    with pytest.raises(RuntimeError, match="reduce failed"):
+        _image_first_round(tmp_path)
+
+    assert flushed
+    assert not find_continuum_node_tasks._FIRST_ROUND_MOMENTS
+    store = str(tmp_path / "cube_find_continuum_first_round.zarr")
     assert not os.path.exists(find_continuum_first_round_partials_path(store))
 
 
