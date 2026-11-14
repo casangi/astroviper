@@ -502,7 +502,12 @@ def _n_hosts(resources):
 
 def _hosts_text(n_hosts):
     """``"1 host"``, ``"2 hosts"``."""
-    return f"{n_hosts} host" + ("" if n_hosts == 1 else "s")
+    return _count_text(n_hosts, "hosts")
+
+
+def _count_text(n, noun):
+    """``"1 task"``, ``"2 tasks"``: ``n`` with the plural ``noun``, singular for 1."""
+    return f"{n} {noun[:-1] if n == 1 else noun}"
 
 
 def _host_worker_layout(resources, hostname):
@@ -1454,6 +1459,7 @@ def plot_core_resource_usage(
     time_unit="seconds",
     compute_resources=None,
     bin_seconds=None,
+    notes=None,
     save_path=None,
 ):
     """Per-core (or per-host) CPU / memory / I/O over the RUN's wall clock:
@@ -1515,6 +1521,8 @@ def plot_core_resource_usage(
         at least a task period the peak and minimum differ from the mean by
         about one burst over the bin width; in narrower bins the minimum
         drops towards 0 and the peak towards the rate of a single burst.
+    notes : str or sequence of str, optional
+        Lines along the bottom of every figure.
     save_path : str, optional
         PNG path, with the field ``{figure}`` (replaced by ``cpu``,
         ``memory`` and ``io``) when several figures are drawn; saved at
@@ -1638,7 +1646,10 @@ def plot_core_resource_usage(
         f" ({'/'.join(f'{b:g}' for b in dict.fromkeys(r['binw'] for r in runs))} "
         "s bin means)"
     )
-    counts = f"({' / '.join(str(r['n_rows']) for r in runs)} {unit}"
+    counts = (
+        f"({' / '.join(str(r['n_rows']) for r in runs)} "
+        f"{unit if any(r['n_rows'] != 1 for r in runs) else unit[:-1]}"
+    )
     peak_label = f"peak (max over {unit})"
 
     def _figure(title, panels):
@@ -1769,6 +1780,9 @@ def plot_core_resource_usage(
         else:
             print("(no read_chars/write_chars series; skipping the per-slot I/O plot)")
 
+    for key in keys:
+        if axes[key] is not None:
+            _add_notes(axes[key].figure, notes)
     _save_figures(
         {key: axes[key].figure for key in keys if axes[key] is not None}, save_path
     )
@@ -1832,6 +1846,7 @@ def plot_task_time_drift(
     memory_band_gib=None,
     io_rate_band=None,
     fault_band_millions=None,
+    notes=None,
     title=None,
     save_path=None,
 ):
@@ -1883,6 +1898,8 @@ def plot_task_time_drift(
         (GiB/s per host) and the page faults (millions), used when at least
         95 % of the values fall inside (:func:`_band_or_auto`); the task time
         otherwise spans at least +-22 % around its median.
+    notes : str or sequence of str, optional
+        Lines along the bottom of the figure.
     title : str, optional
         The title of the top panel.
     save_path : str, optional
@@ -2103,6 +2120,7 @@ def plot_task_time_drift(
         if x_axis == "hours"
         else "Position in the run (fraction of tasks started)"
     )
+    _add_notes(figure, notes)
     _save_figures({"figure": figure}, save_path)
     return figure
 
@@ -2114,6 +2132,7 @@ def plot_fault_time_correlation(
     task_time_band=None,
     fault_axis_max_millions=None,
     max_points=None,
+    notes=None,
     title=None,
     save_path=None,
 ):
@@ -2140,6 +2159,8 @@ def plot_fault_time_correlation(
         The x axis spans at least ``[0, fault_axis_max_millions]``.
     max_points : int, optional
         Draw every ``max(1, n // max_points)``-th task (the fit uses all).
+    notes : str or sequence of str, optional
+        Lines along the bottom of the figure.
     title : str, optional
         The title.
     save_path : str, optional
@@ -2219,6 +2240,7 @@ def plot_fault_time_correlation(
     ax.set_title(title if title is not None else "Task Time vs Page Faults")
     ax.grid(True, color="lightgray", alpha=0.5)
     ax.legend()
+    _add_notes(figure, notes)
     _save_figures({"figure": figure}, save_path)
     return figure
 
@@ -2296,9 +2318,9 @@ def plot_task_time_distribution(
     panel_labels : sequence of str, optional
         One panel title per source, for step histograms only: one panel per
         distinct value, stacked and sharing x.
-    bins : int, optional
+    bins : int or sequence of float, optional
         Histogram bins; for step histograms the number of shared edges
-        ``linspace(min, max, bins)`` over all values.
+        ``linspace(min, max, bins)`` over all values, or the edges themselves.
     log_counts : bool, optional
         A logarithmic count axis.
     quantile_line : float, optional
@@ -2372,7 +2394,7 @@ def plot_task_time_distribution(
                 values,
                 np.arange(1, len(values) + 1) / len(values),
                 color=cmap(i / max(len(runs) - 1, 1)),
-                label=label if label is not None else f"{len(values)} tasks",
+                label=label if label is not None else _count_text(len(values), "tasks"),
             )
         if quantile_line is not None:
             ax.axhline(quantile_line, color="gray", linestyle=":", linewidth=1)
@@ -2393,14 +2415,18 @@ def plot_task_time_distribution(
         ax.set_title(
             title
             or default_title
-            or f"Per-Task Time Distribution ({len(values)} tasks)"
+            or f"Per-Task Time Distribution ({_count_text(len(values), 'tasks')})"
         )
         ax.grid(True, color="lightgray")
         ax.set_axisbelow(True)
         axes = [ax]
     else:
         all_values = np.concatenate([v for *_, v in runs])
-        edges = np.linspace(all_values.min(), all_values.max(), bins)
+        edges = (
+            np.linspace(all_values.min(), all_values.max(), bins)
+            if np.isscalar(bins)
+            else np.asarray(bins, dtype=float)
+        )
         panel_names = list(dict.fromkeys(panel for _, panel, _ in runs))
         figure, axes = _performance_figure(
             (10, 5 * len(panel_names)), len(panel_names), 1, sharex=True, squeeze=False

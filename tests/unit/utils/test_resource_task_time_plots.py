@@ -15,6 +15,7 @@ import pytest
 
 from astroviper.utils.resource_plots import (
     _binned_task_series,
+    _count_text,
     _worker_share_divisors,
     plot_cluster_resource_usage,
     plot_core_resource_usage,
@@ -625,6 +626,17 @@ def test_task_time_distribution_cdf():
     assert figure.axes[0].get_lines()[0].get_label() == f"{len(a) - 1} tasks"
 
 
+def test_count_text_and_one_task_label():
+    assert _count_text(1, "tasks") == "1 task"
+    assert _count_text(2, "slots") == "2 slots"
+    assert _count_text(0, "hosts") == "0 hosts"
+    one = _timing_frame(n_tasks=1, seed=3)
+    figure = plot_task_time_distribution(one, quantile_line=None)
+    assert figure.axes[0].get_lines()[0].get_label() == "1 task"
+    figure = plot_task_time_distribution(one, kind="histogram", pooled=True)
+    assert figure.axes[0].get_title() == "Per-Task Time Distribution (1 task)"
+
+
 def test_task_time_distribution_histograms():
     a, b, c = (_timing_frame(n_tasks=n, seed=n) for n in (100, 120, 140))
     figure = plot_task_time_distribution(
@@ -661,6 +673,23 @@ def test_task_time_distribution_histograms():
         )
     with pytest.raises(ValueError, match="panel_labels"):
         plot_task_time_distribution([a, b], labels=["1", "2"], panel_labels=["x", "y"])
+
+
+def test_explicit_bin_edges_and_notes():
+    a, b = _timing_frame(n_tasks=100, seed=4), _timing_frame(n_tasks=120, seed=5)
+    edges = np.linspace(0.0, 100.0, 21)
+    figure = plot_task_time_distribution(
+        [a, b], labels=["run 1", "run 2"], kind="histogram", bins=edges
+    )
+    step = figure.axes[0].patches[0].get_xy()
+    assert step[:, 0].min() == pytest.approx(0.0)
+    assert step[:, 0].max() == pytest.approx(100.0)
+    figure = plot_task_time_drift(a, notes=["occupancy 90 %"])
+    assert figure.texts[-1].get_text() == "occupancy 90 %"
+    figure = plot_fault_time_correlation(a, notes="n")
+    assert figure.texts[-1].get_text() == "n"
+    axes = plot_core_resource_usage(_two_host_frame(), notes=["a", "b"])
+    assert axes["cpu"].figure.texts[-1].get_text() == "a\nb"
 
 
 def _non_io(tasks):
