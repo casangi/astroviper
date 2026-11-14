@@ -323,3 +323,85 @@ def plane_statistics_to_dataframe(statistics):
             ]
         )
     return pd.concat(frames, ignore_index=True)
+
+
+def plane_statistics_from_dataframe(frame):
+    """Rebuild plane statistics from their long-format table.
+
+    The inverse of :func:`plane_statistics_to_dataframe`: rows of a
+    statistic of :data:`PLANE_STATISTIC_NAMES`, of its ``_masked`` twin or of
+    ``entropy`` become data variables; any other row (a non-index coordinate
+    such as ``velocity``, which :func:`plane_statistics_to_dataframe` writes
+    as a statistic) becomes a coordinate along ``frequency`` again.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        Columns ``image_variable``, ``statistic``, ``time``, ``frequency``,
+        ``polarization`` and ``value``, as written by
+        :func:`plane_statistics_to_dataframe`.
+
+    Returns
+    -------
+    dict of str -> xarray.Dataset
+        ``{image_variable_key: xarray.Dataset}`` in the order of first
+        appearance. Each dataset has dims ``(time, frequency, polarization)``
+        with the coordinate values in the order of first appearance and one
+        float64 variable per statistic (NaN for a plane without a row), in
+        the order of first appearance too. The attrs ``data_variable``,
+        ``mask_present`` and ``mask_source`` are not in the table and not
+        set. Empty for an empty frame.
+
+    Raises
+    ------
+    ValueError
+        If the rows of a name that is not a statistic differ within a
+        frequency (over the variables, times and polarizations), so that
+        they are no coordinate along ``frequency``.
+    """
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    plane_dims = ("time", "frequency", "polarization")
+    statistic_names = {
+        *PLANE_STATISTIC_NAMES,
+        *(name + "_masked" for name in PLANE_STATISTIC_NAMES),
+        "entropy",
+    }
+    coordinate_rows = frame[~frame["statistic"].isin(statistic_names)]
+    for name, rows in coordinate_rows.groupby("statistic", sort=False):
+        spread = rows.groupby("frequency", sort=False)["value"].nunique(dropna=False)
+        if (spread > 1).any():
+            raise ValueError(
+                f"plane_statistics_from_dataframe: the rows of {name!r} are no "
+                "statistic and differ within a frequency, so they are no "
+                "coordinate along frequency"
+            )
+
+    results = {}
+    for key, rows in frame.groupby("image_variable", sort=False):
+        coords = {dim: np.asarray(pd.unique(rows[dim])) for dim in plane_dims}
+        shape = tuple(len(coords[dim]) for dim in plane_dims)
+        positions = {
+            dim: pd.Index(coords[dim]).get_indexer(rows[dim]) for dim in plane_dims
+        }
+        values = rows["value"].to_numpy(dtype=np.float64)
+        statistics = xr.Dataset(coords={dim: (dim, coords[dim]) for dim in plane_dims})
+        groups = rows.groupby("statistic", sort=False).indices
+        for name in pd.unique(rows["statistic"]):
+            selected = groups[name]
+            if name in statistic_names:
+                cube = np.full(shape, np.nan)
+                cube[tuple(positions[dim][selected] for dim in plane_dims)] = values[
+                    selected
+                ]
+                statistics[name] = (plane_dims, cube)
+            else:
+                along_frequency = np.full(shape[1], np.nan)
+                along_frequency[positions["frequency"][selected]] = values[selected]
+                statistics = statistics.assign_coords(
+                    {name: ("frequency", along_frequency)}
+                )
+        results[key] = statistics
+    return results

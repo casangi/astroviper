@@ -6,8 +6,8 @@ These exercise the data-free parts of
 * the reduce step ``combine_return_data_frames`` keys its output on
   ``"timing_node_tasks"`` (not the old ``"timing"``), and
 * the driver's pre-return timing summaries -- the per-step
-  ``timing_distributed_application`` breakdown and the mean / max over the
-  per-node-task timing frame -- format without error.
+  ``timing_distributed_application`` breakdown and the node-task table over
+  the per-node-task timing frame -- format without error.
 
 They do not run the imaging graph (no data download); the end-to-end shape is
 validated in ``tests/stakeholder/test_single_field_imaging.py``.
@@ -26,7 +26,7 @@ from astroviper.processing_functions.imaging.utils import (
     IMAGING_TIMING_TOTAL_KEY,
     ImagingDict,
 )
-from astroviper.utils.timing import format_timing_summary
+from astroviper.utils.timing import format_timing_summary, node_task_timing_table
 
 
 def _make_chunk_result(task_id, t_load, t_deconvolve, t_total, chan):
@@ -100,8 +100,8 @@ def test_combine_return_data_frames_composes_under_tree_reduction():
     assert len(final["timing_reduce_nodes"]) == 2
 
 
-def test_node_task_timing_mean_and_max_summaries_format():
-    """The driver's mean/max-over-chunks summaries render without error."""
+def test_node_task_timing_table_over_the_chunks():
+    """The driver logs the node-task table grouped by the imaging layout."""
     combined = combine_return_data_frames(
         [
             _make_chunk_result(0, t_load=1.0, t_deconvolve=2.0, t_total=4.0, chan=0),
@@ -109,27 +109,16 @@ def test_node_task_timing_mean_and_max_summaries_format():
         ],
         input_params={},
     )
-    timing_node_tasks = combined["timing_node_tasks"]
-
-    mean_summary = format_timing_summary(
-        timing_node_tasks.mean(numeric_only=True).to_dict(),
+    table = node_task_timing_table(
+        combined["timing_node_tasks"],
         IMAGING_TIMING_PHASES,
         total_key=IMAGING_TIMING_TOTAL_KEY,
-        title="mean",
     )
-    max_summary = format_timing_summary(
-        timing_node_tasks.max(numeric_only=True).to_dict(),
-        IMAGING_TIMING_PHASES,
-        total_key=IMAGING_TIMING_TOTAL_KEY,
-        title="max",
-    )
-
-    # Mean total is (4 + 10) / 2 = 7; max total is 10. Both show under the
-    # IMAGING_TIMING_TOTAL_KEY grand-total line.
-    assert "7.000" in mean_summary
-    assert "10.000" in max_summary
-    # The deconvolve leaf is grouped under the model-update phase.
-    assert "deconvolve" in mean_summary
+    total = table.loc[("TASK TOTAL", IMAGING_TIMING_TOTAL_KEY)]
+    assert (total["mean"], total["median"], total["max"]) == (7.0, 7.0, 10.0)
+    deconvolve = ("MODEL UPDATE (summed over imaging cycles)", "deconvolve")
+    assert table.loc[deconvolve, "max"] == 6.0
+    assert "(outside the phases)" in table.to_string(float_format="{:.3f}".format)
 
 
 def test_format_timing_summary_skips_string_metadata_columns():
@@ -140,8 +129,7 @@ def test_format_timing_summary_skips_string_metadata_columns():
     -- the regression that crashed every stakeholder imaging test on any host
     whose name is not a number (``ValueError: could not convert string to float``).
 
-    This guards the DataFrame-coercion branch directly; the mean/max summary test
-    above only feeds a ``numeric_only=True`` dict and so never exercises it.
+    This guards the DataFrame-coercion branch directly.
     """
     timing_df = pd.DataFrame(
         [

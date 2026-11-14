@@ -36,6 +36,8 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     ITERATION_HISTORY_FIELDS,
     ImagingDict,
     Key,
+    deconvolution_per_channel,
+    imaging_dict_from_dataframe,
     imaging_dict_to_dataframe,
 )
 from astroviper.processing_functions.imaging.utils.timing import (
@@ -53,6 +55,8 @@ from astroviper.processing_functions.imaging.utils.visibility import (
 __all__ = [
     "ImagingDict",
     "imaging_dict_to_dataframe",
+    "imaging_dict_from_dataframe",
+    "deconvolution_per_channel",
     "Key",
     "FIELD_ACCUM",
     "FIELD_SINGLE_VALUE",
