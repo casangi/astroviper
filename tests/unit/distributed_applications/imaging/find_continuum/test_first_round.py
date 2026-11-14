@@ -609,6 +609,46 @@ def test_drain_refuses_pops_that_ran_elsewhere(cube, tmp_path, monkeypatch):
     assert not os.path.exists(find_continuum_first_round_partials_path(store))
 
 
+def test_a_pop_whose_result_cannot_be_fetched_counts_as_missing(monkeypatch):
+    """A worker lost after its pop finished: its result can never be
+    fetched (the pop is pinned to it), so it is cancelled, not waited for."""
+    import distributed
+
+    class Future:
+        status = "finished"
+
+        def __init__(self, value):
+            self.value = value
+
+        def result(self, timeout=None):
+            if self.value is None:
+                raise TimeoutError("lost")
+            return self.value
+
+    class Client:
+        cancelled = []
+
+        def nthreads(self):
+            return {"tcp://b": 1, "tcp://a": 1}
+
+        def submit(self, function, run_id, address, partials_directory, **kwargs):
+            return Future(None if address == "tcp://b" else {"address": address})
+
+        def gather(self, futures):
+            return [future.result() for future in futures]
+
+        def cancel(self, futures):
+            self.cancelled.extend(futures)
+
+    monkeypatch.setattr(distributed, "wait", lambda futures, timeout: None)
+    client = Client()
+
+    assert first_round._pop_on_workers(client, "run", "partials", 600.0) == [
+        {"address": "tcp://a"}
+    ]
+    assert [future.value for future in client.cancelled] == [None]
+
+
 def test_drain_on_a_local_cluster(cube, tmp_path):
     """Pops run on their workers and the slots of two workers merge in
     address order; a restarted or busy worker leaves its window incomplete."""

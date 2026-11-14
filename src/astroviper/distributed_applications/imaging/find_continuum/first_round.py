@@ -42,6 +42,8 @@ from astroviper.processing_functions.imaging.find_continuum import (
 )
 
 _IMAGE_DIMS = ("time", "frequency", "polarization", "l", "m")
+# Shortest wait for the result of a finished pop.
+_POP_FETCH_SECONDS = 30.0
 
 
 def find_continuum_first_round_store_path(image_store):
@@ -234,8 +236,9 @@ def drain_first_round_moments(
     its registry
     (:func:`~astroviper.node_tasks.imaging.find_continuum.pop_first_round_moments`):
     with a distributed client, one pop per worker, pinned to it, in sorted
-    address order (a pop not finished after ``timeout_seconds`` is cancelled,
-    so the channels of its worker count as missing); otherwise the driver's own
+    address order (a pop not finished after ``timeout_seconds``, or whose
+    result cannot be fetched within 30 s after that, is cancelled, so the
+    channels of its worker count as missing); otherwise the driver's own
     process. A window is complete when every pop ran where it was sent, the
     pops added each of its channels exactly once, listed each of its slots
     once and saved all of them. The slots of a complete
@@ -588,9 +591,13 @@ def _distributed_client():
 
 
 def _pop_on_workers(client, run_id, partials_directory, timeout_seconds):
-    """The finished pops of every worker; the others are cancelled."""
+    """The pops of every worker that finished and could be fetched; the
+    others are cancelled."""
+    import time
+
     import distributed
 
+    deadline = time.time() + timeout_seconds
     futures = [
         client.submit(
             pop_first_round_moments,
@@ -605,9 +612,18 @@ def _pop_on_workers(client, run_id, partials_directory, timeout_seconds):
     ]
     with contextlib.suppress(TimeoutError):
         distributed.wait(futures, timeout=timeout_seconds)
-    finished, unfinished = [], []
+    pops, unfinished = [], []
     for future in futures:
-        (finished if future.status == "finished" else unfinished).append(future)
+        # A pop is pinned to its worker: the result of a worker lost after
+        # the pop finished can never be fetched again.
+        try:
+            if future.status != "finished":
+                raise TimeoutError
+            pops.append(
+                future.result(timeout=max(_POP_FETCH_SECONDS, deadline - time.time()))
+            )
+        except Exception:
+            unfinished.append(future)
     if unfinished:
         client.cancel(unfinished)
         logger.warning(
@@ -615,7 +631,7 @@ def _pop_on_workers(client, run_id, partials_directory, timeout_seconds):
             f"{len(futures)} workers did not finish: the channels of those "
             "workers count as missing."
         )
-    return client.gather(finished)
+    return pops
 
 
 def _merge_tiles(moments):
