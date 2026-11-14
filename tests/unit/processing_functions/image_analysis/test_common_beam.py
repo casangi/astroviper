@@ -314,6 +314,25 @@ def test_common_beam_tests_the_other_beams_after_a_right_angle():
     )
 
 
+def test_common_beam_keeps_a_right_angle_ellipse_that_contains_every_beam():
+    """casatools 6.7.6-14 returns the 3" circle of the largest beam and the fourth, at a
+    right angle; the second beam touches it, and the deconvolution test fails for it by
+    rounding, which would grow the circle by a step of 1.001."""
+    beams = radians(
+        [
+            (2.5, 1.0, -45.0),
+            (3.0, 0.5, 90.0),
+            (2.5, 1.0, 90.0),
+            (3.0, 0.5, 45.0),
+            (3.0, 2.0, -45.0),
+        ]
+    )
+    np.testing.assert_array_equal(
+        common_beam(cube(beams)),
+        (1.454441043328608e-05, 1.454441043328608e-05, -0.7853981633974483),
+    )
+
+
 def test_common_beam_of_position_angles_more_than_90_degrees_apart():
     """The pair at 80 and -80 deg has the beam of the pair turned by -45 deg, turned back.
     CASA's enclosing ellipse is mirrored and grows until it contains both beams, to 1.86

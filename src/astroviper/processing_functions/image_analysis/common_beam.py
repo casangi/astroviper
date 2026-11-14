@@ -90,8 +90,9 @@ def common_beam(beam_fit_params):
       turned by -45 degrees. ``common_beam`` takes the difference modulo 180 degrees, as
       for the axes of an ellipse, and gives the turned pair's beam, turned back.
     - At an exact right angle CASA returns the ellipse of the two major axes at once,
-      without testing the other beams, so a third beam can stick out of it. ``common_beam``
-      puts that ellipse in place of the two beams and repeats the test.
+      without testing the other beams, so a third beam can stick out of it. When one does,
+      beyond the tolerance of :func:`correcting_beam`, ``common_beam`` puts that ellipse
+      in place of the two beams and repeats the test.
 
     Elsewhere, given the same doubles in the same units and order, the result is that of
     casatools 6.7.6, except where CAS-14719 changed it, up to the rounding of sin, cos and
@@ -165,8 +166,13 @@ def common_beam(beam_fit_params):
                 1.0,
                 outer.unwrapped_pa,
             )
-            # It touches both beams, where the containment test can fail by rounding: it
-            # takes the place of both and of their copies, and the test is repeated.
+            if np.all(
+                _correcting_covariance(usable, _result(right_angle))[2] == "contained"
+            ):
+                return _result(right_angle)
+            # A beam sticks out of it (Notes). It touches both beams, where the
+            # containment test can fail by rounding: it takes the place of both and of
+            # their copies, and the test is repeated.
             beams = [
                 right_angle if _equal(beam, largest) or _equal(beam, problem) else beam
                 for beam in beams
