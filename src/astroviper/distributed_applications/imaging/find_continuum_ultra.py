@@ -182,10 +182,11 @@ def find_continuum_ultra(
         window.
     work_directory : str
         Directory in which the run makes its directory
-        ``<cube>.find_continuum_ultra_<start>_<stop>`` (refused if it exists:
-        the products of an earlier run), with the stores of the passes while
-        they run, the first-round store when none is given and the
-        joint-mask store; the report is written next to it.
+        ``<cube>.find_continuum_ultra_<start>_<stop>``, ``<cube>`` the name of
+        the image store without ``.img.zarr`` or ``.zarr`` (refused if it
+        exists: the products of an earlier run), with the stores of the
+        passes while they run, the first-round store when none is given and
+        the joint-mask store; the report is written next to it.
     image_data_group_in_name : str, default "residual"
         Image data group with the roles ``sky``, ``primary_beam`` and
         ``beam_fit_params_point_spread_function``.
@@ -600,7 +601,11 @@ def _new_run_directory(work_directory, input_image_store, window_range):
     """The new directory of the run in the work directory, named after the
     cube and the spectral window; refused if it exists."""
     start, stop = window_range
-    stem = os.path.basename(input_image_store).split(".")[0]
+    stem = os.path.basename(input_image_store)
+    for suffix in (".img.zarr", ".zarr"):
+        if stem.endswith(suffix):
+            stem = stem.removesuffix(suffix)
+            break
     run_directory = os.path.join(
         work_directory, f"{stem}.find_continuum_ultra_{start}_{stop}"
     )

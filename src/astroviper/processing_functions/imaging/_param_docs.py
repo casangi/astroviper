@@ -278,10 +278,11 @@ _FIND_CONTINUUM_ULTRA_PARAM_DOCS = {
             ),
             "work_directory": (
                 "Directory in which the run makes its directory\n"
-                "``<cube>.find_continuum_ultra_<start>_<stop>`` (refused if it exists:\n"
-                "the products of an earlier run), with the stores of the passes while\n"
-                "they run, the first-round store when none is given and the\n"
-                "joint-mask store; the report is written next to it."
+                "``<cube>.find_continuum_ultra_<start>_<stop>``, ``<cube>`` the name of\n"
+                "the image store without ``.img.zarr`` or ``.zarr`` (refused if it\n"
+                "exists: the products of an earlier run), with the stores of the\n"
+                "passes while they run, the first-round store when none is given and\n"
+                "the joint-mask store; the report is written next to it."
             ),
             "image_data_group_in_name": (
                 "Image data group with the roles ``sky``, ``primary_beam`` and\n"

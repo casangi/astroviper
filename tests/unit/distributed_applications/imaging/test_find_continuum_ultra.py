@@ -639,6 +639,31 @@ def test_each_window_equals_a_cube_of_that_window(two_windows, tmp_path):
         assert result["all_continuum"] is port["all_continuum"]
 
 
+def test_cubes_whose_names_share_a_prefix_have_their_own_run_directories(
+    two_windows, tmp_path
+):
+    """The run directory is named after the image store without its suffix,
+    so the cubes of two spectral windows named as the pipeline names them
+    run in one work directory."""
+    import shutil
+
+    names = [
+        f"uid___A001_X1_X2.s36_0.target_sci.spw{spw}.cube.I.iter0.residual.img.zarr"
+        for spw in (25, 27)
+    ]
+    for name in names:
+        shutil.copytree(two_windows["single"][0], tmp_path / name)
+        result = _run(
+            str(tmp_path / name),
+            tmp_path / "work",
+            12,
+            n_mapping_parallelism={"frequency": 2},
+        )
+        assert os.path.basename(os.path.dirname(result["joint_mask"])) == (
+            f"{name.removesuffix('.img.zarr')}.find_continuum_ultra_0_12"
+        )
+
+
 @pytest.mark.parametrize("monitor", [None, 0.05])
 def test_return_dictionary(two_windows, tmp_path, monitor):
     """Every key and column of design section 12, with and without the
