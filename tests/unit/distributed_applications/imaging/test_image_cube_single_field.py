@@ -859,12 +859,15 @@ def threaded_dask():
         yield
 
 
-def _image_first_round(tmp_path, n_channels=3, offset=SECOND_WINDOW_OFFSET, **kwargs):
+def _image_first_round(
+    tmp_path, n_channels=3, offset=SECOND_WINDOW_OFFSET, n_tasks=3, **kwargs
+):
     """The dirty cube of the point source in two spectral windows of
     ``n_channels`` channels (the second ``offset`` Hz above the first and
-    three times brighter), with find_continuum's first round: three node
-    tasks (the second straddles the windows), a chunk per channel, tiles of
-    32 px and the primary beam below its limit in the corners."""
+    three times brighter), with find_continuum's first round: ``n_tasks``
+    node tasks (by default three, the second straddling the windows), a chunk
+    per channel, tiles of 32 px and the primary beam below its limit in the
+    corners."""
     ps_store = _simulate_point_source(tmp_path, n_channels=n_channels)
     frequencies = _add_shifted_execution_block(ps_store, offset)
     return distributed_applications.imaging.image_cube_single_field(
@@ -894,7 +897,7 @@ def _image_first_round(tmp_path, n_channels=3, offset=SECOND_WINDOW_OFFSET, **kw
         },
         image_data_variables_keep=["sky_residual"],
         processing_set_data_group_name="base",
-        n_mapping_parallelism={"frequency": 3},
+        n_mapping_parallelism={"frequency": n_tasks},
         image_chunking={"frequency": 1, "l": FIRST_ROUND_TILE, "m": FIRST_ROUND_TILE},
         find_continuum_first_round=True,
         **kwargs,
@@ -1033,6 +1036,51 @@ def test_find_continuum_first_round(
         assert np.isfinite(integral).any() and np.isnan(integral).any()
         np.testing.assert_array_equal(maps[1][window], maximum)
         np.testing.assert_allclose(maps[0][window], integral, rtol=1e-12)
+
+
+def test_find_continuum_first_round_shard_waves_one_window_at_a_time(
+    tmp_path, threaded_dask, monkeypatch
+):
+    """With sharded output and the moments, the imager dispatches the shard
+    waves of one spectral window before those of the next, so that a worker
+    saves the moments of each window about once; the waves over the whole
+    cube would take a worker through both windows in every wave."""
+    import graphviper.graph_tools
+
+    import astroviper.node_tasks as node_tasks
+
+    graphs = []
+    graphviper_map = graphviper.graph_tools.map
+
+    def recording_map(*args, **kwargs):
+        graphs.append(kwargs)
+        return graphviper_map(*args, **kwargs)
+
+    monkeypatch.setattr(graphviper.graph_tools, "map", recording_map)
+    result = _image_first_round(
+        tmp_path,
+        n_channels=4,
+        n_tasks=8,
+        skunk_works=True,
+        image_sharding={"frequency": 2},
+    )
+
+    _assert_imaged(result, n_tasks=8)
+    assert result["find_continuum_first_round"]["moments_complete"] == [True, True]
+    (graph,) = (
+        graph
+        for graph in graphs
+        if graph["node_task"] is node_tasks.imaging.image_cube_single_field
+    )
+    priorities = graph["task_priorities"]
+    channels = {
+        task: item["task_coords"]["frequency"]["slice"].start
+        for task, item in graph["node_task_data_mapping"].items()
+    }
+    order = sorted(priorities, key=lambda task: (-priorities[task], task))
+    # Shards of two channels, two per window: the waves of window [0, 4),
+    # then those of window [4, 8).
+    assert [channels[task] for task in order] == [0, 2, 1, 3, 4, 6, 5, 7]
 
 
 def test_find_continuum_first_round_of_a_chunk_not_written(

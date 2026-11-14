@@ -117,6 +117,7 @@ FREQUENCY_COLUMNS = {
     "n_shard_opens",
     "bytes_written",
     "T_read",
+    "T_read_masks",
     "T_read_wait",
     "T_masks",
     "T_moments",
@@ -463,7 +464,14 @@ def test_first_round_timing_and_counters(cube, first_round):
     assert (timing["bytes_read_primary_beam"] > 0).all()
     assert (timing["bytes_read_masks"] == 0).all()
     assert (timing["bytes_written"] > 0).all()
-    for key in ("T_read", "T_masks", "T_first_round", "T_moments", "T_write_partials"):
+    for key in (
+        "T_read",
+        "T_read_masks",
+        "T_masks",
+        "T_first_round",
+        "T_moments",
+        "T_write_partials",
+    ):
         assert (timing[key] > 0).all()
     assert (timing[["T_spectrum", "T_noise"]] == 0).all().all()
     records = merged["timing_reduce_nodes"]
@@ -507,7 +515,62 @@ def test_moments_with_the_store_equal_those_of_the_first_pass(
     assert timing["n_chunks_read"].sum() == 64 * N_TILES - outside
     assert (timing["bytes_read_primary_beam"] == 0).all()
     assert (timing["bytes_read_masks"] > 0).all()
-    assert (timing["T_first_round"] == 0).all()
+    assert (timing[["T_first_round", "T_read_masks"]] == 0).all().all()
+
+
+def test_first_round_phases_count_the_reader_once(cube, tmp_path, monkeypatch):
+    """The masks the reader thread makes and writes have their own column:
+    the task's thread waits for them in T_read_wait, so its phases add up to
+    no more than the task's time, also when the masks take most of it."""
+    import time
+
+    from astroviper.distributed_applications.imaging.find_continuum_ultra import (
+        NODE_TASK_TIMING_PHASES,
+    )
+    from astroviper.node_tasks.imaging import find_continuum_first_round
+
+    write_primary_beam_masks = find_continuum_first_round.write_primary_beam_masks
+
+    def slow_write(*args):
+        time.sleep(0.02)
+        return write_primary_beam_masks(*args)
+
+    monkeypatch.setattr(
+        find_continuum_first_round, "write_primary_beam_masks", slow_write
+    )
+    store = str(tmp_path / "first_round.zarr")
+    create_find_continuum_first_round_store(
+        store,
+        N_CHANNELS,
+        (1, N_CHANNELS, 2, N_PIXELS, N_PIXELS),
+        TILE,
+        MERGE_TILE,
+        LIMIT,
+        VARIABLES,
+        STOKES_I,
+        {"sky": "float32", "primary_beam": "float32"},
+        None,
+        "find_continuum_ultra",
+        [cube["window"]],
+        cube["rest_frequency"],
+    )
+    partials_store, _ = _moment_stores(tmp_path / "pass")
+    (output,) = _frequency_tasks(
+        find_continuum_first_round_task,
+        cube["store"],
+        chunks=CHUNKS[:1],
+        primary_beam_limit=LIMIT,
+        moment_channel_weights=cube["weights"],
+        first_round_store=store,
+        compute_masks=True,
+        compute_moments=True,
+        partials_store=partials_store,
+        planes_per_batch=5,
+    )
+    row = output["timing_node_tasks"].iloc[0]
+    leaves = [key for _, key in NODE_TASK_TIMING_PHASES[0][2]]
+    assert row[leaves].sum() <= row["T_find_continuum_task"]
+    assert row["T_read_masks"] > 22 * 0.02
 
 
 def _regions():
@@ -727,6 +790,44 @@ def test_merge_of_unwritten_and_missing_slots(cube, tmp_path):
         merge_find_continuum_moment_partials(
             partials_store, maps_store, [1], len(CHUNKS), "float32"
         )
+
+
+def test_a_transient_error_of_a_slot_stat_is_retried(
+    cube, first_round, tmp_path, monkeypatch
+):
+    """A Lustre eviction fails the stat of a listed slot with EIO: the stat is
+    repeated instead of taken for a missing slot, and the maps are those of a
+    merge without it."""
+    from astroviper.node_tasks.imaging.utils import skunk_works
+
+    partials_store, maps_store = _moment_stores(tmp_path)
+    outputs = _frequency_tasks(
+        find_continuum_first_round_task,
+        cube["store"],
+        primary_beam_limit=LIMIT,
+        moment_channel_weights=cube["weights"],
+        first_round_store=first_round["store"],
+        compute_masks=False,
+        compute_moments=True,
+        partials_store=partials_store,
+        planes_per_batch=3,
+    )
+    written_slots = _reduce(outputs)["written_slots"]
+    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    stat, failures = os.stat, []
+
+    def evicted_once(path, *args, **kwargs):
+        shard = os.path.join(partials_store, "SKY_MOMENT_INTEGRATED", "c", "")
+        if os.fspath(path).startswith(shard) and not failures:
+            failures.append(path)
+            raise OSError(errno.EIO, "Input/output error")
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", evicted_once)
+    integral, maximum, _ = _merge(partials_store, maps_store, written_slots)
+    assert len(failures) == 1
+    np.testing.assert_array_equal(integral, first_round["integral"])
+    np.testing.assert_array_equal(maximum, first_round["maximum"])
 
 
 def test_reduce_concatenates_rows_and_folds_resource_series():

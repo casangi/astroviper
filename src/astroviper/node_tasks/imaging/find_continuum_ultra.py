@@ -48,8 +48,11 @@ _MOMENT_ARRAYS = {
     "integrated": "SKY_MOMENT_INTEGRATED",
     "maximum": "SKY_MOMENT_MAXIMUM",
 }
+# T_read and T_read_masks are the reader thread's, whose work the task's
+# thread waits for in T_read_wait.
 _FREQUENCY_SECONDS = (
     "T_read",
+    "T_read_masks",
     "T_read_wait",
     "T_masks",
     "T_moments",
@@ -206,7 +209,6 @@ def find_continuum_first_round_task(
 
     def make_masks(primary_beam, channels):
         """The masks of a batch, written to the store (reader thread)."""
-        start = time.perf_counter()
         n_tiles = [
             -(-n // size) for n, size in zip((n_l, n_m), tile_shape, strict=True)
         ]
@@ -215,19 +217,14 @@ def find_continuum_first_round_task(
             name: np.empty((channels.size, *n_tiles), dtype=bool)
             for name in _MASK_TILES
         }
-        write_seconds = 0.0
         for p in range(channels.size):
             masks = primary_beam_masks(primary_beam[:, p : p + 1], primary_beam_limit)
             for name, mask in zip(_MASK_TILES, masks, strict=True):
                 tiles[name][p] = tile_occupancy(mask, tile_shape)[0, 0, 0]
             packed[p] = pack_plane_masks(masks[0][0, 0, 0])
-            write_start = time.perf_counter()
             bytes_written["masks"] += write_primary_beam_masks(
                 first_round_store, channels[p : p + 1], *masks
             )
-            write_seconds += time.perf_counter() - write_start
-        reader_seconds["T_first_round"] += write_seconds
-        reader_seconds["T_masks"] += time.perf_counter() - start - write_seconds
         return {_LIMIT_MASK: packed}, tiles
 
     map_shape = (1, 1, 1, n_l, n_m)
@@ -814,7 +811,10 @@ def merge_find_continuum_moment_partials(
         _execution_identity,
         _write_array_region,
     )
-    from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
+    from astroviper.node_tasks.imaging.utils.skunk_works import (
+        _retry_transient_io,
+        read_array_region,
+    )
     from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         finalize_moments,
         merge_moment_partials_in_tree_order,
@@ -847,11 +847,16 @@ def merge_find_continuum_moment_partials(
                 key = arrays[field].metadata.encode_chunk_key(
                     (slot, rows.start // grid[1], columns.start // grid[2])
                 )
-                if not os.path.exists(os.path.join(path, key)):
-                    raise FileNotFoundError(
-                        f"Slot {slot} is listed as written, but "
-                        f"{os.path.join(path, key)} is absent"
+                # A transient error of the stat is retried, not taken for absence.
+                shard = os.path.join(path, key)
+                try:
+                    _retry_transient_io(
+                        f"stat of {shard}", lambda shard=shard: os.stat(shard)
                     )
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"Slot {slot} is listed as written, but {shard} is absent"
+                    ) from None
                 partials[field] = read_array_region(
                     path,
                     {"slot": slice(slot, slot + 1), "l": rows, "m": columns},
@@ -1390,6 +1395,7 @@ def _stream_batches(
             )[0]
             counters[role]["planes"] += channels.size
         reader_seconds["T_read"] += time.perf_counter() - start - masks_seconds
+        reader_seconds["T_read_masks"] += masks_seconds
         return data
 
     with ThreadPoolExecutor(max_workers=1) as executor:

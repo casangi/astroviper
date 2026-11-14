@@ -15,6 +15,7 @@ added exactly once. The store is bound to the cube it was made from
 (:func:`validate_find_continuum_first_round`).
 """
 
+import bisect
 import contextlib
 import hashlib
 import os
@@ -128,6 +129,57 @@ def find_continuum_merge_tile_counts(map_shape: tuple, tile_shape: tuple) -> lis
         -(-n // (2 * (chunk if chunk < n else MERGE_TILE_INNER_CHUNK)))
         for n, chunk in zip(map_shape, tile_shape, strict=True)
     ]
+
+
+def find_continuum_first_round_task_priorities(
+    task_priorities: dict, node_task_data_mapping: dict, windows: list
+) -> dict:
+    """The imager's shard-wave task priorities, one spectral window after the
+    other.
+
+    A worker process holds the moments of ``FIRST_ROUND_WINDOWS_IN_MEMORY``
+    windows and saves the least recently used one to a slot before it
+    allocates another
+    (:func:`~astroviper.node_tasks.imaging.find_continuum_first_round.add_first_round_moments`).
+    The waves of
+    :func:`~astroviper.node_tasks.imaging.utils.skunk_works.compute_shard_task_priorities`
+    step through every shard of the cube, so a worker would take tasks of
+    every window in every wave and save a slot at each change of window. Here
+    the waves step through the shards of one window before those of the next,
+    and a worker saves about one slot per window.
+
+    Parameters
+    ----------
+    task_priorities : dict
+        ``{task_id: -rank}``, the ranks of the tasks in the shard waves.
+    node_task_data_mapping : dict
+        The imager's mapping: ``task_coords["frequency"]["slice"]`` of every
+        task, in channels of the cube.
+    windows : list of dict
+        Spectral windows of the cube in channel order, with ``channel_range``
+        (``[start, stop)``).
+
+    Returns
+    -------
+    dict
+        ``{task_id: -(window * n_ranks + rank)}``, ``window`` that of the
+        task's first channel and ``n_ranks`` one more than the largest rank.
+    """
+    starts = [window["channel_range"][0] for window in windows]
+    n_ranks = 1 - min(task_priorities.values())
+    return {
+        task: priority
+        - n_ranks
+        * (
+            bisect.bisect_right(
+                starts,
+                node_task_data_mapping[task]["task_coords"]["frequency"]["slice"].start
+                or 0,
+            )
+            - 1
+        )
+        for task, priority in task_priorities.items()
+    }
 
 
 def create_find_continuum_first_round_store(

@@ -21,6 +21,7 @@ from astroviper.distributed_applications.imaging.find_continuum_first_round impo
     drain_first_round_moments,
     find_continuum_first_round_partials_path,
     find_continuum_first_round_store_path,
+    find_continuum_first_round_task_priorities,
     find_continuum_merge_tile_counts,
     validate_find_continuum_first_round,
 )
@@ -494,6 +495,53 @@ def test_drain_merges_the_slots_in_sequence_order(cube, tmp_path, monkeypatch):
         np.testing.assert_array_equal(integral[window], merged[0])
         np.testing.assert_array_equal(maximum[window], _direct(cube, window)[1])
         _assert_reordered_sum(integral[window], _direct(cube, window)[0])
+
+
+def test_task_priorities_run_the_shard_waves_one_window_at_a_time(
+    cube, tmp_path, monkeypatch
+):
+    """The shard waves of the first window come before those of the second:
+    a process holding one window that takes the tasks in priority order saves
+    one slot per window, where the waves over the whole cube make it save one
+    at every change of window."""
+    from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
+
+    monkeypatch.setattr(node_tasks, "FIRST_ROUND_WINDOWS_IN_MEMORY", 1)
+    mapping = {
+        channel: {"task_coords": {"frequency": {"slice": slice(channel, channel + 1)}}}
+        for channel in range(N_CHANNELS)
+    }
+    waves = compute_shard_task_priorities(cube["store"], "sky_residual", mapping)
+    priorities = find_continuum_first_round_task_priorities(
+        waves, mapping, cube["windows"]
+    )
+
+    def dispatched(task_priorities):
+        return sorted(task_priorities, key=lambda task: (-task_priorities[task], task))
+
+    # Shards of four channels: the waves of [0, 16), then those of [16, 34).
+    assert dispatched(priorities) == [
+        channel
+        for start, stop in WINDOW_RANGES
+        for within in range(4)
+        for channel in range(start + within, stop, 4)
+    ]
+    n_slots = {}
+    for run_id, task_priorities in (("waves", waves), ("windows", priorities)):
+        store = _first_round(
+            cube,
+            tmp_path / f"{run_id}.zarr",
+            [[channel] for channel in dispatched(task_priorities)],
+            run_id=run_id,
+        )
+        result, _ = drain_first_round_moments(run_id, store, cube["windows"])
+        assert result["moments_complete"] == [True, True]
+        n_slots[run_id] = result["n_slots"]
+        integral, maximum = _stored_moments(store)
+        for window in (0, 1):
+            np.testing.assert_array_equal(maximum[window], _direct(cube, window)[1])
+            _assert_reordered_sum(integral[window], _direct(cube, window)[0])
+    assert n_slots == {"waves": 8, "windows": 2}
 
 
 @pytest.mark.parametrize("change", ["missing", "duplicated"])

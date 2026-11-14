@@ -1400,6 +1400,8 @@ def image_cube_single_field(
     # all shard files -- and hence all Lustre OSTs -- instead of piling onto the
     # few shards that consecutive task_ids share. Derived from the on-disk shard
     # layout of the first kept variable, for any combination of sharded dims.
+    # With find_continuum's moments the waves run one spectral window at a
+    # time, so that a worker saves each window's moments about once.
     task_priorities = None
     if skunk_works and image_sharding:
         from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
@@ -1407,6 +1409,18 @@ def image_cube_single_field(
         task_priorities = compute_shard_task_priorities(
             image_store, image_data_variables_keep[0], node_task_data_mapping
         )
+        if (
+            task_priorities is not None
+            and first_round_params is not None
+            and first_round_params["run_id"] is not None
+        ):
+            from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+                find_continuum_first_round_task_priorities,
+            )
+
+            task_priorities = find_continuum_first_round_task_priorities(
+                task_priorities, node_task_data_mapping, first_round_params["windows"]
+            )
 
     # The node task has an explicit, NumPy-documented standalone signature;
     # graphviper adapts the input_params dictionary to its declared arguments.
