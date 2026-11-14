@@ -29,13 +29,15 @@ class TestMomentsFullStack:
         """Moment over frequency: the graph parallelizes over m (never the moment axis)."""
         path, img_xds = input_image
         out = str(tmp_path / "moments.img.zarr")
-        timing = moments(
+        return_dict = moments(
             input_image_store=path,
             moments_image_store=out,
             moments=ALL_MOMENTS,
             moment_axis="frequency",
             n_mapping_parallelism={"m": 3},
         )
+        assert isinstance(return_dict, dict)
+        timing = return_dict["timing_node_tasks"]
         assert isinstance(timing, pd.DataFrame)
         assert len(timing) == 3  # one row per m chunk
         result = load_image(out)
@@ -65,7 +67,7 @@ class TestMomentsFullStack:
             moment_axis="frequency",
             n_mapping_parallelism={"m": 2},
             monitor_resources_seconds=0.01,
-        )
+        )["timing_node_tasks"]
         assert len(timing) == 2
         for column in ("time_seconds", "cpu_percent", "memory_rss_bytes"):
             assert column in timing.columns, column
@@ -153,7 +155,7 @@ class TestMomentsFullStack:
             moments=["median", "rms"],
             moment_axis="frequency",
             thread_info={"n_threads": 2, "memory_per_thread": 4.0},
-        )
+        )["timing_node_tasks"]
         assert len(timing) >= 1
         result = load_image(out)
         reference = reference_moments(
@@ -207,7 +209,7 @@ class TestMomentsOverwriteAndErrors:
         """A ``.zarr`` name is written as given by earlier XRADIO versions and as
         ``.img.zarr`` by later ones; the moment maps go into the store written."""
         path, img_xds = input_image
-        moments(
+        result = moments(
             input_image_store=path,
             moments_image_store=str(tmp_path / "bare.zarr"),
             moments=["mean", "maximum"],
@@ -220,6 +222,7 @@ class TestMomentsOverwriteAndErrors:
             if store.exists()
         ]
         assert len(stores) == 1
+        assert result["moments_image_store"] == str(stores[0])
         reference = reference_moments(
             img_xds.SKY.values, axis=1, coord_values=img_xds.frequency.values
         )
@@ -346,7 +349,7 @@ class TestMomentsTiling:
             moment_axis="frequency",
             use_mask=True,
             # default n_mapping_parallelism -> {"l": None, "m": None}
-        )
+        )["timing_node_tasks"]
         assert len(timing) == 3 * 2  # one task per (l, m) inner-chunk tile
         result = load_image(out)
         reference = reference_moments(
@@ -373,12 +376,136 @@ class TestMomentsTiling:
             moments=["rms"],
             moment_axis="frequency",
             n_mapping_parallelism={"l": 2, "m": 3},
-        )
+        )["timing_node_tasks"]
         assert len(timing) == 6
         reference = reference_moments(
             img_xds.SKY.values, axis=1, coord_values=img_xds.frequency.values
         )
         assert_moments_match(load_image(out), reference, axis=1)
+
+    def test_return_dict_and_driver_timing(self, chunked_image, tmp_path, monkeypatch):
+        """The return dict: the driver steps and the node tasks on one wall
+        clock, the mapping parallelism as run, the compute resources and the
+        store written; the driver logs its steps and the node-task table."""
+        import importlib
+
+        from astroviper.utils.data_partitioning import (
+            COMPUTE_RESOURCES_KEYS,
+            get_compute_resources,
+        )
+
+        driver = importlib.import_module(
+            "astroviper.distributed_applications.image_analysis.moments"
+        )
+        logged = []
+        monkeypatch.setattr(
+            driver.logger,
+            "info",
+            lambda message, *args, **kwargs: logged.append(str(message)),
+        )
+        path, _ = chunked_image
+        out = str(tmp_path / "tiled.img.zarr")
+        result = moments(
+            input_image_store=path,
+            moments_image_store=out,
+            moments=["maximum"],
+            moment_axis="frequency",
+        )
+        assert set(result) == {
+            "timing_node_tasks",
+            "timing_distributed_application",
+            "n_mapping_parallelism",
+            "compute_resources",
+            "moments_image_store",
+            "report",
+        }
+        assert list(result["n_mapping_parallelism"].items()) == [("l", 3), ("m", 2)]
+        assert result["moments_image_store"] == out
+        assert result["report"] is None
+        assert set(result["compute_resources"]) == set(COMPUTE_RESOURCES_KEYS)
+        assert result["compute_resources"] == get_compute_resources("dask", None)
+        assert result["compute_resources"]["compute_backend"] == "dask"
+
+        steps = [
+            key
+            for _, _, leaves in driver.DISTRIBUTED_APPLICATION_TIMING_PHASES
+            for _, key in leaves
+        ]
+        timing = result["timing_distributed_application"]
+        assert set(timing) == {
+            *steps,
+            "T_total",
+            "compute_start_unixtime",
+            "compute_end_unixtime",
+            "application_start_unixtime",
+            "application_end_unixtime",
+        }
+        assert all(timing[key] >= 0.0 for key in steps)
+        assert timing["T_total"] == pytest.approx(
+            timing["application_end_unixtime"] - timing["application_start_unixtime"]
+        )
+        assert sum(timing[key] for key in steps) <= timing["T_total"]
+        assert timing["T_compute_dask_graph"] == pytest.approx(
+            timing["compute_end_unixtime"] - timing["compute_start_unixtime"]
+        )
+        tasks = result["timing_node_tasks"]
+        assert list(tasks["task_id"]) == list(range(6))
+        assert (
+            timing["application_start_unixtime"]
+            <= timing["compute_start_unixtime"]
+            <= tasks["start_unixtime"].min()
+        )
+        assert (
+            (tasks["start_unixtime"] + tasks["T_moments_task"]).max()
+            <= timing["compute_end_unixtime"]
+            <= timing["application_end_unixtime"]
+        )
+        assert any("moments timing (driver, seconds)" in text for text in logged)
+        table = [
+            text
+            for text in logged
+            if text.startswith("moments node-task timing over the 6 chunks")
+        ]
+        assert len(table) == 1 and "T_moments_task" in table[0]
+
+    def test_task_order_of_the_graph(self):
+        """graphviper numbers the node tasks in C order over the parallel axes,
+        in the order of n_mapping_parallelism: task_id k works on the chunks
+        numpy.unravel_index(k, tuple(n_mapping_parallelism.values()))."""
+        import xarray as xr
+        from graphviper.graph_tools.coordinate_utils import (
+            interpolate_data_coords_onto_parallel_coords,
+            make_parallel_coord,
+        )
+
+        for sizes, n_chunks in (
+            ({"l": 18, "m": 14}, {"l": 3, "m": 2}),
+            ({"m": 14, "l": 18}, {"m": 4, "l": 5}),
+            ({"frequency": 6, "l": 10, "m": 9}, {"frequency": 2, "l": 3, "m": 2}),
+        ):
+            # Index-space parallel coordinates, as the driver makes them.
+            index_xds = xr.Dataset(
+                coords={
+                    axis: np.arange(sizes[axis], dtype=np.float64) for axis in n_chunks
+                }
+            )
+            parallel_coords = {
+                axis: make_parallel_coord(coord=index_xds[axis], n_chunks=n)
+                for axis, n in n_chunks.items()
+            }
+            shape = tuple(
+                len(parallel_coords[axis]["data_chunks"]) for axis in n_chunks
+            )
+            assert shape == tuple(n_chunks.values())
+            mapping = interpolate_data_coords_onto_parallel_coords(
+                parallel_coords, {"img": index_xds}
+            )
+            assert sorted(mapping) == list(range(int(np.prod(shape))))
+            for task_id, entry in mapping.items():
+                assert list(entry["parallel_dims"]) == list(n_chunks)
+                assert tuple(entry["chunk_indices"]) == tuple(
+                    int(index) for index in np.unravel_index(task_id, shape)
+                )
 
     def test_dimension_flags_through_the_graph(self, chunked_image, tmp_path):
         """Full-image flags flow through the driver to every (l, m) tile."""
@@ -391,7 +518,7 @@ class TestMomentsTiling:
             moments=["maximum", "mean"],
             moment_axis="frequency",
             dimension_flags=flags,
-        )
+        )["timing_node_tasks"]
         assert len(timing) == 3 * 2
         nan_sky = img_xds.SKY.values.copy()
         nan_sky[:, [0, 5]] = np.nan
@@ -408,7 +535,7 @@ class TestMomentsTiling:
             moments_image_store=out,
             moments=["minimum"],
             moment_axis="m",
-        )
+        )["timing_node_tasks"]
         assert len(timing) == 6  # one task per 1-channel on-disk chunk
         reference = reference_moments(
             img_xds.SKY.values, axis=4, coord_values=img_xds.m.values
@@ -535,7 +662,7 @@ class TestMomentsInput:
             moments_image_store=out,
             moments=["maximum"],
             moment_axis="frequency",
-        )
+        )["timing_node_tasks"]
         assert len(timing) == 1  # one tile: the whole (l, m) plane
         reference = reference_moments(
             img_xds.SKY.values, axis=1, coord_values=img_xds.frequency.values
