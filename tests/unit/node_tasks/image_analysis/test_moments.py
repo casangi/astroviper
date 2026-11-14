@@ -430,3 +430,128 @@ def test_dimension_flags_are_sliced_to_the_chunk(input_image):
         rtol=1e-6,
         equal_nan=True,
     )
+
+
+def test_tile_read_takes_only_the_compressed_chunks(tmp_path, monkeypatch):
+    """On a file system whose ``st_blksize`` is 4 MiB (Lustre), a tile read
+    from a fixed-slot sharded image store reads each inner chunk's compressed
+    bytes and the shard index, not the 4 MiB a buffered ``open()`` reads."""
+    import glob
+    import io
+    import os
+    from pathlib import Path
+
+    import zarr
+
+    from astroviper.node_tasks.image_analysis.moments import _open_image_lazy
+    from astroviper.node_tasks.imaging.utils import (
+        write_result_chunk_to_disk_sharded_skunk_works,
+    )
+    from astroviper.utils.io import create_empty_data_variables_on_disk
+
+    n_frequency, shard = 8, 4
+    store = str(tmp_path / "fixed_slot.img.zarr")
+    zarr.open_group(store, mode="w")
+    create_empty_data_variables_on_disk(
+        store,
+        ["sky_residual"],
+        shape_dict={
+            "time": 1,
+            "frequency": n_frequency,
+            "polarization": 2,
+            "l": 16,
+            "m": 16,
+        },
+        parallel_coords={
+            "frequency": {"data_chunks": [[k] for k in range(n_frequency)]}
+        },
+        compressor=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        double_precision=False,
+        data_variable_definitions="imaging",
+        image_chunking={"l": 8, "m": 8},
+        image_sharding={"frequency": shard},
+    )
+    dims = ["time", "frequency", "polarization", "l", "m"]
+    sky = (
+        np.random.default_rng(3)
+        .standard_normal((1, n_frequency, 2, 16, 16))
+        .astype("<f4")
+    )
+    for k in range(n_frequency):
+        write_result_chunk_to_disk_sharded_skunk_works(
+            store,
+            ["sky_residual"],
+            {"frequency": {"slice": slice(k, k + 1)}},
+            xr.Dataset({"SKY_RESIDUAL": (dims, sky[:, k : k + 1])}),
+        )
+
+    # Expected reads per shard for the tile l 0..7, m 8..15: the index and
+    # inner chunk (l 0, m 1) of each channel, at the lengths the index records.
+    index_nbytes = 16 * shard * 2 * 2
+    expected = {}
+    paths = sorted(
+        p
+        for p in glob.glob(store + "/SKY_RESIDUAL/c/**", recursive=True)
+        if os.path.isfile(p)
+    )
+    for path in paths:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(size - index_nbytes)
+            index = np.frombuffer(f.read(), dtype="<u8").reshape(shard, 2, 2, 2)
+        expected[os.stat(path).st_ino] = sorted(
+            [(size - index_nbytes, index_nbytes)]
+            + [tuple(int(v) for v in index[f, 0, 1]) for f in range(shard)]
+        )
+    assert len(expected) == n_frequency // shard
+
+    blksize = 4 << 20
+    reads = []
+    real_open, real_pread = io.open, os.pread
+
+    class LustreFileIO(io.FileIO):
+        def readinto(self, buffer):
+            offset = self.tell()
+            n = super().readinto(buffer)
+            reads.append((os.fstat(self.fileno()).st_ino, offset, n))
+            return n
+
+        def readall(self):
+            offset = self.tell()
+            data = super().readall()
+            reads.append((os.fstat(self.fileno()).st_ino, offset, len(data)))
+            return data
+
+    def lustre_open(file, mode="r", buffering=-1, *args, **kwargs):
+        if mode == "rb" and buffering == -1:
+            return io.BufferedReader(LustreFileIO(file), blksize)
+        return real_open(file, mode, buffering, *args, **kwargs)
+
+    def counting_pread(fd, n, offset):
+        data = real_pread(fd, n, offset)
+        reads.append((os.fstat(fd).st_ino, offset, len(data)))
+        return data
+
+    monkeypatch.setattr(io, "open", lustre_open)
+    monkeypatch.setattr(os, "pread", counting_pread)
+
+    # A read the way LocalStore makes it fills the whole buffer for one chunk.
+    inode = os.stat(paths[0]).st_ino
+    offset, nbytes = expected[inode][0]
+    with Path(paths[0]).open("rb") as f:
+        f.seek(offset)
+        f.read(nbytes)
+    assert reads == [(inode, offset, blksize)]
+    reads.clear()
+
+    tile = (
+        _open_image_lazy(store)["SKY_RESIDUAL"]
+        .isel(l=slice(0, 8), m=slice(8, 16))
+        .values
+    )
+    np.testing.assert_array_equal(tile, sky[..., 0:8, 8:16])
+    per_shard = {}
+    for inode, offset, n in reads:
+        if inode in expected:
+            per_shard.setdefault(inode, []).append((offset, n))
+    assert {inode: sorted(r) for inode, r in per_shard.items()} == expected

@@ -32,13 +32,17 @@ def _open_image_lazy(input_image_store):
     if "zarr" in input_image_store:
         import xarray as xr
 
+        from astroviper.utils.zarr_store import PreadLocalStore
+
         # chunks=None -> zarr-backed lazy arrays WITHOUT dask, so .load()
         # reads directly in this process. With the default (dask-backed)
         # arrays, .load() inside a distributed worker ships the chunk-read
         # graph to the ambient Client/scheduler -- tasks submitting tasks,
         # whose inner futures get cancelled (FutureCancelledError) when the
         # cluster is busy running the outer map tasks.
-        return xr.open_zarr(input_image_store, chunks=None)
+        return xr.open_zarr(
+            PreadLocalStore(input_image_store, read_only=True), chunks=None
+        )
     from xradio.image import open_image
 
     return open_image(input_image_store)
