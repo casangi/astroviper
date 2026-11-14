@@ -1,6 +1,22 @@
 """Processing functions of find_continuum_ultra: findContinuum's algorithm on
 image-shaped maps and one-dimensional spectra."""
 
+from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
+    accumulate_moments,
+    finalize_moments,
+    first_round_channel_rows,
+    masked_channel_means,
+    masked_channel_medians_and_mads,
+    masked_channel_scaled_mads,
+    merge_moment_partials,
+    merge_moment_partials_in_tree_order,
+    new_moment_partials,
+    pack_plane_masks,
+    primary_beam_masks,
+    tile_occupancy,
+    unpack_plane_masks,
+    valid_voxels,
+)
 from astroviper.processing_functions.imaging.find_continuum_ultra.numerics import (
     channels_of_ranges,
     chauvenet_statistics,
@@ -57,4 +73,18 @@ __all__ = [
     "n_baseline_channels",
     "primary_beam_mean_channels",
     "find_continuum_settings",
+    "primary_beam_masks",
+    "valid_voxels",
+    "first_round_channel_rows",
+    "new_moment_partials",
+    "accumulate_moments",
+    "merge_moment_partials",
+    "merge_moment_partials_in_tree_order",
+    "finalize_moments",
+    "masked_channel_means",
+    "masked_channel_scaled_mads",
+    "masked_channel_medians_and_mads",
+    "tile_occupancy",
+    "pack_plane_masks",
+    "unpack_plane_masks",
 ]
