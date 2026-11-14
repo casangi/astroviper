@@ -185,6 +185,23 @@ def _cube_request(path, kind, chans="", mask="", **fields):
     )
 
 
+def _moments_request(path, moments, chans="", mask=""):
+    metadata = _cube(path)["metadata"]
+    return _cube_request(
+        path,
+        "moments",
+        chans,
+        mask,
+        moments=list(moments),
+        frequency=(
+            metadata["reference_value"][3]
+            + metadata["increment"][3]
+            * (np.arange(metadata["shape"][3]) - metadata["reference_pixel"][3])
+        ).tolist(),
+        rest_frequency=metadata["rest_frequency"],
+    )
+
+
 class _Casalog:
     def post(self, message, priority="INFO", origin=""):
         if priority in ("WARN", "SEVERE"):
@@ -217,20 +234,7 @@ def immoments(
     if cube is None:
         raise NotImplementedError("immoments is only supported on the registered cubes")
     metadata = cube["metadata"]
-    request = _cube_request(
-        imagename,
-        "moments",
-        chans,
-        mask,
-        moments=moments,
-        frequency=(
-            metadata["reference_value"][3]
-            + metadata["increment"][3]
-            * (np.arange(metadata["shape"][3]) - metadata["reference_pixel"][3])
-        ).tolist(),
-        rest_frequency=metadata["rest_frequency"],
-    )
-    maps = _reduce([request])[0]
+    maps = _reduce([_moments_request(imagename, moments, chans, mask)])[0]
     for moment in moments:
         path = outfile + MOMENT_SUFFIXES[moment] if len(moments) > 1 else outfile
         values = maps[moment][:, :, None, None]

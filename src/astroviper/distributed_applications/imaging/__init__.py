@@ -1,5 +1,8 @@
 from astroviper.distributed_applications.imaging.feather import feather
-from astroviper.distributed_applications.imaging.find_continuum import find_continuum
+from astroviper.distributed_applications.imaging.find_continuum import (
+    find_continuum,
+    find_continuum_fused,
+)
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     image_continuum_single_field,
 )
@@ -20,4 +23,5 @@ __all__ = [
     "image_continuum_single_field",
     "feather",
     "find_continuum",
+    "find_continuum_fused",
 ]
