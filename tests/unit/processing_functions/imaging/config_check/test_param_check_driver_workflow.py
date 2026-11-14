@@ -34,9 +34,9 @@ def test_workflow_schema_rejected(options):
 @pytest.mark.parametrize(
     "options",
     [
-        {"skunk_works": False},
-        {"skunk_works": True, "write_visibility_model_to_ps": True},
-        {"skunk_works": True, "write_imaging_weights_to_ps": True},
+        {"io_engine": "xradio"},
+        {"io_engine": "chunk", "write_visibility_model_to_ps": True},
+        {"io_engine": "chunk", "write_imaging_weights_to_ps": True},
     ],
 )
 def test_msv2_storage_restrictions(options):
@@ -56,9 +56,11 @@ def test_msv2_read_only_supported_path():
         check_input_storage,
     )
 
-    check_input_storage({"skunk_works": True}, input_is_msv2=True)
+    check_input_storage({"io_engine": "chunk"}, input_is_msv2=True)
     with pytest.raises(ValueError, match="convert"):
-        check_input_storage({"skunk_works": True}, input_is_msv2=True, allow_msv2=False)
+        check_input_storage(
+            {"io_engine": "chunk"}, input_is_msv2=True, allow_msv2=False
+        )
 
 
 @pytest.mark.parametrize("kind", ["cube", "mfs", "mvc"])
@@ -174,13 +176,13 @@ def test_complete_workflow_requires_each_configuration_group(missing):
         ({"compute_backend": "gpu"}, "compute_backend"),
         ({"write_visibility_model_to_ps": True}, "write_visibility_model_to_ps"),
         ({"write_imaging_weights_to_ps": True}, "write_imaging_weights_to_ps"),
-        ({"image_sharding": {"frequency": 1}}, "skunk_works"),
+        ({"image_sharding": {"frequency": 1}}, "io_engine"),
         ({"output_image_format": "hdf5"}, "output_image_format"),
-        ({"output_image_format": "fits"}, "FITS.*skunk_works"),
+        ({"output_image_format": "fits"}, "FITS.*io_engine"),
         (
             {
                 "output_image_format": "fits",
-                "skunk_works": True,
+                "io_engine": "chunk",
                 "image_chunking": {"frequency": 1},
             },
             "FITS.*image_chunking",

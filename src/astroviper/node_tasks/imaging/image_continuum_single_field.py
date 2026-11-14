@@ -1024,7 +1024,7 @@ def residual_update_continuum_single_field(
     weight_memory_mode="in_place",
     visibility_memory_mode="recompute",
     wideband_primary_beam_memory_mode="recompute",
-    skunk_works=False,
+    io_engine="xradio",
     data_group=None,
     is_first_cycle=True,
     make_primary_beam_taylor=True,
@@ -1239,11 +1239,11 @@ def residual_update_continuum_single_field(
         the driver but passes each map only its local beam. The setting is ignored
         for MFS.
 
-    skunk_works : bool, optional
-        Use the experimental direct-Zarr loading path.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the processing-set load.
 
     data_group : dict, optional
-        Role-to-variable mapping used by the skunk-works loader.
+        Role-to-variable mapping used by the chunk loader.
 
     is_first_cycle : bool, optional
         Indicates whether this is the first imaging cycle.
@@ -1439,10 +1439,10 @@ def residual_update_continuum_single_field(
         # task-level sub-selection.
         ps_xdt = input_data
 
-    elif skunk_works:
-        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
+    elif io_engine == "chunk":
+        from astroviper.utils.chunk_io import load_processing_set
 
-        ps_xdt = load_processing_set_skunk_works(
+        ps_xdt = load_processing_set(
             input_data_store,
             sel_parms=data_selection,
             data_group=data_group,
@@ -1820,7 +1820,7 @@ def grid_imaging_weight_density_continuum_node(
     instrument_polarization_basis="linear",
     single_precision_gridding=False,
     processing_function_threads=1,
-    skunk_works=False,
+    io_engine="xradio",
     data_group=None,
     input_data=None,
     task_id=0,
@@ -1900,12 +1900,12 @@ def grid_imaging_weight_density_continuum_node(
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
-    skunk_works : bool, optional
-        Use the experimental direct Measurement Set loader.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the processing-set load.
     data_group : dict or None, optional
         Resolved data-group role mapping. Its correlated-data variable is
         omitted from ordinary loads because global density gridding uses only
-        UVW, weights, and flags. It also configures the experimental loader.
+        UVW, weights, and flags. It also configures the chunk loader.
     input_data : xarray.DataTree or mapping or None, optional
         Preloaded Processing Set partition; when supplied, skip disk loading.
     task_id : int, optional
@@ -1973,10 +1973,10 @@ def grid_imaging_weight_density_continuum_node(
         # processing-set partition.
         ps_xdt = input_data
 
-    elif skunk_works:
-        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
+    elif io_engine == "chunk":
+        from astroviper.utils.chunk_io import load_processing_set
 
-        ps_xdt = load_processing_set_skunk_works(
+        ps_xdt = load_processing_set(
             input_data_store,
             sel_parms=data_selection,
             data_group=data_group,
@@ -2134,7 +2134,7 @@ def degrid_imaging_weights_continuum_node(
     instrument_polarization_basis="linear",
     processing_function_threads=1,
     weight_memory_mode="in_place",
-    skunk_works=False,
+    io_engine="xradio",
     data_group=None,
     input_data=None,
     task_id=0,
@@ -2228,12 +2228,12 @@ def degrid_imaging_weights_continuum_node(
         is copied into the input only when ``write_imaging_weights_to_ps=True``.
         This option remains separate from ``memory_mode`` for now; the policies
         may be unified later.
-    skunk_works : bool, optional
-        Use the experimental direct Measurement Set loader.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the processing-set load.
     data_group : dict or None, optional
         Resolved data-group role mapping. Its correlated-data variable is
         omitted from ordinary loads because weight degridding uses only UVW,
-        weights, and flags. It also configures the experimental loader.
+        weights, and flags. It also configures the chunk loader.
     input_data : xarray.DataTree or mapping or None, optional
         Preloaded Processing Set partition; when supplied, skip disk loading.
     task_id : int, optional
@@ -2297,10 +2297,10 @@ def degrid_imaging_weights_continuum_node(
     if input_data is not None:
         ps_xdt = input_data
 
-    elif skunk_works:
-        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
+    elif io_engine == "chunk":
+        from astroviper.utils.chunk_io import load_processing_set
 
-        ps_xdt = load_processing_set_skunk_works(
+        ps_xdt = load_processing_set(
             input_data_store,
             sel_parms=data_selection,
             data_group=data_group,

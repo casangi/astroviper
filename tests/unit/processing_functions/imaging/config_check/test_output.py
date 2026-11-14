@@ -16,7 +16,7 @@ from astroviper.processing_functions.imaging.config_check._output import (
 
 
 def fits_config(**image):
-    return {"output_image_format": "fits", "skunk_works": True, "image_params": image}
+    return {"output_image_format": "fits", "io_engine": "chunk", "image_params": image}
 
 
 @pytest.mark.parametrize(
@@ -90,14 +90,14 @@ def test_layout_uses_task_boundaries_when_available():
     ],
 )
 def test_planned_sharded_codec_chain_rejected(sharding):
-    config = {"skunk_works": True, "zarr_meta": {"SKY": {"sharding": sharding}}}
+    config = {"io_engine": "chunk", "zarr_meta": {"SKY": {"sharding": sharding}}}
     with pytest.raises(ValueError):
         check_driver_workflow(config, mode=CUBE_SINGLE_FIELD)
 
 
 def test_planned_sharded_codec_chain_is_read_only():
     config = {
-        "skunk_works": True,
+        "io_engine": "chunk",
         "zarr_meta": {
             "SKY": {
                 "sharding": {
@@ -123,7 +123,7 @@ def test_unsupported_codec_rejected_only_for_direct_writer(monkeypatch):
     config = {"compressor": ZstdCodec()}
     check_driver_workflow(config, mode=CUBE_SINGLE_FIELD)
     with pytest.raises(ValueError, match="direct writer"):
-        check_driver_workflow({**config, "skunk_works": True}, mode=CUBE_SINGLE_FIELD)
+        check_driver_workflow({**config, "io_engine": "chunk"}, mode=CUBE_SINGLE_FIELD)
 
 
 @pytest.mark.parametrize("coordinates", [[], "I", [["I", "Q"]]])

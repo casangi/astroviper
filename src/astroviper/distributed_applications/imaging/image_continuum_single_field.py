@@ -2474,7 +2474,7 @@ def image_continuum_single_field(
     restore: bool = False,
     restoration_output: str = "primary_beam_corrected",
     gridding_kernel_params: dict[str, Any] | None = None,
-    skunk_works: bool = False,
+    io_engine: str = "xradio",
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     reduce_mode: str = "tree",
@@ -2735,8 +2735,10 @@ def image_continuum_single_field(
     fft_backend : str
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
-    skunk_works : bool
-        Enable the experimental storage path; required for sharded output.
+    io_engine : {"chunk", "xradio"}
+        I/O of the node tasks: ``"chunk"`` reads the data group's variables
+        straight from the Zarr chunk blobs; ``"xradio"`` uses XRADIO's
+        ``load_processing_set``. Default ``"xradio"``.
     cycle_control_params : dict
         CLEAN cycle controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual
@@ -3568,7 +3570,7 @@ def image_continuum_single_field(
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
     input_params["make_primary_beam_taylor"] = bool(restore)
-    input_params["skunk_works"] = skunk_works
+    input_params["io_engine"] = io_engine
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
     input_params["spectral_diagnostics"] = spectral_diagnostics
 
@@ -3748,11 +3750,11 @@ def image_continuum_single_field(
             "data_group": input_params["data_group"],
         }
 
-        if skunk_works:
+        if io_engine == "chunk":
             # The preparation node shown above currently uses the standard loader.
             logger.warning(
                 "Imaging-weight preparation currently uses the standard "
-                "processing-set loader even though skunk_works=True."
+                "processing-set loader even though io_engine='chunk'."
             )
 
         if weighting in ("natural", "briggs", "briggs_abs", "uniform"):

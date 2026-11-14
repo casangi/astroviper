@@ -1,7 +1,7 @@
-"""Performance-oriented (``_skunk_works``) FITS output for cube imaging.
+"""FITS output of the chunk I/O engine (``io_engine="chunk"``) for cube imaging.
 
 FITS counterpart of the direct-Zarr writers in
-:mod:`astroviper.node_tasks.imaging.utils.skunk_works`, following the same
+:mod:`astroviper.utils.chunk_io.zarr_chunks`, following the same
 two-phase pattern the Zarr image store uses:
 
 1. The **driver** (``distributed_applications`` layer) calls
@@ -11,7 +11,7 @@ two-phase pattern the Zarr image store uses:
    (:func:`xradio.image.open_image`) reconstructs the same coordinates and
    attributes as the Zarr store -- and a **sparse** (``ftruncate``\\ d) data
    area sized for the full cube.
-2. Each **node task** calls :func:`write_result_chunk_to_fits_skunk_works` to
+2. Each **node task** calls :func:`write_fits` to
    ``pwrite`` its frequency chunk directly into the pre-created files. The
    frequency axis is deliberately the *last* (slowest-varying) FITS axis, so a
    task's block of consecutive channels is one contiguous byte range: parallel
@@ -49,8 +49,8 @@ import struct
 import numpy as np
 
 # The FITS writers share the transient-I/O (Lustre eviction) retry machinery
-# with the direct-Zarr skunk-works module.
-from astroviper.node_tasks.imaging.utils.skunk_works import (
+# with the Zarr chunk writers.
+from astroviper.utils.chunk_io.zarr_chunks import (
     _EIO_RETRY_BACKOFF_SECONDS,
     _TRANSIENT_IO_ERRNOS,
     _retry_transient_io,
@@ -353,7 +353,7 @@ def create_empty_fits_images(
       variables, whose fixed-size rows the node tasks later overwrite in place.
 
     The concurrent write phase then creates no files and writes only disjoint
-    byte ranges (:func:`write_result_chunk_to_fits_skunk_works`).
+    byte ranges (:func:`write_fits`).
 
     Parameters
     ----------
@@ -580,7 +580,7 @@ def _pwrite_with_eio_retry(path, offset, blob):
     raise last_exc
 
 
-def write_result_chunk_to_fits_skunk_works(
+def write_fits(
     image_store,
     image_data_variables_keep,
     task_coords,
@@ -590,7 +590,7 @@ def write_result_chunk_to_fits_skunk_works(
     """Write this task's frequency chunk directly into the pre-created FITS files.
 
     FITS counterpart of
-    :func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_using_zarr_skunk_works`,
+    :func:`~astroviper.utils.chunk_io.write_zarr`,
     with the same two decoupled phases:
 
     1. **Encode** each kept image variable's chunk (transpose to FITS axis

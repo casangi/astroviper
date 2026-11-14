@@ -107,7 +107,6 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         "prepared_continuum_image",
         "single_precision_image",
         "restore",
-        "skunk_works",
         "calculate_parameters_only",
         "overwrite",
         "clear_cache",
@@ -117,6 +116,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     ):
         if name in config:
             require_boolean(name, config[name])
+
+    # --- I/O engine of the node tasks ---
+    if "io_engine" in config and config["io_engine"] not in ("chunk", "xradio"):
+        raise ValueError("io_engine must be 'chunk' or 'xradio'.")
 
     # --- Supported graph backend ---
     # Cube supports Dask and MPI; continuum is restricted to its Dask path above.
@@ -208,11 +211,12 @@ def check_driver_workflow(config, *, mode, require_complete=False):
         for name, allowed in policies.items():
             if name in config and config[name] not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}.")
-        if config.get("weight_memory_mode", "in_place") == "in_place" and config.get(
-            "skunk_works", False
+        if (
+            config.get("weight_memory_mode", "in_place") == "in_place"
+            and config.get("io_engine") == "chunk"
         ):
             raise ValueError(
-                "weight_memory_mode='in_place' is not supported with skunk_works=True."
+                "weight_memory_mode='in_place' is not supported with io_engine='chunk'."
             )
         if (
             config.get("write_imaging_weights_to_ps", False)
@@ -244,8 +248,8 @@ def check_driver_workflow(config, *, mode, require_complete=False):
 
     # --- Concurrent sharded output ---
     # Partial shards need the direct writer; the standard writer cannot share them.
-    if config.get("image_sharding") and not config.get("skunk_works", False):
-        raise ValueError("image_sharding requires skunk_works=True.")
+    if config.get("image_sharding") and not config.get("io_engine") == "chunk":
+        raise ValueError("image_sharding requires io_engine='chunk'.")
 
     # --- Output format and layout ---
     # FITS requires the direct cube writer and cannot use Zarr chunk/shard options.
@@ -253,8 +257,10 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     if output_format not in ("zarr", "fits"):
         raise ValueError("output_image_format must be 'zarr' or 'fits'.")
     if output_format == "fits":
-        if mode.imaging_kind != "cube" or not config.get("skunk_works", False):
-            raise ValueError("FITS output requires cube imaging with skunk_works=True.")
+        if mode.imaging_kind != "cube" or not config.get("io_engine") == "chunk":
+            raise ValueError(
+                "FITS output requires cube imaging with io_engine='chunk'."
+            )
         if config.get("image_chunking") or config.get("image_sharding"):
             raise ValueError(
                 "FITS output does not support image_chunking or image_sharding."
@@ -550,7 +556,7 @@ def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
 
     Notes
     -----
-    MSv2 is read through the skunk-works engine and is never written by an
+    MSv2 is read through XRADIO's xradio_msv2 engine and is never written by an
     imaging run. Keep format detection and optional-engine imports at the
     calling layer; this validator performs no I/O.
     """
@@ -561,9 +567,9 @@ def check_input_storage(config, *, input_is_msv2, allow_msv2=True):
         raise ValueError(
             f"{store} is a Measurement Set v2; convert it with xradio.measurement_set.convert_msv2_to_processing_set and use the processing set."
         )
-    if not config.get("skunk_works", False):
+    if not config.get("io_engine") == "chunk":
         raise ValueError(
-            f"{store} is a Measurement Set v2, which is imaged with skunk_works=True only; or convert it with xradio.measurement_set.convert_msv2_to_processing_set and image the processing set."
+            f"{store} is a Measurement Set v2, which is imaged with io_engine='chunk' only; or convert it with xradio.measurement_set.convert_msv2_to_processing_set and image the processing set."
         )
     if config.get("write_visibility_model_to_ps", False) or config.get(
         "write_imaging_weights_to_ps", False

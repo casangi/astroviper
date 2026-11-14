@@ -329,7 +329,7 @@ def point_spread_function_cube_single_field(
 
     # The node tasks load through XRADIO's processing set loader, which can
     # leave VISIBILITY out; a Measurement Set v2 is read only by the imager's
-    # skunk works path.
+    # chunk engine.
     from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
         check_input_storage,
     )

@@ -23,7 +23,7 @@ import xarray as xr
 from xarray.backends import BackendArray
 from xarray.core import indexing
 
-from astroviper.node_tasks.imaging.utils import (
+from astroviper.utils.measurement_set_v2_input import (
     add_lazy_input_data,
     msv2_engine_available,
 )
@@ -55,7 +55,7 @@ def _minimal_task_inputs(tmp_path):
         data_selection=data_selection,
         image_store=str(tmp_path / "img.zarr"),
         input_data_store=str(tmp_path / "does_not_exist.ps.zarr"),
-        skunk_works=True,
+        io_engine="chunk",
         task_id=7,
     )
 
@@ -221,7 +221,7 @@ class _Imaged(Exception):
 
 def test_lazy_input_data_is_read_for_the_science(tmp_path, monkeypatch):
     """The node task reads ``lazy_input_data`` (neither the missing input store
-    nor ``skunk_works`` is consulted) and hands the science function the
+    nor ``io_engine`` is consulted) and hands the science function the
     loaded values: NumPy, writeable, with the baseline names rebuilt."""
     import astroviper.processing_functions.imaging as pf_imaging
     from astroviper.node_tasks.imaging.image_cube_single_field import (
@@ -233,7 +233,7 @@ def test_lazy_input_data_is_read_for_the_science(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pf_imaging, "image_cube_single_field", science)
     inputs = _minimal_task_inputs(tmp_path)
-    inputs["skunk_works"] = False
+    inputs["io_engine"] = "xradio"
     ms_xds = _lazy_measurement_set()
     lazy_input_data = _lazy_input_data(ms_xds, inputs["data_selection"])
 
@@ -328,14 +328,12 @@ def test_changed_msv2_aborts_the_task(imageable_msv2, tmp_path, monkeypatch):
     from astroviper.node_tasks.imaging.image_cube_single_field import (
         image_cube_single_field,
     )
-    from astroviper.node_tasks.imaging.utils import (
-        open_processing_set_skunk_works_msv2,
-    )
+    from astroviper.utils.measurement_set_v2_input import open_processing_set_msv2
 
     monkeypatch.delenv("XRADIO_MSV2_PARTITION_CACHE", raising=False)
     ms_path = str(tmp_path / os.path.basename(imageable_msv2))
     shutil.copytree(imageable_msv2, ms_path)
-    ps_xdt = open_processing_set_skunk_works_msv2(ms_path)
+    ps_xdt = open_processing_set_msv2(ms_path)
     parallel_coords = {
         "frequency": make_parallel_coord(coord=ps_xdt.xr_ps.get_freq_axis(), n_chunks=3)
     }

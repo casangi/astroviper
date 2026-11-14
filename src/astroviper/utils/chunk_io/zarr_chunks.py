@@ -1,11 +1,10 @@
-"""Performance-oriented (``_skunk_works``) I/O variants for cube imaging.
+"""Zarr reads and writes of the chunk I/O engine (``io_engine="chunk"``).
 
-These are **experimental test variants** of the two I/O bottlenecks in the
-single-field cube imaging node task, written for running at scale (thousands of
-cores, ~15000 single/few-channel ``image_cube_single_field`` tasks). They trade
-generality for speed:
+Node tasks read and write Zarr chunk blobs directly by byte offset, written for
+running at scale (thousands of cores, ~15000 single/few-channel
+``image_cube_single_field`` tasks). They trade generality for speed:
 
-* :func:`load_processing_set_skunk_works` reads **only** the data variables of
+* :func:`load_processing_set` reads **only** the data variables of
   the requested data group, going straight to the on-disk Zarr chunk blobs
   instead of opening a dataset/datatree through the asyncio Zarr array API. For
   a sharded array it reads the shard index and then ``pread``\\ s only the byte
@@ -15,7 +14,7 @@ generality for speed:
   threads. Every other coordinate is *reconstructed* from the node-task inputs
   (the processing set and the image are assumed to share the same frequency
   coordinate); all sub-datasets are ignored.
-* :func:`write_result_chunk_to_disk_using_zarr_skunk_works` writes **only** this
+* :func:`write_zarr` writes **only** this
   task's chunk by encoding each kept variable's array to its compressed blob and
   writing the file directly -- no ``open_group``/``open_zarr`` and no metadata
   round trip. The empty image (and its Zarr metadata) was already created by the
@@ -25,14 +24,13 @@ generality for speed:
 Nothing here uses dask: the node task is already wrapped in dask, and each task
 owns a disjoint set of chunks, so reads and writes are embarrassingly parallel.
 
-The functions deliberately do not remove or replace the production
-:func:`astroviper.utils.io.write_result_chunk_to_disk_using_zarr` /
-``load_processing_set`` paths; they are selected by the ``skunk_works`` flag.
+The xradio I/O engine (``io_engine="xradio"``) uses
+:func:`astroviper.utils.io.write_result_chunk_to_disk_using_zarr` and XRADIO's
+``load_processing_set`` instead.
 
-A Measurement Set v2 input of this path (``ps_store`` a Measurement Set v2,
-``skunk_works=True``) is read by the sibling module
-:mod:`astroviper.node_tasks.imaging.utils.skunk_works_msv2` instead, through
-XRADIO's ``xradio_msv2`` engine; the writers here serve both inputs.
+A Measurement Set v2 is read through XRADIO's ``xradio_msv2`` engine
+(:mod:`astroviper.utils.measurement_set_v2_input`) by both engines; the writers
+here serve both inputs.
 """
 
 from __future__ import annotations
@@ -427,7 +425,7 @@ def read_array_region(array_path, sel):
 
 
 # ---------------------------------------------------------------------------
-# Public skunk-works load
+# Public chunk-engine load
 # ---------------------------------------------------------------------------
 def _read_arrays_concurrently(reads, processing_function_threads):
     """Read several Zarr arrays at once via :func:`read_array_region`.
@@ -457,7 +455,7 @@ def _read_arrays_concurrently(reads, processing_function_threads):
     return results
 
 
-def load_processing_set_skunk_works(
+def load_processing_set(
     input_data_store,
     sel_parms,
     data_group,
@@ -661,7 +659,7 @@ def load_processing_set_skunk_works(
 
 
 # ---------------------------------------------------------------------------
-# Public skunk-works write
+# Public chunk-engine write
 # ---------------------------------------------------------------------------
 def _encode_chunk_blob(chunk, meta):
     """Encode a full-chunk array to the on-disk blob for ``meta``'s codecs."""
@@ -757,7 +755,7 @@ def _encode_one_variable(dv, image_store, task_coords, img_xds):
     is safe to run for several variables concurrently.  Splitting encode from
     the disk write lets the CPU-bound compression run concurrently while the
     writes stay serial (see
-    :func:`write_result_chunk_to_disk_using_zarr_skunk_works`).
+    :func:`write_zarr`).
     """
     name = dv.upper()
     array_path = os.path.join(image_store, name)
@@ -790,7 +788,7 @@ def _write_blob(path, blob):
         fh.write(blob)
 
 
-def write_result_chunk_to_disk_using_zarr_skunk_works(
+def write_zarr(
     image_store,
     image_data_variables_keep,
     task_coords,
@@ -1057,7 +1055,7 @@ def _encode_one_variable_sharded(dv, image_store, task_coords, img_xds):
     return encoded
 
 
-def write_result_chunk_to_disk_sharded_skunk_works(
+def write_zarr_sharded(
     image_store,
     image_data_variables_keep,
     task_coords,
@@ -1073,7 +1071,7 @@ def write_result_chunk_to_disk_sharded_skunk_works(
     concurrently (``processing_function_threads``); the ``pwrite``\\ s are serial per task. The
     shard files must already exist (:func:`precreate_sharded_files`).
 
-    Parameters mirror :func:`write_result_chunk_to_disk_using_zarr_skunk_works`.
+    Parameters mirror :func:`write_zarr`.
     """
     variables = list(image_data_variables_keep)
 
@@ -1151,14 +1149,14 @@ def _retry_transient_io(description, func):
                 raise
             last_exc = exc
             logger.warning(
-                f"skunk-works reader: transient "
+                f"chunk reader: transient "
                 f"{errno.errorcode.get(exc.errno, exc.errno)} on {description} "
                 f"(attempt {attempt + 1}/{n_attempts}); reopening and retrying."
             )
             continue
         if attempt:
             logger.warning(
-                f"skunk-works reader: {description} succeeded on attempt "
+                f"chunk reader: {description} succeeded on attempt "
                 f"{attempt + 1} after transient I/O error."
             )
         return result

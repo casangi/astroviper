@@ -1,4 +1,4 @@
-"""Benchmark the per-task data load of skunk-works cube imaging from a Measurement Set v2.
+"""Benchmark the per-task data load of cube imaging from a Measurement Set v2.
 
 Not collected by pytest (like the other ``benchmark_*.py``): run it as a
 script. It builds the node-task mapping exactly as the distributed
@@ -8,9 +8,9 @@ application ``image_cube_single_field`` does for a Measurement Set v2
 ``--stokes``, ``add_lazy_input_data``) and then times the load of every task
 in this process, without imaging:
 
-* ``engine``: ``load_processing_set_skunk_works_msv2`` (what a node task does
+* ``engine``: ``load_processing_set_msv2`` (what a node task does
   with its ``lazy_input_data``: the values are read by the engine);
-* ``zarr:<path>``: ``load_processing_set_skunk_works`` (the Zarr skunk-works
+* ``zarr:<path>``: ``load_processing_set`` (the Zarr chunk
   loader) on each processing set given with ``--zarr``, or made with
   ``--convert`` (the converter with its default chunks and with one channel
   per chunk), for the same task selections. Their values are compared with
@@ -45,9 +45,9 @@ into ``--work-dir``.
 
 Examples::
 
-    python benchmark_skunk_works_msv2_load.py Antennae_North.cal.lsrk.split.ms \\
+    python benchmark_msv2_load.py Antennae_North.cal.lsrk.split.ms \\
         --work-dir /scratch/bench --convert --stokes I,Q --basis linear
-    python benchmark_skunk_works_msv2_load.py /data/3c391_ctm_mosaic_10s_spw0.ms \\
+    python benchmark_msv2_load.py /data/3c391_ctm_mosaic_10s_spw0.ms \\
         --data-group corrected --stokes I,V --basis circular --max-tasks 8 --cold
 
 Each run prints one JSON record (and appends it to ``--output`` when given).
@@ -203,11 +203,11 @@ def build_mapping(ps_xdt, stokes, basis, n_tasks, data_group_name):
         make_parallel_coord,
     )
 
-    from astroviper.node_tasks.imaging.utils import add_lazy_input_data
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
         correlation_selection,
         correlations_for_stokes,
     )
+    from astroviper.utils.measurement_set_v2_input import add_lazy_input_data
 
     timings = {}
     frequencies = ps_xdt.xr_ps.get_freq_axis()
@@ -392,10 +392,10 @@ def main(argv=None):
     import numpy as np
     import xradio
 
-    from astroviper.node_tasks.imaging.utils import (
-        load_processing_set_skunk_works,
-        load_processing_set_skunk_works_msv2,
-        open_processing_set_skunk_works_msv2,
+    from astroviper.utils.chunk_io import load_processing_set
+    from astroviper.utils.measurement_set_v2_input import (
+        load_processing_set_msv2,
+        open_processing_set_msv2,
         require_msv2_engine,
     )
 
@@ -415,7 +415,7 @@ def main(argv=None):
     record["tile_shapes"] = column_tile_shapes(ms_path)
 
     start = time.perf_counter()
-    ps_xdt = open_processing_set_skunk_works_msv2(ms_path, scan_intents=scan_intents)
+    ps_xdt = open_processing_set_msv2(ms_path, scan_intents=scan_intents)
     record["T_open_s"] = round(time.perf_counter() - start, 3)
     record["n_msv4"] = len(ps_xdt.children)
     record.update(
@@ -436,7 +436,7 @@ def main(argv=None):
 
     record["engine"], engine_digests = time_loads(
         mapping,
-        lambda task: load_processing_set_skunk_works_msv2(task["lazy_input_data"]),
+        lambda task: load_processing_set_msv2(task["lazy_input_data"]),
         ms_path if arguments.cold else None,
         task_ids,
     )
@@ -451,7 +451,7 @@ def main(argv=None):
         data_group = dict(first.attrs["data_groups"][arguments.data_group])
 
         def zarr_loader(task, store=store, data_group=data_group):
-            return load_processing_set_skunk_works(
+            return load_processing_set(
                 store,
                 sel_parms=task["data_selection"],
                 data_group=data_group,

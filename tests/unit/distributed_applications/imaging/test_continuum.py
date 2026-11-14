@@ -721,7 +721,7 @@ def _run_tw_hydra_continuum(
     restore=False,
     primary_beam_limit=0.2,
     single_precision_image=False,
-    skunk_works=False,
+    io_engine="xradio",
     disk_chunk_sizes=None,
     image_sharding=None,
     image_chunking=None,
@@ -799,7 +799,7 @@ def _run_tw_hydra_continuum(
             write_visibility_model_to_ps=write_visibility_model_to_ps,
             write_imaging_weights_to_ps=write_imaging_weights_to_ps,
             clear_cache=clear_cache,
-            skunk_works=skunk_works,
+            io_engine=io_engine,
             disk_chunk_sizes=disk_chunk_sizes,
             image_sharding=image_sharding,
             image_chunking=image_chunking,
@@ -2180,20 +2180,18 @@ def test_tw_hydra_additional_weighting_paths(
     assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
 
 
-def test_tw_hydra_auto_chunked_single_precision_skunk_works_path(
-    tmp_path, tw_hydra_store
-):
+def test_tw_hydra_auto_chunked_single_precision_chunk_engine(tmp_path, tw_hydra_store):
     """Automatic chunking and direct loading support float32 continuum imaging."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, image = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / "tw_hydra_auto_float32_skunk.img.zarr",
+        tmp_path / "tw_hydra_auto_float32_chunk.img.zarr",
         processing_set,
         None,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
         single_precision_image=True,
-        skunk_works=True,
+        io_engine="chunk",
         disk_chunk_sizes="Auto",
     )
 
@@ -2559,7 +2557,7 @@ def test_tw_hydra_alternate_reduction_and_direct_io(
         5,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
-        skunk_works=True,
+        io_engine="chunk",
         disk_chunk_sizes="Auto",
         reduce_mode=reduce_mode,
         reduce_n_batch=reduce_n_batch,
@@ -2633,7 +2631,7 @@ def test_continuum_rejects_output_layout_options_until_final_node_writes(
             5,
             "mfs",
             {"weighting": "natural", "weighting_scope": "local"},
-            skunk_works=True,
+            io_engine="chunk",
             **layout,
         )
     assert not output.exists()

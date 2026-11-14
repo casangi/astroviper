@@ -356,7 +356,7 @@ def _channel_cycle_control_params(
 
 def _select_chunk_writer(
     graph_mode,
-    skunk_works,
+    io_engine,
     image_sharding,
     output_image_format,
     image_store,
@@ -376,22 +376,16 @@ def _select_chunk_writer(
         # (and its BEAMS-table rows) directly into the pre-created
         # XRADIO-conformant FITS files -- disjoint byte ranges across tasks,
         # no locking, no file creation.
-        from astroviper.node_tasks.imaging.utils import (
-            write_result_chunk_to_fits_skunk_works as writer,
-        )
-    elif graph_mode and skunk_works and image_sharding:
+        from astroviper.utils.chunk_io import write_fits as writer
+    elif graph_mode and io_engine == "chunk" and image_sharding:
         # Sharded performance path: write the chunk's inner-chunk blob(s) into
         # shared, pre-created Zarr v3 shard files (far fewer files ->
         # metadata-server relief; the "single parallel file" pattern).
-        from astroviper.node_tasks.imaging.utils import (
-            write_result_chunk_to_disk_sharded_skunk_works as writer,
-        )
-    elif graph_mode and skunk_works:
+        from astroviper.utils.chunk_io import write_zarr_sharded as writer
+    elif graph_mode and io_engine == "chunk":
         # Experimental performance path: encode and write only the chunk's
         # blob(s) directly to the pre-created Zarr image store (no open_group).
-        from astroviper.node_tasks.imaging.utils import (
-            write_result_chunk_to_disk_using_zarr_skunk_works as writer,
-        )
+        from astroviper.utils.chunk_io import write_zarr as writer
     elif graph_mode:
         from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
 
@@ -532,7 +526,7 @@ def image_cube_single_field(
     clean_mask=None,
     auto_mask_params=None,
     memory_mode="in_memory",
-    skunk_works=False,
+    io_engine="xradio",
     data_group=None,
     task_id=0,
     input_data=None,
@@ -1053,20 +1047,21 @@ def image_cube_single_field(
           mask or, without a mask, on the pixels Chauvenet's criterion leaves.
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
-    skunk_works : bool, optional
-        If ``True`` use the experimental performance I/O path: load only the
-        data group's data variables straight from the Zarr chunk blobs with
-        :func:`~astroviper.node_tasks.imaging.utils.load_processing_set_skunk_works`
+    io_engine : {"chunk", "xradio"}, optional
+        ``"chunk"``: load only the data group's data variables straight from the
+        Zarr chunk blobs with
+        :func:`~astroviper.utils.chunk_io.load_processing_set`
         (reconstructing coordinates from the inputs) and write each result chunk
-        with
-        :func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_using_zarr_skunk_works`.
-        Both the skunk-works load and write spread their per-array / per-variable
-        I/O and (de)compression concurrently across ``processing_function_threads``
-        threads.  Requires ``data_group``.  Default ``False`` (production I/O).
+        with :func:`~astroviper.utils.chunk_io.write_zarr`; both spread their
+        per-array / per-variable I/O and (de)compression concurrently across
+        ``processing_function_threads`` threads, and require ``data_group``.
+        ``"xradio"``: XRADIO's ``load_processing_set`` and
+        :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.
+        Default ``"xradio"``.
     data_group : dict, optional
         Resolved role->variable mapping for ``processing_set_data_group_name``
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), supplied
-        by the distributed graph; only used when ``skunk_works`` is ``True``.
+        by the distributed graph; only used when ``io_engine`` is ``"chunk"``.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     input_data : dict, optional
@@ -1078,10 +1073,10 @@ def image_cube_single_field(
         Measurement Set with XRADIO's ``xradio_msv2`` engine and gives every
         task, per MSv4 of its ``data_selection``, the data group's variables
         already restricted to that selection (lazily indexed arrays; see
-        :func:`~astroviper.node_tasks.imaging.utils.add_lazy_input_data`).
+        :func:`~astroviper.utils.measurement_set_v2_input.add_lazy_input_data`).
         The task reads them with
-        :func:`~astroviper.node_tasks.imaging.utils.load_processing_set_skunk_works_msv2`
-        (used only when ``input_data`` is ``None``; ``skunk_works`` and
+        :func:`~astroviper.utils.measurement_set_v2_input.load_processing_set_msv2`
+        (used only when ``input_data`` is ``None``; ``io_engine`` and
         ``data_group`` are not consulted for the read). Any read error skips
         the chunk, as for the other inputs, except
         ``xradio.measurement_set.MSv2ChangedError``: the Measurement Set
@@ -1103,17 +1098,17 @@ def image_cube_single_field(
         ``None`` (default) writes the whole task as one chunk.
     image_sharding : dict, optional
         Shard shape of the (Zarr v3 sharded) image store as ``{dimension_name:
-        shard_size}``; when set together with ``skunk_works`` the chunks are
+        shard_size}``; when set together with ``io_engine="chunk"`` the chunks are
         written with
-        :func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_sharded_skunk_works`.
+        :func:`~astroviper.utils.chunk_io.write_zarr_sharded`.
         ``None`` (default) selects the unsharded writer.
     output_image_format : str, optional
         On-disk format of the image store this task writes into: ``"zarr"``
         (default) or ``"fits"``.  With ``"fits"`` the chunk is ``pwrite``-en
         directly into the pre-created XRADIO-conformant FITS files
-        (:func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_fits_skunk_works`;
+        (:func:`~astroviper.utils.chunk_io.write_fits`;
         the driver created them with
-        :func:`~astroviper.node_tasks.imaging.utils.create_empty_fits_images`).
+        :func:`~astroviper.utils.chunk_io.create_empty_fits_images`).
     report_statistics : bool, optional
         The statistics only a report of the run needs; the distributed
         application sets it when it makes one. With ``True`` the image
@@ -1230,20 +1225,18 @@ def image_cube_single_field(
             # Measurement Set v2: read the lazily indexed selection that the
             # distributed application attached to this task (the values are
             # read by XRADIO's xradio_msv2 engine).
-            from astroviper.node_tasks.imaging.utils import (
-                load_processing_set_skunk_works_msv2,
+            from astroviper.utils.measurement_set_v2_input import (
+                load_processing_set_msv2,
             )
 
-            ps_xdt = load_processing_set_skunk_works_msv2(lazy_input_data)
-        elif skunk_works:
+            ps_xdt = load_processing_set_msv2(lazy_input_data)
+        elif io_engine == "chunk":
             # Experimental performance path: read only this chunk's data-group
             # variables straight from the Zarr chunk blobs and reconstruct the
             # coordinates from the inputs (no datatree/coords/sub-datasets open).
-            from astroviper.node_tasks.imaging.utils import (
-                load_processing_set_skunk_works,
-            )
+            from astroviper.utils.chunk_io import load_processing_set
 
-            ps_xdt = load_processing_set_skunk_works(
+            ps_xdt = load_processing_set(
                 input_data_store,
                 sel_parms=data_selection,
                 data_group=data_group,
@@ -1265,7 +1258,7 @@ def image_cube_single_field(
         # A Measurement Set v2 that changed after the distributed application
         # opened it no longer matches the graph: every remaining task would be
         # inconsistent, which a skipped chunk would hide, so the run aborts.
-        from astroviper.node_tasks.imaging.utils import is_fatal_load_error
+        from astroviper.utils.measurement_set_v2_input import is_fatal_load_error
 
         if is_fatal_load_error(exc):
             raise
@@ -1329,7 +1322,7 @@ def image_cube_single_field(
         chunk_channels = n_chan
     write_chunk = _select_chunk_writer(
         graph_mode,
-        skunk_works,
+        io_engine,
         image_sharding,
         output_image_format,
         image_store,

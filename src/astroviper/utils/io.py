@@ -665,7 +665,7 @@ def create_empty_data_variables_on_disk(
         their own index entry, and the shard files are pre-created sparse with
         an empty index. This replaces one-file-per-chunk with far fewer files
         (metadata-server relief) and is written by
-        :func:`astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_sharded_skunk_works`.
+        :func:`astroviper.utils.chunk_io.write_zarr_sharded`.
         ``None`` (default) keeps the original one-file-per-chunk layout.
     """
     import os
@@ -717,7 +717,7 @@ def create_empty_data_variables_on_disk(
             # Sharded array: `chunks` is the INNER chunk shape and `shard` the
             # shard shape (see image_chunk_and_shard_shapes). The index CRC is
             # disabled so independent single-chunk writers can set their own
-            # index entries (see write_result_chunk_to_disk_sharded_skunk_works).
+            # index entries (see write_zarr_sharded).
             from zarr.codecs import BytesCodec, ShardingCodec
 
             inner_codecs = [BytesCodec()] + ([compressor] if compressor else [])
@@ -765,7 +765,7 @@ def create_empty_data_variables_on_disk(
     if sharded:
         # Pre-create every shard file (sparse, empty index) ONCE here in the driver
         # so the concurrent write phase creates no files (metadata-server relief).
-        from astroviper.node_tasks.imaging.utils import (
+        from astroviper.utils.chunk_io import (
             precreate_sharded_files,
             record_shard_ost_map,
         )

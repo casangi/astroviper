@@ -1,4 +1,4 @@
-"""Unit tests for the ``_skunk_works`` FITS output path.
+"""Unit tests for the FITS output of the chunk I/O engine.
 
 Creates empty XRADIO-conformant FITS files from a tiny empty image dataset,
 writes frequency chunks into them the way independent node tasks would
@@ -16,9 +16,9 @@ import os
 import numpy as np
 import pytest
 
-from astroviper.node_tasks.imaging.utils import (
+from astroviper.utils.chunk_io import (
     create_empty_fits_images,
-    write_result_chunk_to_fits_skunk_works,
+    write_fits,
 )
 
 IMAGE_SIZE = [16, 12]  # (l, m) -> FITS (NAXIS1, NAXIS2)
@@ -70,9 +70,7 @@ def _write_chunk(store, full, chan_slice, threads=1, keep=KEEP):
         dims = FULL_DIMS if array.ndim == 5 else BEAM_DIMS
         chunk_xds[name] = (dims, array[:, chan_slice])
     task_coords = {"frequency": {"data": FREQS[chan_slice], "slice": chan_slice}}
-    write_result_chunk_to_fits_skunk_works(
-        store, keep, task_coords, chunk_xds, processing_function_threads=threads
-    )
+    write_fits(store, keep, task_coords, chunk_xds, processing_function_threads=threads)
 
 
 @pytest.fixture

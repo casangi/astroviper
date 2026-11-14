@@ -9,7 +9,7 @@ reproduce its truth image to within ``TRUTH_RTOL``.
 
 The truth images are themselves astroviper output: a single canonical
 reference per base test, regenerated at double precision,
-``processing_function_threads=1``, ``n_mapping_parallelism=1`` and ``skunk_works=False``
+``processing_function_threads=1``, ``n_mapping_parallelism=1`` and ``io_engine="xradio"``
 (see ``_regenerate_truth_images``). The old CASA reference images are no longer
 used.
 
@@ -70,7 +70,7 @@ PS_STORE = "twhya_selfcal_lsrk_5chans.ps.zarr"
 # Astroviper truth (reference) images. niter0 and niter100 each have a single
 # double-precision truth; multi_cycle has both a double- and a single-precision
 # truth because its deep CLEAN is precision-sensitive. All are regenerated at
-# processing_function_threads=1, n_mapping_parallelism=1, skunk_works=False (see
+# processing_function_threads=1, n_mapping_parallelism=1, io_engine="xradio" (see
 # ``_regenerate_truth_images``); double-precision variants compare against the
 # double truth, single-precision variants against the single truth.
 TRUTH_IMAGE_NITER0 = "twhya_selfcal_5chans_lsrk_niter0_truth_v8.img.zarr"
@@ -209,8 +209,8 @@ IMAGING_WEIGHTS_PARAMS = {
 
 # Per-base-test imaging configuration. Everything fixed for a base test lives
 # here; the per-variant knobs (``processing_function_threads``, ``n_mapping_parallelism`` and
-# ``single_precision_image``) are supplied by each test. ``skunk_works`` is
-# always False and the truth images are generated from these configs at double
+# ``single_precision_image``) are supplied by each test. ``io_engine`` is
+# always "xradio" and the truth images are generated from these configs at double
 # precision, threads=1, n_mapping_parallelism=1.
 _CONFIGS = {
     "niter0": {
@@ -605,7 +605,7 @@ def _run_image_cube(
     processing_function_threads,
     n_mapping_parallelism,
     single_precision_image=None,
-    skunk_works=False,
+    io_engine="xradio",
     image_sharding=None,
     image_chunking=None,
 ):
@@ -614,7 +614,7 @@ def _run_image_cube(
     Returns ``(imaging_dict, img_av_xds, image_params)``. The per-variant knobs are
     ``processing_function_threads``, ``n_mapping_parallelism`` and optionally
     ``single_precision_image`` (which overrides the config value when not None),
-    plus ``skunk_works`` / ``image_sharding`` /
+    plus ``io_engine`` / ``image_sharding`` /
     ``image_chunking`` to exercise the direct-write, sharded-write and
     sub-chunked-write paths. Everything else comes from ``_CONFIGS[kind]``, so the
     truth images (generated from the same configs at double precision, threads=1,
@@ -645,7 +645,7 @@ def _run_image_cube(
         n_mapping_parallelism={"frequency": n_mapping_parallelism},
         overwrite=True,
         vizualize_graph=False,
-        skunk_works=skunk_works,
+        io_engine=io_engine,
         image_sharding=image_sharding,
         image_chunking=image_chunking,
         **config["extra_kwargs"],
@@ -1006,7 +1006,7 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
 
 @pytest.mark.parametrize("processing_function_threads", [1, 12])
 def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_threads):
-    """The sharded direct-write path (skunk_works=True + image_sharding)
+    """The sharded direct-write path (io_engine="chunk" + image_sharding)
     must produce the SAME image as the plain direct-write path while writing far
     fewer files -- many single-channel tasks writing into shared Zarr v3 shard
     files (the "single parallel file" pattern for metadata-server relief).
@@ -1024,7 +1024,7 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
 
     # A: plain direct write (one file per channel).
     store_plain = (
-        "twhya_selfcal_5chans_lsrk_niter0_skunk_astroviper_"
+        "twhya_selfcal_5chans_lsrk_niter0_chunk_astroviper_"
         f"t{processing_function_threads}.img.zarr"
     )
     _, img_plain, _ = _run_image_cube(
@@ -1032,7 +1032,7 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         store_plain,
         processing_function_threads=processing_function_threads,
         n_mapping_parallelism=5,
-        skunk_works=True,
+        io_engine="chunk",
         image_sharding=None,
     )
     # B: sharded direct write (2 channels per shard).
@@ -1045,7 +1045,7 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         store_sharded,
         processing_function_threads=processing_function_threads,
         n_mapping_parallelism=5,
-        skunk_works=True,
+        io_engine="chunk",
         image_sharding={"frequency": 2},
     )
 
@@ -1122,13 +1122,13 @@ def test_single_field_imaging_niter0_image_chunking(plot_saver):
     chunking = {"l": 100, "m": 125}
 
     # Reference: plain direct write, no sub-chunking.
-    store_plain = "twhya_selfcal_5chans_lsrk_niter0_skunk_ref_astroviper.img.zarr"
+    store_plain = "twhya_selfcal_5chans_lsrk_niter0_chunk_ref_astroviper.img.zarr"
     _, img_plain, _ = _run_image_cube(
         "niter0",
         store_plain,
         processing_function_threads=4,
         n_mapping_parallelism=5,
-        skunk_works=True,
+        io_engine="chunk",
     )
     # A: plain direct write with l/m sub-chunking.
     store_chunked = "twhya_selfcal_5chans_lsrk_niter0_chunked_astroviper.img.zarr"
@@ -1137,7 +1137,7 @@ def test_single_field_imaging_niter0_image_chunking(plot_saver):
         store_chunked,
         processing_function_threads=4,
         n_mapping_parallelism=5,
-        skunk_works=True,
+        io_engine="chunk",
         image_chunking=chunking,
     )
     # B: sharded direct write with l/m sub-chunking (inner chunks).
@@ -1149,7 +1149,7 @@ def test_single_field_imaging_niter0_image_chunking(plot_saver):
         store_sharded,
         processing_function_threads=4,
         n_mapping_parallelism=5,
-        skunk_works=True,
+        io_engine="chunk",
         image_sharding={"frequency": 2},
         image_chunking=chunking,
     )
