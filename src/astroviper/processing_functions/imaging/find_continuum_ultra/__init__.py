@@ -15,6 +15,21 @@ from astroviper.processing_functions.imaging.find_continuum_ultra.numerics impor
     round_to_significant_digits,
     scaled_median_absolute_deviation,
 )
+from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
+    atmosphere_variation,
+    continuum_n_bin,
+    find_continuum_settings,
+    initial_moment_difference_level,
+    is_bad_atmosphere,
+    is_time_division_mode,
+    linear_spectral_axis,
+    max_baseline_from_beam_fits,
+    moment_channel_weights,
+    n_baseline_channels,
+    pixel_cells_arcsec,
+    primary_beam_mean_channels,
+    rounds_after_original,
+)
 
 __all__ = [
     "round_half_up",
@@ -29,4 +44,17 @@ __all__ = [
     "ranges_of_channels",
     "range_count",
     "line_fit",
+    "linear_spectral_axis",
+    "moment_channel_weights",
+    "pixel_cells_arcsec",
+    "max_baseline_from_beam_fits",
+    "is_time_division_mode",
+    "continuum_n_bin",
+    "rounds_after_original",
+    "atmosphere_variation",
+    "is_bad_atmosphere",
+    "initial_moment_difference_level",
+    "n_baseline_channels",
+    "primary_beam_mean_channels",
+    "find_continuum_settings",
 ]
