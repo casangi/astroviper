@@ -211,16 +211,19 @@ _FIND_CONTINUUM_PARAM_DOCS = {
     "thread_info": (
         "``n_threads`` and ``memory_per_thread`` (GiB) of the cluster, as\n"
         ":func:`~astroviper.utils.data_partitioning.get_thread_info` returns\n"
-        "them (the default): the frequency chunks and the memory budget of a\n"
-        "task follow from them."
+        "them (the default, refused when the cluster reports no thread or no\n"
+        "memory limit): the frequency chunks and the memory budget of a task\n"
+        "follow from them."
     ),
     "memory_budget_gb": (
         "Memory budget of a frequency task (GiB). The default, and the largest\n"
         "value used, is 0.8 of ``memory_per_thread`` less the task baseline\n"
         "(``min(1.5, 0.2 x memory_per_thread)``). A pass whose tasks would\n"
         "exceed it reads fewer planes at a time, leaves out predicted moment\n"
-        "maps or is split into passes; a requested reduction that does not fit\n"
-        "at one plane per read is refused."
+        "maps or is split into passes. A requested reduction, or the first\n"
+        "round, that does not fit it at one plane per read runs so, alone, with\n"
+        "a warning; it is refused only when it needs more than\n"
+        "``memory_per_thread``."
     ),
     "channel_range": (
         "``[start, stop)``, the channels of the cube that findContinuum sees as\n"

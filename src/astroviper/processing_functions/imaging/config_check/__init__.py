@@ -21,6 +21,7 @@ from astroviper.processing_functions.imaging.config_check.param_check_feather im
 )
 from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
     check_find_continuum_channel_range,
+    check_find_continuum_cluster_threads,
     check_find_continuum_config,
     check_find_continuum_first_round,
     check_find_continuum_first_round_store,
@@ -42,6 +43,7 @@ __all__ = [
     "check_feather_config",
     "check_feather_inputs",
     "check_find_continuum_channel_range",
+    "check_find_continuum_cluster_threads",
     "check_find_continuum_config",
     "check_find_continuum_first_round",
     "check_find_continuum_first_round_store",

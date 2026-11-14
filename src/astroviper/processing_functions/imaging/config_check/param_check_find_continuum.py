@@ -302,25 +302,63 @@ def _plain(value):
 # ========================================================================
 
 
-def check_find_continuum_ultra_task_memory(task_bytes, budget_bytes):
-    """Require that a find_continuum_ultra node task fits its memory budget.
+def check_find_continuum_ultra_task_memory(task_bytes, memory_per_thread_bytes):
+    """Require that the smallest find_continuum_ultra node task of a reduction
+    fits the memory of a thread.
+
+    A task between its budget and the memory of a thread runs, at one plane
+    per batch; only a task that cannot fit a thread at all is refused.
 
     Parameters
     ----------
     task_bytes : int
-        Memory of a node task that computes one requested reduction, one plane
-        per batch.
-    budget_bytes : int
-        Memory budget of a node task.
+        Memory of a node task that computes one requested reduction (or the
+        first round), one plane per batch.
+    memory_per_thread_bytes : int
+        Memory of a thread of the cluster.
 
     Raises
     ------
     ValueError
-        ``task_bytes`` exceeds ``budget_bytes``.
+        ``task_bytes`` exceeds ``memory_per_thread_bytes``.
     """
-    if task_bytes > budget_bytes:
+    if task_bytes > memory_per_thread_bytes:
         raise ValueError(
             f"A find_continuum_ultra node task needs {task_bytes / 2**30:.2f} GiB "
-            "for one reduction at one plane per batch, more than its budget of "
-            f"{budget_bytes / 2**30:.2f} GiB: it needs more memory per thread."
+            "for one reduction at one plane per batch, more than the "
+            f"{memory_per_thread_bytes / 2**30:.2f} GiB of memory per thread: "
+            "run it with fewer threads per worker or more memory per worker "
+            "(thread_info['memory_per_thread'])."
+        )
+
+
+def check_find_continuum_cluster_threads(thread_info):
+    """Require threads with a memory limit of the cluster find_continuum_ultra
+    runs on, when it takes them from the cluster.
+
+    Parameters
+    ----------
+    thread_info : mapping
+        ``n_threads`` and ``memory_per_thread`` (GiB) as
+        :func:`~astroviper.utils.data_partitioning.get_thread_info` returns
+        them.
+
+    Raises
+    ------
+    ValueError
+        No thread, or no finite positive memory per thread.
+    """
+    n_threads = thread_info.get("n_threads")
+    memory_per_thread = thread_info.get("memory_per_thread")
+    if not (
+        isinstance(n_threads, int | np.integer)
+        and n_threads >= 1
+        and isinstance(memory_per_thread, int | float | np.number)
+        and np.isfinite(memory_per_thread)
+        and memory_per_thread > 0
+    ):
+        raise ValueError(
+            f"The cluster reports {n_threads} threads of {memory_per_thread} GiB "
+            "(no worker connected yet, or workers without a memory limit): pass "
+            "thread_info."
         )

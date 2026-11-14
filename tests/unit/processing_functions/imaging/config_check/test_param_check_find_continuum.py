@@ -6,6 +6,7 @@ import xarray as xr
 
 from astroviper.processing_functions.imaging.config_check import (
     check_find_continuum_channel_range,
+    check_find_continuum_cluster_threads,
     check_find_continuum_config,
     check_find_continuum_first_round,
     check_find_continuum_first_round_store,
@@ -175,8 +176,26 @@ def test_first_round_store_refused(attrs, match):
 
 def test_ultra_task_memory():
     check_find_continuum_ultra_task_memory(2**30, 2**30)
-    with pytest.raises(ValueError, match="needs 2.00 GiB .* budget of 1.00 GiB"):
+    with pytest.raises(
+        ValueError,
+        match=r"needs 2.00 GiB .* than the 1.00 GiB of memory per thread: .*"
+        r"thread_info\['memory_per_thread'\]",
+    ):
         check_find_continuum_ultra_task_memory(2 * 2**30, 2**30)
+
+
+@pytest.mark.parametrize(
+    "thread_info",
+    [
+        {"n_threads": 0, "memory_per_thread": -1},
+        {"n_threads": 4, "memory_per_thread": 0.0},
+        {"n_threads": 4, "memory_per_thread": float("inf")},
+    ],
+)
+def test_cluster_threads_without_workers_or_memory_limit(thread_info):
+    check_find_continuum_cluster_threads({"n_threads": 24, "memory_per_thread": 20.0})
+    with pytest.raises(ValueError, match="pass thread_info"):
+        check_find_continuum_cluster_threads(thread_info)
 
 
 def test_channel_range_of_one_window():

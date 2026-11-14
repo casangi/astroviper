@@ -705,11 +705,13 @@ def test_needs_stokes_i(small_cube, tmp_path):
         )
 
 
-def test_ultra_refuses_a_request_over_the_memory_budget(
+def test_ultra_refuses_a_task_over_the_memory_of_a_thread(
     small_cube, tmp_path, monkeypatch
 ):
-    """By default the budget is that of the cluster's threads; 1.5 GiB per
-    thread leaves no room for a task's baseline."""
+    """By default the threads are the cluster's; 1.5 GiB per thread leaves no
+    room for the first round of a task beside its baseline. The call is
+    refused before anything is written to the work directory, so that it can
+    be repeated there with other settings."""
     from astroviper.utils import data_partitioning
 
     monkeypatch.setattr(
@@ -718,8 +720,62 @@ def test_ultra_refuses_a_request_over_the_memory_budget(
         lambda: {"n_threads": 1, "memory_per_thread": 1.5},
     )
     store = _write_cube(tmp_path / "cube.img.zarr", small_cube)
-    with pytest.raises(ValueError, match="more than its budget"):
+    work = tmp_path / "work"
+    with pytest.raises(ValueError, match="than the 1.50 GiB of memory per thread"):
+        _run("ultra", store, work, n_channels=20, thread_info=None)
+    assert not os.path.exists(work) or os.listdir(work) == []
+    with pytest.raises(ValueError, match="memory per thread"):
+        _run("ultra", store, work, n_channels=20, thread_info=None)
+
+
+@pytest.mark.parametrize(
+    "thread_info",
+    [
+        {"n_threads": 0, "memory_per_thread": -1},
+        {"n_threads": 4, "memory_per_thread": 0.0},
+    ],
+)
+def test_ultra_refuses_a_cluster_without_workers_or_memory_limit(
+    small_cube, tmp_path, monkeypatch, thread_info
+):
+    from astroviper.utils import data_partitioning
+
+    monkeypatch.setattr(data_partitioning, "get_thread_info", lambda: thread_info)
+    store = _write_cube(tmp_path / "cube.img.zarr", small_cube)
+    with pytest.raises(ValueError, match="pass thread_info"):
         _run("ultra", store, tmp_path / "work", n_channels=20, thread_info=None)
+
+
+def test_ultra_runs_a_task_over_its_budget_within_the_memory_of_a_thread(
+    two_windows, tmp_path, monkeypatch
+):
+    """At 2 GiB per thread the budget, 1.2 GiB, is below a task's baseline:
+    the tasks run at one plane per batch, with warnings, and find the
+    channels of a run with room."""
+    from astroviper.distributed_applications.imaging.find_continuum import (
+        ultra_reductions,
+    )
+
+    warnings = []
+    monkeypatch.setattr(ultra_reductions.logger, "warning", warnings.append)
+    results = [
+        _run(
+            "ultra",
+            two_windows["store"],
+            tmp_path / name,
+            n_channels=12,
+            channel_range=[0, 12],
+            thread_info=thread_info,
+        )
+        for name, thread_info in (
+            ("tight", {"n_threads": 1, "memory_per_thread": 2.0}),
+            ("room", THREAD_INFO),
+        )
+    ]
+    _assert_same_results(*results)
+    assert results[0]["memory_plan"]["budget_bytes"] == int(1.2 * 2**30)
+    assert (results[0]["passes"]["planes_per_batch"] == 1).all()
+    assert any("the first round" in warning for warning in warnings)
 
 
 @pytest.mark.parametrize(

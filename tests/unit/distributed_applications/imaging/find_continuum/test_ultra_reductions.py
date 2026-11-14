@@ -651,6 +651,62 @@ def test_memory_plan_with_a_small_budget(cube, first_pass, tmp_path):
         _ultra(cube, tmp_path / "refused", store, budget - 1).memory_plan(planned, 2)
 
 
+def test_a_request_over_the_budget_runs_within_the_memory_of_a_thread(
+    cube, first_pass, tmp_path, monkeypatch
+):
+    """Request 1 needs more than the budget at one plane per batch but no more
+    than a thread has: it runs alone at one plane per batch, with a warning,
+    and gives the results of the default plan."""
+    warnings = []
+    monkeypatch.setattr(ultra_reductions.logger, "warning", warnings.append)
+    requests = cube["requests"][-2:]
+    store = first_pass["ultra"].first_round
+    default = _ultra(cube, tmp_path / "default", first_round=store)
+    needed = ultra_task_memory_bytes(
+        N_PIXELS, N_PIXELS, 1, 22, 1, 0.0, False, read_unit_bytes=TILE[0] * TILE[1] * 4
+    )
+    tight = UltraReductions(
+        cube["cubes"],
+        cube["store"],
+        VARIABLES,
+        0,
+        str(tmp_path / "tight"),
+        0.2,
+        store,
+        N_TASKS,
+        needed - 1,
+        cube["frequency_axis"],
+        cube["rest_frequency"],
+        None,
+        memory_per_thread_bytes=needed,
+    )
+    plan = tight.memory_plan(requests, 2)
+    assert plan["sub_passes"] == [[0], [1]]
+    assert plan["planes_per_batch"][1] == 1 and plan["task_bytes"][1] == needed
+    assert len(warnings) == 1 and "runs alone at one plane per batch" in warnings[0]
+
+    with dask.config.set(scheduler="synchronous"):
+        expected = default.run_pass(requests, 2)
+        results = tight.run_pass(requests, 2)
+    _assert_results_equal(results, expected, requests, exact=True)
+    with pytest.raises(ValueError, match="memory per thread"):
+        UltraReductions(
+            cube["cubes"],
+            cube["store"],
+            VARIABLES,
+            0,
+            str(tmp_path / "refused"),
+            0.2,
+            store,
+            N_TASKS,
+            needed - 1,
+            cube["frequency_axis"],
+            cube["rest_frequency"],
+            None,
+            memory_per_thread_bytes=needed - 1,
+        ).memory_plan(requests, 2)
+
+
 def test_a_moments_request_without_channels_is_refused(cube, first_pass, tmp_path):
     ultra = _ultra(cube, tmp_path, first_round=first_pass["ultra"].first_round)
     request = dict(cube["requests"][8], channels=[])

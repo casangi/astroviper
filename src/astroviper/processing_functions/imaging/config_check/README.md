@@ -459,8 +459,12 @@ beam limit, Stokes I index or tile shape, or whose binding (the modification
 time of the cube's `zarr.json`, the digests of its coordinates and its shape)
 differs from the cube's: a rewritten cube needs a new first round.
 `check_find_continuum_ultra_task_memory` refuses a planned
-`find_continuum_ultra` node task that does not fit its memory budget with one
-requested reduction at one plane per batch.
+`find_continuum_ultra` node task that does not fit the memory of a thread with
+one requested reduction (or the first round) at one plane per batch; a task
+over its budget but within a thread runs, with a warning.
+`check_find_continuum_cluster_threads` refuses the threads of a cluster with no
+worker or no memory limit, when `find_continuum_ultra` takes `thread_info` from
+the cluster.
 
 ## Runtime Taylor-Hessian reuse
 

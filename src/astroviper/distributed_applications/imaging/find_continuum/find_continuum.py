@@ -531,15 +531,18 @@ def find_continuum_ultra(
     thread_info : dict, optional
         ``n_threads`` and ``memory_per_thread`` (GiB) of the cluster, as
         :func:`~astroviper.utils.data_partitioning.get_thread_info` returns
-        them (the default): the frequency chunks and the memory budget of a
-        task follow from them.
+        them (the default, refused when the cluster reports no thread or no
+        memory limit): the frequency chunks and the memory budget of a task
+        follow from them.
     memory_budget_gb : float, optional
         Memory budget of a frequency task (GiB). The default, and the largest
         value used, is 0.8 of ``memory_per_thread`` less the task baseline
         (``min(1.5, 0.2 x memory_per_thread)``). A pass whose tasks would
         exceed it reads fewer planes at a time, leaves out predicted moment
-        maps or is split into passes; a requested reduction that does not fit
-        at one plane per read is refused.
+        maps or is split into passes. A requested reduction, or the first
+        round, that does not fit it at one plane per read runs so, alone, with
+        a warning; it is refused only when it needs more than
+        ``memory_per_thread``.
     channel_range : list of int, optional
         ``[start, stop)``, the channels of the cube that findContinuum sees as
         its cube: one spectral window, on which the frequencies are linear (a
@@ -584,8 +587,12 @@ def find_continuum_ultra(
     Raises
     ------
     ValueError
-        As :func:`find_continuum_fused`, and if a requested reduction does not
-        fit the memory budget of a task at one plane per read.
+        As :func:`find_continuum_fused`; if the cluster reports no thread or no
+        memory limit (without ``thread_info``); and if a requested reduction,
+        or the first round, needs more than ``memory_per_thread`` at one plane
+        per read (the first round, or a read of the cube with
+        ``first_round_reductions``, is checked before anything is written to
+        ``work_directory``).
 
     Notes
     -----
@@ -669,6 +676,7 @@ def _find_continuum(
     )
     from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
         check_find_continuum_channel_range,
+        check_find_continuum_cluster_threads,
         check_find_continuum_config,
         check_find_continuum_inputs,
     )
@@ -774,7 +782,6 @@ def _find_continuum(
         (".psf", data_group.get("point_spread_function"), beam_variable),
     ):
         path = stem + suffix
-        os.makedirs(path, exist_ok=True)
         cubes[path] = {
             "store": input_image_store,
             "variable": variable,
@@ -881,6 +888,7 @@ def _find_continuum(
     if backend == "ultra":
         if thread_info is None:
             thread_info = get_thread_info()
+            check_find_continuum_cluster_threads(thread_info)
         sky = zarr.open_array(
             os.path.join(input_image_store, data_variables["sky"]), mode="r"
         )
@@ -903,7 +911,11 @@ def _find_continuum(
             linear_frequency_axis(lazy_xds.frequency.values),
             cubes[stem + ".residual"]["metadata"]["rest_frequency"],
             monitor_resources_seconds,
+            int(thread_info["memory_per_thread"] * 2**30),
         )
+        # Before anything is written to the work directory, so that the call
+        # can be repeated there with other settings.
+        ultra.check_smallest_task()
         reductions = FusedReductions(
             ultra.run_pass, stem + ".residual", stem + ".pb", first_round
         )
@@ -932,6 +944,8 @@ def _find_continuum(
                 first_round,
             )
         )
+    for path in cubes:
+        os.makedirs(path, exist_ok=True)
     timing_distributed_application["T_register_cubes"] = time.time() - step_start
 
     def call_find_continuum(input_params):

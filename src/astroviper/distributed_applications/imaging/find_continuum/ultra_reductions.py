@@ -241,6 +241,10 @@ class UltraReductions:
         Rest frequency (Hz).
     monitor_resources_seconds : float or None
         Sampling interval of GraphVIPER's resource monitor in every map.
+    memory_per_thread_bytes : int, optional
+        Memory of a thread: a task over its budget at one plane per batch runs
+        up to it, with a warning, and is refused above it. ``None`` (default):
+        refused above the budget.
 
     Attributes
     ----------
@@ -273,6 +277,7 @@ class UltraReductions:
         frequency_axis,
         rest_frequency,
         monitor_resources_seconds,
+        memory_per_thread_bytes=None,
     ):
         import xarray as xr
         import zarr
@@ -288,6 +293,9 @@ class UltraReductions:
         self.primary_beam_limit = primary_beam_limit
         self.first_round = first_round
         self.budget_bytes = budget_bytes
+        self.limit_bytes = (
+            budget_bytes if memory_per_thread_bytes is None else memory_per_thread_bytes
+        )
         self.frequency_axis = tuple(frequency_axis)
         self.rest_frequency = rest_frequency
         self.monitor_resources_seconds = monitor_resources_seconds
@@ -473,10 +481,44 @@ class UltraReductions:
         Raises
         ------
         ValueError
-            If a requested request (or the first round) does not fit the budget
-            at one plane per batch.
+            If a requested request (or the first round) does not fit the
+            memory of a thread at one plane per batch.
         """
         return self._plan(*self._encode(requests), n_requested)
+
+    def check_smallest_task(self):
+        """Refuse a run whose smallest frequency task cannot fit the memory of
+        a thread: the first round at one plane per batch, or with a
+        first-round store, a read of the cube at one plane per batch.
+
+        Raises
+        ------
+        ValueError
+            If that task needs more than the memory of a thread.
+        """
+        from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
+            check_find_continuum_ultra_task_memory,
+        )
+
+        first_round = self.first_round is None
+        check_find_continuum_ultra_task_memory(
+            ultra_task_memory_bytes(
+                *self.map_shape,
+                1,
+                0,
+                0,
+                0.0,
+                first_round,
+                self.dtypes["sky"].itemsize,
+                self.dtypes["primary_beam"].itemsize,
+                max(
+                    self.read_unit_bytes[role]
+                    for role in _ROLES[: 2 if first_round else 1]
+                ),
+                first_round,
+            ),
+            self.limit_bytes,
+        )
 
     def _plan(self, encoded, masks, n_requested):
         from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
@@ -509,14 +551,21 @@ class UltraReductions:
         def fits(indices, first, planes_per_batch=1):
             return task_bytes(indices, planes_per_batch, first) <= self.budget_bytes
 
+        def check(indices, first, label):
+            smallest = task_bytes(indices, 1, first)
+            check_find_continuum_ultra_task_memory(smallest, self.limit_bytes)
+            if smallest > self.budget_bytes:
+                logger.warning(
+                    f"A find_continuum_ultra task needs {smallest / 2**30:.2f} GiB "
+                    f"for {label} at one plane per batch, more than its budget of "
+                    f"{self.budget_bytes / 2**30:.2f} GiB: it runs alone at one "
+                    "plane per batch."
+                )
+
         if first_round:
-            check_find_continuum_ultra_task_memory(
-                task_bytes([], 1, True), self.budget_bytes
-            )
+            check([], True, "the first round")
         for k in range(n_requested):
-            check_find_continuum_ultra_task_memory(
-                task_bytes([k], 1, False), self.budget_bytes
-            )
+            check([k], False, f"the {encoded[k]['kind']} of {encoded[k]['image']}")
         kept, dropped = list(range(len(encoded))), []
         for k in reversed(range(n_requested, len(encoded))):
             if fits(kept, True):
