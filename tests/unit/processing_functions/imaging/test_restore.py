@@ -1229,6 +1229,29 @@ def test_restores_to_two_targets_keep_the_beam_of_each_group():
     )
 
 
+def test_a_second_restore_never_replaces_the_beam_another_group_records():
+    """With overwrite, a restore to a target into another group would replace
+    the beams that the first restore, without a target, applied to its sky."""
+    xds = _target_inputs(np.float32)
+    restore_image(xds)
+    beam = xds.BEAM_FIT_PARAMS_SKY_RESTORED.values.copy()
+    with pytest.raises(ValueError, match=r"of data group\(s\) \['restored'\]"):
+        restore_image(
+            xds,
+            image_data_group_out_restore_name="restored_again",
+            image_data_group_out_modified={"sky": "SKY_RESTORED_AGAIN"},
+            restoring_beam=TARGET,
+        )
+    np.testing.assert_array_equal(xds.BEAM_FIT_PARAMS_SKY_RESTORED.values, beam)
+    assert "restored_again" not in xds.attrs["data_groups"]
+    # The group's own beam is replaced by a restore into the same group.
+    restore_image(xds, restoring_beam=TARGET)
+    restored_beam = xds.BEAM_FIT_PARAMS_SKY_RESTORED.values
+    np.testing.assert_array_equal(
+        restored_beam, np.broadcast_to(TARGET, restored_beam.shape)
+    )
+
+
 def test_restoring_beam_is_checked_on_a_direct_call():
     with pytest.raises(ValueError, match="common_beam"):
         restore_image(_target_inputs(np.float32), restoring_beam="common")

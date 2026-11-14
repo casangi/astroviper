@@ -1052,7 +1052,8 @@ def restore_image(
         in the ``SKY_RESTORED`` data variable.  The restored beam goes to the
         variable of its ``"beam_fit_params_sky"`` entry,
         ``BEAM_FIT_PARAMS_SKY_RESTORED`` without one; like the restored sky, an
-        existing variable of that name is refused unless ``overwrite``.
+        existing variable of that name is refused unless ``overwrite``, and one
+        that another data group names is always refused.
     beam_fit_params_key : str, optional
         Role key in the residual data group holding the ``[major, minor, pa]``
         beam-fit parameters (FWHM major/minor and position angle, in radians),
@@ -1230,6 +1231,20 @@ def restore_image(
         data_group_out_modified=image_data_group_out_modified,
         overwrite=overwrite,
     )
+    # Even with overwrite, another group's restored sky keeps the beam it records.
+    restored_beam_name = restored_group["beam_fit_params_sky"]
+    groups_naming_beam = [
+        name
+        for name, group in img_xds.attrs["data_groups"].items()
+        if name != image_data_group_out_restore_name
+        and restored_beam_name in group.values()
+    ]
+    if groups_naming_beam:
+        raise ValueError(
+            f"{restored_beam_name} is the beam of data group(s) {groups_naming_beam}; "
+            "give this restore's beam another variable with "
+            "image_data_group_out_modified['beam_fit_params_sky']."
+        )
     restored_sky_name = restored_group["sky"]
     if correct:
         primary_beam = img_xds[primary_beam_name].values
