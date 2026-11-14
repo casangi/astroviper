@@ -6,6 +6,7 @@ their results are compared bit for bit with the processing functions of
 ``find_continuum_ultra.cube_reductions`` applied to the whole cube.
 """
 
+import errno
 import math
 import os
 
@@ -976,6 +977,79 @@ def test_the_pass_directory_is_removed_when_a_pass_fails(
             7,
         )
     assert not os.path.exists(tmp_path / "pass_7")
+
+
+def test_transient_errors_of_the_drivers_stores_are_retried(
+    cube, layout, first_round, tmp_path, monkeypatch
+):
+    """A Lustre eviction fails with EIO the creation of the pass's partials
+    store and the write of the first-round rows, once each: each is
+    repeated, and the pass gives the results of one without them."""
+    from astroviper.node_tasks.imaging.utils import skunk_works
+
+    store = _new_store(cube, layout, str(tmp_path / "first_round.zarr"))
+    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    targets = {
+        "partials store": lambda path, mode: (
+            path.endswith("partials.zarr") and mode == "w"
+        ),
+        "rows": lambda path, mode: path == store and mode == "r+",
+    }
+    failed = set()
+    open_group = zarr.open_group
+
+    def evicted_once(path, *args, **kwargs):
+        for name, target in targets.items():
+            if name not in failed and target(os.fspath(path), kwargs.get("mode")):
+                failed.add(name)
+                raise OSError(errno.EIO, "Input/output error")
+        return open_group(path, *args, **kwargs)
+
+    monkeypatch.setattr(zarr, "open_group", evicted_once)
+    with dask.config.set(scheduler="synchronous"):
+        reductions, _ = run_first_round_pass(
+            cube["window_xds"],
+            layout,
+            cube["settings"],
+            store,
+            True,
+            True,
+            str(tmp_path / "pass_0"),
+            None,
+            None,
+            0,
+        )
+    assert failed == set(targets)
+    expected = first_round["reductions"]
+    for field in FirstRoundRows._fields:
+        np.testing.assert_array_equal(
+            getattr(reductions.rows, field), getattr(expected.rows, field)
+        )
+    np.testing.assert_array_equal(reductions.integral, expected.integral)
+    np.testing.assert_array_equal(reductions.maximum, expected.maximum)
+
+
+def test_stored_bytes_retries_a_transient_error(tmp_path, monkeypatch):
+    """The sizes of a store's files are counted again after a transient EIO."""
+    from astroviper.node_tasks.imaging.utils import skunk_works
+
+    store = tmp_path / "store.zarr"
+    (store / "c").mkdir(parents=True)
+    (store / "zarr.json").write_bytes(b"{}")
+    (store / "c" / "0").write_bytes(b"0" * 10)
+    (store / "c" / "1").write_bytes(b"0" * 5)
+    monkeypatch.setattr(skunk_works, "_EIO_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    getsize, failures = os.path.getsize, []
+
+    def evicted_once(path):
+        if not failures:
+            failures.append(path)
+            raise OSError(errno.EIO, "Input/output error")
+        return getsize(path)
+
+    monkeypatch.setattr(os.path, "getsize", evicted_once)
+    assert find_continuum_ultra_passes._stored_bytes(str(store)) == 15
+    assert len(failures) == 1
 
 
 def test_a_pass_of_one_task_with_the_resource_monitor(cube, first_round, tmp_path):

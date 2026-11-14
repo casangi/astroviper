@@ -805,7 +805,6 @@ def merge_find_continuum_moment_partials(
         If a slot of ``written_slots`` has no file for the tile.
     """
     import pandas as pd
-    import zarr
 
     from astroviper.node_tasks.imaging.find_continuum_first_round import (
         _execution_identity,
@@ -826,7 +825,7 @@ def merge_find_continuum_moment_partials(
         field: os.path.join(partials_store, name)
         for field, name in _MOMENT_ARRAYS.items()
     }
-    arrays = {field: zarr.open_array(path, mode="r") for field, path in paths.items()}
+    arrays = {field: _open_array(path) for field, path in paths.items()}
     _, n_l, n_m = arrays["integrated"].shape
     rows = slice(*selection.get("l", slice(None)).indices(n_l)[:2])
     columns = slice(*selection.get("m", slice(None)).indices(n_m)[:2])
@@ -1072,35 +1071,41 @@ def write_region_masks(
     from astroviper.node_tasks.imaging.find_continuum_first_round import (
         _write_array_region,
     )
+    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
     from astroviper.processing_functions.imaging.find_continuum_ultra.cube_reductions import (
         pack_plane_masks,
         tile_occupancy,
     )
 
-    group = zarr.open_group(regions_store, mode="w", zarr_format=3)
-    tiles, written = {}, 0
-    for name, region in regions.items():
-        plane = np.asarray(region)
-        plane = plane.reshape(plane.shape[-2:])
-        tiles[name] = tile_occupancy(plane[None, None, None], tile_shape)[0, 0, 0]
-        for array_name, values, dims in (
-            (name, pack_plane_masks(plane), ("l", "m_packed")),
-            (f"{name}_TILES", tiles[name], ("l_tile", "m_tile")),
-        ):
-            group.create_array(
-                array_name,
-                shape=values.shape,
-                chunks=values.shape,
-                dtype=values.dtype,
-                fill_value=0,
-                compressors=zarr.codecs.ZstdCodec(level=1),
-                dimension_names=dims,
-            )
-            written += _write_array_region(
-                os.path.join(regions_store, array_name),
-                tuple(slice(0, size) for size in values.shape),
-                values,
-            )
+    def write():
+        group = zarr.open_group(regions_store, mode="w", zarr_format=3)
+        tiles, written = {}, 0
+        for name, region in regions.items():
+            plane = np.asarray(region)
+            plane = plane.reshape(plane.shape[-2:])
+            tiles[name] = tile_occupancy(plane[None, None, None], tile_shape)[0, 0, 0]
+            for array_name, values, dims in (
+                (name, pack_plane_masks(plane), ("l", "m_packed")),
+                (f"{name}_TILES", tiles[name], ("l_tile", "m_tile")),
+            ):
+                group.create_array(
+                    array_name,
+                    shape=values.shape,
+                    chunks=values.shape,
+                    dtype=values.dtype,
+                    fill_value=0,
+                    compressors=zarr.codecs.ZstdCodec(level=1),
+                    dimension_names=dims,
+                )
+                written += _write_array_region(
+                    os.path.join(regions_store, array_name),
+                    tuple(slice(0, size) for size in values.shape),
+                    values,
+                )
+        return tiles, written
+
+    # A transient I/O error makes the store again.
+    tiles, written = _retry_transient_io(f"write of {regions_store}", write)
     return tiles, {"bytes": written}
 
 
@@ -1297,11 +1302,9 @@ def _stream_batches(
     import itertools
     from concurrent.futures import ThreadPoolExecutor
 
-    import zarr
-
     from astroviper.node_tasks.imaging.utils.skunk_works import read_array_region
 
-    arrays = {role: zarr.open_array(paths[role], mode="r") for role in role_tiles}
+    arrays = {role: _open_array(paths[role]) for role in role_tiles}
     cube = arrays["sky"]
     n_time, _, _, n_l, n_m = cube.shape
     unit = cube.chunks[1]
@@ -1413,16 +1416,26 @@ def _open_cube(input_image_store, variables, roles):
     """The paths of the data variables of ``roles``, in their order, and the
     residual's array, required to be one time of (time, frequency,
     polarization, l, m)."""
-    import zarr
-
     paths = {role: os.path.join(input_image_store, variables[role]) for role in roles}
-    cube = zarr.open_array(paths["sky"], mode="r")
+    cube = _open_array(paths["sky"])
     if list(cube.metadata.dimension_names) != _IMAGE_DIMS or cube.shape[0] != 1:
         raise ValueError(
             f"{paths['sky']} has dimensions {cube.metadata.dimension_names} and "
             f"shape {cube.shape}, not one time of {_IMAGE_DIMS}"
         )
     return paths, cube
+
+
+def _open_array(path):
+    """A Zarr array opened for reading; a transient I/O error of its metadata
+    read is retried."""
+    import zarr
+
+    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+
+    return _retry_transient_io(
+        f"metadata of {path}", lambda: zarr.open_array(path, mode="r")
+    )
 
 
 def _task_channels(n_channels, channel_range, data_selection):

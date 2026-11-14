@@ -819,10 +819,16 @@ def _run_graphs(
     import dask
     from graphviper.graph_tools import generate_dask_workflow, map, reduce
 
+    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+
     graph_start = time.time()
     if moments:
-        partials_store, maps_store = _moment_stores(
-            pass_directory, layout, (window_xds.sizes["l"], window_xds.sizes["m"])
+        # A transient I/O error makes the stores again.
+        partials_store, maps_store = _retry_transient_io(
+            f"stores of {pass_directory}",
+            lambda: _moment_stores(
+                pass_directory, layout, (window_xds.sizes["l"], window_xds.sizes["m"])
+            ),
         )
         input_params = dict(input_params, partials_store=partials_store)
     viper_graph = map(
@@ -1086,10 +1092,16 @@ def _rss_peak(frame):
 
 
 def _stored_bytes(store):
-    """Bytes of the chunk and shard files of a Zarr store."""
-    return sum(
-        os.path.getsize(os.path.join(root, name))
-        for root, _, names in os.walk(store)
-        for name in names
-        if name != "zarr.json"
+    """Bytes of the chunk and shard files of a Zarr store, counted again after
+    a transient I/O error."""
+    from astroviper.node_tasks.imaging.utils.skunk_works import _retry_transient_io
+
+    return _retry_transient_io(
+        f"sizes of {store}",
+        lambda: sum(
+            os.path.getsize(os.path.join(root, name))
+            for root, _, names in os.walk(store)
+            for name in names
+            if name != "zarr.json"
+        ),
     )
