@@ -36,6 +36,13 @@ Four complementary views:
   NOT the monitor's sampled series, so it works with
   ``monitor_resources_seconds=None``.
 
+The task-time figures read the node tasks' timings:
+:func:`plot_task_time_drift` (the drift of the non-I/O task time within a
+run, with the worker state and the page faults),
+:func:`plot_fault_time_correlation`, :func:`plot_task_time_distribution`,
+:func:`plot_task_phase_times`, :func:`plot_task_times_per_host` and
+:func:`plot_task_maps` (per task on the grid of its chunks).
+
 All accept the full return dict or the ``timing_node_tasks`` frame directly,
 and skip gracefully (with a printed note) when the needed columns are absent.
 :func:`performance_measures` gives the performance measures of a run (the
@@ -60,6 +67,12 @@ __all__ = [
     "plot_task_resource_usage",
     "plot_cluster_resource_usage",
     "plot_core_resource_usage",
+    "plot_task_time_drift",
+    "plot_fault_time_correlation",
+    "plot_task_time_distribution",
+    "plot_task_phase_times",
+    "plot_task_times_per_host",
+    "plot_task_maps",
     "plot_task_stream",
     "plot_scaling",
     "plot_efficiency_loss_decomposition",
@@ -837,6 +850,7 @@ def _plot_task_series(
     label_prefix="",
     max_task_lines=200,
     subtract_first=False,
+    divisors=None,
 ):
     """One task-aligned series: a subsample of tasks as faint lines plus the
     average over the tasks.
@@ -849,13 +863,14 @@ def _plot_task_series(
     the tasks still running, drawn only while at least 5 % of the tasks run.
     ``cpu_percent`` is derived from the cumulative CPU seconds
     (:func:`_cpu_seconds`), so the monitor's first and last samples over
-    near-zero intervals do not spike.
+    near-zero intervals do not spike. ``divisors``
+    (:func:`_worker_share_divisors`) turn the process-wide samples into the
+    task's approximate share: RSS is divided sample by sample, the cumulative
+    series (CPU seconds, I/O counters) have their increments shared out.
 
     The y-axis is clipped to the 99.5th percentile of the plotted values (or
     the average's peak if larger).
     """
-    import matplotlib.pyplot as plt
-
     if column not in df or df[column].isna().all():
         print(
             f"No {column!r} series recorded (monitoring off, psutil missing, "
@@ -864,7 +879,7 @@ def _plot_task_series(
         return None
     created_ax = ax is None
     if created_ax:
-        _, ax = plt.subplots(figsize=(10, 6))
+        _, ax = _performance_figure((10, 6))
     interval = float(df["sample_interval_seconds"].iloc[0])
     grid = np.arange(0.0, max(t[-1] for t in df["time_seconds"]) + interval, interval)
     total, count = np.zeros_like(grid), np.zeros_like(grid)
@@ -873,19 +888,22 @@ def _plot_task_series(
     first = True
     for i, row in df.iterrows():
         t = np.asarray(row["time_seconds"], dtype=float)
+        d = 1.0 if divisors is None else divisors[i]
         if column == "cpu_percent":
-            t, v = _cpu_percent_series(t, _cpu_seconds(row), interval)
+            t, v = _cpu_percent_series(
+                t, _shared_cumulative(_cpu_seconds(row), d), interval
+            )
             v = v * scale
+        elif subtract_first:
+            v = _shared_cumulative(np.asarray(row[column], dtype=float) * scale, d)
         else:
-            v = np.asarray(row[column], dtype=float) * scale
-        if subtract_first:
-            v = v - v[0]
+            v = np.asarray(row[column], dtype=float) * scale / d
         if i in show:
             ax.plot(
                 t,
                 v,
                 color=color,
-                alpha=0.15,
+                alpha=0.08,
                 linewidth=0.8,
                 label=(f"{label_prefix}node tasks (subsample)" if first else None),
             )
@@ -931,14 +949,29 @@ def _plot_task_series(
     return ax
 
 
-def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
+def _scope_title(title, parts):
+    """``title`` followed by the non-empty ``parts`` in brackets."""
+    parts = [part for part in parts if part]
+    return title + (f" ({'; '.join(parts)})" if parts else "")
+
+
+def plot_task_resource_usage(
+    source,
+    max_task_lines=200,
+    compute_resources=None,
+    filesystem_label="network filesystems",
+    save_path=None,
+):
     """Task-aligned CPU / memory / I/O plots (one figure each).
 
     Every task's clock starts at its own beginning. The bold CPU and memory
     curves are the average over the tasks still running at each instant, so
     they are not diluted by tasks that already finished; the bold I/O curves
     average every task, a finished task holding its total, so they end at the
-    mean per-task volume.
+    mean per-task volume. When several task threads share one worker process
+    (``n_worker_slots`` above ``n_workers`` of the compute resources), the
+    monitor's process-wide samples are shared out over the tasks running in
+    the worker at each instant, so a curve is the task's approximate share.
 
     Parameters
     ----------
@@ -946,36 +979,76 @@ def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
         The application return dict, or its ``timing_node_tasks`` frame.
     max_task_lines : int, optional
         How many individual task curves to draw behind the average.
-    save_prefix : str, optional
-        If set, save ``<prefix>task_cpu/memory/io.png``.
+    compute_resources : dict, optional
+        Replaces the run's ``return_dict["compute_resources"]``
+        (:func:`~astroviper.utils.data_partitioning.get_compute_resources`):
+        the worker layout for the shares, ``n_hosts`` for the titles and
+        ``processing_function_threads`` for the per-task capacity line (drawn
+        when it is at least 1).
+    filesystem_label : str, optional
+        The file systems the I/O counters count, for the I/O title.
+    save_path : str, optional
+        PNG path with the field ``{figure}``, replaced by ``cpu``, ``memory``
+        and ``io``; saved at dpi 150 with a tight bounding box.
 
     Returns
     -------
     dict
         ``{"cpu": ax, "memory": ax, "io": ax}`` (values are None for series
         that were not recorded).
+
+    Raises
+    ------
+    ValueError
+        When ``save_path`` lacks the field ``{figure}``.
     """
-
+    _figure_save_paths(save_path, ("cpu", "memory", "io"))
     df = _as_timing_frame(source)
+    resources = _compute_resources(source, compute_resources)
+    divisors = None
+    if "cpu_percent" in df.columns:
+        divisors = _worker_share_divisors(df, resources)
+    n_hosts = _n_hosts(resources)
+    hosts = f"{n_hosts} hosts" if n_hosts else None
+    share = "approx. per-task share" if divisors is not None else None
+    scope = (
+        "approx. per-task share of worker process"
+        if divisors is not None
+        else "per worker process, all threads"
+    )
     axes = {}
-
     axes["cpu"] = _plot_task_series(
         df,
         "cpu_percent",
         "CPU (%)",
-        "Node-task CPU usage (per worker process, all threads)",
+        _scope_title("Node-Task CPU Usage", [hosts, scope]),
         max_task_lines=max_task_lines,
+        divisors=divisors,
     )
+    threads = resources.get("processing_function_threads")
+    if axes["cpu"] is not None and threads is not None and threads >= 1:
+        ax = axes["cpu"]
+        ax.axhline(
+            threads * 100,
+            color="gray",
+            linestyle="--",
+            label=f"per-task capacity ({threads} OpenMP threads)",
+        )
+        ax.set_ylim(top=max(ax.get_ylim()[1], 105 * threads))
+        ax.legend()
     axes["memory"] = _plot_task_series(
         df,
         "memory_rss_bytes",
-        "Resident memory (GiB)",
-        "Node-task memory usage",
+        "Resident Memory (GiB)",
+        _scope_title("Node-Task Memory Usage", [hosts, share]),
         scale=1 / 2**30,
         max_task_lines=max_task_lines,
+        divisors=divisors,
     )
     # I/O counters are cumulative over the worker process -> rebase per task.
-    io_title = "Node-task I/O (syscall-level, counts network filesystems)"
+    io_title = _scope_title(
+        "Node-Task I/O", [hosts, f"syscall-level, counts {filesystem_label}", share]
+    )
     axes["io"] = _plot_task_series(
         df,
         "read_chars",
@@ -986,6 +1059,7 @@ def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
         label_prefix="read: ",
         max_task_lines=max_task_lines,
         subtract_first=True,
+        divisors=divisors,
     )
     if axes["io"] is not None:
         _plot_task_series(
@@ -999,17 +1073,56 @@ def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
             label_prefix="write: ",
             max_task_lines=max_task_lines,
             subtract_first=True,
+            divisors=divisors,
         )
-
-    if save_prefix is not None:
-        for name, ax in axes.items():
-            if ax is not None:
-                ax.figure.savefig(f"{save_prefix}task_{name}.png")
+    for ax in axes.values():
+        if ax is not None:
+            ax.figure.tight_layout()
+    _save_figures(
+        {key: None if ax is None else ax.figure for key, ax in axes.items()}, save_path
+    )
     return axes
 
 
+def _io_summary(rate, edges, binw, n_running, n_per):
+    """The I/O footer line of one direction: the total moved, the mean rate
+    while at least 95 % of the peak number of tasks run (from the first to the
+    last such bin) and the largest bin inside that window without its first
+    and last bins. ``rate`` is in GiB/s per host for ``n_per`` hosts, or the
+    cluster rate for ``n_per = None``."""
+    width = np.diff(edges)
+    full = np.flatnonzero(n_running >= 0.95 * n_running.max())
+    i0, i1 = full[0], full[-1]
+    steady = slice(i0, i1 + 1)
+    inner = slice(i0 + 1, i1) if i1 - i0 >= 2 else steady
+
+    def _gib(x):
+        return f"{x / 1024:.3g} TiB" if x >= 1024 else f"{x:.3g} GiB"
+
+    def _rate(x):
+        if n_per is None:
+            return f"{x:.3g} GiB/s"
+        return f"{x:.3g} GiB/s/host" + (
+            f" ({x * n_per:.3g} cluster-wide)" if n_per > 1 else ""
+        )
+
+    mean = float(np.average(rate[steady], weights=width[steady]))
+    return (
+        f"{_gib((rate * width).sum() * (n_per or 1))} in all; "
+        f"{_rate(mean)} while >= 95 % of peak tasks run "
+        f"({edges[i0]:.0f}-{edges[i1 + 1]:.0f} s); largest {binw:g} s "
+        f"bin there {_rate(float(rate[inner].max()))}"
+    )
+
+
 def plot_cluster_resource_usage(
-    source, core_capacity=None, memory_capacity_gib=None, save_prefix=None
+    source,
+    compute_resources=None,
+    per_host=False,
+    node_samples=None,
+    filesystem_label="network filesystems",
+    io_notes=None,
+    save_path=None,
 ):
     """Cluster-wide CPU / memory / I/O over the RUN's wall clock.
 
@@ -1023,7 +1136,19 @@ def plot_cluster_resource_usage(
     seconds, bytes, the time integral of RSS), so it conserves that
     quantity; once a bin would exceed a quarter of the task period it spans
     whole task periods (:func:`_display_bins`). Every figure also shows the
-    mean number of running tasks in a strip below.
+    mean number of running tasks in a strip below. When several task threads
+    share one worker process, the process-wide samples are shared out over
+    the tasks running in the worker (:func:`_worker_share_divisors`), so the
+    sums count every worker process once.
+
+    The capacity lines come from the compute resources: on the CPU figure the
+    hosts' logical CPUs (dashed) and the worker slots times the processing
+    function threads (dotted, when at least 1 and different); on the memory
+    figure the hosts' memory (dashed) and the workers' memory limit (dotted,
+    when different). A value that is not known is not drawn. The I/O figure's
+    footer gives, per direction, the total moved, the mean rate while at
+    least 95 % of the peak number of tasks run and the largest bin mean in
+    that window; it is printed too.
 
     Parameters
     ----------
@@ -1031,93 +1156,223 @@ def plot_cluster_resource_usage(
         The application return dict, or its ``timing_node_tasks`` frame.
         Needs the ``start_unixtime`` column (graphviper monitor >= 2026-07-13);
         cross-node placement relies on NTP-synced node clocks.
-    core_capacity : int, optional
-        Total cores of the allocation; drawn as a dashed capacity line.
-    memory_capacity_gib : float, optional
-        Total memory of the allocation (GiB); drawn as a dashed capacity line.
-    save_prefix : str, optional
-        If set, save ``<prefix>cluster_cpu/memory/io.png``.
+    compute_resources : dict, optional
+        Replaces the run's ``return_dict["compute_resources"]``
+        (:func:`~astroviper.utils.data_partitioning.get_compute_resources`).
+    per_host : bool, optional
+        Divide the sums, the running tasks and the capacity lines by the
+        number of hosts (``n_hosts``), so runs on different numbers of hosts
+        plot on one scale.
+    node_samples : pandas.DataFrame, optional
+        A sampler of the whole host (``unixtime`` and ``busy_cores``, each the
+        mean over the interval before it) of a run on one host: its busy cores
+        are drawn in black, and the footer gives their mean excess over the
+        worker processes (driver, scheduler, kernel).
+    filesystem_label : str, optional
+        The file systems the I/O counters count, for the I/O title.
+    io_notes : sequence of str, optional
+        Further lines of the I/O footer (e.g. a file system health note).
+    save_path : str, optional
+        PNG path with the field ``{figure}``, replaced by ``cpu``, ``memory``
+        and ``io``; saved at dpi 150 with a tight bounding box.
 
     Returns
     -------
     dict
         ``{"cpu": ax, "memory": ax, "io": ax}`` (``io`` is None when the I/O
         counters were not recorded), or None when ``start_unixtime`` is absent.
-    """
-    import matplotlib.pyplot as plt
 
+    Raises
+    ------
+    ValueError
+        For ``per_host=True`` when the number of hosts is not recorded, and
+        when ``save_path`` lacks the field ``{figure}``.
+    """
+    _figure_save_paths(save_path, ("cpu", "memory", "io"))
     df = _as_timing_frame(source)
+    resources = _compute_resources(source, compute_resources)
+    n_hosts = _n_hosts(resources)
+    if per_host and not n_hosts:
+        raise ValueError(
+            "per_host=True needs the number of hosts, compute_resources"
+            "['n_hosts'], which is not known for this run."
+        )
     if not _placed_on_wall_clock(df, "plot_cluster_resource_usage"):
         return None
 
-    binw, edges, sums = _binned_task_series(df)
+    divisors = _worker_share_divisors(df, resources)
+    per = n_hosts if per_host else 1
+    binw, edges, sums = _binned_task_series(df, divisors=divisors)
     grid = 0.5 * (edges[:-1] + edges[1:])
-    acc = {key: v[0] / np.diff(edges) for key, v in sums.items()}
+    width = np.diff(edges)
+    acc = {key: v[0] / (width * per) for key, v in sums.items()}
     have_io = "read" in acc
     n_running = acc.pop("running")
     bin_note = f" ({binw:g} s bin means)"
+    host_scope = " per Host" if per_host else ""
+    per_host_unit = " per host" if per_host else ""
+    hosts = f"{n_hosts} hosts" if n_hosts else None
+    dedup_note = (
+        "\n(samples de-duplicated across tasks sharing a worker)"
+        if divisors is not None
+        else ""
+    )
 
-    def _figure(title, ylabel, curves, capacity=None):
-        fig, (ax, axr) = plt.subplots(
-            2, 1, figsize=(11, 7), sharex=True, height_ratios=(4, 1)
+    node_cpu = None
+    if node_samples is not None:
+        if n_hosts == 1 and len(node_samples) > 1:
+            # Each node sample is the mean over the interval before it, so the
+            # cumulative busy core-seconds bin exactly; bins the samples do not
+            # cover stay NaN.
+            ut = node_samples["unixtime"].to_numpy(dtype=float) - float(
+                df["start_unixtime"].min()
+            )
+            busy = node_samples["busy_cores"].to_numpy(dtype=float)
+            cumulative = np.concatenate(([0.0], np.cumsum(busy[1:] * np.diff(ut))))
+            node_cpu = np.diff(np.interp(edges, ut, cumulative)) / width
+            node_cpu[(edges[:-1] < ut[0]) | (edges[1:] > ut[-1])] = np.nan
+        else:
+            print(
+                "plot_cluster_resource_usage: node_samples describe one host; "
+                f"this run's n_hosts is {n_hosts}, so they are not drawn."
+            )
+
+    def _per(value, scale=1.0):
+        return None if value is None else value * scale / per
+
+    cpu_capacities = []
+    host_cpus = _per(resources.get("n_logical_cpus"))
+    if host_cpus is not None:
+        cpu_capacities.append(
+            (f"host capacity ({host_cpus:g} logical CPUs)", host_cpus, "--")
         )
+    threads = resources.get("processing_function_threads")
+    n_slots = resources.get("n_worker_slots")
+    if threads is not None and threads >= 1 and n_slots is not None:
+        worker_cores = n_slots * threads / per
+        if host_cpus is None or not np.isclose(worker_cores, host_cpus):
+            n_workers = resources.get("n_workers")
+            layout = (
+                f"{n_workers / per:g}w x {n_slots / n_workers:g}t"
+                if n_workers
+                else f"{n_slots / per:g} slots"
+            )
+            cpu_capacities.append(
+                (
+                    f"worker capacity ({layout} x {threads} OpenMP = "
+                    f"{worker_cores:g} cores)",
+                    worker_cores,
+                    ":",
+                )
+            )
+    memory_capacities = []
+    host_memory = _per(resources.get("memory_total_bytes"), 1 / 2**30)
+    if host_memory is not None:
+        memory_capacities.append(
+            (f"host memory ({host_memory:g} GiB)", host_memory, "--")
+        )
+    worker_memory = _per(resources.get("worker_memory_limit_bytes"), 1 / 2**30)
+    if worker_memory is not None and (
+        host_memory is None or not np.isclose(worker_memory, host_memory)
+    ):
+        memory_capacities.append(
+            (f"worker memory limit ({worker_memory:g} GiB)", worker_memory, ":")
+        )
+
+    def _figure(title, ylabel, curves, capacities=(), footer=()):
+        figure, (ax,), strip = _wall_clock_figure(1, (11, 7), (4, 1))
         for label, y, color in curves:
             ax.plot(grid, y, color=color, linewidth=1.5, label=label)
-        top = max(np.nanmax(y) for _, y, _ in curves)
-        if capacity is not None:
-            ax.axhline(capacity[1], color="gray", linestyle="--", label=capacity[0])
-            top = max(top, capacity[1])
+        for label, y, style in capacities:
+            ax.axhline(y, color="gray", linestyle=style, label=label)
+        top = max([np.nanmax(y) for _, y, _ in curves] + [y for _, y, _ in capacities])
         ax.set_ylim(0.0, 1.25 * top)  # headroom for the legend
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.legend(loc="upper right", ncol=2)
-        axr.plot(grid, n_running, color="dimgray", linewidth=1)
-        axr.set_ylim(0.0, 1.1 * n_running.max())
-        axr.set_ylabel("Running tasks")
-        axr.set_xlabel("Wall-clock time since first task start (s)")
-        for a in (ax, axr):
-            a.grid(True, color="lightgray", alpha=0.5)
-        fig.tight_layout()
+        ax.legend(loc="upper right", ncol=2, fontsize=9)
+        strip.plot(grid, n_running, color="dimgray", linewidth=1)
+        strip.set_ylim(0.0, 1.1 * n_running.max())
+        strip.set_ylabel("Running tasks" + ("\nper host" if per_host else ""))
+        footer = [line for line in footer if line]
+        if footer:
+            n_lines = sum(line.count("\n") + 1 for line in footer)
+            figure.tight_layout(rect=(0, 0.02 + 0.03 * n_lines, 1, 1))
+            _add_notes(figure, footer)
+        else:
+            figure.tight_layout()
         return ax
 
     axes = {}
+    cpu_curves = [("node-task worker processes (sum)", acc["cpu"], "tab:blue")]
+    cpu_footer = []
+    if node_cpu is not None:
+        cpu_curves.append(
+            ("node total (node sampler: all processes + kernel)", node_cpu, "black")
+        )
+        cpu_footer.append(
+            "node total minus worker processes: "
+            f"{np.nanmean(node_cpu - acc['cpu']):.2f} cores on average "
+            "(driver, Dask scheduler, kernel)"
+        )
     axes["cpu"] = _figure(
-        "Cluster CPU usage over the run",
-        "Busy cores" + bin_note,
-        [("busy cores", acc["cpu"], "tab:blue")],
-        capacity=(
-            None
-            if core_capacity is None
-            else (f"capacity ({core_capacity} cores)", core_capacity)
-        ),
+        _scope_title(
+            f"Cluster CPU Usage{host_scope} over the Run",
+            [hosts, "node-task processes"],
+        )
+        + dedup_note,
+        ("Busy cores per host" if per_host else "Busy cores") + bin_note,
+        cpu_curves,
+        cpu_capacities,
+        cpu_footer,
     )
     axes["memory"] = _figure(
-        "Cluster memory usage over the run (task-running workers only)",
-        "Total resident memory (GiB)" + bin_note,
-        [("total RSS", acc["rss"], "tab:blue")],
-        capacity=(
-            None
-            if memory_capacity_gib is None
-            else (f"capacity ({memory_capacity_gib:g} GiB)", memory_capacity_gib)
-        ),
+        _scope_title(
+            f"Cluster Memory Usage{host_scope} over the Run",
+            [hosts, "task-running workers only"],
+        )
+        + dedup_note,
+        (
+            "Resident memory per host (GiB)"
+            if per_host
+            else "Total resident memory (GiB)"
+        )
+        + bin_note,
+        [("RSS per host" if per_host else "total RSS", acc["rss"], "tab:blue")],
+        memory_capacities,
     )
     if have_io:
+        io_footer = [
+            f"{name}: "
+            + _io_summary(
+                acc[name], edges, binw, n_running, n_hosts if per_host else None
+            )
+            for name in ("read", "write")
+        ]
+        print(
+            f"plot_cluster_resource_usage: I/O{per_host_unit}\n    "
+            + "\n    ".join(io_footer)
+        )
         axes["io"] = _figure(
-            "Cluster I/O rate over the run (syscall-level, counts network filesystems)",
-            "Aggregate I/O rate (GiB/s)" + bin_note,
+            _scope_title(
+                f"Cluster I/O Rate{host_scope} over the Run",
+                [hosts, f"syscall-level, counts {filesystem_label}"],
+            )
+            + dedup_note,
+            ("I/O rate per host (GiB/s)" if per_host else "Aggregate I/O rate (GiB/s)")
+            + bin_note,
             [
                 ("write", acc["write"], "tab:orange"),
                 ("read", acc["read"], "tab:blue"),
             ],
+            footer=[*io_footer, *(io_notes or ())],
         )
     else:
         axes["io"] = None
         print("(no read_chars/write_chars series; skipping the cluster I/O plot)")
 
-    if save_prefix is not None:
-        for name, ax in axes.items():
-            if ax is not None:
-                ax.figure.savefig(f"{save_prefix}cluster_{name}.png")
+    _save_figures(
+        {key: None if ax is None else ax.figure for key, ax in axes.items()}, save_path
+    )
     return axes
 
 
@@ -1147,36 +1402,107 @@ def _over_slots(v):
     return stats
 
 
-def plot_core_resource_usage(
-    source, memory_per_slot_gib=None, bin_seconds=None, save_prefix=None
-):
-    """Per-core CPU / memory / I/O over the RUN's wall clock: the peak, mean,
-    median and minimum over the worker slots in each bin.
+def _source_list(source, labels, labels_required=False):
+    """The sources of a figure and their labels: ``([(source, label), ...],
+    several)``. ``source`` is one return dict or frame, or a list or tuple of
+    them (``several``); ``labels`` is aligned with a sequence, or None, or a
+    one-element sequence for one source."""
+    if isinstance(source, (list, tuple)):
+        if labels is None:
+            if labels_required:
+                raise ValueError(f"{len(source)} sources need labels, one per source.")
+            labels = [None] * len(source)
+        if len(labels) != len(source):
+            raise ValueError(
+                f"labels has {len(labels)} entries for {len(source)} sources."
+            )
+        return list(zip(source, labels, strict=True)), True
+    if labels is not None and len(labels) != 1:
+        raise ValueError(f"labels has {len(labels)} entries for one source.")
+    return [(source, None if labels is None else labels[0])], False
 
-    A worker slot runs one task at a time: a thread of a Dask worker, whose
-    tasks are packed into slots within the worker (a worker keeps its name
-    when its nanny restarts the process), else the recorded (host, process,
-    thread), else interval packing within each host
-    (:func:`assign_task_stream_lanes`). With single-threaded workers, one
-    per core, a slot is a core; the figures say worker slot because a slot
-    whose tasks run several threads uses several cores. Each slot's CPU
-    (all threads of its worker process, so OpenMP threads can take it above
+
+def _memory_per_slot(resources, key):
+    """``resources[key]`` (bytes) per worker slot in GiB: the minimum over the
+    recorded hosts, else the total over ``n_worker_slots``; None when not
+    known."""
+    hosts = resources.get("hosts")
+    if hosts:
+        values = [
+            None
+            if host.get(key) is None or not host.get("n_worker_slots")
+            else host[key] / host["n_worker_slots"]
+            for host in hosts.values()
+        ]
+        return None if None in values else min(values) / 2**30
+    if resources.get(key) is None or not resources.get("n_worker_slots"):
+        return None
+    return resources[key] / resources["n_worker_slots"] / 2**30
+
+
+def plot_core_resource_usage(
+    source,
+    labels=None,
+    group="slot",
+    statistics=("peak", "mean", "median", "min"),
+    quantities=("cpu", "memory", "read", "write"),
+    time_unit="seconds",
+    compute_resources=None,
+    bin_seconds=None,
+    save_path=None,
+):
+    """Per-core (or per-host) CPU / memory / I/O over the RUN's wall clock:
+    statistics over the worker slots or the hosts in each bin.
+
+    ``group="slot"``: a worker slot runs one task at a time: a thread of a
+    Dask worker, whose tasks are packed into slots within the worker (a worker
+    keeps its name when its nanny restarts the process), else the recorded
+    (host, process, thread), else interval packing within each host
+    (:func:`assign_task_stream_lanes`). With single-threaded workers, one per
+    core, a slot is a core; the figures say worker slot because a slot whose
+    tasks run several threads uses several cores. Each slot's CPU (all
+    threads of its worker process, so OpenMP threads can take it above
     100 %), resident memory and read/write rates are bin means, by default on
     the bins of :func:`plot_cluster_resource_usage`; for CPU and I/O the mean
     over the slots times the number of slots is the cluster total. A slot
     between tasks counts as 0 % CPU and no I/O. Its memory is not monitored
     then, so the memory statistics are over the slots that ran a task in the
-    bin, each averaged over its running time. Every figure also shows the
-    mean number of running tasks in a strip below.
+    bin, each averaged over its running time.
+
+    ``group="host"``: the rows are the hosts (``hostname``): each host's busy
+    cores, the resident memory of its task-running workers and its read and
+    write rates (GiB/s), all summed over its tasks as bin means.
+
+    Every figure also shows the mean number of running tasks in a strip
+    below.
 
     Parameters
     ----------
-    source : dict or pandas.DataFrame
-        The application return dict, or its ``timing_node_tasks`` frame.
-        Needs the ``start_unixtime`` column of every task.
-    memory_per_slot_gib : float, optional
-        Memory available to one worker slot (GiB), e.g. the node's memory
-        over its worker slots; drawn as a dashed line.
+    source : dict or pandas.DataFrame, or a list of them
+        The application return dict, or its ``timing_node_tasks`` frame; a
+        list or tuple of them is overlaid, one colour per source. Needs the
+        ``start_unixtime`` column of every task.
+    labels : sequence of str, optional
+        One legend label per source; required for several sources.
+    group : {"slot", "host"}, optional
+        The rows the statistics are taken over.
+    statistics : sequence of str, optional
+        Which of ``"peak"``, ``"mean"``, ``"median"`` and ``"min"`` to draw.
+        With one source and both ``"min"`` and ``"peak"``, the band between
+        them is filled.
+    quantities : sequence of str, optional
+        Which of ``"cpu"``, ``"memory"``, ``"read"`` and ``"write"`` to draw:
+        a CPU figure, a memory figure and an I/O figure with a write panel
+        and/or a read panel (in that order).
+    time_unit : {"seconds", "hours"}, optional
+        The unit of the wall-clock axis.
+    compute_resources : dict, optional
+        Replaces the run's ``return_dict["compute_resources"]``
+        (:func:`~astroviper.utils.data_partitioning.get_compute_resources`).
+        For ``group="slot"`` and one source the memory figure shows the host
+        memory per worker slot (dashed) and the worker memory limit per slot
+        (dotted, when different), each the minimum over the recorded hosts;
+        several sources draw no such lines and take no ``compute_resources``.
     bin_seconds : float, optional
         Bin width, rounded to whole sample intervals and at most half the
         run; by default the bins of :func:`plot_cluster_resource_usage`. A
@@ -1184,134 +1510,1417 @@ def plot_core_resource_usage(
         at least a task period the peak and minimum differ from the mean by
         about one burst over the bin width; in narrower bins the minimum
         drops towards 0 and the peak towards the rate of a single burst.
-    save_prefix : str, optional
-        If set, save ``<prefix>core_cpu/memory/io.png``.
+    save_path : str, optional
+        PNG path, with the field ``{figure}`` (replaced by ``cpu``,
+        ``memory`` and ``io``) when several figures are drawn; saved at
+        dpi 150 with a tight bounding box.
 
     Returns
     -------
     dict
-        ``{"cpu": ax, "memory": ax, "io": ax}`` (``io`` is the write panel,
-        with the read panel below it, or None when the I/O counters were not
-        recorded), or None when the tasks cannot be placed on the wall clock.
-    """
-    import matplotlib.pyplot as plt
+        ``{"cpu": ax, "memory": ax, "io": ax}`` (``io`` is the first I/O
+        panel; a value is None when not requested or not recorded), or None
+        when no source's tasks can be placed on the wall clock.
 
-    df = _as_timing_frame(source)
-    if not _placed_on_wall_clock(df, "plot_core_resource_usage"):
+    Raises
+    ------
+    ValueError
+        For an unknown ``group``, statistic, quantity or ``time_unit``,
+        several sources without as many labels or with ``compute_resources``,
+        a ``hostname``-less frame with ``group="host"``, and a ``save_path``
+        without the field ``{figure}`` for several figures.
+    """
+    if group not in ("slot", "host"):
+        raise ValueError(f"group must be 'slot' or 'host'; got {group!r}.")
+    if time_unit not in ("seconds", "hours"):
+        raise ValueError(f"time_unit must be 'seconds' or 'hours'; got {time_unit!r}.")
+    known = [key for key, *_ in _SLOT_STATISTICS]
+    if not statistics or set(statistics) - set(known):
+        raise ValueError(f"statistics must be a non-empty subset of {known}.")
+    if not quantities or set(quantities) - {"cpu", "memory", "read", "write"}:
+        raise ValueError(
+            "quantities must be a non-empty subset of ('cpu', 'memory', 'read', "
+            "'write')."
+        )
+    entries, several = _source_list(source, labels, labels_required=True)
+    if several and compute_resources is not None:
+        raise ValueError(
+            "compute_resources gives the memory lines of one source; several "
+            "sources draw none."
+        )
+    io_keys = [key for key in ("write", "read") if key in quantities]
+    keys = [key for key in ("cpu", "memory") if key in quantities]
+    keys += ["io"] if io_keys else []
+    _figure_save_paths(save_path, keys)
+
+    unit = "slots" if group == "slot" else "hosts"
+    runs = []
+    for src, label in entries:
+        df = _as_timing_frame(src)
+        if not _placed_on_wall_clock(df, "plot_core_resource_usage"):
+            continue
+        if group == "slot":
+            identity = ["hostname", "process_pid", "thread_native_id", "start_unixtime"]
+            lanes = df[[c for c in identity if c in df.columns]].assign(
+                T_image_cube_task=[t[-1] for t in df["time_seconds"]]
+            )
+            if "hostname" not in lanes.columns:
+                lanes["hostname"] = ""
+            if "worker_name" in df.columns and df["worker_name"].notna().all():
+                lanes["hostname"] = (
+                    lanes["hostname"].astype(str) + "/" + df["worker_name"].astype(str)
+                )
+                lanes = lanes.drop(
+                    columns=["process_pid", "thread_native_id"], errors="ignore"
+                )
+            lanes, _, n_rows = assign_task_stream_lanes(lanes)
+            rows = lanes["row"].to_numpy()
+        else:
+            if "hostname" not in df.columns:
+                raise ValueError(
+                    "group='host' needs the tasks' hostname column, which this "
+                    "run did not record."
+                )
+            names, rows = np.unique(df["hostname"].astype(str), return_inverse=True)
+            n_rows = len(names)
+        binw, edges, sums = _binned_task_series(df, rows, bin_seconds)
+        width = np.diff(edges)
+        x = 0.5 * (edges[:-1] + edges[1:])
+        if time_unit == "hours":
+            x = x / 3600
+        if group == "slot":
+            running = sums["running"]
+            values = {
+                "cpu": 100.0 * sums["cpu"] / width,
+                "memory": np.divide(
+                    sums["rss"],
+                    running,
+                    out=np.full_like(running, np.nan),
+                    where=running > 1e-6 * width,
+                ),
+            }
+            values.update(
+                {
+                    key: 1024.0 * sums[key] / width
+                    for key in ("read", "write")
+                    if key in sums
+                }
+            )
+        else:
+            values = {
+                "cpu": sums["cpu"] / width,
+                "memory": sums["rss"] / width,
+            }
+            values.update(
+                {key: sums[key] / width for key in ("read", "write") if key in sums}
+            )
+        runs.append(
+            {
+                "label": label,
+                "x": x,
+                "binw": binw,
+                "n_rows": n_rows,
+                "values": values,
+                "n_running": sums["running"].sum(axis=0) / width,
+                "resources": _compute_resources(src, compute_resources),
+            }
+        )
+    if not runs:
         return None
 
-    identity = ["hostname", "process_pid", "thread_native_id", "start_unixtime"]
-    lanes = df[[c for c in identity if c in df.columns]].assign(
-        T_image_cube_task=[t[-1] for t in df["time_seconds"]]
+    one = len(runs) == 1 and not several
+    bin_note = (
+        f" ({'/'.join(f'{b:g}' for b in dict.fromkeys(r['binw'] for r in runs))} "
+        "s bin means)"
     )
-    if "hostname" not in lanes.columns:
-        lanes["hostname"] = ""
-    if "worker_name" in df.columns and df["worker_name"].notna().all():
-        lanes["hostname"] = (
-            lanes["hostname"].astype(str) + "/" + df["worker_name"].astype(str)
-        )
-        lanes = lanes.drop(columns=["process_pid", "thread_native_id"], errors="ignore")
-    lanes, _, n_slots = assign_task_stream_lanes(lanes)
-    binw, edges, sums = _binned_task_series(df, lanes["row"].to_numpy(), bin_seconds)
-    grid = 0.5 * (edges[:-1] + edges[1:])
-    width = np.diff(edges)
-    running = sums["running"]
-    n_running = running.sum(axis=0) / width
-    bin_note = f" ({binw:g} s bin means)"
+    counts = f"({' / '.join(str(r['n_rows']) for r in runs)} {unit}"
+    peak_label = f"peak (max over {unit})"
 
     def _figure(title, panels):
-        fig, axs = plt.subplots(
-            len(panels) + 1,
-            1,
-            figsize=(11, 4 + 3 * len(panels)),
-            sharex=True,
-            height_ratios=(*[4] * len(panels), 1),
+        figure, axs, strip = _wall_clock_figure(
+            len(panels), (11, 4 + 3 * len(panels)), (*[4] * len(panels), 1)
         )
-        for ax, (v, color, ylabel, reference) in zip(axs, panels, strict=False):
-            stats = _over_slots(v)
-            ax.fill_between(
-                grid, stats["min"], stats["peak"], color=color, alpha=0.15, lw=0
-            )
-            for key, label, style, lw in _SLOT_STATISTICS:
-                ax.plot(grid, stats[key], color=color, ls=style, lw=lw, label=label)
-            top = np.nanmax(stats["peak"])
-            if reference is not None:
-                ax.axhline(reference[1], color="gray", ls="--", label=reference[0])
-                top = max(top, reference[1])
+        for ax, (key, color, ylabel, references) in zip(axs, panels, strict=True):
+            top = 0.0
+            for i, run in enumerate(runs):
+                stats = _over_slots(run["values"][key])
+                run_color = color if one else f"C{i}"
+                if one and "min" in statistics and "peak" in statistics:
+                    ax.fill_between(
+                        run["x"],
+                        stats["min"],
+                        stats["peak"],
+                        color=run_color,
+                        alpha=0.15,
+                        lw=0,
+                    )
+                for stat, label, style, lw in _SLOT_STATISTICS:
+                    if stat not in statistics:
+                        continue
+                    label = peak_label if stat == "peak" else label
+                    ax.plot(
+                        run["x"],
+                        stats[stat],
+                        color=run_color,
+                        ls=style,
+                        lw=lw,
+                        label=label if one else f"{run['label']} ({label})",
+                    )
+                    top = max(top, float(np.nanmax(stats[stat])))
+            for label, value, style in references:
+                ax.axhline(value, color="gray", ls=style, label=label)
+                top = max(top, value)
             ax.set_ylim(0.0, 1.25 * top)  # headroom for the legend
-            ax.set_ylabel(ylabel)
-            ax.legend(loc="upper right", ncol=3)
+            ax.set_ylabel(ylabel + bin_note)
+            ax.legend(loc="upper right", ncol=3 if one else 2)
         axs[0].set_title(title)
-        axr = axs[-1]
-        axr.plot(grid, n_running, color="dimgray", linewidth=1)
-        axr.set_ylim(0.0, 1.1 * n_slots)
-        axr.set_ylabel("Running tasks")
-        axr.set_xlabel("Wall-clock time since first task start (s)")
-        for a in axs:
-            a.grid(True, color="lightgray", alpha=0.5)
-        fig.tight_layout()
+        top = 0.0
+        for i, run in enumerate(runs):
+            strip.plot(
+                run["x"],
+                run["n_running"],
+                color="dimgray" if one else f"C{i}",
+                linewidth=1,
+            )
+            top = max(top, float(run["n_running"].max()))
+        if one and group == "slot":
+            top = runs[0]["n_rows"]
+        strip.set_ylim(0.0, 1.1 * top)
+        strip.set_ylabel("Running tasks")
+        if time_unit == "hours":
+            strip.set_xlabel("Wall-clock time since first task start (hours)")
+        figure.tight_layout()
         return axs[0]
 
-    axes = {}
-    axes["cpu"] = _figure(
-        f"CPU usage per worker slot over the run ({n_slots} slots)",
-        [
-            (
-                100.0 * sums["cpu"] / width,
-                "tab:blue",
-                "CPU per worker slot (%)" + bin_note,
-                ("one core (100 %)", 100.0),
-            )
-        ],
-    )
-    rss = np.divide(
-        sums["rss"],
-        running,
-        out=np.full_like(running, np.nan),
-        where=running > 1e-6 * width,
-    )
-    axes["memory"] = _figure(
-        f"Memory usage per worker slot over the run ({n_slots} slots; "
-        "slots running a task)",
-        [
-            (
-                rss,
-                "tab:blue",
-                "Resident memory per worker slot (GiB)" + bin_note,
-                (
-                    None
-                    if memory_per_slot_gib is None
-                    else (
-                        f"memory per slot ({memory_per_slot_gib:g} GiB)",
-                        memory_per_slot_gib,
-                    )
-                ),
-            )
-        ],
-    )
-    if "read" in sums:
-        axes["io"] = _figure(
-            f"I/O rate per worker slot over the run ({n_slots} slots; "
-            "syscall-level, counts network filesystems)",
+    slot = group == "slot"
+    axes = {"cpu": None, "memory": None, "io": None}
+    if "cpu" in quantities:
+        axes["cpu"] = _figure(
+            f"CPU usage per {'worker slot' if slot else 'host'} over the run {counts})",
             [
                 (
-                    1024.0 * sums[key] / width,
-                    color,
-                    f"{key.capitalize()} rate per worker slot (MiB/s)" + bin_note,
-                    None,
+                    "cpu",
+                    "tab:blue",
+                    "CPU per worker slot (%)" if slot else "Busy cores per host",
+                    [("one core (100 %)", 100.0, "--")] if slot else [],
                 )
-                for key, color in (("write", "tab:orange"), ("read", "tab:blue"))
             ],
         )
-    else:
-        axes["io"] = None
-        print("(no read_chars/write_chars series; skipping the per-slot I/O plot)")
+    if "memory" in quantities:
+        references = []
+        if slot and one:
+            resources = runs[0]["resources"]
+            host_memory = _memory_per_slot(resources, "memory_total_bytes")
+            worker_memory = _memory_per_slot(resources, "worker_memory_limit_bytes")
+            if host_memory is not None:
+                references.append(
+                    (
+                        f"host memory per worker slot ({host_memory:g} GiB)",
+                        host_memory,
+                        "--",
+                    )
+                )
+            if worker_memory is not None and (
+                host_memory is None or not np.isclose(worker_memory, host_memory)
+            ):
+                references.append(
+                    (
+                        f"worker memory limit per slot ({worker_memory:g} GiB)",
+                        worker_memory,
+                        ":",
+                    )
+                )
+        axes["memory"] = _figure(
+            f"Memory usage per {'worker slot' if slot else 'host'} over the run "
+            f"{counts}; {'slots running a task' if slot else 'task-running workers'})",
+            [
+                (
+                    "memory",
+                    "tab:blue",
+                    "Resident memory per worker slot (GiB)"
+                    if slot
+                    else "Resident memory per host (GiB)",
+                    references,
+                )
+            ],
+        )
+    if io_keys:
+        if all(key in run["values"] for run in runs for key in io_keys):
+            axes["io"] = _figure(
+                f"I/O rate per {'worker slot' if slot else 'host'} over the run "
+                f"{counts}; syscall-level, counts network filesystems)",
+                [
+                    (
+                        key,
+                        color,
+                        f"{key.capitalize()} rate per "
+                        + ("worker slot (MiB/s)" if slot else "host (GiB/s)"),
+                        [],
+                    )
+                    for key, color in (("write", "tab:orange"), ("read", "tab:blue"))
+                    if key in io_keys
+                ],
+            )
+        else:
+            print("(no read_chars/write_chars series; skipping the per-slot I/O plot)")
 
-    if save_prefix is not None:
-        for name, ax in axes.items():
-            if ax is not None:
-                ax.figure.savefig(f"{save_prefix}core_{name}.png")
+    _save_figures(
+        {key: axes[key].figure for key in keys if axes[key] is not None}, save_path
+    )
     return axes
+
+
+def _column_values(tasks, column, task_columns):
+    """One value per task of a column spec: a column name, a tuple of names
+    (summed, NaN skipped) or ``"non_io_task_time"``
+    (:func:`_non_io_task_time`); None when a column is absent."""
+    if column == "non_io_task_time":
+        return _non_io_task_time(tasks, task_columns)
+    names = list(column) if isinstance(column, tuple) else [column]
+    if any(name not in tasks.columns for name in names):
+        return None
+    if isinstance(column, tuple):
+        return tasks[names].sum(axis=1).to_numpy(dtype=float)
+    return tasks[column].to_numpy(dtype=float)
+
+
+def _segment_columns(tasks, task_columns):
+    """The default phase columns: the task stream's load, non-I/O and write
+    segments (:data:`IMAGING_TASK_STREAM_COLUMNS`), those present."""
+    columns = _task_columns(task_columns)
+    load = tuple(column for column in columns["load"] if column in tasks.columns)
+    segments = {}
+    if load:
+        segments["load"] = load
+    segments["non-I/O"] = "non_io_task_time"
+    if columns["write"] and columns["write"] in tasks.columns:
+        segments["write"] = columns["write"]
+    return segments
+
+
+_STATISTIC_FUNCTIONS = {"median": np.nanmedian, "mean": np.nanmean}
+
+
+def _statistic_function(statistic):
+    """The NaN-skipping reduction of ``"median"`` or ``"mean"``."""
+    if statistic not in _STATISTIC_FUNCTIONS:
+        raise ValueError(f"statistic must be 'median' or 'mean'; got {statistic!r}.")
+    return _STATISTIC_FUNCTIONS[statistic]
+
+
+def _drift_panel_figsize(n_panels, several):
+    """The figure size of :func:`plot_task_time_drift`."""
+    if n_panels == 1 or several:
+        return (9, 6)
+    return (11, 4 + 2 * n_panels)
+
+
+def plot_task_time_drift(
+    source,
+    labels=None,
+    panels=("task_time",),
+    n_bins=24,
+    x_axis="hours",
+    task_columns=None,
+    compute_resources=None,
+    task_time_band=None,
+    memory_band_gib=None,
+    io_rate_band=None,
+    fault_band_millions=None,
+    title=None,
+    save_path=None,
+):
+    """The drift of the task time within a run: the median non-I/O task time
+    (:func:`_non_io_task_time`) in quantile bins of the task starts, and what
+    the workers did meanwhile.
+
+    Panels, in this order:
+
+    * ``"task_time"``: the bin medians of the non-I/O task time;
+    * ``"worker_state"``: the mean resident memory of the running tasks and
+      its maximum, and the read and write rates per host (right axis), as
+      bin means on the run's wall clock (the bins of
+      :func:`plot_cluster_resource_usage`; shared out over the tasks of a
+      worker process, :func:`_worker_share_divisors`);
+    * ``"page_faults"``: the bin medians of the minor page faults per task;
+    * ``"huge_page_coverage"``: the transparent-huge-page coverage of the
+      per-task buffer churn they imply: with the largest bin median F_max
+      taken as the all-4-KiB regime, a bin median F implies the fraction
+      ``(F_max - F) / (F_max (1 - 1/512))`` of the churn served as 2 MiB
+      pages (meaningful when the run reaches the plateau).
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame, or a list of them
+        The application return dict or its ``timing_node_tasks`` frame; a
+        list or tuple of them (then only the ``"task_time"`` panel), one line
+        per source. A source without ``start_unixtime`` is skipped.
+    labels : sequence of str, optional
+        One label per source, required for several sources; sources with the
+        same label share a colour and a legend entry.
+    panels : sequence of str, optional
+        A subset of ``"task_time"``, ``"worker_state"``, ``"page_faults"``
+        and ``"huge_page_coverage"``, drawn in that order.
+    n_bins : int, optional
+        The number of quantile bins of the task starts.
+    x_axis : {"hours", "fraction"}, optional
+        The x of a bin: its mean start in hours after the first task start,
+        or its position in the run, ``(bin + 0.5) / n_bins`` (not with the
+        ``"worker_state"`` panel).
+    task_columns : dict, optional
+        The node task's columns (as for :func:`plot_task_stream`); None for
+        the imager's.
+    compute_resources : dict, optional
+        Replaces the run's ``return_dict["compute_resources"]``: the worker
+        layout and ``n_hosts`` of the ``"worker_state"`` panel.
+    task_time_band, memory_band_gib, io_rate_band, fault_band_millions : tuple of float, optional
+        Fixed y limits of the task time (s), the memory (GiB), the I/O rates
+        (GiB/s per host) and the page faults (millions), used when at least
+        95 % of the values fall inside (:func:`_band_or_auto`); the task time
+        otherwise spans at least +-22 % around its median.
+    title : str, optional
+        The title of the top panel.
+    save_path : str, optional
+        PNG path; saved at dpi 150 with a tight bounding box.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        None when no source has ``start_unixtime``, or a page-fault panel was
+        asked for and the run recorded no ``minor_page_faults``.
+
+    Raises
+    ------
+    ValueError
+        For unknown panels or ``x_axis``, several sources with other panels
+        than ``"task_time"``, ``x_axis="fraction"`` with ``"worker_state"``,
+        and a monitored ``"worker_state"`` panel without a known number of
+        hosts.
+    """
+    order = ("task_time", "worker_state", "page_faults", "huge_page_coverage")
+    if not panels or set(panels) - set(order):
+        raise ValueError(f"panels must be a non-empty subset of {order}.")
+    panels = [panel for panel in order if panel in panels]
+    if x_axis not in ("hours", "fraction"):
+        raise ValueError(f"x_axis must be 'hours' or 'fraction'; got {x_axis!r}.")
+    if x_axis == "fraction" and "worker_state" in panels:
+        raise ValueError("x_axis='fraction' cannot place the worker_state bins.")
+    entries, several = _source_list(source, labels, labels_required=True)
+    if several and panels != ["task_time"]:
+        raise ValueError("Several sources take panels=('task_time',) only.")
+
+    runs = []
+    for src, label in entries:
+        tasks = _as_timing_frame(src)
+        if (
+            "start_unixtime" not in tasks.columns
+            or tasks["start_unixtime"].isna().all()
+        ):
+            print(
+                "plot_task_time_drift: no start_unixtime; "
+                f"{label or 'the run'} is skipped."
+            )
+            continue
+        runs.append((src, label, tasks))
+    if not runs:
+        return None
+
+    faults = None
+    if {"page_faults", "huge_page_coverage"} & set(panels):
+        tasks = runs[0][2]
+        if (
+            "minor_page_faults" not in tasks.columns
+            or tasks["minor_page_faults"].isna().all()
+        ):
+            print("plot_task_time_drift: no minor_page_faults recorded; skipping.")
+            return None
+        faults = _task_start_bins(
+            tasks, tasks["minor_page_faults"].to_numpy(dtype=float), n_bins
+        )
+
+    figure, axes = _performance_figure(
+        _drift_panel_figsize(len(panels), several),
+        len(panels),
+        1,
+        sharex=True,
+        squeeze=False,
+        gridspec_kw={"hspace": 0.08},
+    )
+    axes = dict(zip(panels, axes[:, 0], strict=True))
+
+    ax = axes.get("task_time")
+    if ax is not None:
+        colors = {}
+        values = []
+        for _, label, tasks in runs:
+            binned = _task_start_bins(
+                tasks, _non_io_task_time(tasks, task_columns), n_bins
+            )
+            values.append(binned["median"].to_numpy(dtype=float))
+            if several:
+                new = label not in colors
+                colors.setdefault(label, f"C{len(colors)}")
+                ax.plot(
+                    binned[x_axis],
+                    binned["median"],
+                    marker="o",
+                    markersize=4,
+                    color=colors[label],
+                    label=label if new else None,
+                )
+            else:
+                ax.plot(
+                    binned[x_axis],
+                    binned["median"],
+                    marker="o",
+                    color="tab:red",
+                    label=label,
+                )
+        _band_or_minimum_span(ax, np.concatenate(values), task_time_band)
+        ax.set_ylabel("Median non_io_task_time (s)")
+        if several or runs[0][1] is not None:
+            ax.legend(fontsize=8)
+
+    ax = axes.get("worker_state")
+    if ax is not None:
+        src, _, tasks = runs[0]
+        resources = _compute_resources(src, compute_resources)
+        monitored = (
+            "memory_rss_bytes" in tasks.columns
+            and not tasks["memory_rss_bytes"].isna().all()
+        )
+        lim = memory_band_gib
+        if monitored:
+            n_hosts = _n_hosts(resources)
+            if not n_hosts:
+                raise ValueError(
+                    "The worker_state panel needs the number of hosts, "
+                    "compute_resources['n_hosts'], for the rates per host."
+                )
+            divisors = _worker_share_divisors(tasks, resources)
+            binw, edges, sums = _binned_task_series(tasks, divisors=divisors)
+            hours = 0.5 * (edges[:-1] + edges[1:]) / 3600
+            width = np.diff(edges)
+            running, rss = sums["running"][0], sums["rss"][0]
+            rss_mean = np.divide(
+                rss, running, out=np.full_like(rss, np.nan), where=running > 0
+            )
+            rss_max = _binned_maximum(
+                tasks, edges, "memory_rss_bytes", 1 / 2**30, divisors
+            )
+            lim = _band_or_auto(rss_max, memory_band_gib)
+            ax.plot(hours, rss_mean, color="tab:blue", label="mean worker RSS (GiB)")
+            ax.plot(
+                hours,
+                rss_max,
+                color="tab:blue",
+                linestyle="--",
+                linewidth=0.9,
+                alpha=0.7,
+                label="max worker RSS (GiB)",
+            )
+            handles, names = ax.get_legend_handles_labels()
+            if "read" in sums:
+                ax_io = ax.twinx()
+                rates = {
+                    key: sums[key][0] / width / n_hosts for key in ("read", "write")
+                }
+                for key, color in (("read", "tab:gray"), ("write", "tab:orange")):
+                    ax_io.plot(
+                        hours,
+                        rates[key],
+                        color=color,
+                        alpha=0.7,
+                        linewidth=0.8,
+                        label=f"{key} rate (GiB/s/host)",
+                    )
+                io_lim = _band_or_auto(
+                    np.r_[rates["read"], rates["write"]], io_rate_band
+                )
+                if io_lim:
+                    ax_io.set_ylim(*io_lim)
+                ax_io.set_ylabel(f"I/O rate per host (GiB/s; {binw:g} s bin means)")
+                more_handles, more_names = ax_io.get_legend_handles_labels()
+                handles, names = handles + more_handles, names + more_names
+            ax.legend(
+                handles,
+                names,
+                fontsize=8,
+                loc="upper left",
+                bbox_to_anchor=(1.08, 1.0),
+            )
+        else:
+            ax.annotate(
+                "no monitoring data recorded\n"
+                "(run made without monitor_resources_seconds)",
+                xy=(0.5, 0.5),
+                xycoords="axes fraction",
+                ha="center",
+                va="center",
+                fontsize=11,
+                color="gray",
+            )
+        if lim:
+            ax.set_ylim(*lim)
+        ax.set_ylabel("Mean worker RSS (GiB)", color="tab:blue")
+
+    ax = axes.get("page_faults")
+    if ax is not None:
+        millions = faults["median"] / 1e6
+        ax.plot(faults[x_axis], millions, marker="o", color="tab:blue")
+        lim = _band_or_auto(millions, fault_band_millions)
+        if lim:
+            ax.set_ylim(*lim)
+        ax.set_ylabel("Median minor page faults\nper task (millions)")
+
+    ax = axes.get("huge_page_coverage")
+    if ax is not None:
+        f_max = faults["median"].max()
+        coverage = ((f_max - faults["median"]) / (f_max * (1 - 1 / 512))).clip(0, 1)
+        ax.plot(faults[x_axis], 100 * coverage, marker="o", color="tab:green")
+        ax.set_ylim(0.0, 100.0)
+        ax.set_ylabel("Implied THP coverage (%)")
+
+    top = axes[panels[0]]
+    heading = (
+        title if title is not None else "Within-Run Drift of the Non-I/O Task Time"
+    )
+    if "huge_page_coverage" in panels:
+        heading += (
+            f" (per-task churn at plateau ~{faults['median'].max() * 4096 / 2**30:.0f}"
+            " GiB)"
+        )
+    top.set_title(heading)
+    for ax in axes.values():
+        ax.grid(True, color="lightgray", alpha=0.5)
+    axes[panels[-1]].set_xlabel(
+        "Wall-clock time since first task start (hours)"
+        if x_axis == "hours"
+        else "Position in the run (fraction of tasks started)"
+    )
+    _save_figures({"figure": figure}, save_path)
+    return figure
+
+
+def plot_fault_time_correlation(
+    source,
+    labels=None,
+    task_columns=None,
+    task_time_band=None,
+    fault_axis_max_millions=None,
+    max_points=None,
+    title=None,
+    save_path=None,
+):
+    """The non-I/O task time (:func:`_non_io_task_time`) of every task against
+    its minor page faults, with a straight-line fit over all tasks: the slope
+    is the task time per fault (about 1.4 µs for an anonymous 4 KiB fault),
+    the intercept the fault-free task time.
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame, or a list of them
+        The application return dict or its ``timing_node_tasks`` frame, or a
+        list or tuple of them, overlaid in one colour per source. A source
+        with fewer than 10 tasks with finite values is skipped.
+    labels : sequence of str, optional
+        One label per source, required for several sources.
+    task_columns : dict, optional
+        The node task's columns (as for :func:`plot_task_stream`); None for
+        the imager's.
+    task_time_band : tuple of float, optional
+        Fixed y limits (s), used when at least 95 % of the task times fall
+        inside (:func:`_band_or_auto`).
+    fault_axis_max_millions : float, optional
+        The x axis spans at least ``[0, fault_axis_max_millions]``.
+    max_points : int, optional
+        Draw every ``max(1, n // max_points)``-th task (the fit uses all).
+    title : str, optional
+        The title.
+    save_path : str, optional
+        PNG path; saved at dpi 150 with a tight bounding box.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        None when no source has enough tasks with page faults.
+    """
+    entries, several = _source_list(source, labels, labels_required=True)
+    runs = []
+    for src, label in entries:
+        tasks = _as_timing_frame(src)
+        if "minor_page_faults" not in tasks.columns:
+            print(
+                f"plot_fault_time_correlation: {label or 'the run'} has no "
+                "minor_page_faults; skipped."
+            )
+            continue
+        faults = tasks["minor_page_faults"].to_numpy(dtype=float) / 1e6
+        times = _non_io_task_time(tasks, task_columns)
+        ok = np.isfinite(faults) & np.isfinite(times)
+        if ok.sum() < 10:
+            print(
+                f"plot_fault_time_correlation: {label or 'the run'} has fewer "
+                "than 10 tasks with page faults; skipped."
+            )
+            continue
+        runs.append((label, faults[ok], times[ok]))
+    if not runs:
+        return None
+
+    figure, ax = _performance_figure((9, 6) if several else (9, 7))
+    for i, (label, faults, times) in enumerate(runs):
+        step = max(1, len(faults) // max_points) if max_points else 1
+        slope, intercept = np.polyfit(faults, times, 1)
+        r = np.corrcoef(faults, times)[0, 1]
+        xs = np.linspace(0, faults.max(), 50)
+        if several:
+            color = f"C{i}"
+            ax.scatter(faults[::step], times[::step], s=4, alpha=0.25, color=color)
+            ax.plot(
+                xs,
+                intercept + slope * xs,
+                color=color,
+                linewidth=2,
+                label=f"{label}: {slope:.2f} s/Mfault, r={r:.2f}",
+            )
+        else:
+            ax.scatter(
+                faults[::step],
+                times[::step],
+                s=2,
+                alpha=0.08,
+                color="tab:blue",
+                rasterized=True,
+                linewidths=0,
+            )
+            ax.plot(
+                xs,
+                intercept + slope * xs,
+                color="tab:red",
+                label=(
+                    f"fit: {intercept:.1f} s + {slope:.2f} s/Mfault "
+                    f"(= {slope:.2f} µs/fault),  r = {r:.3f}"
+                ),
+            )
+    ax.set_xlim(
+        0, max(fault_axis_max_millions or 0, 1.05 * max(f.max() for _, f, _ in runs))
+    )
+    lim = _band_or_auto(np.concatenate([t for *_, t in runs]), task_time_band)
+    if lim:
+        ax.set_ylim(*lim)
+    ax.set_xlabel("Minor page faults per task (millions)")
+    ax.set_ylabel("non_io_task_time (s)")
+    ax.set_title(title if title is not None else "Task Time vs Page Faults")
+    ax.grid(True, color="lightgray", alpha=0.5)
+    ax.legend()
+    _save_figures({"figure": figure}, save_path)
+    return figure
+
+
+def _task_quantity(tasks, quantity, task_columns, read_time_column):
+    """One value per task of ``"task_time"``, ``"non_io_task_time"`` or
+    ``"read_rate"`` (MiB/s: the GiB read over ``read_time_column``, by default
+    the task column). Returns ``(values, axis label, name, GiB read)``; the
+    values are None when the needed columns are absent, the GiB read is the
+    total for the read rate, else 0."""
+    columns = _task_columns(task_columns)
+    if quantity == "task_time":
+        values = _column_values(tasks, columns["task"], task_columns)
+        return values, f"{columns['task']} (s)", columns["task"], 0.0
+    if quantity == "non_io_task_time":
+        values = _non_io_task_time(tasks, task_columns)
+        return values, "non_io_task_time (s)", "non_io_task_time", 0.0
+    if quantity == "read_rate":
+        time_column = read_time_column or columns["task"]
+        label = "per-task read rate (MiB/s, syscall-level)"
+        if "read_chars" not in tasks.columns or time_column not in tasks.columns:
+            return None, label, "read rate", 0.0
+        read_gib = _per_task_totals(tasks)["read_gib"].to_numpy(dtype=float)
+        rate = read_gib * 1024 / tasks[time_column].to_numpy(dtype=float)
+        return rate, label, "read rate", float(np.nansum(read_gib))
+    raise ValueError(
+        "quantity must be 'task_time', 'non_io_task_time' or 'read_rate'; "
+        f"got {quantity!r}."
+    )
+
+
+def plot_task_time_distribution(
+    source,
+    labels=None,
+    quantity="task_time",
+    kind="cdf",
+    pooled=False,
+    panel_labels=None,
+    bins=50,
+    log_counts=False,
+    quantile_line=0.95,
+    read_time_column=None,
+    task_columns=None,
+    notes=None,
+    title=None,
+    save_path=None,
+):
+    """The distribution of a per-task quantity: the empirical CDF or the
+    histogram, one curve per source.
+
+    The upper percentiles of the task time set the end of the map tasks, so
+    the right-hand edge of a CDF is the straggler tail; the dotted line marks
+    the 95th percentile the performance measures use.
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame, or a list of them
+        The application return dict or its ``timing_node_tasks`` frame, or a
+        list or tuple of them.
+    labels : sequence of str, optional
+        One label per source; required for several sources unless
+        ``pooled=True``. Sources with the same label are drawn as one
+        histogram.
+    quantity : {"task_time", "non_io_task_time", "read_rate"}, optional
+        The task column, the time outside the load and write segments
+        (:func:`_non_io_task_time`), or the read rate in MiB/s (the GiB read,
+        from the ``read_chars`` series, over ``read_time_column``).
+    kind : {"cdf", "histogram"}, optional
+        The empirical CDF (sorted values against their rank over the count,
+        ``viridis`` colours) or the histogram: filled for one source or
+        ``pooled``, else step histograms on shared bin edges, one per distinct
+        label.
+    pooled : bool, optional
+        One histogram of all sources' tasks.
+    panel_labels : sequence of str, optional
+        One panel title per source, for step histograms only: one panel per
+        distinct value, stacked and sharing x.
+    bins : int, optional
+        Histogram bins; for step histograms the number of shared edges
+        ``linspace(min, max, bins)`` over all values.
+    log_counts : bool, optional
+        A logarithmic count axis.
+    quantile_line : float, optional
+        The fraction marked on the CDF (None: no line).
+    read_time_column : str, optional
+        The time column of the read rate; None for the task column.
+    task_columns : dict, optional
+        The node task's columns (as for :func:`plot_task_stream`); None for
+        the imager's.
+    notes : str or sequence of str, optional
+        Lines along the bottom of the figure.
+    title : str, optional
+        The title.
+    save_path : str, optional
+        PNG path; saved at dpi 150 with a tight bounding box.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        None when no source has finite values of the quantity.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``quantity`` or ``kind``, several sources without
+        labels (unless pooled), and ``panel_labels`` that are not one per
+        source of step histograms.
+    """
+    from matplotlib import colormaps
+
+    if kind not in ("cdf", "histogram"):
+        raise ValueError(f"kind must be 'cdf' or 'histogram'; got {kind!r}.")
+    entries, several = _source_list(
+        source, labels, labels_required=not (kind == "histogram" and pooled)
+    )
+    steps = kind == "histogram" and several and not pooled
+    if panel_labels is not None and not (steps and len(panel_labels) == len(entries)):
+        raise ValueError(
+            "panel_labels takes one panel title per source and goes with step "
+            "histograms (kind='histogram', several sources, pooled=False)."
+        )
+    panel_of = [None] * len(entries) if panel_labels is None else list(panel_labels)
+    runs = []
+    total_read_gib = 0.0
+    for (src, label), panel in zip(entries, panel_of, strict=True):
+        tasks = _as_timing_frame(src)
+        values, axis_label, name, read_gib = _task_quantity(
+            tasks, quantity, task_columns, read_time_column
+        )
+        if values is None:
+            continue
+        total_read_gib += read_gib
+        values = values[np.isfinite(values)]
+        if len(values):
+            runs.append((label, panel, values))
+    if not runs:
+        print(f"plot_task_time_distribution: no {quantity} values; skipping.")
+        return None
+    default_title = (
+        f"Read throughput per task (total {total_read_gib / 1024:.1f} TiB read)"
+        if quantity == "read_rate"
+        else None
+    )
+
+    if kind == "cdf":
+        cmap = colormaps["viridis"]
+        figure, ax = _performance_figure((9, 7))
+        for i, (label, _, values) in enumerate(runs):
+            values = np.sort(values)
+            ax.plot(
+                values,
+                np.arange(1, len(values) + 1) / len(values),
+                color=cmap(i / max(len(runs) - 1, 1)),
+                label=label if label is not None else f"{len(values)} tasks",
+            )
+        if quantile_line is not None:
+            ax.axhline(quantile_line, color="gray", linestyle=":", linewidth=1)
+        ax.set_xlabel(axis_label)
+        ax.set_ylabel("Fraction of tasks")
+        ax.set_title(
+            title or default_title or f"Per-Task Time Distribution (CDF of {name})"
+        )
+        ax.grid(True, color="lightgray")
+        ax.legend(fontsize=8)
+        axes = [ax]
+    elif pooled or not several:
+        values = np.concatenate([v for *_, v in runs])
+        figure, ax = _performance_figure((10, 6) if pooled else (9, 6))
+        ax.hist(values, bins=bins, color="C0")
+        ax.set_xlabel(axis_label)
+        ax.set_ylabel("Number of tasks")
+        ax.set_title(
+            title
+            or default_title
+            or f"Per-Task Time Distribution ({len(values)} tasks)"
+        )
+        ax.grid(True, color="lightgray")
+        ax.set_axisbelow(True)
+        axes = [ax]
+    else:
+        all_values = np.concatenate([v for *_, v in runs])
+        edges = np.linspace(all_values.min(), all_values.max(), bins)
+        panel_names = list(dict.fromkeys(panel for _, panel, _ in runs))
+        figure, axes = _performance_figure(
+            (10, 5 * len(panel_names)), len(panel_names), 1, sharex=True, squeeze=False
+        )
+        axes = list(axes[:, 0])
+        for ax, panel in zip(axes, panel_names, strict=True):
+            grouped = {}
+            for label, run_panel, values in runs:
+                if run_panel == panel:
+                    grouped.setdefault(label, []).append(values)
+            for label, parts in grouped.items():
+                ax.hist(
+                    np.concatenate(parts),
+                    bins=edges,
+                    histtype="step",
+                    linewidth=1.2,
+                    label=str(label),
+                )
+            ax.set_ylabel("Number of tasks")
+            if panel is not None:
+                ax.set_title(panel)
+            ax.grid(True, color="lightgray")
+            ax.legend(fontsize=8)
+        axes[-1].set_xlabel(axis_label)
+        if title or default_title:
+            figure.suptitle(title or default_title)
+    if log_counts and kind == "histogram":
+        for ax in axes:
+            ax.set_yscale("log")
+    _add_notes(figure, notes)
+    _save_figures({"figure": figure}, save_path)
+    return figure
+
+
+def plot_task_phase_times(
+    source,
+    labels=None,
+    columns=None,
+    statistic="median",
+    layout="grouped",
+    task_columns=None,
+    notes=None,
+    title=None,
+    save_path=None,
+):
+    """The time of the node task's phases: a statistic over the tasks per
+    phase and source, or every task's phases.
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame, or a list of them
+        The application return dict or its ``timing_node_tasks`` frame, or a
+        list or tuple of them.
+    labels : sequence of str, optional
+        One label per source; required for several sources.
+    columns : dict, optional
+        ``{legend label: column spec}``: a column name, a tuple of names
+        (summed) or ``"non_io_task_time"`` (:func:`_non_io_task_time`); an
+        entry whose columns are absent is left out. By default the task
+        stream's load, non-I/O and write segments.
+    statistic : {"median", "mean"}, optional
+        The statistic over the tasks (not used by ``layout="per_task"``).
+    layout : {"grouped", "stacked", "per_task"}, optional
+        ``"grouped"``: one bar group per phase, one bar per source, above the
+        statistic in seconds, below its share of the source's statistic of
+        the task column. ``"stacked"``: one bar per source, the phases
+        stacked, the total written above. ``"per_task"`` (one source): every
+        task's phases stacked, the tasks sorted by the task column, with the
+        median task time.
+    task_columns : dict, optional
+        The node task's columns (as for :func:`plot_task_stream`); None for
+        the imager's.
+    notes : str or sequence of str, optional
+        Lines along the bottom of the figure.
+    title : str, optional
+        The title.
+    save_path : str, optional
+        PNG path; saved at dpi 150 with a tight bounding box.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        None when no column is present.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``statistic`` or ``layout``, ``layout="per_task"``
+        with several sources and several sources without labels.
+    """
+    from matplotlib import colormaps
+
+    reduce = _statistic_function(statistic)
+    if layout not in ("grouped", "stacked", "per_task"):
+        raise ValueError(
+            f"layout must be 'grouped', 'stacked' or 'per_task'; got {layout!r}."
+        )
+    entries, several = _source_list(source, labels, labels_required=True)
+    if layout == "per_task" and several:
+        raise ValueError("layout='per_task' draws one source.")
+    task_column = _task_columns(task_columns)["task"]
+    frames = [_as_timing_frame(src) for src, _ in entries]
+    if columns is None:
+        columns = _segment_columns(frames[0], task_columns)
+    values = [
+        {
+            name: values
+            for name, values in (
+                (name, _column_values(tasks, spec, task_columns))
+                for name, spec in columns.items()
+            )
+            if values is not None
+        }
+        for tasks in frames
+    ]
+    names = [name for name in columns if all(name in v for v in values)]
+    for name in columns:
+        if name not in names:
+            print(f"plot_task_phase_times: no {columns[name]} column; {name} left out.")
+    if not names:
+        return None
+    label_of = [label if label is not None else "" for _, label in entries]
+    statistic_title = statistic.capitalize()
+
+    if layout == "grouped":
+        cmap = colormaps["viridis"]
+        x = np.arange(len(names))
+        width = 0.8 / len(frames)
+        figure, (ax_time, ax_share) = _performance_figure(
+            (max(12, 1.5 * len(names)), 10),
+            2,
+            1,
+            sharex=True,
+            gridspec_kw={"hspace": 0.06},
+        )
+        for i, (tasks, run) in enumerate(zip(frames, values, strict=True)):
+            offsets = x - 0.4 + (i + 0.5) * width
+            color = cmap(i / max(len(frames) - 1, 1))
+            seconds = np.array([reduce(run[name]) for name in names])
+            task_seconds = reduce(tasks[task_column].to_numpy(dtype=float))
+            ax_time.bar(offsets, seconds, width, color=color, label=label_of[i])
+            ax_share.bar(offsets, seconds / task_seconds * 100, width, color=color)
+        ax_time.set_ylabel(f"{statistic_title} time per task (s)")
+        if several or entries[0][1] is not None:
+            ax_time.legend(ncols=min(len(frames), 5), fontsize=8)
+        ax_time.set_title(
+            title
+            or f"{statistic_title} Node-Task Component Times (bottom: % of "
+            f"{statistic} {task_column})"
+        )
+        ax_share.set_ylabel(f"% of {statistic} {task_column}")
+        ax_share.set_xticks(x, names, rotation=30, ha="right")
+        for ax in (ax_time, ax_share):
+            ax.grid(True, axis="y", color="lightgray")
+            ax.set_axisbelow(True)
+    elif layout == "stacked":
+        x = np.arange(len(frames))
+        figure, ax = _performance_figure((2.4 + 2.2 * len(frames), 6))
+        for i, run in enumerate(values):
+            bottom = 0.0
+            for j, name in enumerate(names):
+                height = reduce(run[name])
+                ax.bar(
+                    x[i],
+                    height,
+                    0.55,
+                    bottom=bottom,
+                    color=f"C{j}",
+                    label=name if i == 0 else None,
+                )
+                bottom += height
+            ax.text(x[i], bottom * 1.01, f"{bottom:.0f} s", ha="center", fontsize=9)
+        ax.set_xticks(x, label_of)
+        ax.set_ylabel(f"{statistic_title} time per task (s)")
+        ax.set_title(title or f"{statistic_title} node-task phase times")
+        ax.grid(True, axis="y", color="lightgray")
+        ax.set_axisbelow(True)
+        ax.legend(fontsize=9)
+    else:
+        tasks = frames[0].assign(
+            **{f"__phase_{j}": values[0][name] for j, name in enumerate(names)}
+        )
+        order = tasks.sort_values(task_column, ignore_index=True)
+        x = np.arange(len(order))
+        figure, ax = _performance_figure((11, 5.5))
+        bottom = np.zeros(len(order))
+        for j, name in enumerate(names):
+            heights = order[f"__phase_{j}"].to_numpy(dtype=float)
+            ax.bar(x, heights, width=1.0, bottom=bottom, color=f"C{j}", label=name)
+            bottom += heights
+        median = float(order[task_column].median())
+        ax.axhline(median, color="0.3", ls="--", lw=1.0, label=f"median {median:.0f} s")
+        ax.set_xlabel("Task (sorted by total time)")
+        ax.set_ylabel("Time (s)")
+        ax.set_title(title or f"Node-task timing breakdown ({len(order)} tasks)")
+        ax.grid(True, axis="y", color="lightgray")
+        ax.set_axisbelow(True)
+        ax.legend(fontsize=9)
+    _add_notes(figure, notes)
+    _save_figures({"figure": figure}, save_path)
+    return figure
+
+
+_HOST_MARKERS = ("o", "s", "^", "D", "v", "<", ">", "p", "h", "*")
+
+
+def plot_task_times_per_host(
+    source,
+    labels=None,
+    columns=None,
+    statistic="mean",
+    kind="lines",
+    sort="total",
+    task_columns=None,
+    notes=None,
+    title=None,
+    save_path=None,
+):
+    """Task times per host (the short ``hostname``), pooled over the
+    sources, to spot slow hosts.
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame, or a list of them
+        The application return dict or its ``timing_node_tasks`` frame, or a
+        list or tuple of them (pooled).
+    labels : sequence of str, optional
+        One label per source; ``kind="tasks"`` colours the tasks by it.
+    columns : dict, optional
+        ``{legend label: column spec}`` (as for
+        :func:`plot_task_phase_times`). By default the task stream's load,
+        non-I/O and write segments and the task column for
+        ``kind="lines"``, the task column otherwise.
+    statistic : {"mean", "median"}, optional
+        The statistic over a host's tasks.
+    kind : {"lines", "bars", "tasks"}, optional
+        ``"lines"``: one marker line per column over the hosts (the task
+        column grey). ``"bars"`` (one column): horizontal bars, the first
+        host on top. ``"tasks"`` (one column): every task as a point, the
+        per-host median in black.
+    sort : {"total", "name"}, optional
+        Hosts by the statistic of the task column, largest first, or by
+        name.
+    task_columns : dict, optional
+        The node task's columns (as for :func:`plot_task_stream`); None for
+        the imager's.
+    notes : str or sequence of str, optional
+        Lines along the bottom of the figure.
+    title : str, optional
+        The title.
+    save_path : str, optional
+        PNG path; saved at dpi 150 with a tight bounding box.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        None when the tasks have no ``hostname`` or no column is present.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``statistic``, ``kind`` or ``sort``, and several
+        columns with ``kind="bars"`` or ``"tasks"``.
+    """
+    from matplotlib import colormaps
+
+    _statistic_function(statistic)
+    if kind not in ("lines", "bars", "tasks"):
+        raise ValueError(f"kind must be 'lines', 'bars' or 'tasks'; got {kind!r}.")
+    if sort not in ("total", "name"):
+        raise ValueError(f"sort must be 'total' or 'name'; got {sort!r}.")
+    entries, _ = _source_list(source, labels)
+    task_column = _task_columns(task_columns)["task"]
+    frames = []
+    for i, (src, _) in enumerate(entries):
+        tasks = _as_timing_frame(src)
+        if "hostname" not in tasks.columns:
+            print("plot_task_times_per_host: no hostname column; skipping.")
+            return None
+        frames.append(tasks.assign(__source=i))
+    tasks = pd.concat(frames, ignore_index=True)
+    if columns is None:
+        columns = (
+            {**_segment_columns(tasks, task_columns), task_column: task_column}
+            if kind == "lines"
+            else {task_column: task_column}
+        )
+    if kind != "lines" and len(columns) != 1:
+        raise ValueError(f"kind={kind!r} draws one column; got {list(columns)}.")
+    table = pd.DataFrame({"host": tasks["hostname"].astype(str).str.split(".").str[0]})
+    names = []
+    for name, spec in columns.items():
+        values = _column_values(tasks, spec, task_columns)
+        if values is None:
+            print(f"plot_task_times_per_host: no {spec} column; {name} left out.")
+            continue
+        table[name] = values
+        names.append(name)
+    if not names:
+        return None
+    table["__task"] = tasks[task_column].to_numpy(dtype=float)
+    per_host = table.groupby("host")[[*names, "__task"]].agg(statistic)
+    per_host = (
+        per_host.sort_values("__task", ascending=False)
+        if sort == "total"
+        else per_host.sort_index()
+    )
+    hosts = list(per_host.index)
+    statistic_title = statistic.capitalize()
+    order_note = (
+        f"sorted by {statistic} total task time"
+        if sort == "total"
+        else "sorted by name"
+    )
+
+    if kind == "lines":
+        x = np.arange(len(hosts))
+        figure, ax = _performance_figure((max(12, 0.22 * len(hosts)), 7))
+        n_colored = 0
+        for name, spec in zip(names, (columns[n] for n in names), strict=True):
+            if spec == task_column:
+                ax.plot(
+                    x, per_host[name], marker=".", color="gray", alpha=0.5, label=name
+                )
+            else:
+                ax.plot(
+                    x,
+                    per_host[name],
+                    marker=_HOST_MARKERS[n_colored % len(_HOST_MARKERS)],
+                    color=f"C{n_colored}",
+                    label=name,
+                )
+                n_colored += 1
+        ax.set_xticks(x, hosts, rotation=90, fontsize=7)
+        ax.set_xlabel(f"Host ({order_note})")
+        ax.set_ylabel(f"{statistic_title} Task Time (seconds)")
+        ax.set_title(title or f"{statistic_title} Task Times per Host")
+        ax.grid(True, color="lightgray")
+        ax.legend()
+        figure.tight_layout(rect=(0, 0.04, 1, 1) if notes else (0, 0, 1, 1))
+    elif kind == "bars":
+        name = names[0]
+        y = np.arange(len(hosts))[::-1]  # the first host on top
+        figure, ax = _performance_figure((7, max(5, 0.2 * len(hosts))))
+        ax.barh(y, per_host[name].to_numpy(dtype=float), color="C1")
+        ax.set_yticks(y, hosts, fontsize=8)
+        ax.set_xlabel(name)
+        ax.set_title(title or f"{statistic_title} task time per host")
+        ax.grid(True, axis="x", color="lightgray")
+        ax.set_axisbelow(True)
+        figure.tight_layout()
+    else:
+        name = names[0]
+        host_x = pd.Series(np.arange(len(hosts)), index=hosts)
+        x = table["host"].map(host_x).to_numpy()
+        figure, ax = _performance_figure((16, 7))
+        cmap = colormaps["tab10"]
+        label_of = [label for _, label in entries]
+        groups = list(dict.fromkeys(label_of))
+        source_group = np.array([groups.index(label_of[i]) for i in tasks["__source"]])
+        for g, label in enumerate(groups):
+            rows = source_group == g
+            ax.scatter(
+                x[rows],
+                table[name].to_numpy()[rows],
+                s=1,
+                alpha=0.05,
+                color=cmap(g % 10),
+                rasterized=True,
+                linewidths=0,
+            )
+            if label is not None:
+                ax.scatter([], [], s=12, color=cmap(g % 10), label=str(label))
+        medians = table.groupby("host")[name].median()
+        ax.scatter(
+            host_x[medians.index],
+            medians,
+            s=3,
+            color="black",
+            label="per-host median",
+            zorder=3,
+        )
+        step = max(1, len(hosts) // 40)
+        ax.set_xticks(
+            host_x.iloc[::step], list(host_x.index[::step]), rotation=90, fontsize=6
+        )
+        ax.set_xlabel(
+            f"Host ({len(hosts)} hosts, {order_note}; every {step}th labeled)"
+        )
+        ax.set_ylabel(name)
+        ax.set_title(title or f"{name} per host (every task)")
+        ax.grid(True, color="lightgray", alpha=0.5)
+        ax.legend(fontsize=8, markerscale=2)
+    _add_notes(figure, notes)
+    _save_figures({"figure": figure}, save_path)
+    return figure
+
+
+_TASK_MAP_PANELS = {
+    "task_time": "task wall time (s)",
+    "peak_rss": "peak RSS (GiB)",
+    "read": "bytes read (GiB, syscall-level)",
+    "cpu": "mean CPU (%)",
+}
+
+
+def plot_task_maps(
+    source,
+    n_mapping_parallelism=None,
+    quantities=("task_time", "peak_rss", "read", "cpu"),
+    task_columns=None,
+    title=None,
+    save_path=None,
+):
+    """Per-task quantities on the grid of the node tasks' chunk indices.
+
+    The node task ``task_id`` works on the chunks
+    ``numpy.unravel_index(task_id, tuple(n_mapping_parallelism.values()))``;
+    the first parallel axis runs up the rows, the second across. Structure
+    in rows or columns points at the data layout (shards, file system
+    targets) rather than at a slow host.
+
+    Parameters
+    ----------
+    source : dict or pandas.DataFrame
+        The application return dict, or its ``timing_node_tasks`` frame
+        (then ``n_mapping_parallelism`` is needed).
+    n_mapping_parallelism : dict, optional
+        ``{parallel axis: number of chunks}`` of the run, two axes; None for
+        the return dict's ``"n_mapping_parallelism"``.
+    quantities : sequence of str, optional
+        Which of ``"task_time"`` (the task column), ``"peak_rss"`` (GiB),
+        ``"read"`` (GiB read) and ``"cpu"`` (the mean CPU over the task, %;
+        :func:`_per_task_totals`) to draw; those not recorded are left out.
+    task_columns : dict, optional
+        The node task's columns (as for :func:`plot_task_stream`); None for
+        the imager's.
+    title : str, optional
+        The figure title.
+    save_path : str, optional
+        PNG path; saved at dpi 150 with a tight bounding box.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        None (with a printed reason) when the grid is not recorded or has
+        other than two axes, or no quantity is recorded.
+
+    Raises
+    ------
+    ValueError
+        For an unknown quantity.
+    """
+    if not quantities or set(quantities) - set(_TASK_MAP_PANELS):
+        raise ValueError(
+            f"quantities must be a non-empty subset of {list(_TASK_MAP_PANELS)}."
+        )
+    if n_mapping_parallelism is None and isinstance(source, dict):
+        n_mapping_parallelism = source.get("n_mapping_parallelism")
+    if not n_mapping_parallelism or any(
+        n is None for n in n_mapping_parallelism.values()
+    ):
+        print("plot_task_maps: the chunk grid (n_mapping_parallelism) is not recorded.")
+        return None
+    if len(n_mapping_parallelism) != 2:
+        print(
+            "plot_task_maps: task maps need two parallel axes; this run was "
+            f"mapped over {list(n_mapping_parallelism)}."
+        )
+        return None
+    tasks = _as_timing_frame(source)
+    if "task_id" not in tasks.columns:
+        print("plot_task_maps: the tasks have no task_id column.")
+        return None
+    (axis_0, n_0), (axis_1, n_1) = n_mapping_parallelism.items()
+    task_id = tasks["task_id"].to_numpy(dtype=int)
+    if task_id.min() < 0 or task_id.max() >= n_0 * n_1:
+        print(
+            f"plot_task_maps: task ids {task_id.min()}-{task_id.max()} do not fit "
+            f"the {n_0} x {n_1} chunk grid."
+        )
+        return None
+    rows, cols = np.unravel_index(task_id, (n_0, n_1))
+    series = {}
+    if "task_time" in quantities:
+        series["task_time"] = _column_values(
+            tasks, _task_columns(task_columns)["task"], task_columns
+        )
+    if {"peak_rss", "read", "cpu"} & set(quantities):
+        totals = _per_task_totals(tasks)
+        for key, column in (
+            ("peak_rss", "peak_rss_gib"),
+            ("read", "read_gib"),
+            ("cpu", "mean_cpu_percent"),
+        ):
+            if key in quantities:
+                series[key] = totals[column].to_numpy(dtype=float)
+    panels = [
+        key
+        for key in quantities
+        if series.get(key) is not None and np.isfinite(series[key]).any()
+    ]
+    if not panels:
+        print("plot_task_maps: none of the quantities is recorded.")
+        return None
+    figure, axes = _performance_figure(
+        (4.6 * len(panels), 4.4), 1, len(panels), squeeze=False
+    )
+    figure.set_layout_engine("constrained")
+    for ax, key in zip(axes[0], panels, strict=True):
+        grid = np.full((n_0, n_1), np.nan)
+        grid[rows, cols] = series[key]
+        image = ax.imshow(grid, origin="lower", aspect="equal", cmap="viridis")
+        figure.colorbar(image, ax=ax, shrink=0.85)
+        ax.set_title(_TASK_MAP_PANELS[key], fontsize=10)
+        ax.set_xlabel(f"{axis_1} chunk index")
+        ax.set_ylabel(f"{axis_0} chunk index")
+    figure.suptitle(
+        title
+        or f"Per-task maps on the ({axis_0}, {axis_1}) chunk grid ({n_0} x {n_1}) "
+        f"-- task_id = i_{axis_0} * {n_1} + i_{axis_1}",
+        fontsize=11,
+    )
+    _save_figures({"figure": figure}, save_path)
+    return figure
 
 
 def assign_task_stream_lanes(tasks):

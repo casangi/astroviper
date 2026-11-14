@@ -88,7 +88,9 @@ def test_task_plots_all_three_series():
 
 def test_task_plots_accept_return_dict_and_save(tmp_path):
     ret = {"timing_node_tasks": _monitored_frame(), "deconvolution": {}}
-    axes = plot_task_resource_usage(ret, save_prefix=str(tmp_path / "x_"))
+    axes = plot_task_resource_usage(
+        ret, save_path=str(tmp_path / "x_task_{figure}.png")
+    )
     assert axes["cpu"] is not None
     for name in ("cpu", "memory", "io"):
         assert (tmp_path / f"x_task_{name}.png").exists()
@@ -101,7 +103,14 @@ def test_task_plots_without_io_columns():
 
 def test_cluster_plots_sum_over_running_tasks():
     df = _monitored_frame()
-    axes = plot_cluster_resource_usage(df, core_capacity=8, memory_capacity_gib=64)
+    axes = plot_cluster_resource_usage(
+        df,
+        compute_resources={
+            "n_hosts": 1,
+            "n_logical_cpus": 8,
+            "memory_total_bytes": 64 * 2**30,
+        },
+    )
     assert all(axes[k] is not None for k in ("cpu", "memory", "io"))
     # x-axis spans the whole run (last task starts at +15s and runs >=9.5s),
     # not just one task's duration.
@@ -217,7 +226,9 @@ def test_over_slots():
 
 def test_core_plots_statistics_over_the_slots(tmp_path):
     axes = plot_core_resource_usage(
-        _two_slot_frame(), memory_per_slot_gib=8, save_prefix=str(tmp_path / "x_")
+        _two_slot_frame(),
+        compute_resources={"n_worker_slots": 2, "memory_total_bytes": 16 * 2**30},
+        save_path=str(tmp_path / "x_core_{figure}.png"),
     )
     for name in ("cpu", "memory", "io"):
         assert (tmp_path / f"x_core_{name}.png").exists()
@@ -234,7 +245,7 @@ def test_core_plots_statistics_over_the_slots(tmp_path):
     np.testing.assert_allclose(memory["peak (max over slots)"], 4.0)
     np.testing.assert_allclose(memory["min"], np.where(gap, 4, 2))
     np.testing.assert_allclose(memory["mean"], np.where(gap, 4, 3))
-    assert "memory per slot (8 GiB)" in memory
+    assert "host memory per worker slot (8 GiB)" in memory
     write = _statistics(axes["io"])
     np.testing.assert_allclose(write["min"], np.where(gap, 0, 1))
     np.testing.assert_allclose(write["peak (max over slots)"], 2.0)

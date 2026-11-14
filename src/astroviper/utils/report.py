@@ -598,8 +598,18 @@ def add_processing_section(
         )
         return
     for key, caption in (
-        ("cpu", "Cluster CPU: busy cores summed over the running tasks."),
-        ("memory", "Cluster memory: resident memory of the task-running workers."),
+        (
+            "cpu",
+            "Cluster CPU: busy cores summed over the running tasks; dashed, the "
+            "logical CPUs of the hosts; dotted, the worker slots times the "
+            "processing function threads (from the compute resources).",
+        ),
+        (
+            "memory",
+            "Cluster memory: resident memory of the task-running workers; "
+            "dashed, the hosts' memory; dotted, the workers' memory limit (from "
+            "the compute resources).",
+        ),
         ("io", "Cluster I/O: aggregate read and write rate (syscall level)."),
     ):
         if axes.get(key) is not None:
