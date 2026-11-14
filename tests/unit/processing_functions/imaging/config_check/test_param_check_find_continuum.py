@@ -95,7 +95,7 @@ def _store_attrs(binding=BINDING, **changes):
 
 @pytest.mark.parametrize("channel_range", [[0, 3840], [3840, 7680], [4000, 5000]])
 def test_first_round_store_of_the_cube(channel_range):
-    assert FIND_CONTINUUM_FIRST_ROUND_VERSION == 2
+    assert FIND_CONTINUUM_FIRST_ROUND_VERSION == 3
     check_find_continuum_first_round_store(
         _store_attrs(), BINDING, 0.2, 0, (625, 625), VARIABLES, channel_range
     )
@@ -109,9 +109,9 @@ def test_first_round_store_of_the_cube(channel_range):
         (
             _store_attrs(version=1),
             [0, 3840],
-            "version 1, not 2: make the first round again",
+            "version 1, not 3: make the first round again",
         ),
-        (_store_attrs(version=3), [0, 3840], "version 3, not 2"),
+        (_store_attrs(version=2), [0, 3840], "version 2, not 3"),
         (_store_attrs(complete=False), [0, 3840], "incomplete"),
         (
             _store_attrs(primary_beam_limit=0.3),

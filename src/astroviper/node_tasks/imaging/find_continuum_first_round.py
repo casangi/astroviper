@@ -94,8 +94,9 @@ def find_continuum_first_round_chunk(
     partials_directory : str
         Directory of the registry's slots.
     rest_frequency : float
-        Rest frequency of the cube (Hz), with which the windows' moment
-        channel weights were computed.
+        Rest frequency of the cube (Hz); the windows' moment channel weights
+        were computed with their own
+        (:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`).
 
     Returns
     -------

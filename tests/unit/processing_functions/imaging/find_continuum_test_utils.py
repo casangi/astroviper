@@ -151,6 +151,18 @@ def make_find_continuum_image_xds(
     return img_xds
 
 
+def window_cube(img_xds, channel_range):
+    """The cube of one spectral window of a cube, with the rest frequency
+    that ``make_empty_sky_image`` gives a cube of those channels: its middle
+    channel."""
+    xds = img_xds.isel(frequency=slice(*channel_range))
+    rest_frequency = float(xds.frequency.values[xds.sizes["frequency"] // 2])
+    attrs = dict(xds.frequency.attrs)
+    for key in ("rest_frequency", "rest_frequencies"):
+        attrs[key] = dict(attrs[key], data=rest_frequency)
+    return xds.assign_coords(frequency=xds.frequency.copy().assign_attrs(attrs))
+
+
 #: A compact bright line, a faint extended line offset from it, and a narrow line.
 LINE_SET = (
     {

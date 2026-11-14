@@ -187,7 +187,9 @@ def find_continuum(
         ``[start, stop)``, the channels of the cube that findContinuum sees as
         its cube: one spectral window, on which the frequencies are linear (a
         run of
-        :func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`).
+        :func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`);
+        in a cube of several windows its middle channel is the rest frequency
+        (:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`).
         ``None`` (default): every channel, refused for a cube of several
         spectral windows.
     monitor_resources_seconds : float, optional
@@ -273,6 +275,9 @@ def find_continuum(
     from astroviper.processing_functions.imaging.find_continuum import (
         finalize_find_continuum_reductions,
     )
+    from astroviper.processing_functions.imaging.utils.spectral_windows import (
+        window_rest_frequency,
+    )
     from astroviper.utils.timing import format_timing_summary
 
     application_start = time.time()
@@ -315,6 +320,11 @@ def find_continuum(
     os.makedirs(work_directory, exist_ok=True)
     beam_variable = data_group["beam_fit_params_point_spread_function"]
     polarization_index = lazy_xds.polarization.values.tolist().index("I")
+    rest_frequency = window_rest_frequency(
+        cube_xds.frequency.values,
+        [window_start, window_stop],
+        float(cube_xds.frequency.attrs["rest_frequency"]["data"]),
+    )
     cubes = {}
     for suffix, variable, beam in (
         (".residual", data_variables["sky"], beam_variable),
@@ -325,8 +335,9 @@ def find_continuum(
         cubes[path] = {
             "store": input_image_store,
             "variable": variable,
-            "metadata": _cube_metadata(
-                lazy_xds, data_variables["sky"], beam, telescope_name
+            "metadata": dict(
+                _cube_metadata(lazy_xds, data_variables["sky"], beam, telescope_name),
+                rest_frequency=rest_frequency,
             ),
             "channel_offset": window_start,
             "polarization_index": polarization_index,

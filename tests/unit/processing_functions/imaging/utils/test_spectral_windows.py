@@ -5,6 +5,7 @@ import pytest
 
 from astroviper.processing_functions.imaging.utils.spectral_windows import (
     linear_channel_ranges,
+    window_rest_frequency,
 )
 
 
@@ -37,3 +38,17 @@ from astroviper.processing_functions.imaging.utils.spectral_windows import (
 )
 def test_linear_channel_ranges(frequency, ranges):
     assert linear_channel_ranges(frequency) == ranges
+
+
+def test_window_rest_frequency():
+    """A cube of one spectral window keeps its rest frequency, for every range
+    of its channels; a window of a cube of several takes its middle channel,
+    the rest frequency of a cube of its channels alone."""
+    one = 230.0e9 + 1.0e6 * np.arange(8)
+    assert window_rest_frequency(one, [0, 8], 229.0e9) == 229.0e9
+    assert window_rest_frequency(one, [2, 6], 229.0e9) == 229.0e9
+    two = np.append(one, 232.0e9 + 2.0e6 * np.arange(5))
+    assert window_rest_frequency(two, [0, 8], two[4]) == two[4]
+    assert window_rest_frequency(two, [0, 8], two[6]) == two[4]
+    assert window_rest_frequency(two, [8, 13], two[6]) == two[10]
+    assert window_rest_frequency(two, [9, 12], two[6]) == two[10]

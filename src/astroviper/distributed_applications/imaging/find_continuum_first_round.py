@@ -4,7 +4,7 @@
 findContinuum's first round while it images the cube, in a store next to the
 cube (:func:`find_continuum_first_round_store_path`); ``find_continuum_ultra``
 makes it in its first pass, in its work directory, when it is given none.
-The store (:func:`create_find_continuum_first_round_store`, version 2) holds
+The store (:func:`create_find_continuum_first_round_store`, version 3) holds
 the bit-packed primary-beam limit and spectrum masks of every channel, their
 tile occupancy, the per-channel rows of the residual and of the primary beam,
 and the integrated and maximum moments of every spectral window. The imager's
@@ -197,7 +197,7 @@ def create_find_continuum_first_round_store(
     windows: list,
     rest_frequency: float,
 ) -> None:
-    """Create an empty first-round store (Zarr v3, version 2), replacing one
+    """Create an empty first-round store (Zarr v3, version 3), replacing one
     of that path.
 
     Parameters
@@ -246,8 +246,11 @@ def create_find_continuum_first_round_store(
     n_tiles_m)``), ``SKY_VALID_COUNT`` and ``PRIMARY_BEAM_VALID_COUNT`` (int64
     ``(n_channels,)``, 0 until written), ``SKY_MINIMUM``, ``SKY_MAXIMUM`` and
     ``PRIMARY_BEAM_MINIMUM`` (float64 ``(n_channels,)``, NaN until written),
-    ``SKY_MOMENT_INTEGRATED`` (float64) and ``SKY_MOMENT_MAXIMUM`` (``(window,
-    l, m)``, NaN until drained). Attributes ``find_continuum_first_round``:
+    ``SKY_MOMENT_INTEGRATED`` (float64, weighted by the radio velocity of the
+    window's rest frequency,
+    :func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`)
+    and ``SKY_MOMENT_MAXIMUM`` (``(window, l, m)``, NaN until drained).
+    Attributes ``find_continuum_first_round``:
     ``version``, ``written_by``, ``run_id``, ``primary_beam_limit``,
     ``spectrum_primary_beam_level``, ``variables``, ``polarization_index``,
     ``value_dtypes``, ``tile_shape``, ``merge_tile_shape``, ``windows``,

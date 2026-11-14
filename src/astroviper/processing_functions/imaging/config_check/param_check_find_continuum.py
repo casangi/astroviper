@@ -20,8 +20,9 @@ FIND_CONTINUUM_ROLES = (
     "primary_beam",
     "beam_fit_params_point_spread_function",
 )
-# Format version of the first-round store made next to the cube.
-FIND_CONTINUUM_FIRST_ROUND_VERSION = 2
+# Format version of the first-round store made next to the cube; 3 weights
+# the moments of each window of a cube of several by its own rest frequency.
+FIND_CONTINUUM_FIRST_ROUND_VERSION = 3
 # Telescopes of findContinuum's time-division-mode rules (fC 4449-4463).
 FIND_CONTINUUM_ULTRA_TELESCOPES = ("ALMA", "VLA")
 # Fewest channels of a spectral window: findContinuum's selection needs two
@@ -437,8 +438,8 @@ def check_find_continuum_first_round_store(
     Raises
     ------
     ValueError
-        The store is missing or incomplete, has another version (a store of
-        version 1 must be made again), was made with another primary beam
+        The store is missing or incomplete, has another version (a store of an
+        earlier version must be made again), was made with another primary beam
         limit, Stokes index, tile shape or data variables, holds no window
         with every channel of ``channel_range``, or a field of its binding
         differs from the cube's: the cube was rewritten, or is another one.

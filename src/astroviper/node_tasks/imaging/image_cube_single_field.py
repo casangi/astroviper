@@ -1144,8 +1144,10 @@ def image_cube_single_field(
         except that each of the ``windows`` carries its ``first_frequency``,
         ``channel_increment`` and ``n_channels``
         (:func:`~astroviper.processing_functions.imaging.find_continuum_ultra.settings.linear_spectral_axis`)
-        instead of its moment channel weights, which the task computes with
-        ``rest_frequency``. Default ``None``: none.
+        and ``rest_frequency``
+        (:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`)
+        instead of its moment channel weights, which the task computes from
+        them. Default ``None``: none.
 
     image_frequency_attrs : dict
         The attributes of the whole image's ``frequency`` coordinate (from the
@@ -1391,7 +1393,6 @@ def image_cube_single_field(
         )
 
         # The graph carries each window's axis, not its weights.
-        rest_frequency = find_continuum_first_round_params["rest_frequency"]
         first_round_params = dict(
             find_continuum_first_round_params,
             windows=[
@@ -1401,7 +1402,7 @@ def image_cube_single_field(
                         window["first_frequency"],
                         window["channel_increment"],
                         window["n_channels"],
-                        rest_frequency,
+                        window["rest_frequency"],
                     ),
                 )
                 for window in find_continuum_first_round_params["windows"]

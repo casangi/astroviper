@@ -385,7 +385,7 @@ def test_create_store(cube, tmp_path):
     assert group["SKY_MOMENT_MAXIMUM"].compressors == ()
     assert dict(group.attrs) == {"find_continuum_first_round": _attributes(store)}
     assert _attributes(store) == {
-        "version": 2,
+        "version": 3,
         "run_id": "run",
         "written_by": "image_cube_single_field",
         "primary_beam_limit": LIMIT,
@@ -938,7 +938,7 @@ def test_validation_refuses_a_store_of_version_1(cube, tmp_path):
     group = zarr.open_group(store, mode="r+")
     group.attrs["find_continuum_first_round"] = dict(_attributes(store), version=1)
     with pytest.raises(
-        ValueError, match="has version 1, not 2: make the first round again"
+        ValueError, match="has version 1, not 3: make the first round again"
     ):
         validate_find_continuum_first_round(store, cube["store"], LIMIT, [0, 16])
 
