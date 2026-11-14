@@ -36,6 +36,10 @@ from astroviper.processing_functions.imaging.utils.cycle_control_heuristics impo
     NOISY_N_SIGMA,
     noisy_cycle_control_params,
 )
+from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics import (
+    UNIFORM_DISK_HALF_POWER_WIDTH,
+    image_size_for_field_of_view,
+)
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.telescope_layout import read_telescope_layout
 
@@ -279,13 +283,22 @@ def test_image_cube_single_field_per_channel_threshold_shape(ps_store, tmp_path)
 # --------------------------------------------------------------------------- #
 # image_cube_single_field_delphi with a stand-in PSF pass
 # --------------------------------------------------------------------------- #
-#: Fitted minor axis of the stand-in PSF, in units of the cell of the PSF pass.
+#: Fitted minor axis of the stand-in PSF at the highest frequency, in units of
+#: the cell of the PSF pass.
 MINOR_AXIS_IN_CELLS = 4.0
+#: The highest frequency of the processing set (Hz).
+TOP_FREQUENCY = 3.4e9
 
 
 @pytest.fixture
 def psf_calls(monkeypatch):
-    """Replace the PSF pass by a stand-in of its contract; records the calls."""
+    """Replace the PSF pass by a stand-in of its contract; records the calls.
+
+    As for a real PSF, the beam does not depend on the cell of a call: its
+    minor axis is MINOR_AXIS_IN_CELLS cells of the first call (the PSF pass)
+    at TOP_FREQUENCY and scales with the wavelength. The longest baseline is
+    the one that cell is made for, ``1 / (3 cell)`` at TOP_FREQUENCY.
+    """
     calls = []
 
     def point_spread_function_cube_single_field(
@@ -299,15 +312,15 @@ def psf_calls(monkeypatch):
                 **kwargs,
             }
         )
+        cell_guess = abs(float(calls[0]["image_params"]["cell_size"][0]))
         frequency = np.asarray(image_params["frequency_coords"])
         polarization = list(image_params["polarization_coords"])
         shape = (frequency.size, len(polarization))
-        cell = abs(float(image_params["cell_size"][0]))
         beam = np.empty(shape + (3,))
         # The beam shrinks with frequency; the highest channel sets the cell.
-        scale = frequency.max() / frequency
-        beam[..., 0] = 1.2 * MINOR_AXIS_IN_CELLS * cell * scale[:, None]
-        beam[..., 1] = MINOR_AXIS_IN_CELLS * cell * scale[:, None]
+        scale = TOP_FREQUENCY / frequency
+        beam[..., 0] = 1.2 * MINOR_AXIS_IN_CELLS * cell_guess * scale[:, None]
+        beam[..., 1] = MINOR_AXIS_IN_CELLS * cell_guess * scale[:, None]
         beam[..., 2] = 0.3
         sensitivity = np.array([[1e-3, 2e-3], [3e-3, 4e-3]])[: shape[0], : shape[1]]
         dims = ("frequency", "polarization")
@@ -322,7 +335,7 @@ def psf_calls(monkeypatch):
                 "SENSITIVITY_NATURAL": (dims, 0.8 * sensitivity),
                 "SUM_OF_WEIGHTS": (dims, np.full(shape, 100.0)),
                 "EFFECTIVE_NUMBER_OF_VISIBILITIES": (dims, np.full(shape, 50.0)),
-                "UV_DISTANCE_MAX": ("frequency", np.full(shape[0], 1e4)),
+                "UV_DISTANCE_MAX": ("frequency", 1.0 / (3.0 * cell_guess * scale)),
                 "UV_DISTANCE_MIN": ("frequency", np.full(shape[0], 1e2)),
                 "ABS_W_MAX": ("frequency", np.full(shape[0], 1e3)),
                 "FLAGGED_FRACTION": ("frequency", np.zeros(shape[0])),
@@ -331,6 +344,10 @@ def psf_calls(monkeypatch):
                 "frequency": frequency,
                 "polarization": polarization,
                 "beam_params_label": ["major", "minor", "pa"],
+            },
+            attrs={
+                "image_size": [int(size) for size in image_params["image_size"]],
+                "cell_size": [float(cell) for cell in image_params["cell_size"]],
             },
         )
 
@@ -353,7 +370,7 @@ def test_delphi_calculate_parameters_only(ps_store, tmp_path, psf_calls):
     assert not (tmp_path / "cube.img.zarr").exists()
 
     # The PSF pass: the derived polarization, kernel and beam, no image written.
-    (call,) = psf_calls
+    call, *refits = psf_calls
     assert call["image_store"] is None
     assert call["instrument_polarization_basis"] == "circular"
     assert call["image_params"]["polarization_coords"] == ["I", "V"]
@@ -372,6 +389,42 @@ def test_delphi_calculate_parameters_only(ps_store, tmp_path, psf_calls):
     cell_guess = derived["cell_size_guess"]
     assert abs(call["image_params"]["cell_size"][0]) == pytest.approx(cell_guess)
     assert call["image_params"]["image_size"] == [derived["image_size_guess"]] * 2
+    assert call["image_params"]["frequency_coords"].size == 2
+
+    # Two refits of the highest channel, at 5 and 6.25 pixels across the minor
+    # axis the pass predicts, the field of view and every other argument kept.
+    minor_axis = MINOR_AXIS_IN_CELLS * cell_guess
+    assert derived["frequency_refit"] == TOP_FREQUENCY
+    assert derived["minor_axis_estimate"] == pytest.approx(minor_axis)
+    np.testing.assert_allclose(
+        derived["cell_size_refit"], [minor_axis / 5.0, minor_axis / 6.25]
+    )
+    assert len(refits) == 2
+    for refit, refit_cell, refit_size in zip(
+        refits, derived["cell_size_refit"], derived["image_size_refit"], strict=True
+    ):
+        assert refit["image_params"]["frequency_coords"].tolist() == [TOP_FREQUENCY]
+        assert refit["image_params"]["cell_size"] == pytest.approx(
+            [-refit_cell, refit_cell]
+        )
+        assert refit["image_params"]["image_size"] == [refit_size] * 2
+        assert refit_size == image_size_for_field_of_view(
+            derived["field_of_view"], refit_cell
+        )
+        assert refit["n_mapping_parallelism"] == {"frequency": 1}
+        for key in set(call) - {"image_params", "n_mapping_parallelism"}:
+            assert refit[key] == call[key], key
+        for key in set(call["image_params"]) - {
+            "image_size",
+            "cell_size",
+            "frequency_coords",
+        }:
+            np.testing.assert_array_equal(
+                refit["image_params"][key], call["image_params"][key]
+            )
+    np.testing.assert_allclose(
+        derived["beam_fit_params_refit"], [[1.2 * minor_axis, minor_axis, 0.3]] * 2
+    )
     # pixels_per_beam = 5 across the minor axis of the highest channel.
     cell = MINOR_AXIS_IN_CELLS * cell_guess / 5.0
     assert derived["cell_size"] == pytest.approx(cell)
@@ -491,16 +544,19 @@ def test_delphi_end_to_end_with_stand_in_psf_pass(ps_store, tmp_path, psf_calls)
 
 
 def test_delphi_skips_a_fully_flagged_highest_channel(ps_store, tmp_path, psf_calls):
-    """A flagged channel has a zero beam fit and infinite sensitivity."""
+    """A flagged channel has a zero beam fit, infinite sensitivity and no uv
+    extent."""
     module = sys.modules[PSF_MODULE]
     psf = module.point_spread_function_cube_single_field
 
     def flagged_highest_channel(*args, **kwargs):
         xds = psf(*args, **kwargs)
-        top = int(np.argmax(xds.frequency.values))
-        xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"][top] = 0.0
-        xds["SENSITIVITY"][top] = np.inf
-        xds["FLAGGED_FRACTION"][top] = 1.0
+        if TOP_FREQUENCY in xds.frequency.values:
+            top = {"frequency": TOP_FREQUENCY}
+            xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].loc[top] = 0.0
+            xds["SENSITIVITY"].loc[top] = np.inf
+            xds["FLAGGED_FRACTION"].loc[top] = 1.0
+            xds["UV_DISTANCE_MAX"].loc[top] = np.nan
         return xds
 
     module.point_spread_function_cube_single_field = flagged_highest_channel
@@ -511,9 +567,13 @@ def test_delphi_skips_a_fully_flagged_highest_channel(ps_store, tmp_path, psf_ca
     with open(f"{image_store}.parameters.json") as file:
         text = file.read()
     assert "NaN" not in text and "Infinity" not in text
-    # The cell comes from the remaining channel, whose beam is wider.
+    # The cell comes from the refits of the remaining channel, whose beam is
+    # wider.
     derived = parameters["derived"]
     frequency = np.asarray(derived["frequency"])
+    assert derived["frequency_refit"] == frequency.min()
+    for refit in psf_calls[1:]:
+        assert refit["image_params"]["frequency_coords"].tolist() == [frequency.min()]
     scale = frequency.max() / frequency.min()
     cell = MINOR_AXIS_IN_CELLS * derived["cell_size_guess"] * scale / 5.0
     assert derived["cell_size"] == pytest.approx(cell)
@@ -521,6 +581,140 @@ def test_delphi_skips_a_fully_flagged_highest_channel(ps_store, tmp_path, psf_ca
         "threshold"
     ]
     assert threshold[int(np.argmax(frequency))] == [0.0, 0.0]
+
+
+def _replace_beam_fits(beam_fit_params):
+    """Replace every fit of a stand-in pass by ``beam_fit_params(image extent,
+    true minor axis at the highest frequency of the pass)``."""
+
+    def replace(xds):
+        beam = xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"]
+        extent = xds.attrs["image_size"][0] * abs(xds.attrs["cell_size"][0])
+        true_minor = float(beam.sel(polarization="I", beam_params_label="minor").min())
+        beam[:] = beam_fit_params(extent, true_minor)
+        return xds
+
+    return replace
+
+
+def test_delphi_takes_the_cell_from_the_refits_not_from_a_junk_fit(
+    ps_store, tmp_path, psf_calls
+):
+    """A junk fit of the highest channel in the PSF pass (a major axis longer
+    than the image, the position angle at 90 deg, the minor axis 7 times too
+    wide), as in the 10 antenna ALMA simulation, set the cell before. It is
+    left out of the estimate, the refits are made at the cells of the other
+    channel's fit scaled to the highest frequency, and they give the cell."""
+    module = sys.modules[PSF_MODULE]
+    psf = module.point_spread_function_cube_single_field
+
+    def junk_highest_channel_in_the_pass(*args, **kwargs):
+        xds = psf(*args, **kwargs)
+        if xds.sizes["frequency"] > 1:
+            beam = xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"]
+            top = {"frequency": TOP_FREQUENCY}
+            extent = xds.attrs["image_size"][0] * abs(xds.attrs["cell_size"][0])
+            minor = float(
+                beam.loc[top].sel(polarization="I", beam_params_label="minor")
+            )
+            beam.loc[top] = [2.0 * extent, 7.0 * minor, np.pi / 2]
+        return xds
+
+    module.point_spread_function_cube_single_field = junk_highest_channel_in_the_pass
+    derived = delphi_module.image_cube_single_field_delphi(
+        ps_store, str(tmp_path / "cube.img.zarr"), calculate_parameters_only=True
+    )["derived"]
+    minor_axis = MINOR_AXIS_IN_CELLS * derived["cell_size_guess"]
+    assert derived["cell_size"] == pytest.approx(minor_axis / 5.0)
+    stokes_i, highest = 0, int(np.argmax(derived["frequency"]))
+    assert derived["beam_fit_params_point_spread_function"][highest][stokes_i][
+        1
+    ] == pytest.approx(7.0 * minor_axis)
+    assert derived["minor_axis_estimate"] == pytest.approx(minor_axis)
+    np.testing.assert_allclose(
+        derived["cell_size_refit"], [minor_axis / 5.0, minor_axis / 6.25]
+    )
+
+
+def test_delphi_leaves_out_a_junk_refit(ps_store, tmp_path, psf_calls):
+    """The first refit is an axis-aligned fit three times too wide, plausible
+    but in agreement with neither the second refit nor the estimate of the PSF
+    pass: the second refit gives the cell."""
+    module = sys.modules[PSF_MODULE]
+    psf = module.point_spread_function_cube_single_field
+    axis_aligned = _replace_beam_fits(
+        lambda extent, minor: [3.3 * minor, 3.0 * minor, np.pi / 2]
+    )
+
+    def junk_first_refit(*args, **kwargs):
+        xds = psf(*args, **kwargs)
+        return axis_aligned(xds) if len(psf_calls) == 2 else xds
+
+    module.point_spread_function_cube_single_field = junk_first_refit
+    derived = delphi_module.image_cube_single_field_delphi(
+        ps_store, str(tmp_path / "cube.img.zarr"), calculate_parameters_only=True
+    )["derived"]
+    minor_axis = MINOR_AXIS_IN_CELLS * derived["cell_size_guess"]
+    np.testing.assert_allclose(
+        derived["beam_fit_params_refit"],
+        [
+            [3.3 * minor_axis, 3.0 * minor_axis, np.pi / 2],
+            [1.2 * minor_axis, minor_axis, 0.3],
+        ],
+    )
+    assert derived["cell_size"] == pytest.approx(minor_axis / 5.0)
+
+
+def test_delphi_refuses_refits_without_a_plausible_minor_axis(
+    ps_store, tmp_path, psf_calls
+):
+    """Two failed refits (NaN, as the fit reports a failure) give no cell: delphi
+    raises before it writes the parameters file."""
+    module = sys.modules[PSF_MODULE]
+    psf = module.point_spread_function_cube_single_field
+    failed = _replace_beam_fits(lambda extent, minor: np.nan)
+
+    def failed_refits(*args, **kwargs):
+        xds = psf(*args, **kwargs)
+        return failed(xds) if xds.sizes["frequency"] == 1 else xds
+
+    module.point_spread_function_cube_single_field = failed_refits
+    image_store = str(tmp_path / "cube.img.zarr")
+    with pytest.raises(ValueError, match="give no plausible minor axis"):
+        delphi_module.image_cube_single_field_delphi(
+            ps_store, image_store, calculate_parameters_only=True
+        )
+    assert len(psf_calls) == 3
+    assert not (tmp_path / "cube.img.zarr.parameters.json").exists()
+
+
+def test_delphi_refits_at_the_uniform_disk_width_without_a_plausible_fit(
+    ps_store, tmp_path, psf_calls
+):
+    """When no fit of the PSF pass is plausible (every major axis longer than
+    the image, the minor axes 7 times too wide), the refits sample the half
+    power width of a uniformly weighted disk out to the longest baseline of the
+    highest channel; the two refits agree and give the cell."""
+    module = sys.modules[PSF_MODULE]
+    psf = module.point_spread_function_cube_single_field
+    too_long = _replace_beam_fits(
+        lambda extent, minor: [2.0 * extent, 7.0 * minor, np.pi / 2]
+    )
+
+    def junk_pass(*args, **kwargs):
+        xds = psf(*args, **kwargs)
+        return too_long(xds) if xds.sizes["frequency"] > 1 else xds
+
+    module.point_spread_function_cube_single_field = junk_pass
+    derived = delphi_module.image_cube_single_field_delphi(
+        ps_store, str(tmp_path / "cube.img.zarr"), calculate_parameters_only=True
+    )["derived"]
+    cell_guess = derived["cell_size_guess"]
+    assert derived["cell_size"] == pytest.approx(MINOR_AXIS_IN_CELLS * cell_guess / 5.0)
+    # The stand-in's longest baseline at the highest frequency is 1 / (3 cell_guess).
+    width = UNIFORM_DISK_HALF_POWER_WIDTH * 3.0 * cell_guess
+    assert derived["minor_axis_estimate"] is None
+    np.testing.assert_allclose(derived["cell_size_refit"], [width / 5.0, width / 6.25])
 
 
 # --------------------------------------------------------------------------- #
@@ -661,7 +855,8 @@ def test_delphi_gives_the_teardown_to_the_last_compute_only(
     ps_store, tmp_path, psf_calls, monkeypatch
 ):
     """graphviper arms teardown_force_exit_seconds at the end of a compute, so
-    the PSF pass runs without it unless it is the only compute."""
+    the PSF pass and the first refit run without it, and the second refit gets
+    it only when it is the last compute."""
 
     @functools.wraps(image_cube_single_field)
     def fake_image_cube_single_field(**kwargs):
@@ -677,7 +872,9 @@ def test_delphi_gives_the_teardown_to_the_last_compute_only(
         compute_backend="mpi",
         mpi_cluster_setup=mpi_cluster_setup,
     )
-    assert psf_calls[-1]["mpi_cluster_setup"] == {"max_workers": 2}
+    assert len(psf_calls) == 3
+    for call in psf_calls:
+        assert call["mpi_cluster_setup"] == {"max_workers": 2}
     arguments = result["parameters"]["image_cube_single_field"]
     assert arguments["mpi_cluster_setup"] == mpi_cluster_setup
     delphi_module.image_cube_single_field_delphi(
@@ -687,6 +884,9 @@ def test_delphi_gives_the_teardown_to_the_last_compute_only(
         compute_backend="mpi",
         mpi_cluster_setup=mpi_cluster_setup,
     )
+    assert len(psf_calls) == 6
+    for call in psf_calls[3:5]:
+        assert call["mpi_cluster_setup"] == {"max_workers": 2}
     assert psf_calls[-1]["mpi_cluster_setup"] == mpi_cluster_setup
     assert mpi_cluster_setup == {"max_workers": 2, "teardown_force_exit_seconds": 30}
 
