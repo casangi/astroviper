@@ -122,6 +122,11 @@ def test_html_report_of_a_monitored_single_task_run(processing_set, tmp_path):
     text = _text(result["report"])
     for heading in (
         "Processing",
+        "Performance",
+        "Timing",
+        "Task stream",
+        "Task times",
+        "Resources",
         "Results",
         "Point spread function",
         "Maximum over frequency",
@@ -129,8 +134,16 @@ def test_html_report_of_a_monitored_single_task_run(processing_set, tmp_path):
         "Deconvolution",
     ):
         assert f">{heading}</h" in text, heading
-    assert "Cluster CPU" in text
-    assert text.count("data:image/png;base64,") >= 8
+    assert "parallelism p" in text and "compute resources" in text
+    assert "grouped by phase" in text and "(outside the phases)" in text
+    assert "PREPARATION (once per chunk)" in text
+    assert "Cluster CPU" in text and "CPU per worker slot" in text
+    assert "CPU per task" in text
+    # processing (9 without I/O counters), point spread function, 3 maxima,
+    # deconvolution and the image statistics drawn
+    assert text.count("data:image/png;base64,") >= 9 + 5 + sum(
+        key in result["image_statistics"] for key in ("sky_residual", "sky_restored")
+    )
     files = tmp_path / "cube_report_files"
     for key in ("sky_residual", "sky_model", "sky_restored_primary_beam_corrected"):
         assert (files / f"moment_maximum_{key}.img.zarr").exists(), key

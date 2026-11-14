@@ -811,13 +811,14 @@ def image_cube_single_field(
         ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
         gives ``cube_report.html``), or ``"notebook"``, displayed in the
         calling Jupyter notebook. The report has a processing section common
-        to all distributed applications (timing, task stream and, with
-        ``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a
-        results section of the application's own; the products it makes with
-        other distributed applications are kept in ``<name>_report_files``
-        next to the output store. It is made after the output is written: a
-        failure while making it is logged and leaves the results intact.
-        ``None`` (default): no report.
+        to all distributed applications (performance measures, timing, task
+        stream, task times and, with ``monitor_resources_seconds``, the CPU,
+        memory and I/O of the cluster, of every worker slot and of the tasks)
+        and a results section of the application's own; the products it
+        makes with other distributed applications are kept in
+        ``<name>_report_files`` next to the output store. It is made after
+        the output is written: a failure while making it is logged and leaves
+        the results intact. ``None`` (default): no report.
     parameters_file : str, optional
         JSON file whose ``"image_cube_single_field"`` block gives the
         arguments, as
@@ -878,12 +879,13 @@ def image_cube_single_field(
     cross sections of the point spread function (Stokes I, centre channel)
     with the fitted Gaussian, the maximum over frequency (``moments``) of the
     residual, the model and the primary beam corrected restored image per
-    Stokes plane, the spectrum of the peak inside the clean mask, and per
-    channel the cycle control stop codes, the occurrences of the model update
-    stop codes, the iterations, the imaging cycles, the final residual entropy
-    and the residual RMS. With a report and a kept
-    ``point_spread_function``, ``beam_fit_params_point_spread_function`` is
-    kept too.
+    Stokes plane, every per-plane statistic of the residual and of the
+    restored image, and per channel the cycle control stop codes, the
+    occurrences of the model update stop codes, the iterations, the imaging
+    cycles, the peak residual at the start of the first model update and at
+    the end, the final residual entropy and the residual RMS. With a report
+    and a kept ``point_spread_function``,
+    ``beam_fit_params_point_spread_function`` is kept too.
 
     The Zarr image store is created with :func:`xradio.image.write_image`.
     XRADIO versions that give image Zarr stores the ``.img.zarr`` extension

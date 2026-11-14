@@ -8,6 +8,11 @@ MOMENTS_TASK_STREAM_COLUMNS = {
     "load": ("T_load", "T_stream_read"),
     "write": "T_write",
 }
+# The phases of a node task: T_moments = T_stream_read + T_accumulate on the
+# streamed path; the slab path (median) records no split (NaN), its T_load
+# reads the slab.
+STREAMED_TASK_PHASE_COLUMNS = ("T_load", "T_stream_read", "T_accumulate", "T_write")
+SLAB_TASK_PHASE_COLUMNS = ("T_load", "T_moments", "T_write")
 # Largest side of a moment map drawn; larger maps are drawn every k-th pixel.
 MAX_MOMENT_IMAGE_SIZE = 2048
 
@@ -17,13 +22,21 @@ def moments_report(return_dict, report="html"):
 
     The processing section is the one of every distributed application
     (:func:`~astroviper.utils.report.add_processing_section`), with the node
-    tasks named after their chunks of the parallel axes. The results section
-    holds the moment maps per Stokes plane, read from the store written, when
-    they are ``(l, m)`` images: the store holds one frequency and more than
-    one ``l`` and ``m`` (a moment over ``frequency``); otherwise a note. Maps
-    with a side larger than :data:`MAX_MOMENT_IMAGE_SIZE` are drawn every
-    k-th pixel along ``l`` and ``m``, and a store with several times is drawn
-    at its first time.
+    tasks named after their chunks of the parallel axes, followed by the task
+    maps: per task on the grid of two parallel axes, the task time and, for a
+    monitored run, the peak resident memory, the bytes read and the mean CPU
+    (:func:`~astroviper.utils.resource_plots.plot_task_maps`; a note for a
+    run over another number of axes). The results section holds every node
+    task's phases, the tasks sorted by their time
+    (:func:`~astroviper.utils.resource_plots.plot_task_phase_times`: the read,
+    the accumulation and the write of the streamed path, the load, the moments
+    and the write of the slab path), the distribution of the tasks' read rate
+    when the monitor recorded the I/O counters (Linux), and the moment maps
+    per Stokes plane, read from the store written, when they are ``(l, m)``
+    images: the store holds one frequency and more than one ``l`` and ``m`` (a
+    moment over ``frequency``); otherwise a note. Maps with a side larger
+    than :data:`MAX_MOMENT_IMAGE_SIZE` are drawn every k-th pixel along ``l``
+    and ``m``, and a store with several times is drawn at its first time.
 
     Parameters
     ----------
@@ -62,7 +75,10 @@ def moments_report(return_dict, report="html"):
             task_columns=MOMENTS_TASK_STREAM_COLUMNS,
             task_name=_task_name(return_dict["n_mapping_parallelism"]),
         )
+        _add_task_maps(document, return_dict)
         document.section("Results")
+        _add_task_phase_times(document, return_dict)
+        _add_read_rate(document, return_dict)
         _add_moment_maps(document, store)
     return path
 
@@ -73,6 +89,109 @@ def _task_name(n_mapping_parallelism):
     if len(axes) == 1:
         return f"{axes[0]} chunk"
     return f"({', '.join(axes)}) chunk"
+
+
+def _task_phase_columns(timing_node_tasks):
+    """The phase columns of the node tasks: :data:`STREAMED_TASK_PHASE_COLUMNS`
+    when every task recorded a finite ``T_stream_read`` and ``T_accumulate``,
+    else :data:`SLAB_TASK_PHASE_COLUMNS`."""
+    import numpy as np
+
+    if all(
+        column in timing_node_tasks.columns
+        and np.isfinite(timing_node_tasks[column].to_numpy(dtype=float)).all()
+        for column in ("T_stream_read", "T_accumulate")
+    ):
+        return STREAMED_TASK_PHASE_COLUMNS
+    return SLAB_TASK_PHASE_COLUMNS
+
+
+def _add_task_maps(document, return_dict):
+    from astroviper.utils.report import _captured
+    from astroviper.utils.resource_plots import plot_task_maps
+
+    document.subsection("Task maps")
+    figure, printed = _captured(
+        plot_task_maps, return_dict, task_columns=MOMENTS_TASK_STREAM_COLUMNS
+    )
+    if figure is None:
+        document.note("Task maps: " + (printed or "not recorded."))
+        return
+    (axis_0, _), (axis_1, n_1) = return_dict["n_mapping_parallelism"].items()
+    document.figure(
+        figure,
+        caption=f"Per task on the grid of its chunk indices ({axis_0} up the "
+        f"rows, {axis_1} across; task_id = i_{axis_0} x {n_1} + i_{axis_1}): the "
+        "task time and, for a monitored run, the peak resident memory, the bytes "
+        "read and the mean CPU (%).",
+    )
+
+
+def _add_task_phase_times(document, return_dict):
+    from astroviper.utils.report import _captured
+    from astroviper.utils.resource_plots import plot_task_phase_times
+
+    document.subsection("Task phase times")
+    columns = _task_phase_columns(return_dict["timing_node_tasks"])
+    figure, printed = _captured(
+        plot_task_phase_times,
+        return_dict,
+        columns={column: column for column in columns},
+        layout="per_task",
+        task_columns=MOMENTS_TASK_STREAM_COLUMNS,
+    )
+    if figure is None:
+        document.note("Task phase times: " + (printed or "not recorded."))
+        return
+    document.figure(
+        figure,
+        caption="The phases of every node task, the tasks sorted by their time "
+        "(T_moments_task), with the median task time: "
+        + (
+            "T_load (open the store and plan the read), T_stream_read (the "
+            "reads and their decompression), T_accumulate (the accumulation of "
+            "the moments) and T_write."
+            if columns is STREAMED_TASK_PHASE_COLUMNS
+            else "T_load (the load of the chunk's slab), T_moments and T_write."
+        ),
+    )
+
+
+def _add_read_rate(document, return_dict):
+    from astroviper.utils.report import _captured
+    from astroviper.utils.resource_plots import plot_task_time_distribution
+
+    document.subsection("Read rate")
+    timing_node_tasks = return_dict["timing_node_tasks"]
+    if "read_chars" not in timing_node_tasks.columns:
+        document.note(
+            "The read rate was not recorded: it needs monitor_resources_seconds "
+            "and the I/O counters of the monitor, which exist on Linux only."
+        )
+        return
+    # The read is in T_moments on the streamed path, in T_load on the slab path.
+    streamed = _task_phase_columns(timing_node_tasks) is STREAMED_TASK_PHASE_COLUMNS
+    read_time_column = "T_moments" if streamed else "T_load"
+    figure, printed = _captured(
+        plot_task_time_distribution,
+        return_dict,
+        quantity="read_rate",
+        kind="histogram",
+        bins=40,
+        read_time_column=read_time_column,
+        task_columns=MOMENTS_TASK_STREAM_COLUMNS,
+    )
+    if figure is None:
+        document.note("Read rate: " + (printed or "not recorded."))
+        return
+    document.figure(
+        figure,
+        caption="The read rate of every node task: the bytes its worker process "
+        f"read during the task over {read_time_column} (MiB/s). The counter "
+        "(read_chars) is the worker process's, at the system call: reads served "
+        "from the page cache count, and so do those of other tasks the worker "
+        "runs at the same time.",
+    )
 
 
 def _add_moment_maps(document, store):

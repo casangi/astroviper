@@ -325,13 +325,14 @@ def simulate_processing_set(
         ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
         gives ``cube_report.html``), or ``"notebook"``, displayed in the
         calling Jupyter notebook. The report has a processing section common
-        to all distributed applications (timing, task stream and, with
-        ``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a
-        results section of the application's own; the products it makes with
-        other distributed applications are kept in ``<name>_report_files``
-        next to the output store. It is made after the output is written: a
-        failure while making it is logged and leaves the results intact.
-        ``None`` (default): no report.
+        to all distributed applications (performance measures, timing, task
+        stream, task times and, with ``monitor_resources_seconds``, the CPU,
+        memory and I/O of the cluster, of every worker slot and of the tasks)
+        and a results section of the application's own; the products it
+        makes with other distributed applications are kept in
+        ``<name>_report_files`` next to the output store. It is made after
+        the output is written: a failure while making it is logged and leaves
+        the results intact. ``None`` (default): no report.
 
     Returns
     -------

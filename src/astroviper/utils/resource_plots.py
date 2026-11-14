@@ -500,6 +500,11 @@ def _n_hosts(resources):
     return resources.get("n_hosts")
 
 
+def _hosts_text(n_hosts):
+    """``"1 host"``, ``"2 hosts"``."""
+    return f"{n_hosts} host" + ("" if n_hosts == 1 else "s")
+
+
 def _host_worker_layout(resources, hostname):
     """``(n_workers, n_worker_slots)`` of the host ``hostname``: from the
     recorded ``hosts``, else the totals spread evenly over ``n_hosts``; None
@@ -1009,7 +1014,7 @@ def plot_task_resource_usage(
     if "cpu_percent" in df.columns:
         divisors = _worker_share_divisors(df, resources)
     n_hosts = _n_hosts(resources)
-    hosts = f"{n_hosts} hosts" if n_hosts else None
+    hosts = _hosts_text(n_hosts) if n_hosts else None
     share = "approx. per-task share" if divisors is not None else None
     scope = (
         "approx. per-task share of worker process"
@@ -1211,7 +1216,7 @@ def plot_cluster_resource_usage(
     bin_note = f" ({binw:g} s bin means)"
     host_scope = " per Host" if per_host else ""
     per_host_unit = " per host" if per_host else ""
-    hosts = f"{n_hosts} hosts" if n_hosts else None
+    hosts = _hosts_text(n_hosts) if n_hosts else None
     dedup_note = (
         "\n(samples de-duplicated across tasks sharing a worker)"
         if divisors is not None
@@ -4025,7 +4030,7 @@ def plot_task_stream(
     )
     _p(
         f"  parallelism p              : {n_worker_slots} worker slots "
-        f"({provenance}; {len(hosts)} hosts, {n_lanes} reconstructed lanes)"
+        f"({provenance}; {_hosts_text(len(hosts))}, {n_lanes} reconstructed lanes)"
     )
     _p(
         f"  T_ideal = W / p            : {ideal:8.1f} s "

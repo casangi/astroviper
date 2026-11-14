@@ -592,6 +592,11 @@ def test_html_report_of_a_monitored_single_task_run(tmp_path):
     text = _report_text(result["report"])
     for heading in (
         "Processing",
+        "Performance",
+        "Timing",
+        "Task stream",
+        "Task times",
+        "Resources",
         "Observation",
         "Antennas",
         "uv coverage",
@@ -600,9 +605,12 @@ def test_html_report_of_a_monitored_single_task_run(tmp_path):
         "Sky components",
     ):
         assert f">{heading}</h" in text, heading
-    assert "Cluster CPU" in text
+    assert "Cluster CPU" in text and "CPU per worker slot" in text
+    assert "CPU per task" in text
+    assert "most a given time (T_simulate_task)" in text
     assert "shortest baseline" in text and "longest baseline" in text
-    assert text.count("data:image/png;base64,") >= 9
+    # processing (9 without I/O counters) and the 6 results figures
+    assert text.count("data:image/png;base64,") >= 9 + 6
     assert (
         tmp_path / "vla_sim_report_files" / "point_spread_function.img.zarr"
     ).exists()
@@ -631,7 +639,7 @@ def test_pdf_and_notebook_reports(tmp_path, monkeypatch):
     (html,) = (shown[0].data,)
     assert "No noise was simulated" in html
     assert "the sky image of the simulation" in html
-    assert "Cluster CPU, memory and I/O were not recorded" in html
+    assert "CPU, memory and I/O were not recorded" in html
 
 
 def test_unknown_report_format_is_refused(tmp_path):

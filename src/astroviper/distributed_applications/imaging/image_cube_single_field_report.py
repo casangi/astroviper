@@ -26,8 +26,9 @@ def image_cube_single_field_report(
     """Make the report of an ``image_cube_single_field`` run.
 
     The processing section is the one of every distributed application
-    (:func:`~astroviper.utils.report.add_processing_section`). The results
-    section holds the cross sections of the point spread function (Stokes I,
+    (:func:`~astroviper.utils.report.add_processing_section`), its node task
+    timing and phase times grouped by the phases of the imaging node task
+    (``IMAGING_TIMING_PHASES``). The results section holds the cross sections of the point spread function (Stokes I,
     centre channel) along the major axis, the minor axis and the diagonal
     between them with the fitted Gaussian; the maximum over frequency (the
     ``"maximum"`` moment of
@@ -69,6 +70,7 @@ def image_cube_single_field_report(
     from astroviper.distributed_applications.imaging.image_cube_single_field import (
         DISTRIBUTED_APPLICATION_TIMING_PHASES,
     )
+    from astroviper.processing_functions.imaging.utils import IMAGING_TIMING_PHASES
     from astroviper.utils.report import (
         Report,
         add_processing_section,
@@ -93,6 +95,7 @@ def image_cube_single_field_report(
             return_dict,
             DISTRIBUTED_APPLICATION_TIMING_PHASES,
             task_name="frequency chunk",
+            node_task_timing_phases=IMAGING_TIMING_PHASES,
         )
         document.section("Results")
         _add_point_spread_function(

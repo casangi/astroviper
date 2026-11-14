@@ -562,7 +562,7 @@ def test_task_stream_prints_the_recorded_or_packed_parallelism(capsys, tmp_path)
         _stream_dict(), compute_resources={"n_worker_slots": 4}, html_path=str(html)
     )
     out = capsys.readouterr().out
-    assert "4 worker slots (recorded; 1 hosts, 2 reconstructed lanes)" in out
+    assert "4 worker slots (recorded; 1 host, 2 reconstructed lanes)" in out
     assert "E map-reduce               :     43.0 %" in out  # 43 / 25 / 4
     assert "p = 4 worker slots" in [
         text.get_text() for text in figure.axes[0].get_legend().get_texts()

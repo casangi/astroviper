@@ -352,13 +352,14 @@ def moments(
         ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
         gives ``cube_report.html``), or ``"notebook"``, displayed in the
         calling Jupyter notebook. The report has a processing section common
-        to all distributed applications (timing, task stream and, with
-        ``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a
-        results section of the application's own; the products it makes with
-        other distributed applications are kept in ``<name>_report_files``
-        next to the output store. It is made after the output is written: a
-        failure while making it is logged and leaves the results intact.
-        ``None`` (default): no report.
+        to all distributed applications (performance measures, timing, task
+        stream, task times and, with ``monitor_resources_seconds``, the CPU,
+        memory and I/O of the cluster, of every worker slot and of the tasks)
+        and a results section of the application's own; the products it
+        makes with other distributed applications are kept in
+        ``<name>_report_files`` next to the output store. It is made after
+        the output is written: a failure while making it is logged and leaves
+        the results intact. ``None`` (default): no report.
 
     Returns
     -------
@@ -410,12 +411,15 @@ def moments(
     only the store the moment maps are written to. The store written is
     returned as ``moments_image_store``.
 
-    The report's results section (see
-    :func:`~astroviper.distributed_applications.image_analysis.moments_report.moments_report`):
-    the moment maps per Stokes plane when the store holds one frequency and
-    more than one ``l`` and ``m`` (moment axis ``frequency``; a moment over
-    ``time`` of a cube is not drawn), every k-th pixel along ``l`` and ``m``
-    for maps with a side larger than 2048 pixels.
+    The report (see
+    :func:`~astroviper.distributed_applications.image_analysis.moments_report.moments_report`)
+    adds to the processing section the task maps, per task on the grid of
+    two parallel axes. Its results section: the phases of every node task,
+    the read rate per task (monitored runs on Linux), and the moment maps per
+    Stokes plane when the store holds one frequency and more than one ``l``
+    and ``m`` (moment axis ``frequency``; a moment over ``time`` of a cube is
+    not drawn), every k-th pixel along ``l`` and ``m`` for maps with a side
+    larger than 2048 pixels.
     """
     import dask
     import pandas as pd
