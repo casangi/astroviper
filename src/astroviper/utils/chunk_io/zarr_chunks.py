@@ -593,6 +593,8 @@ def load_processing_set(
     instrument_polarization_basis="linear",
     processing_function_threads=1,
     load_correlated_data=True,
+    *,
+    map_frequencies,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -603,9 +605,9 @@ def load_processing_set(
     * ``frequency`` from each measurement set's own on-disk ``frequency``
       coordinate (from ``frequency_coords`` for a single measurement set
       without one); every selected channel must lie within half a channel of
-      a task frequency, onto the nearest of which it is imaged (see
-      :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`),
-      and every task frequency must receive at least one channel;
+      a task frequency, onto the nearest of which it is imaged
+      (``map_frequencies``), and every task frequency must receive at least
+      one channel;
     * ``polarization`` from ``instrument_polarization_basis`` and the data's
       correlation count;
     * ``time`` / ``baseline_id`` / ``uvw_label`` as plain index ranges (the
@@ -642,12 +644,14 @@ def load_processing_set(
         If false, omit the observed correlated-data array. This is used by
         cached-grid MFS residual updates, which require only UVW, flags, and
         imaging weights to predict and grid the model contribution.
+    map_frequencies : callable
+        ``map_frequencies(visibility_frequencies, task_frequencies)`` returns
+        the index of the task frequency each selected channel is imaged onto
+        and raises ``ValueError`` for a channel that maps onto none (for
+        imaging,
+        :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`).
     """
     import xarray as xr
-
-    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-        map_visibility_frequencies_to_image,
-    )
 
     task_frequency_values = np.asarray(frequency_coords)
     task_frequency_match_counts = np.zeros(
@@ -730,7 +734,7 @@ def load_processing_set(
         # use: execution blocks converted to LSRK have channel centres a few
         # kHz apart, so their frequencies never equal the image's exactly.
         try:
-            frequency_map = map_visibility_frequencies_to_image(
+            frequency_map = map_frequencies(
                 child_frequency_values, task_frequency_values
             )
         except ValueError as exc:

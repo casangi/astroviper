@@ -1212,6 +1212,9 @@ def image_cube_single_field(
             # Experimental performance path: read only this chunk's data-group
             # variables straight from the Zarr chunk blobs and reconstruct the
             # coordinates from the inputs (no datatree/coords/sub-datasets open).
+            from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+                map_visibility_frequencies_to_image,
+            )
             from astroviper.utils.chunk_io import load_processing_set
 
             ps_xdt = load_processing_set(
@@ -1222,6 +1225,7 @@ def image_cube_single_field(
                 frequency_coords=task_coords["frequency"]["data"],
                 instrument_polarization_basis=instrument_polarization_basis,
                 processing_function_threads=processing_function_threads,
+                map_frequencies=map_visibility_frequencies_to_image,
             )
         else:
             from xradio.measurement_set.load_processing_set import load_processing_set

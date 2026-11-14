@@ -92,6 +92,96 @@ _FULL_DIMS_LM = ("time", "frequency", "polarization", "l", "m")
 _BEAM_PARAMS_DIMS = ("time", "frequency", "polarization", "beam_params_label")
 
 
+def _require_finite_positive(name, value):
+    """Nonempty, finite, strictly positive real values, not coerced."""
+    if hasattr(value, "unit"):
+        raise TypeError(
+            f"{name} must use plain numerical SI values, not a unit-bearing quantity."
+        )
+    values = np.asarray(value)
+    if values.dtype.kind not in "iuf":
+        raise TypeError(f"{name} must contain real numbers.")
+    if not values.size or not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must be nonempty and finite.")
+    if np.any(values <= 0):
+        raise ValueError(f"{name} must be strictly positive.")
+    return values
+
+
+def check_fits_coordinates(image_params):
+    """Require image coordinates exactly representable by the cube FITS writer.
+
+    Parameters
+    ----------
+    image_params : mapping
+        Supplied image coordinates. Only available keys are checked.
+    """
+    # --- Number of axes ---
+    # The implemented four-axis FITS image has no independent time axis.
+    if "time_coords" in image_params and np.size(image_params["time_coords"]) != 1:
+        raise ValueError("FITS output supports a single time plane.")
+    if "image_size" in image_params and np.any(
+        np.asarray(image_params["image_size"]) < 2
+    ):
+        raise ValueError("FITS output needs at least 2 pixels per direction axis.")
+
+    # --- Polarization axis ---
+    # A linear FITS axis can encode consecutive Stokes/correlation codes only.
+    if "polarization_coords" in image_params:
+        codes_by_label = {
+            "I": 1,
+            "Q": 2,
+            "U": 3,
+            "V": 4,
+            "RR": -1,
+            "LL": -2,
+            "RL": -3,
+            "LR": -4,
+            "XX": -5,
+            "YY": -6,
+            "XY": -7,
+            "YX": -8,
+        }
+        labels = image_params["polarization_coords"]
+        if (
+            not isinstance(labels, list | tuple | np.ndarray)
+            or np.ndim(labels) != 1
+            or not len(labels)
+        ):
+            raise ValueError("FITS polarization_coords must be a nonempty vector.")
+        if any(label not in codes_by_label for label in labels):
+            raise ValueError("FITS polarization_coords contains an unknown label.")
+        codes = [codes_by_label[label] for label in labels]
+        if codes != list(range(codes[0], codes[0] + len(codes))):
+            raise ValueError("FITS output requires consecutive polarization codes.")
+
+    # --- Spectral axis ---
+    # Do not substitute the first-to-last linear approximation for real centres.
+    # Use the writer's tolerance (one millionth of a channel) for round-off.
+    if "frequency_coords" in image_params:
+        frequencies = _require_finite_positive(
+            "FITS frequency_coords", image_params["frequency_coords"]
+        )
+        if frequencies.ndim != 1:
+            raise ValueError("FITS frequency_coords must be one-dimensional.")
+        if frequencies.size > 1:
+            increment = (frequencies[-1] - frequencies[0]) / (frequencies.size - 1)
+            if increment == 0:
+                raise ValueError("FITS frequency coordinates have zero overall span.")
+            linear = frequencies[0] + increment * np.arange(frequencies.size)
+            if np.max(np.abs(frequencies - linear)) > 1e-6 * abs(increment):
+                raise ValueError(
+                    "FITS output requires uniformly spaced frequency_coords; use Zarr to preserve the channel centres."
+                )
+
+    # --- Direction frame ---
+    # The writer/reader pair supports RA/DEC in these two reference frames.
+    if "direction_reference" in image_params:
+        frame = image_params["direction_reference"]
+        if not isinstance(frame, str) or frame.upper() not in ("FK5", "ICRS"):
+            raise ValueError("FITS direction_reference must be FK5 or ICRS.")
+
+
 def _pad_to_block(nbytes):
     """Round ``nbytes`` up to a whole number of 2880-byte FITS blocks."""
     return -(-nbytes // _FITS_BLOCK) * _FITS_BLOCK
@@ -112,10 +202,6 @@ def _stokes_axis(pol_labels):
     """
     from xradio.measurement_set._utils._utils.stokes_types import stokes_types
 
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
-    )
-
     check_fits_coordinates({"polarization_coords": pol_labels})
     label_to_code = {label: code for code, label in stokes_types.items()}
     return float(label_to_code[pol_labels[0]]), 1.0, 1.0
@@ -129,9 +215,6 @@ def _frequency_axis(freq_values):
     shared round-off tolerance. Nonuniform axes raise rather than replacing
     the frequencies with a first-to-last approximation.
     """
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
-    )
 
     check_fits_coordinates({"frequency_coords": freq_values})
     freq_values = np.asarray(freq_values, dtype=np.float64)
@@ -163,10 +246,6 @@ def _build_primary_header(
     """
     from astropy.io import fits
     from astropy.time import Time
-
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
-    )
 
     csys = img_xds.attrs["coordinate_system_info"]
     reference_direction = csys["reference_direction"]
@@ -292,39 +371,22 @@ def _build_beams_extension_bytes(n_chan, n_pol):
     )
 
 
-def _classify_kept_variables(image_data_variables_keep, double_precision):
+def _classify_kept_variables(image_data_variables_keep, data_variable_definitions):
     """Split the keep list into image variables and beam-fit-params variables.
 
-    Uses the imaging variable registry in :mod:`astroviper.utils.io` (the
-    single source of truth for names/dims/dtypes) and rejects variables with no
-    FITS representation (uv-domain / complex normalization variables).
+    ``data_variable_definitions`` maps each key to its ``"dims"``; a variable
+    with other dimensions (uv-domain or normalization variables) has no FITS
+    representation and raises ``ValueError``.
     """
-    from astroviper.utils.io import (
-        imaging_data_variables_and_dims_double_precision,
-        imaging_data_variables_and_dims_single_precision,
-    )
-
-    definitions = (
-        imaging_data_variables_and_dims_double_precision
-        if double_precision
-        else imaging_data_variables_and_dims_single_precision
-    )
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_kept_variables,
-    )
-
-    check_kept_variables(
-        {"image_data_variables_keep": image_data_variables_keep},
-        fits=True,
-        require_image=False,
-    )
     image_variables, beam_variables = [], []
     for key in image_data_variables_keep:
-        dims = tuple(definitions[key]["dims"])
+        dims = tuple(data_variable_definitions[key]["dims"])
         if dims == _FULL_DIMS_LM:
             image_variables.append(key)
         elif dims == _BEAM_PARAMS_DIMS:
             beam_variables.append(key)
+        else:
+            raise ValueError(f"{key!r} has no FITS representation (dims {dims}).")
     return image_variables, beam_variables
 
 
@@ -335,6 +397,8 @@ def create_empty_fits_images(
     double_precision=False,
     telescope_name="UNKNOWN",
     overwrite=False,
+    *,
+    data_variable_definitions,
 ):
     """Pre-create one XRADIO-conformant FITS file per kept image variable.
 
@@ -366,8 +430,7 @@ def create_empty_fits_images(
         time plane (FITS has 4 image axes).
     image_data_variables_keep : list of str
         Logical image-variable keys to create (e.g. ``"sky_residual"``); each
-        is upper-cased to the FITS file name. Variables with no FITS
-        representation (uv-domain / complex) raise ``ValueError``.
+        is upper-cased to the FITS file name.
     double_precision : bool, optional
         If ``True`` write 64-bit floats (``BITPIX`` -64), else 32-bit
         (``BITPIX`` -32). Default ``False``.
@@ -377,6 +440,9 @@ def create_empty_fits_images(
     overwrite : bool, optional
         Replace an existing ``image_store``. Default ``False`` (raise
         ``FileExistsError``).
+    data_variable_definitions : dict
+        ``{key: {"dims": [...], ...}}`` of the kept variables; a variable
+        without the image or beam-fit-params dimensions raises ``ValueError``.
 
     Returns
     -------
@@ -384,14 +450,7 @@ def create_empty_fits_images(
         ``{variable_key: fits_path}`` of the created files.
     """
     image_variables, beam_variables = _classify_kept_variables(
-        image_data_variables_keep, double_precision
-    )
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_kept_variables,
-    )
-
-    check_kept_variables(
-        {"image_data_variables_keep": image_data_variables_keep}, fits=True
+        image_data_variables_keep, data_variable_definitions
     )
 
     if os.path.exists(image_store):

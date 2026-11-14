@@ -392,6 +392,9 @@ def main(argv=None):
     import numpy as np
     import xradio
 
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
+    )
     from astroviper.utils.chunk_io import load_processing_set
     from astroviper.utils.measurement_set_v2_input import (
         load_processing_set_msv2,
@@ -458,6 +461,7 @@ def main(argv=None):
                 processing_set_data_group_name=arguments.data_group,
                 frequency_coords=task["task_coords"]["frequency"]["data"],
                 instrument_polarization_basis=arguments.basis,
+                map_frequencies=map_visibility_frequencies_to_image,
             )
 
         key = "zarr:" + os.path.basename(store.rstrip("/"))

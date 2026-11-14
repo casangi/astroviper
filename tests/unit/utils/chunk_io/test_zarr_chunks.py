@@ -23,6 +23,9 @@ import pytest
 import xarray as xr
 import zarr
 
+from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+    map_visibility_frequencies_to_image,
+)
 from astroviper.utils.chunk_io import (
     load_processing_set,
     read_array_region,
@@ -134,6 +137,7 @@ def test_load_processing_set_supports_descending_frequency_selection(tmp_path):
         _minimal_data_group(),
         "base",
         np.array([1.0e9, 2.0e9]),
+        map_frequencies=map_visibility_frequencies_to_image,
     )["ms0"]
 
     np.testing.assert_array_equal(loaded.frequency, [1.0e9, 2.0e9])
@@ -158,6 +162,7 @@ def test_load_processing_set_labels_each_child_in_a_multi_child_task(tmp_path):
         _minimal_data_group(),
         "base",
         np.array([1.0e9, 2.0e9, 3.0e9, 4.0e9]),
+        map_frequencies=map_visibility_frequencies_to_image,
     )
 
     np.testing.assert_array_equal(loaded["lower"].frequency, [1.0e9, 2.0e9])
@@ -182,6 +187,7 @@ def test_load_processing_set_maps_children_onto_the_nearest_task_frequency(tmp_p
         _minimal_data_group(),
         "base",
         task_frequencies,
+        map_frequencies=map_visibility_frequencies_to_image,
     )
 
     np.testing.assert_array_equal(loaded["eb0"].frequency, task_frequencies)
@@ -204,6 +210,7 @@ def test_load_processing_set_refuses_a_channel_far_from_every_task_frequency(
             _minimal_data_group(),
             "base",
             np.array([1.0e9, 2.0e9]),
+            map_frequencies=map_visibility_frequencies_to_image,
         )
 
 
@@ -410,16 +417,17 @@ def test_read_short_pread_is_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(time, "sleep", lambda s: None)
     real_pread = os.pread
     state = {"calls": 0, "truncated": 0}
+    lock = threading.Lock()
 
     def flaky_pread(fd, n, off):
-        state["calls"] += 1
         raw = real_pread(fd, n, off)
-        # Truncate the 2nd pread overall (the first inner-chunk read; call 1
-        # is the shard index) once; every retry pread after that is honest.
-        if state["calls"] == 2 and not state["truncated"]:
-            state["truncated"] = 1
-            return raw[:-1]
-        return raw
+        # Truncate one inner-chunk read (call 1 is the shard index) once;
+        # every pread after that is honest. Inner chunks are read concurrently.
+        with lock:
+            state["calls"] += 1
+            truncate = state["calls"] >= 2 and not state["truncated"]
+            state["truncated"] |= truncate
+        return raw[:-1] if truncate else raw
 
     monkeypatch.setattr(os, "pread", flaky_pread)
     got, _ = read_array_region(path, {"frequency": slice(0, 4)})
@@ -716,6 +724,7 @@ def test_load_processing_set_reconstruction(
         "linear",
         processing_function_threads=processing_function_threads,
         load_correlated_data=load_correlated_data,
+        map_frequencies=map_visibility_frequencies_to_image,
     )
     ms = ps[ms_name]
     if load_correlated_data:
@@ -790,6 +799,7 @@ def test_load_processing_set_selects_the_needed_correlations(
         "base",
         freq_values,
         load_correlated_data=load_correlated_data,
+        map_frequencies=map_visibility_frequencies_to_image,
     )[ms_name]
     assert list(everything.polarization.values) == ["XX", "XY", "YX", "YY"]
 
@@ -801,6 +811,7 @@ def test_load_processing_set_selects_the_needed_correlations(
         "base",
         freq_values,
         load_correlated_data=load_correlated_data,
+        map_frequencies=map_visibility_frequencies_to_image,
     )[ms_name]
     assert list(ms.polarization.values) == ["XX", "YY"]
     assert ("VISIBILITY" in everything) == load_correlated_data

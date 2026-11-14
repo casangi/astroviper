@@ -269,11 +269,11 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     # --- Output representation ---
     # Check known coordinates, variable roles and codecs before creating files.
     from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
         check_kept_variables,
         check_output_codec,
         check_output_layout,
     )
+    from astroviper.utils.chunk_io.fits_blocks import check_fits_coordinates
 
     image_params = require_mapping("image_params", config.get("image_params", {}))
     if mode.imaging_kind == "continuum" and "continuum_mode" in image_params:

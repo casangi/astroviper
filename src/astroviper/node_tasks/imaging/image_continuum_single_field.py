@@ -1440,6 +1440,9 @@ def residual_update_continuum_single_field(
         ps_xdt = input_data
 
     elif io_engine == "chunk":
+        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            map_visibility_frequencies_to_image,
+        )
         from astroviper.utils.chunk_io import load_processing_set
 
         ps_xdt = load_processing_set(
@@ -1451,6 +1454,7 @@ def residual_update_continuum_single_field(
             instrument_polarization_basis=instrument_polarization_basis,
             processing_function_threads=processing_function_threads,
             load_correlated_data=not omit_observed_visibility,
+            map_frequencies=map_visibility_frequencies_to_image,
         )
 
     else:
@@ -1974,6 +1978,9 @@ def grid_imaging_weight_density_continuum_node(
         ps_xdt = input_data
 
     elif io_engine == "chunk":
+        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            map_visibility_frequencies_to_image,
+        )
         from astroviper.utils.chunk_io import load_processing_set
 
         ps_xdt = load_processing_set(
@@ -1985,6 +1992,7 @@ def grid_imaging_weight_density_continuum_node(
             instrument_polarization_basis=(instrument_polarization_basis),
             processing_function_threads=(processing_function_threads),
             load_correlated_data=False,
+            map_frequencies=map_visibility_frequencies_to_image,
         )
 
     else:
@@ -2298,6 +2306,9 @@ def degrid_imaging_weights_continuum_node(
         ps_xdt = input_data
 
     elif io_engine == "chunk":
+        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            map_visibility_frequencies_to_image,
+        )
         from astroviper.utils.chunk_io import load_processing_set
 
         ps_xdt = load_processing_set(
@@ -2309,6 +2320,7 @@ def degrid_imaging_weights_continuum_node(
             instrument_polarization_basis=(instrument_polarization_basis),
             processing_function_threads=(processing_function_threads),
             load_correlated_data=False,
+            map_frequencies=map_visibility_frequencies_to_image,
         )
 
     else:

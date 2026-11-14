@@ -128,18 +128,14 @@ def test_unsupported_codec_rejected_only_for_direct_writer(monkeypatch):
 
 @pytest.mark.parametrize("coordinates", [[], "I", [["I", "Q"]]])
 def test_fits_requires_a_polarization_vector(coordinates):
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
-    )
+    from astroviper.utils.chunk_io.fits_blocks import check_fits_coordinates
 
     with pytest.raises(ValueError, match="polarization_coords"):
         check_fits_coordinates({"polarization_coords": coordinates})
 
 
 def test_fits_requires_a_frequency_vector():
-    from astroviper.processing_functions.imaging.config_check._output import (
-        check_fits_coordinates,
-    )
+    from astroviper.utils.chunk_io.fits_blocks import check_fits_coordinates
 
     with pytest.raises(ValueError, match="one-dimensional"):
         check_fits_coordinates({"frequency_coords": [[1e9, 1.1e9]]})

@@ -1248,6 +1248,10 @@ def image_cube_single_field(
     # it; timed into the same slot the Zarr path uses for its empty variables.
     if output_image_format == "fits":
         from astroviper.utils.chunk_io import create_empty_fits_images
+        from astroviper.utils.io import (
+            imaging_data_variables_and_dims_double_precision,
+            imaging_data_variables_and_dims_single_precision,
+        )
 
         start = time.time()
         first_ms = next(iter(ps_xdt.values()))
@@ -1262,6 +1266,11 @@ def image_cube_single_field(
             double_precision=not single_precision_image,
             telescope_name=telescope_name,
             overwrite=overwrite,
+            data_variable_definitions=(
+                imaging_data_variables_and_dims_single_precision
+                if single_precision_image
+                else imaging_data_variables_and_dims_double_precision
+            ),
         )
         timing_distributed_application["T_create_empty_data_variables"] += (
             time.time() - start
