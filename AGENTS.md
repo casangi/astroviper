@@ -133,8 +133,9 @@ the future.
 1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
    over data chunks via `graphviper...map`, reduces results
    (`graphviper...reduce`), then `generate_dask_workflow` + `dask.compute`. This
-   is the *only* layer that knows about Dask, chunking, and clusters. It also
-   creates the (empty) on-disk output structures that node tasks write into.
+   owns Dask execution, chunking, and clusters. The centralized imaging
+   validation module is the explicit exception described below. This layer
+   also creates the (empty) on-disk output structures that node tasks write into.
 2. **`node_tasks/`** — The functions that get delayed in `distributed_applications/`.
    They may load chunks of input data, write chunks of output data, and call
    `processing_functions`. The structures they write into are created by
@@ -161,6 +162,16 @@ the future.
    data groups) and `utils/io.py` (Zarr variable definitions + chunk writers).
    The io.py will eventually move to XRADIO.
 
+**Configuration-validation exception:**
+`processing_functions/imaging/config_check/` deliberately serves all layers.
+It may validate backend and MPI options, append-node arguments, task mappings,
+and channel-partition coverage, and import GraphVIPER helpers needed to apply
+the workflow's coordinate-selection rules. These checks stay centralized here
+even though they understand graph configuration and structure. This exception
+permits validation only: graph construction, scheduling, and execution remain
+in `distributed_applications/`; input/output data I/O remains outside the
+validation module. Other processing functions retain the normal layer rules.
+
 ### Public API surface
 Each layer/subdomain re-exports its entry points via `__init__.py`. The imaging
 entry point is exposed at all three layers as `image_cube_single_field`, the
@@ -177,11 +188,16 @@ A distributed application takes `report=None | "html" | "pdf" | "notebook"` and,
 once its output is written, makes a report through `utils.report.make_report`
 (a failing report is logged and never costs the run its results). Every report
 starts with the common processing section (`utils.report.add_processing_section`:
-timing, task stream, cluster resources); the application's results section lives
+performance measures, timing, task stream, task times, the resources of the cluster,
+of the worker slots and of the tasks); the application's results section lives
 next to it (`<application>_report.py`), built with `utils.report.Report` and the
 pyplot-free figures of `utils/report_plots.py`. For the task stream and the
 resource monitor, a node task records `start_unixtime` and its execution identity
 (`hostname`, `process_pid`, `thread_native_id`, `worker_name`) and returns a dict.
+Right before its first compute the application records what its graphs run on
+(`utils.data_partitioning.get_compute_resources`, the driver step
+`T_get_compute_resources`) under `return_dict["compute_resources"]`, which the
+performance measures and the plots of `utils/resource_plots.py` read.
 
 ### The `simulation` subdomain (port of SIRIUS)
 `simulate_processing_set` is a **pure generator**: there is no input processing
@@ -271,12 +287,12 @@ path is untouched. A sample with any loaded correlation flagged is dropped for
 all of them (no pseudo Stokes I), which gives every plane the same uv coverage
 and hence the same PSF.
 
-**Measurement Set v2 input (skunk works).** `image_cube_single_field` also
-images a Measurement Set v2 directly when `skunk_works=True`
+**Measurement Set v2 input.** `image_cube_single_field` also
+images a Measurement Set v2 directly, with either I/O engine
 (`utils/measurement_set_v2.py::is_measurement_set_v2` detects it; guards in
-the driver refuse `skunk_works=False`, a missing engine, the write-back flags,
+the driver refuse a missing engine, the write-back flags,
 an empty `scan_intents` selection and an MSv4 without the data group (or one
-of its four roles; `check_data_group_skunk_works_msv2`) before anything is
+of its four roles; `check_data_group_msv2`) before anything is
 written). AstroVIPER has no MSv2 reader of its own: the driver opens the MS
 lazily with XRADIO's `xradio_msv2` engine (`open_msv2`,
 `array_backend="xarray"`, `partition_cache="read"` unless
@@ -286,8 +302,8 @@ mapping exactly as for a Zarr processing set, and `add_lazy_input_data`
 gives every task, under the mapping key `lazy_input_data`, the lazily indexed
 data-group variables of its selection (baseline names as integer codes into a
 name table, to keep the graph payload small). The node task reads them with
-`load_processing_set_skunk_works_msv2`
-(`node_tasks/imaging/utils/skunk_works_msv2.py`); an `MSv2ChangedError` aborts
+`load_processing_set_msv2`
+(`utils/measurement_set_v2_input.py`); an `MSv2ChangedError` aborts
 the run instead of skipping the chunk. Every value comes from the engine, so
 the images equal those of the MS converted with
 `convert_msv2_to_processing_set` (same `partition_scheme`). python-casacore
@@ -630,11 +646,39 @@ per-variable nodes.
   validates** (not in a central `config/` directory), and the decorator points
   the validator at the module's own directory, e.g.
   `validate(config_dir=os.path.dirname(os.path.abspath(__file__)))`. The schema
-  key is the function name. Validate **once, at the graph layer** — node tasks
-  and processing functions trust the already-checked `input_params`. For
-  internal/leaf-level checks reuse
-  `astroviper.utils.check_params.check_params` (type/range/allowed-value checks
-  with defaults) rather than ad-hoc validation.
+  key is the function name. JSON schemas check basic structure, types, and
+  allowed strings; numerical bounds and conditional relationships belong in
+  Python.
+  - **Validate at every callable layer:** distributed applications, node tasks,
+    and processing functions validate direct calls by default. Imaging entry
+    points use keyword-only `input_checked=False`. Import and call the applicable
+    configuration validators inside `if not input_checked`.
+  - **Skip repeated configuration validation:** after successful validation, an
+    upper layer passes `input_checked=True` down the stack; graph nodes also
+    carry it through `input_params`. This applies to distributed entry points
+    called from another validated workflow as well. Reuse the flag only for
+    unchanged configuration in the same imaging mode. Newly derived or changed
+    settings require their applicable checks before being marked checked.
+  - **Keep validation centralized and non-mutating:** imaging configuration
+    rules live in `processing_functions/imaging/config_check/`. The independent
+    residual-update, model-update, and driver-workflow validators share utility
+    predicates; they do not call one another. `check_config` orchestrates all
+    three. Drivers require complete configuration before I/O, output creation,
+    or graph construction; lower entry points check the settings they receive.
+    Raise on malformed configuration without inserting defaults, coercing
+    values, or substituting another configuration. Documented optional defaults
+    must not modify the caller's mapping. Do not add duplicate inline rules or
+    use the legacy default-inserting `check_params` helper for these checks.
+  - **Keep runtime validation active:** `input_checked` skips configuration
+    checks only. Checks on newly loaded data, derived products, numerical
+    results, and native array contracts remain active in their owning modules.
+    Metadata preflight must stay cheap: inspect coordinates, attributes, shapes,
+    and dtypes without reading bulk sample arrays or doing imaging work.
+  - **Design for all imaging modes:** each imaging validator distinguishes cube
+    and continuum, and single-field and multifield layouts. Multifield execution
+    is currently unsupported, but its rules belong in the same validation
+    architecture. Keep checks in clear logical blocks, with a description of
+    each check and motivation for numerical acceptance criteria.
 
 ---
 

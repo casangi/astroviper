@@ -144,7 +144,7 @@ def node_task_inputs(tmp_path_factory):
                 n_mapping_parallelism={"frequency": 1},
                 fft_backend="scipy",
                 restore=True,
-                primary_beam_correction=True,
+                restoration_output="both",
                 overwrite=True,
             )
     assert len(captured) == 1, f"{len(captured)} node tasks, expected one"

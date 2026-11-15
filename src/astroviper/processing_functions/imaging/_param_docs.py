@@ -23,7 +23,16 @@ _IMAGE_PARAMS_DOC = (
     "``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is\n"
     '``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image\n'
     'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
-    "correlations (see ``instrument_polarization_basis``)."
+    "correlations (see ``instrument_polarization_basis``). The labels must be a\n"
+    "nonempty one-dimensional vector. An xarray DataArray must have exactly\n"
+    "the dimension ``polarization``; other dimension names are rejected.\n"
+    "``time_coords`` accepts XRADIO image-factory time formats: numeric MJD\n"
+    "(UTC) days, numeric strings, ISO time strings, datetime64 values, Python\n"
+    "datetime objects, or Astropy Time, as scalars or one-dimensional sequences.\n"
+    "Times must be finite and nonempty; validation preserves the supplied values.\n"
+    "Distributed single-field imagers require exactly one image time plane and\n"
+    "an explicit ``fft_padding``. Designed kernels, including the default,\n"
+    "require padding at least 1.05; CASA's fixed kernel permits 1.0."
 )
 
 _CONTINUUM_IMAGE_PARAMS_DOC = (
@@ -103,25 +112,31 @@ _PRIMARY_BEAM_FLOAT_DTYPE_DOC = (
     "Floating-point precision for the primary beam. Defaults to\n``numpy.float64``."
 )
 
+_AUTO_MASK_DATA_GROUP_IN_DOC = 'Data group of the residual. Default ``"residual"``.'
+_AUTO_MASK_DATA_GROUP_OUT_DOC = 'Data group that gets the mask. Default ``"residual"``.'
+
 _CONTINUUM_DECONVOLVER_DOC = (
     'Deconvolution algorithm for the model update. ``"hogbom"`` (C++,\n'
-    'threaded across planes) cleans Taylor term zero only. ``"asp"``\n'
+    'threaded across planes) requires one Taylor term. Use ``"mtmfs"``\n'
+    'for two to four terms. ``"asp"``\n'
     "(C++, adaptive scale pixel) cleans Taylor term zero only and needs\n"
     '``image_params["n_taylor_terms"] = 1``. In MVC its significance test\n'
-    "(``asp_scale_significance``) needs a ``clean_mask`` that leaves more\n"
-    "pixels of the primary-beam support outside it than the image has\n"
-    "outside that support: Asp takes the noise from the median absolute\n"
-    "deviation of the pixels outside its mask, and MVC sets the residual to\n"
-    "0 outside the support. Without a clean mask that noise is 0, or after\n"
-    "the residual-shaped components that of their sidelobes there (a warning\n"
-    'is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
+    "(``asp_scale_significance``) needs a ``clean_mask`` or an automatic mask\n"
+    "that leaves more pixels of the primary-beam support outside it than the\n"
+    "image has outside that support: Asp takes the noise from the median\n"
+    "absolute deviation of the pixels outside its mask, and MVC sets the\n"
+    "residual to 0 outside the support. Without either that noise is 0, or\n"
+    "after the residual-shaped components that of their sidelobes there (a\n"
+    'warning is logged). ``"mtmfs"`` (C++, multi-term multi-frequency\n'
     "synthesis) cleans the Taylor terms together and needs\n"
     '``image_params["n_taylor_terms"]`` from 2 to 4. Other values are\n'
-    "refused before anything is written."
+    "refused before anything is written, without substituting another algorithm\n"
+    "or Taylor order."
 )
 
 _CONTINUUM_MODE_DOC = (
-    'Continuum construction mode. ``"mfs"`` grids Taylor-weighted\n'
+    "Top-level workflow selection; do not place it inside ``image_params``.\n"
+    '``"mfs"`` grids Taylor-weighted\n'
     "visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe\n"
     "the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains\n"
     "both the intrinsic source spectral index and the primary-beam spectral\n"
@@ -138,7 +153,410 @@ _CONTINUUM_MODE_DOC = (
     'parallel hands only; ``["I", "Q", "U", "V"]`` is refused.'
 )
 
+_FIELD_NAME_DOC = (
+    "Reserved field-selection argument, retained for future support. It does\n"
+    "not currently filter fields; prepare a single-field input Processing Set."
+)
+
+# The parameters of find_continuum.
+_FIND_CONTINUUM_PARAM_DOCS = {
+    "input_image_store": "xradio image store of the dirty cube (Stokes I is used).",
+    "atmospheric_transmission": (
+        "Atmospheric transmission at every channel of ``channel_range`` (0 to\n"
+        "1), as CASA's atmosphere model gives it for the observation."
+    ),
+    "atmospheric_sky_temperature": (
+        "Sky brightness temperature at every channel of ``channel_range`` (K)."
+    ),
+    "work_directory": (
+        "Directory for findContinuum's plots, spectra and intermediate images.\n"
+        "It must not hold the products of an earlier run on a cube of the same\n"
+        "name: findContinuum would reuse them, as in the pipeline."
+    ),
+    "image_data_group_in_name": (
+        "Image data group with the roles ``sky``, ``primary_beam`` and\n"
+        "``beam_fit_params_point_spread_function`` (findContinuum reads the\n"
+        "point spread function through its beams only)."
+    ),
+    "telescope_name": "Telescope, as findContinuum reads it from a CASA image header.",
+    "single_continuum": (
+        "The spectral window is a single-continuum setup [findContinuum\n"
+        "``singleContinuum``]."
+    ),
+    "n_bin": "Channels to average in the mean spectrum [findContinuum ``nbin``].",
+    "spectral_dynamic_range_bandwidth": (
+        "The requested spectral dynamic range bandwidth (Hz) [findContinuum\n"
+        "``spectralDynamicRangeBandWidth``]."
+    ),
+    "primary_beam_limit": (
+        "Pixels where the primary beam is below this level are masked in the\n"
+        "dirty cube and the primary beam, as in the cube ``hif_findcont`` makes\n"
+        "with ``tclean(pblimit=0.2)``; ``None`` reads the cubes as they are."
+    ),
+    "n_mapping_parallelism": (
+        '``{"frequency": n}``, the number of frequency chunks of every\n'
+        "map-reduce; one chunk if not given."
+    ),
+    "channel_range": (
+        "``[start, stop)``, the channels of the cube that findContinuum sees as\n"
+        "its cube: one spectral window, on which the frequencies are linear (a\n"
+        "run of\n"
+        ":func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`);\n"
+        "in a cube of several windows its middle channel is the rest frequency\n"
+        "(:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`).\n"
+        "``None`` (default): every channel, refused for a cube of several\n"
+        "spectral windows."
+    ),
+    "monitor_resources_seconds": (
+        "If set, sample each node task's worker-process CPU, memory and I/O\n"
+        "every this many seconds (graphviper's resource monitor) and carry the\n"
+        "series into ``timing_node_tasks`` as list-valued columns, as\n"
+        "``image_cube_single_field`` does; the driver is sampled while\n"
+        "findContinuum runs. Requires ``psutil``."
+    ),
+    "report": (
+        'Make a report of the run: ``"html"`` or ``"pdf"``, written in\n'
+        "``work_directory`` as ``<name>_report.html`` or ``.pdf``, or\n"
+        '``"notebook"``, displayed in the calling notebook. It has the\n'
+        "processing section of every distributed application (timing, task\n"
+        "stream and, with ``monitor_resources_seconds``, CPU, memory and I/O)\n"
+        "and the results of findContinuum. A failure while making it is logged\n"
+        "and leaves the results intact. ``None`` (default): no report."
+    ),
+    "input_checked": (
+        "Skip the configuration checks already done by the calling layer. The\n"
+        "checks of the opened image and of the work directory always run."
+    ),
+}
+
+# The parameters of find_continuum_ultra and of the functions of its stack
+# that share them.
+_FIND_CONTINUUM_ULTRA_TASKS = (
+    "find_continuum_first_round_task",
+    "find_continuum_spectrum_task",
+    "find_continuum_selection_moments_task",
+)
+_FIND_CONTINUUM_ULTRA_PASSES = (
+    "run_first_round_pass",
+    "run_spectrum_pass",
+    "run_selection_moments_pass",
+)
+_FIND_CONTINUUM_SETTINGS_PARAM_DOCS = {
+    "n_bin": (
+        "Channels to average in the mean spectrum, as the caller resolved\n"
+        "them [findContinuum ``nbin``]."
+    ),
+    "spectral_dynamic_range_bandwidth": (
+        "The requested spectral dynamic range bandwidth (Hz) [findContinuum\n"
+        "``spectralDynamicRangeBandWidth``]; ``None``: none."
+    ),
+    "atmospheric_transmission": (
+        "Atmospheric transmission (0 to 1) at every channel of the spectral\nwindow."
+    ),
+    "atmospheric_sky_temperature": (
+        "Sky brightness temperature (K) at every channel of the spectral\nwindow."
+    ),
+    "single_continuum": (
+        "The spectral window is a single-continuum setup [findContinuum\n"
+        "``singleContinuum``]."
+    ),
+}
+_FIND_CONTINUUM_ULTRA_PARAM_DOCS = {
+    **{
+        f"find_continuum_ultra.{name}": description
+        for name, description in {
+            "input_image_store": (
+                "Path of the xradio image store (Zarr) of the dirty cube, its primary\n"
+                "beam and the beam fits of its point spread function; Stokes I is\n"
+                "used."
+            ),
+            "atmospheric_transmission": (
+                "Atmospheric transmission (0 to 1) at every channel of the spectral\n"
+                "window, as an atmosphere model gives it for the observation."
+            ),
+            "atmospheric_sky_temperature": (
+                "Sky brightness temperature (K) at every channel of the spectral\n"
+                "window."
+            ),
+            "work_directory": (
+                "Directory in which the run makes its directory\n"
+                "``<cube>.find_continuum_ultra_<start>_<stop>``, ``<cube>`` the name of\n"
+                "the image store without ``.img.zarr`` or ``.zarr`` (refused if it\n"
+                "exists: the products of an earlier run), with the stores of the\n"
+                "passes while they run, the first-round store when none is given and\n"
+                "the joint-mask store; the report is written next to it."
+            ),
+            "image_data_group_in_name": (
+                "Image data group with the roles ``sky``, ``primary_beam`` and\n"
+                "``beam_fit_params_point_spread_function``."
+            ),
+            "channel_range": (
+                "``[start, stop)``, the channels of the cube in the spectral window: a\n"
+                "run of linear frequencies\n"
+                "(:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.linear_channel_ranges`),\n"
+                "increasing, of at least 8 channels; in a cube of several windows its\n"
+                "middle channel is the rest frequency of moment 0\n"
+                "(:func:`~astroviper.processing_functions.imaging.utils.spectral_windows.window_rest_frequency`).\n"
+                "``None`` (default): every channel, refused for a cube of several\n"
+                "spectral windows."
+            ),
+            "telescope_name": (
+                '``"ALMA"`` or ``"VLA"``, whose time-division-mode rule sets the number\n'
+                "of rounds; every other step takes ALMA's rule, as findContinuum does."
+            ),
+            "single_continuum": _FIND_CONTINUUM_SETTINGS_PARAM_DOCS["single_continuum"],
+            "n_bin": (
+                "Channels to average in the mean spectrum, as the caller resolved them\n"
+                "[findContinuum ``nbin``]."
+            ),
+            "spectral_dynamic_range_bandwidth": (
+                "The requested spectral dynamic range bandwidth (Hz), which sets\n"
+                "``n_bin`` when given [findContinuum ``spectralDynamicRangeBandWidth``];\n"
+                "``None``: none."
+            ),
+            "primary_beam_limit": (
+                "Primary-beam level in (0, 1) below which a voxel of the dirty cube and\n"
+                "of the primary beam is invalid, as in the cube ``hif_findcont`` makes\n"
+                "[tclean ``pblimit``]."
+            ),
+            "first_round_store": (
+                "Path of the imager's first-round store of the cube\n"
+                "(:func:`~astroviper.distributed_applications.imaging.image_cube_single_field.image_cube_single_field`\n"
+                "with ``find_continuum_first_round``), made with the same primary-beam\n"
+                "limit and data variables. Its masks and per-channel rows, and its\n"
+                "moments when they are complete for the spectral window, replace the\n"
+                "first pass; a store that does not fit the window is refused\n"
+                "(:func:`~astroviper.distributed_applications.imaging.find_continuum_first_round.validate_find_continuum_first_round`).\n"
+                "``None`` (default): the first pass makes the first round, in a store\n"
+                "of the run's directory."
+            ),
+            "n_mapping_parallelism": (
+                '``{"frequency": n}``, the frequency chunks of every pass; ``None``\n'
+                "(default): ``ceil(n_channels / k)`` chunks of the window, ``k`` the\n"
+                "channels of a whole number of shards that gives about\n"
+                "``FREQUENCY_TASKS_PER_THREAD`` chunks per thread. GraphVIPER makes the\n"
+                "chunks of equal length, so they are whole shards only when the window\n"
+                "starts on a shard and ``k`` divides its channels."
+            ),
+            "thread_info": (
+                "``n_threads`` and ``memory_per_thread`` (GiB) of the cluster, which\n"
+                "set the frequency chunks and the memory budget of a task. ``None``\n"
+                "(default): those of\n"
+                ":func:`~astroviper.utils.data_partitioning.get_thread_info`, refused\n"
+                "when the cluster reports no thread or no memory limit."
+            ),
+            "memory_budget_gb": (
+                "Memory budget of a frequency task (GiB). The default, and the largest\n"
+                "value used, is 0.8 of ``memory_per_thread`` less the task baseline\n"
+                "(``min(1.5, 0.2 x memory_per_thread)``). A pass whose tasks would\n"
+                "exceed it reads fewer planes at a time; a task over it at one plane\n"
+                "per batch runs so with a warning, and a pass whose task needs more\n"
+                "than ``memory_per_thread`` is refused."
+            ),
+            "monitor_resources_seconds": (
+                "If set, sample the CPU, memory and I/O of each node task's worker\n"
+                "process every this many seconds (GraphVIPER's resource monitor) into\n"
+                "``timing_node_tasks``, and the driver's process while it works into\n"
+                "``driver_resource_usage``. Requires ``psutil``."
+            ),
+            "report": (
+                'Make a report of the run: ``"html"`` or ``"pdf"``, written next to the\n'
+                "run's directory as ``<run directory>_report.html`` or ``.pdf``, or\n"
+                '``"notebook"``, displayed in the calling notebook. It has the\n'
+                "processing section of every distributed application and the results:\n"
+                "the ranges, flags, the spectrum of the last computed round with its\n"
+                "selection, the rounds and the passes. A failure while making it is\n"
+                "logged and leaves the results intact. ``None`` (default): no report."
+            ),
+            "input_checked": (
+                "Skip the configuration checks already done by the calling layer. The\n"
+                "checks of the opened window, of the first-round store and of the\n"
+                "run's directory, and the runtime checks, always run."
+            ),
+        }.items()
+    },
+    # The node tasks.
+    **{
+        f"{task}.{name}": description
+        for task in _FIND_CONTINUUM_ULTRA_TASKS
+        for name, description in {
+            "input_image_store": (
+                "Path of the xradio image store (Zarr) of the residual and its primary\n"
+                "beam."
+            ),
+            "variables": (
+                '``{"sky": ..., "primary_beam": ...}``, the data variables of the\n'
+                "residual and of its primary beam."
+            ),
+            "polarization_index": "Index of Stokes I along ``polarization``.",
+            "channel_range": (
+                "``[start, stop)``, the channels of the cube in the spectral window."
+            ),
+            "planes_per_batch": "Planes a read spans at most.",
+            "data_selection": (
+                '``{"img": {"frequency": slice}}``, the chunk of this task in channels\n'
+                "of the cube; the whole window if not given."
+            ),
+        }.items()
+    },
+    "find_continuum_first_round_task.first_round_store": (
+        "Path of the first-round store whose primary-beam masks are read, or\n"
+        "written with ``compute_masks``."
+    ),
+    **{
+        f"{task}.first_round_store": (
+            "Path of the first-round store whose primary-beam masks are read."
+        )
+        for task in _FIND_CONTINUUM_ULTRA_TASKS[1:]
+    },
+    "find_continuum_first_round_task.chunk_indices": (
+        "Graph chunk index; ``chunk_indices[0]`` is the slot of the moment\n"
+        "partials (needed with them)."
+    ),
+    "find_continuum_spectrum_task.chunk_indices": (
+        "Graph chunk index (recorded as the task's slot)."
+    ),
+    "find_continuum_selection_moments_task.chunk_indices": (
+        "Graph chunk index; ``chunk_indices[0]`` is the slot of the moment\n"
+        "partials (needed)."
+    ),
+    **{
+        f"{task}.moment_channel_weights": (
+            "float64 moment-0 weight (km/s) of every channel of the window, the\n"
+            "weight of cube channel ``c`` at ``c - start``."
+        )
+        for task in _FIND_CONTINUUM_ULTRA_TASKS[::2]
+    },
+    "find_continuum_first_round_task.partials_store": (
+        "Path of the pass's partials store (needed with ``compute_moments``)."
+    ),
+    **{
+        f"{task}.partials_store": "Path of the pass's partials store."
+        for task in (
+            "find_continuum_selection_moments_task",
+            "merge_find_continuum_moment_partials",
+        )
+    },
+    "merge_find_continuum_moment_partials.data_selection": (
+        '``{"img": {"l": slice, "m": slice}}``, the tile of this task; the\n'
+        "whole map if not given."
+    ),
+    "find_continuum_spectrum_task.regions_store": (
+        "Path of the pass's regions store (:func:`write_region_masks`) with\n"
+        "``MEAN_REGION`` and, with ``scaled_mad``, ``SCALED_MAD_REGION``."
+    ),
+    "find_continuum_selection_moments_task.regions_store": (
+        "Path of the pass's regions store (:func:`write_region_masks`) with\n"
+        "``NOISE_REGION`` (needed with ``noise``)."
+    ),
+    # The passes.
+    **{
+        f"{function}.{name}": description
+        for function in _FIND_CONTINUUM_ULTRA_PASSES
+        for name, description in {
+            "window_xds": "The spectral window, opened lazily.",
+            "layout": (
+                "Layout of the window (:func:`plan_find_continuum_ultra_layout`)."
+            ),
+            "pass_directory": (
+                "New directory of the pass's stores, removed when the pass ends or\n"
+                "fails."
+            ),
+            "round_index": "Round of findContinuum the pass belongs to, recorded.",
+            "monitor_resources_seconds": (
+                "Sampling interval (s) of GraphVIPER's resource monitor in the tasks;\n"
+                "``None``: no monitor."
+            ),
+            "pass_index": "Index of the pass in the run, recorded.",
+        }.items()
+    },
+    "run_first_round_pass.first_round_store": (
+        "Path of the window's first-round store, whose attributes give the\n"
+        "primary-beam limit: with ``compute_masks`` an empty one of the window\n"
+        "and of the tile shapes of ``layout``\n"
+        "(:func:`~astroviper.distributed_applications.imaging.find_continuum_first_round.create_find_continuum_first_round_store`),\n"
+        "otherwise a complete one."
+    ),
+    "run_spectrum_pass.first_round_store": (
+        "Path of the window's complete first-round store, whose primary-beam\n"
+        "masks the tasks read."
+    ),
+    "run_selection_moments_pass.first_round_store": (
+        "Path of the window's complete first-round store, whose limit masks\n"
+        "the tasks read."
+    ),
+    **{
+        f"{function}.settings": (
+            "Settings of the window; its ``moment_channel_weights`` are read."
+        )
+        for function in _FIND_CONTINUUM_ULTRA_PASSES[::2]
+    },
+    **{
+        f"{function}.round_kind": "Kind of that round, recorded."
+        for function in _FIND_CONTINUUM_ULTRA_PASSES[1:]
+    },
+    # The settings of findContinuum.
+    "is_time_division_mode.telescope_name": (
+        "Telescope whose rule applies: the VLA's for a name containing\n"
+        '``"VLA"``, ALMA\'s otherwise.'
+    ),
+    "find_continuum_settings.telescope_name": (
+        'Telescope, ``"ALMA"`` or ``"VLA"``, whose time-division-mode rule sets\n'
+        "the number of rounds; every other step takes ALMA's rule, as\n"
+        "findContinuum does."
+    ),
+    **{
+        f"{function}.{name}": _FIND_CONTINUUM_SETTINGS_PARAM_DOCS[name]
+        for function, names in (
+            ("continuum_n_bin", ("n_bin", "spectral_dynamic_range_bandwidth")),
+            (
+                "atmosphere_variation",
+                ("atmospheric_transmission", "atmospheric_sky_temperature"),
+            ),
+            ("initial_moment_difference_level", ("single_continuum",)),
+            ("find_continuum_settings", tuple(_FIND_CONTINUUM_SETTINGS_PARAM_DOCS)),
+        )
+        for name in names
+    },
+    "primary_beam_masks.primary_beam_limit": (
+        "Primary-beam level below which a voxel of the residual and of the\n"
+        "primary beam is invalid [tclean ``pblimit``]."
+    ),
+}
+
 IMAGING_PARAM_DOCS = {
+    "make_primary_beam_taylor": (
+        "Collect the first-cycle inputs needed for primary-beam Taylor products.\n"
+        "Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,\n"
+        "fit the globally reduced beam in the first append node, and keep the\n"
+        "fitted diagnostic outside the iterative image and static cache."
+    ),
+    "lookup_frequency_max": (
+        "Upper frequency in Hz used to build the physical Airy interpolation\n"
+        "table. Supply the maximum frequency of the complete task when evaluating\n"
+        "its channels separately, preserving the same beam samples as a batched\n"
+        "evaluation. None uses the maximum of freq_chan. The CASA Airy model\n"
+        "uses its own per-channel tables and does not need this bound."
+    ),
+    "hessian_cache": (
+        "Workflow-owned mutable cache for content-verified PSF/Hessian diagnostics.\n"
+        "Reuse requires matching PSF contents, coordinates, precision, Taylor basis,\n"
+        "geometry, scales, scale bias, and cell sampling. Changing-product checks\n"
+        "always run. None disables reuse; input_checked does not control this cache."
+    ),
+    "image_cube_single_field.field_name": _FIELD_NAME_DOC,
+    "image_continuum_single_field.field_name": _FIELD_NAME_DOC,
+    "point_spread_function_cube_single_field.field_name": _FIELD_NAME_DOC,
+    "feather.selection": """``xarray`` ``isel`` selection applied to both input images (e.g. a
+frequency channel range or an ``l``/``m`` sub-window). Chunking is determined
+from the selected images.""",
+    "feather.fft_backend": """FFT backend used by the feather combination (``"scipy"`` or ``"pyfftw"``).""",
+    "require_complete": """Require all coordinates and cycle controls needed by a distributed driver.
+Lower-level entry points check only the configuration they receive.""",
+    "input_checked": """Skip configuration checks already performed by the calling layer.
+Runtime checks on newly created data always remain active. For graph nodes
+using an input_params dictionary, its input_checked entry also carries this
+flag. Set it only for an unchanged configuration in the same imaging mode.""",
     "image_params": _IMAGE_PARAMS_DOC,
     "make_primary_beam_single_field.image_params": _PRIMARY_BEAM_IMAGE_PARAMS_DOC,
     "make_continuum_primary_beam_single_field.image_params": (
@@ -147,6 +565,14 @@ IMAGING_PARAM_DOCS = {
     "resolve_continuum_primary_beam.image_params": (
         _CONTINUUM_PRIMARY_BEAM_RESOLUTION_PARAMS_DOC
     ),
+    "make_auto_mask.auto_mask_params": (
+        "Keys of :data:`AUTO_MASK_DEFAULTS`; those left out take these defaults."
+    ),
+    "make_auto_mask_continuum.auto_mask_params": "The automatic mask parameters.",
+    "make_auto_mask.image_data_group_in_name": _AUTO_MASK_DATA_GROUP_IN_DOC,
+    "make_auto_mask_continuum.image_data_group_in_name": _AUTO_MASK_DATA_GROUP_IN_DOC,
+    "make_auto_mask.image_data_group_out_name": _AUTO_MASK_DATA_GROUP_OUT_DOC,
+    "make_auto_mask_continuum.image_data_group_out_name": _AUTO_MASK_DATA_GROUP_OUT_DOC,
     "make_primary_beam_single_field.img_xds": _PRIMARY_BEAM_IMAGE_DATASET_DOC,
     "make_continuum_primary_beam_single_field.img_xds": (
         _PRIMARY_BEAM_IMAGE_DATASET_DOC
@@ -212,8 +638,9 @@ IMAGING_PARAM_DOCS = {
     "residual_cycle_continuum_single_field.image_params": (_CONTINUUM_IMAGE_PARAMS_DOC),
     "imaging_weights_params": (
         'Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,\n'
-        '``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs\n'
-        'trade-off. ``weighting_scope`` is ``"local"`` for a density per\n'
+        '``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an\n'
+        "explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.\n"
+        '``weighting_scope`` is ``"local"`` for a density per\n'
         'frequency channel or ``"global"`` for one density across all selected\n'
         "channels in distributed continuum imaging. Natural weighting is\n"
         "independent of this scope."
@@ -296,7 +723,9 @@ IMAGING_PARAM_DOCS = {
         '``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square\n'
         "of the voltage pattern the simulator applies for the model, computed by\n"
         "the same function\n"
-        "(:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).\n"
+        "(:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);\n"
+        'an Airy disk (``func="airy"``) the imager interpolates from a radial\n'
+        "table, within 1e-9 of it.\n"
         "The CASA variants, to compare with the ``.pb`` of ``tclean``, are such\n"
         'models: ``airy_disk_model(telescope, func="casa_airy")`` and\n'
         '``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.\n'
@@ -557,6 +986,7 @@ IMAGING_PARAM_DOCS = {
         'few planes, e.g. single-channel imaging) or ``"asp"``.'
     ),
     "image_continuum_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
+    "check_continuum_model_products.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
     "residual_update_continuum_single_field.deconvolver": (_CONTINUUM_DECONVOLVER_DOC),
     "model_update_mtmfs_single_field.deconvolver": _CONTINUUM_DECONVOLVER_DOC,
     "instrument_polarization_basis": (
@@ -624,6 +1054,14 @@ IMAGING_PARAM_DOCS = {
         "moments while approximating the channel PSFs by a common response. The\n"
         "setting is ignored by MFS."
     ),
+    "io_engine": (
+        'I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk\n'
+        "blobs (and FITS data blocks) directly by byte offset\n"
+        '(:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO\'s\n'
+        "loaders and xarray and writes with zarr-python. A Measurement Set v2\n"
+        "and CASA or FITS images are read through XRADIO by both. Default\n"
+        '``"chunk"``.'
+    ),
     "processing_function_threads": (
         "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."
     ),
@@ -632,18 +1070,55 @@ IMAGING_PARAM_DOCS = {
     ),
     "image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
-        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).'
+        '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
+        "The distributed cube writer does not publish UV grids; standalone\n"
+        "processing functions may retain their working grids in memory."
     ),
-    "primary_beam_correction": (
-        "If ``True`` write the primary beam corrected restored sky to the\n"
-        "``sky_restored_primary_beam_corrected``\n"
-        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable. Cube imaging and\n"
-        "MVC divide the model and residual by their channel or common (power)\n"
-        "primary beam before restoration. MFS instead divides the apparent\n"
-        "Taylor polynomials by the fitted primary-beam Taylor polynomial.\n"
-        "Pixels below the zeroth-order primary-\n"
-        "beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires\n"
-        "``restore``."
+    "restore_continuum_image.continuum_mode": (
+        "Continuum construction convention. When omitted, infer it from the\n"
+        "residual or image metadata. An explicit value must agree with any\n"
+        "stored metadata. MFS corrects the Taylor polynomial as a whole; MVC\n"
+        "divides each coefficient by its already-constructed common primary\n"
+        "beam."
+    ),
+    "restore_continuum_image.deconvolver": (
+        "Deconvolver that produced the model. MT-MFS restoration applies the\n"
+        "Taylor Hessian's principal solution to a private copy of every residual\n"
+        "Taylor term before restoration. The stored residual remains unchanged."
+    ),
+    "restoration_output": (
+        'Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,\n'
+        'or ``"both"``. Cube outputs are ``SKY_RESTORED`` and\n'
+        "``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are\n"
+        "``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.\n"
+        "Cube corrects the model and residual by the channel power primary beam\n"
+        "before convolution. MFS divides their Taylor polynomials; MVC divides\n"
+        "by its common power primary beam. Corrected pixels below\n"
+        "``primary_beam_limit`` are blanked with NaN. Imaging workflows use this\n"
+        "selector only when ``restore=True``."
+    ),
+    "restoring_beam": (
+        "``None`` restores each plane with its own PSF fit [CASA ``tclean``\n"
+        "``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle\n"
+        "in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,\n"
+        "``|pa| <= pi``) restores every plane to that beam as ``tclean`` does\n"
+        "since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak\n"
+        "target beam, and the residual with the Gaussian that takes the plane's\n"
+        "PSF beam to the target, times the ratio of the beam areas, so it is in\n"
+        "Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF\n"
+        "beam the target does not contain, or that has no PSF fit, keeps its\n"
+        "residual unconvolved and unscaled, as ``tclean`` does, and is named in a\n"
+        "warning. The continuum imager refuses a target that does not contain its\n"
+        "PSF beam, and any target when its PSF fit failed, right after that fit\n"
+        "in its first imaging cycle: the residual update has run, but no model\n"
+        "update. With primary-beam correction a restore cutoff below 1e-3 is\n"
+        "refused (``primary_beam_limit``; in cube imaging that of\n"
+        "``cycle_control_params``, where 0 restores at 0.2): in the transform to\n"
+        "the target, the float32 rounding of the residual divided by the primary\n"
+        "beam, large near its nulls, would spread over the corrected image. The\n"
+        "beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For\n"
+        "``tclean``'s ``restoringbeam='common'``, see\n"
+        ":func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`."
     ),
     "psf_fitting_method": (
         'Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or\n'
@@ -658,20 +1133,23 @@ IMAGING_PARAM_DOCS = {
     "image_continuum_single_field.image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
-        "Restoration automatically retains its mode-specific restored Taylor\n"
-        "product and the "
-        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.'
+        "Restoration automatically retains its selected restored Taylor\n"
+        'products, the derived ``"alpha"``, ``"alpha_error"``, and, when\n'
+        'available, ``"beta"``, and ``"beam_fit_params_sky_restored"``, the beam\n'
+        "the restore applied; with a ``restoring_beam`` also\n"
+        '``"beam_fit_params_point_spread_function"``.\n'
+        "Restored and spectral products require ``restore=True``. Alpha products\n"
+        "require at least two Taylor terms; beta requires at least three.\n"
+        "MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;\n"
+        "MVC cannot publish channel UV grids. Unavailable products are rejected\n"
+        "before input reads or graph construction."
     ),
     "image_continuum_single_field.restore": (
         "If ``True`` restore every Taylor coefficient after deconvolution and\n"
-        "always produce the intrinsic, primary-beam-corrected Taylor image in\n"
-        "``SKY_RESTORED_FLAT_SKY``. This is the sole restored sky product for\n"
-        "both MFS and MVC; the apparent ``SKY_RESTORED_FLAT_NOISE`` image is not\n"
-        "written. Pixels below ``primary_beam_limit`` are blanked with NaN. With\n"
-        "at least two Taylor terms, also write ``ALPHA`` and ``ALPHA_ERROR``;\n"
-        "with at least three, also write ``BETA``. ``ALPHA_ERROR`` is CASA's\n"
-        "pixel-residual diagnostic, not a statistically calibrated one-sigma\n"
-        "uncertainty."
+        "write the products selected by ``restoration_output``. With at least\n"
+        "two Taylor terms also write ``ALPHA`` and ``ALPHA_ERROR``; with at least\n"
+        "three also write ``BETA``. ``ALPHA_ERROR`` is a pixel-residual diagnostic,\n"
+        "not a statistically calibrated one-sigma uncertainty."
     ),
     "clean_mask": (
         'Two-dimensional CLEAN mask of shape ``image_params["image_size"]``:\n'
@@ -682,8 +1160,64 @@ IMAGING_PARAM_DOCS = {
         "residual plane that the model update cleans: in cube imaging in place\n"
         "of the primary-beam mask of ``primary_beam_limit``, in continuum\n"
         "imaging within it. Asp measures the noise of its significance test\n"
-        "(``asp_scale_significance``) outside the pixels it cleans. ``None``\n"
-        "keeps the primary-beam mask."
+        "(``asp_scale_significance``) outside the pixels it cleans. Without\n"
+        "``auto_mask_params``, ``None`` keeps the primary-beam mask."
+    ),
+    "auto_mask_params": (
+        "Automatic CLEAN mask (CASA ``usemask='auto-multithresh'``, Kepley et\n"
+        "al. 2020, PASP 132, 024505). ``None`` makes no automatic mask; a dict,\n"
+        "empty for the defaults, updates the mask of every plane from its\n"
+        "residual after every residual update, before the stop test. It is\n"
+        "refused together with ``clean_mask``. A mask never loses pixels and\n"
+        "holds none outside ``primary_beam_limit``; a plane with an empty mask\n"
+        "stops with stop code 7. A plane whose last two model updates did no\n"
+        "iteration gets stop code 4 when its mask grows onto pixels above the\n"
+        "threshold, and is cleaned again only if another plane keeps the imaging\n"
+        "cycles going. Continuum imaging makes the mask from Taylor term zero\n"
+        "and applies it to every term. *Differs from CASA*: the clean beam and\n"
+        "the largest PSF sidelobe are those of each plane, not of the whole\n"
+        "cube; a plane stops updating on its own, from its own\n"
+        "``threshold_per_cycle``, not with its channel or the peak of the cube;\n"
+        "``max_iter = 0`` makes a mask, ``niter=0`` none; and the mask written\n"
+        "includes the update after the last model update.\n"
+        "Keys, with the default and the CASA name in brackets:\n"
+        "\n"
+        "- ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts\n"
+        "  from the pixels above this times the largest PSF sidelobe times the\n"
+        "  peak residual (the sidelobe level) or, when larger,\n"
+        "  ``noise_threshold`` times the noise.\n"
+        "- ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is\n"
+        "  1.4826 times the median absolute deviation; every threshold is\n"
+        "  relative to the median of the noise sample.\n"
+        "- ``low_noise_threshold`` (1.5) [``lownoisethreshold``] : The mask grows\n"
+        "  through the pixels above this times the noise or, when larger, the\n"
+        "  sidelobe level.\n"
+        "- ``negative_threshold`` (0.0) [``negativethreshold``] : Above 0, the\n"
+        "  mask takes the pixels below minus this times the noise or, when\n"
+        "  lower, minus the sidelobe level.\n"
+        "- ``smooth_factor`` (1.0) [``smoothfactor``] : Every part of the mask is\n"
+        "  smoothed with the clean beam scaled by this.\n"
+        "- ``min_beam_fraction`` (0.3) [``minbeamfrac``] : Positive regions\n"
+        "  smaller than this fraction of the clean beam area are removed before\n"
+        "  smoothing; 0 keeps them. An unresolved source is removed whatever its\n"
+        "  signal to noise when ``sidelobe_threshold`` times the largest PSF\n"
+        "  sidelobe is above exp(-``min_beam_fraction``), and a warning is logged.\n"
+        "- ``cut_threshold`` (0.01) [``cutthreshold``] : A smoothed mask is cut\n"
+        "  at this fraction of its peak, in (0, 1).\n"
+        "- ``grow_iterations`` (75) [``growiterations``] : Largest number of\n"
+        "  binary dilation steps in one update, before smoothing; 0 does not\n"
+        "  grow it.\n"
+        "- ``grow_prune`` (``True``) [``dogrowprune``] : Remove small regions\n"
+        "  from the grown mask too.\n"
+        "- ``min_percent_change`` (-1.0) [``minpercentchange``] : At or above 0,\n"
+        "  a plane whose threshold is set by the noise stops updating its mask\n"
+        "  once the ``threshold_per_cycle`` of its model update is the absolute\n"
+        "  ``threshold`` and the mask then did not change or changed by less\n"
+        "  than this percentage. Whatever the value, such a plane stops updating\n"
+        "  when its mask is empty.\n"
+        "- ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every\n"
+        "  pixel inside ``primary_beam_limit``. ``False`` measures it outside the\n"
+        "  mask or, without a mask, on the pixels Chauvenet's criterion leaves."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
     # Shared by every distributed application that makes a report.
@@ -693,13 +1227,14 @@ IMAGING_PARAM_DOCS = {
         "``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``\n"
         'gives ``cube_report.html``), or ``"notebook"``, displayed in the\n'
         "calling Jupyter notebook. The report has a processing section common\n"
-        "to all distributed applications (timing, task stream and, with\n"
-        "``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a\n"
-        "results section of the application's own; the products it makes with\n"
-        "other distributed applications are kept in ``<name>_report_files``\n"
-        "next to the output store. It is made after the output is written: a\n"
-        "failure while making it is logged and leaves the results intact.\n"
-        "``None`` (default): no report."
+        "to all distributed applications (performance measures, timing, task\n"
+        "stream, task times and, with ``monitor_resources_seconds``, the CPU,\n"
+        "memory and I/O of the cluster, of every worker slot and of the tasks)\n"
+        "and a results section of the application's own; the products it\n"
+        "makes with other distributed applications are kept in\n"
+        "``<name>_report_files`` next to the output store. It is made after\n"
+        "the output is written: a failure while making it is logged and leaves\n"
+        "the results intact. ``None`` (default): no report."
     ),
     "task_id": "Identifier of the parallel chunk being processed.",
     "task_coords": (
@@ -732,4 +1267,9 @@ IMAGING_PARAM_DOCS = {
         'and ``"none"`` 33; the paper found models oscillating with constant\n'
         "coefficients of 0.7 to 0.9."
     ),
+    **{
+        f"find_continuum.{name}": description
+        for name, description in _FIND_CONTINUUM_PARAM_DOCS.items()
+    },
+    **_FIND_CONTINUUM_ULTRA_PARAM_DOCS,
 }

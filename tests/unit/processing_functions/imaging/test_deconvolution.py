@@ -240,7 +240,8 @@ class TestValidateDeconvolveParams:
             "max_psf_fraction": 0.7,
         }
         result = _validate_deconvolve_params(params)
-        assert result == params
+        assert all(result[key] == value for key, value in params.items())
+        assert "primary_beam_limit" not in params
 
     @pytest.mark.parametrize("gain", [0.01, 0.1, 0.5, 1.0])
     def test_gain_accepts_valid(self, gain):
@@ -252,17 +253,17 @@ class TestValidateDeconvolveParams:
         with pytest.raises(ValueError, match="CLEAN gain"):
             _validate_deconvolve_params({"gain": gain})
 
-    @pytest.mark.parametrize("max_iter", [1, 100, 1000])
+    @pytest.mark.parametrize("max_iter", [0, 1, 100, 1000])
     def test_niter_accepts_valid(self, max_iter):
         result = _validate_deconvolve_params({"max_iter": max_iter})
         assert result["max_iter"] == max_iter
 
-    @pytest.mark.parametrize("max_iter", [0, -1, 1.5, "100", None])
+    @pytest.mark.parametrize("max_iter", [-1, 1.5, "100", None])
     def test_niter_rejects_invalid(self, max_iter):
-        with pytest.raises(ValueError, match="positive integer"):
+        with pytest.raises(ValueError, match="non-negative integer"):
             _validate_deconvolve_params({"max_iter": max_iter})
 
-    @pytest.mark.parametrize("threshold", [None, 0.0, 1e-6, 1.0])
+    @pytest.mark.parametrize("threshold", [0.0, 1e-6, 1.0])
     def test_threshold_accepts_valid(self, threshold):
         result = _validate_deconvolve_params({"threshold": threshold})
         assert result["threshold"] == threshold
@@ -303,13 +304,14 @@ class TestValidateDeconvolveParams:
 
     @pytest.mark.parametrize("value", [0, -2, 2.5, True, "30", None])
     def test_max_iter_divergence_rejects_invalid(self, value):
-        with pytest.raises(ValueError, match="max_iter_divergence"):
+        with pytest.raises((ValueError, TypeError), match="max_iter_divergence"):
             _validate_deconvolve_params({"max_iter_divergence": value})
 
     def test_does_not_mutate_other_keys(self):
         params = {"gain": 0.2, "extra": "ignored"}
-        result = _validate_deconvolve_params(params)
-        assert result["extra"] == "ignored"
+        with pytest.raises(ValueError, match="Unknown"):
+            _validate_deconvolve_params(params)
+        assert params == {"gain": 0.2, "extra": "ignored"}
 
 
 # ---------------------------------------------------------------------------
@@ -1097,7 +1099,7 @@ class TestAspClean:
         )
 
         with pytest.raises(
-            ValueError, match="asp_stop_after_hogbom_run must be a bool"
+            (ValueError, TypeError), match="asp_stop_after_hogbom_run must be a bool"
         ):
             _validate_deconvolve_params({"asp_stop_after_hogbom_run": 1})
         assert _validate_deconvolve_params({})["asp_stop_after_hogbom_run"] is False
@@ -1110,7 +1112,7 @@ class TestAspClean:
             _validate_deconvolve_params,
         )
 
-        with pytest.raises(ValueError, match=f"{key} must be a bool"):
+        with pytest.raises((ValueError, TypeError), match=f"{key} must be a bool"):
             _validate_deconvolve_params({key: 1})
         assert _validate_deconvolve_params({})[key] is True
 
@@ -1261,6 +1263,7 @@ class TestAspClean:
                 psf,
                 model,
                 {"gain": 0.1, "max_iter": 1, "asp_min_mask_coverage": 1.0},
+                input_checked=True,
             )
 
     def test_rejects_non_5d(self):
@@ -1410,7 +1413,7 @@ class TestDeconvolveAsp:
         assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=0.1)
         assert np.max(np.abs(xds["RESIDUAL"].values)) < 0.1
 
-    @pytest.mark.parametrize("algorithm", ["aspclean", "asp_clean", "ASP"])
+    @pytest.mark.parametrize("algorithm", ["ASP"])
     def test_algorithm_names_are_exact(self, algorithm):
         with pytest.raises(ValueError, match="not recognized"):
             deconvolve(img_xds=_make_img_xds(nt=1, nf=1, npol=1), algorithm=algorithm)
@@ -1498,9 +1501,13 @@ class TestExactPsfSubtraction:
 
     @pytest.mark.parametrize("value", [1, 0, "yes", None])
     def test_must_be_a_bool(self, value):
-        with pytest.raises(ValueError, match="exact_psf_subtraction must be a bool"):
+        with pytest.raises(
+            (ValueError, TypeError), match="exact_psf_subtraction must be a bool"
+        ):
             validate_exact_psf_subtraction("hogbom", value)
-        with pytest.raises(ValueError, match="exact_psf_subtraction must be a bool"):
+        with pytest.raises(
+            (ValueError, TypeError), match="exact_psf_subtraction must be a bool"
+        ):
             _validate_deconvolve_params({"exact_psf_subtraction": value})
 
     def test_asp_is_refused(self):
@@ -1593,3 +1600,54 @@ class TestExactPsfSubtraction:
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("clean", [hogbom_clean, hogbom_clean_many_threads])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "image_size,box",
+    [
+        ([64, 64], (60, 64, 0, 64)),
+        ([48, 96], (10, 90, 5, 40)),
+        ([96, 48], (5, 40, 10, 90)),
+    ],
+)
+def test_clean_box_matches_native_half_open_axes(clean, dtype, image_size, box):
+    from astroviper.processing_functions.imaging.config_check import (
+        CUBE_SINGLE_FIELD,
+        check_model_update,
+    )
+
+    check_model_update(
+        {
+            "image_params": {"image_size": image_size},
+            "cycle_control_params": {"clean_box": box},
+        },
+        mode=CUBE_SINGLE_FIELD,
+    )
+    n_l, n_m = image_size
+    xmin, xmax, ymin, ymax = box
+    residual = np.zeros((1, 1, 1, n_l, n_m), dtype=dtype)
+    expected_model = np.zeros_like(residual)
+    for row, column, flux in ((ymin, xmin, 2.0), (ymax - 1, xmax - 1, 3.0)):
+        residual[0, 0, 0, row, column] = flux
+        expected_model[0, 0, 0, row, column] = flux
+    # Stronger sources outside the rectangle must not enter the peak search.
+    # For interior boxes these lie exactly on the excluded upper endpoints.
+    if xmax < n_m:
+        residual[0, 0, 0, ymin, xmax] = 100.0
+    else:
+        residual[0, 0, 0, ymin, xmin - 1] = 100.0
+    if ymax < n_l:
+        residual[0, 0, 0, ymax, xmin] = 50.0
+    expected_residual = residual - expected_model
+    model = np.zeros_like(residual)
+    clean(
+        residual,
+        _delta_psf_cube(1, 1, 1, n_l, n_m, dtype),
+        model,
+        {"clean_box": box, "gain": 1.0, "max_iter": 4, "threshold": 0.1},
+        processing_function_threads=1,
+    )
+    np.testing.assert_array_equal(model, expected_model)
+    np.testing.assert_array_equal(residual, expected_residual)

@@ -119,7 +119,10 @@ def test_measurement_set_v2_is_refused(tmp_path):
     (ms_v2 / "table.dat").write_bytes(b"")
     with pytest.raises(ValueError, match="is a Measurement Set v2"):
         psf_module.point_spread_function_cube_single_field(
-            str(ms_v2), _image_params([3e9]), {"weighting": "natural"}
+            str(ms_v2),
+            _image_params([3e9]),
+            {"weighting": "natural"},
+            instrument_polarization_basis="circular",
         )
 
 
@@ -154,3 +157,78 @@ def test_the_direct_fourier_transform_point_spread_function(ps_store):
         rtol=1e-2,
     )
     xr.testing.assert_identical(dft.SENSITIVITY, gridder.SENSITIVITY)
+
+
+def test_psf_driver_checks_nested_configuration_before_io(tmp_path):
+    from astroviper.distributed_applications.imaging.point_spread_function_cube_single_field import (
+        point_spread_function_cube_single_field,
+    )
+
+    image_params = {
+        "image_size": [0, 16],
+        "cell_size": [-1e-5, 1e-5],
+        "phase_direction": [0, 0],
+        "frequency_coords": [1e9],
+        "time_coords": [0],
+        "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
+    }
+    output = tmp_path / "never-created.zarr"
+    with pytest.raises(ValueError, match="image_size"):
+        point_spread_function_cube_single_field(
+            "missing.ps.zarr",
+            image_params,
+            {"weighting": "natural"},
+            image_store=str(output),
+        )
+    assert not output.exists()
+
+
+def test_both_io_engines_and_fits_write_the_same_cube(tmp_path):
+    """The xradio and chunk engines write the same point spread function cube,
+    and the chunk engine's FITS files hold the same values."""
+    from xradio.image import open_image
+    from xradio.measurement_set import open_processing_set
+
+    from tests.unit.distributed_applications.simulation.test_simulate_processing_set import (
+        run,
+    )
+
+    simulated, _ = run(tmp_path, polarization=["XX", "YY"], noise_params=None)
+    ps_store = simulated["ps_store"]
+    frequency_coords = open_processing_set(ps_store).xr_ps.get_freq_axis().values
+    common = dict(
+        instrument_polarization_basis="linear",
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        n_mapping_parallelism={"frequency": 3},
+    )
+    stores = {}
+    for name, options in {
+        "xradio": dict(io_engine="xradio"),
+        "chunk": dict(io_engine="chunk"),
+        "fits": dict(io_engine="chunk", output_image_format="fits"),
+    }.items():
+        stores[name] = str(tmp_path / f"psf_{name}")
+        psf_module.point_spread_function_cube_single_field(
+            ps_store,
+            {**_image_params(frequency_coords), "polarization_coords": ["I", "Q"]},
+            {"weighting": "natural"},
+            image_store=stores[name],
+            **options,
+            **common,
+        )
+    xradio = xr.open_zarr(stores["xradio"] + ".img.zarr").load()
+    chunk = xr.open_zarr(stores["chunk"] + ".img.zarr").load()
+    np.testing.assert_array_equal(
+        chunk.POINT_SPREAD_FUNCTION.values, xradio.POINT_SPREAD_FUNCTION.values
+    )
+    fits = open_image(
+        {"point_spread_function": stores["fits"] + "/POINT_SPREAD_FUNCTION.fits"}
+    )
+    np.testing.assert_allclose(
+        fits.POINT_SPREAD_FUNCTION.values,
+        xradio.POINT_SPREAD_FUNCTION.values,
+        rtol=0,
+        atol=1e-12,
+    )

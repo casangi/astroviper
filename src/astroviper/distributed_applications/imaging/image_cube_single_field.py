@@ -1,3 +1,4 @@
+import contextlib
 import functools
 import inspect
 import json
@@ -35,11 +36,16 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             ("create empty data vars on disk", "T_create_empty_data_variables"),
             ("open processing set", "T_open_processing_set"),
             ("interpolate data coords", "T_interpolate_data_coords"),
+            ("input preflight", "T_input_preflight"),
             # Measurement Set v2 input only (0.0 for a processing set).
             ("add lazy input data", "T_add_lazy_input_data"),
             ("create map/reduce graph", "T_create_map_reduce_graph"),
+            ("get compute resources", "T_get_compute_resources"),
             ("generate dask graph", "T_generate_dask_graph"),
             ("compute dask graph", "T_compute_dask_graph"),
+            # With find_continuum_first_round (0.0 without).
+            ("write find_continuum first round", "T_find_continuum_first_round_write"),
+            ("drain find_continuum moments", "T_find_continuum_first_round_drain"),
             ("consolidate metadata", "T_consolidate_metadata"),
         ],
     ),
@@ -146,12 +152,14 @@ def image_cube_single_field(
     vizualize_graph: bool = False,
     fft_backend="pyfftw",
     restore: bool = False,
-    primary_beam_correction: bool = False,
+    restoration_output: str = "apparent",
+    restoring_beam: list[float] | None = None,
     psf_fitting_method: str = "astroviper",
     gridding_kernel_params: dict[str, Any] | None = None,
     primary_beam_params: dict[str, Any] | None = None,
     clean_mask: str | None = None,
-    skunk_works: bool = False,
+    auto_mask_params: dict[str, Any] | None = None,
+    io_engine: str = "chunk",
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     reduce_mode: str = "tree",
@@ -162,7 +170,10 @@ def image_cube_single_field(
     monitor_resources_seconds: float | None = None,
     msv2_open_options: dict[str, Any] | None = None,
     report: str | None = None,
+    find_continuum_first_round: bool = False,
     parameters_file: str | None = None,
+    *,
+    input_checked: bool = False,
 ):  # -> Tuple[xr.Dataset, ImagingDict]:
     """
     Create a spectral cube.
@@ -170,9 +181,9 @@ def image_cube_single_field(
     Parameters
     ----------
     ps_store : str
-        Path of the input visibilities: a processing set (Zarr store) or, with
-        ``skunk_works=True``, a Measurement Set v2 (a casacore table directory,
-        see :func:`~astroviper.utils.measurement_set_v2.is_measurement_set_v2`).
+        Path of the input visibilities: a processing set (Zarr store) or a
+        Measurement Set v2 (a casacore table directory, see
+        :func:`~astroviper.utils.measurement_set_v2.is_measurement_set_v2`).
         A Measurement Set v2 is imaged without converting it: the driver opens
         it with XRADIO's ``xradio_msv2`` engine
         (:func:`xradio.measurement_set.open_msv2`, in the XRADIO releases that
@@ -186,7 +197,7 @@ def image_cube_single_field(
         options the run never writes into the Measurement Set (a
         ``partition_cache`` that stores partitions writes them into it, see
         ``msv2_open_options``). These errors are raised before anything is
-        written: ``skunk_works=False``, no engine, a write-back flag, a
+        written: no engine, a write-back flag, a
         refused ``msv2_open_options`` key, no MSv4 left after
         ``scan_intents``, or an MSv4 without the data group
         ``processing_set_data_group_name`` or without one of the roles the
@@ -200,11 +211,21 @@ def image_cube_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -475,7 +496,8 @@ def image_cube_single_field(
         Measurement Set v2 from CASA often lacks the default
         ``"OBSERVE_TARGET#ON_SOURCE"``).
     field_name : str
-        The field to image. If None, the first field in the processing set will be used
+        Reserved field-selection argument, retained for future support. It does
+        not currently filter fields; prepare a single-field input Processing Set.
     compressor : numcodecs compressor
         Compressor applied to each chunk of the on-disk image.
     processing_set_data_group_name : str
@@ -541,16 +563,38 @@ def image_cube_single_field(
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
-    primary_beam_correction : bool, optional
-        If ``True`` write the primary beam corrected restored sky to the
-        ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable. Cube imaging and
-        MVC divide the model and residual by their channel or common (power)
-        primary beam before restoration. MFS instead divides the apparent
-        Taylor polynomials by the fitted primary-beam Taylor polynomial.
-        Pixels below the zeroth-order primary-
-        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
-        ``restore``.
+    restoration_output : {"apparent", "primary_beam_corrected", "both"}, optional
+        Restored products to compute: ``"apparent"``, ``"primary_beam_corrected"``,
+        or ``"both"``. Cube outputs are ``SKY_RESTORED`` and
+        ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``; continuum outputs are
+        ``SKY_RESTORED_FLAT_NOISE`` and ``SKY_RESTORED_FLAT_SKY``.
+        Cube corrects the model and residual by the channel power primary beam
+        before convolution. MFS divides their Taylor polynomials; MVC divides
+        by its common power primary beam. Corrected pixels below
+        ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
+        selector only when ``restore=True``.
+    restoring_beam : list of float or None, optional
+        ``None`` restores each plane with its own PSF fit [CASA ``tclean``
+        ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
+        in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,
+        ``|pa| <= pi``) restores every plane to that beam as ``tclean`` does
+        since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
+        target beam, and the residual with the Gaussian that takes the plane's
+        PSF beam to the target, times the ratio of the beam areas, so it is in
+        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        beam the target does not contain, or that has no PSF fit, keeps its
+        residual unconvolved and unscaled, as ``tclean`` does, and is named in a
+        warning. The continuum imager refuses a target that does not contain its
+        PSF beam, and any target when its PSF fit failed, right after that fit
+        in its first imaging cycle: the residual update has run, but no model
+        update. With primary-beam correction a restore cutoff below 1e-3 is
+        refused (``primary_beam_limit``; in cube imaging that of
+        ``cycle_control_params``, where 0 restores at 0.2): in the transform to
+        the target, the float32 rounding of the residual divided by the primary
+        beam, large near its nulls, would spread over the corrected image. The
+        beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        ``tclean``'s ``restoringbeam='common'``, see
+        :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -625,7 +669,9 @@ def image_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
-        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
         The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
         models: ``airy_disk_model(telescope, func="casa_airy")`` and
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
@@ -640,19 +686,70 @@ def image_cube_single_field(
         residual plane that the model update cleans: in cube imaging in place
         of the primary-beam mask of ``primary_beam_limit``, in continuum
         imaging within it. Asp measures the noise of its significance test
-        (``asp_scale_significance``) outside the pixels it cleans. ``None``
-        keeps the primary-beam mask.
-    skunk_works : bool
-        If ``True`` use the experimental performance I/O path in each node task:
-        load only the data group's data variables straight from the Zarr chunk
-        blobs (reconstructing coordinates from the inputs, ignoring all
-        sub-datasets) and write each result chunk's blob directly to the
-        pre-created image store, bypassing the asyncio Zarr dataset API. The
-        processing set and image are assumed to share the same frequency
-        coordinate. A Measurement Set v2 ``ps_store`` requires ``True``: its
-        node tasks read their data through XRADIO's ``xradio_msv2`` engine
-        instead, with the Measurement Set's own frequencies (see
-        ``ps_store``), and write with this path. Default ``False``.
+        (``asp_scale_significance``) outside the pixels it cleans. Without
+        ``auto_mask_params``, ``None`` keeps the primary-beam mask.
+    auto_mask_params : dict or None, optional
+        Automatic CLEAN mask (CASA ``usemask='auto-multithresh'``, Kepley et
+        al. 2020, PASP 132, 024505). ``None`` makes no automatic mask; a dict,
+        empty for the defaults, updates the mask of every plane from its
+        residual after every residual update, before the stop test. It is
+        refused together with ``clean_mask``. A mask never loses pixels and
+        holds none outside ``primary_beam_limit``; a plane with an empty mask
+        stops with stop code 7. A plane whose last two model updates did no
+        iteration gets stop code 4 when its mask grows onto pixels above the
+        threshold, and is cleaned again only if another plane keeps the imaging
+        cycles going. Continuum imaging makes the mask from Taylor term zero
+        and applies it to every term. *Differs from CASA*: the clean beam and
+        the largest PSF sidelobe are those of each plane, not of the whole
+        cube; a plane stops updating on its own, from its own
+        ``threshold_per_cycle``, not with its channel or the peak of the cube;
+        ``max_iter = 0`` makes a mask, ``niter=0`` none; and the mask written
+        includes the update after the last model update.
+        Keys, with the default and the CASA name in brackets:
+
+        - ``sidelobe_threshold`` (3.0) [``sidelobethreshold``] : The mask starts
+          from the pixels above this times the largest PSF sidelobe times the
+          peak residual (the sidelobe level) or, when larger,
+          ``noise_threshold`` times the noise.
+        - ``noise_threshold`` (5.0) [``noisethreshold``] : The noise is
+          1.4826 times the median absolute deviation; every threshold is
+          relative to the median of the noise sample.
+        - ``low_noise_threshold`` (1.5) [``lownoisethreshold``] : The mask grows
+          through the pixels above this times the noise or, when larger, the
+          sidelobe level.
+        - ``negative_threshold`` (0.0) [``negativethreshold``] : Above 0, the
+          mask takes the pixels below minus this times the noise or, when
+          lower, minus the sidelobe level.
+        - ``smooth_factor`` (1.0) [``smoothfactor``] : Every part of the mask is
+          smoothed with the clean beam scaled by this.
+        - ``min_beam_fraction`` (0.3) [``minbeamfrac``] : Positive regions
+          smaller than this fraction of the clean beam area are removed before
+          smoothing; 0 keeps them. An unresolved source is removed whatever its
+          signal to noise when ``sidelobe_threshold`` times the largest PSF
+          sidelobe is above exp(-``min_beam_fraction``), and a warning is logged.
+        - ``cut_threshold`` (0.01) [``cutthreshold``] : A smoothed mask is cut
+          at this fraction of its peak, in (0, 1).
+        - ``grow_iterations`` (75) [``growiterations``] : Largest number of
+          binary dilation steps in one update, before smoothing; 0 does not
+          grow it.
+        - ``grow_prune`` (``True``) [``dogrowprune``] : Remove small regions
+          from the grown mask too.
+        - ``min_percent_change`` (-1.0) [``minpercentchange``] : At or above 0,
+          a plane whose threshold is set by the noise stops updating its mask
+          once the ``threshold_per_cycle`` of its model update is the absolute
+          ``threshold`` and the mask then did not change or changed by less
+          than this percentage. Whatever the value, such a plane stops updating
+          when its mask is empty.
+        - ``fast_noise`` (``True``) [``fastnoise``] : Measure the noise on every
+          pixel inside ``primary_beam_limit``. ``False`` measures it outside the
+          mask or, without a mask, on the pixels Chauvenet's criterion leaves.
+    io_engine : {"chunk", "xradio"}
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     compute_backend : str
         Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
         a ``dask.delayed`` graph with
@@ -676,7 +773,7 @@ def image_cube_single_field(
         Fan-in per reduce node when ``reduce_mode="tree_n"`` (must be ``>= 2``).
         Ignored for the other modes.
     image_sharding : dict, optional
-        If set (requires ``skunk_works=True``), write the output image as Zarr v3
+        If set (requires ``io_engine="chunk"``), write the output image as Zarr v3
         **sharded** arrays with shard shape ``{dimension_name: shard_size}``,
         e.g. ``{"frequency": 200}`` packs 200 channels into each shard file and
         ``{"frequency": 32, "l": 2048, "m": 2048}`` also tiles the sky plane.
@@ -690,7 +787,7 @@ def image_cube_single_field(
         server. ``None`` (default) keeps one file per written chunk.
     output_image_format : str
         On-disk format of the output image: ``"zarr"`` (default) or ``"fits"``
-        (requires ``skunk_works=True``; incompatible with
+        (requires ``io_engine="chunk"``; incompatible with
         ``image_sharding``). With ``"fits"`` the driver pre-creates one
         XRADIO-conformant FITS file per kept image variable
         (``<image_store>/<VARIABLE>.fits``, readable with
@@ -699,7 +796,11 @@ def image_cube_single_field(
         range, since frequency is the slowest-varying FITS axis -- directly
         into the shared files (no locking, no file creation). Kept
         beam-fit-params variables become CASA-style multi-beam ``BEAMS`` table
-        extensions. uv-domain / complex variables cannot be written to FITS.
+        extensions, whose rows of planes without a fit hold the beam ``tclean``
+        gives them, except that a ``restoring_beam`` is the header beam
+        (``BMAJ``, ``BMIN``, ``BPA``) of the restored images; without one the
+        primary beam corrected image has no beam.
+        uv-domain / complex variables cannot be written to FITS.
     task_time_kill_switch_seconds : float, optional
         Watchdog: if a node task's total wall time exceeds this many seconds, it
         writes an error log with that task's full timing breakdown and then raises,
@@ -738,13 +839,36 @@ def image_cube_single_field(
         ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
         gives ``cube_report.html``), or ``"notebook"``, displayed in the
         calling Jupyter notebook. The report has a processing section common
-        to all distributed applications (timing, task stream and, with
-        ``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a
-        results section of the application's own; the products it makes with
-        other distributed applications are kept in ``<name>_report_files``
-        next to the output store. It is made after the output is written: a
-        failure while making it is logged and leaves the results intact.
-        ``None`` (default): no report.
+        to all distributed applications (performance measures, timing, task
+        stream, task times and, with ``monitor_resources_seconds``, the CPU,
+        memory and I/O of the cluster, of every worker slot and of the tasks)
+        and a results section of the application's own; the products it
+        makes with other distributed applications are kept in
+        ``<name>_report_files`` next to the output store. It is made after
+        the output is written: a failure while making it is logged and leaves
+        the results intact. ``None`` (default): no report.
+    find_continuum_first_round : bool, optional
+        Also make findContinuum's first round of the Stokes I cube as each
+        chunk is written, into a store next to the image store
+        (``cube.img.zarr`` gives ``cube_find_continuum_first_round.zarr``,
+        store version 3): per channel the primary-beam limit mask at the
+        ``primary_beam_limit`` of ``cycle_control_params`` (0.2,
+        findContinuum's default, when the key is absent, although cube
+        imaging then cleans to a limit of 0) and the spectrum mask above
+        0.21 inside it, their tile occupancy, the count, minimum and maximum
+        of the finite residual and the count and minimum of the finite
+        primary beam inside the limit, and with the Dask backend the
+        integrated and maximum moments of the residual of every spectral
+        window (a linear run of channels), accumulated in the worker
+        processes and merged after the imaging. The store is bound to the
+        cube as written and refused for any other. A part of the first round
+        that cannot be written (after the retries of transient I/O errors)
+        leaves it, or a window's moments, incomplete and is logged; the
+        imaging goes on. If the imaging compute raises, the worker processes
+        drop the moments of the run and their slots are removed. Keeps the
+        variables find_continuum reads (``sky_residual``, ``primary_beam``
+        and ``beam_fit_params_point_spread_function``). Needs Stokes I and
+        ``output_image_format="zarr"``. Default ``False``.
     parameters_file : str, optional
         JSON file whose ``"image_cube_single_field"`` block gives the
         arguments, as
@@ -755,11 +879,17 @@ def image_cube_single_field(
         (an ``image_params`` given replaces the file's ``image_params``).
         ``None`` (default): every argument comes from the call.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     dict
         ``{"timing_node_tasks", "deconvolution", "image_statistics",
-        "timing_distributed_application", "report"}``:
+        "timing_distributed_application", "compute_resources", "report"}``:
 
         * ``"timing_node_tasks"`` is a :class:`pandas.DataFrame` with one row per
           frequency chunk and a ``T_*`` column per processing function (the
@@ -769,7 +899,8 @@ def image_cube_single_field(
           of convergence statistics (global channel numbering).
         * ``"image_statistics"`` is ``{image_variable_key: xarray.Dataset}``
           (``"sky_residual"``, ``"sky_restored"``, ``"sky_model"``, ... --
-          whichever were in memory in the node tasks) of NaN-ignoring
+          whichever were in memory in the node tasks; not ``"sky_model"``
+          when ``max_iter`` or ``max_cycles`` is 0) of NaN-ignoring
           per-plane statistics over ``(l, m)``, each dataset with dims
           ``(time, frequency, polarization)`` covering the whole cube in
           frequency order and one variable per statistic (``mean``, ``median``,
@@ -781,27 +912,51 @@ def image_cube_single_field(
           Computed in every node task right before its chunk is written.
         * ``"timing_distributed_application"`` is a dict of the driver-level
           step timings (``T_*`` seconds: building/writing the empty image,
-          opening the input, building the graph, computing it, consolidating
-          metadata; ``T_add_lazy_input_data`` is ``0.0`` for a processing set)
-          plus the grand total ``T_total``.
+          opening the input, building the graph, computing it, writing
+          find_continuum's first round and draining its moments, consolidating
+          metadata; ``T_add_lazy_input_data`` is ``0.0`` for a processing set,
+          the first-round steps without ``find_continuum_first_round``) plus
+          the grand total ``T_total``.
+        * ``"compute_resources"``: what the graphs ran on, see
+          :func:`astroviper.utils.data_partitioning.get_compute_resources`.
         * ``"report"`` is the path of the report file written (``None``
           without one, for ``report="notebook"`` and when the report failed).
           With a report the image statistics of the residual also hold
           ``entropy``, the entropy of every plane's final residual.
+        * ``"find_continuum_first_round"`` (with
+          ``find_continuum_first_round=True``) is ``{"store",
+          "primary_beam_limit", "complete", "moments_complete"}``: the path of
+          the first-round store, the ``primary_beam_limit`` of
+          ``cycle_control_params`` (0.2 when the key is absent), ``True``, and
+          per spectral window whether its moments are in the store (every
+          channel added exactly once, every slot saved and merged; never with
+          MPI); ``None`` when a chunk or its first round could not be
+          written. The records of the moments' drain (``stage``
+          ``"first_round_pop"`` and ``"first_round_merge"``) are added to
+          ``"timing_reduce_nodes"``.
 
     Notes
     -----
     The report's results section (see
     :func:`~astroviper.distributed_applications.imaging.image_cube_single_field_report.image_cube_single_field_report`):
     cross sections of the point spread function (Stokes I, centre channel)
-    with the fitted Gaussian, the maximum over frequency (``moments``) of the
-    residual, the model and the primary beam corrected restored image per
-    Stokes plane, the spectrum of the peak inside the clean mask, and per
-    channel the cycle control stop codes, the occurrences of the model update
-    stop codes, the iterations, the imaging cycles, the final residual entropy
-    and the residual RMS. With a report and a kept
-    ``point_spread_function``, ``beam_fit_params_point_spread_function`` is
-    kept too.
+    with the fitted Gaussian; with a ``restoring_beam``, that beam, the axes
+    of the PSF fit of every channel against it and the channels whose
+    residual was left unconvolved and unscaled; the maximum over frequency
+    (``moments``) of the residual, the model and the primary beam corrected
+    restored image per Stokes plane, every per-plane statistic of the
+    residual and of the restored image, and per channel the cycle control
+    stop codes, the occurrences of the model update stop codes, the
+    iterations, the imaging cycles, the peak residual at the start of the
+    first model update and at the end, the final residual entropy and the
+    residual RMS. With a report and a kept
+    ``point_spread_function``, or a report and a ``restoring_beam``,
+    ``beam_fit_params_point_spread_function`` is kept too. With
+    ``restore=True``, ``beam_fit_params_sky_restored`` is kept: the beams the
+    restore applied (the ``restoring_beam``, or without one the PSF beam of
+    the first Stokes plane in every plane of its channel), planes without a
+    fit holding the beam ``tclean`` gives them, the first beam of largest area
+    of the planes with one (a circle of 1e-6 arcsec when no plane has one).
 
     The Zarr image store is created with :func:`xradio.image.write_image`.
     XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
@@ -821,10 +976,29 @@ def image_cube_single_field(
     using fewer, wider tasks is faster.
     """
 
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD, require_complete=True)
+        if find_continuum_first_round:
+            from astroviper.processing_functions.imaging.config_check import (
+                check_find_continuum_first_round,
+            )
+
+            check_find_continuum_first_round(image_params, output_image_format)
+
+    from astroviper.utils.io import check_image_output_destination
+
+    check_image_output_destination(
+        image_store, overwrite=overwrite, output_image_format=output_image_format
+    )
+
     import time
 
     import dask
-    import numpy as np
     import toolviper.utils.logger as logger
     from graphviper.graph_tools import (
         generate_dask_workflow,
@@ -835,30 +1009,16 @@ def image_cube_single_field(
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
     from xradio.measurement_set import open_processing_set
 
-    from astroviper.processing_functions.imaging.deconvolution import (
-        validate_exact_psf_subtraction,
-        validate_record_iteration_history,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        is_direct_fourier_transform,
-    )
-    from astroviper.processing_functions.imaging.utils.cycle_control import (
-        validate_max_cycles,
-        validate_threshold_tolerance,
-    )
-    from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
-        THRESHOLD_TOLERANCE,
-    )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
         correlation_selection,
         correlations_for_stokes,
     )
     from astroviper.utils.clean_mask import load_clean_mask
     from astroviper.utils.data_group_tools import modify_data_groups_xds
+    from astroviper.utils.data_partitioning import get_compute_resources
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
-        validate_image_chunking_and_sharding,
         write_zarr_image_store,
     )
     from astroviper.utils.measurement_set_v2 import is_measurement_set_v2
@@ -866,87 +1026,64 @@ def image_cube_single_field(
     if compressor is None:
         compressor = Blosc(cname="lz4", clevel=5)
 
-    assert memory_mode == "in_memory", (
-        "Currently only in_memory is supported for memory_mode is implemented."
+    # A Measurement Set v2 is read through XRADIO's xradio_msv2 engine by both
+    # I/O engines. Checked here, before anything is written.
+    input_is_msv2 = is_measurement_set_v2(ps_store)
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_input_storage,
     )
 
-    # Sharded output is written by the concurrent direct-blob (skunk_works) writer;
-    # the standard write path cannot safely write partial shards concurrently, so
-    # creating sharded arrays without it would corrupt the output. Fail fast rather
-    # than silently create sharded arrays a non-concurrent writer will clobber.
-    if image_sharding and not skunk_works:
-        raise ValueError(
-            "image_sharding requires skunk_works=True (sharded output is "
-            "written by the concurrent direct-blob writer)."
-        )
-
-    # FITS output is written by the concurrent direct-pwrite (skunk_works) FITS
-    # writer into files pre-created by this driver; the standard write path has
-    # no FITS support, and Zarr sharding does not apply to FITS files.
-    if output_image_format == "fits":
-        if not skunk_works:
-            raise ValueError(
-                "output_image_format='fits' requires skunk_works=True (FITS "
-                "output is written by the concurrent direct-pwrite writer)."
-            )
-        if image_sharding:
-            raise ValueError(
-                "image_sharding does not apply to FITS output "
-                "(output_image_format='fits')."
-            )
-        if image_chunking:
-            raise ValueError(
-                "image_chunking does not apply to FITS output "
-                "(output_image_format='fits'): FITS files have no chunked "
-                "storage layout."
-            )
-
-    # A Measurement Set v2 is read by the skunk-works node-task path only
-    # (through XRADIO's xradio_msv2 engine); the production path loads Zarr
-    # processing sets. Checked here, before anything is written.
-    input_is_msv2 = is_measurement_set_v2(ps_store)
+    check_input_storage(locals(), input_is_msv2=input_is_msv2)
     if input_is_msv2:
-        if not skunk_works:
-            raise ValueError(
-                f"{ps_store} is a Measurement Set v2, which is imaged with "
-                "skunk_works=True only; or convert it with "
-                "xradio.measurement_set.convert_msv2_to_processing_set and image "
-                "the processing set."
-            )
-        if write_visibility_model_to_ps or write_imaging_weights_to_ps:
-            raise ValueError(
-                "write_visibility_model_to_ps and write_imaging_weights_to_ps "
-                f"must be False for a Measurement Set v2 ps_store ({ps_store}): "
-                "an imaging run never writes into its input Measurement Set."
-            )
-        from astroviper.node_tasks.imaging.utils import require_msv2_engine
+        from astroviper.utils.measurement_set_v2_input import require_msv2_engine
 
         require_msv2_engine()
-
-    if n_mapping_parallelism is not None:
-        _validate_n_mapping_parallelism(n_mapping_parallelism)
 
     clean_mask_array = load_clean_mask(clean_mask, image_params["image_size"])
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
-    if restore and "sky_restored" not in image_data_variables_keep:
+    if (
+        restore
+        and restoration_output in ("apparent", "both")
+        and "sky_restored" not in image_data_variables_keep
+    ):
         image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
-    if primary_beam_correction:
-        if not restore:
-            raise ValueError("primary_beam_correction requires restore=True.")
+    if restore and restoration_output in ("primary_beam_corrected", "both"):
         if "sky_restored_primary_beam_corrected" not in image_data_variables_keep:
             image_data_variables_keep = list(image_data_variables_keep) + [
                 "sky_restored_primary_beam_corrected"
             ]
-    # The report draws the point spread function with its fitted Gaussian.
+    # A restore records the beams it applied.
+    if restore and "beam_fit_params_sky_restored" not in image_data_variables_keep:
+        image_data_variables_keep = list(image_data_variables_keep) + [
+            "beam_fit_params_sky_restored"
+        ]
+    # The report draws the point spread function with its fitted Gaussian, and
+    # the PSF beam of every channel against a restoring beam. Kept only for it:
+    # the zero beam of a flagged channel stops xradio's export to CASA.
     if (
         report is not None
-        and "point_spread_function" in image_data_variables_keep
+        and (
+            "point_spread_function" in image_data_variables_keep
+            or (restore and restoring_beam is not None)
+        )
         and "beam_fit_params_point_spread_function" not in image_data_variables_keep
     ):
         image_data_variables_keep = list(image_data_variables_keep) + [
             "beam_fit_params_point_spread_function"
+        ]
+    # find_continuum reads these variables of the cube (of the point spread
+    # function only its beams).
+    if find_continuum_first_round:
+        image_data_variables_keep = list(image_data_variables_keep) + [
+            variable
+            for variable in (
+                "sky_residual",
+                "primary_beam",
+                "beam_fit_params_point_spread_function",
+            )
+            if variable not in image_data_variables_keep
         ]
 
     # Every driver step is timed into ``timing_distributed_application``; the
@@ -961,66 +1098,23 @@ def image_cube_single_field(
     correlation_coords = correlations_for_stokes(
         image_params["polarization_coords"], instrument_polarization_basis
     )
-    # A per channel threshold has one row of Stokes plane values per image
-    # channel (each node task hands its channels their rows).
-    threshold_shape = np.shape(cycle_control_params.get("threshold", 0.0))
-    if len(threshold_shape) == 2 and threshold_shape != (
-        len(image_params["frequency_coords"]),
-        len(image_params["polarization_coords"]),
-    ):
-        raise ValueError(
-            f"a per channel cycle_control_params['threshold'] has shape "
-            f"{threshold_shape}; expected (n_frequency, n_polarization) = "
-            f"({len(image_params['frequency_coords'])}, "
-            f"{len(image_params['polarization_coords'])})"
-        )
-    # max_cycles (an integer, or "auto" with max_psf_fraction < 1),
-    # threshold_tolerance (a finite number >= 0), record_iteration_history (a
-    # bool) and exact_psf_subtraction (Hogbom only) are checked again in every
-    # node task; checked here too so that a bad value leaves no image behind.
-    validate_max_cycles(
-        cycle_control_params.get("max_cycles", -1),
-        cycle_control_params.get("max_psf_fraction"),
-    )
-    validate_threshold_tolerance(
-        cycle_control_params.get("threshold_tolerance", THRESHOLD_TOLERANCE)
-    )
-    validate_record_iteration_history(
-        deconvolver, cycle_control_params.get("record_iteration_history", False)
-    )
-    validate_exact_psf_subtraction(
-        deconvolver, cycle_control_params.get("exact_psf_subtraction", False)
-    )
-    # gridding_kernel_params too are checked here (and again in every node
-    # task); the direct Fourier transform makes no uv grid that could be kept.
-    if is_direct_fourier_transform(gridding_kernel_params):
-        kept_grids = sorted(
-            {"visibility", "uv_sampling"} & set(image_data_variables_keep)
-        )
-        if kept_grids:
-            raise ValueError(
-                f"image_data_variables_keep {kept_grids} are uv grids, which the "
-                'gridding_kernel_params type "dft" (the direct Fourier transform) '
-                "does not make"
-            )
-
     # A Measurement Set v2 is opened and its data group checked before
     # anything is written, so that their errors (a refused msv2_open_options
     # key, no MSv4 left after scan_intents, a Measurement Set the engine
     # cannot read, an MSv4 without the data group or one of the roles the
     # imaging reads) leave no image behind. Lazy: only the metadata is read.
     if input_is_msv2:
-        from astroviper.node_tasks.imaging.utils import (
-            check_data_group_skunk_works_msv2,
-            open_processing_set_skunk_works_msv2,
+        from astroviper.utils.measurement_set_v2_input import (
+            check_data_group_msv2,
+            open_processing_set_msv2,
         )
 
         start = time.time()
-        ps_xdt = open_processing_set_skunk_works_msv2(
+        ps_xdt = open_processing_set_msv2(
             ps_store, scan_intents=scan_intents, msv2_open_options=msv2_open_options
         )
         timing_distributed_application["T_open_processing_set"] = time.time() - start
-        check_data_group_skunk_works_msv2(ps_xdt, processing_set_data_group_name)
+        check_data_group_msv2(ps_xdt, processing_set_data_group_name)
 
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()
@@ -1051,16 +1145,7 @@ def image_cube_single_field(
             "populated by its node tasks.",
         )
 
-    start = time.time()
-    if output_image_format == "zarr":
-        # The store written can differ from the image_store given (the
-        # ".img.zarr" extension of newer XRADIO versions); everything below
-        # uses the store written.
-        image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
-    # For FITS output the empty files (headers + sparse data areas) are created
-    # after the processing set is opened, so the TELESCOP keyword can be read
-    # from it.
-    timing_distributed_application["T_write_empty_image"] = time.time() - start
+    timing_distributed_application["T_write_empty_image"] = 0.0
 
     # Determine the mapping parallelism (the number of frequency chunks, one
     # node task per chunk). Cube imaging always maps over frequency, so the
@@ -1092,36 +1177,33 @@ def image_cube_single_field(
         + str(len(parallel_coords["frequency"]["data_chunks"]))
     )
 
-    validate_image_chunking_and_sharding(
-        image_chunking, image_sharding, dict(img_xds.sizes), parallel_coords
+    # Check write alignment against the constructed image and automatic tasks.
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_output_layout,
+    )
+
+    check_output_layout(
+        locals(), parallel_coords=parallel_coords, image_shape=dict(img_xds.sizes)
     )
     timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
         time.time() - start
     )
 
-    # Add nan images (these will be overwritten with the actual image data but this ensures the coordinates and dtypes are correct and allows for lazy writing of the data)
-    # create_empty_data_varable_on_disk(zarr_store, dv_names, dims, shape, chunk, variable_dtype, compressor)
-    start = time.time()
-    if output_image_format == "zarr":
-        create_empty_data_variables_on_disk(
-            image_store,
-            image_data_variables_keep,
-            shape_dict=img_xds.sizes,
-            parallel_coords=parallel_coords,
-            compressor=compressor,
-            double_precision=not single_precision_image,
-            data_variable_definitions="imaging",
-            image_chunking=image_chunking,
-            image_sharding=image_sharding,
-        )
-    timing_distributed_application["T_create_empty_data_variables"] = (
-        time.time() - start
-    )
+    timing_distributed_application["T_create_empty_data_variables"] = 0.0
 
     zarr_meta = {}
 
     input_params = {}
-    input_params["image_params"] = image_params
+    # Cube nodes obtain their frequency slice from task_coords. Keep the full
+    # axis on the driver instead of copying it into every task's configuration.
+    input_params["image_params"] = {
+        name: value
+        for name, value in image_params.items()
+        if name != "frequency_coords"
+    }
+    # Each task's image covers its own channels; the whole image's spectral
+    # reference keeps its velocities equal to the image store's.
+    input_params["image_frequency_attrs"] = dict(img_xds.frequency.attrs)
     input_params["imaging_weights_params"] = imaging_weights_params
     input_params["zarr_meta"] = zarr_meta
     input_params["to_disk"] = True
@@ -1130,6 +1212,7 @@ def image_cube_single_field(
     input_params["compressor"] = compressor
     input_params["image_store"] = image_store
     input_params["input_data_store"] = ps_store
+    input_params["input_checked"] = True
     input_params["processing_set_data_group_name"] = processing_set_data_group_name
     input_params["image_data_variables_keep"] = image_data_variables_keep
     input_params["memory_mode"] = memory_mode
@@ -1145,12 +1228,16 @@ def image_cube_single_field(
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
-    input_params["primary_beam_correction"] = primary_beam_correction
+    input_params["restoration_output"] = restoration_output
+    input_params["restoring_beam"] = (
+        None if restoring_beam is None else [float(value) for value in restoring_beam]
+    )
     input_params["psf_fitting_method"] = psf_fitting_method
     input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["primary_beam_params"] = primary_beam_params
     input_params["clean_mask"] = clean_mask_array
-    input_params["skunk_works"] = skunk_works
+    input_params["auto_mask_params"] = auto_mask_params
+    input_params["io_engine"] = io_engine
     input_params["image_chunking"] = image_chunking
     input_params["image_sharding"] = image_sharding
     input_params["output_image_format"] = output_image_format
@@ -1166,42 +1253,19 @@ def image_cube_single_field(
         ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
         timing_distributed_application["T_open_processing_set"] = time.time() - start
 
-    # The skunk-works node-task I/O path reconstructs the processing set from the
+    if len(ps_xdt) == 0:
+        raise ValueError("The Processing Set is empty after the requested selection.")
+
+    # The chunk engine's node-task loader reconstructs the processing set from the
     # data group's variables only, so it needs the resolved role->variable
     # mapping. Read it once here (from the first MS) and forward it to every
     # node task rather than re-reading it per task. (The lazy inputs of a
     # Measurement Set v2 carry each MSv4's own data group instead.)
-    if skunk_works and not input_is_msv2:
+    if io_engine == "chunk" and not input_is_msv2:
         first_ms = next(iter(ps_xdt.values()))
         input_params["data_group"] = first_ms.ds.attrs["data_groups"][
             processing_set_data_group_name
         ]
-
-    # FITS output: pre-create one XRADIO-conformant FITS file per kept image
-    # variable (complete header + sparse full-cube data area + zero-filled
-    # BEAMS tables) so the node tasks only pwrite disjoint byte ranges. Done
-    # here -- after the processing set is open -- so TELESCOP can be read from
-    # it; timed into the same slot the Zarr path uses for its empty variables.
-    if output_image_format == "fits":
-        from astroviper.node_tasks.imaging.utils import create_empty_fits_images
-
-        start = time.time()
-        first_ms = next(iter(ps_xdt.values()))
-        telescope_name = (
-            first_ms.ds.attrs.get("observation_info", {}).get("telescope_name")
-            or "UNKNOWN"
-        )
-        create_empty_fits_images(
-            image_store,
-            img_xds,
-            image_data_variables_keep,
-            double_precision=not single_precision_image,
-            telescope_name=telescope_name,
-            overwrite=overwrite,
-        )
-        timing_distributed_application["T_create_empty_data_variables"] += (
-            time.time() - start
-        )
 
     start = time.time()
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
@@ -1229,7 +1293,7 @@ def image_cube_single_field(
     # through XRADIO's engine. Nothing is read here.
     timing_distributed_application["T_add_lazy_input_data"] = 0.0
     if input_is_msv2:
-        from astroviper.node_tasks.imaging.utils import add_lazy_input_data
+        from astroviper.utils.measurement_set_v2_input import add_lazy_input_data
 
         start = time.time()
         add_lazy_input_data(
@@ -1237,29 +1301,133 @@ def image_cube_single_field(
         )
         timing_distributed_application["T_add_lazy_input_data"] = time.time() - start
 
-    # frequency_coords is not used by node tasks (they use task_coords["frequency"]["data"])
-    # so remove it to avoid embedding the full frequency axis in every task in the graph.
-    input_params["image_params"] = {
-        k: v for k, v in image_params.items() if k != "frequency_coords"
-    }
+    from astroviper.node_tasks.imaging.config_check import preflight_imaging_inputs
+    from astroviper.processing_functions.imaging.config_check import CUBE_SINGLE_FIELD
+    from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+        check_channel_partitions,
+    )
+
+    check_channel_partitions(
+        node_task_data_mapping,
+        ps_xdt,
+        image_params=image_params,
+        mode=CUBE_SINGLE_FIELD,
+    )
+    preflight_start = time.time()
+    spectral_diagnostics = preflight_imaging_inputs(
+        ps_xdt, locals(), mode=CUBE_SINGLE_FIELD
+    )
+    timing_distributed_application["T_input_preflight"] = time.time() - preflight_start
+    img_xds.attrs["input_validation"] = spectral_diagnostics
+
+    start = time.time()
+    if output_image_format == "zarr":
+        # The store written can differ from the image_store given (the
+        # ".img.zarr" extension of newer XRADIO versions); everything below
+        # uses the store written.
+        image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
+    # For FITS output the empty files (headers + sparse data areas) are created
+    # after the processing set is opened, so the TELESCOP keyword can be read
+    # from it.
+    timing_distributed_application["T_write_empty_image"] = time.time() - start
+
+    # Add nan images (these will be overwritten with the actual image data but this ensures the coordinates and dtypes are correct and allows for lazy writing of the data)
+    # create_empty_data_varable_on_disk(zarr_store, dv_names, dims, shape, chunk, variable_dtype, compressor)
+    start = time.time()
+    if output_image_format == "zarr":
+        create_empty_data_variables_on_disk(
+            image_store,
+            image_data_variables_keep,
+            shape_dict=img_xds.sizes,
+            parallel_coords=parallel_coords,
+            compressor=compressor,
+            double_precision=not single_precision_image,
+            data_variable_definitions="imaging",
+            image_chunking=image_chunking,
+            image_sharding=image_sharding,
+        )
+    first_round_params = None
+    if find_continuum_first_round:
+        first_round_params = _create_find_continuum_first_round(
+            image_store,
+            img_xds,
+            cycle_control_params.get("primary_beam_limit", 0.2),
+            compute_backend,
+        )
+    timing_distributed_application["T_create_empty_data_variables"] = (
+        time.time() - start
+    )
+
+    # FITS output: pre-create one XRADIO-conformant FITS file per kept image
+    # variable (complete header + sparse full-cube data area + zero-filled
+    # BEAMS tables) so the node tasks only pwrite disjoint byte ranges. Done
+    # here -- after the processing set is open -- so TELESCOP can be read from
+    # it; timed into the same slot the Zarr path uses for its empty variables.
+    if output_image_format == "fits":
+        from astroviper.utils.chunk_io import create_empty_fits_images
+        from astroviper.utils.io import (
+            imaging_data_variables_and_dims_double_precision,
+            imaging_data_variables_and_dims_single_precision,
+        )
+
+        start = time.time()
+        first_ms = next(iter(ps_xdt.values()))
+        telescope_name = (
+            first_ms.ds.attrs.get("observation_info", {}).get("telescope_name")
+            or "UNKNOWN"
+        )
+        create_empty_fits_images(
+            image_store,
+            img_xds,
+            image_data_variables_keep,
+            double_precision=not single_precision_image,
+            telescope_name=telescope_name,
+            overwrite=overwrite,
+            data_variable_definitions=(
+                imaging_data_variables_and_dims_single_precision
+                if single_precision_image
+                else imaging_data_variables_and_dims_double_precision
+            ),
+            restoring_beam=restoring_beam,
+        )
+        timing_distributed_application["T_create_empty_data_variables"] += (
+            time.time() - start
+        )
+
+    input_params["image_store"] = image_store
+    input_params["find_continuum_first_round_params"] = first_round_params
+    # Preflight diagnostics belong to the output metadata and driver result;
+    # cube nodes do not consume them.
 
     # Sharded output: dispatch the tasks in shard-interleaved "waves" (each wave
     # touches every shard file once) so the concurrently running tasks write to
     # all shard files -- and hence all Lustre OSTs -- instead of piling onto the
     # few shards that consecutive task_ids share. Derived from the on-disk shard
     # layout of the first kept variable, for any combination of sharded dims.
+    # With find_continuum's moments the waves run one spectral window at a
+    # time, so that a worker saves each window's moments about once.
     task_priorities = None
-    if skunk_works and image_sharding:
-        from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
+    if io_engine == "chunk" and image_sharding:
+        from astroviper.utils.chunk_io import compute_shard_task_priorities
 
         task_priorities = compute_shard_task_priorities(
             image_store, image_data_variables_keep[0], node_task_data_mapping
         )
+        if (
+            task_priorities is not None
+            and first_round_params is not None
+            and first_round_params["run_id"] is not None
+        ):
+            from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+                find_continuum_first_round_task_priorities,
+            )
 
-    # Create Map Graph. The node task has an explicit, NumPy-documented,
-    # standalone signature; graphviper's map() adapts it to the single
-    # ``input_params`` dict calling convention automatically (forwarding only the
-    # keys the node task declares), so it can be passed directly.
+            task_priorities = find_continuum_first_round_task_priorities(
+                task_priorities, node_task_data_mapping, first_round_params["windows"]
+            )
+
+    # The node task has an explicit, NumPy-documented standalone signature;
+    # graphviper adapts the input_params dictionary to its declared arguments.
     start = time.time()
     viper_graph = map(
         input_data=ps_xdt,
@@ -1334,6 +1502,11 @@ def image_cube_single_field(
     # pool, selected with compute_backend="mpi" and launched via
     # `python -m mpi4py.futures`). The MPI backend builds no dask.delayed graph, so
     # there is no separate "generate" step (T_generate_dask_graph = 0).
+    start = time.time()
+    compute_resources = get_compute_resources(
+        compute_backend, processing_function_threads
+    )
+    timing_distributed_application["T_get_compute_resources"] = time.time() - start
     if compute_backend == "mpi":
         if vizualize_graph:
             logger.warning(
@@ -1342,7 +1515,8 @@ def image_cube_single_field(
             )
         timing_distributed_application["T_generate_dask_graph"] = 0.0
         start = time.time()
-        imaging_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
+        with _first_round_cleared_on_failure(first_round_params):
+            imaging_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
         end = time.time()
         timing_distributed_application["T_compute_dask_graph"] = end - start
         # ABSOLUTE anchors of the compute call, saved with the overall row so
@@ -1361,23 +1535,91 @@ def image_cube_single_field(
             dask.visualize(dask_graph, filename="cube_imaging.png")
 
         start = time.time()
-        imaging_dict = dask.compute(dask_graph)[0]
+        with _first_round_cleared_on_failure(first_round_params):
+            imaging_dict = dask.compute(dask_graph)[0]
         end = time.time()
         timing_distributed_application["T_compute_dask_graph"] = end - start
         # Same absolute compute-call anchors as the MPI branch (see above).
         timing_distributed_application["compute_start_unixtime"] = start
         timing_distributed_application["compute_end_unixtime"] = end
-    else:
-        raise ValueError(
-            f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
+
+    # Planes without a fit (a flagged channel, a failed fit, a skipped task)
+    # take the beam tclean gives them, now that every task has written its
+    # beams, and before the report, during which the teardown watchdog that
+    # processes_with_mpi arms can end the process.
+    planes_without_fit = None
+    if output_image_format == "fits":
+        from astroviper.utils.chunk_io import fill_fits_beams_without_fit
+
+        planes_without_fit = fill_fits_beams_without_fit(
+            image_store, image_data_variables_keep
         )
+    elif "beam_fit_params_sky_restored" in image_data_variables_keep:
+        from astroviper.utils.io import fill_zarr_restored_beams_without_fit
+
+        fill_zarr_restored_beams_without_fit(image_store)
+
     # A graph of one map task has no reduce node: its result is the node
     # task's own dict, whose monitor series are folded in here as the reduce
     # folds them in.
+    imaging_dict["input_validation"] = spectral_diagnostics
+    imaging_dict["compute_resources"] = compute_resources
     usage = imaging_dict.pop("resource_usage", None)
     if usage is not None:
         imaging_dict["timing_node_tasks"] = _with_resource_usage(
             imaging_dict["timing_node_tasks"], usage
+        )
+
+    timing_distributed_application["T_find_continuum_first_round_write"] = 0.0
+    timing_distributed_application["T_find_continuum_first_round_drain"] = 0.0
+    # A failure of the first round after the compute leaves it incomplete (or
+    # its moments) and is logged; the imaging results are returned.
+    if first_round_params is not None:
+        from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+            bind_find_continuum_first_round_store,
+            clear_first_round_moments,
+            drain_first_round_moments,
+        )
+        from astroviper.node_tasks.imaging.find_continuum_first_round import (
+            write_first_round_rows,
+        )
+
+        first_round_store = first_round_params["first_round_store"]
+        run_id = first_round_params["run_id"]
+        start = time.time()
+        rows = imaging_dict.pop("find_continuum_first_round", None)
+        try:
+            first_round_complete = (
+                rows is not None
+                and write_first_round_rows(
+                    first_round_store, rows, img_xds.sizes["frequency"]
+                )["complete"]
+            )
+        except Exception as exc:
+            logger.error(
+                f"The find_continuum first round could not be written: {exc!r}"
+            )
+            first_round_complete = False
+        timing_distributed_application["T_find_continuum_first_round_write"] = (
+            time.time() - start
+        )
+        # Also when incomplete, so that the worker processes free their moments.
+        start = time.time()
+        moments_complete = [False] * len(first_round_params["windows"])
+        if run_id is not None:
+            try:
+                drained, records = drain_first_round_moments(
+                    run_id, first_round_store, first_round_params["windows"]
+                )
+                moments_complete = drained["moments_complete"]
+                imaging_dict.setdefault("timing_reduce_nodes", []).extend(records)
+            except Exception as exc:
+                logger.error(
+                    f"The imager's find_continuum moments could not be drained: {exc!r}"
+                )
+                clear_first_round_moments(run_id, first_round_store)
+        timing_distributed_application["T_find_continuum_first_round_drain"] = (
+            time.time() - start
         )
 
     # The processing set is not needed any more. Severing its parent<->child
@@ -1392,6 +1634,52 @@ def image_cube_single_field(
     if output_image_format == "zarr":
         zarr.consolidate_metadata(image_store)
     timing_distributed_application["T_consolidate_metadata"] = time.time() - start
+
+    if first_round_params is not None:
+        start = time.time()
+        # Absent when no task loaded its data.
+        task_seconds = imaging_dict["timing_node_tasks"].get(
+            "T_find_continuum_first_round"
+        )
+        try:
+            group = zarr.open_group(first_round_store, mode="r+")
+            group.attrs["find_continuum_first_round"] = dict(
+                group.attrs["find_continuum_first_round"],
+                imager={
+                    "n_tasks": n_map_tasks,
+                    "T_find_continuum_first_round_sum": 0.0
+                    if task_seconds is None
+                    else float(task_seconds.sum()),
+                    "T_drain": timing_distributed_application[
+                        "T_find_continuum_first_round_drain"
+                    ],
+                },
+            )
+            bind_find_continuum_first_round_store(first_round_store, image_store)
+        except Exception as exc:
+            logger.error(
+                "The find_continuum first-round store could not be bound to the "
+                f"cube: {exc!r}"
+            )
+            first_round_complete = False
+        timing_distributed_application["T_find_continuum_first_round_write"] += (
+            time.time() - start
+        )
+        if not first_round_complete:
+            logger.warning(
+                "The find_continuum first round was not made: a chunk of the "
+                "cube or its first round could not be written."
+            )
+        imaging_dict["find_continuum_first_round"] = (
+            {
+                "store": first_round_store,
+                "primary_beam_limit": first_round_params["primary_beam_limit"],
+                "complete": True,
+                "moments_complete": moments_complete,
+            }
+            if first_round_complete
+            else None
+        )
 
     application_end = time.time()
     timing_distributed_application["T_total"] = application_end - application_start
@@ -1409,7 +1697,7 @@ def image_cube_single_field(
         IMAGING_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
     )
-    from astroviper.utils.timing import format_timing_summary
+    from astroviper.utils.timing import format_timing_summary, node_task_timing_table
 
     # Driver-level ("distributed application") timing breakdown.
     logger.info(
@@ -1422,24 +1710,14 @@ def image_cube_single_field(
         )
     )
 
-    # Per-node-task timing summarized across all frequency chunks: the mean of
-    # each timing column over all chunks, then the max (the slowest chunk).
+    # Node-task timing over all frequency chunks, as in the report.
     timing_node_tasks = imaging_dict["timing_node_tasks"]
     logger.info(
-        format_timing_summary(
-            timing_node_tasks.mean(numeric_only=True).to_dict(),
-            IMAGING_TIMING_PHASES,
-            total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER node-task timing: MEAN over frequency chunks (seconds)",
-        )
-    )
-    logger.info(
-        format_timing_summary(
-            timing_node_tasks.max(numeric_only=True).to_dict(),
-            IMAGING_TIMING_PHASES,
-            total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER node-task timing: MAX over frequency chunks (seconds)",
-        )
+        f"AstroVIPER node-task timing over the {len(timing_node_tasks)} frequency "
+        "chunks (seconds)\n"
+        + node_task_timing_table(
+            timing_node_tasks, IMAGING_TIMING_PHASES, total_key=IMAGING_TIMING_TOTAL_KEY
+        ).to_string(float_format="{:.3f}".format)
     )
 
     imaging_dict["report"] = None
@@ -1457,6 +1735,8 @@ def image_cube_single_field(
             output_image_format=output_image_format,
             image_data_variables_keep=image_data_variables_keep,
             thread_info=thread_info,
+            restoring_beam=restoring_beam,
+            planes_without_fit=planes_without_fit,
         )
     return imaging_dict
 
@@ -1471,6 +1751,123 @@ def _with_resource_usage(timing, usage):
     return timing
 
 
+@contextlib.contextmanager
+def _first_round_cleared_on_failure(first_round_params):
+    """When the imaging compute raises, no worker keeps the moments of the run
+    and its slots are removed."""
+    try:
+        yield
+    except BaseException:
+        if first_round_params is not None:
+            from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+                clear_first_round_moments,
+            )
+
+            clear_first_round_moments(
+                first_round_params["run_id"], first_round_params["first_round_store"]
+            )
+        raise
+
+
+def _create_find_continuum_first_round(
+    image_store, img_xds, primary_beam_limit, compute_backend
+):
+    """Create the empty first-round store of the cube and the directory of
+    the moments' slots; return the node tasks' ``find_continuum_first_round_params``.
+
+    The spectral windows are the linear runs of the cube's channels. Without
+    the Dask backend the run has no ``run_id`` (the drain cannot address MPI
+    ranks), so no moments.
+    """
+    import shutil
+    import uuid
+
+    from graphviper.graph_tools.coordinate_utils import make_parallel_coord
+
+    from astroviper.distributed_applications.imaging.find_continuum_first_round import (
+        create_find_continuum_first_round_store,
+        find_continuum_first_round_partials_path,
+        find_continuum_first_round_store_path,
+        find_continuum_merge_tile_counts,
+    )
+    from astroviper.processing_functions.imaging.find_continuum_ultra.settings import (
+        linear_spectral_axis,
+    )
+    from astroviper.processing_functions.imaging.utils.spectral_windows import (
+        linear_channel_ranges,
+        window_rest_frequency,
+    )
+
+    residual = img_xds.attrs["data_groups"]["residual"]
+    variables = {role: residual[role] for role in ("sky", "primary_beam")}
+    arrays = {
+        role: zarr.open_array(os.path.join(image_store, variable), mode="r")
+        for role, variable in variables.items()
+    }
+    tile_shape = arrays["sky"].chunks[-2:]
+    frequency = img_xds.frequency.values
+    rest_frequency = float(img_xds.frequency.attrs["rest_frequency"]["data"])
+    windows = []
+    for start, stop in linear_channel_ranges(frequency):
+        n_channels, first_frequency, _, channel_increment = linear_spectral_axis(
+            frequency[start:stop]
+        )
+        windows.append(
+            {
+                "channel_range": [start, stop],
+                "first_frequency": first_frequency,
+                "channel_increment": channel_increment,
+                "n_channels": n_channels,
+                "rest_frequency": window_rest_frequency(
+                    frequency, [start, stop], rest_frequency
+                ),
+            }
+        )
+    store = find_continuum_first_round_store_path(image_store)
+    params = {
+        "first_round_store": store,
+        "variables": variables,
+        "polarization_index": list(img_xds.polarization.values).index("I"),
+        "primary_beam_limit": primary_beam_limit,
+        "tile_shape": tile_shape,
+        "value_dtypes": {role: array.dtype.name for role, array in arrays.items()},
+        "run_id": uuid.uuid4().hex if compute_backend == "dask" else None,
+        "windows": windows,
+        "partials_directory": find_continuum_first_round_partials_path(store),
+        "rest_frequency": rest_frequency,
+    }
+    # The merge tiles of find_continuum_ultra's moments.
+    merge_tile_shape = [
+        len(
+            make_parallel_coord(coord=img_xds[dim], n_chunks=n_chunks)["data_chunks"][0]
+        )
+        for dim, n_chunks in zip(
+            ("l", "m"),
+            find_continuum_merge_tile_counts(arrays["sky"].shape[-2:], tile_shape),
+            strict=True,
+        )
+    ]
+    create_find_continuum_first_round_store(
+        first_round_store=store,
+        n_channels=frequency.size,
+        image_shape=arrays["sky"].shape,
+        tile_shape=tile_shape,
+        merge_tile_shape=merge_tile_shape,
+        primary_beam_limit=primary_beam_limit,
+        variables=variables,
+        polarization_index=params["polarization_index"],
+        value_dtypes=params["value_dtypes"],
+        run_id=params["run_id"],
+        written_by="image_cube_single_field",
+        windows=params["windows"],
+        rest_frequency=params["rest_frequency"],
+    )
+    shutil.rmtree(params["partials_directory"], ignore_errors=True)
+    if params["run_id"] is not None:
+        os.makedirs(params["partials_directory"])
+    return params
+
+
 def combine_return_data_frames(input_data, input_params):
     """Reduce per-chunk ``{"timing_node_tasks", "deconvolution"}`` results into one dict.
 
@@ -1483,7 +1880,9 @@ def combine_return_data_frames(input_data, input_params):
     chunk), merges the per-chunk deconvolution dicts with
     :func:`merge_imaging_dicts` and concatenates the per-chunk statistics along
     ``frequency`` (:func:`concatenate_plane_statistics`). Because every chunk
-    covers a disjoint global channel range, the merges never collide.
+    covers a disjoint global channel range, the merges never collide. The
+    rows of find_continuum's first round are concatenated and their
+    ``write_failed`` or-ed.
 
     Returns the same ``{"timing_node_tasks", "deconvolution",
     "image_statistics"}`` shape so it composes under tree-mode reduction (its
@@ -1494,7 +1893,7 @@ def combine_return_data_frames(input_data, input_params):
     input_data : list of dict
         Per-chunk (or partially reduced) results, each with
         ``"timing_node_tasks"``, ``"deconvolution"`` and (optionally)
-        ``"image_statistics"`` keys.
+        ``"image_statistics"`` and ``"find_continuum_first_round"`` keys.
     input_params : dict
         Unused; present for the GraphVIPER reduce signature.
 
@@ -1502,7 +1901,8 @@ def combine_return_data_frames(input_data, input_params):
     -------
     dict
         ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ImagingDict,
-        "image_statistics": dict, "timing_reduce_nodes": list}``.
+        "image_statistics": dict, "timing_reduce_nodes": list}``, and
+        ``"find_continuum_first_round"`` when an input has it.
     """
     import os
     import socket
@@ -1522,6 +1922,7 @@ def combine_return_data_frames(input_data, input_params):
     timing_frames = []
     imaging_dicts = []
     statistics_list = []
+    first_rounds = []
     # Per-reduce-node timing provenance: child reduce calls carry their records
     # in "timing_reduce_nodes" (leaf node-task results have none); pool them and
     # append this call's own record, so the final result holds one record per
@@ -1542,6 +1943,8 @@ def combine_return_data_frames(input_data, input_params):
         timing_frames.append(timing)
         imaging_dicts.append(result["deconvolution"])
         statistics_list.append(result.get("image_statistics", {}))
+        if "find_continuum_first_round" in result:
+            first_rounds.append(result["find_continuum_first_round"])
         reduce_records.extend(result.get("timing_reduce_nodes", []))
 
     # ONE concat per reduce call: concatenating inside the loop re-copied the
@@ -1575,12 +1978,24 @@ def combine_return_data_frames(input_data, input_params):
             "n_rows_out": int(len(combined_timing)),
         }
     )
-    return {
+    combined = {
         "timing_node_tasks": combined_timing,
         "deconvolution": merged_deconvolve,
         "image_statistics": merged_statistics,
         "timing_reduce_nodes": reduce_records,
     }
+    if first_rounds:
+        import numpy as np
+
+        combined["find_continuum_first_round"] = {
+            **{
+                key: np.concatenate([rows[key] for rows in first_rounds])
+                for key in first_rounds[0]
+                if key != "write_failed"
+            },
+            "write_failed": any(rows["write_failed"] for rows in first_rounds),
+        }
+    return combined
 
 
 def _validate_n_mapping_parallelism(n_mapping_parallelism):
@@ -1595,21 +2010,17 @@ def _validate_n_mapping_parallelism(n_mapping_parallelism):
     ValueError
         On any other key, or a non-positive/non-integer chunk count.
     """
-    if set(n_mapping_parallelism) != {"frequency"}:
-        raise ValueError(
-            "n_mapping_parallelism must be a dict with the single key "
-            "'frequency' (cube imaging always maps over frequency), e.g. "
-            '{"frequency": 500}; got keys '
-            f"{sorted(n_mapping_parallelism)}."
+    from astroviper.processing_functions.imaging.config_check import (
+        CUBE_SINGLE_FIELD,
+        check_driver_workflow,
+    )
+
+    try:
+        check_driver_workflow(
+            {"n_mapping_parallelism": n_mapping_parallelism}, mode=CUBE_SINGLE_FIELD
         )
-    count = n_mapping_parallelism["frequency"]
-    if count is not None and (
-        isinstance(count, bool) or not isinstance(count, int) or count < 1
-    ):
-        raise ValueError(
-            "n_mapping_parallelism['frequency'] must be a positive int or "
-            f"None (auto), got {count!r}."
-        )
+    except TypeError as error:
+        raise ValueError(str(error)) from error
 
 
 def calculate_mapping_parallelism_for_cube_imaging(

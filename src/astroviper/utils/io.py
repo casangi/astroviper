@@ -134,6 +134,12 @@ imaging_data_variables_and_dims_double_precision = {
         "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_DECONVOLVED",
     },
+    "beam_fit_params_sky_restored": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_RESTORED",
+        "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
+    },
 }
 
 imaging_data_variables_and_dims_single_precision = {
@@ -207,25 +213,32 @@ imaging_data_variables_and_dims_single_precision = {
         "name": "MASK",
         "attrs": {"dtype": "bool"},
     },
+    # Beam fits stay float64: float32 copies can change their common_beam.
     "beam_fit_params_point_spread_function": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
     },
     "beam_fit_params_sky_residual": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_RESIDUAL",
     },
     "beam_fit_params_sky_dirty": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_DIRTY",
     },
     "beam_fit_params_sky_deconvolved": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_DECONVOLVED",
+    },
+    "beam_fit_params_sky_restored": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_RESTORED",
+        "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
     },
 }
 
@@ -257,6 +270,7 @@ imaging_data_variable_data_group_roles = {
     ),
     "sky_restored_flat_noise": ("restored", "sky_flat_noise"),
     "sky_restored_flat_sky": ("restored", "sky_flat_sky"),
+    "beam_fit_params_sky_restored": ("restored", "beam_fit_params_sky"),
     "alpha": ("restored", "alpha"),
     "alpha_error": ("restored", "alpha_error"),
     "beta": ("restored", "beta"),
@@ -311,6 +325,69 @@ def write_result_chunk_to_disk_using_zarr(
         group = zarr.open_group(image_store, mode="r+")
         sky = group[dv]
         sky[idx] = img_xds[dv].values
+
+
+def write_result_chunk(
+    io_engine,
+    image_store,
+    image_data_variables_keep,
+    task_coords,
+    img_xds,
+    output_image_format="zarr",
+    image_sharding=None,
+    processing_function_threads=1,
+):
+    """Write a node task's result chunk into the pre-created image store.
+
+    Parameters
+    ----------
+    io_engine : {"chunk", "xradio"}
+        ``"chunk"`` writes the chunk blobs directly
+        (:func:`~astroviper.utils.chunk_io.write_zarr`,
+        :func:`~astroviper.utils.chunk_io.write_zarr_sharded` when
+        ``image_sharding`` is set, :func:`~astroviper.utils.chunk_io.write_fits`
+        for FITS); ``"xradio"`` writes with
+        :func:`write_result_chunk_to_disk_using_zarr`.
+    image_store : str
+        Path of the image store (the directory of the FITS files for FITS).
+    image_data_variables_keep : list of str
+        Variables to write.
+    task_coords : dict
+        ``{dimension: {"slice": slice, ...}}`` of the chunk in the image.
+    img_xds : xarray.Dataset
+        The chunk.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of the image store; FITS needs ``io_engine="chunk"``.
+    image_sharding : dict, optional
+        Shard sizes of a sharded Zarr store (``io_engine="chunk"`` only).
+    processing_function_threads : int, optional
+        Threads of the chunk writers.
+    """
+    if io_engine not in ("chunk", "xradio"):
+        raise ValueError(f"io_engine must be 'chunk' or 'xradio', not {io_engine!r}.")
+    if io_engine == "xradio":
+        if output_image_format == "fits" or image_sharding:
+            raise ValueError("FITS and sharded output need io_engine='chunk'.")
+        write_result_chunk_to_disk_using_zarr(
+            image_store, image_data_variables_keep, task_coords, img_xds
+        )
+        return
+
+    from astroviper.utils import chunk_io
+
+    if output_image_format == "fits":
+        writer = chunk_io.write_fits
+    elif image_sharding:
+        writer = chunk_io.write_zarr_sharded
+    else:
+        writer = chunk_io.write_zarr
+    writer(
+        image_store,
+        image_data_variables_keep,
+        task_coords,
+        img_xds,
+        processing_function_threads=processing_function_threads,
+    )
 
 
 def _to_zarr_v3_codec(compressor):
@@ -368,7 +445,13 @@ def _task_chunk_lengths(dim, parallel_coords):
 
 
 def validate_image_chunking_and_sharding(
-    image_chunking, image_sharding, shape_dict, parallel_coords, extra_dims=("u", "v")
+    image_chunking,
+    image_sharding,
+    shape_dict,
+    parallel_coords,
+    extra_dims=("u", "v"),
+    *,
+    parallelism_pending=False,
 ):
     """Validate the on-disk image chunking and sharding against the image and
     the mapping parallelism.
@@ -405,6 +488,10 @@ def validate_image_chunking_and_sharding(
         ``frequency``), providing the per-task chunk lengths.
     extra_dims : tuple of str, optional
         Dimension names accepted as keys although absent from ``shape_dict``.
+    parallelism_pending : bool, optional
+        Before mapping, defer the implicit frequency chunk's shard divisibility
+        check until task extents are known. Explicit chunks and known image
+        extents are still checked. Default False.
 
     Raises
     ------
@@ -413,8 +500,21 @@ def validate_image_chunking_and_sharding(
         larger than the task extent or not dividing the task chunks, or a shard
         that is not a multiple of its chunk.
     """
+    from collections.abc import Mapping
+
+    for label, value in (
+        ("image_chunking", image_chunking),
+        ("image_sharding", image_sharding),
+    ):
+        if value is not None and not isinstance(value, Mapping):
+            raise TypeError(f"{label} must be a mapping.")
     chunking = dict(image_chunking or {})
     sharding = dict(image_sharding or {})
+    if sharding:
+        import zarr
+
+        if int(zarr.__version__.split(".")[0]) < 3:
+            raise ValueError("image_sharding requires Zarr v3.")
     valid_dims = set(shape_dict) | set(extra_dims)
     for label, mapping in (("image_chunking", chunking), ("image_sharding", sharding)):
         for dim, size in mapping.items():
@@ -448,6 +548,8 @@ def validate_image_chunking_and_sharding(
                     )
     for dim, size in sharding.items():
         if dim not in shape_dict:
+            continue
+        if parallelism_pending and dim == "frequency" and dim not in chunking:
             continue
         chunk = chunking.get(dim, _task_extent(dim, shape_dict, parallel_coords))
         if size < int(shape_dict[dim]) and size % chunk:
@@ -487,6 +589,53 @@ def image_chunk_and_shard_shapes(
         chunks.append(chunk)
         shards.append(max(chunk, -(-want // chunk) * chunk))
     return chunks, shards
+
+
+def check_image_output_destination(
+    image_store, *, overwrite=False, output_image_format="zarr"
+):
+    """Reject an existing destination before opening imaging input data.
+
+    Parameters
+    ----------
+    image_store : str or path-like
+        Requested output name. Zarr follows the installed XRADIO writer's
+        naming policy. Cube FITS output uses this directory unchanged and
+        creates its per-variable FITS files inside it.
+    overwrite : bool, optional
+        Permit replacement. This check never creates, deletes, or changes files.
+    output_image_format : {"zarr", "fits"}, optional
+        Output representation, default "zarr".
+
+    Raises
+    ------
+    FileExistsError
+        If the actual output destination exists and overwrite is False.
+
+    Notes
+    -----
+    The writer must still check at write time: a destination can appear after
+    this early check. Older XRADIO writers without a Zarr naming resolver keep
+    the requested name; newer writers supply the resolver used here.
+    """
+    import os
+
+    if overwrite:
+        return
+    destination = os.fsdecode(os.fspath(image_store))
+    if output_image_format == "zarr":
+        from xradio.image import image as image_module
+
+        resolve_name = getattr(image_module, "zarr_store_name", None)
+        if resolve_name is not None:
+            destination = os.path.expanduser(destination)
+            if len(destination) > 1:
+                destination = destination.rstrip(os.sep)
+            destination = resolve_name(destination)
+    if os.path.lexists(destination):
+        raise FileExistsError(
+            f"{destination} already exists. Set overwrite=True to replace it."
+        )
 
 
 def write_zarr_image_store(img_xds, image_store, overwrite=False):
@@ -530,6 +679,38 @@ def write_zarr_image_store(img_xds, image_store, overwrite=False):
     if written_paths:
         return written_paths[0]
     return image_store
+
+
+def fill_zarr_restored_beams_without_fit(image_store):
+    """Give the planes of ``BEAM_FIT_PARAMS_SKY_RESTORED`` without a fit the beam
+    ``tclean`` gives them.
+
+    Run ONCE in the driver, after every node task has written its beams, for
+    every Zarr image store, whichever writer made it. The planes without a fit
+    (a flagged channel, a failed fit, a skipped task) take the first beam of
+    largest area of the planes with one, or a circle of 1e-6 arcsec at 0
+    degrees when no plane has one
+    (:func:`~astroviper.processing_functions.imaging.restore.fill_planes_without_fit`).
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the Zarr image store, which holds ``BEAM_FIT_PARAMS_SKY_RESTORED``.
+    """
+    import zarr
+
+    from astroviper.processing_functions.imaging.restore import (
+        NO_FIT_BEAM,
+        fill_planes_without_fit,
+    )
+
+    restored_beam = zarr.open_group(image_store, mode="r+")[
+        "BEAM_FIT_PARAMS_SKY_RESTORED"
+    ]
+    beams = restored_beam[...]
+    filled = fill_planes_without_fit(beams, NO_FIT_BEAM)
+    if filled is not beams:
+        restored_beam[...] = filled
 
 
 def create_empty_data_variables_on_disk(
@@ -593,7 +774,7 @@ def create_empty_data_variables_on_disk(
         their own index entry, and the shard files are pre-created sparse with
         an empty index. This replaces one-file-per-chunk with far fewer files
         (metadata-server relief) and is written by
-        :func:`astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_sharded_skunk_works`.
+        :func:`astroviper.utils.chunk_io.write_zarr_sharded`.
         ``None`` (default) keeps the original one-file-per-chunk layout.
     """
     import os
@@ -607,11 +788,6 @@ def create_empty_data_variables_on_disk(
     validate_image_chunking_and_sharding(
         image_chunking, image_sharding, shape_dict, parallel_coords
     )
-    if image_sharding and not _ZARR_V3:
-        raise ValueError(
-            "image_sharding (output sharding) requires Zarr v3; the installed "
-            "zarr is v2."
-        )
     sharded = bool(image_sharding) and _ZARR_V3
 
     if _ZARR_V3 and compressor is not None:
@@ -650,7 +826,7 @@ def create_empty_data_variables_on_disk(
             # Sharded array: `chunks` is the INNER chunk shape and `shard` the
             # shard shape (see image_chunk_and_shard_shapes). The index CRC is
             # disabled so independent single-chunk writers can set their own
-            # index entries (see write_result_chunk_to_disk_sharded_skunk_works).
+            # index entries (see write_zarr_sharded).
             from zarr.codecs import BytesCodec, ShardingCodec
 
             inner_codecs = [BytesCodec()] + ([compressor] if compressor else [])
@@ -698,7 +874,7 @@ def create_empty_data_variables_on_disk(
     if sharded:
         # Pre-create every shard file (sparse, empty index) ONCE here in the driver
         # so the concurrent write phase creates no files (metadata-server relief).
-        from astroviper.node_tasks.imaging.utils import (
+        from astroviper.utils.chunk_io import (
             precreate_sharded_files,
             record_shard_ost_map,
         )

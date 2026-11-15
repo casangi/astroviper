@@ -15,6 +15,8 @@ def make_undeconvolved_image_mvc_single_field(
     image_data_group_out_name="residual",
     processing_function_threads=1,
     complex_dtype=None,
+    *,
+    input_checked: bool = False,
 ):
     """Grid residual visibilities into a frequency-resolved MVC UV cube.
 
@@ -30,7 +32,16 @@ def make_undeconvolved_image_mvc_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``
@@ -55,6 +66,12 @@ def make_undeconvolved_image_mvc_single_field(
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the channelized residual UV grids.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -62,6 +79,15 @@ def make_undeconvolved_image_mvc_single_field(
     return_df : pandas.DataFrame
         One-row timing dataframe for filtering and visibility gridding.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import numpy as np
     import pandas as pd
 
@@ -97,6 +123,7 @@ def make_undeconvolved_image_mvc_single_field(
             fft_padding=image_params["fft_padding"],
             processing_function_threads=(processing_function_threads),
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
         T_vis_grid += time.time() - start
 

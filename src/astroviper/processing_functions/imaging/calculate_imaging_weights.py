@@ -7,6 +7,105 @@ import xarray as xr
 from astroviper.utils.param_docs import shares_param_docs
 
 
+def check_continuum_weight_density_products(density_xds, *, name="weight_density"):
+    """Check runtime density products without reading density-grid pixels.
+
+    Parameters
+    ----------
+    density_xds : xarray.Dataset
+        Frequency-collapsed continuum density and summed statistical weights.
+        Briggs factors are checked separately once they have been calculated.
+    name : str, optional
+        Product location included in diagnostics, for example a reducer input.
+
+    Raises
+    ------
+    TypeError
+        If the product is not a Dataset.
+    KeyError
+        If required variables or the frequency coordinate are absent.
+    ValueError
+        If dimensions or the collapsed-frequency layout are inconsistent.
+    """
+    # --- Required density products ---
+    # Reduction and factor preparation consume the same two-variable contract.
+    if not isinstance(density_xds, xr.Dataset):
+        raise TypeError(
+            f"{name} must be an xarray.Dataset; received {type(density_xds).__name__}."
+        )
+    missing = [
+        key for key in ("WEIGHT_DENSITY_GRID", "SUM_WEIGHT") if key not in density_xds
+    ]
+    if missing:
+        raise KeyError(f"{name} is missing required variables {missing}.")
+    if "frequency" not in density_xds.coords:
+        raise KeyError(f"{name} does not contain a frequency coordinate.")
+
+    # --- Storage dimensions ---
+    # Ordered axes are part of the gridder contract. Xarray enforces shared
+    # dimension lengths within a Dataset, so separate axis-length tests add no
+    # further constraint once both variables use these exact dimensions.
+    for variable, dimensions in (
+        ("WEIGHT_DENSITY_GRID", ("frequency", "weight_polarization", "u", "v")),
+        ("SUM_WEIGHT", ("frequency", "weight_polarization")),
+    ):
+        if density_xds[variable].dims != dimensions:
+            raise ValueError(
+                f"{name} {variable} has dimensions {density_xds[variable].dims}; expected {dimensions}."
+            )
+
+    # --- Collapsed continuum frequency axis ---
+    # All selected visibility channels contribute to one stored density plane.
+    # Only the small frequency coordinate is read, never the density grid.
+    frequency = np.asarray(density_xds.coords["frequency"].values, dtype=np.float64)
+    if frequency.ndim != 1:
+        raise ValueError(
+            f"{name} frequency coordinate must be one-dimensional; received shape {frequency.shape}."
+        )
+    if frequency.size == 0:
+        raise ValueError(f"{name} contains no frequency channels.")
+    if not np.all(np.isfinite(frequency)):
+        raise ValueError(f"{name} frequency coordinate contains non-finite values.")
+    if np.unique(frequency).size != frequency.size:
+        raise ValueError(f"{name} frequency coordinate contains duplicate values.")
+    if not density_xds.attrs.get("continuum_frequency_collapsed", False):
+        raise ValueError(
+            f"{name} must contain a frequency-collapsed continuum weight-density grid."
+        )
+    if frequency.size != 1:
+        raise ValueError(f"{name} must contain exactly one frequency plane.")
+
+
+def check_continuum_briggs_factor_shape(factors, density_xds):
+    """Require two factors per density frequency/polarization plane.
+
+    Accept the freshly calculated NumPy array or the stored DataArray. This
+    checks shape only; product-specific dimension and numerical checks remain
+    with preparation and application. No factor values are read or converted.
+
+    Parameters
+    ----------
+    factors : numpy.ndarray or xarray.DataArray
+        Calculated or stored Briggs factors.
+    density_xds : xarray.Dataset
+        Density products whose layout has already been validated.
+
+    Raises
+    ------
+    ValueError
+        If the factors do not have shape (2, frequency, weight_polarization).
+    """
+    expected = (
+        2,
+        density_xds.sizes["frequency"],
+        density_xds.sizes["weight_polarization"],
+    )
+    if factors.shape != expected:
+        raise ValueError(
+            f"BRIGGS_FACTORS has an unexpected shape: {factors.shape}; expected {expected} (exactly two Briggs parameters)."
+        )
+
+
 def _equalize_parallel_hand_weights(
     data_weight: np.ndarray, casa_weighting_implementation: bool
 ) -> np.ndarray:
@@ -62,7 +161,9 @@ def _equalize_parallel_hand_weights(
     if casa_weighting_implementation:
         equalized = (w0 + w1) / 2
     else:
-        equalized = (2 * w0 * w1) / (w0 + w1)
+        equalized = np.divide(
+            2 * w0 * w1, w0 + w1, out=np.zeros_like(w0), where=(w0 + w1) != 0
+        )
     if cross_flagged is not None and cross_flagged.any():
         # a flagged cross hand drops the sample for every correlation
         equalized = np.where(cross_flagged, np.nan, equalized)
@@ -70,35 +171,17 @@ def _equalize_parallel_hand_weights(
 
 
 def normalize_imaging_weight_params(imaging_weights_params):
-    """Validate and normalize the imaging-weight configuration.
+    """Validate and return the original weighting configuration unchanged.
 
-    Parameters
-    ----------
-    imaging_weights_params : dict
-        User imaging-weight configuration.
-
-    Returns
-    -------
-    dict
-        Validated copy in which uniform weighting is represented by Briggs
-        weighting with robust parameter ``-2``.
+    The historical name is kept for internal callers. Uniform weighting is
+    handled by the Briggs kernel recipe without rewriting this mapping.
     """
-    import copy
-
     from astroviper.processing_functions.imaging.check_imaging_parameters import (
         check_imaging_weights_params,
     )
 
-    params = copy.deepcopy(imaging_weights_params)
-
-    if not check_imaging_weights_params(params):
-        raise ValueError("Invalid imaging-weight parameters.")
-
-    if params["weighting"] == "uniform":
-        params["weighting"] = "briggs"
-        params["robust"] = -2.0
-
-    return params
+    check_imaging_weights_params(imaging_weights_params)
+    return imaging_weights_params
 
 
 def prepare_local_data_weights(
@@ -149,6 +232,8 @@ def grid_imaging_weight_density_continuum(
     ms_data_group_in_name: str = "base",
     single_precision_gridding: bool = False,
     processing_function_threads: int = 1,
+    *,
+    input_checked: bool = False,
 ) -> xr.Dataset:
     """Grid one visibility partition's contribution to the weight density.
 
@@ -174,8 +259,9 @@ def grid_imaging_weight_density_continuum(
 
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -191,6 +277,12 @@ def grid_imaging_weight_density_continuum(
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
 
     Returns
     -------
@@ -218,14 +310,24 @@ def grid_imaging_weight_density_continuum(
     Natural weighting does not require a UV-density grid and is therefore
     rejected by this function.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_weight_density_method,
+        )
+
+        check_weight_density_method(imaging_weights_params)
+
     import copy
 
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.check_imaging_parameters import (
-        check_imaging_weights_params,
-    )
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
         grid_imaging_weights,
     )
@@ -233,35 +335,13 @@ def grid_imaging_weight_density_continuum(
     # ------------------------------------------------------------------
     # Validate and normalize the weighting configuration.
     # ------------------------------------------------------------------
-    if not isinstance(imaging_weights_params, dict):
-        raise TypeError(
-            "imaging_weights_params must be a dictionary; received "
-            f"{type(imaging_weights_params).__name__}."
-        )
-
     weight_params = copy.deepcopy(imaging_weights_params)
 
-    if not check_imaging_weights_params(weight_params):
-        raise ValueError("imaging_weights_params validation failed.")
+    weighting = weight_params.get("weighting", "natural")
 
-    weighting = str(weight_params["weighting"]).lower()
-
-    if weighting == "natural":
-        raise ValueError("Natural weighting does not require a weight-density grid.")
-
-    if weighting == "uniform":
-        # The robust value is not used during density gridding, but normalize
-        # the configuration here so that all stages use the same convention.
-        weight_params["weighting"] = "briggs"
-        weight_params["robust"] = -2.0
-
-    elif weighting != "briggs":
-        raise ValueError(
-            "grid_imaging_weight_density_continuum supports only "
-            f"'briggs' and 'uniform'; received {weighting!r}."
-        )
-
-    casa_weighting_implementation = bool(weight_params["casa_weighting_implementation"])
+    casa_weighting_implementation = weight_params.get(
+        "casa_weighting_implementation", False
+    )
 
     # ------------------------------------------------------------------
     # Resolve the common local output layout.
@@ -506,7 +586,7 @@ def grid_imaging_weight_density_continuum(
             ),
         },
         attrs={
-            "weighting": weight_params["weighting"],
+            "weighting": weight_params.get("weighting", "natural"),
             "robust": weight_params.get("robust"),
             "casa_weighting_implementation": (casa_weighting_implementation),
             "n_processing_set_datasets_gridded": datasets_gridded,
@@ -531,6 +611,8 @@ def degrid_imaging_weights_continuum(
     ms_data_group_out_modified: dict | None = None,
     overwrite: bool = False,
     processing_function_threads: int = 1,
+    *,
+    input_checked: bool = False,
 ) -> xr.DataTree:
     """Create per-visibility imaging weights from the global density grid.
 
@@ -568,8 +650,9 @@ def degrid_imaging_weights_continuum(
 
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -594,6 +677,12 @@ def degrid_imaging_weights_continuum(
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     xarray.DataTree
@@ -608,6 +697,19 @@ def degrid_imaging_weights_continuum(
     Global continuum weighting always uses a single density plane accumulated
     from all selected visibility channels.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_weight_density_method,
+        )
+
+        check_weight_density_method(imaging_weights_params)
+
     import copy
 
     import numpy as np
@@ -629,76 +731,24 @@ def degrid_imaging_weights_continuum(
             "weight_imaging": "WEIGHT_IMAGING",
         }
 
-    if not isinstance(global_weighting_xds, xr.Dataset):
-        raise TypeError(
-            "global_weighting_xds must be an xarray.Dataset; received "
-            f"{type(global_weighting_xds).__name__}."
-        )
-
-    weight_params = normalize_imaging_weight_params(imaging_weights_params)
-
-    weighting = str(weight_params["weighting"]).lower()
-
-    if weighting != "briggs":
-        raise ValueError(
-            "degrid_imaging_weights_continuum requires Briggs or uniform "
-            f"weighting; normalized weighting is {weighting!r}."
-        )
-
-    required_global_variables = (
-        "WEIGHT_DENSITY_GRID",
-        "SUM_WEIGHT",
-        "BRIGGS_FACTORS",
+    check_continuum_weight_density_products(
+        global_weighting_xds, name="global_weighting_xds"
     )
-
-    missing_global_variables = [
-        variable_name
-        for variable_name in required_global_variables
-        if variable_name not in global_weighting_xds
-    ]
-
-    if missing_global_variables:
+    if "BRIGGS_FACTORS" not in global_weighting_xds:
         raise KeyError(
-            "global_weighting_xds is missing required variables "
-            f"{missing_global_variables}."
+            "global_weighting_xds is missing required variable 'BRIGGS_FACTORS'."
         )
 
-    if "frequency" not in global_weighting_xds.coords:
-        raise KeyError("global_weighting_xds does not contain a frequency coordinate.")
-
+    weight_params = imaging_weights_params
+    weighting = weight_params.get("weighting", "natural")
     global_density_da = global_weighting_xds["WEIGHT_DENSITY_GRID"]
-    global_sum_weight_da = global_weighting_xds["SUM_WEIGHT"]
     global_briggs_da = global_weighting_xds["BRIGGS_FACTORS"]
 
-    expected_density_dims = (
-        "frequency",
-        "weight_polarization",
-        "u",
-        "v",
-    )
-    expected_sum_weight_dims = (
-        "frequency",
-        "weight_polarization",
-    )
     expected_briggs_dims = (
         "briggs_parameter",
         "frequency",
         "weight_polarization",
     )
-
-    if global_density_da.dims != expected_density_dims:
-        raise ValueError(
-            "WEIGHT_DENSITY_GRID has dimensions "
-            f"{global_density_da.dims}; expected "
-            f"{expected_density_dims}."
-        )
-
-    if global_sum_weight_da.dims != expected_sum_weight_dims:
-        raise ValueError(
-            "SUM_WEIGHT has dimensions "
-            f"{global_sum_weight_da.dims}; expected "
-            f"{expected_sum_weight_dims}."
-        )
 
     if global_briggs_da.dims != expected_briggs_dims:
         raise ValueError(
@@ -707,38 +757,7 @@ def degrid_imaging_weights_continuum(
             f"{expected_briggs_dims}."
         )
 
-    if global_briggs_da.sizes["briggs_parameter"] != 2:
-        raise ValueError(
-            "BRIGGS_FACTORS must contain exactly two Briggs parameters; "
-            f"received "
-            f"{global_briggs_da.sizes['briggs_parameter']}."
-        )
-
-    global_frequency = np.asarray(
-        global_weighting_xds.coords["frequency"].values,
-        dtype=np.float64,
-    )
-    if global_frequency.ndim != 1:
-        raise ValueError(
-            "The global frequency coordinate must be one-dimensional; "
-            f"received shape {global_frequency.shape}."
-        )
-
-    if global_frequency.size == 0:
-        raise ValueError("The global frequency coordinate contains no channels.")
-
-    if not np.all(np.isfinite(global_frequency)):
-        raise ValueError("The global frequency coordinate contains non-finite values.")
-
-    if not global_weighting_xds.attrs.get("continuum_frequency_collapsed", False):
-        raise ValueError(
-            "Global continuum weighting requires a frequency-collapsed density."
-        )
-    if global_frequency.size != 1:
-        raise ValueError(
-            "A frequency-collapsed continuum density must contain exactly one "
-            "stored density plane."
-        )
+    check_continuum_briggs_factor_shape(global_briggs_da, global_weighting_xds)
 
     # ------------------------------------------------------------------
     # Resolve the common image geometry used by the degridder.
@@ -806,7 +825,9 @@ def degrid_imaging_weights_continuum(
         overwrite=overwrite,
     )
 
-    casa_weighting_implementation = bool(weight_params["casa_weighting_implementation"])
+    casa_weighting_implementation = weight_params.get(
+        "casa_weighting_implementation", False
+    )
 
     datasets_processed = 0
 
@@ -841,33 +862,6 @@ def degrid_imaging_weights_continuum(
         local_density_grid = np.asarray(global_density_da.values)
         local_briggs_factors = np.asarray(global_briggs_da.values)
         frequency_map = np.zeros(local_frequency.size, dtype=np.int64)
-
-        expected_local_density_shape = (
-            1,
-            global_density_da.sizes["weight_polarization"],
-            n_uv[0],
-            n_uv[1],
-        )
-
-        if local_density_grid.shape != expected_local_density_shape:
-            raise ValueError(
-                f"Selected density grid for child {ms_name!r} has shape "
-                f"{local_density_grid.shape}; expected "
-                f"{expected_local_density_shape}."
-            )
-
-        expected_local_briggs_shape = (
-            2,
-            1,
-            global_density_da.sizes["weight_polarization"],
-        )
-
-        if local_briggs_factors.shape != expected_local_briggs_shape:
-            raise ValueError(
-                f"Selected Briggs factors for child {ms_name!r} have "
-                f"shape {local_briggs_factors.shape}; expected "
-                f"{expected_local_briggs_shape}."
-            )
 
         required_input_variables = (
             ms_data_group_in["uvw"],
@@ -972,7 +966,7 @@ def degrid_imaging_weights_continuum(
                     "Per-visibility continuum imaging weights derived "
                     "from the globally reduced UV-density grid."
                 ),
-                "weighting": weight_params["weighting"],
+                "weighting": weight_params.get("weighting", "natural"),
                 "robust": weight_params.get("robust"),
             },
         )
@@ -1008,7 +1002,8 @@ def calculate_imaging_weights(
     return_weight_density_grid: bool = False,
     processing_function_threads: int = 1,
     truncate_uv_cells: bool = False,
-    frequency_matching: str = "nearest",
+    *,
+    input_checked: bool = False,
 ) -> None | np.ndarray:
     """
     Calculate imaging weights for interferometric data.
@@ -1031,8 +1026,9 @@ def calculate_imaging_weights(
         size).
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -1061,10 +1057,11 @@ def calculate_imaging_weights(
         truncation, matching CASA continuum weighting. If False, use the
         nearest-cell convention used by cube and continuum weighting.
 
-    frequency_matching : {"nearest", "exact"}, default "nearest"
-        Cube and continuum imaging assign visibility frequencies to the nearest image
-        channel. Exact matching can optionally enforce one-to-one
-        channel assignment. This policy is independent of UV-cell truncation.
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
 
     Returns
     -------
@@ -1121,9 +1118,14 @@ def calculate_imaging_weights(
     ... )
     """
 
-    from astroviper.processing_functions.imaging.check_imaging_parameters import (
-        check_imaging_weights_params,
-    )
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CUBE_SINGLE_FIELD)
+
     from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
         calculate_briggs_params,
     )
@@ -1144,18 +1146,10 @@ def calculate_imaging_weights(
 
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
     _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
-    assert check_imaging_weights_params(_imaging_weights_params), (
-        "######### ERROR: imaging_weights_params checking failed"
+
+    casa_weighting_implementation = _imaging_weights_params.get(
+        "casa_weighting_implementation", False
     )
-
-    # Uniform weighting is implemented as Briggs with robust = -2.0.
-    if _imaging_weights_params["weighting"] == "uniform":
-        _imaging_weights_params["weighting"] = "briggs"
-        _imaging_weights_params["robust"] = -2.0
-
-    casa_weighting_implementation = _imaging_weights_params[
-        "casa_weighting_implementation"
-    ]
 
     ms_data_group_in, ms_data_group_out = create_ps_xdt_data_groups_in_and_out(
         ps_xdt,
@@ -1166,7 +1160,7 @@ def calculate_imaging_weights(
     )
 
     # for natural weighting, we can skip the gridding and degridding operations
-    if _imaging_weights_params["weighting"] == "natural":
+    if _imaging_weights_params.get("weighting", "natural") == "natural":
         logger.debug(
             "Calculating natural imaging weights (parallel-hand equalization only; "
             "no rescaling of data weights)."
@@ -1223,7 +1217,8 @@ def calculate_imaging_weights(
         # Same physical channel assignment as the visibility / PSF gridders,
         # so the weight density is accumulated on the image channel planes.
         frequency_map = map_visibility_frequencies_to_image(
-            freq_chan, img_xds.frequency.values, matching=frequency_matching
+            freq_chan,
+            img_xds.frequency.values,
         )
 
         grid_imaging_weights(
@@ -1254,7 +1249,8 @@ def calculate_imaging_weights(
 
         freq_chan = ms_xdt.frequency.values
         frequency_map = map_visibility_frequencies_to_image(
-            freq_chan, img_xds.frequency.values, matching=frequency_matching
+            freq_chan,
+            img_xds.frequency.values,
         )
 
         imaging_weights = degrid_imaging_weights(
@@ -1281,7 +1277,7 @@ def calculate_imaging_weights(
         data_group_out_name=ms_data_group_out_name,
         data_group_out=ms_data_group_out,
         description=(
-            f"Briggs imaging weights with robust={_imaging_weights_params['robust']}; "
+            f"Imaging weights with weighting={_imaging_weights_params.get('weighting', 'natural')}, robust={_imaging_weights_params.get('robust')}; "
             "parallel-hand correlation weights equalized, then rescaled by "
             "robust-dependent factors computed from the weight-density grid and "
             "channel-wise sum of data weights."

@@ -102,7 +102,7 @@ def progress_callback(
         logger.debug(f"  Iteration {iter_num}, peak at ({px}, {py}): {peak:.6f}")
 
 
-def _validate_deconvolve_params(deconvolve_params):
+def _validate_deconvolve_params(deconvolve_params, *, input_checked=False):
     """
     Validate a deconvolution parameter dict and fill in defaults.
 
@@ -131,7 +131,9 @@ def _validate_deconvolve_params(deconvolve_params):
           cutoff as a fraction of the peak primary beam (used to build the
           deconvolution mask, *not* the deconvolver stopping threshold).
           Default 0.0.
-        - ``clean_box`` : 4-tuple ``(xmin, xmax, ymin, ymax)``. Default
+        - ``clean_box`` : 4-tuple ``(xmin, xmax, ymin, ymax)`` with exclusive
+          upper bounds. The x axis follows ``m`` and y follows ``l``; the
+          nonempty rectangle must fit the image. Default
           ``(-1, -1, -1, -1)`` meaning the full image.
         - ``max_iter_divergence`` : int, number of consecutive iterations the
           RMS of a plane's residual may be above ``(1 + gain / 10)`` times
@@ -174,8 +176,16 @@ def _validate_deconvolve_params(deconvolve_params):
     # NOTE : XXX : This should probably not live here. This validation
     # function should live in utils or something.
 
-    if deconvolve_params is None:
-        deconvolve_params = {}
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(
+            {"deconvolve_params": deconvolve_params or {}}, mode=CUBE_SINGLE_FIELD
+        )
+    deconvolve_params = dict(deconvolve_params or {})
 
     default_params = {
         "gain": 0.1,
@@ -193,55 +203,8 @@ def _validate_deconvolve_params(deconvolve_params):
         "asp_scale_significance": True,
     }
 
-    for key, default_value in default_params.items():
-        if key not in deconvolve_params:
-            logger.debug(
-                f"Deconvolution parameter '{key}' not specified. Using default: {default_value}"
-            )
-            deconvolve_params[key] = default_value
-            continue
-
-        value = deconvolve_params[key]
-        if key == "gain":
-            if not (0 < value <= 1):
-                raise ValueError("CLEAN gain must be between 0 and 1.")
-        elif key == "max_iter":
-            if not (isinstance(value, int) and value > 0):
-                raise ValueError(
-                    "Maximum number of iterations must be a positive integer."
-                )
-        elif key == "threshold":
-            if value is not None and np.min(value) < 0:
-                raise ValueError("Threshold must be non-negative or None.")
-        elif key == "clean_box":
-            if value is not None and not (isinstance(value, tuple) and len(value) == 4):
-                raise ValueError(
-                    "Clean box must be a 4-tuple (xmin, xmax, ymin, ymax) or None."
-                )
-        elif key in ("min_psf_fraction", "max_psf_fraction", "primary_beam_limit"):
-            if not (0 <= value <= 1):
-                raise ValueError(f"{key} must be between 0 and 1.")
-        elif key == "max_iter_divergence":
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int | np.integer)
-                or not (value == -1 or value >= 1)
-            ):
-                raise ValueError(
-                    "max_iter_divergence must be a positive integer, or -1 to "
-                    f"disable the divergence test; got {value!r}."
-                )
-        elif key in (
-            "record_iteration_history",
-            "exact_psf_subtraction",
-            "asp_stop_after_hogbom_run",
-            "asp_residual_components",
-            "asp_scale_significance",
-        ):
-            if not isinstance(value, bool | np.bool_):
-                raise ValueError(f"{key} must be a bool; got {value!r}.")
-
-    return deconvolve_params
+    # Defaults are effective kernel inputs, not additions to the caller's config.
+    return {**default_params, **deconvolve_params}
 
 
 def validate_record_iteration_history(deconvolver, record_iteration_history):
@@ -266,16 +229,16 @@ def validate_record_iteration_history(deconvolver, record_iteration_history):
         If ``record_iteration_history`` is not a bool, or if the history is
         requested from a deconvolver not in :data:`ITERATION_HISTORY_ALGORITHMS`.
     """
-    if not isinstance(record_iteration_history, bool | np.bool_):
-        raise ValueError(
-            "record_iteration_history must be a bool; got "
-            f"{record_iteration_history!r}."
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_hogbom_option,
+    )
+
+    try:
+        check_hogbom_option(
+            deconvolver, "record_iteration_history", record_iteration_history
         )
-    if record_iteration_history and deconvolver not in ITERATION_HISTORY_ALGORITHMS:
-        raise ValueError(
-            "record_iteration_history is supported by the deconvolvers "
-            f"{ITERATION_HISTORY_ALGORITHMS} only; got deconvolver {deconvolver!r}."
-        )
+    except TypeError as error:
+        raise ValueError(str(error)) from error
 
 
 def validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction):
@@ -300,16 +263,14 @@ def validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction):
         If ``exact_psf_subtraction`` is not a bool, or if it is requested from
         a deconvolver other than ``"hogbom"`` or ``"hogbom_many_threads"``.
     """
-    if not isinstance(exact_psf_subtraction, bool | np.bool_):
-        raise ValueError(
-            f"exact_psf_subtraction must be a bool; got {exact_psf_subtraction!r}."
-        )
-    if exact_psf_subtraction and deconvolver not in EXACT_PSF_SUBTRACTION_ALGORITHMS:
-        raise ValueError(
-            "exact_psf_subtraction is supported by the Hogbom deconvolvers "
-            f"{EXACT_PSF_SUBTRACTION_ALGORITHMS} only; got deconvolver "
-            f"{deconvolver!r}."
-        )
+    from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+        check_hogbom_option,
+    )
+
+    try:
+        check_hogbom_option(deconvolver, "exact_psf_subtraction", exact_psf_subtraction)
+    except TypeError as error:
+        raise ValueError(str(error)) from error
 
 
 def _divergence_factors(gain):
@@ -742,6 +703,8 @@ def deconvolve(
     image_data_group_in_name: str = "residual",
     image_data_group_out_name: str = "model",
     image_data_group_out_modified: dict | None = None,
+    *,
+    input_checked: bool = False,
 ):
     """
     Deconvolve a residual image cube, in place, with planes parallelized
@@ -787,6 +750,10 @@ def deconvolve(
     image_data_group_out_modified : dict, optional
         Mapping from logical names to data-variable names for the output
         data group. Defaults to ``{"sky": "SKY_MODEL"}``.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active.
 
     Returns
     -------
@@ -842,16 +809,20 @@ def deconvolve(
       writes are lost, and the model stays zero. ``deconvolve`` raises a
       ``ValueError`` if handed lazy residual/model variables.
     """
-    if algorithm not in ("hogbom", "hogbom_many_threads", "asp"):
-        raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
-    # Refused before the model is created on img_xds.
-    validate_record_iteration_history(
-        algorithm, (deconvolve_params or {}).get("record_iteration_history", False)
-    )
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(
+            {"deconvolver": algorithm, "deconvolve_params": deconvolve_params or {}},
+            mode=CUBE_SINGLE_FIELD,
+        )
+
     exact_psf_subtraction = (deconvolve_params or {}).get(
         "exact_psf_subtraction", False
     )
-    validate_exact_psf_subtraction(algorithm, exact_psf_subtraction)
 
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {"sky": "SKY_MODEL"}
@@ -912,7 +883,9 @@ def deconvolve(
         img_xds, data_group_name=image_data_group_in_name
     )
 
-    deconvolve_params = _validate_deconvolve_params(deconvolve_params)
+    deconvolve_params = _validate_deconvolve_params(
+        deconvolve_params, input_checked=True
+    )
 
     max_psf_fraction = deconvolve_params["max_psf_fraction"]
     min_psf_fraction = deconvolve_params["min_psf_fraction"]
@@ -1003,6 +976,7 @@ def deconvolve(
             deconvolve_params=deconvolve_params,
             processing_function_threads=processing_function_threads,
             mask_cube=mask_arr,
+            input_checked=True,
         )
     elif algorithm == "hogbom_many_threads":
         results = hogbom_clean_many_threads(
@@ -1012,6 +986,7 @@ def deconvolve(
             deconvolve_params=deconvolve_params,
             processing_function_threads=processing_function_threads,
             mask_cube=mask_arr,
+            input_checked=True,
         )
     else:  # asp
         results = asp_clean(
@@ -1021,6 +996,7 @@ def deconvolve(
             deconvolve_params=deconvolve_params,
             processing_function_threads=processing_function_threads,
             mask_cube=mask_arr,
+            input_checked=True,
         )
 
     iters = np.asarray(results["iterations_performed"])
@@ -1136,6 +1112,8 @@ def hogbom_clean(
     deconvolve_params: dict | None = None,
     processing_function_threads: int = 1,
     mask_cube: np.ndarray | None = None,
+    *,
+    input_checked: bool = False,
 ):
     """
     Run Hogbom CLEAN over an entire ``(time, frequency, polarization,
@@ -1184,6 +1162,10 @@ def hogbom_clean(
         accepts the buffer directly without a copy). Pixels with mask
         value ``True`` are considered in the peak search; others are
         ignored. ``None`` disables masking.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active.
 
     Returns
     -------
@@ -1267,7 +1249,20 @@ def hogbom_clean(
     Recording does not change the residual or the model: they are the same
     to the bit with and without it.
     """
-    deconvolve_params = _validate_deconvolve_params(deconvolve_params)
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(
+            {"deconvolver": "hogbom", "deconvolve_params": deconvolve_params or {}},
+            mode=CUBE_SINGLE_FIELD,
+        )
+
+    deconvolve_params = _validate_deconvolve_params(
+        deconvolve_params, input_checked=True
+    )
 
     for name, arr in (
         ("residual_cube", residual_cube),
@@ -1351,25 +1346,34 @@ def hogbom_clean_many_threads(
     deconvolve_params: dict | None = None,
     processing_function_threads: int = 1,
     mask_cube: np.ndarray | None = None,
+    *,
+    input_checked: bool = False,
 ):
-    """Hogbom CLEAN over a 5-D cube, threaded across AND within planes (C++).
+    """Run Högbom with threads across and within image planes.
 
-    A drop-in alternative to :func:`hogbom_clean`. The C++ ``hogbom`` deconvolver
-    parallelizes only *across* the ``(time, frequency, polarization)`` planes, so
-    for single-channel imaging (a few planes) it leaves most threads idle. This
-    version additionally parallelizes each iteration's peak search and PSF
-    subtraction *within* every plane (the parallel domain is ``plane x row``), so
-    all ``processing_function_threads`` stay busy regardless of the plane count. The per-plane
-    algorithm and tie-breaking match :func:`hogbom_clean`, so the result is
-    bit-identical on tie-free data; the residual and model cubes are updated in
-    place. Parameters, return value and stop tests (threshold, divergence
-    with ``max_iter_divergence``; see the Notes of :func:`hogbom_clean`) match
-    :func:`hogbom_clean`.
-
-    Threads are set from ``processing_function_threads`` (the imaging
-    ``processing_function_threads``).
+    Parameters
+    ----------
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active.
     """
-    deconvolve_params = _validate_deconvolve_params(deconvolve_params)
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(
+            {
+                "deconvolver": "hogbom_many_threads",
+                "deconvolve_params": deconvolve_params or {},
+            },
+            mode=CUBE_SINGLE_FIELD,
+        )
+
+    deconvolve_params = _validate_deconvolve_params(
+        deconvolve_params, input_checked=True
+    )
 
     for name, arr in (
         ("residual_cube", residual_cube),
@@ -1445,6 +1449,8 @@ def asp_clean(
     deconvolve_params: dict | None = None,
     processing_function_threads: int = 1,
     mask_cube: np.ndarray | None = None,
+    *,
+    input_checked: bool = False,
 ):
     """
     Run Adaptive Scale Pixel (Asp / AAspClean) CLEAN over an entire
@@ -1534,11 +1540,13 @@ def asp_clean(
           about half the iterations of the gain 0.1 for the same deconvolution
           error (within 3 % on four test skies), 0.5 is worse on
           crescent-like emission.
-          ``<= 0`` uses ``gain``. Default 0.3.
+          Must not exceed 1; ``<= 0`` uses ``gain``. Default 0.3.
         - ``asp_residual_component_min_fraction``,
           ``asp_residual_component_max_epsilon_fraction`` : float, lower bound
           of ``frac`` (upper 0.99) and upper bound of ``eps_frac`` (lower 1e-3)
-          in the fit of the residual-shaped components. Defaults 0.3 and
+          in the fit of the residual-shaped components. The lower fraction
+          must not exceed 0.99 and the upper epsilon fraction must be at
+          least 1e-3. Defaults 0.3 and
           10.0; a lower ``frac`` or a larger ``eps_frac`` makes broad weak
           components that fail on crescent-like emission.
         - ``asp_residual_component_noise_floor`` : float, ``T`` is also at least
@@ -1587,6 +1595,10 @@ def asp_clean(
         converted to that dtype (the only place a copy may be made).
         ``None`` cleans the whole image.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active.
+
     Returns
     -------
     dict
@@ -1617,11 +1629,20 @@ def asp_clean(
         dtype, or have incompatible shapes, or if ``exact_psf_subtraction``
         is requested (see :func:`validate_exact_psf_subtraction`).
     """
-    deconvolve_params = _validate_deconvolve_params(deconvolve_params)
-    validate_record_iteration_history(
-        "asp", deconvolve_params["record_iteration_history"]
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_model_update,
+        )
+
+        check_model_update(
+            {"deconvolver": "asp", "deconvolve_params": deconvolve_params or {}},
+            mode=CUBE_SINGLE_FIELD,
+        )
+
+    deconvolve_params = _validate_deconvolve_params(
+        deconvolve_params, input_checked=True
     )
-    validate_exact_psf_subtraction("asp", deconvolve_params["exact_psf_subtraction"])
 
     for name, arr in (
         ("residual_cube", residual_cube),

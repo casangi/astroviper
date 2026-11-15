@@ -7,6 +7,7 @@ rather than retaining the frequency-cube NaN placeholders created at startup.
 
 import inspect
 import json
+import os
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,7 +23,6 @@ from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _accumulate_graph_timings,
-    _apply_exact_frequency_selection_to_continuum_mapping,
     _combine_graph_timing_frames,
     _continuum_image_for_disk,
     _create_continuum_weight_cache_store,
@@ -77,24 +77,6 @@ def test_mapping_with_task_weights_requires_every_task_once():
         _mapping_with_task_weights(mappings, {0: {}})
 
 
-def _frequency_mapping(task_frequency_chunks, child_frequencies):
-    """Build a minimal GraphVIPER-shaped mapping and Processing Set."""
-    processing_set = xr.DataTree()
-    processing_set["child"] = xr.Dataset(
-        coords={"frequency": np.asarray(child_frequencies, dtype=float)}
-    )
-    mapping = {
-        task_id: {
-            "task_coords": {
-                "frequency": {"data": np.asarray(frequencies, dtype=float)}
-            },
-            "data_selection": {},
-        }
-        for task_id, frequencies in enumerate(task_frequency_chunks)
-    }
-    return mapping, processing_set
-
-
 def test_load_clean_mask_returns_contiguous_boolean_plane(tmp_path):
     """The public mask file is normalized to a C-contiguous Boolean plane."""
     mask_path = tmp_path / "clean_mask.npy"
@@ -130,57 +112,6 @@ def test_load_clean_mask_rejects_invalid_input(
 
     with pytest.raises(ValueError, match=message):
         load_clean_mask(mask_path, image_size)
-
-
-def test_exact_frequency_selection_reorders_a_nonmonotonic_child():
-    """Irregular integer indexers put a non-monotonic child in task order."""
-    mapping, processing_set = _frequency_mapping(
-        [[10.0, 11.0, 20.0], [21.0, 30.0, 31.0]],
-        [30.0, 31.0, 20.0, 21.0, 10.0, 11.0],
-    )
-
-    result = _apply_exact_frequency_selection_to_continuum_mapping(
-        mapping,
-        processing_set,
-    )
-
-    for task_id in result:
-        selector = result[task_id]["data_selection"]["child"]["frequency"]
-        assert isinstance(selector, np.ndarray)
-        selected = processing_set["child"].isel(frequency=selector).frequency.values
-        np.testing.assert_array_equal(
-            selected,
-            result[task_id]["task_coords"]["frequency"]["data"],
-        )
-
-
-def test_exact_frequency_selection_retains_lazy_contiguous_slices():
-    """Contiguous child indices remain slice indexers instead of arrays."""
-    mapping, processing_set = _frequency_mapping(
-        [[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]],
-        [30.0, 31.0, 20.0, 21.0, 10.0, 11.0],
-    )
-
-    result = _apply_exact_frequency_selection_to_continuum_mapping(
-        mapping,
-        processing_set,
-    )
-
-    selectors = [
-        result[task_id]["data_selection"]["child"]["frequency"] for task_id in result
-    ]
-    assert selectors == [slice(4, 6), slice(2, 4), slice(0, 2)]
-
-
-def test_exact_frequency_selection_rejects_unassigned_child_channels():
-    """The helper never silently drops a Processing Set frequency channel."""
-    mapping, processing_set = _frequency_mapping([[10.0]], [10.0, 20.0])
-
-    with pytest.raises(ValueError, match="not assigned exactly once"):
-        _apply_exact_frequency_selection_to_continuum_mapping(
-            mapping,
-            processing_set,
-        )
 
 
 @pytest.fixture(scope="module")
@@ -379,12 +310,32 @@ def _mfs_map_result(task_id, value=1.0):
     image.attrs["continuum_imaging"] = {
         "continuum_mode": "mfs",
         "n_taylor_terms": 2,
-        "reference_frequency_hz": 1.0e9,
+        "reference_frequency": 1.0e9,
     }
     return {
         "image": image,
         "timing_node_tasks": pd.DataFrame({"task_id": [task_id]}),
     }
+
+
+def test_automatic_sensitivity_reduction_is_associative_and_requires_every_partition():
+    leaves = [_mfs_map_result(index) for index in range(3)]
+    for index, leaf in enumerate(leaves):
+        leaf["auto_weight_sums"] = xr.Dataset(
+            {"sum_weight_imaging": ("correlation", [1.0 + index, 2.0 + index])},
+            coords={"correlation": ["XX", "YY"]},
+        )
+    params = {"continuum_mode": "mfs", "additive_variables": ()}
+    flat = combine_continuum_chunks(leaves, params)
+    partial = combine_continuum_chunks(leaves[:2], params)
+    tree = combine_continuum_chunks([partial, leaves[2]], params)
+    xr.testing.assert_identical(flat["auto_weight_sums"], tree["auto_weight_sums"])
+    np.testing.assert_array_equal(
+        flat["auto_weight_sums"].sum_weight_imaging, [6.0, 9.0]
+    )
+    leaves[2].pop("auto_weight_sums")
+    with pytest.raises(ValueError, match="weight sums are missing"):
+        combine_continuum_chunks(leaves, params)
 
 
 def test_mfs_reducer_retains_one_identical_static_primary_beam():
@@ -595,19 +546,40 @@ def test_graph_timing_record_retains_model_update_timing():
     assert record["timing_model_update"] is not model_timing
 
 
+def test_graph_timing_record_keeps_finalization_out_of_map_tasks():
+    """The final node remains plottable without becoming a map-task row."""
+    finalization = pd.DataFrame({"T_image_cube_task": [4.0]})
+    record = _graph_timing_record(
+        "restoration",
+        {"timing_finalization": finalization},
+        {"T_compute_dask_graph": 5.0},
+        stage_kind="final",
+        includes_restoration=True,
+        timing_key="timing_finalization",
+    )
+
+    assert "timing_node_tasks" not in record
+    pd.testing.assert_frame_equal(
+        record["timing_finalization"][["T_image_cube_task"]], finalization
+    )
+
+
 def test_combine_graph_timing_frames_includes_every_graph():
     """Summary input contains tasks from weighting and every imaging cycle."""
     records = [
         {"timing_node_tasks": pd.DataFrame({"stage_value": [1.0, 2.0]})},
         {"timing_node_tasks": pd.DataFrame({"stage_value": [3.0]})},
         {"timing_model_update": pd.DataFrame({"T_model_update": [4.0]})},
+        {"timing_finalization": pd.DataFrame({"T_image_cube_task": [5.0]})},
     ]
 
     node_timing = _combine_graph_timing_frames(records, "timing_node_tasks")
     model_timing = _combine_graph_timing_frames(records, "timing_model_update")
+    final_timing = _combine_graph_timing_frames(records, "timing_finalization")
 
     assert node_timing.stage_value.tolist() == [1.0, 2.0, 3.0]
     assert model_timing.T_model_update.tolist() == [4.0]
+    assert final_timing.T_image_cube_task.tolist() == [5.0]
     assert _combine_graph_timing_frames([], "timing_node_tasks") is None
 
 
@@ -742,15 +714,18 @@ def _run_tw_hydra_continuum(
     continuum_mode,
     weighting,
     *,
-    deconvolver="hogbom",
+    deconvolver="mtmfs",
     mvc_model_update_approximation="local_beam_moments",
     cycle_control_params=None,
     image_param_overrides=None,
     image_params=None,
     restore=False,
+    restoration_output="primary_beam_corrected",
+    restoring_beam=None,
     primary_beam_limit=0.2,
     single_precision_image=False,
-    skunk_works=False,
+    io_engine="xradio",
+    output_image_format="zarr",
     disk_chunk_sizes=None,
     image_sharding=None,
     image_chunking=None,
@@ -800,6 +775,8 @@ def _run_tw_hydra_continuum(
             gridder="anti_alias",
             deconvolver=deconvolver,
             restore=restore,
+            restoration_output=restoration_output,
+            restoring_beam=restoring_beam,
             primary_beam_limit=primary_beam_limit,
             continuum_mode=continuum_mode,
             mvc_model_update_approximation=mvc_model_update_approximation,
@@ -828,7 +805,8 @@ def _run_tw_hydra_continuum(
             write_visibility_model_to_ps=write_visibility_model_to_ps,
             write_imaging_weights_to_ps=write_imaging_weights_to_ps,
             clear_cache=clear_cache,
-            skunk_works=skunk_works,
+            io_engine=io_engine,
+            output_image_format=output_image_format,
             disk_chunk_sizes=disk_chunk_sizes,
             image_sharding=image_sharding,
             image_chunking=image_chunking,
@@ -838,7 +816,53 @@ def _run_tw_hydra_continuum(
             reduce_mode=reduce_mode,
             reduce_n_batch=reduce_n_batch,
         )
+    if output_image_format == "fits":
+        return result, None
     return result, xr.open_zarr(output_store)
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_beam_metadata_rejection_precedes_weight_scan_and_output(
+    tmp_path, tw_hydra_store, monkeypatch, continuum_mode, existing_output
+):
+    """An unsupported inferred aperture must fail before expensive preflight."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    unsupported_antenna = xr.Dataset(
+        {"ANTENNA_DISH_DIAMETER": ("antenna_name", [15.0])},
+        attrs={"overall_telescope_name": "ALMA"},
+    )
+    monkeypatch.setattr(
+        type(processing_set.xr_ps),
+        "get_combined_antenna_xds",
+        lambda self: unsupported_antenna,
+    )
+
+    def unexpected_weight_scan(*args, **kwargs):
+        raise AssertionError("Weight preflight ran before the beam metadata check")
+
+    monkeypatch.setattr(
+        "astroviper.node_tasks.imaging.config_check.preflight_imaging_inputs",
+        unexpected_weight_scan,
+    )
+    output = tmp_path / "unsupported_beam.img.zarr"
+    if existing_output:
+        output.mkdir()
+        (output / "marker").write_text("keep existing output")
+    with pytest.raises(ValueError, match="12-m or 7-m"):
+        _run_tw_hydra_continuum(
+            tw_hydra_store,
+            output,
+            processing_set,
+            1,
+            continuum_mode,
+            {"weighting": "natural"},
+        )
+    if existing_output:
+        assert list(output.iterdir()) == [output / "marker"]
+        assert (output / "marker").read_text() == "keep existing output"
+    else:
+        assert not output.exists()
 
 
 def test_tw_hydra_mvc_local_beam_moments_are_frequency_partition_invariant(
@@ -856,6 +880,7 @@ def test_tw_hydra_mvc_local_beam_moments_are_frequency_partition_invariant(
             n_chunks,
             "mvc",
             {"weighting": "natural", "weighting_scope": "local"},
+            deconvolver="mtmfs",
             mvc_model_update_approximation="local_beam_moments",
             cycle_control_params={
                 "max_iter": 2,
@@ -1200,7 +1225,7 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
     ("deconvolver", "error", "message"),
     [
         ("hogbom_many_threads", AssertionError, None),
-        ("asp", ValueError, "deconvolver='asp' cleans Taylor term zero"),
+        ("asp", ValueError, "Continuum asp requires n_taylor_terms=1"),
     ],
 )
 def test_tw_hydra_refused_deconvolvers_write_nothing(
@@ -1239,7 +1264,7 @@ def test_tw_hydra_refused_deconvolvers_write_nothing(
                 "weighting_scope": "global",
             },
             {"weight_memory_mode": "in_place"},
-            "Global weighting scope",
+            "briggs_abs requires weighting_scope='local'",
             id="briggs_abs-global",
         ),
         pytest.param(
@@ -1287,7 +1312,7 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
         pytest.param(
             lambda params: params.update(reference_frequency=0.0),
             ValueError,
-            "finite and positive",
+            "strictly positive",
             id="zero-reference-frequency",
         ),
         pytest.param(
@@ -1298,8 +1323,8 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
         ),
         pytest.param(
             lambda params: params.update(n_taylor_terms=0),
-            AssertionError,
-            None,
+            ValueError,
+            "n_taylor_terms must be positive",
             id="zero-n_taylor_terms",
         ),
         pytest.param(
@@ -1307,14 +1332,6 @@ def test_tw_hydra_refused_weight_requests_write_nothing(
             TypeError,
             "must be an integer",
             id="non-integer-n_taylor_terms",
-        ),
-        pytest.param(
-            lambda params: params.update(
-                frequency_coords=params["frequency_coords"][:2]
-            ),
-            ValueError,
-            "not assigned exactly once",
-            id="channel-subset",
         ),
     ],
 )
@@ -1342,6 +1359,28 @@ def test_tw_hydra_refused_image_params_write_nothing(
         )
     assert _store_snapshot(store) == files
     assert not output_store.exists()
+
+
+def test_tw_hydra_frequency_subset_uses_shared_cube_selection(tmp_path, tw_hydra_store):
+    """A continuum frequency subset is imaged through the shared cube mapping."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    image_params = _tw_hydra_image_params(processing_set)
+    image_params["frequency_coords"] = image_params["frequency_coords"][:2]
+
+    _, image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "frequency_subset.img.zarr",
+        processing_set,
+        2,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        image_params=image_params,
+        weight_memory_mode="in_place",
+    )
+
+    assert image.SKY_RESIDUAL.sizes["taylor_term"] == 2
+    assert np.isfinite(image.SKY_RESIDUAL.values).all()
+    assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
@@ -1423,8 +1462,8 @@ def test_tw_hydra_failed_in_place_run_removes_its_weights(
     contents = _store_snapshot(store, parse_metadata=True)
     write_weights = node_module._write_continuum_weights_in_place
 
-    def write_then_fail(ps_xdt, image_store):
-        write_weights(ps_xdt, image_store)
+    def write_then_fail(ps_xdt, image_store, io_engine):
+        write_weights(ps_xdt, image_store, io_engine)
         raise RuntimeError("injected failure")
 
     monkeypatch.setattr(
@@ -1732,11 +1771,26 @@ def test_tw_hydra_cleaning_runs_later_imaging_cycles_and_builds_a_model(
     )
 
     assert result["n_cycles"] == 2
-    assert len(result["timing_graphs"]) == result["n_cycles"] + 1
+    expected_final_graphs = 1 if continuum_mode == "mvc" else 0
+    assert (
+        len(result["timing_graphs"]) == result["n_cycles"] + 1 + expected_final_graphs
+    )
     assert result["timing_graphs"][0]["stage"].startswith("imaging cycle 1")
-    assert result["timing_graphs"][-1]["stage"] == "final residual"
-    assert result["timing_graphs"][-1]["stage_kind"] == "final"
-    assert result["timing_graphs"][-1]["includes_restoration"] is False
+    assert result["timing_graphs"][-1 - expected_final_graphs]["stage"] == (
+        "final residual"
+    )
+    if continuum_mode == "mvc":
+        assert result["timing_graphs"][-1]["stage"] == "finalization"
+        assert result["timing_graphs"][-1]["stage_kind"] == "final"
+        assert result["timing_graphs"][-1]["includes_restoration"] is False
+        assert "timing_finalization" in result["timing_graphs"][-1]
+        assert "timing_node_tasks" not in result["timing_graphs"][-1]
+    else:
+        assert "T_install_final_model" in result["timing_distributed_application"]
+    assert result["timing_distributed_application"]["T_get_compute_resources"] >= 0
+    assert result["compute_resources"]["compute_backend"] == "dask"
+    assert result["compute_resources"]["scheduler"] == "synchronous"
+    assert result["compute_resources"]["processing_function_threads"] == 1
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.SKY_MODEL.values).all()
@@ -2139,20 +2193,18 @@ def test_tw_hydra_additional_weighting_paths(
     assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
 
 
-def test_tw_hydra_auto_chunked_single_precision_skunk_works_path(
-    tmp_path, tw_hydra_store
-):
+def test_tw_hydra_auto_chunked_single_precision_chunk_engine(tmp_path, tw_hydra_store):
     """Automatic chunking and direct loading support float32 continuum imaging."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, image = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / "tw_hydra_auto_float32_skunk.img.zarr",
+        tmp_path / "tw_hydra_auto_float32_chunk.img.zarr",
         processing_set,
         None,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
         single_precision_image=True,
-        skunk_works=True,
+        io_engine="chunk",
         disk_chunk_sizes="Auto",
     )
 
@@ -2195,7 +2247,7 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     )
 
     assert result["n_cycles"] == 2
-    assert len(result["timing_graphs"]) == result["n_cycles"] + 3
+    assert len(result["timing_graphs"]) == result["n_cycles"] + 4
     assert [record["stage"] for record in result["timing_graphs"][:2]] == [
         "global weight density",
         "global weight degridding",
@@ -2204,7 +2256,8 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
         "weighting",
         "weighting",
     ]
-    assert result["timing_graphs"][-1]["stage"] == "final residual + restoration"
+    assert result["timing_graphs"][-2]["stage"] == "final residual"
+    assert result["timing_graphs"][-1]["stage"] == "restoration"
     assert result["timing_graphs"][-1]["stage_kind"] == "final"
     assert result["timing_graphs"][-1]["includes_restoration"] is True
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
@@ -2410,6 +2463,48 @@ def test_wideband_natural_and_absolute_briggs_weights_default_to_the_local_densi
     xr.testing.assert_equal(images["default"], images["local"])
 
 
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+@pytest.mark.parametrize("weight_memory_mode", ["in_memory", "in_place"])
+@pytest.mark.parametrize("restore", [False, True])
+def test_natural_weighting_scopes_are_equivalent_without_global_density_graphs(
+    tmp_path, wideband_store, monkeypatch, continuum_mode, weight_memory_mode, restore
+):
+    from importlib import import_module
+
+    driver = import_module(
+        "astroviper.distributed_applications.imaging.image_continuum_single_field"
+    )
+
+    def forbidden_global_density(*args, **kwargs):
+        raise AssertionError("Natural weighting must not prepare global weight density")
+
+    monkeypatch.setattr(
+        driver, "prepare_continuum_imaging_weights_global", forbidden_global_density
+    )
+    processing_set = open_processing_set(str(wideband_store))
+    images = {}
+    for scope in ("default", "local", "global"):
+        params = {"weighting": "natural"}
+        if scope != "default":
+            params["weighting_scope"] = scope
+        original = dict(params)
+        _, image = _run_tw_hydra_continuum(
+            wideband_store,
+            tmp_path / f"natural_{scope}.img.zarr",
+            processing_set,
+            2,
+            continuum_mode,
+            params,
+            restore=restore,
+            weight_memory_mode=weight_memory_mode,
+        )
+        images[scope] = image.load()
+        image.close()
+        assert params == original
+    xr.testing.assert_equal(images["default"], images["local"])
+    xr.testing.assert_equal(images["global"], images["local"])
+
+
 def test_tw_hydra_direct_max_iter_zero_dirty_image(tmp_path, tw_hydra_store):
     """The public continuum application accepts a genuine zero-iteration run."""
     processing_set = open_processing_set(str(tw_hydra_store))
@@ -2450,6 +2545,7 @@ def test_tw_hydra_supports_alternate_taylor_orders(
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
         image_param_overrides={"n_taylor_terms": n_taylor_terms},
+        deconvolver="hogbom" if n_taylor_terms == 1 else "mtmfs",
     )
 
     assert image.SKY_RESIDUAL.sizes["taylor_term"] == n_taylor_terms
@@ -2474,7 +2570,7 @@ def test_tw_hydra_alternate_reduction_and_direct_io(
         5,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
-        skunk_works=True,
+        io_engine="chunk",
         disk_chunk_sizes="Auto",
         reduce_mode=reduce_mode,
         reduce_n_batch=reduce_n_batch,
@@ -2540,7 +2636,7 @@ def test_continuum_rejects_output_layout_options_until_final_node_writes(
     """Continuum fails fast instead of discarding a requested output layout."""
     output = tmp_path / "unsupported_layout.img.zarr"
     processing_set = open_processing_set(str(tw_hydra_store))
-    with pytest.raises(NotImplementedError, match="not supported"):
+    with pytest.raises(ValueError, match="not implemented"):
         _run_tw_hydra_continuum(
             tw_hydra_store,
             output,
@@ -2548,7 +2644,7 @@ def test_continuum_rejects_output_layout_options_until_final_node_writes(
             5,
             "mfs",
             {"weighting": "natural", "weighting_scope": "local"},
-            skunk_works=True,
+            io_engine="chunk",
             **layout,
         )
     assert not output.exists()
@@ -2666,6 +2762,9 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
     # ordinary Dask computations without this test's now-closed client.
     assert dask.delayed(sum)([1, 2, 3]).compute() == 6
     assert result["n_cycles"] == 2
+    assert result["compute_resources"]["scheduler"] == "distributed"
+    assert result["compute_resources"]["n_workers"] == 2
+    assert result["compute_resources"]["n_worker_slots"] == 2
     # The helper reopens the output store lazily; read it locally after the
     # distributed client has closed.
     with dask.config.set(scheduler="synchronous"):
@@ -2733,6 +2832,7 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         2,
         continuum_mode,
         {"weighting": "natural", "weighting_scope": "local"},
+        deconvolver="hogbom",
         visibility_memory_mode=visibility_memory_mode,
         restore=True,
         image_param_overrides={"polarization_coords": ["I", "Q"], "n_taylor_terms": 1},
@@ -2752,7 +2852,135 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
         IMAGING_MAX_CYCLES if max_iter == 100 else IMAGING_MAX_ITER
     )
     assert result["controller"].cycles_done == result["n_cycles"] == expected_updates
-    assert len(result["timing_graphs"]) == expected_updates + 1
+    assert len(result["timing_graphs"]) == expected_updates + 2
     assert result["controller"].total_iter_done > 0
     assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8
     assert result["residual_statistics"].data
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_tw_hydra_in_place_caches_equal_with_both_io_engines(
+    tmp_path, tw_hydra_store, continuum_mode
+):
+    """With the in-place weight, visibility-grid and primary-beam caches, the
+    chunk I/O engine gives the images of the xradio engine."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    images = {}
+    for io_engine in ("chunk", "xradio"):
+        _, images[io_engine] = _run_tw_hydra_continuum(
+            tw_hydra_store,
+            tmp_path / f"tw_hydra_in_place_{io_engine}.img.zarr",
+            processing_set,
+            None,
+            continuum_mode,
+            {"weighting": "briggs", "robust": 0.5, "weighting_scope": "global"},
+            io_engine=io_engine,
+            weight_memory_mode="in_place",
+            visibility_memory_mode="in_place",
+            wideband_primary_beam_memory_mode="in_place",
+        )
+    for name in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+        np.testing.assert_allclose(
+            images["chunk"][name].values,
+            images["xradio"][name].values,
+            rtol=1e-6,
+            atol=1e-9,
+            err_msg=name,
+        )
+
+
+@pytest.mark.parametrize(
+    "restoring_beam",
+    [None, [3.0 * np.pi / (180 * 3600), 3.0 * np.pi / (180 * 3600), 0.0]],
+    ids=["psf_beam", "restoring_beam"],
+)
+def test_tw_hydra_fits_output_of_a_restore(tmp_path, tw_hydra_store, restoring_beam):
+    """FITS output of a restore follows the cube's: with a restoring_beam the
+    restored images carry it as their header beam (degrees) and no BEAMS
+    table; without one the flat-noise image carries the restored beam in its
+    BEAMS table and the flat-sky image no beam. The residual carries the PSF
+    beam."""
+    from astropy.io import fits
+
+    fits_store = tmp_path / "restored_fits"
+    _run_tw_hydra_continuum(
+        tw_hydra_store,
+        fits_store,
+        open_processing_set(str(tw_hydra_store)),
+        None,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        restore=True,
+        restoration_output="both",
+        restoring_beam=restoring_beam,
+        io_engine="chunk",
+        output_image_format="fits",
+    )
+
+    def beams(name):
+        with fits.open(fits_store / name) as hdulist:
+            header = hdulist[0].header
+            header_beam = (
+                [header[key] for key in ("BMAJ", "BMIN", "BPA")]
+                if "BMAJ" in header
+                else None
+            )
+            if "BEAMS" not in hdulist:
+                return header_beam, None
+            table = hdulist["BEAMS"].data
+            rows = np.stack([table[key] for key in ("BMAJ", "BMIN", "BPA")], -1)
+            return header_beam, rows
+
+    _, psf_rows = beams("SKY_RESIDUAL.tt0.fits")
+    assert psf_rows is not None and np.all(psf_rows[:, :2] > 0)
+    noise_beam, noise_rows = beams("SKY_RESTORED_FLAT_NOISE.tt0.fits")
+    sky_beam, sky_rows = beams("SKY_RESTORED_FLAT_SKY.tt0.fits")
+    if restoring_beam is None:
+        assert noise_beam is None and sky_beam is None and sky_rows is None
+        # The restore applies the PSF beam of Stokes I to Stokes Q too.
+        np.testing.assert_array_equal(noise_rows, psf_rows[[0, 0]])
+    else:
+        assert noise_rows is None and sky_rows is None
+        np.testing.assert_allclose(noise_beam, np.degrees(restoring_beam), rtol=1e-15)
+        np.testing.assert_allclose(sky_beam, np.degrees(restoring_beam), rtol=1e-15)
+
+
+@pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])
+def test_tw_hydra_fits_output_per_taylor_term(tmp_path, tw_hydra_store, continuum_mode):
+    """FITS output: one file per variable and Taylor term, holding the planes
+    of the Zarr image, with the PSF beam in the BEAMS tables."""
+    from xradio.image import open_image
+
+    processing_set = open_processing_set(str(tw_hydra_store))
+    common = dict(io_engine="chunk")
+    _, zarr_image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"{continuum_mode}.img.zarr",
+        processing_set,
+        None,
+        continuum_mode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        **common,
+    )
+    fits_store = tmp_path / f"{continuum_mode}_fits"
+    _run_tw_hydra_continuum(
+        tw_hydra_store,
+        fits_store,
+        processing_set,
+        None,
+        continuum_mode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        output_image_format="fits",
+        **common,
+    )
+    names = sorted(os.listdir(fits_store))
+    assert "SKY_RESIDUAL.tt0.fits" in names and "SKY_RESIDUAL.tt1.fits" in names
+    assert "PRIMARY_BEAM.fits" in names
+    for term in range(zarr_image.sizes["taylor_term"]):
+        fits = open_image({"sky": str(fits_store / f"SKY_RESIDUAL.tt{term}.fits")})
+        np.testing.assert_allclose(
+            fits.SKY.values[:, 0],
+            zarr_image.SKY_RESIDUAL.isel(taylor_term=term).values,
+            rtol=1e-6,
+            atol=1e-9,
+        )

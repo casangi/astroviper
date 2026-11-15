@@ -26,6 +26,8 @@ def add_visibility_grid_mvc_single_field(
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
     complex_dtype=None,
+    *,
+    input_checked: bool = False,
 ) -> None:
     """Grid visibilities into a frequency-resolved MVC UV cube.
 
@@ -90,6 +92,10 @@ def add_visibility_grid_mvc_single_field(
         Complex dtype used for the visibility grid. Defaults to
         ``numpy.complex128``.
 
+    input_checked : bool, optional
+        Skip shared configuration checks after validation by an upper layer.
+        Existing data/product checks always run.
+
     Returns
     -------
     None
@@ -105,6 +111,24 @@ def add_visibility_grid_mvc_single_field(
     3. reduce those contributions and normalize the global Taylor products.
 
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(
+            {
+                **locals(),
+                "continuum_mode": "mvc",
+                "image_params": {"time_coords": img_xds.time.values}
+                if "time" in img_xds.coords
+                else {},
+            },
+            mode=CONTINUUM_SINGLE_FIELD,
+        )
+
     from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
         anti_alias_grid,
     )
@@ -130,20 +154,6 @@ def add_visibility_grid_mvc_single_field(
 
     if complex_dtype is None:
         complex_dtype = np.complex128
-
-    if not np.issubdtype(
-        np.dtype(complex_dtype),
-        np.complexfloating,
-    ):
-        raise TypeError(
-            "complex_dtype must be a complex floating-point dtype; "
-            f"received {complex_dtype!r}."
-        )
-
-    if not np.isfinite(fft_padding) or fft_padding < 1.0:
-        raise ValueError(
-            f"fft_padding must be finite and at least 1.0; received {fft_padding}."
-        )
 
     # ------------------------------------------------------------------
     # Resolve input and output data groups.
@@ -266,9 +276,7 @@ def add_visibility_grid_mvc_single_field(
         )
 
     frequency_map = map_visibility_frequencies_to_image(
-        frequency_coord,
-        image_frequency_coord,
-        matching="nearest",
+        frequency_coord, image_frequency_coord
     )
     n_image_chan = image_frequency_coord.size
 

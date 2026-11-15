@@ -167,7 +167,7 @@ def test_protoplanetary_disk_is_simulated_and_recovered(
         n_mapping_parallelism={"frequency": 1},
         overwrite=True,
         restore=True,
-        primary_beam_correction=True,
+        restoration_output="both",
     )
 
     img = load_image(image_store)

@@ -16,10 +16,15 @@ from astroviper.processing_functions.image_analysis.point_spread_function_gaussi
 )
 from astroviper.utils.report_plots import (
     _asinh_ticks,
+    _spectral_windows,
+    plane_maximum_detections,
     plot_antenna_positions,
+    plot_continuum_selection,
     plot_deconvolution_summary,
+    plot_image_statistics,
     plot_plane_deconvolution_summary,
     plot_point_spread_function_cross_sections,
+    plot_restoring_beam_axes,
     plot_signed_images,
     plot_spectra,
     plot_stokes_images,
@@ -152,19 +157,487 @@ def test_spectra_and_deconvolution_summary():
     assert figure.axes[0].xaxis.get_major_formatter().get_useOffset() is False
 
     shape = (3, 2)
+    iterations = np.full(shape, 300.0)
+    iterations[1] = 0.0  # channel 1 never deconvolved
     figure = plot_deconvolution_summary(
         frequency,
         ["I", "Q"],
         np.ones(shape),
         {1: [2, 2, 2], 2: [1, 1, 1]},
-        np.full(shape, 300),
+        iterations,
         [2, 2, 2],
+        np.full(shape, -0.2),
+        np.full(shape, 0.01),
         np.full(shape, np.nan),
         np.ones(shape),
         {1: "Reached max_iter"},
         {1: "Reached max_iter_per_cycle_updated", 2: "Reached threshold_per_cycle"},
+        threshold=np.full(shape, 2.5e-3),
+        title="t",
     )
+    _assert_pyplot_free(figure, 8)
+    axes = figure.axes
+    assert not axes[7].axison  # the empty eighth panel
+    assert axes[2].get_yscale() == "symlog"
+    assert "4 of 6 planes deconvolved" in axes[2].get_title()
+    peak = axes[4]
+    assert peak.get_yscale() == "log"
+    lines = {line.get_label(): line for line in peak.get_lines()}
+    np.testing.assert_allclose(lines["start, Stokes I"].get_ydata(), 0.2)
+    np.testing.assert_allclose(lines["final, Stokes Q"].get_ydata(), 0.01)
+    assert lines["start, Stokes I"].get_alpha() == pytest.approx(0.45)
+    assert lines["threshold 2.5 mJy"].get_ydata()[0] == pytest.approx(2.5e-3)
+    for ax in axes[:7]:  # the never deconvolved channel is shaded everywhere
+        assert len(ax.collections) == 1
+    assert axes[5].xaxis.get_label().get_text() == "frequency (GHz)"
+    assert axes[6].xaxis.get_label().get_text() == "frequency (GHz)"
+
+
+def test_deconvolution_summary_threshold_per_plane_and_no_shading():
+    frequency = np.array([1.0, 1.1]) * 1e9
+    shape = (2, 1)
+    figure = plot_deconvolution_summary(
+        frequency,
+        ["I"],
+        np.ones(shape),
+        {},
+        np.full(shape, 5.0),
+        [1, 1],
+        np.full(shape, np.nan),
+        np.full(shape, np.nan),
+        np.ones(shape),
+        np.ones(shape),
+        {},
+        {},
+        threshold=np.array([[1e-3], [2e-3]]),
+    )
+    peak = figure.axes[4]
+    assert peak.get_yscale() == "linear"  # no peak residual recorded
+    threshold = [
+        line for line in peak.get_lines() if line.get_label() == "threshold, Stokes I"
+    ]
+    np.testing.assert_allclose(threshold[0].get_ydata(), [1e-3, 2e-3])
+    assert all(len(ax.collections) == 0 for ax in figure.axes)
+    assert figure.get_suptitle() == ""
+    # no threshold for None or 0
+    for value in (None, 0.0):
+        figure = plot_deconvolution_summary(
+            frequency,
+            ["I"],
+            np.ones(shape),
+            {},
+            np.full(shape, 5.0),
+            [1, 1],
+            np.full(shape, 0.5),
+            np.full(shape, 0.1),
+            np.ones(shape),
+            np.ones(shape),
+            {},
+            {},
+            threshold=value,
+        )
+        labels = [line.get_label() for line in figure.axes[4].get_lines()]
+        assert not any(label.startswith("threshold") for label in labels)
+
+
+def _statistics_return_dict(rng=None, n_window=24, masked=True):
+    """Image statistics of two spectral windows of ``n_window`` channels (1
+    MHz apart, 1 GHz between them) and Stokes I and Q: unit noise, a line in
+    I at channel 5 of the first window, bright first edge channels and
+    ``n_pixels`` 1e6 (an expected noise maximum of sqrt(2 ln 1e6) = 5.26)."""
+    rng = np.random.default_rng(7) if rng is None else rng
+    frequency = np.concatenate(
+        [100e9 + 1e6 * np.arange(n_window), 101e9 + 1e6 * np.arange(n_window)]
+    )
+    shape = (1, len(frequency), 2)
+    maximum = 4.0 + 0.1 * rng.random(shape)
+    maximum[0, 5, 0] = 20.0
+    maximum[0, 0, :] = 30.0
+    maximum[0, n_window, 1] = 30.0
+    data = {
+        "max": maximum,
+        "min": -maximum,
+        "mean": rng.normal(size=shape),
+        "rms": np.ones(shape),
+        "mad_sigma": np.ones(shape),
+        "n_pixels": np.full(shape, 1e6),
+        "sum": np.full(shape, np.nan),  # all NaN: left out
+    }
+    if masked:
+        data |= {
+            "max_masked": maximum / 2.0,
+            "mad_sigma_masked": np.full(shape, 0.5),
+            "n_pixels_masked": np.full(shape, 1e4),
+            "rms_masked": np.full(shape, 0.5),
+            "mean_masked": np.full(shape, np.nan),
+        }
+    dims = ("time", "frequency", "polarization")
+    statistics = xr.Dataset(
+        {name: (dims, values) for name, values in data.items()},
+        coords={"time": [0.0], "frequency": frequency, "polarization": ["I", "Q"]},
+    )
+    return {"image_statistics": {"sky_residual": statistics}}
+
+
+def _lines_by_label(ax):
+    return {line.get_label(): line for line in ax.get_lines()}
+
+
+def test_image_statistics_grid():
+    return_dict = _statistics_return_dict()
+    statistics = return_dict["image_statistics"]["sky_residual"]
+    figure = plot_image_statistics(return_dict, "sky_residual")
     _assert_pyplot_free(figure, 6)
+    visible = [ax for ax in figure.axes if ax.get_visible()]
+    # max, min, mean, rms, mad_sigma; sum is all NaN
+    assert [ax.get_title() for ax in visible] == [
+        "Max",
+        "Min",
+        "Mean",
+        "RMS",
+        "MAD sigma (robust noise)",
+    ]
+    lines = _lines_by_label(visible[0])
+
+    def gapped(values):  # a NaN between the two spectral windows
+        return np.insert(np.asarray(values, dtype=float), 24, np.nan)
+
+    np.testing.assert_allclose(
+        lines["Stokes Q"].get_xdata(), gapped(statistics.frequency / 1e9)
+    )
+    np.testing.assert_allclose(
+        lines["Stokes Q"].get_ydata(), gapped(statistics["max"][0, :, 1])
+    )
+    twin = lines["Stokes I inside the mask"]
+    assert twin.get_linestyle() == "--"
+    np.testing.assert_allclose(
+        twin.get_ydata(), gapped(statistics["max_masked"][0, :, 0])
+    )
+    assert "Stokes I inside the mask" not in _lines_by_label(visible[2])  # all NaN
+    assert visible[0].get_legend() is not None
+    assert all(ax.get_legend() is None for ax in visible[1:])
+    assert visible[4].xaxis.get_label().get_text() == "frequency (GHz)"
+    assert visible[3].xaxis.get_label().get_text() == "frequency (GHz)"
+    assert visible[1].xaxis.get_label().get_text() == ""
+    assert figure.get_suptitle() == "Per-plane statistics of sky_residual (48 channels)"
+
+    figure = plot_image_statistics(
+        return_dict,
+        "sky_residual",
+        statistics=("rms",),
+        masked=False,
+        spectral_window_gap_factor=1e4,  # one window: no break
+        title="t",
+    )
+    assert list(_lines_by_label(figure.axes[0])) == ["Stokes I", "Stokes Q"]
+    assert not np.isnan(figure.axes[0].get_lines()[0].get_xdata()).any()
+    assert figure.get_suptitle() == "t"
+    assert plot_image_statistics(return_dict, "sky_restored") is None
+    assert plot_image_statistics(return_dict, "sky_residual", ("sum",)) is None
+    with pytest.raises(ValueError, match="layout"):
+        plot_image_statistics(return_dict, "sky_residual", layout="stokes")
+
+
+def test_spectral_windows_split_at_gaps():
+    frequency = np.concatenate([np.arange(4.0), 100.0 + np.arange(3.0)])
+    windows = _spectral_windows(frequency, 3.0)
+    assert [list(window) for window in windows] == [[0, 1, 2, 3], [4, 5, 6]]
+    assert [list(window) for window in _spectral_windows([5.0], 3.0)] == [[0]]
+
+
+def test_plane_maximum_detections():
+    return_dict = _statistics_return_dict()
+    detections = plane_maximum_detections(
+        return_dict,
+        "sky_residual",
+        1.0,
+        spectral_lines={"line A": 100.0052e9, "far": 100.5e9},
+    )
+    assert list(detections.columns) == [
+        "spectral_window",
+        "frequency",
+        "polarization",
+        "max",
+        "mad_sigma",
+        "significance",
+        "line_id",
+        "statistics",
+    ]
+    # inside the mask: threshold 0.5 * (sqrt(2 ln 1e4) + 1) = 2.646
+    assert detections["statistics"].unique().tolist() == ["masked"]
+    first = detections[detections["spectral_window"] == 0]
+    assert first["frequency"].tolist() == [100e9, 100e9, 100.005e9]
+    assert first["polarization"].tolist() == ["I", "Q", "I"]
+    row = detections.iloc[2]
+    assert row["max"] == pytest.approx(10.0)
+    assert row["significance"] == pytest.approx(20.0)
+    assert row["line_id"] == "line A"
+    assert detections.iloc[0]["line_id"] == ""
+    # the threshold is noise maximum + margin: 2.0 + 0.1 noise stays below
+    assert len(detections) == 4  # and Q in channel 0 of the second window
+    assert detections.iloc[3][["spectral_window", "polarization"]].tolist() == [1, "Q"]
+
+    flagged = plane_maximum_detections(
+        return_dict,
+        "sky_residual",
+        1.0,
+        masked=False,
+        flagged_edge_channels=1,
+        flagged_frequency_ranges={"line": (100.0045e9, 100.0055e9)},
+    )
+    assert flagged.empty
+    assert list(flagged.columns)[0] == "spectral_window"
+    # all-pixel statistics: threshold sqrt(2 ln 1e6) + 1 = 6.26
+    detections = plane_maximum_detections(
+        return_dict, "sky_residual", 1.0, masked=False
+    )
+    assert detections["statistics"].unique().tolist() == ["all"]
+    assert detections["frequency"].tolist() == [100e9, 100e9, 100.005e9, 101e9]
+
+    unmasked = _statistics_return_dict(masked=False)
+    detections = plane_maximum_detections(unmasked, "sky_residual", 1.0)
+    assert detections["statistics"].unique().tolist() == ["all"]
+    with pytest.raises(ValueError, match="no max and mad_sigma"):
+        plane_maximum_detections(unmasked, "sky_restored", 1.0)
+
+
+def test_plane_maximum_detections_without_pixel_counts_or_noise():
+    statistics = _statistics_return_dict(masked=False)["image_statistics"]
+    statistics = statistics["sky_residual"].drop_vars("n_pixels")
+    statistics["mad_sigma"][0, 5, 0] = 0.0
+    return_dict = {"image_statistics": {"sky_residual": statistics}}
+    detections = plane_maximum_detections(return_dict, "sky_residual", 1.0)
+    # without n_pixels the noise maximum is sqrt(2 ln e) = 1.41, so the noise
+    # (4.0 to 4.1) is detected too; a mad_sigma of 0 gives an inf significance
+    assert len(detections) == 96
+    row = detections[
+        (detections.frequency == 100.005e9) & (detections.polarization == "I")
+    ]
+    assert row["significance"].iloc[0] == np.inf
+
+
+def test_image_statistics_per_spectral_window():
+    return_dict = _statistics_return_dict()
+    statistics = return_dict["image_statistics"]["sky_residual"]
+    figure = plot_image_statistics(
+        return_dict,
+        "sky_residual",
+        layout="spectral_windows",
+        detection_margin_sigma=1.0,
+        spectral_lines={"line A": 100.005e9, "line B": 100.0052e9, "far": 105e9},
+        telluric_lines={"O3": 101.010e9},
+        flagged_frequency_ranges={"telluric": (101.009e9, 101.011e9)},
+        flagged_edge_channels=1,
+    )
+    _assert_pyplot_free(figure, 2)
+    first, second = figure.axes[:2]
+    assert first.get_title() == "spectral window 0: 100.000-100.023 GHz (24 channels)"
+    assert first.get_yscale() == "log"
+    assert first.get_ylabel() == "max_masked"
+    lines = first.get_lines()
+    kept = lines[0].get_ydata()
+    assert np.isnan(kept[0])  # the flagged edge channel
+    np.testing.assert_allclose(kept[1:-1], statistics["max_masked"][0, 1:23, 0])
+    threshold = lines[2].get_ydata()
+    assert lines[2].get_linestyle() == "--"
+    np.testing.assert_allclose(
+        threshold[1:-1], 0.5 * (np.sqrt(2.0 * np.log(1e4)) + 1.0)
+    )
+    detected = lines[3]
+    assert detected.get_marker() == "o"
+    np.testing.assert_allclose(detected.get_xdata(), [100.005])
+    np.testing.assert_allclose(detected.get_ydata(), [10.0])
+    known = [line for line in lines if line.get_linestyle() == ":"]
+    assert len(known) == 2  # "far" is outside the window
+    heights = [text.xyann[1] for text in first.texts]
+    assert heights == [0.985, 0.70]  # labels of close lines alternate
+    assert len(first.patches) == 2  # the shaded edge channels
+    telluric = [line for line in second.get_lines() if line.get_linestyle() == "-."]
+    assert len(telluric) == 1
+    assert len(second.patches) == 3  # edges and the telluric range
+    legend = [text.get_text() for text in figure.legends[0].get_texts()]
+    assert legend == [
+        "Stokes I",
+        "Stokes Q",
+        "detection threshold",
+        "detection",
+        "known line",
+        "telluric line",
+        "flagged channels",
+    ]
+    assert "detection: above mad_sigma" in figure.get_suptitle()
+    assert "channels flagged" in figure.get_suptitle()
+
+    # three windows: the fourth panel is hidden
+    three = xr.concat(
+        [
+            statistics,
+            statistics.isel(frequency=slice(0, 24)).assign_coords(
+                frequency=102e9 + 1e6 * np.arange(24)
+            ),
+        ],
+        dim="frequency",
+    )
+    figure = plot_image_statistics(
+        {"image_statistics": {"sky_residual": three}},
+        "sky_residual",
+        layout="spectral_windows",
+    )
+    assert [ax.get_visible() for ax in figure.axes] == [True, True, True, False]
+
+    # a single window, a statistic with a non-positive value, no threshold
+    one_window = {
+        "image_statistics": {"sky_residual": statistics.isel(frequency=slice(0, 24))}
+    }
+    figure = plot_image_statistics(
+        one_window,
+        "sky_residual",
+        statistics=("min",),
+        layout="spectral_windows",
+        ylabel="minimum",
+        title="t",
+    )
+    ax = figure.axes[0]
+    assert ax.get_yscale() == "linear"
+    assert ax.get_ylabel() == "minimum"
+    assert len(ax.get_lines()) == 2
+    assert [text.get_text() for text in figure.legends[0].get_texts()] == [
+        "Stokes I",
+        "Stokes Q",
+    ]
+    assert figure.get_suptitle() == "t"
+    assert (
+        plot_image_statistics(
+            one_window, "sky_residual", ("sum",), layout="spectral_windows"
+        )
+        is None
+    )
+    assert (
+        plot_image_statistics(one_window, "sky_model", layout="spectral_windows")
+        is None
+    )
+    with pytest.raises(ValueError, match="one statistic"):
+        plot_image_statistics(
+            return_dict, "sky_residual", ("max", "min"), layout="spectral_windows"
+        )
+
+
+def test_image_statistics_consistency_of_runs():
+    reference = _statistics_return_dict()
+    statistics = reference["image_statistics"]["sky_residual"]
+    changed = statistics.copy(deep=True)
+    changed["max"][0, 3, 0] += 0.3  # max |max| is 30
+    shorter = statistics.isel(frequency=slice(0, 10)).copy(deep=True)
+    shorter["rms"][0, 0, 1] = 1.5
+    shorter = shorter.drop_vars("min")
+    elsewhere = statistics.assign_coords(frequency=statistics.frequency + 1e12)
+    source = [
+        reference,
+        {"image_statistics": {"sky_residual": changed}},
+        {"image_statistics": {}},
+        {"image_statistics": {"sky_residual": shorter}},
+        {"image_statistics": {"sky_residual": elsewhere}},  # no plane shared
+    ]
+    figure = plot_image_statistics(
+        source,
+        "sky_residual",
+        layout="consistency",
+        labels=["1 node", "2 nodes", "3 nodes", "4 nodes", "5 nodes"],
+    )
+    _assert_pyplot_free(figure, 1)
+    ax = figure.axes[0]
+    names = [label.get_text() for label in ax.get_xticklabels()]
+    assert names == [
+        "max",
+        "min",
+        "mean",
+        "rms",
+        "mad_sigma",
+        "max_masked",
+        "rms_masked",
+        "mad_sigma_masked",
+    ]
+    assert ax.get_yscale() == "symlog"
+    assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+        "2 nodes",
+        "4 nodes",
+        "5 nodes",
+    ]
+    heights = np.array([bar.get_height() for bar in ax.patches]).reshape(3, -1)
+    np.testing.assert_allclose(heights[0, 0], 0.01)
+    np.testing.assert_allclose(heights[0, 1:], 0.0)
+    np.testing.assert_allclose(heights[1, names.index("rms")], 0.5)
+    assert np.isnan(heights[1, names.index("min")])  # not in that run
+    assert np.all(np.isnan(heights[2]))
+    assert "against 1 node" in ax.get_title()
+
+    figure = plot_image_statistics(
+        source[:2],
+        "sky_residual",
+        statistics=("max",),
+        layout="consistency",
+        masked=False,
+    )
+    assert [label.get_text() for label in figure.axes[0].get_xticklabels()] == ["max"]
+    assert (
+        plot_image_statistics(source[1:3], "sky_residual", layout="consistency") is None
+    )
+    assert (
+        plot_image_statistics(
+            source[:2], "sky_residual", statistics=("sum",), layout="consistency"
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="labels"):
+        plot_image_statistics(
+            source, "sky_residual", layout="consistency", labels=["a"]
+        )
+
+
+def test_continuum_selection():
+    frequency = 230.0e9 + 0.9765625e6 * np.arange(40)
+    spectrum = np.random.default_rng(1).standard_normal(40)
+    figure = plot_continuum_selection(
+        frequency, spectrum, [[0, 10], [25, 40]], 2.5, -2.0, 0.1, title="window 0"
+    )
+    _assert_pyplot_free(figure, 1)
+    ax = figure.axes[0]
+    spans = [patch for patch in ax.patches]
+    assert len(spans) == 2
+    # The spans reach the outer edges of the selected channels, in GHz.
+    x0, x1 = spans[1].get_x(), spans[1].get_x() + spans[1].get_width()
+    edges = (frequency[25] - 0.4882812e6) / 1e9, (frequency[39] + 0.4882812e6) / 1e9
+    np.testing.assert_allclose([x0, x1], edges, rtol=1e-12)
+    assert sorted(line.get_ydata()[0] for line in ax.lines[1:]) == [-2.0, 0.1, 2.5]
+    assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+        "continuum",
+        "spectrum",
+        "thresholds",
+        "corrected median",
+    ]
+
+
+@pytest.mark.parametrize("not_contained", [[False, True, False], [False] * 3])
+def test_restoring_beam_axes(not_contained):
+    frequency = np.array([372.7626, 372.7632, 372.7638]) * 1e9
+    beams = np.array([[2.0, 1.0, 0.1], [2.2, 1.1, 0.2], [1.9, 0.9, 0.3]])
+    beams[:, :2] *= ARCSEC
+    figure = plot_restoring_beam_axes(
+        frequency, beams, [2.1 * ARCSEC, 1.2 * ARCSEC, 0.0], not_contained
+    )
+    _assert_pyplot_free(figure, 2)
+    for ax, axis_index, restoring_axis in zip(
+        figure.axes[:2], (0, 1), (2.1, 1.2), strict=True
+    ):
+        lines = {line.get_label(): line for line in ax.lines}
+        np.testing.assert_allclose(
+            lines["PSF fit"].get_ydata(), beams[:, axis_index] / ARCSEC
+        )
+        np.testing.assert_allclose(lines["restoring beam"].get_ydata(), restoring_axis)
+        if any(not_contained):
+            np.testing.assert_allclose(lines["not contained"].get_xdata(), [372.7632])
+        else:
+            assert "not contained" not in lines
 
 
 def test_antenna_positions_and_uv_coverage():
@@ -697,3 +1170,33 @@ def test_signed_images_and_visibility_comparison():
     ]
     assert [handle.get_marker() for handle in legend.legend_handles] == ["o", "."]
     assert figure.axes[1].get_title() == "difference (33 samples equal)"
+
+
+def test_deconvolution_summary_lines_break_between_spectral_windows():
+    frequency = np.array([1.0, 1.001, 1.002, 2.0, 2.001]) * 1e9
+    shape = (5, 1)
+    figure = plot_deconvolution_summary(
+        frequency,
+        ["I"],
+        np.ones(shape),
+        {1: np.ones(5)},
+        np.full(shape, 3.0),
+        np.ones(5),
+        np.full(shape, 0.5),
+        np.full(shape, 0.1),
+        np.ones(shape),
+        np.arange(5.0).reshape(shape),
+        {},
+        {},
+        threshold=np.arange(1.0, 6.0).reshape(shape) * 1e-3,
+    )
+    for ax in figure.axes[1:7]:
+        for line in ax.get_lines():
+            if line.get_label().startswith("threshold "):  # a horizontal line
+                continue
+            assert len(line.get_xdata()) == 6
+            assert np.isnan(line.get_xdata()[3]) and np.isnan(line.get_ydata()[3])
+    rms = figure.axes[6].get_lines()[0].get_ydata()
+    np.testing.assert_array_equal(rms, [0, 1, 2, np.nan, 3, 4])
+    stop_code = figure.axes[0].get_lines()[0].get_xdata()
+    assert len(stop_code) == 5  # markers only

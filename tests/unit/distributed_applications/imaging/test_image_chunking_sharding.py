@@ -147,12 +147,12 @@ class TestValidateNMappingParallelism:
         ids=["wrong-axis", "extra-axis", "empty"],
     )
     def test_non_frequency_keys_rejected(self, bad_keys):
-        with pytest.raises(ValueError, match="single key\\s+'frequency'"):
+        with pytest.raises(ValueError, match="must contain only 'frequency'"):
             self._validate(bad_keys)
 
     @pytest.mark.parametrize("bad", [0, -3, 2.5, True, "5"])
     def test_bad_count_rejected(self, bad):
-        with pytest.raises(ValueError, match="positive int"):
+        with pytest.raises(ValueError, match="must be >= 1|must be an integer"):
             self._validate({"frequency": bad})
 
 
@@ -217,3 +217,36 @@ class TestChannelMemoryOfTheMappingParallelism:
             # A4 (360 px, two polarizations, single precision): the traced
             # peak of the build was 0.0317 to 0.0402 GiB (measured)
             assert exact - default > 0.0402 * 1024**3
+
+
+@pytest.mark.parametrize(
+    "chunks,shards,error",
+    [
+        ({"frequency": 1, "l": 4}, {"frequency": 4}, None),
+        ({"u": 4}, {"u": 8}, None),
+        ({"frequency": 3}, None, "exceeds"),
+        ({"frequency": 2}, None, "divide every"),
+        ({"time": 2}, None, "exceeds"),
+        ({"l": 17}, None, "exceeds"),
+        ({"chan": 1}, None, "not an image dimension"),
+        ({"l": 4}, {"l": 6}, "multiple"),
+    ],
+)
+def test_configuration_layout_uses_actual_image_and_task_extents(chunks, shards, error):
+    from astroviper.processing_functions.imaging.config_check._output import (
+        check_output_layout,
+    )
+
+    # Explicit image dimensions remain authoritative even if the configuration
+    # carries only the subset of coordinates needed at this entry point.
+    config = {"image_params": {}, "image_chunking": chunks, "image_sharding": shards}
+    parallel = (
+        _parallel_coords([3, 3, 2])
+        if error == "divide every"
+        else _parallel_coords([2, 2, 2, 2])
+    )
+    if error is None:
+        check_output_layout(config, parallel_coords=parallel, image_shape=SHAPE)
+    else:
+        with pytest.raises(ValueError, match=error):
+            check_output_layout(config, parallel_coords=parallel, image_shape=SHAPE)

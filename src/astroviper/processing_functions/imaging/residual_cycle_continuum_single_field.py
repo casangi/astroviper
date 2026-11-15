@@ -23,6 +23,8 @@ def residual_cycle_continuum_single_field(
     image_data_group_out_name="residual",
     last_residual_cycle=False,
     gridding_kernel_params=None,
+    *,
+    input_checked: bool = False,
 ):
     """Grid residual products for one continuum visibility partition.
 
@@ -44,7 +46,8 @@ def residual_cycle_continuum_single_field(
     Parameters
     ----------
     continuum_mode : {"mfs", "mvc"}
-        Continuum construction mode. ``"mfs"`` grids Taylor-weighted
+        Top-level workflow selection; do not place it inside ``image_params``.
+        ``"mfs"`` grids Taylor-weighted
         visibilities directly. Its ``SKY_MODEL`` Taylor coefficients describe
         the apparent sky, ``A_nu * I_nu``; consequently ``tt1 / tt0`` contains
         both the intrinsic source spectral index and the primary-beam spectral
@@ -82,7 +85,16 @@ def residual_cycle_continuum_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
         Continuum imaging also requires ``frequency_coords``,
         ``n_taylor_terms`` (CASA ``nterms``), and ``reference_frequency`` in Hz.
         ``spectral_reference``
@@ -120,6 +132,8 @@ def residual_cycle_continuum_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+        The distributed cube writer does not publish UV grids; standalone
+        processing functions may retain their working grids in memory.
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         Continuum residual-update storage policy for observed visibility grids.
         ``"in_memory"`` retains the first-cycle grid in driver memory, while
@@ -188,6 +202,12 @@ def residual_cycle_continuum_single_field(
         ``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the
         gridders' that sum times the kernel's stencil sums.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -197,6 +217,16 @@ def residual_cycle_continuum_single_field(
         Timing summary for the residual-update stage.
 
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_driver_workflow,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+        check_driver_workflow(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import time
 
     import numpy as np
@@ -209,9 +239,6 @@ def residual_cycle_continuum_single_field(
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         prepare_model_uv_mvc_single_field,
     )
-    from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
-        _validate_n_taylor_terms,
-    )
     from astroviper.processing_functions.imaging.residual_update import (
         calculate_residual_visibilities,
         make_visibility_model_single_field,
@@ -220,24 +247,8 @@ def residual_cycle_continuum_single_field(
     if image_data_variables_keep is None:
         image_data_variables_keep = []
 
-    if continuum_mode not in ("mfs", "mvc"):
-        raise ValueError(
-            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
-        )
-    if visibility_memory_mode not in ("in_memory", "in_place", "recompute"):
-        raise ValueError(
-            "visibility_memory_mode must be 'in_memory', 'in_place', or "
-            f"'recompute'; received {visibility_memory_mode!r}."
-        )
-
-    n_taylor_terms = _validate_n_taylor_terms(image_params["n_taylor_terms"])
+    n_taylor_terms = int(image_params["n_taylor_terms"])
     reference_frequency = float(image_params["reference_frequency"])
-
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "image_params['reference_frequency'] must be a positive finite "
-            "frequency in Hz."
-        )
 
     complex_dtype = np.complex64 if single_precision_image else np.complex128
 
@@ -246,13 +257,6 @@ def residual_cycle_continuum_single_field(
     # The type "dft" replaces the degridding, the gridding and their FFTs by
     # the exact direct Fourier transforms (no kernel, padding or correction).
     direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
-    if direct_fourier_transform:
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
-            check_dft_continuum_parameters,
-        )
-
-        check_dft_continuum_parameters(continuum_mode, visibility_memory_mode)
-
     start = time.time()
     if not direct_fourier_transform:
         cgk_1D = make_gridding_kernel(
@@ -299,6 +303,7 @@ def residual_cycle_continuum_single_field(
                     },
                     image_data_group_in_name=image_data_group_in_name,
                     processing_function_threads=processing_function_threads,
+                    input_checked=True,
                 )
             else:
                 make_visibility_model_continuum_single_field(
@@ -315,6 +320,7 @@ def residual_cycle_continuum_single_field(
                     image_data_group_in_name=image_data_group_in_name,
                     processing_function_threads=processing_function_threads,
                     fft_padding=image_params["fft_padding"],
+                    input_checked=True,
                 )
 
             T_degrid += time.time() - degrid_start
@@ -366,6 +372,7 @@ def residual_cycle_continuum_single_field(
                 image_data_group_in_name=image_data_group_in_name,
                 image_data_group_out_name=image_data_group_in_name,
                 gridding_kernel_params=gridding_kernel_params,
+                input_checked=True,
             )
 
             make_visibility_model_single_field(
@@ -422,6 +429,7 @@ def residual_cycle_continuum_single_field(
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
 
     elif continuum_mode == "mfs":
@@ -443,6 +451,7 @@ def residual_cycle_continuum_single_field(
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
 
     elif continuum_mode == "mvc":
@@ -462,6 +471,7 @@ def residual_cycle_continuum_single_field(
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
 
         if not is_first_cycle and visibility_memory_mode != "recompute":
@@ -482,11 +492,6 @@ def residual_cycle_continuum_single_field(
                 grid_kind="MVC",
             )
             img_xds.attrs["continuum_mode"] = "mvc"
-
-    else:
-        raise ValueError(
-            f"continuum_mode must be either 'mfs' or 'mvc'; received {continuum_mode!r}."
-        )
 
     T_grid = time.time() - start
 
@@ -522,6 +527,7 @@ def make_visibility_model_continuum_single_field(
     image_data_group_in_name="model",
     processing_function_threads=1,
     fft_padding=1.2,
+    input_checked=False,
 ):
     """Predict channel-dependent model visibilities from a Fourier Taylor model.
 
@@ -582,6 +588,10 @@ def make_visibility_model_continuum_single_field(
     fft_padding : float, optional
         FFT padding factor used to interpret the continuum UV-grid geometry.
 
+    input_checked : bool, optional
+        Whether an upper layer has validated this unchanged configuration.
+        Direct calls default to False.
+
     Returns
     -------
     None
@@ -597,6 +607,14 @@ def make_visibility_model_continuum_single_field(
     continuum model update. Consequently, this function performs only the spectral
     reconstruction and degridding required for the current visibility partition.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
+
     import numpy as np
 
     from astroviper.processing_functions.imaging.degrid_visibility_grid import (
@@ -615,14 +633,6 @@ def make_visibility_model_continuum_single_field(
 
     n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
-
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
-
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be a positive finite frequency in Hz."
-        )
 
     data_groups = model_xds.attrs.get("data_groups", {})
 

@@ -1,0 +1,61 @@
+"""Non-mutating imaging configuration checks shared by all three layers.
+
+Configuration, input-metadata and planned-output checks precede execution.
+Runtime array/native checks remain independent and must never be bypassed.
+"""
+
+from astroviper.processing_functions.imaging.config_check._common import (
+    CONTINUUM_SINGLE_FIELD,
+    CUBE_SINGLE_FIELD,
+    ImagingMode,
+)
+from astroviper.processing_functions.imaging.config_check.check_config import (
+    check_config,
+)
+from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
+    check_driver_workflow,
+)
+from astroviper.processing_functions.imaging.config_check.param_check_feather import (
+    check_feather_config,
+    check_feather_inputs,
+)
+from astroviper.processing_functions.imaging.config_check.param_check_find_continuum import (
+    check_find_continuum_channel_range,
+    check_find_continuum_cluster_threads,
+    check_find_continuum_config,
+    check_find_continuum_first_round,
+    check_find_continuum_first_round_store,
+    check_find_continuum_inputs,
+    check_find_continuum_ultra_config,
+    check_find_continuum_ultra_inputs,
+    check_find_continuum_ultra_task_config,
+    check_find_continuum_ultra_task_memory,
+)
+from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+    check_model_update,
+)
+from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+    check_residual_update,
+)
+
+__all__ = [
+    "ImagingMode",
+    "CUBE_SINGLE_FIELD",
+    "CONTINUUM_SINGLE_FIELD",
+    "check_config",
+    "check_feather_config",
+    "check_feather_inputs",
+    "check_find_continuum_channel_range",
+    "check_find_continuum_cluster_threads",
+    "check_find_continuum_config",
+    "check_find_continuum_first_round",
+    "check_find_continuum_first_round_store",
+    "check_find_continuum_inputs",
+    "check_find_continuum_ultra_config",
+    "check_find_continuum_ultra_inputs",
+    "check_find_continuum_ultra_task_config",
+    "check_find_continuum_ultra_task_memory",
+    "check_driver_workflow",
+    "check_model_update",
+    "check_residual_update",
+]

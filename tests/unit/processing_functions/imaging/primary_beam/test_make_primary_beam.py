@@ -233,8 +233,8 @@ def test_primary_beam_is_the_airy_disk_inside_max_rad_and_zero_beyond():
 def test_default_primary_beam_is_the_uncut_textbook_airy_disk(
     telescope, frequency_coords, cell_arcsec
 ):
-    """The default beam of a telescope is the textbook Airy power pattern, bit
-    for bit, with its first sidelobe beyond CASA's table radius."""
+    """The default beam of a telescope is the textbook Airy power pattern, to
+    1e-9 (its radial table), with its first sidelobe beyond CASA's table radius."""
     from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
         airy_disk_response,
     )
@@ -257,7 +257,7 @@ def test_default_primary_beam_is_the_uncut_textbook_airy_disk(
         ipower=2,
     )
     pb = img_xds["PRIMARY_BEAM"].values[0, :, 0]
-    np.testing.assert_array_equal(pb, expected)
+    np.testing.assert_allclose(pb, expected, rtol=0, atol=1e-9)
     cut = airy_disk_model(telescope, func="casa_airy")["max_rad_1GHz"] / (
         frequency / 1e9
     )
@@ -284,6 +284,49 @@ def test_airy_disk_rorder_versions_agree():
     pb_v2 = airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params)
     assert pb_v1.shape == pb_v2.shape
     np.testing.assert_allclose(pb_v1, pb_v2, atol=1e-4)
+
+
+@pytest.mark.parametrize("lookup_frequency_max", [[1.1e11], np.nan, np.inf])
+def test_airy_disk_rejects_non_scalar_or_non_finite_lookup_bound(
+    lookup_frequency_max,
+):
+    """A malformed public lookup bound must not reach interpolation."""
+    with pytest.raises(ValueError, match="must be a finite scalar"):
+        airy_disk_rorder_v2(
+            np.array([1.0e11, 1.1e11]),
+            ["I"],
+            {
+                "list_dish_diameters": np.array([10.7]),
+                "list_blockage_diameters": np.array([0.75]),
+                "ipower": 1,
+            },
+            {
+                "cell_size": np.array([-2.0, 2.0]) * ARCSEC,
+                "image_size": (8, 8),
+                "image_center": (4, 4),
+            },
+            lookup_frequency_max=lookup_frequency_max,
+        )
+
+
+def test_airy_disk_rejects_lookup_bound_below_requested_channel():
+    """A short lookup table must fail rather than clamp the physical beam."""
+    with pytest.raises(ValueError, match="at least the maximum requested"):
+        airy_disk_rorder_v2(
+            np.array([1.0e11, 1.1e11]),
+            ["I"],
+            {
+                "list_dish_diameters": np.array([10.7]),
+                "list_blockage_diameters": np.array([0.75]),
+                "ipower": 1,
+            },
+            {
+                "cell_size": np.array([-2.0, 2.0]) * ARCSEC,
+                "image_size": (8, 8),
+                "image_center": (4, 4),
+            },
+            lookup_frequency_max=1.05e11,
+        )
 
 
 def _primary_beam(
@@ -396,14 +439,26 @@ def test_primary_beam_params_numbers_equal_to_a_telescope_give_its_beam():
     "primary_beam_params, match",
     [
         ({"telescope": "gbt"}, "telescope"),
-        ({"dish_diameter": 12.0}, "unknown primary_beam_params"),
-        ({"effective_dish_diameter": 0.0}, "effective_dish_diameter > 0"),
-        ({"blockage_diameter": 11.0}, "blockage_diameter"),
-        ({"max_rad_1GHz": 0.0}, "max_rad_1GHz > 0"),
-        ({"telescope": "vla", "effective_dish_diameter": 25.0}, "do not apply"),
-        ({"telescope": "VLA", "blockage_diameter": 1.0}, "do not apply"),
-        ({"telescope": "vla", "max_rad_1GHz": 0.0}, "max_rad_1GHz > 0"),
-        ({"telescope": "vla", "max_rad_1GHz": None}, "max_rad_1GHz > 0"),
+        ({"dish_diameter": 12.0}, "Unknown primary_beam_params"),
+        ({"effective_dish_diameter": 0.0}, "dish diameter must be strictly positive"),
+        ({"blockage_diameter": 11.0}, "matching diameters"),
+        ({"max_rad_1GHz": 0.0}, "max_rad_1GHz must be strictly positive"),
+        (
+            {"telescope": "vla", "effective_dish_diameter": 25.0},
+            "do not accept dish/blockage overrides",
+        ),
+        (
+            {"telescope": "VLA", "blockage_diameter": 1.0},
+            "do not accept dish/blockage overrides",
+        ),
+        (
+            {"telescope": "vla", "max_rad_1GHz": 0.0},
+            "max_rad_1GHz must be strictly positive",
+        ),
+        (
+            {"telescope": "vla", "max_rad_1GHz": None},
+            "max_rad_1GHz must be strictly positive",
+        ),
     ],
 )
 def test_primary_beam_params_refused(primary_beam_params, match):
@@ -464,8 +519,12 @@ def test_primary_beam_is_the_simulator_beam(name, frequency_coords, casa):
         parallactic_angle[0],
     )
     simulated = (np.abs(jones[:, :, 0]) ** 2).T.reshape(outside.shape)
+    # 1e-9: the imager's "airy" beam is a radial table (AIRY_TABLE_STEP)
     np.testing.assert_allclose(
-        img_xds["PRIMARY_BEAM"].values[0, :, 0], simulated, rtol=0, atol=1e-15
+        img_xds["PRIMARY_BEAM"].values[0, :, 0],
+        simulated,
+        rtol=0,
+        atol=1e-15 if casa or name == "EVLA_" else 1e-9,
     )
 
 
@@ -509,42 +568,50 @@ def _jones_image_model():
         (
             lambda: {"beam_model": airy_disk_model("alma"), "telescope": "alma"},
             ValueError,
-            "do not apply with beam_model",
+            "cannot be combined",
         ),
         (
             lambda: {"beam_model": _beam_model("EVLA_"), "max_rad_1GHz": 0.02},
             ValueError,
-            "do not apply with beam_model",
+            "cannot be combined",
         ),
-        (lambda: {"beam_model": _zernike_model()}, ValueError, "not supported"),
-        (lambda: {"beam_model": _jones_image_model()}, ValueError, "not supported"),
+        (
+            lambda: {"beam_model": _zernike_model()},
+            ValueError,
+            "analytic mapping or beam-polynomial dataset",
+        ),
+        (
+            lambda: {"beam_model": _jones_image_model()},
+            ValueError,
+            "analytic mapping or beam-polynomial dataset",
+        ),
         (lambda: {"beam_model": "alma"}, TypeError, "Unsupported beam model"),
         (
             lambda: {"beam_model": {**airy_disk_model("alma"), "dish_diameter": 0.0}},
             ValueError,
-            "dish_diameter > 0",
+            "dish diameter must be strictly positive",
         ),
         (
             lambda: {
                 "beam_model": {**airy_disk_model("alma"), "blockage_diameter": 12.0}
             },
             ValueError,
-            "blockage_diameter < dish_diameter",
+            "matching diameters",
         ),
         (
             lambda: {"beam_model": {**airy_disk_model("alma"), "func": "gaussian"}},
             ValueError,
-            "func 'casa_airy', 'airy' or 'none'",
+            "func must be 'airy', 'casa_airy', or 'none'",
         ),
         (
             lambda: {"beam_model": {**airy_disk_model("alma"), "max_rad_1GHz": 0.0}},
             ValueError,
-            "max_rad_1GHz > 0",
+            "max_rad_1GHz must be strictly positive",
         ),
         (
             lambda: {"beam_model": _beam_model("EVLA_").assign_attrs(max_rad_1GHz=0.0)},
             ValueError,
-            "max_rad_1GHz > 0",
+            "max_rad_1GHz must be strictly positive",
         ),
     ],
 )
@@ -555,7 +622,7 @@ def test_primary_beam_params_beam_model_refused(primary_beam_params, error, matc
 
 def test_primary_beam_of_a_zernike_model_refused():
     img_xds, image_params = _make_empty_residual_image()
-    with pytest.raises(ValueError, match="not supported"):
+    with pytest.raises(ValueError, match="analytic mapping or beam-polynomial dataset"):
         make_primary_beam_single_field(
             img_xds, image_params, beam_model=_zernike_model()
         )

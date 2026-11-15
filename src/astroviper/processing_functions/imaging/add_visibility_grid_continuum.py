@@ -26,6 +26,8 @@ def add_visibility_grid_continuum_single_field(
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
     complex_dtype=None,
+    *,
+    input_checked: bool = False,
 ):
     """Grid visibilities into MT-MFS residual Taylor uv grids.
 
@@ -83,11 +85,23 @@ def add_visibility_grid_continuum_single_field(
     complex_dtype : numpy dtype, optional
         Complex precision of the visibility grid.
 
+    input_checked : bool, optional
+        Skip shared configuration checks after validation by an upper layer.
+        Existing data/product checks always run.
+
     Returns
     -------
     None
         ``img_xds`` is modified in place.
     """
+
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CONTINUUM_SINGLE_FIELD,
+            check_residual_update,
+        )
+
+        check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
     from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
         anti_alias_grid,
@@ -106,14 +120,6 @@ def add_visibility_grid_continuum_single_field(
     # Read input
     n_taylor_terms = int(n_taylor_terms)
     reference_frequency = float(reference_frequency)
-
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
-
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be a positive finite frequency in Hz."
-        )
 
     if complex_dtype is None:
         complex_dtype = np.complex128

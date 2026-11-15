@@ -160,8 +160,15 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode=
     """
     params = dict(image_params)
     model = params.get("primary_beam_model", "auto")
-    if model not in ("auto", "airy", "casa_airy"):
-        raise ValueError("primary_beam_model must be 'auto', 'airy', or 'casa_airy'.")
+    from astroviper.processing_functions.imaging.config_check._common import (
+        check_continuum_mode,
+    )
+    from astroviper.processing_functions.imaging.config_check._primary_beam import (
+        check_continuum_primary_beam,
+    )
+
+    check_continuum_primary_beam(image_params)
+    check_continuum_mode(continuum_mode)
     if "telescope_name" in antenna_xds:
         names = {
             str(name).strip().upper()
@@ -178,8 +185,6 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode=
     # which instead uses a 24.5-m unobstructed aperture with the same support.
     reference_frequency = params.get("reference_frequency")
     frequencies = np.asarray(params.get("frequency_coords", []), dtype=float)
-    if continuum_mode not in ("mfs", "mvc"):
-        raise ValueError("continuum_mode must be 'mfs' or 'mvc'.")
     if reference_frequency is None:
         reference_frequency = np.mean(frequencies) if frequencies.size else np.nan
     frequency_ghz = float(reference_frequency) / 1e9
@@ -256,7 +261,10 @@ def resolve_continuum_primary_beam(image_params, antenna_xds, *, continuum_mode=
     return params
 
 
-def evaluate_primary_beam(freq_chan, pol, pb_params, grid_params, dtype=None):
+@shares_param_docs
+def evaluate_primary_beam(
+    freq_chan, pol, pb_params, grid_params, dtype=None, *, lookup_frequency_max=None
+):
     """Evaluate the selected beam in dish/frequency/polarization/l/m order.
 
     Parameters
@@ -269,6 +277,12 @@ def evaluate_primary_beam(freq_chan, pol, pb_params, grid_params, dtype=None):
         Image geometry and resolved ``primary_beam_model`` prescription.
     dtype : numpy.dtype, optional
         Output dtype, default float64.
+    lookup_frequency_max : float or None, optional
+        Upper frequency in Hz used to build the physical Airy interpolation
+        table. Supply the maximum frequency of the complete task when evaluating
+        its channels separately, preserving the same beam samples as a batched
+        evaluation. None uses the maximum of freq_chan. The CASA Airy model
+        uses its own per-channel tables and does not need this bound.
 
     Returns
     -------
@@ -279,7 +293,8 @@ def evaluate_primary_beam(freq_chan, pol, pb_params, grid_params, dtype=None):
     ------
     ValueError
         If ``primary_beam_model`` was not resolved to ``"airy"`` or
-        ``"casa_airy"``.
+        ``"casa_airy"``, or if the physical Airy model receives an invalid
+        ``lookup_frequency_max``.
     KeyError
         If required image geometry or dish, blockage, or power parameters are
         absent.
@@ -290,7 +305,14 @@ def evaluate_primary_beam(freq_chan, pol, pb_params, grid_params, dtype=None):
 
     model = grid_params.get("primary_beam_model", "airy")
     if model == "airy":
-        return airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=dtype)
+        return airy_disk_rorder_v2(
+            freq_chan,
+            pol,
+            pb_params,
+            grid_params,
+            dtype=dtype,
+            lookup_frequency_max=lookup_frequency_max,
+        )
     if model != "casa_airy":
         raise ValueError("Resolve primary_beam_model before evaluating the beam.")
     if dtype is None:

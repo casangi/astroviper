@@ -42,7 +42,7 @@ def _data(n=128, npol=2, seed=0):
     return resid, psf, mask
 
 
-def _params(npol, max_iter=30, thr=-1.0):
+def _params(npol, max_iter=30, thr=0.0):
     # The residual of _data is white noise, which is no image this PSF could
     # have made: every subtraction of the broad PSF raises its RMS, and the
     # divergence test would stop the clean. It is switched off here, where the
@@ -66,7 +66,7 @@ class TestHogbomManyThreads:
     def test_matches_cpp_iteration_limited(self, npol):
         resid, psf, mask = _data(npol=npol, seed=1)
         p = _params(
-            npol, max_iter=30, thr=-1.0
+            npol, max_iter=30, thr=0.0
         )  # threshold never triggers -> max_iter iters
         r1, m1 = resid.copy(), np.zeros_like(resid)
         r2, m2 = resid.copy(), np.zeros_like(resid)
@@ -92,7 +92,7 @@ class TestHogbomManyThreads:
         resid, psf, mask = _data(npol=2, seed=3)
         resid = resid.astype(np.float64)
         psf = psf.astype(np.float64)
-        p = _params(2, max_iter=20, thr=-1.0)
+        p = _params(2, max_iter=20, thr=0.0)
         p["threshold_per_cycle"] = p["threshold_per_cycle"].astype(np.float64)
         r2, m2 = resid.copy(), np.zeros_like(resid)
         o2 = hogbom_clean_many_threads(r2, psf, m2, copy.deepcopy(p), 8, mask)
@@ -105,7 +105,7 @@ class TestHogbomManyThreads:
         yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
         psf1 = np.exp(-((yy - n // 2) ** 2 + (xx - n // 2) ** 2) / (2 * (n / 16) ** 2))
         psf = psf1.astype(np.float32)[None, None, None]  # np_psf == 1
-        p = _params(2, max_iter=15, thr=-1.0)
+        p = _params(2, max_iter=15, thr=0.0)
         r2, m2 = resid.copy(), np.zeros_like(resid)
         o2 = hogbom_clean_many_threads(r2, psf, m2, copy.deepcopy(p), 8, mask)
         assert o2["iterations_performed"].shape == (1, 1, 2)
@@ -122,7 +122,7 @@ class TestHogbomManyThreads:
         psf2d /= psf2d[n, n]
         psf = np.broadcast_to(psf2d.astype(np.float32), (1, 1, npol, 2 * n, 2 * n))
         psf = psf.copy()
-        p = _params(npol, max_iter=30, thr=-1.0)
+        p = _params(npol, max_iter=30, thr=0.0)
         r1, m1 = resid.copy(), np.zeros_like(resid)
         r2, m2 = resid.copy(), np.zeros_like(resid)
         o1 = hogbom_clean(r1, psf, m1, copy.deepcopy(p), 8, mask)

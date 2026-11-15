@@ -53,7 +53,7 @@ def test_restore_requires_or_infers_consistent_continuum_mode():
     mvc_image = make_continuum_image(continuum_mode="mvc")
     restored_mvc, _ = restore_continuum_image(
         mvc_image,
-        primary_beam_correction=True,
+        restoration_output="both",
     )
     assert "SKY_RESTORED_FLAT_SKY" in restored_mvc
 
@@ -110,7 +110,7 @@ def test_mode_and_deconvolver_names_are_exact():
     image = _image()
     with pytest.raises(ValueError, match="continuum_mode"):
         accumulate_continuum_model(image, continuum_mode="MFS")
-    with pytest.raises(NotImplementedError, match="hogbom"):
+    with pytest.raises(ValueError, match="deconvolver"):
         model_update_mtmfs_single_field(image, "MTMFS", {})
     with pytest.raises(ValueError, match="deconvolver"):
         restore_continuum_image(image, deconvolver="MTMFS")
@@ -137,30 +137,29 @@ def test_restore_rejects_missing_registered_or_fallback_products(
 @pytest.mark.parametrize(
     "fault,error,message",
     [
-        ("deconvolver", NotImplementedError, "hogbom"),
-        ("aspclean", NotImplementedError, "'hogbom', 'asp' and 'mtmfs'"),
-        ("asp_clean", NotImplementedError, "'hogbom', 'asp' and 'mtmfs'"),
-        ("asp", ValueError, "requires SKY_RESIDUAL with one Taylor term"),
+        ("deconvolver", ValueError, "hogbom"),
+        ("asp", ValueError, "requires n_taylor_terms=1"),
         ("residual", KeyError, "SKY_RESIDUAL"),
         ("psf", KeyError, "POINT_SPREAD_FUNCTION"),
         ("group", KeyError, "Input data group"),
         ("residual_dimension", ValueError, "taylor_term"),
         ("psf_dimension", ValueError, "psf_taylor_order"),
-        ("empty_residual", ValueError, "no Taylor terms"),
-        ("empty_psf", ValueError, "no PSF Taylor terms"),
-        ("control_dimensions", ValueError, "three dimensions"),
-        ("empty_controls", ValueError, "no image planes"),
+        ("empty_residual", ValueError, "nonempty dimensions"),
+        ("empty_psf", ValueError, "nonempty dimensions"),
+        ("control_dimensions", ValueError, "per-plane shape"),
+        ("empty_controls", ValueError, "nonempty"),
         ("sidelobe", KeyError, "MAX_SIDELOBE"),
     ],
 )
 def test_model_update_rejects_incomplete_images_and_controls(fault, error, message):
-    image = _image()
+    image = _image().isel(taylor_term=slice(0, 1), psf_taylor_order=slice(0, 1))
     controls = {}
     deconvolver = "hogbom"
     if fault == "deconvolver":
         deconvolver = "unsupported"
-    elif fault in ("aspclean", "asp_clean", "asp"):
-        deconvolver = fault
+    elif fault == "asp":
+        deconvolver = "asp"
+        image = _image()
     elif fault in ("residual", "psf"):
         image = image.drop_vars(
             "SKY_RESIDUAL" if fault == "residual" else "POINT_SPREAD_FUNCTION"
@@ -179,9 +178,14 @@ def test_model_update_rejects_incomplete_images_and_controls(fault, error, messa
             }
         )
     elif fault == "control_dimensions":
-        controls["max_iter_per_cycle_updated"] = np.ones((1, 2))
+        controls["max_iter_per_cycle_updated"] = np.ones((1, 2), dtype=int)
     elif fault == "empty_controls":
         controls["threshold_per_cycle"] = np.ones((1, 0, 1))
+    if fault != "sidelobe":
+        image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+            ("time", "polarization"),
+            [[0.1]],
+        )
     snapshot = image.copy(deep=True)
     with pytest.raises(error, match=message):
         model_update_mtmfs_single_field(image, deconvolver, controls)

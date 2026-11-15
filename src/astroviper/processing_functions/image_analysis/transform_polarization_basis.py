@@ -310,7 +310,7 @@ def transform_polarization_basis(
 
         if ("polarization" in img_xds[var_name].dims) and ("BEAM_FIT" not in var_name):
             img_dtype = img_transformed_xds[var_name].dtype
-            if complex_conversion and img_dtype.kind not in "fc":
+            if img_dtype.kind not in "fc":
                 # Masks belong to their plane; they are not linear combinations
                 # of each other.
                 continue

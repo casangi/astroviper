@@ -23,7 +23,7 @@ def _leaf(task_id):
             "continuum_imaging": {
                 "n_taylor_terms": 2,
                 "n_psf_taylor_terms": 3,
-                "reference_frequency_hz": 100.0,
+                "reference_frequency": 100.0,
             }
         },
     )
@@ -77,7 +77,7 @@ def test_reduction_accumulates_without_out_of_place_xarray_addition(monkeypatch)
     [
         ("n_taylor_terms", 3),
         ("n_psf_taylor_terms", 5),
-        ("reference_frequency_hz", 101.0),
+        ("reference_frequency", 101.0),
     ],
 )
 def test_reduction_rejects_incompatible_taylor_definitions(key, value):

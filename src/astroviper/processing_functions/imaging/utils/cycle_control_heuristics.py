@@ -89,7 +89,9 @@ def psf_fraction(max_psf_sidelobe, psf_sidelobe_factor=PSF_SIDELOBE_FACTOR):
     )
 
 
-def predicted_imaging_cycles(peak_residual, reference_level, psf_fraction):
+def predicted_imaging_cycles(
+    peak_residual, reference_level, psf_fraction, *, input_checked=False
+):
     """Imaging cycles that bring the peak residual down to ``reference_level``.
 
     Parameters
@@ -102,6 +104,10 @@ def predicted_imaging_cycles(peak_residual, reference_level, psf_fraction):
     psf_fraction : float
         The PSF fraction ``f`` of ``threshold_per_cycle``, in ``(0, 1)``.
 
+    input_checked : bool, optional
+        Skip validation of unchanged policy checked by the calling layer.
+        Measured residual values are checked on each prediction.
+
     Returns
     -------
     int
@@ -112,13 +118,20 @@ def predicted_imaging_cycles(peak_residual, reference_level, psf_fraction):
     ValueError
         For a non positive peak or level, or ``f`` outside ``(0, 1)``.
     """
-    if not (peak_residual > 0.0 and reference_level > 0.0):
-        raise ValueError(
-            "peak_residual and reference_level must be positive; got "
-            f"{peak_residual!r}, {reference_level!r}"
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_cycle_heuristic_parameters,
         )
-    if not 0.0 < psf_fraction < 1.0:
-        raise ValueError(f"psf_fraction must lie in (0, 1); got {psf_fraction!r}")
+
+        check_cycle_heuristic_parameters(locals())
+
+    # These are measured/derived values; a checked policy cannot certify them.
+    from astroviper.processing_functions.imaging.config_check._common import (
+        require_finite_real,
+    )
+
+    require_finite_real("peak_residual", peak_residual, positive=True, scalar=True)
+    require_finite_real("reference_level", reference_level, positive=True, scalar=True)
     if peak_residual <= reference_level:
         return 1
     return max(
@@ -141,6 +154,7 @@ def alma_cycle_control_params(
     thermal_noise=None,
     max_iter=200000,
     primary_beam_limit=0.2,
+    input_checked=False,
 ):
     """``cycle_control_params`` for an ALMA single field cube.
 
@@ -170,6 +184,10 @@ def alma_cycle_control_params(
     primary_beam_limit : float, optional
         Primary beam mask cutoff.
 
+    input_checked : bool, optional
+        Skip validation of unchanged policy checked by the calling layer.
+        Measured residual values are checked on each prediction.
+
     Returns
     -------
     dict
@@ -181,6 +199,13 @@ def alma_cycle_control_params(
         For ``noisy`` without a positive ``thermal_noise``, or an invalid
         observable (see :func:`predicted_imaging_cycles`).
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_cycle_heuristic_parameters,
+        )
+
+        check_cycle_heuristic_parameters(locals())
+
     fraction = psf_fraction(max_psf_sidelobe)
     params = {
         "max_iter": int(max_iter),
@@ -192,8 +217,6 @@ def alma_cycle_control_params(
         "max_iter_divergence": 1,
     }
     if noisy:
-        if thermal_noise is None or not thermal_noise > 0.0:
-            raise ValueError("noisy=True needs a positive thermal_noise")
         cycles = predicted_imaging_cycles(peak_residual, thermal_noise, fraction)
         params.update(
             {
@@ -224,6 +247,7 @@ def noisy_cycle_control_params(
     gain=NOISY_GAIN,
     max_iter=200000,
     primary_beam_limit=0.2,
+    input_checked=False,
 ):
     """``cycle_control_params`` for noisy data from the PSF pass of the cube.
 
@@ -279,6 +303,10 @@ def noisy_cycle_control_params(
     primary_beam_limit : float, optional
         Primary beam mask cutoff.
 
+    input_checked : bool, optional
+        Skip validation of unchanged policy checked by the calling layer.
+        Measured residual values are checked on each prediction.
+
     Returns
     -------
     dict
@@ -292,8 +320,13 @@ def noisy_cycle_control_params(
     ValueError
         For a non positive ``n_sigma``.
     """
-    if not n_sigma > 0.0:
-        raise ValueError(f"n_sigma must be positive; got {n_sigma!r}")
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_model_update import (
+            check_cycle_heuristic_parameters,
+        )
+
+        check_cycle_heuristic_parameters(locals())
+
     sensitivity = point_spread_function_xds["SENSITIVITY"].transpose(
         "frequency", "polarization"
     )

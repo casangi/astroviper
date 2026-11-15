@@ -792,29 +792,20 @@ def check_dft_continuum_parameters(
         For ``continuum_mode="mvc"``, a ``visibility_memory_mode`` other than
         ``"recompute"`` or a kept ``visibility`` or ``uv_sampling`` grid.
     """
-    refusal = (
-        'with the gridding_kernel_params type "dft" (the direct Fourier '
-        "transform), which makes no uv grids: "
+    from astroviper.processing_functions.imaging.config_check import (
+        CONTINUUM_SINGLE_FIELD,
+        check_driver_workflow,
     )
-    if continuum_mode != "mfs":
-        raise ValueError(
-            f"continuum_mode {continuum_mode!r} is not available "
-            + refusal
-            + 'MVC forms and caches its channels as uv grids; use continuum_mode="mfs"'
-        )
-    if visibility_memory_mode != "recompute":
-        raise ValueError(
-            f"visibility_memory_mode {visibility_memory_mode!r} is not available "
-            + refusal
-            + 'it caches the observed uv grid; use visibility_memory_mode="recompute"'
-        )
-    kept_grids = sorted({"visibility", "uv_sampling"} & set(image_data_variables_keep))
-    if kept_grids:
-        raise ValueError(
-            f"image_data_variables_keep {kept_grids} are uv grids, which the "
-            'gridding_kernel_params type "dft" (the direct Fourier transform) '
-            "does not make"
-        )
+
+    check_driver_workflow(
+        {
+            "gridding_kernel_params": {"type": "dft"},
+            "continuum_mode": continuum_mode,
+            "visibility_memory_mode": visibility_memory_mode,
+            "image_data_variables_keep": image_data_variables_keep,
+        },
+        mode=CONTINUUM_SINGLE_FIELD,
+    )
 
 
 def add_dft_image_continuum_single_field(
@@ -830,6 +821,8 @@ def add_dft_image_continuum_single_field(
     overwrite=True,
     processing_function_threads=1,
     complex_dtype=None,
+    *,
+    input_checked=False,
 ):
     """Accumulate the Taylor-weighted direct Fourier transforms of one measurement set.
 
@@ -898,6 +891,10 @@ def add_dft_image_continuum_single_field(
         complex64 sky in a four-correlation basis), ``complex128`` (the
         default) a float64 one. The sums are made in double precision.
 
+    input_checked : bool, optional
+        Skip configuration validation when the caller checked these unchanged
+        parameters. Runtime data checks remain active.
+
     Returns
     -------
     None
@@ -910,6 +907,21 @@ def add_dft_image_continuum_single_field(
         and positive, an existing output of another shape, or as
         :func:`add_dft_image_single_field`.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_continuum_basis,
+        )
+
+        check_continuum_basis(
+            {
+                "n_taylor_terms": n_taylor_terms,
+                "reference_frequency": reference_frequency,
+            }
+        )
+
+    n_taylor_terms = int(n_taylor_terms)
+    reference_frequency = float(reference_frequency)
+
     from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
         dft_image,
         dft_image_uv_sampling,
@@ -918,14 +930,6 @@ def add_dft_image_continuum_single_field(
         is_four_correlation_basis,
     )
 
-    n_taylor_terms = int(n_taylor_terms)
-    reference_frequency = float(reference_frequency)
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be a positive finite frequency in Hz."
-        )
     if image_data_group_out_modified is None:
         image_data_group_out_modified = dict(
             _UV_SAMPLING_ROLES if uv_sampling else _SKY_ROLES
@@ -1086,6 +1090,8 @@ def make_dft_undeconvolved_image_continuum_single_field(
     image_data_group_out_name="residual",
     processing_function_threads=1,
     complex_dtype=None,
+    *,
+    input_checked=False,
 ):
     """Image the (residual) visibilities of every measurement set into Taylor terms by the direct Fourier transform.
 
@@ -1122,6 +1128,12 @@ def make_dft_undeconvolved_image_continuum_single_field(
         ``complex64`` for a single-precision image, ``complex128`` (the
         default) otherwise.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -1131,6 +1143,18 @@ def make_dft_undeconvolved_image_continuum_single_field(
         (zero) and ``T_vis_grid`` (the transforms), the columns of the
         gridder path.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_continuum_basis,
+        )
+
+        check_continuum_basis(
+            {
+                "n_taylor_terms": n_taylor_terms,
+                "reference_frequency": reference_frequency,
+            }
+        )
+
     import pandas as pd
 
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
@@ -1159,6 +1183,7 @@ def make_dft_undeconvolved_image_continuum_single_field(
             uv_sampling=False,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
         T_vis_grid += time.time() - start
 
@@ -1183,6 +1208,8 @@ def make_dft_point_spread_function_continuum_single_field(
     image_data_group_out_name="residual",
     processing_function_threads=1,
     complex_dtype=None,
+    *,
+    input_checked=False,
 ):
     """Build the MT-MFS Taylor point spread functions by the direct Fourier transform of the imaging weights.
 
@@ -1226,6 +1253,12 @@ def make_dft_point_spread_function_continuum_single_field(
         ``complex64`` gives float32 point spread functions, ``complex128``
         (the default) float64 ones.
 
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
+
     Returns
     -------
     img_xds : xarray.Dataset
@@ -1234,6 +1267,18 @@ def make_dft_point_spread_function_continuum_single_field(
         One-row timing frame with the ``T_gcf`` (zero), ``T_vis_mask`` and
         ``T_uv_sampling_grid`` (the transforms) columns of the gridder path.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_continuum_basis,
+        )
+
+        check_continuum_basis(
+            {
+                "n_taylor_terms": n_psf_taylor_terms,
+                "reference_frequency": reference_frequency,
+            }
+        )
+
     import pandas as pd
 
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
@@ -1264,6 +1309,7 @@ def make_dft_point_spread_function_continuum_single_field(
             uv_sampling=True,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
+            input_checked=True,
         )
         T_uv_sampling_grid += time.time() - start
 
@@ -1287,6 +1333,8 @@ def make_dft_visibility_model_continuum_single_field(
     ms_data_group_out_modified=None,
     image_data_group_in_name="model",
     processing_function_threads=1,
+    *,
+    input_checked=False,
 ):
     """Predict channel-dependent model visibilities from a Taylor model by the direct Fourier transform.
 
@@ -1330,6 +1378,10 @@ def make_dft_visibility_model_continuum_single_field(
     processing_function_threads : int, optional
         Threads of the C++ kernel. The result does not depend on it.
 
+    input_checked : bool, optional
+        Skip configuration validation when the caller checked these unchanged
+        parameters. Runtime data checks remain active.
+
     Returns
     -------
     None
@@ -1344,18 +1396,25 @@ def make_dft_visibility_model_continuum_single_field(
         frequency that is not finite and positive, or as
         :func:`predict_dft_visibilities_single_field`.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check.param_check_residual_update import (
+            check_continuum_basis,
+        )
+
+        check_continuum_basis(
+            {
+                "n_taylor_terms": n_taylor_terms,
+                "reference_frequency": reference_frequency,
+            }
+        )
+
+    n_taylor_terms = int(n_taylor_terms)
+    reference_frequency = float(reference_frequency)
+
     from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
         dft_predict,
     )
 
-    n_taylor_terms = int(n_taylor_terms)
-    reference_frequency = float(reference_frequency)
-    if n_taylor_terms < 1:
-        raise ValueError("n_taylor_terms must be at least 1.")
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError(
-            "reference_frequency must be a positive finite frequency in Hz."
-        )
     if ms_data_group_out_modified is None:
         ms_data_group_out_modified = {"correlated_data": "VISIBILITY_MODEL"}
 

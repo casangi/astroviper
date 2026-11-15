@@ -22,10 +22,11 @@ processing = importlib.import_module(
 
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize(
-    "restore,primary_beam_correction", [(False, False), (True, False), (True, True)]
+    "restore,restoration_output",
+    [(False, "apparent"), (True, "apparent"), (True, "primary_beam_corrected")],
 )
 def test_finalization_prepares_only_when_needed_and_restores_once(
-    monkeypatch, prepared, restore, primary_beam_correction
+    monkeypatch, prepared, restore, restoration_output
 ):
     image = make_continuum_image()
     model = image[["SKY_MODEL"]].copy(deep=True)
@@ -55,7 +56,7 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
             "model_xds": model,
             "prepared_continuum_image": prepared,
             "restore": restore,
-            "primary_beam_correction": primary_beam_correction,
+            "restoration_output": restoration_output,
         },
     )
     assert calls == ([] if prepared else ["prepare"]) + (["restore"] if restore else [])
@@ -63,17 +64,13 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
     xr.testing.assert_identical(result["image"].SKY_MODEL, model.SKY_MODEL)
     assert not np.shares_memory(result["image"].SKY_MODEL, model.SKY_MODEL)
     if restore:
-        restoration_output = (
-            "primary_beam_corrected" if primary_beam_correction else "apparent"
-        )
         expected, _ = original_restore(
             make_continuum_image(),
-            primary_beam_correction=primary_beam_correction,
             restoration_output=restoration_output,
         )
         expected_name = (
             "SKY_RESTORED_FLAT_SKY"
-            if primary_beam_correction
+            if restoration_output == "primary_beam_corrected"
             else "SKY_RESTORED_FLAT_NOISE"
         )
         xr.testing.assert_allclose(
@@ -83,7 +80,7 @@ def test_finalization_prepares_only_when_needed_and_restores_once(
         assert "SKY_RESTORED_FLAT_NOISE" not in result["image"]
         assert "SKY_RESTORED_FLAT_SKY" not in result["image"]
         assert result["timing_restore"] is None
-    if primary_beam_correction:
+    if restoration_output == "primary_beam_corrected":
         assert "SKY_RESTORED_FLAT_NOISE" not in result["image"]
         assert (
             result["image"].attrs["data_groups"]["restored"]["sky"]
@@ -110,7 +107,7 @@ def test_continuum_finalization_exposes_only_the_flat_sky(continuum_mode):
             "static_xds": xr.Dataset(),
             "model_xds": model,
             "restore": True,
-            "primary_beam_correction": True,
+            "restoration_output": "primary_beam_corrected",
             "continuum_mode": continuum_mode,
         },
     )
@@ -122,11 +119,12 @@ def test_continuum_finalization_exposes_only_the_flat_sky(continuum_mode):
     assert "sky_flat_sky" not in restored.attrs["data_groups"]["restored"]
 
 
+@pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
 @pytest.mark.parametrize("zarr_format", [2, 3])
 @pytest.mark.parametrize("kind", ["mfs", "mvc", "pb"])
 @pytest.mark.parametrize("single_precision", [False, True])
 def test_image_cache_replacement_and_repeated_cleanup(
-    tmp_path, zarr_format, kind, single_precision
+    tmp_path, zarr_format, kind, single_precision, io_engine
 ):
     store = str(tmp_path / "image.zarr")
     root = zarr.open_group(store, mode="w", zarr_format=zarr_format)
@@ -180,7 +178,7 @@ def test_image_cache_replacement_and_repeated_cleanup(
                 single_precision,
                 None,
             )
-            node._write_mfs_visibility_grid_in_place(cache, store)
+            node._write_mfs_visibility_grid_in_place(cache, store, io_engine)
             assert zarr.open_group(store).metadata.zarr_format == zarr_format
             np.testing.assert_array_equal(zarr.open_group(store)["PUBLIC"][:], [42.0])
             xr.testing.assert_equal(
@@ -204,7 +202,7 @@ def test_image_cache_replacement_and_repeated_cleanup(
             blank.VISIBILITY.data[:] = value + 2j
             blank.VISIBILITY_NORMALIZATION.data[:] = value
             node._write_mvc_visibility_grid_in_place(
-                blank.isel(frequency=[1, 0]), store
+                blank.isel(frequency=[1, 0]), store, io_engine
             )
             loaded = node._load_mvc_visibility_grid_in_place(image, store)
             np.testing.assert_array_equal(loaded.VISIBILITY, value + 2j)
@@ -227,7 +225,7 @@ def test_image_cache_replacement_and_repeated_cleanup(
             blank = node._load_wideband_primary_beam_in_place(image, store)
             assert np.isnan(blank.PRIMARY_BEAM).all()
             blank.PRIMARY_BEAM.data[:] = value
-            node._write_wideband_primary_beam_in_place(blank, store)
+            node._write_wideband_primary_beam_in_place(blank, store, io_engine)
             np.testing.assert_array_equal(
                 node._load_wideband_primary_beam_in_place(image, store).PRIMARY_BEAM,
                 value,
@@ -241,10 +239,11 @@ def test_image_cache_replacement_and_repeated_cleanup(
     np.testing.assert_array_equal(root["PUBLIC"][:], [42.0])
 
 
+@pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
 @pytest.mark.parametrize("zarr_format", [2, 3])
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_weight_cache_activation_replacement_and_cleanup(
-    tmp_path, zarr_format, interrupted
+    tmp_path, zarr_format, interrupted, io_engine
 ):
     ps_store = str(tmp_path / "input.zarr")
     image_store = str(tmp_path / "image.zarr")
@@ -281,7 +280,7 @@ def test_weight_cache_activation_replacement_and_cleanup(
         task_child["CALCULATED"] = ("frequency", [value, value + 1])
         task_child.attrs["data_groups"]["base"]["weight_imaging"] = "CALCULATED"
         node._write_continuum_weights_in_place(
-            xr.DataTree.from_dict({"child": task_child}), image_store
+            xr.DataTree.from_dict({"child": task_child}), image_store, io_engine
         )
         root = zarr.open_group(image_store, mode="r", use_consolidated=False)
         cache = root["_CONTINUUM_WEIGHT_CACHE"]["child"]
@@ -302,3 +301,26 @@ def test_weight_cache_activation_replacement_and_cleanup(
         assert name not in view
         assert ("weight_imaging" in view.attrs["data_groups"]["base"]) is interrupted
         np.testing.assert_array_equal(view["WEIGHT"][:], [1.0, 2.0])
+
+
+@pytest.mark.parametrize("node,params", [(None, {}), (lambda: None, None)])
+def test_graph_pair_rejected_before_graph_construction(node, params):
+    from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+        compute_continuum_graph,
+    )
+
+    with pytest.raises(ValueError, match="append_"):
+        compute_continuum_graph(
+            ps_xdt=None,
+            node_task_data_mapping=None,
+            cycle_input_params=None,
+            reduce_input_params=None,
+            disk_chunk_sizes=None,
+            processing_set_data_group_name=None,
+            monitor_resources_seconds=None,
+            task_priorities=None,
+            reduce_mode=None,
+            reduce_n_batch=None,
+            append_node=node,
+            append_input_params=params,
+        )

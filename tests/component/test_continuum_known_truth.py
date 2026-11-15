@@ -172,6 +172,7 @@ def _dirty_continuum_image(
                 "min_psf_fraction": 0.05,
                 "max_psf_fraction": 0.8,
             },
+            deconvolver="mtmfs",
             continuum_mode=continuum_mode,
             **(
                 {}

@@ -567,6 +567,17 @@ class TestImagingDictKeyBehavior(unittest.TestCase):
 class TestMergeImagingDicts(unittest.TestCase):
     """Test merging multiple ImagingDict objects."""
 
+    def test_invalid_strategy_rejected_before_inspecting_records(self):
+        left = ImagingDict()
+        left.add({"peakres": 1.0}, time=0, pol=0, chan=0)
+        right = ImagingDict()
+        right.add({"peakres": 0.5}, time=0, pol=0, chan=1)
+        for records in ([], [left], [left, right]):
+            with self.subTest(records=len(records)):
+                with self.assertRaisesRegex(ValueError, "Unknown merge_strategy"):
+                    merge_imaging_dicts(records, merge_strategy="invalid")
+        self.assertEqual(left.sel(time=0, pol=0, chan=0)["peakres"], [1.0])
+
     def setUp(self):
         """Create test ImagingDict objects."""
         self.rd1 = ImagingDict()
@@ -1046,6 +1057,21 @@ class TestBuildResidualImagingDict(unittest.TestCase):
             }
         }
         return img_xds
+
+    def test_max_cycles_zero_measures_only_what_the_stop_test_needs(self):
+        img_xds = self._make_img_xds(residual_peak=1.0, real_sidelobe=0.3)
+        key = Key(time=0, chan=0, pol=0)
+        skipped = build_residual_imaging_dict(
+            img_xds, "residual", {"gain": 0.1, "max_cycles": 0}
+        ).data[key]
+        measured = build_residual_imaging_dict(
+            img_xds, "residual", {"gain": 0.1, "max_cycles": 1}
+        ).data[key]
+        for field in ("peakres", "peakres_nomask", "masksum", "max_psf_sidelobe"):
+            self.assertEqual(skipped[field], measured[field])
+        for field in ("entropy", "residual_snr", *RESIDUAL_STATISTICS):
+            self.assertTrue(np.isnan(skipped[field]), field)
+        self.assertTrue(np.isfinite(measured["rms_in_mask"]))
 
     def test_max_psf_sidelobe_is_the_measured_value(self):
         real_sidelobe = 0.3

@@ -24,15 +24,20 @@ def point_spread_function_cube_single_field(
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
-    load_data_variables=None,
+    load_correlated_data=True,
+    io_engine="chunk",
+    data_group=None,
+    output_image_format="zarr",
     task_id=0,
     input_data=None,
+    *,
+    input_checked=False,
 ):
     """Make the point spread function of one frequency chunk of a single-field
     cube, with its beam fit and the weight statistics of every channel.
 
     Thin node task: loads this chunk's weights, flags and uvw (``VISIBILITY``
-    is never read when ``load_data_variables`` leaves it out), then, **once
+    is never read when ``load_correlated_data`` is false), then, **once
     per frequency channel**, runs
     :func:`~astroviper.processing_functions.imaging.residual_update.imaging_setup_single_field`
     (imaging weights, point spread function, primary beam, Stokes basis and
@@ -50,11 +55,21 @@ def point_spread_function_cube_single_field(
         ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
-        correlations (see ``instrument_polarization_basis``).
+        correlations (see ``instrument_polarization_basis``). The labels must be a
+        nonempty one-dimensional vector. An xarray DataArray must have exactly
+        the dimension ``polarization``; other dimension names are rejected.
+        ``time_coords`` accepts XRADIO image-factory time formats: numeric MJD
+        (UTC) days, numeric strings, ISO time strings, datetime64 values, Python
+        datetime objects, or Astropy Time, as scalars or one-dimensional sequences.
+        Times must be finite and nonempty; validation preserves the supplied values.
+        Distributed single-field imagers require exactly one image time plane and
+        an explicit ``fft_padding``. Designed kernels, including the default,
+        require padding at least 1.05; CASA's fixed kernel permits 1.0.
     imaging_weights_params : dict
         Weighting configuration: ``weighting`` is ``"natural"``, ``"uniform"``,
-        ``"briggs"`` or ``"briggs_abs"``; ``robust`` controls the Briggs
-        trade-off. ``weighting_scope`` is ``"local"`` for a density per
+        ``"briggs"`` or ``"briggs_abs"``. Both Briggs variants require an
+        explicit finite real ``robust`` in ``[-2, 2]``; no default is inferred.
+        ``weighting_scope`` is ``"local"`` for a density per
         frequency channel or ``"global"`` for one density across all selected
         channels in distributed continuum imaging. Natural weighting is
         independent of this scope.
@@ -165,21 +180,40 @@ def point_spread_function_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
-        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
         The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
         models: ``airy_disk_model(telescope, func="casa_airy")`` and
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
         Zernike aperture models and Jones images are not supported: they are
         not azimuthally symmetric and depend on the parallactic angle.
-    load_data_variables : list of str, optional
-        Data variables to load (XRADIO ``include_variables``), for example the
-        data group's weight, flag and uvw variables; ``None`` (default) loads
-        every variable of the data group, ``VISIBILITY`` included.
+    load_correlated_data : bool, optional
+        If false, the data group's correlated data are not read. Default
+        ``True``.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
+    data_group : dict, optional
+        Role->variable mapping of ``processing_set_data_group_name``; read from
+        the processing set when ``None`` and needed.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of ``image_store``. Default ``"zarr"``.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     input_data : dict, optional
         Pre-loaded ``{ms_name: node}`` visibilities; when given, nothing is
         loaded.
+
+    input_checked : bool, optional
+        Skip configuration checks already performed by the calling layer.
+        Runtime checks on newly created data always remain active. For graph nodes
+        using an input_params dictionary, its input_checked entry also carries this
+        flag. Set it only for an unchanged configuration in the same imaging mode.
 
     Returns
     -------
@@ -195,6 +229,14 @@ def point_spread_function_cube_single_field(
           ``MAX_SIDELOBE_POINT_SPREAD_FUNCTION`` and the variables of
           :func:`~astroviper.processing_functions.imaging.weight_statistics.calculate_weight_statistics_single_field`.
     """
+    if not input_checked:
+        from astroviper.processing_functions.imaging.config_check import (
+            CUBE_SINGLE_FIELD,
+            check_config,
+        )
+
+        check_config(locals(), mode=CUBE_SINGLE_FIELD)
+
     import time
 
     import pandas as pd
@@ -242,14 +284,18 @@ def point_spread_function_cube_single_field(
     if input_data is not None:
         ps_xdt = input_data
     else:
-        from xradio.measurement_set.load_processing_set import load_processing_set
+        from astroviper.utils.node_task_io import load_processing_set
 
         ps_xdt = load_processing_set(
+            io_engine,
             input_data_store,
-            sel_parms=data_selection,
-            data_group_name=processing_set_data_group_name,
-            include_variables=load_data_variables,
-            load_sub_datasets=False,
+            data_selection,
+            processing_set_data_group_name,
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=instrument_polarization_basis,
+            data_group=data_group,
+            load_correlated_data=load_correlated_data,
+            processing_function_threads=processing_function_threads,
         )
     T_load = time.time() - start
 
@@ -282,6 +328,7 @@ def point_spread_function_cube_single_field(
             psf_fitting_method=psf_fitting_method,
             gridding_kernel_params=gridding_kernel_params,
             primary_beam_params=primary_beam_params,
+            input_checked=True,
         )
         timing_frames.append(timing_chan)
 
@@ -331,13 +378,15 @@ def point_spread_function_cube_single_field(
 
     start = time.time()
     if image_store is not None:
-        from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
+        from astroviper.utils.io import write_result_chunk
 
-        write_result_chunk_to_disk_using_zarr(
+        write_result_chunk(
+            io_engine,
             image_store,
             POINT_SPREAD_FUNCTION_IMAGE_VARIABLES,
             _chunk_task_coords(task_coords, data_selection, 0, n_chan),
             psf_xds,
+            output_image_format=output_image_format,
         )
     T_write = time.time() - start
 

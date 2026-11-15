@@ -158,7 +158,7 @@ def test_gaussian_disk_is_simulated_and_recovered(tmp_path):
         n_mapping_parallelism={"frequency": 1},
         overwrite=True,
         restore=True,
-        primary_beam_correction=False,
+        restoration_output="apparent",
     )
 
     img = load_image(image_store)

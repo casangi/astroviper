@@ -3,10 +3,11 @@
 A distributed application called with ``report="html"``, ``"pdf"`` or
 ``"notebook"`` makes a compact report of its run once its output is written.
 Every report has a processing section common to all distributed applications
-(:func:`add_processing_section`: the timing of the application's steps and of
-its node tasks, the task stream and, for a monitored run, the cluster CPU,
-memory and I/O) and a results section of the application's own, assembled
-from text, tables and figures with :class:`Report`.
+(:func:`add_processing_section`: the performance measures, the timing of the
+application's steps and of its node tasks, the task stream, the task times
+and, for a monitored run, the CPU, memory and I/O of the cluster, of every
+worker slot and of the tasks) and a results section of the application's own,
+assembled from text, tables and figures with :class:`Report`.
 
 The report of an output store ``cube.img.zarr`` is ``cube_report.html`` (or
 ``.pdf``) next to it, and the products a report makes with other distributed
@@ -27,7 +28,6 @@ __all__ = [
     "Report",
     "add_processing_section",
     "make_report",
-    "node_task_timing_table",
     "report_files_directory",
     "report_path",
 ]
@@ -488,49 +488,195 @@ class _PdfFlow:
         self._pages.close()
 
 
-def node_task_timing_table(timing_node_tasks):
-    """The mean, maximum and total over the node tasks of every ``T_*`` timing.
+def _captured(function, *args, **kwargs):
+    """``function(*args, **kwargs)`` and the messages it logged at INFO and
+    above, one per line: ``(result, text)``.
 
-    Parameters
-    ----------
-    timing_node_tasks : pandas.DataFrame
-        The ``"timing_node_tasks"`` frame of a distributed application, one
-        row per node task.
-
-    Returns
-    -------
-    pandas.DataFrame
-        One row per numeric ``T_*`` column (seconds), with the columns
-        ``mean``, ``max`` and ``total``.
+    The plot functions log their notes and summaries to the toolviper logger;
+    the report shows the figure, or the logged reason as a note when there is
+    none.
     """
+    import logging
+
+    import toolviper.utils.logger as logger
+
+    messages = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            messages.append(record.getMessage())
+
+    # The logger the toolviper functions log to (a worker plugin's on a Dask
+    # worker).
+    target = logger.get_logger()
+    handler = _Collect(logging.INFO)
+    target.addHandler(handler)
+    try:
+        result = function(*args, **kwargs)
+    finally:
+        target.removeHandler(handler)
+    return result, "\n".join(messages).strip()
+
+
+# The rows of the performance-measures table: (label, key of
+# resource_plots.performance_measures, unit).
+_PERFORMANCE_MEASURE_ROWS = (
+    ("parallelism p", "n_worker_slots", "worker slots"),
+    ("map tasks", "n_map_tasks", ""),
+    ("reduce tasks", "n_reduce_tasks", ""),
+    ("work W of the map and reduce tasks", "work", "s"),
+    ("work of the map tasks", "work_map", "s"),
+    ("work of the reduce tasks", "work_reduce", "s"),
+    ("ideal time W / p", "ideal_time", "s"),
+    ("map-reduce window t3 - t1", "map_reduce_window", "s"),
+    ("end-to-end window t3 - t0", "end_to_end_window", "s"),
+    ("map window t2 - t1", "task_window", "s"),
+    ("after the map window t3 - t2", "post_map", "s"),
+    ("speedup S_mr = W / (t3 - t1)", "speedup_map_reduce", ""),
+    ("speedup S_e2e = W / (t3 - t0)", "speedup_end_to_end", ""),
+    ("efficiency E_mr = S_mr / p", "parallel_efficiency_map_reduce", ""),
+    ("efficiency E_e2e = S_e2e / p", "parallel_efficiency_end_to_end", ""),
+    ("busy fraction of the map window", "map_busy_fraction", ""),
+    ("time from t1 to 95 % busy", "time_to_95_percent_busy", "s"),
+    ("time from t1 to the end of 95 % of the map tasks", "p95_task_end", "s"),
+)
+
+
+def _performance_measures_table(measures):
+    """The finite rows of :data:`_PERFORMANCE_MEASURE_ROWS` in ``measures``."""
+    import numpy as np
     import pandas as pd
 
-    columns = [
-        column
-        for column in timing_node_tasks.columns
-        if str(column).startswith("T_")
-        and pd.api.types.is_numeric_dtype(timing_node_tasks[column])
+    rows = [
+        (label, float(measures[key]), unit)
+        for label, key, unit in _PERFORMANCE_MEASURE_ROWS
+        if measures.get(key) is not None and np.isfinite(measures[key])
     ]
-    timing = timing_node_tasks[columns]
     table = pd.DataFrame(
-        {"mean": timing.mean(), "max": timing.max(), "total": timing.sum()}
+        {
+            "value": [value for _, value, _ in rows],
+            "unit": [unit for *_, unit in rows],
+        },
+        index=[label for label, *_ in rows],
     )
-    table.index.name = "node task step"
+    table.index.name = "performance measure"
     return table
 
 
+def _compute_resources_table(compute_resources):
+    """The recorded compute resources, one row per key of
+    :data:`~astroviper.utils.data_partitioning.COMPUTE_RESOURCES_KEYS` but
+    ``hosts`` (``n_hosts`` stands for it), without the values not known."""
+    import pandas as pd
+
+    from astroviper.utils.data_partitioning import COMPUTE_RESOURCES_KEYS
+
+    keys = [
+        key
+        for key in COMPUTE_RESOURCES_KEYS
+        if key != "hosts" and compute_resources.get(key) is not None
+    ]
+    table = pd.DataFrame(
+        {"value": [compute_resources[key] for key in keys]}, index=keys, dtype=object
+    )
+    table.index.name = "compute resources"
+    return table
+
+
+_RESOURCE_VIEW_TITLES = {
+    "cluster": "Cluster CPU, memory and I/O",
+    "core": "CPU, memory and I/O per worker slot",
+    "task": "CPU, memory and I/O per task",
+}
+# The figures of the three resource views: (key, caption).
+_RESOURCE_CAPTIONS = {
+    "cluster": (
+        (
+            "cpu",
+            "Cluster CPU: busy cores summed over the running tasks; dashed, the "
+            "logical CPUs of the hosts, and dotted, the worker slots times the "
+            "processing function threads, where the compute resources give them.",
+        ),
+        (
+            "memory",
+            "Cluster memory: resident memory of the task-running workers; "
+            "dashed, the hosts' memory, and dotted, the workers' memory limit, "
+            "where the compute resources give them.",
+        ),
+        ("io", "Cluster I/O: aggregate read and write rate (syscall level)."),
+    ),
+    "core": (
+        (
+            "cpu",
+            "CPU per worker slot: the peak, mean, median and minimum over the "
+            "worker slots of the CPU of each slot's worker process (dashed, one "
+            "core: 100 %).",
+        ),
+        (
+            "memory",
+            "Memory per worker slot: the peak, mean, median and minimum over the "
+            "slots running a task; dashed, the host memory per worker slot, and "
+            "dotted, the worker memory limit per slot, where the compute "
+            "resources give them.",
+        ),
+        (
+            "io",
+            "I/O per worker slot: the write (top) and read (bottom) rate, as "
+            "peak, mean, median and minimum over the slots.",
+        ),
+    ),
+    "task": (
+        (
+            "cpu",
+            "CPU per task: every task on its own clock (0 at its start), a "
+            "subsample of the tasks and their mean while at least 5 % of them "
+            "run; dashed, the processing function threads (100 % each), where "
+            "the compute resources give them.",
+        ),
+        (
+            "memory",
+            "Memory per task: resident memory on the task's own clock, a "
+            "subsample of the tasks and their mean while at least 5 % of them "
+            "run.",
+        ),
+        (
+            "io",
+            "I/O per task: bytes read and written since the task's start, a "
+            "subsample of the tasks and their mean (a finished task holds its "
+            "total).",
+        ),
+    ),
+}
+
+
 def add_processing_section(
-    document, return_dict, timing_phases, task_columns=None, task_name="node task"
+    document,
+    return_dict,
+    timing_phases,
+    task_columns=None,
+    task_name="node task",
+    node_task_timing_phases=None,
 ):
     """Add the processing section common to all distributed applications.
 
-    The timing of the application's own steps
-    (:func:`~astroviper.utils.timing.format_timing_summary`), the timing of its
-    node tasks (:func:`node_task_timing_table`), the task stream
-    (:func:`~astroviper.utils.resource_plots.plot_task_stream`) and, for a run
-    with ``monitor_resources_seconds``, the cluster CPU, memory and I/O
-    (:func:`~astroviper.utils.resource_plots.plot_cluster_resource_usage`);
-    a note says what the run did not record.
+    Its subsections: Performance, the performance measures
+    (:func:`~astroviper.utils.resource_plots.performance_measures`) and the
+    compute resources the run recorded; Timing, the timing of the
+    application's own steps
+    (:func:`~astroviper.utils.timing.format_timing_summary`) and of its node
+    tasks (:func:`~astroviper.utils.timing.node_task_timing_table`); Task
+    stream (:func:`~astroviper.utils.resource_plots.plot_task_stream`); Task
+    times, the distribution of the task time
+    (:func:`~astroviper.utils.resource_plots.plot_task_time_distribution`)
+    and the median time of the phases
+    (:func:`~astroviper.utils.resource_plots.plot_task_phase_times`); and
+    Resources, for a run with ``monitor_resources_seconds``, the CPU, memory
+    and I/O of the cluster, of every worker slot and of the tasks
+    (:func:`~astroviper.utils.resource_plots.plot_cluster_resource_usage`,
+    :func:`~astroviper.utils.resource_plots.plot_core_resource_usage`,
+    :func:`~astroviper.utils.resource_plots.plot_task_resource_usage`). A
+    note says what the run did not record. The number of figures does not
+    grow with the run: at most 12.
 
     Parameters
     ----------
@@ -538,28 +684,80 @@ def add_processing_section(
         The report.
     return_dict : dict
         The application's return dict (``"timing_distributed_application"``,
-        ``"timing_node_tasks"`` and, when recorded, ``"timing_reduce_nodes"``).
+        ``"timing_node_tasks"`` and, when recorded, ``"timing_reduce_nodes"``
+        and ``"compute_resources"``).
     timing_phases : list of tuple
         The phase layout of ``"timing_distributed_application"``, the
-        application's ``DISTRIBUTED_APPLICATION_TIMING_PHASES``.
+        application's ``DISTRIBUTED_APPLICATION_TIMING_PHASES``: the timing
+        summary and the driver strip of the task stream follow it.
     task_columns : dict, optional
         The node task columns of the task stream (``task_columns`` of
         :func:`~astroviper.utils.resource_plots.plot_task_stream`); ``None``
         for the imager's.
     task_name : str, optional
         What a node task does, for the captions (e.g. ``"frequency chunk"``).
+    node_task_timing_phases : list of tuple, optional
+        The phase layout of the node task's timings (as for
+        :func:`~astroviper.utils.timing.format_timing_summary`, e.g.
+        ``IMAGING_TIMING_PHASES``): the node task table and the phase times
+        are grouped by it. ``None`` (default): one row per ``T_*`` column and
+        the load, non-I/O and write segments of the task stream as phases.
     """
-    import contextlib
-
-    import pandas as pd
-
     from astroviper.utils.resource_plots import (
-        plot_cluster_resource_usage,
+        IMAGING_TASK_STREAM_COLUMNS,
+        performance_measures,
+        plot_task_phase_times,
         plot_task_stream,
+        plot_task_time_distribution,
     )
-    from astroviper.utils.timing import format_timing_summary
+    from astroviper.utils.timing import (
+        format_timing_summary,
+        node_task_phase_columns,
+        node_task_timing_table,
+    )
 
+    columns = {**IMAGING_TASK_STREAM_COLUMNS, **(task_columns or {})}
+    frame = return_dict["timing_node_tasks"]
     document.section("Processing")
+
+    document.subsection("Performance")
+    if (
+        len(frame)
+        and "start_unixtime" in frame.columns
+        and frame["start_unixtime"].notna().all()
+    ):
+        measures = performance_measures(
+            return_dict, timing_phases=timing_phases, task_columns=task_columns
+        )
+        document.table(
+            _performance_measures_table(measures),
+            caption="Performance measures (the RADPS benchmarking memo): t0 is "
+            "the start of the application, t1 the start of the first task, t2 "
+            "the end of the last map task and t3 the end of the compute call; W "
+            "is the summed time of the map and reduce tasks and p the number of "
+            "worker slots.",
+            float_format="{:.6g}",
+        )
+    else:
+        document.note(
+            "Performance measures: the node tasks have no start_unixtime, so "
+            "they cannot be placed on the run's wall clock."
+        )
+    compute_resources = return_dict.get("compute_resources")
+    if compute_resources:
+        document.table(
+            _compute_resources_table(compute_resources),
+            caption='Compute resources recorded by the run (return_dict["compute_'
+            'resources"]): p is n_worker_slots, and the capacity lines of the '
+            "resource figures are taken from it.",
+        )
+    else:
+        document.note(
+            "The run recorded no compute resources: p is reconstructed by lane "
+            "packing and the resource figures have no capacity lines."
+        )
+
+    document.subsection("Timing")
     timing = return_dict.get("timing_distributed_application") or {}
     if timing:
         document.preformatted(
@@ -571,45 +769,112 @@ def add_processing_section(
                 total_label="TOTAL (wall time)",
             )
         )
-    frame = return_dict.get("timing_node_tasks")
-    if isinstance(frame, pd.DataFrame) and len(frame):
+    if len(frame):
         document.table(
-            node_task_timing_table(frame),
+            node_task_timing_table(
+                frame,
+                node_task_timing_phases,
+                total_key=None if node_task_timing_phases is None else columns["task"],
+            ),
             caption=f"Node task timing (seconds) over the {len(frame)} tasks, one "
-            f"per {task_name}.",
+            f"per {task_name}: the mean, median, maximum and total over the tasks"
+            + (
+                "; grouped by phase, (unaccounted) is the time of a phase outside "
+                "its steps and (outside the phases) the task time outside every phase"
+                if node_task_timing_phases
+                else ""
+            )
+            + ".",
         )
 
-    # The plot functions print their notes and summaries; the figures carry them.
-    printed = io.StringIO()
-    with contextlib.redirect_stdout(printed):
-        figure = plot_task_stream(return_dict, task_columns=task_columns)
+    document.subsection("Task stream")
+    figure, printed = _captured(
+        plot_task_stream,
+        return_dict,
+        timing_phases=timing_phases,
+        task_columns=task_columns,
+    )
     if figure is None:
-        document.note("Task stream: " + (printed.getvalue().strip() or "not recorded."))
+        document.note("Task stream: " + (printed or "not recorded."))
     else:
         document.figure(
             figure,
-            caption="Task stream: one lane per worker, every task as its load "
-            "(blue), science (green) and write (orange) time, above it the "
-            "number of running tasks and the steps of the application itself.",
+            caption="Task stream: one lane per worker slot, every task as its "
+            "load (blue), science (green) and write (orange) time, above it the "
+            "number of running tasks and the steps of the application itself "
+            "(those before compute as one setup segment).",
         )
 
-    with contextlib.redirect_stdout(io.StringIO()):
-        axes = plot_cluster_resource_usage(return_dict)
-    if axes is None:
+    document.subsection("Task times")
+    for title, (figure, printed), caption in (
+        (
+            "Task time distribution",
+            _captured(
+                plot_task_time_distribution, return_dict, task_columns=task_columns
+            ),
+            "Task time distribution: the fraction of the tasks that took at "
+            f"most a given time ({columns['task']}); the dotted line marks 95 % "
+            "of the tasks.",
+        ),
+        (
+            "Task phase times",
+            _captured(
+                plot_task_phase_times,
+                return_dict,
+                columns=None
+                if node_task_timing_phases is None
+                else node_task_phase_columns(frame, node_task_timing_phases),
+                statistic="median",
+                layout="grouped",
+                task_columns=task_columns,
+            ),
+            "Task phase times: the median over the tasks of every phase (of the "
+            "load, non-I/O and write segments for a node task without a phase "
+            "layout), and its share of the median task time.",
+        ),
+    ):
+        if figure is None:
+            document.note(f"{title}: " + (printed or "not recorded."))
+        else:
+            document.figure(figure, caption=caption)
+
+    document.subsection("Resources")
+    _add_resource_figures(document, return_dict)
+
+
+def _add_resource_figures(document, return_dict):
+    """The cluster, per-slot and per-task CPU, memory and I/O figures, or notes
+    on what was not recorded."""
+    from astroviper.utils.resource_plots import (
+        plot_cluster_resource_usage,
+        plot_core_resource_usage,
+        plot_task_resource_usage,
+    )
+
+    drawn, reasons = {}, {}
+    for view, function in (
+        ("cluster", plot_cluster_resource_usage),
+        ("core", plot_core_resource_usage),
+        ("task", plot_task_resource_usage),
+    ):
+        axes, printed = _captured(function, return_dict)
+        if axes is None or all(ax is None for ax in axes.values()):
+            reasons[view] = printed
+        else:
+            drawn[view] = axes
+    if not drawn:
         document.note(
-            "Cluster CPU, memory and I/O were not recorded: run with "
+            "CPU, memory and I/O were not recorded: run with "
             "monitor_resources_seconds (e.g. 0.5) to record them."
         )
         return
-    for key, caption in (
-        ("cpu", "Cluster CPU: busy cores summed over the running tasks."),
-        ("memory", "Cluster memory: resident memory of the task-running workers."),
-        ("io", "Cluster I/O: aggregate read and write rate (syscall level)."),
-    ):
-        if axes.get(key) is not None:
-            document.figure(axes[key].figure, caption=caption)
-    if axes.get("io") is None:
+    for view, axes in drawn.items():
+        for key, caption in _RESOURCE_CAPTIONS[view]:
+            if axes.get(key) is not None:
+                document.figure(axes[key].figure, caption=caption)
+    for view, reason in reasons.items():
+        document.note(f"{_RESOURCE_VIEW_TITLES[view]}: {reason or 'not recorded.'}")
+    if any(axes.get("io") is None for axes in drawn.values()):
         document.note(
-            "Cluster I/O was not recorded: the I/O counters of the monitor "
-            "exist on Linux only."
+            "I/O was not recorded: the I/O counters of the monitor exist on Linux only."
         )

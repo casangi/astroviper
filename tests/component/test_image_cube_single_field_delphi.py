@@ -10,8 +10,10 @@ import inspect
 import json
 
 import numpy as np
+import pytest
 from astropy.coordinates import SkyCoord
 from xradio.image import load_image
+from xradio.measurement_set import open_processing_set
 
 import astroviper.distributed_applications as distributed_applications
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
@@ -68,13 +70,20 @@ def _simulate_noisy_alma(ps_store):
     )["ps_store"]
 
 
-def test_delphi_parameters_file_then_image_from_it(tmp_path):
+@pytest.mark.parametrize("named_field", [False, True])
+def test_delphi_parameters_file_then_image_from_it(tmp_path, named_field):
     ps_store = _simulate_noisy_alma(str(tmp_path / "alma.ps.zarr"))
+    field_name = None
+    if named_field:
+        fields = open_processing_set(ps_store).xr_ps.get_combined_field_and_source_xds()
+        field_name = str(fields.attrs["center_field_name"])
     image_store = str(tmp_path / "alma.img.zarr")
     parameters = delphi_module.image_cube_single_field_delphi(
         ps_store,
         image_store,
         processing_set_data_group_name="base",
+        field_name=field_name,
+        mpi_cluster_setup={"max_workers": 2},
         calculate_parameters_only=True,
         n_mapping_parallelism={"frequency": 2},
     )
@@ -99,6 +108,8 @@ def test_delphi_parameters_file_then_image_from_it(tmp_path):
         "oversampling": 300,
         "interpolation": "linear",
     }
+    assert arguments["mpi_cluster_setup"] == {"max_workers": 2}
+    assert arguments["field_name"] == field_name
     image_params = arguments["image_params"]
     assert image_params["fft_padding"] == 1.2
     assert image_params["polarization_coords"] == ["I", "Q"]
@@ -122,8 +133,10 @@ def test_delphi_parameters_file_then_image_from_it(tmp_path):
     # sample the cell of the PSF pass is sized for.
     u_max = derived["longest_antenna_separation"] * 101e9 / 299792458.0
     assert max(derived["uv_distance_max"]) <= u_max
-    # 5 pixels across the fitted minor axis of the highest channel (Stokes I).
-    minor = derived["beam_fit_params_point_spread_function"][1][0][1]
+    # 5 pixels across the minor axis of the refits of the highest channel
+    # (Stokes I): the two agree, and the smaller is taken.
+    assert derived["frequency_refit"] == 101e9
+    minor = min(beam[1] for beam in derived["beam_fit_params_refit"])
     np.testing.assert_allclose(image_params["cell_size"], [-minor / 5, minor / 5])
     size = image_params["image_size"][0]
     assert size % 2 == 0 and size * minor / 5 >= derived["field_of_view"]
@@ -138,6 +151,13 @@ def test_delphi_parameters_file_then_image_from_it(tmp_path):
     for name in ("SKY_MODEL", "SKY_RESIDUAL", "SKY_RESTORED", "PRIMARY_BEAM"):
         assert name in img.data_vars, name
     assert img.sizes["l"] == size
+    # The imager's own fit of the highest channel has 5 pixels across its minor
+    # axis (measured 4.93; fits at 3.5 to 10 pixels that are not junk lie within
+    # 1.5 percent of their median); the cell of the PSF pass's fit gave 4.44.
+    imager_minor = img.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.sel(
+        frequency=101e9, polarization="I", beam_params_label="minor"
+    ).values
+    np.testing.assert_allclose(imager_minor / (minor / 5), 5.0, rtol=0.05)
     stokes_i = 0
     model_flux = np.nansum(img.SKY_MODEL.values[0, :, stokes_i], axis=(1, 2))
     np.testing.assert_allclose(model_flux, [1.0, 1.0], rtol=0.1)

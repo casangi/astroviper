@@ -19,10 +19,13 @@ from astroviper.node_tasks.imaging.image_cube_single_field import (
     _channel_cycle_control_params,
     _chunk_task_coords,
     _combine_channel_timing_frames,
+    _image_channel_start,
     _ImageChunkAccumulator,
+    _remap_imaging_dict_to_global_channels,
     _select_processing_set_channel,
     _shift_imaging_dict_channels,
     _visibility_to_image_frequency_maps,
+    _with_image_spectral_reference,
 )
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     ImagingDict,
@@ -30,6 +33,17 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
 )
 
 VIS_FREQUENCIES = np.array([1.0e9, 1.1e9, 1.2e9])
+
+
+def _image_frequency_attrs(frequencies):
+    """The frequency attributes of the whole image, as the distributed
+    application passes them to its node tasks."""
+    from xradio.image import make_empty_sky_image
+
+    image = make_empty_sky_image(
+        [1.0, 0.5], [4, 4], [-4.85e-6, 4.85e-6], frequencies, ["I"], [0]
+    )
+    return dict(image.frequency.attrs)
 
 
 def _fake_measurement_set(frequencies, seed=0):
@@ -91,6 +105,7 @@ def _task_inputs(tmp_path, n_chan=3, data_selection=None, **overrides):
         image_data_variables_keep=["sky_residual"],
         graph_mode=False,  # whole task written with to_zarr
         task_id=3,
+        image_frequency_attrs=_image_frequency_attrs(VIS_FREQUENCIES),
     )
     inputs.update(overrides)
     return inputs
@@ -239,6 +254,36 @@ def test_node_task_images_one_channel_at_a_time(tmp_path, fake_science):
     # Per-plane image statistics cover the whole chunk.
     stats = result["image_statistics"]["sky_residual"]
     assert stats.sizes["frequency"] == 3
+
+
+@pytest.mark.parametrize(
+    "cycle_control_params, model_statistics",
+    [
+        ({"max_iter": 10, "max_cycles": 3}, True),
+        ({"max_iter": 0, "max_cycles": 3}, False),
+        ({"max_iter": 10, "max_cycles": 0}, False),
+    ],
+)
+def test_no_model_statistics_when_no_model_update_can_run(
+    tmp_path, fake_science, monkeypatch, cycle_control_params, model_statistics
+):
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+
+    def science_with_model(*args, **kwargs):
+        img_xds, timing, imaging_dict = fake_science(*args, **kwargs)
+        img_xds["SKY_MODEL"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
+        return img_xds, timing, imaging_dict
+
+    monkeypatch.setattr(pf_imaging, "image_cube_single_field", science_with_model)
+    result = image_cube_single_field(
+        **_task_inputs(tmp_path, cycle_control_params=cycle_control_params),
+        input_data=_fake_processing_set({"ms_a": VIS_FREQUENCIES}),
+    )
+    assert "sky_residual" in result["image_statistics"]
+    assert ("sky_model" in result["image_statistics"]) == model_statistics
 
 
 def test_imaging_dict_channels_shift_onto_global_numbers(tmp_path, fake_science):
@@ -396,17 +441,21 @@ def write_spy(monkeypatch):
     """Record every chunk write's global frequency slice; optionally fail one."""
     import astroviper.utils.io as io_module
 
-    original = io_module.write_result_chunk_to_disk_using_zarr
+    original = io_module.write_result_chunk
     spy = {"slices": [], "fail_on_call": None}
 
-    def wrapper(image_store, image_data_variables_keep, task_coords, img_xds):
+    def wrapper(
+        io_engine, image_store, image_data_variables_keep, task_coords, *a, **k
+    ):
         call_index = len(spy["slices"])
         spy["slices"].append(task_coords["frequency"]["slice"])
         if spy["fail_on_call"] == call_index:
             raise OSError("simulated Lustre write failure")
-        original(image_store, image_data_variables_keep, task_coords, img_xds)
+        original(
+            io_engine, image_store, image_data_variables_keep, task_coords, *a, **k
+        )
 
-    monkeypatch.setattr(io_module, "write_result_chunk_to_disk_using_zarr", wrapper)
+    monkeypatch.setattr(io_module, "write_result_chunk", wrapper)
     return spy
 
 
@@ -692,6 +741,48 @@ def test_shift_imaging_dict_channels():
     shifted = _shift_imaging_dict_channels(imaging_dict, 4)
     assert list(shifted.data) == [Key(time=0, pol=1, chan=4)]
     assert shifted.data[Key(0, 1, 4)]["iter_done"] == [3]
+
+
+def test_imaging_dict_channels_across_spectral_windows():
+    """Each spectral window's MSv4 numbers its own channels from 0, so the
+    record is placed by the task's image channels, not the data selection."""
+    imaging_dict = ImagingDict()
+    imaging_dict.add({"iter_done": 1}, time=0, pol=0, chan=0)
+    imaging_dict.add({"iter_done": 2}, time=0, pol=0, chan=1)
+    second_window = {
+        "frequency": {"data": [2.0e11, 2.1e11], "slice": slice(3840, 3842)}
+    }
+    data_selection = {"ms_spw_1": {"frequency": slice(0, 2)}}
+    assert _image_channel_start(second_window, data_selection) == 3840
+    remapped = _remap_imaging_dict_to_global_channels(
+        imaging_dict, second_window, data_selection
+    )
+    assert [key.chan for key in remapped.data] == [3840, 3841]
+    # a task without an image slice falls back to the data selection
+    no_slice = {"frequency": {"data": [2.0e11, 2.1e11]}}
+    assert _image_channel_start(no_slice, {"ms": {"frequency": slice(5, 7)}}) == 5
+
+
+def test_task_velocities_match_the_image():
+    """A task's image of its own channels takes the whole image's rest
+    frequency, so its velocities equal the image's at those channels."""
+    from xradio.image import make_empty_sky_image
+
+    frequencies = np.array([1.0e11, 1.0001e11, 1.0002e11, 1.0003e11, 1.0004e11])
+    image = make_empty_sky_image(
+        [1.0, 0.5], [4, 4], [-4.85e-6, 4.85e-6], frequencies, ["I"], [0]
+    )
+    task = make_empty_sky_image(
+        [1.0, 0.5], [4, 4], [-4.85e-6, 4.85e-6], frequencies[3:], ["I"], [0]
+    )
+    assert task.velocity.values[1] == 0.0  # its own middle channel
+    task = _with_image_spectral_reference(task, dict(image.frequency.attrs))
+    np.testing.assert_allclose(task.velocity.values, image.velocity.values[3:])
+    assert (
+        task.frequency.attrs["rest_frequency"]
+        == image.frequency.attrs["rest_frequency"]
+    )
+    assert task.velocity.attrs == image.velocity.attrs
 
 
 def test_channel_cycle_control_params_takes_the_global_row():

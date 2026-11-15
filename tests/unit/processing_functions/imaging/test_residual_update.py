@@ -522,3 +522,14 @@ def test_make_visibility_model_missing_input_data_group_raises():
         make_visibility_model_single_field(
             ps_xdt, img_xds, cgk_1D, ms_data_group_in_name="corrected"
         )
+
+
+def test_direct_cube_setup_checks_fitter_before_input_access():
+    from astroviper.processing_functions.imaging.residual_update import (
+        imaging_setup_single_field,
+    )
+
+    with pytest.raises(ValueError, match="psf_fitting_method"):
+        imaging_setup_single_field(
+            None, None, {"fft_padding": 1.2}, {}, psf_fitting_method="bad"
+        )

@@ -274,6 +274,88 @@ def _combine_variances(variance, matrix_squared):
     return np.sqrt(contributions.sum(axis=-1))
 
 
+def continuum_correlation_weight_sums(
+    ps_xdt, processing_set_data_group_name="corrected"
+):
+    """Accumulate additive correlation-weight statistics over selected channels.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        One already loaded continuum imaging partition with its actual imaging
+        weights. Only cross-correlations and valid samples enter the sums.
+    processing_set_data_group_name : str, optional
+        Data group supplying natural weights, imaging weights and flags.
+
+    Returns
+    -------
+    xarray.Dataset
+        Small per-correlation sums, additive across frequency partitions. They
+        use the same validity and variance calculation as cube sensitivity.
+        No image, visibility, or UVW values are read.
+    """
+    import xarray as xr
+
+    labels = None
+    sums = None
+    for ms in ps_xdt.values():
+        group = ms.attrs["data_groups"][processing_set_data_group_name]
+        current = [str(label) for label in ms.polarization.values]
+        if labels is None:
+            # Keep summaries compatible across partitions whose first MSes
+            # store the same correlations in different orders.
+            labels = sorted(current)
+        order = [current.index(label) for label in labels]
+        cross = ms.baseline_antenna1_name.values != ms.baseline_antenna2_name.values
+        samples_per_time = int(cross.sum()) * ms.sizes["frequency"] * len(order)
+        block = max(1, BLOCK_SAMPLES // max(samples_per_time, 1))
+        for start in range(0, ms.sizes["time"], block):
+            weight, imaging, flag = (
+                _cross_correlation_values(
+                    ms[group[role]].isel(time=slice(start, start + block)), cross, order
+                )
+                for role in ("weight", "weight_imaging", "flag")
+            )
+            sums = accumulate_correlation_weight_sums(
+                weight,
+                imaging,
+                flag,
+                np.zeros(ms.sizes["frequency"], dtype=int),
+                1,
+                sums,
+            )
+    return xr.Dataset(
+        {name: ("correlation", sums[name][0]) for name in CORRELATION_WEIGHT_SUM_NAMES},
+        coords={"correlation": labels},
+    )
+
+
+def continuum_sensitivity(weight_sums, stokes_labels):
+    """Convert globally reduced weight sums to Taylor-zero dirty-image noise.
+
+    Parameters
+    ----------
+    weight_sums : xarray.Dataset
+        Reduced output of continuum_correlation_weight_sums.
+    stokes_labels : sequence of str
+        Requested image polarizations.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape (1, npol), in Jy/beam when natural weights are absolute. For each
+        correlation, variance is sum(W**2/w)/sum(W)**2; independent correlation
+        variances are combined with the existing Stokes transform. Reducing the
+        sums before taking this ratio preserves frequency-partition invariance.
+    """
+    sums = {
+        name: weight_sums[name].values[None, :] for name in CORRELATION_WEIGHT_SUM_NAMES
+    }
+    return stokes_weight_statistics(
+        sums, list(weight_sums.correlation.values), list(stokes_labels)
+    )["sensitivity"]
+
+
 def _cross_correlation_values(data_array, cross, order):
     """Values of a measurement-set variable on the cross-correlation baselines
     ``cross``, as (time, baseline_id, frequency, polarization) with the

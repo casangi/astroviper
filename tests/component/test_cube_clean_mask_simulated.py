@@ -145,7 +145,18 @@ def test_cube_refuses_an_invalid_clean_mask_before_writing(tmp_path, simulated):
                 "fft_padding": 1.2,
             },
             imaging_weights_params={"weighting": "natural"},
-            cycle_control_params={"max_iter": 0},
+            # Keep the cycle configuration valid so this test isolates the
+            # malformed mask and still verifies rejection before output creation.
+            cycle_control_params={
+                "max_iter": 0,
+                "max_cycles": 0,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.0,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+                "max_iter_per_cycle": -1,
+            },
             clean_mask=str(mask_file),
             instrument_polarization_basis="circular",
         )

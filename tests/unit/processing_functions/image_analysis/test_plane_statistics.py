@@ -1,6 +1,7 @@
 """Unit tests for the per-plane (l, m) image statistics."""
 
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -9,6 +10,7 @@ from astroviper.processing_functions.image_analysis.plane_statistics import (
     PLANE_STATISTIC_NAMES,
     calculate_plane_statistics,
     concatenate_plane_statistics,
+    plane_statistics_from_dataframe,
     plane_statistics_to_dataframe,
 )
 
@@ -110,6 +112,48 @@ def test_statistics_match_numpy_and_ignore_nans():
     assert stats["sky_restored"]["mean"].values == pytest.approx(
         ds["mean"].values + 5.0, abs=1e-5
     )
+
+
+def test_median_and_mad_sigma_use_the_regular_subsample_of_a_large_plane():
+    from astroviper.processing_functions.image_analysis.image_statistics import (
+        MAD_SAMPLES,
+    )
+
+    n_lm = int(np.ceil(np.sqrt(MAD_SAMPLES))) + 100
+    step = int(np.ceil(np.sqrt(n_lm * n_lm / MAD_SAMPLES)))
+    assert step == 2
+    plane = np.random.default_rng(7).normal(size=(n_lm, n_lm))
+    mask = np.zeros((n_lm, n_lm), dtype=bool)
+    mask[: n_lm // 3] = True
+    img_xds = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (DIMS, plane[None, None, None]),
+            "MASK": (DIMS, mask[None, None, None]),
+        },
+        coords={
+            "time": [0.0],
+            "frequency": [1.0e9],
+            "polarization": ["I"],
+            "l": np.arange(n_lm),
+            "m": np.arange(n_lm),
+        },
+        attrs={"data_groups": {"residual": {"sky": "SKY_RESIDUAL", "mask": "MASK"}}},
+    )
+    ds = calculate_plane_statistics(img_xds)["sky_residual"].isel(
+        time=0, frequency=0, polarization=0
+    )
+    subsample = plane[::step, ::step]
+    for suffix, values, sample in (
+        ("", plane.ravel(), subsample.ravel()),
+        ("_masked", plane[mask], subsample[mask[::step, ::step]]),
+    ):
+        median = np.median(sample)
+        assert float(ds["median" + suffix]) == median
+        assert float(ds["mad_sigma" + suffix]) == 1.4826 * np.median(
+            np.abs(sample - median)
+        )
+        assert float(ds["max" + suffix]) == values.max()
+        assert float(ds["n_pixels" + suffix]) == values.size
 
 
 def test_no_mask_and_no_primary_beam_gives_nan_masked_statistics():
@@ -284,3 +328,59 @@ def test_shared_interfaces_match_for_full_cube_and_masks(dtype):
                 result[name].dtype == plane[name + suffix].dtype == np.dtype("float64")
             )
         assert result.sizes == {"time": 2, "frequency": 3, "polarization": 2}
+
+
+def test_from_dataframe_inverts_to_dataframe():
+    """Coordinate values and statistics keep the order of the table (Q before
+    I is not sorted back); the velocity coordinate written as a statistic
+    becomes a coordinate again."""
+    img_xds = _make_image(n_freq=3).assign_coords(polarization=["Q", "I"])
+    stats = calculate_plane_statistics(img_xds)
+    stats["sky_residual"]["entropy"] = stats["sky_residual"]["rms"] * 0.5
+    stats["sky_residual"] = stats["sky_residual"].assign_coords(
+        velocity=("frequency", [-5.0, 0.0, 5.0])
+    )
+    stats["sky_restored"] = stats["sky_restored"].isel(frequency=[2, 0])
+    frame = plane_statistics_to_dataframe(stats)
+    assert "velocity" in set(frame["statistic"])
+
+    rebuilt = plane_statistics_from_dataframe(frame)
+    assert list(rebuilt) == ["sky_residual", "sky_restored"]
+    residual = rebuilt["sky_residual"]
+    assert residual["polarization"].values.tolist() == ["Q", "I"]
+    assert residual["velocity"].dims == ("frequency",)
+    assert "velocity" not in residual.data_vars
+    assert list(residual.data_vars) == list(stats["sky_residual"].data_vars)
+    xr.testing.assert_identical(
+        residual.drop_attrs(), stats["sky_residual"].drop_attrs()
+    )
+    restored = rebuilt["sky_restored"]
+    np.testing.assert_array_equal(restored["frequency"], [1.2e9, 1.0e9])
+    assert restored.attrs == {}
+    pd.testing.assert_frame_equal(plane_statistics_to_dataframe(rebuilt), frame)
+
+
+def test_from_dataframe_missing_planes_and_refusals():
+    frame = pd.DataFrame(
+        {
+            "image_variable": ["sky_residual"] * 3,
+            "statistic": ["max", "max", "velocity"],
+            "time": [0.0] * 3,
+            "frequency": [1e9, 2e9, 1e9],
+            "polarization": ["I", "Q", "I"],
+            "value": [1.0, 2.0, 7.0],
+        }
+    )
+    statistics = plane_statistics_from_dataframe(frame)["sky_residual"]
+    np.testing.assert_array_equal(
+        statistics["max"].values, [[[1.0, np.nan], [np.nan, 2.0]]]
+    )
+    np.testing.assert_array_equal(statistics["velocity"].values, [7.0, np.nan])
+    assert statistics["max"].dtype == np.float64
+
+    varying = pd.concat(
+        [frame, frame.iloc[[2]].assign(polarization="Q", value=8.0)], ignore_index=True
+    )
+    with pytest.raises(ValueError, match="'velocity'"):
+        plane_statistics_from_dataframe(varying)
+    assert plane_statistics_from_dataframe(plane_statistics_to_dataframe({})) == {}
