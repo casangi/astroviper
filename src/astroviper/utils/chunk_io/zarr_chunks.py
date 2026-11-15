@@ -195,8 +195,9 @@ def _read_shard_index(fd, file_size, meta, inner_per_shard, path=""):
     """Read just a shard's inner-chunk byte index (its small header/footer).
 
     Returns a flat tuple of ``(offset, nbytes)`` pairs in C-order over the
-    inner-chunk grid.  Only the index bytes are read -- not the chunk data --
-    so a task that wants one channel does not pull the whole shard off disk.
+    inner-chunk grid and the number of index bytes read.  Only the index bytes
+    are read -- not the chunk data -- so a task that wants one channel does not
+    pull the whole shard off disk.
 
     A file smaller than its index, or a short ``pread`` of the index (Lustre
     can return fewer bytes than requested WITHOUT raising during an eviction
@@ -227,7 +228,7 @@ def _read_shard_index(fd, file_size, meta, inner_per_shard, path=""):
         )
     if has_crc:
         index_blob = index_blob[:-4]
-    return struct.unpack("<" + "Q" * (2 * n_inner), index_blob)
+    return struct.unpack("<" + "Q" * (2 * n_inner), index_blob), index_nbytes
 
 
 def _read_inner_chunk(fd, offsets, flat, inner_shape, sharding_cfg, dtype, path=""):
@@ -287,20 +288,65 @@ def _axis_overlaps(start, stop, csize):
     return out
 
 
-def read_array_region(array_path, sel):
+def read_array_region(
+    array_path, sel, chunk_mask=None, counters=None, out=None, concurrency=None
+):
     """Read ``array[sel]`` for one Zarr array via direct chunk-blob reads.
 
-    ``sel`` maps dimension names to slices or one-dimensional integer arrays;
-    missing dims select the full axis. Integer arrays are read through their
-    contiguous bounding range and reordered in memory. Handles Zarr v3
-    (sharded and plain) and v2; supports selections spanning several chunks /
-    inner chunks (e.g. multiple frequency channels). Returns ``(ndarray, dims)``.
+    Handles Zarr v3 (sharded and plain) and v2; supports selections spanning
+    several chunks / inner chunks (e.g. multiple frequency channels). The read
+    units are the inner chunks of a sharded array and the chunks otherwise;
+    a shard is opened, and its index read, once per call and only when it
+    holds a unit to read.
 
     Every filesystem unit (metadata, one shard's index + inner chunks, one
     plain chunk file) runs under :func:`_retry_transient_io`, so a Lustre
     client eviction mid-read is retried with a fresh descriptor instead of
     failing the task (the read-side counterpart of the sharded writer's EIO
     retry; job 7856457 died on exactly this).
+
+    Parameters
+    ----------
+    array_path : str
+        Path of the Zarr array.
+    sel : dict
+        Maps dimension names to slices or one-dimensional integer arrays;
+        missing dims select the full axis. Integer arrays are read through
+        their contiguous bounding range and reordered in memory.
+    chunk_mask : numpy.ndarray of bool, optional
+        Broadcast against the grid of the read units that the bounding range
+        of ``sel`` overlaps, one axis per dimension. Units where it is False
+        are not read and hold the array's fill value. None reads every unit.
+    counters : dict, optional
+        Accumulates ``bytes`` (stored bytes of the units read),
+        ``index_bytes``, ``units_read`` (units not skipped, absent or empty
+        ones included), ``units_skipped`` and ``shard_opens``. Concurrent
+        calls need separate dicts.
+    out : numpy.ndarray, optional
+        Array of the selection's shape and the dtype of the values (boolean
+        for an array stored with xarray's encoding of booleans); it receives
+        the values and is returned.
+    concurrency : int, optional
+        Inner chunks of a shard read at the same time; 1 reads them one at a
+        time. None is ``_READ_CONCURRENCY``.
+
+    Returns
+    -------
+    values : numpy.ndarray
+        ``array[sel]`` (``out`` when given).
+    dims : list of str
+        The array's dimension names.
+
+    Raises
+    ------
+    TypeError
+        If a selection is neither a slice nor a one-dimensional integer
+        array, or ``chunk_mask`` is not boolean.
+    ValueError
+        If a selection is empty, ``chunk_mask`` does not broadcast against
+        the unit grid, or ``out`` has another shape or dtype.
+    IndexError
+        If an integer selection is out of bounds.
     """
     meta = _retry_transient_io(
         f"metadata of {array_path}", lambda: _read_array_meta(array_path)
@@ -337,41 +383,90 @@ def read_array_region(array_path, sel):
             a, b = int(indices.min()), int(indices.max()) + 1
             relative_indices[ax] = indices - a
         ranges.append((a, b))
+    bounds = tuple(b - a for a, b in ranges)
     # An array stored as integers with the attribute dtype "bool" (xarray's
     # encoding of booleans) is read as booleans, as xarray decodes it.
-    out = np.empty(
-        tuple(b - a for a, b in ranges), dtype=bool if meta["bool_encoded"] else dtype
+    values_dtype = np.dtype(bool) if meta["bool_encoded"] else dtype
+    if out is not None:
+        selection_shape = tuple(
+            relative_indices[ax].size if ax in relative_indices else n
+            for ax, n in enumerate(bounds)
+        )
+        if out.shape != selection_shape or out.dtype != values_dtype:
+            raise ValueError(
+                f"out has shape {out.shape} and dtype {out.dtype}; the selection "
+                f"of {array_path} has shape {selection_shape} and dtype "
+                f"{values_dtype}."
+            )
+    buffer = (
+        out
+        if out is not None and not relative_indices
+        else np.empty(bounds, dtype=values_dtype)
     )
     fill = meta["fill_value"] if meta["fill_value"] is not None else 0
 
-    def _apply_relative_indices(data):
-        for axis, indices in relative_indices.items():
-            data = np.take(data, indices, axis=axis)
-        return data
+    sharding = meta["sharding"]
+    unit_shape = tuple(sharding["chunk_shape"]) if sharding else oc
+    per_axis = [
+        _axis_overlaps(ranges[ax][0], ranges[ax][1], unit_shape[ax]) for ax in range(nd)
+    ]
+    grid = tuple(len(overlaps) for overlaps in per_axis)
+    if chunk_mask is not None:
+        chunk_mask = np.asarray(chunk_mask)
+        if chunk_mask.dtype != bool:
+            raise TypeError(f"chunk_mask must be boolean, not {chunk_mask.dtype}.")
+        chunk_mask = np.broadcast_to(chunk_mask, grid)
+    units = []
+    n_skipped = 0
+    for position in np.ndindex(grid):
+        combo = [per_axis[ax][i] for ax, i in enumerate(position)]
+        out_sl = tuple(slice(c[3], c[4]) for c in combo)
+        if chunk_mask is None or chunk_mask[position]:
+            in_sl = tuple(slice(c[1], c[2]) for c in combo)
+            units.append((tuple(c[0] for c in combo), out_sl, in_sl))
+        else:
+            buffer[out_sl] = fill
+            n_skipped += 1
+    tally = {
+        "bytes": 0,
+        "index_bytes": 0,
+        "units_read": len(units),
+        "units_skipped": n_skipped,
+        "shard_opens": 0,
+    }
 
-    if meta["sharding"] is not None:
-        inner = tuple(meta["sharding"]["chunk_shape"])
-        inner_per_shard = tuple(oc[ax] // inner[ax] for ax in range(nd))
-        per_axis = [
-            _axis_overlaps(ranges[ax][0], ranges[ax][1], inner[ax]) for ax in range(nd)
-        ]
+    def _finish():
+        if counters is not None:
+            for key, value in tally.items():
+                counters[key] = counters.get(key, 0) + value
+        values = buffer
+        for axis, indices in relative_indices.items():
+            values = np.take(values, indices, axis=axis)
+        if out is None or values is out:
+            return values, dims
+        out[...] = values
+        return out, dims
+
+    if sharding is not None:
+        inner_per_shard = tuple(oc[ax] // unit_shape[ax] for ax in range(nd))
         # Group the needed inner chunks by their shard so each shard file is
         # opened and its index read exactly once.  A single shard can span the
         # whole array (one inner chunk per channel), so reading just the wanted
         # inner-chunk byte ranges -- rather than the whole shard file -- avoids
         # over-reading by the channel count.
         by_shard = {}
-        for combo in product(*per_axis):
-            gi = tuple(c[0] for c in combo)  # global inner-chunk index
+        for gi, out_sl, in_sl in units:  # gi: global inner-chunk index
             shard_index = tuple(gi[ax] // inner_per_shard[ax] for ax in range(nd))
             within = tuple(gi[ax] % inner_per_shard[ax] for ax in range(nd))
-            out_sl = tuple(slice(c[3], c[4]) for c in combo)
-            in_sl = tuple(slice(c[1], c[2]) for c in combo)
             by_shard.setdefault(shard_index, []).append((within, out_sl, in_sl))
 
         from concurrent.futures import ThreadPoolExecutor
 
-        n_threads = min(_READ_CONCURRENCY, max(len(i) for i in by_shard.values()))
+        # chunk_mask can leave no shard to read.
+        n_threads = min(
+            _READ_CONCURRENCY if concurrency is None else concurrency,
+            max((len(i) for i in by_shard.values()), default=0),
+        )
         executor = ThreadPoolExecutor(max_workers=n_threads) if n_threads > 1 else None
         for shard_index, items in by_shard.items():
             path = _chunk_path(array_path, meta, shard_index)
@@ -387,45 +482,50 @@ def read_array_region(array_path, sel):
                     fd = os.open(path, os.O_RDONLY)
                 except FileNotFoundError:
                     for _within, out_sl, _in_sl in items:
-                        out[out_sl] = fill
-                    return
+                        buffer[out_sl] = fill
+                    return None
                 try:
-                    offsets = _read_shard_index(
+                    offsets, index_nbytes = _read_shard_index(
                         fd, os.fstat(fd).st_size, meta, inner_per_shard, path
                     )
 
                     def _read_item(item):
+                        """Read one inner chunk; returns its stored bytes."""
                         within, out_sl, in_sl = item
                         flat = int(np.ravel_multi_index(within, inner_per_shard))
                         arr = _read_inner_chunk(
-                            fd, offsets, flat, inner, meta["sharding"], dtype, path
+                            fd, offsets, flat, unit_shape, sharding, dtype, path
                         )
-                        out[out_sl] = fill if arr is None else arr[in_sl]
+                        if arr is None:
+                            buffer[out_sl] = fill
+                            return 0
+                        buffer[out_sl] = arr[in_sl]
+                        return offsets[2 * flat + 1]
 
                     if executor is None or len(items) == 1:
-                        for item in items:
-                            _read_item(item)
+                        nbytes = sum(_read_item(item) for item in items)
                     else:
-                        list(executor.map(_read_item, items))
+                        nbytes = sum(executor.map(_read_item, items))
+                    return index_nbytes, nbytes
                 finally:
                     os.close(fd)
 
             try:
-                _retry_transient_io(f"shard {path}", _read_shard)
+                # Tallied after the retried unit succeeds, so a retry counts once.
+                read = _retry_transient_io(f"shard {path}", _read_shard)
             except BaseException:
                 if executor is not None:
                     executor.shutdown(wait=True)
                 raise
+            if read is not None:
+                tally["shard_opens"] += 1
+                tally["index_bytes"] += read[0]
+                tally["bytes"] += read[1]
         if executor is not None:
             executor.shutdown(wait=True)
-        return _apply_relative_indices(out), dims
+        return _finish()
 
-    per_axis = [
-        _axis_overlaps(ranges[ax][0], ranges[ax][1], oc[ax]) for ax in range(nd)
-    ]
-    for combo in product(*per_axis):
-        ci = tuple(c[0] for c in combo)
-        out_sl = tuple(slice(c[3], c[4]) for c in combo)
+    for ci, out_sl, in_sl in units:
         path = _chunk_path(array_path, meta, ci)
 
         # Absent chunk (never written) detected via ENOENT, not an exists()
@@ -441,19 +541,22 @@ def read_array_region(array_path, sel):
             except FileNotFoundError:
                 return None
             try:
-                return _decode_unit(raw, oc, dtype, meta)
+                return _decode_unit(raw, oc, dtype, meta), len(raw)
             except Exception as exc:
                 raise OSError(
                     errno.EIO,
                     f"decode of chunk {path} failed ({len(raw)} bytes): {exc!r}",
                 ) from exc
 
-        arr = _retry_transient_io(f"chunk {path}", _read_chunk)
-        if arr is None:
-            out[out_sl] = fill
+        read = _retry_transient_io(f"chunk {path}", _read_chunk)
+        if read is None:
+            buffer[out_sl] = fill
             continue
-        out[out_sl] = arr[tuple(slice(c[1], c[2]) for c in combo)]
-    return _apply_relative_indices(out), dims
+        buffer[out_sl] = read[0][in_sl]
+        tally["bytes"] += read[1]
+        # Freed before the next chunk is read and decoded.
+        read = None
+    return _finish()
 
 
 class _ChunkArray(BackendArray):

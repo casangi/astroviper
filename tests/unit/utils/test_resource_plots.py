@@ -456,7 +456,11 @@ def test_driver_steps_split_at_the_compute_step():
     assert {"input preflight", "add lazy input data", "get compute resources"} <= set(
         labels
     )
-    assert post == [("consolidate metadata", "T_consolidate_metadata")]
+    assert post == [
+        ("write find_continuum first round", "T_find_continuum_first_round_write"),
+        ("drain find_continuum moments", "T_find_continuum_first_round_drain"),
+        ("consolidate metadata", "T_consolidate_metadata"),
+    ]
     pre, post = _driver_steps(SIMULATOR_PHASES)
     assert "write sky image" in [label for label, _ in pre]
     assert [label for label, _ in post] == [
