@@ -720,6 +720,8 @@ def _run_tw_hydra_continuum(
     image_param_overrides=None,
     image_params=None,
     restore=False,
+    restoration_output="primary_beam_corrected",
+    restoring_beam=None,
     primary_beam_limit=0.2,
     single_precision_image=False,
     io_engine="xradio",
@@ -773,6 +775,8 @@ def _run_tw_hydra_continuum(
             gridder="anti_alias",
             deconvolver=deconvolver,
             restore=restore,
+            restoration_output=restoration_output,
+            restoring_beam=restoring_beam,
             primary_beam_limit=primary_beam_limit,
             continuum_mode=continuum_mode,
             mvc_model_update_approximation=mvc_model_update_approximation,
@@ -2883,6 +2887,62 @@ def test_tw_hydra_in_place_caches_equal_with_both_io_engines(
             atol=1e-9,
             err_msg=name,
         )
+
+
+@pytest.mark.parametrize(
+    "restoring_beam",
+    [None, [3.0 * np.pi / (180 * 3600), 3.0 * np.pi / (180 * 3600), 0.0]],
+    ids=["psf_beam", "restoring_beam"],
+)
+def test_tw_hydra_fits_output_of_a_restore(tmp_path, tw_hydra_store, restoring_beam):
+    """FITS output of a restore follows the cube's: with a restoring_beam the
+    restored images carry it as their header beam (degrees) and no BEAMS
+    table; without one the flat-noise image carries the restored beam in its
+    BEAMS table and the flat-sky image no beam. The residual carries the PSF
+    beam."""
+    from astropy.io import fits
+
+    fits_store = tmp_path / "restored_fits"
+    _run_tw_hydra_continuum(
+        tw_hydra_store,
+        fits_store,
+        open_processing_set(str(tw_hydra_store)),
+        None,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        restore=True,
+        restoration_output="both",
+        restoring_beam=restoring_beam,
+        io_engine="chunk",
+        output_image_format="fits",
+    )
+
+    def beams(name):
+        with fits.open(fits_store / name) as hdulist:
+            header = hdulist[0].header
+            header_beam = (
+                [header[key] for key in ("BMAJ", "BMIN", "BPA")]
+                if "BMAJ" in header
+                else None
+            )
+            if "BEAMS" not in hdulist:
+                return header_beam, None
+            table = hdulist["BEAMS"].data
+            rows = np.stack([table[key] for key in ("BMAJ", "BMIN", "BPA")], -1)
+            return header_beam, rows
+
+    _, psf_rows = beams("SKY_RESIDUAL.tt0.fits")
+    assert psf_rows is not None and np.all(psf_rows[:, :2] > 0)
+    noise_beam, noise_rows = beams("SKY_RESTORED_FLAT_NOISE.tt0.fits")
+    sky_beam, sky_rows = beams("SKY_RESTORED_FLAT_SKY.tt0.fits")
+    if restoring_beam is None:
+        assert noise_beam is None and sky_beam is None and sky_rows is None
+        # The restore applies the PSF beam of Stokes I to Stokes Q too.
+        np.testing.assert_array_equal(noise_rows, psf_rows[[0, 0]])
+    else:
+        assert noise_rows is None and sky_rows is None
+        np.testing.assert_allclose(noise_beam, np.degrees(restoring_beam), rtol=1e-15)
+        np.testing.assert_allclose(sky_beam, np.degrees(restoring_beam), rtol=1e-15)
 
 
 @pytest.mark.parametrize("continuum_mode", ["mfs", "mvc"])

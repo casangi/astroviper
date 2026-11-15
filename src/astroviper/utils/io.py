@@ -134,6 +134,12 @@ imaging_data_variables_and_dims_double_precision = {
         "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_DECONVOLVED",
     },
+    "beam_fit_params_sky_restored": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_RESTORED",
+        "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
+    },
 }
 
 imaging_data_variables_and_dims_single_precision = {
@@ -207,25 +213,32 @@ imaging_data_variables_and_dims_single_precision = {
         "name": "MASK",
         "attrs": {"dtype": "bool"},
     },
+    # Beam fits stay float64: float32 copies can change their common_beam.
     "beam_fit_params_point_spread_function": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
     },
     "beam_fit_params_sky_residual": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_RESIDUAL",
     },
     "beam_fit_params_sky_dirty": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_DIRTY",
     },
     "beam_fit_params_sky_deconvolved": {
         "dims": beam_params_dims,
-        "dtype": "<f4",
+        "dtype": "<f8",
         "name": "BEAM_FIT_PARAMS_SKY_DECONVOLVED",
+    },
+    "beam_fit_params_sky_restored": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_RESTORED",
+        "attrs": {"type": "beam_fit_params_sky", "units": "rad"},
     },
 }
 
@@ -257,6 +270,7 @@ imaging_data_variable_data_group_roles = {
     ),
     "sky_restored_flat_noise": ("restored", "sky_flat_noise"),
     "sky_restored_flat_sky": ("restored", "sky_flat_sky"),
+    "beam_fit_params_sky_restored": ("restored", "beam_fit_params_sky"),
     "alpha": ("restored", "alpha"),
     "alpha_error": ("restored", "alpha_error"),
     "beta": ("restored", "beta"),
@@ -665,6 +679,38 @@ def write_zarr_image_store(img_xds, image_store, overwrite=False):
     if written_paths:
         return written_paths[0]
     return image_store
+
+
+def fill_zarr_restored_beams_without_fit(image_store):
+    """Give the planes of ``BEAM_FIT_PARAMS_SKY_RESTORED`` without a fit the beam
+    ``tclean`` gives them.
+
+    Run ONCE in the driver, after every node task has written its beams, for
+    every Zarr image store, whichever writer made it. The planes without a fit
+    (a flagged channel, a failed fit, a skipped task) take the first beam of
+    largest area of the planes with one, or a circle of 1e-6 arcsec at 0
+    degrees when no plane has one
+    (:func:`~astroviper.processing_functions.imaging.restore.fill_planes_without_fit`).
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the Zarr image store, which holds ``BEAM_FIT_PARAMS_SKY_RESTORED``.
+    """
+    import zarr
+
+    from astroviper.processing_functions.imaging.restore import (
+        NO_FIT_BEAM,
+        fill_planes_without_fit,
+    )
+
+    restored_beam = zarr.open_group(image_store, mode="r+")[
+        "BEAM_FIT_PARAMS_SKY_RESTORED"
+    ]
+    beams = restored_beam[...]
+    filled = fill_planes_without_fit(beams, NO_FIT_BEAM)
+    if filled is not beams:
+        restored_beam[...] = filled
 
 
 def create_empty_data_variables_on_disk(

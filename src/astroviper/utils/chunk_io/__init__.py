@@ -2,6 +2,7 @@
 
 from astroviper.utils.chunk_io.fits_blocks import (
     create_empty_fits_images,
+    fill_fits_beams_without_fit,
     write_fits,
     write_fits_image,
 )
@@ -20,6 +21,7 @@ from astroviper.utils.chunk_io.zarr_chunks import (
 __all__ = [
     "compute_shard_task_priorities",
     "create_empty_fits_images",
+    "fill_fits_beams_without_fit",
     "load_image",
     "load_processing_set",
     "open_image",

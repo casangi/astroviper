@@ -26,9 +26,18 @@ Layout of each FITS file (conforming to what
   (FITS images have no boolean type).
 * Optional ``BEAMS`` binary-table extension (``CASAMBM = T`` in the primary
   header) carrying the per-channel/per-polarization beam-fit parameters
-  (``BMAJ, BMIN, BPA, CHAN, POL`` -- CASA's multi-beam convention). Rows are
-  fixed-size and channel-major, so node tasks ``pwrite`` their channels' rows
-  at disjoint offsets exactly like the image planes.
+  (``BMAJ, BMIN, BPA, CHAN, POL`` -- CASA's multi-beam convention, as
+  casacore reads it: float32 axes and position angle in radians, int32
+  indices). Rows are fixed-size and channel-major, so node tasks
+  ``pwrite`` their channels' rows at disjoint offsets exactly like the image
+  planes. casacore refuses a table with a zero or non-finite beam, so after
+  the run :func:`fill_fits_beams_without_fit` gives the rows of planes without
+  a fit the beam ``tclean`` gives them.
+* The restored images of a run with a ``restoring_beam`` instead carry that
+  one beam as ``BMAJ``, ``BMIN`` and ``BPA`` cards (degrees) of the primary
+  header, as ``tclean`` writes a restored image, and no ``BEAMS`` table.
+  Without one, the beams the restore applied fill the ``BEAMS`` table of the
+  restored image, and the primary beam corrected image has no beam.
 
 Unwritten planes of a sparse data area read back as 0.0 (filesystem holes),
 not NaN -- unlike the NaN-filled empty Zarr store. Every channel is written by
@@ -44,7 +53,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import struct
 
 import numpy as np
 
@@ -79,18 +87,65 @@ _BEAM_CARRYING_VARIABLES = frozenset(
         "sky_residual",
         "sky_model",
         "sky_restored",
+        "sky_restored_flat_noise",
         "sky_deconvolved",
         "point_spread_function",
     }
 )
+# With beam_fit_params_sky_restored kept, these carry a restoring beam in their
+# header (cube and continuum restored images).
+_RESTORED_VARIABLES = frozenset(
+    {
+        "sky_restored",
+        "sky_restored_primary_beam_corrected",
+        "sky_restored_flat_noise",
+        "sky_restored_flat_sky",
+    }
+)
 
 # Fixed BEAMS-table row layout written by create_empty_fits_images and assumed
-# by the row writer: BMAJ, BMIN, BPA as big-endian float64 then CHAN, POL as
-# big-endian int32 (CASA's multi-beam column order; readers use positions).
-_BEAMS_ROW_STRUCT = struct.Struct(">dddii")
+# by the row writer, as casacore's ImageFITSConverter reads it:
+# BMAJ, BMIN, BPA as big-endian float32 in the units below, then CHAN, POL as
+# big-endian int32.
+_BEAMS_ROW_DTYPE = np.dtype(
+    [("BMAJ", ">f4"), ("BMIN", ">f4"), ("BPA", ">f4"), ("CHAN", ">i4"), ("POL", ">i4")]
+)
+_BEAMS_UNITS = ("rad", "rad", "rad")
+# tclean's beam for every plane when no plane has a fit.
+_NO_FIT_BEAM = tuple(np.radians([1e-6 / 3600.0, 1e-6 / 3600.0, 0.0]))
 
 _FULL_DIMS_LM = ("time", "frequency", "polarization", "l", "m")
 _BEAM_PARAMS_DIMS = ("time", "frequency", "polarization", "beam_params_label")
+
+
+def _header_beam(image_variable, beam_variables, restoring_beam):
+    """Whether the file of ``image_variable`` carries ``restoring_beam`` as its
+    header beam: a restored image, when there is a ``restoring_beam`` and
+    ``beam_fit_params_sky_restored`` is kept."""
+    return (
+        restoring_beam is not None
+        and image_variable in _RESTORED_VARIABLES
+        and "beam_fit_params_sky_restored" in beam_variables
+    )
+
+
+def _beams_table_variable(image_variable, beam_variables):
+    """The beam-fit-params variable whose rows fill the ``BEAMS`` table of
+    ``image_variable`` (``None`` for a file without one): for the restored
+    image the beams the restore applied (with a restoring beam the file has
+    its header beam instead, :func:`_header_beam`); else the clean beam (PSF
+    fit), else the first other beam-fit-params variable kept."""
+    if image_variable not in _BEAM_CARRYING_VARIABLES:
+        return None
+    if (
+        image_variable in ("sky_restored", "sky_restored_flat_noise")
+        and "beam_fit_params_sky_restored" in beam_variables
+    ):
+        return "beam_fit_params_sky_restored"
+    others = [dv for dv in beam_variables if dv != "beam_fit_params_sky_restored"]
+    if "beam_fit_params_point_spread_function" in others:
+        return "beam_fit_params_point_spread_function"
+    return others[0] if others else None
 
 
 def _require_finite_positive(name, value):
@@ -234,7 +289,7 @@ def _direction_axis_values(coord_values):
 
 
 def _build_primary_header(
-    img_xds, bitpix, bunit, btype, telescope_name, has_beams_extension
+    img_xds, bitpix, bunit, btype, telescope_name, has_beams_extension, beam=None
 ):
     """Primary-HDU header for one image variable, generated from the empty image.
 
@@ -243,7 +298,9 @@ def _build_primary_header(
     ``RESTFRQ``/``SPECSYS``, ``TELESCOP``, ``DATE-OBS``/``TIMESYS``), and every
     keyword written is one the reader consumes or excludes from the user attrs,
     so nothing leaks into ``attrs["user"]`` on read. Nonuniform frequency
-    grids are rejected by the shared coordinate check.
+    grids are rejected by the shared coordinate check. ``beam``
+    (``[major, minor, pa]`` in radians) is written as the ``BMAJ``, ``BMIN``
+    and ``BPA`` cards in degrees, the one beam of every plane.
     """
     from astropy.io import fits
     from astropy.time import Time
@@ -325,46 +382,45 @@ def _build_primary_header(
         )
     if has_beams_extension:
         header["CASAMBM"] = (True, "CASA multiple beams per channel/polarization")
+    if beam is not None:
+        for keyword, value in zip(("BMAJ", "BMIN", "BPA"), beam, strict=True):
+            header[keyword] = float(np.degrees(value))
     return header
 
 
 def _build_beams_extension_bytes(n_chan, n_pol):
-    """Serialized ``BEAMS`` binary-table extension (header + zero-filled rows).
+    """Serialized ``BEAMS`` binary-table extension (header + rows).
 
     One fixed-size row per (channel, polarization), channel-major, in CASA's
-    multi-beam column order ``BMAJ, BMIN, BPA, CHAN, POL`` (radians). Beam
-    values start as zero and are overwritten in place by the node tasks; the
-    ``CHAN``/``POL`` index columns are correct from the start.
+    multi-beam column order ``BMAJ, BMIN, BPA, CHAN, POL`` (``_BEAMS_ROW_DTYPE``
+    in ``_BEAMS_UNITS``). Beam values start as zero and are overwritten in
+    place by the node tasks; the ``CHAN``/``POL`` index columns are correct from
+    the start, also in rows no task writes.
     """
     from astropy.io import fits
 
-    n_rows = n_chan * n_pol
-    zeros = np.zeros(n_rows, dtype=np.float64)
+    # Big-endian, as the file holds them (astropy's in-memory table is not).
+    rows = np.zeros(n_chan * n_pol, dtype=_BEAMS_ROW_DTYPE)
+    rows["CHAN"] = np.repeat(np.arange(n_chan), n_pol)
+    rows["POL"] = np.tile(np.arange(n_pol), n_chan)
     columns = [
-        fits.Column(name="BMAJ", format="D", unit="rad", array=zeros),
-        fits.Column(name="BMIN", format="D", unit="rad", array=zeros),
-        fits.Column(name="BPA", format="D", unit="rad", array=zeros),
-        fits.Column(
-            name="CHAN",
-            format="J",
-            array=np.repeat(np.arange(n_chan, dtype=np.int32), n_pol),
-        ),
-        fits.Column(
-            name="POL",
-            format="J",
-            array=np.tile(np.arange(n_pol, dtype=np.int32), n_chan),
-        ),
+        fits.Column(name=name, format="E", unit=unit, array=rows[name])
+        for name, unit in zip(("BMAJ", "BMIN", "BPA"), _BEAMS_UNITS, strict=True)
+    ]
+    columns += [
+        fits.Column(name="CHAN", format="J", array=rows["CHAN"]),
+        fits.Column(name="POL", format="J", array=rows["POL"]),
     ]
     hdu = fits.BinTableHDU.from_columns(columns, name="BEAMS")
     hdu.header["NCHAN"] = n_chan
     hdu.header["NPOL"] = n_pol
-    if hdu.header["NAXIS1"] != _BEAMS_ROW_STRUCT.size:
+    if hdu.header["NAXIS1"] != _BEAMS_ROW_DTYPE.itemsize:
         raise AssertionError(
             f"BEAMS row is {hdu.header['NAXIS1']} bytes; the fixed-slot row "
-            f"writer assumes {_BEAMS_ROW_STRUCT.size} (BMAJ,BMIN,BPA,CHAN,POL)."
+            f"writer assumes {_BEAMS_ROW_DTYPE.itemsize} (BMAJ,BMIN,BPA,CHAN,POL)."
         )
     header_bytes = hdu.header.tostring().encode("ascii")
-    data_bytes = hdu.data.tobytes()
+    data_bytes = rows.tobytes()
     return (
         header_bytes
         + data_bytes
@@ -400,6 +456,7 @@ def create_empty_fits_images(
     overwrite=False,
     *,
     data_variable_definitions,
+    restoring_beam=None,
 ):
     """Pre-create one XRADIO-conformant FITS file per kept image variable.
 
@@ -413,9 +470,14 @@ def create_empty_fits_images(
       reference direction, spectral frame, and observation date;
     * a sparse (``ftruncate``\\ d) primary data area sized for the full cube --
       no pixel data is materialised, so creation is metadata-cost only;
-    * when a beam-fit-params variable is kept, a zero-filled ``BEAMS``
-      binary-table extension (and ``CASAMBM = T``) on the beam-carrying
-      variables, whose fixed-size rows the node tasks later overwrite in place.
+    * a ``BEAMS`` binary-table extension of zero beams (and ``CASAMBM = T``)
+      on every variable a kept beam-fit-params variable labels
+      (:func:`_beams_table_variable`), whose fixed-size rows the node tasks
+      later overwrite in place and :func:`fill_fits_beams_without_fit`
+      completes after the run;
+    * with ``beam_fit_params_sky_restored`` kept, ``restoring_beam`` as the
+      header beam of the restored images, which then have no ``BEAMS`` table
+      (:func:`_header_beam`).
 
     The concurrent write phase then creates no files and writes only disjoint
     byte ranges (:func:`write_fits`).
@@ -444,6 +506,9 @@ def create_empty_fits_images(
     data_variable_definitions : dict
         ``{key: {"dims": [...], ...}}`` of the kept variables; a variable
         without the image or beam-fit-params dimensions raises ``ValueError``.
+    restoring_beam : sequence of float, optional
+        The run's target beam ``[major, minor, pa]`` in radians; ``None``
+        without one.
 
     Returns
     -------
@@ -478,11 +543,18 @@ def create_empty_fits_images(
     paths = {}
     for key in image_variables:
         bunit, btype = _VARIABLE_FITS_UNITS.get(key, _DEFAULT_FITS_UNITS)
+        header_beam = _header_beam(key, beam_variables, restoring_beam)
         has_beams = (
-            beams_extension_bytes is not None and key in _BEAM_CARRYING_VARIABLES
+            not header_beam and _beams_table_variable(key, beam_variables) is not None
         )
         header = _build_primary_header(
-            img_xds, bitpix, bunit, btype, telescope_name, has_beams
+            img_xds,
+            bitpix,
+            bunit,
+            btype,
+            telescope_name,
+            has_beams,
+            beam=restoring_beam if header_beam else None,
         )
         header_bytes = header.tostring().encode("ascii")
         path = os.path.join(image_store, key.upper() + ".fits")
@@ -506,7 +578,8 @@ def _fits_file_structure(path):
     """Read one pre-created FITS file's offsets/dtype (headers only, no data).
 
     Returns ``{"data_start", "dtype", "shape" (freq, pol, m, l), "beams"}``
-    where ``beams`` is ``None`` or ``{"data_start", "row_bytes", "n_pol"}``.
+    where ``beams`` is ``None`` or ``{"data_start", "row_bytes", "n_rows",
+    "n_pol"}``.
     """
     from astropy.io import fits
 
@@ -526,6 +599,7 @@ def _fits_file_structure(path):
                 structure["beams"] = {
                     "data_start": hdu.fileinfo()["datLoc"],
                     "row_bytes": hdu.header["NAXIS1"],
+                    "n_rows": hdu.header["NAXIS2"],
                     "n_pol": hdu.header["NPOL"],
                 }
     return structure
@@ -566,15 +640,16 @@ def _encode_image_chunk(variable_key, image_store, chan_start, img_xds):
 
 def _encode_beam_rows(beam_variable_key, chan_start, img_xds):
     """Encode this chunk's ``BEAMS`` rows (full rows, including CHAN/POL)."""
-    values = np.asarray(img_xds[beam_variable_key.upper()].values)[0]  # (chan, pol, 3)
-    rows = bytearray()
-    for local_chan in range(values.shape[0]):
-        for pol in range(values.shape[1]):
-            major, minor, pa = (float(v) for v in values[local_chan, pol, :3])
-            rows += _BEAMS_ROW_STRUCT.pack(
-                major, minor, pa, chan_start + local_chan, pol
-            )
-    return bytes(rows)
+    values = np.asarray(img_xds[beam_variable_key.upper()].values)
+    n_chan, n_pol = values.shape[1:3]
+    beams = values[0, :, :, :3].reshape(-1, 3)
+    rows = np.empty(n_chan * n_pol, dtype=_BEAMS_ROW_DTYPE)
+    rows["BMAJ"] = beams[:, 0]
+    rows["BMIN"] = beams[:, 1]
+    rows["BPA"] = beams[:, 2]
+    rows["CHAN"] = chan_start + np.repeat(np.arange(n_chan), n_pol)
+    rows["POL"] = np.tile(np.arange(n_pol), n_chan)
+    return rows.tobytes()
 
 
 def _pwrite_with_eio_retry(path, offset, blob):
@@ -664,9 +739,13 @@ def write_fits(
        FITS axis). Concurrent tasks touch disjoint byte ranges of the shared,
        pre-created files: no locking, no file creation.
 
-    A kept beam-fit-params variable is written as full ``BEAMS``-table rows
-    (values plus their ``CHAN``/``POL`` indices) into every kept image file
-    that carries a ``BEAMS`` extension.
+    Every kept image file that carries a ``BEAMS`` extension gets full table
+    rows (values plus their ``CHAN``/``POL`` indices) of the beam-fit-params
+    variable that :func:`_beams_table_variable` assigns to it, the clean beam
+    (PSF fit) when it is kept, the restored beam for the restored image; the
+    rows of planes without a fit are filled after the run
+    (:func:`fill_fits_beams_without_fit`). A restoring beam is not written
+    here: the restored images carry it in their header from the start.
 
     Parameters
     ----------
@@ -693,35 +772,34 @@ def write_fits(
     image_variables = [
         dv for dv in image_data_variables_keep if not dv.startswith("beam_fit_params")
     ]
-    # The clean beam (PSF fit) labels the BEAMS tables when several are kept.
-    beam_variable = (
-        "beam_fit_params_point_spread_function"
-        if "beam_fit_params_point_spread_function" in beam_variables
-        else (beam_variables[0] if beam_variables else None)
-    )
+
+    # Beam rows go into every kept image file that carries a BEAMS extension,
+    # encoded once per beam variable.
+    rows = {}
 
     def write(encoded):
-        path, offset, blob, structure = encoded
+        key, (path, offset, blob, structure) = encoded
         _pwrite_with_eio_retry(path, offset, blob)
-        # Beam rows go into every kept image file that carries a BEAMS extension.
         beams = structure["beams"]
-        if beam_variable is None or beams is None:
+        beam_variable = _beams_table_variable(key, beam_variables)
+        if beams is None or beam_variable is None:
             return
-        if beams["row_bytes"] != _BEAMS_ROW_STRUCT.size:
+        if beams["row_bytes"] != _BEAMS_ROW_DTYPE.itemsize:
             raise ValueError(
                 f"{path}: BEAMS rows are {beams['row_bytes']} B; expected "
-                f"{_BEAMS_ROW_STRUCT.size} (BMAJ,BMIN,BPA,CHAN,POL)."
+                f"{_BEAMS_ROW_DTYPE.itemsize} (BMAJ,BMIN,BPA,CHAN,POL)."
             )
-        rows = _encode_beam_rows(beam_variable, chan_start, img_xds)
+        if beam_variable not in rows:
+            rows[beam_variable] = _encode_beam_rows(beam_variable, chan_start, img_xds)
         _pwrite_with_eio_retry(
             path,
             beams["data_start"] + chan_start * beams["n_pol"] * beams["row_bytes"],
-            rows,
+            rows[beam_variable],
         )
 
     _encode_and_write(
         image_variables,
-        lambda dv: _encode_image_chunk(dv, image_store, chan_start, img_xds),
+        lambda dv: (dv, _encode_image_chunk(dv, image_store, chan_start, img_xds)),
         write,
         processing_function_threads,
     )
@@ -736,12 +814,13 @@ def write_fits_image(
     double_precision=False,
     telescope_name="UNKNOWN",
     overwrite=False,
+    restoring_beam=None,
 ):
     """Write a whole image dataset to FITS files.
 
     :func:`create_empty_fits_images` followed by :func:`write_fits` of every
-    channel, for an image written once at the end of a run rather than by the
-    node tasks.
+    channel and :func:`fill_fits_beams_without_fit`, for an image written once
+    at the end of a run rather than by the node tasks.
 
     Parameters
     ----------
@@ -760,6 +839,9 @@ def write_fits_image(
         ``TELESCOP`` keyword.
     overwrite : bool, optional
         Replace an existing ``image_store``.
+    restoring_beam : sequence of float, optional
+        The run's target beam ``[major, minor, pa]`` in radians; ``None``
+        without one.
 
     Returns
     -------
@@ -774,6 +856,7 @@ def write_fits_image(
         telescope_name=telescope_name,
         overwrite=overwrite,
         data_variable_definitions=data_variable_definitions,
+        restoring_beam=restoring_beam,
     )
     write_fits(
         image_store,
@@ -781,4 +864,85 @@ def write_fits_image(
         {"frequency": {"slice": slice(0, img_xds.sizes["frequency"])}},
         img_xds,
     )
+    fill_fits_beams_without_fit(image_store, image_data_variables_keep)
     return paths
+
+
+def fill_fits_beams_without_fit(image_store, image_data_variables_keep):
+    """Give the ``BEAMS`` rows of planes without a fit the beam ``tclean`` gives them.
+
+    Run ONCE in the driver, after every node task has written its rows.
+    casacore refuses a ``BEAMS`` table that holds a zero or non-finite beam,
+    so the rows of planes without a fit (a flagged channel, a failed fit, a
+    skipped task) take the beam ``tclean`` gives such planes
+    (``SIImageStore::makeImageBeamSet``): the first beam of largest area, the
+    planes taken channel by channel as ``tclean`` fits them, or a circle of
+    1e-6 arcsec at 0 degrees when no plane has a fit. A plane has a fit when
+    its beam is finite and both axes are positive.
+
+    Parameters
+    ----------
+    image_store : str
+        Directory of FITS files written by
+        :func:`write_fits`.
+    image_data_variables_keep : list of str
+        The run's kept variables; the ``BEAMS`` tables of the files of its image
+        variables are filled.
+
+    Returns
+    -------
+    dict
+        ``{image variable key: numpy.ndarray}``: for the file of every image
+        variable with a ``BEAMS`` table, which of its planes ``(frequency,
+        polarization)`` had no fit.
+    """
+    planes_without_fit = {}
+    for key in image_data_variables_keep:
+        if not key.startswith("beam_fit_params"):
+            without_fit = _fill_beams_table_without_fit(
+                os.path.join(image_store, key.upper() + ".fits")
+            )
+            if without_fit is not None:
+                planes_without_fit[key] = without_fit
+    return planes_without_fit
+
+
+def _fill_beams_table_without_fit(path):
+    """:func:`fill_fits_beams_without_fit` for the file ``path``: which of its
+    planes had no fit, ``None`` for a file without a ``BEAMS`` table."""
+    import toolviper.utils.logger as logger
+
+    beams = _retry_transient_io(
+        f"FITS structure of {path}", lambda: _fits_file_structure(path)
+    )["beams"]
+    if beams is None:
+        return None
+
+    def read_rows():
+        with open(path, "rb") as file:
+            file.seek(beams["data_start"])
+            return np.frombuffer(
+                file.read(beams["n_rows"] * _BEAMS_ROW_DTYPE.itemsize),
+                dtype=_BEAMS_ROW_DTYPE,
+            ).copy()
+
+    rows = _retry_transient_io(f"BEAMS rows of {path}", read_rows)
+    values = np.stack([rows[name] for name in ("BMAJ", "BMIN", "BPA")], axis=-1)
+    fitted = np.isfinite(values).all(axis=1) & (values[:, 0] > 0) & (values[:, 1] > 0)
+    without_fit = (~fitted).reshape(-1, beams["n_pol"])
+    if fitted.all():
+        return without_fit
+    if fitted.any():
+        area = np.full(len(rows), -np.inf)
+        area[fitted] = values[fitted, 0].astype(np.float64) * values[fitted, 1]
+        fill = values[np.argmax(area)]
+    else:
+        fill = _NO_FIT_BEAM
+    for name, value in zip(("BMAJ", "BMIN", "BPA"), fill, strict=True):
+        rows[name][~fitted] = value
+    logger.debug(
+        f"{path}: {int((~fitted).sum())} BEAMS rows without a fit take "
+        f"{[float(value) for value in fill]} ({', '.join(_BEAMS_UNITS)})."
+    )
+    _pwrite_with_eio_retry(path, beams["data_start"], rows.tobytes())
+    return without_fit

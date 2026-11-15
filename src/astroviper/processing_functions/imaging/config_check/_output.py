@@ -95,6 +95,14 @@ def check_kept_variables(
             raise ValueError(
                 f"Requested variables {sorted(restored_products)} require restore=True."
             )
+        # --- Restored beam ---
+        # A restore records the beams it applied.
+        if (
+            "beam_fit_params_sky_restored" in requested
+            and "restore" in config
+            and not config["restore"]
+        ):
+            raise ValueError("beam_fit_params_sky_restored requires restore=True.")
         # --- Selected cube restoration products ---
         if mode.imaging_kind == "cube" and "restoration_output" in config:
             for key, allowed in (

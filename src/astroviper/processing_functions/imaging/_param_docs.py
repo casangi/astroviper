@@ -731,6 +731,29 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "``primary_beam_limit`` are blanked with NaN. Imaging workflows use this\n"
         "selector only when ``restore=True``."
     ),
+    "restoring_beam": (
+        "``None`` restores each plane with its own PSF fit [CASA ``tclean``\n"
+        "``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle\n"
+        "in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,\n"
+        "``|pa| <= pi``) restores every plane to that beam as ``tclean`` does\n"
+        "since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak\n"
+        "target beam, and the residual with the Gaussian that takes the plane's\n"
+        "PSF beam to the target, times the ratio of the beam areas, so it is in\n"
+        "Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF\n"
+        "beam the target does not contain, or that has no PSF fit, keeps its\n"
+        "residual unconvolved and unscaled, as ``tclean`` does, and is named in a\n"
+        "warning. The continuum imager refuses a target that does not contain its\n"
+        "PSF beam, and any target when its PSF fit failed, right after that fit\n"
+        "in its first imaging cycle: the residual update has run, but no model\n"
+        "update. With primary-beam correction a restore cutoff below 1e-3 is\n"
+        "refused (``primary_beam_limit``; in cube imaging that of\n"
+        "``cycle_control_params``, where 0 restores at 0.2): in the transform to\n"
+        "the target, the float32 rounding of the residual divided by the primary\n"
+        "beam, large near its nulls, would spread over the corrected image. The\n"
+        "beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For\n"
+        "``tclean``'s ``restoringbeam='common'``, see\n"
+        ":func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`."
+    ),
     "psf_fitting_method": (
         'Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or\n'
         '``"casa"``, the C++ port of CASA\'s ``StokesImageUtil::FitGaussianPSF``\n'
@@ -745,8 +768,10 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).\n'
         "Restoration automatically retains its selected restored Taylor\n"
-        "products and the "
-        'derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.\n'
+        'products, the derived ``"alpha"``, ``"alpha_error"``, and, when\n'
+        'available, ``"beta"``, and ``"beam_fit_params_sky_restored"``, the beam\n'
+        "the restore applied; with a ``restoring_beam`` also\n"
+        '``"beam_fit_params_point_spread_function"``.\n'
         "Restored and spectral products require ``restore=True``. Alpha products\n"
         "require at least two Taylor terms; beta requires at least three.\n"
         "MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;\n"
