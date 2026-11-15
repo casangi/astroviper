@@ -1516,7 +1516,16 @@ FIND_CONTINUUM_GROWTH_BUDGET_PLANES = 1.0
 
 
 def resident_peak():
-    """Largest resident set size of this process so far (bytes)."""
+    """Largest resident set size of this process so far (bytes): VmHWM on Linux,
+    where ``ru_maxrss`` keeps the parent's peak across the exec of a spawned
+    process."""
+    if sys.platform.startswith("linux"):
+        with open("/proc/self/status") as status:
+            return next(
+                1024 * int(line.split()[1])
+                for line in status
+                if line.startswith("VmHWM:")
+            )
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak if sys.platform == "darwin" else 1024 * peak
 
