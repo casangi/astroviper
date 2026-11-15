@@ -32,11 +32,22 @@ SHIMS = {
     ),
 }
 
+#: kernel -> (module, hooked entries, modules that import the entries by
+#: name): the kernels whose reference entries are Python functions that their
+#: own module hooks (``_switch._SELF_HOOKED``).
+SELF_HOOKED = {
+    "fft": (
+        f"{_IMAGING}.fft_normalize_anti_alias_gridder",
+        ("ifft_uv_to_lm", "fft_lm_to_uv"),
+        (f"{_IMAGING}.feather",),
+    ),
+}
+
 #: First line of every shim hook.
 HOOK = 'if __import__("os").environ.get("ASTROVIPER_KERNELS"):'
 
 #: Selection that installs every hook and runs the reference everywhere.
-ALL_REF = "dft=ref,hogbom=ref,asp=ref"
+ALL_REF = "dft=ref,hogbom=ref,asp=ref,fft=ref"
 
 #: Source of ``tiny_hogbom()``: one small ``hogbom.clean_cube`` call through the
 #: shim, for subprocesses and Dask workers.
@@ -56,6 +67,22 @@ def tiny_hogbom():
         gain=0.5,
         threshold_per_cycle=np.zeros((1, 1, 1)),
     )
+"""
+
+
+#: Source of ``tiny_fft()``: one call of each FFT entry through the module
+#: that hooks them, on an 8 x 8 plane (below the GPU's default pixel floor).
+TINY_FFT = """
+def tiny_fft():
+    import numpy as np
+
+    from astroviper.processing_functions.imaging import (
+        fft_normalize_anti_alias_gridder as fft,
+    )
+
+    plane = np.zeros((8, 8))
+    plane[4, 4] = 1.0
+    return fft.ifft_uv_to_lm(fft.fft_lm_to_uv(plane))
 """
 
 

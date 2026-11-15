@@ -25,9 +25,9 @@ from astroviper._kernels import _switch
 from astroviper._kernels.__main__ import main as check_main
 from astroviper._kernels._switch import ENV, RESERVED, TRACE_ENV, dispatch, impl, parse
 from astroviper.processing_functions.imaging.deconvolvers.hogbom import _hogbom_ext
-from tests.unit.kernels.conftest import ALL_REF, SHIMS
+from tests.unit.kernels.conftest import ALL_REF, SELF_HOOKED, SHIMS
 
-ALL_REFERENCE = {"dft": "ref", "hogbom": "ref", "asp": "ref"}
+ALL_REFERENCE = {"dft": "ref", "hogbom": "ref", "asp": "ref", "fft": "ref"}
 
 
 def clean_cube(*args, **kwargs):
@@ -91,29 +91,35 @@ def test_reference_selections(value):
 
 
 @pytest.mark.parametrize(
-    "value, dft, hogbom, asp",
+    "value, dft, hogbom, asp, fft",
     [
-        ("fast", "fast", "fast", "fast"),
-        ("*=FAST", "fast", "fast", "fast"),
-        ("hogbom=fast", "ref", "fast", "ref"),
-        ("fast,hogbom=ref", "fast", "ref", "fast"),
-        ("hogbom=ref,fast", "fast", "fast", "fast"),
-        ("ref,hogbom=fast,dft=ref", "ref", "fast", "ref"),
-        ("fast,dft=ref", "ref", "fast", "fast"),
-        ("asp=fast", "ref", "ref", "fast"),
-        ("fast,asp=ref", "fast", "fast", "ref"),
-        ("gpu", "ref", "gpu", "ref"),
-        ("fast,hogbom=gpu", "fast", "gpu", "fast"),
+        ("fast", "fast", "fast", "fast", "ref"),
+        ("*=FAST", "fast", "fast", "fast", "ref"),
+        ("hogbom=fast", "ref", "fast", "ref", "ref"),
+        ("fast,hogbom=ref", "fast", "ref", "fast", "ref"),
+        ("hogbom=ref,fast", "fast", "fast", "fast", "ref"),
+        ("ref,hogbom=fast,dft=ref", "ref", "fast", "ref", "ref"),
+        ("fast,dft=ref", "ref", "fast", "fast", "ref"),
+        ("asp=fast", "ref", "ref", "fast", "ref"),
+        ("fast,asp=ref", "fast", "fast", "ref", "ref"),
+        ("gpu", "ref", "gpu", "ref", "gpu"),
+        ("fast,hogbom=gpu", "fast", "gpu", "fast", "ref"),
+        ("fft=gpu", "ref", "ref", "ref", "gpu"),
+        ("gpu,fft=ref", "ref", "gpu", "ref", "ref"),
+        ("fast,fft=gpu,hogbom=gpu", "fast", "gpu", "fast", "gpu"),
     ],
 )
-def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom, asp):
-    assert parse(value) == {**ALL_REFERENCE, "dft": dft, "hogbom": hogbom, "asp": asp}
+def test_defaults_overrides_and_later_tokens_win(
+    fake_fast, value, dft, hogbom, asp, fft
+):
+    expected = {"dft": dft, "hogbom": hogbom, "asp": asp, "fft": fft}
+    assert parse(value) == expected
 
 
 @pytest.mark.parametrize(
     "value, message",
     [
-        ("dtf=ref", "unknown kernel 'dtf'; kernels: asp, dft, hogbom"),
+        ("dtf=ref", "unknown kernel 'dtf'; kernels: asp, dft, fft, hogbom"),
         (
             "dft=fsat",
             "unknown implementation 'fsat'; implementations: fast, gpu, ref, ref1",
@@ -123,6 +129,10 @@ def test_defaults_overrides_and_later_tokens_win(fake_fast, value, dft, hogbom, 
             "'asp' has no implementation 'gpu'; its implementations: fast, ref",
         ),
         ("hogbom=ref1", "'hogbom' has no implementation 'ref1'"),
+        (
+            "fft=fast",
+            "'fft' has no implementation 'fast'; its implementations: gpu, ref",
+        ),
         ("ref1", "no kernel implements 'ref1' yet"),
         ("dft=ref:avx2", "variants (':...') are not supported"),
         ("ref:x", "variants (':...') are not supported"),
@@ -159,6 +169,7 @@ def test_registry_holds_the_reference_pairs():
         "dft": {"ref", "fast"},
         "hogbom": {"ref", "fast", "gpu"},
         "asp": {"ref", "fast"},
+        "fft": {"ref", "gpu"},
     }
     for kernel, (shim, ext, entries) in SHIMS.items():
         assert _switch._ENTRIES[kernel] == entries
@@ -166,6 +177,37 @@ def test_registry_holds_the_reference_pairs():
             assert impl(kernel, entry, "ref") is getattr(
                 import_module(f"{shim}.{ext}"), entry
             )
+    assert tuple(SELF_HOOKED) == _switch._SELF_HOOKED
+    for kernel, (name, entries, _) in SELF_HOOKED.items():
+        assert _switch._ENTRIES[kernel] == entries
+        assert _switch._REGISTRY[kernel]["ref"] == name
+        for entry in entries:
+            reference = getattr(import_module(name), entry)
+            assert impl(kernel, entry, "ref") is getattr(
+                reference, "__wrapped__", reference
+            )
+
+
+def test_impl_finds_the_reference_behind_a_self_hooked_modules_wrapper(
+    monkeypatch,
+):
+    """A module that hooks its own functions holds the wrappers: the
+    reference is the function a wrapper wraps, not the wrapper (which would
+    call itself)."""
+    monkeypatch.setenv(ENV, "fft=ref")
+    monkeypatch.setattr(_switch, "_resolved", {})
+    name, entries, _ = SELF_HOOKED["fft"]
+    module = import_module(name)
+    for entry in entries:
+        function = getattr(module, entry)
+        function = getattr(function, "__wrapped__", function)
+        monkeypatch.setattr(module, entry, dispatch("fft", function))
+        assert impl("fft", entry, "ref") is function
+    plane = np.zeros((8, 8))
+    plane[4, 3] = 1.0
+    np.testing.assert_allclose(
+        module.ifft_uv_to_lm(module.fft_lm_to_uv(plane)), plane, rtol=0, atol=1e-15
+    )
 
 
 def test_impl_rejects_unhooked_entries_and_unregistered_pairs():
@@ -177,9 +219,11 @@ def test_impl_rejects_unhooked_entries_and_unregistered_pairs():
 
 def test_dispatch_wrapper_carries_the_shim_names(monkeypatch):
     monkeypatch.setenv(ENV, ALL_REF)
-    for kernel, (shim, ext, entries) in SHIMS.items():
+    cases = [(k, shim, e) for k, (shim, _, e) in SHIMS.items()]
+    cases += [(k, name, e) for k, (name, e, _) in SELF_HOOKED.items()]
+    for kernel, shim, entries in cases:
         for entry in entries:
-            function = getattr(import_module(f"{shim}.{ext}"), entry)
+            function = impl(kernel, entry, "ref")
             wrapper = dispatch(kernel, function)
             assert wrapper.__wrapped__ is function
             assert wrapper.__module__ == shim
@@ -254,6 +298,19 @@ def test_trace_lines(monkeypatch, tmp_path):
     assert first["shapes"]["max_iter_per_cycle_updated"] == [1, 1, 1]
     assert first["dtypes"]["max_iter_per_cycle_updated"] == "int32"
     assert "gain" not in first["shapes"]
+
+
+def test_trace_lines_list_arrays_not_types(monkeypatch, tmp_path):
+    """A NumPy scalar type given as an argument (``fft_lm_to_uv``'s
+    ``complex_dtype``) has ``shape`` and ``dtype`` attributes, as a class: the
+    line lists the arrays only, and is written."""
+    monkeypatch.setenv(ENV, "fft=ref")
+    monkeypatch.setenv(TRACE_ENV, str(tmp_path))
+    wrapper = dispatch("fft", impl("fft", "fft_lm_to_uv", "ref"))
+    wrapper(np.ones((4, 6)), complex_dtype=np.complex64, fft_backend="scipy")
+    (path,) = tmp_path.iterdir()
+    (record,) = map(json.loads, path.read_text().splitlines())
+    assert (record["shapes"], record["dtypes"]) == ({"0": [4, 6]}, {"0": "float64"})
 
 
 def test_trace_records_the_reported_path(fake_module, monkeypatch, tmp_path):
@@ -454,8 +511,9 @@ def test_typo_fails_at_shim_import(run_python):
 def test_check_command(run_python):
     out = run_python("-m", "astroviper._kernels", "--check", ASTROVIPER_KERNELS=ALL_REF)
     last = out.strip().splitlines()[-1]
-    assert (
-        last == f"ASTROVIPER_KERNELS={ALL_REF!r} (hooked): dft=ref, hogbom=ref, asp=ref"
+    assert last == (
+        f"ASTROVIPER_KERNELS={ALL_REF!r} (hooked): "
+        "dft=ref, hogbom=ref, asp=ref, fft=ref"
     )
     done = run_python(
         "-m",
@@ -470,9 +528,14 @@ def test_check_command(run_python):
 
 
 def test_hooked_entries_pickle_by_reference(run_python):
+    shims = [shim for shim, _, _ in SHIMS.values()]
+    shims += [name for name, _, _ in SELF_HOOKED.values()]
     names = [f"{shim}.{e}" for shim, _, entries in SHIMS.values() for e in entries]
+    names += [
+        f"{name}.{e}" for name, entries, _ in SELF_HOOKED.values() for e in entries
+    ]
     code = "\n".join(
-        ["import pickle", *(f"import {shim}" for shim, _, _ in SHIMS.values())]
+        ["import pickle", *(f"import {shim}" for shim in shims)]
         + [
             f"assert {n}.__wrapped__ and pickle.loads(pickle.dumps({n})) is {n}"
             for n in names

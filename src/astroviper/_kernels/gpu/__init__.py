@@ -6,6 +6,7 @@ the fast CPU kernels (``astroviper._kernels.fast``). Layout::
 
     gpu/_runtime.py     CuPy, the device, CUPY_GPU_MEMORY_LIMIT, the NVRTC modules
     gpu/hogbom.py       hogbom=gpu: clean_cube, clean_cube_many_threads
+    gpu/fft.py          fft=gpu: ifft_uv_to_lm, fft_lm_to_uv (CuPy's cuFFT)
     gpu/prewarm.py      python -m astroviper._kernels.gpu.prewarm
     gpu/cuda/*.cu       the kernel sources: package data, compiled at first use
 

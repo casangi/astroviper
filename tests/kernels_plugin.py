@@ -14,8 +14,9 @@ not just the reference behind them. The plugin:
 * sets ``ASTROVIPER_KERNELS_TRACE`` to a fresh directory unless it is set, so
   that every hooked call, including those in Dask workers started by the
   tests, writes a trace line, and for ``hogbom=gpu``
-  ``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` to 0 unless it is set, so that the
-  GPU runs the tests' planes, which are all below its default floor;
+  ``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` (for ``fft=gpu``
+  ``ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS``) to 0 unless it is set, so that
+  the GPU runs the tests' planes, which are mostly below its default floor;
 * attributes each trace record, by its start time, to the test file that was
   running (setup, call or teardown), and prints the calls per file, kernel,
   entry, impl, path and error;
@@ -43,6 +44,7 @@ import pytest
 ENV = "ASTROVIPER_KERNELS"
 TRACE_ENV = "ASTROVIPER_KERNELS_TRACE"
 GPU_FLOOR_ENV = "ASTROVIPER_KERNELS_GPU_MIN_PIXELS"
+GPU_FFT_FLOOR_ENV = "ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS"
 
 _DA = "tests/unit/distributed_applications"
 _NT = "tests/unit/node_tasks"
@@ -51,11 +53,13 @@ _DFT = {"dft": ("dft_predict",)}
 _ASP_CUBE = {"asp": ("clean_cube",)}
 _HOGBOM_CUBE = {"hogbom": ("clean_cube",)}
 _HOGBOM_BOTH = {"hogbom": ("clean_cube", "clean_cube_many_threads")}
+_FFT = {"fft": ("ifft_uv_to_lm", "fft_lm_to_uv")}
 
 #: ``{test file: {kernel: entries}}``: the files whose calls (in process or in
 #: Dask workers) execute these hooked entries, measured on the sharded
 #: ``tests/unit`` run with every kernel switched to ``ref`` (and the component
-#: file that the DFT's verification switches). A switched session
+#: file that the DFT's verification switches; for ``fft``, the files that test
+#: the FFT module and feather, measured under ``fft=gpu``). A switched session
 #: fails when a collected file listed here executes none of the selected
 #: implementation of one of its entries for an explicitly selected kernel (or,
 #: for the files of ``DECLINED_BY_DESIGN``, reaches none). Other files are
@@ -66,6 +70,7 @@ MANIFEST = {
     f"{_DA}/imaging/test_continuum_dft.py": _DFT | _HOGBOM_CUBE,
     f"{_DA}/imaging/test_continuum_gridding_kernel.py": _HOGBOM_CUBE,
     f"{_DA}/imaging/test_continuum_polarization.py": _HOGBOM_CUBE,
+    f"{_DA}/imaging/test_feather.py": _FFT,
     f"{_DA}/imaging/test_image_cube_cycle_control_record.py": _HOGBOM_CUBE,
     f"{_DA}/imaging/test_image_cube_single_field.py": _HOGBOM_CUBE,
     f"{_DA}/imaging/test_image_cube_single_field_delphi.py": _HOGBOM_CUBE,
@@ -81,6 +86,9 @@ MANIFEST = {
     f"{_PF}/imaging/test_deconvolution.py": _ASP_CUBE | _HOGBOM_BOTH,
     f"{_PF}/imaging/test_direct_fourier_transform.py": _DFT,
     f"{_PF}/imaging/test_exact_psf_subtraction.py": _HOGBOM_BOTH,
+    f"{_PF}/imaging/test_feather.py": _FFT,
+    f"{_PF}/imaging/test_fft_ifft.py": _FFT,
+    f"{_PF}/imaging/test_fft_plane_dimensions.py": _FFT,
     f"{_PF}/imaging/test_hogbom_clean.py": _HOGBOM_BOTH,
     f"{_PF}/imaging/test_hogbom_many_threads.py": _HOGBOM_BOTH,
     f"{_PF}/imaging/test_hogbom_stop_tests.py": _HOGBOM_BOTH,
@@ -149,8 +157,13 @@ def _records(trace_dir, since):
 #: executes on the path named after it. A ``dft=fast`` call that ``declined``
 #: ran the reference behind the fast entry's checks: parity evidence, not an
 #: execution of the fast kernel (path B joins ``"S"`` here when it lands). A
-#: ``hogbom=gpu`` call that was ``routed`` or ``declined`` ran on the CPU.
-EXECUTED_PATHS = {("dft", "fast"): ("S",), ("hogbom", "gpu"): ("gpu",)}
+#: ``hogbom=gpu`` or ``fft=gpu`` call that was ``routed`` or ``declined`` ran
+#: on the CPU.
+EXECUTED_PATHS = {
+    ("dft", "fast"): ("S",),
+    ("hogbom", "gpu"): ("gpu",),
+    ("fft", "gpu"): ("gpu",),
+}
 
 
 def _reached(record, selection):
@@ -320,6 +333,8 @@ def pytest_configure(config):
     os.environ[TRACE_ENV] = trace_dir
     if selection.get("hogbom") == "gpu":
         os.environ.setdefault(GPU_FLOOR_ENV, "0")
+    if selection.get("fft") == "gpu":
+        os.environ.setdefault(GPU_FFT_FLOOR_ENV, "0")
     config.pluginmanager.register(
         KernelsPlugin(selection, trace_dir), "kernels_plugin_state"
     )

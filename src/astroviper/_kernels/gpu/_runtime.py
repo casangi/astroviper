@@ -3,7 +3,8 @@ The CUDA side of the GPU kernels: CuPy, the device, its memory limit and the
 modules compiled from ``cuda/*.cu``.
 
 CuPy is imported here only, by :func:`require_device` at the first call that
-runs on the GPU. Importing this module imports only the standard library.
+runs on the GPU (its cuFFT by :meth:`Device.fft_plan`, at the first plan).
+Importing this module imports only the standard library.
 CUDA does not survive a fork: in a process forked after its parent opened the
 device, the first GPU call raises ``RuntimeError`` (start worker processes
 with the ``spawn`` or ``forkserver`` method instead).
@@ -97,8 +98,9 @@ class Device:
     ``pool`` (CuPy's default memory pool, with the limit applied), ``stream``
     (a non-blocking stream for the kernels' work), ``lock`` (held by a call
     while it uses the device: one GPU kernel call at a time per process),
-    ``errors`` (the CUDA exception types), ``init_s`` (seconds to import CuPy
-    and create the context) and ``versions`` (CUDA driver, runtime, NVRTC).
+    ``errors`` (the CUDA exception types), ``fft_errors`` (cuFFT's, once
+    :meth:`fft_plan` has loaded it), ``init_s`` (seconds to import CuPy and
+    create the context) and ``versions`` (CUDA driver, runtime, NVRTC).
     """
 
     def __init__(self, cp, init_s, nvrtc):
@@ -112,6 +114,7 @@ class Device:
             self.stream = cp.cuda.Stream(non_blocking=True)
         self.lock = threading.Lock()
         self.errors = (cp.cuda.runtime.CUDARuntimeError, cp.cuda.driver.CUDADriverError)
+        self.fft_errors = ()
         self.init_s = init_s
         self.versions = {
             "driver": cp.cuda.runtime.driverGetVersion(),
@@ -157,6 +160,16 @@ class Device:
         self.compile_s[key] = time.perf_counter() - t0
         self._modules[key] = functions
         return functions
+
+    def fft_plan(self, array):
+        """A cuFFT plan of the complex 2-D transform of ``array``, a C-ordered
+        CuPy array of two axes, with its work area from the memory pool. CuPy's
+        cuFFT is loaded at the first plan."""
+        from cupy.cuda import cufft
+        from cupyx.scipy.fft import get_fft_plan
+
+        self.fft_errors = (cufft.CuFFTError,)
+        return get_fft_plan(array, axes=(0, 1))
 
     def max_blocks(self, kernel, threads):
         """The most blocks of ``threads`` threads of ``kernel`` that the device
