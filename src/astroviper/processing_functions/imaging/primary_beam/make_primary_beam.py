@@ -31,7 +31,9 @@ def make_primary_beam_single_field(
     ``max_rad_1GHz / (frequency / 1 GHz)`` when the model has a cut, as CASA's
     ``.pb`` image.  By default it is the textbook obscured Airy pattern
     (:func:`~astroviper.processing_functions.imaging.primary_beam.airy_disk.airy_disk_response`)
-    without a cut; ``beam_model`` gives another (the CASA ``PBMath1DAiry``
+    without a cut, interpolated linearly from a table along one radius with
+    spacing :data:`AIRY_TABLE_STEP` in ``r = rho k D / 2`` (within 1e-9 of
+    it); ``beam_model`` gives another (the CASA ``PBMath1DAiry``
     compatible one, ``func="casa_airy"``, matching the ``.pb`` image of
     ``tclean`` to float32 precision, or the EVLA beam polynomial).  It is
     written as the ``PRIMARY_BEAM``
@@ -149,15 +151,17 @@ def make_primary_beam_single_field(
 
     # Evaluate the beam on the image's (l, m) grid one channel at a time, then
     # broadcast over polarization and add a leading time axis.
+    l_grid = img_xds.l.values[:, None]
+    m_grid = img_xds.m.values[None, :]
+    radial_airy = packed_model["kind"] == "analytic" and packed_model["func"] == "airy"
+    if radial_airy:
+        radius = np.sqrt(l_grid**2 + m_grid**2)
     pb = None
     for i_chan, f in enumerate(frequency):
-        response = symmetric_beam_response(
-            packed_model,
-            img_xds.l.values[:, None],
-            img_xds.m.values[None, :],
-            f,
-            ipower,
-        )
+        if radial_airy:
+            response = _radial_airy_response(packed_model, radius, f, ipower)
+        else:
+            response = symmetric_beam_response(packed_model, l_grid, m_grid, f, ipower)
         if pb is None:
             pb = np.empty((frequency.size, *response.shape), dtype=float_dtype)
         pb[i_chan] = response
@@ -177,6 +181,43 @@ def make_primary_beam_single_field(
     )
 
     return img_xds, pd.DataFrame({"T_primary_beam": [time.time() - start]})
+
+
+# Spacing of the radial Airy table in the argument ``r = rho k D / 2``: linear
+# interpolation errs by at most AIRY_TABLE_STEP**2 / 8 times the curvature.
+AIRY_TABLE_STEP = 1e-4
+
+
+def _radial_airy_response(packed_model, radius, frequency, ipower):
+    """``symmetric_beam_response`` of an ``"airy"`` model at the angular radii
+    ``radius`` (radians), interpolated from a table along one radius."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        SPEED_OF_LIGHT,
+        airy_disk_response,
+    )
+
+    r_per_radian = np.pi * frequency * packed_model["dish_diameter"] / SPEED_OF_LIGHT
+    radius_max = float(radius.max())
+    n_table = int(np.ceil(radius_max * r_per_radian / AIRY_TABLE_STEP)) + 2
+    table = airy_disk_response(
+        np.linspace(0.0, radius_max, n_table),
+        0.0,
+        frequency,
+        packed_model["dish_diameter"],
+        packed_model["blockage_diameter"],
+        ipower,
+    )
+    # Evenly spaced table: the index is arithmetic, not a search.
+    position = radius * ((n_table - 1) / radius_max)
+    index = np.minimum(position.astype(np.intp), n_table - 2)
+    position -= index
+    response = np.take(np.diff(table), index)
+    response *= position
+    response += np.take(table, index)
+    response[radius >= packed_model["max_rad_1GHz"] / (frequency / 1e9)] = 0.0
+    return response
 
 
 def pack_primary_beam_model(beam_model, frequency):

@@ -8,6 +8,9 @@ from xradio.measurement_set import load_processing_set, open_processing_set
 from xradio.schema.check import check_datatree
 
 import astroviper.distributed_applications as distributed_applications
+from astroviper.distributed_applications.simulation.simulate_processing_set import (
+    DISTRIBUTED_APPLICATION_TIMING_PHASES,
+)
 from astroviper.processing_functions.simulation import (
     simulate_processing_set as simulate_processing_set_pf,
 )
@@ -18,6 +21,7 @@ from astroviper.utils.beam_models import (
     airy_disk_model,
     read_aperture_polynomial_coefficients,
 )
+from astroviper.utils.data_partitioning import check_compute_resources
 from astroviper.utils.telescope_layout import (
     observatory_position,
     read_telescope_layout,
@@ -69,6 +73,15 @@ def test_full_stack_matches_processing_function(tmp_path):
     assert list(result["timing_node_tasks"]["task_id"]) == list(range(6))
     assert result["ms_name"] == "VLA_SBand"
     assert result["timing_distributed_application"]["T_total"] > 0
+    driver_keys = [
+        key for _, _, steps in DISTRIBUTED_APPLICATION_TIMING_PHASES for _, key in steps
+    ]
+    assert {
+        key for key in result["timing_distributed_application"] if key.startswith("T_")
+    } - {"T_total"} <= set(driver_keys)
+    assert result["timing_distributed_application"]["T_get_compute_resources"] >= 0
+    assert result["compute_resources"]["compute_backend"] == "dask"
+    assert result["compute_resources"]["n_hosts"] == 1
 
     ps_xdt = open_processing_set(result["ps_store"])
     issues = check_datatree(ps_xdt)  # XRADIO MSv4 schema checker
@@ -418,6 +431,9 @@ def test_sky_image_output(tmp_path):
     )
     assert result["sky_image_store"] == store
     assert result["timing_distributed_application"]["T_write_sky_image"] >= 0.0
+    assert ("write sky image", "T_write_sky_image") in (
+        DISTRIBUTED_APPLICATION_TIMING_PHASES[0][2]
+    )
     img = load_image(store)
     assert img.SKY.dims == ("time", "frequency", "polarization", "l", "m")
     assert list(img.polarization.values) == ["I", "Q", "U", "V"]
@@ -564,6 +580,8 @@ def test_html_report_of_a_monitored_single_task_run(tmp_path):
     for column in ("cpu_percent", "memory_rss_bytes", "start_unixtime", "hostname"):
         assert column in timing, column
     driver = result["timing_distributed_application"]
+    check_compute_resources(result["compute_resources"])
+    assert result["compute_resources"]["n_worker_slots"] >= 1
     assert (
         driver["application_start_unixtime"]
         <= driver["compute_start_unixtime"]
@@ -574,6 +592,11 @@ def test_html_report_of_a_monitored_single_task_run(tmp_path):
     text = _report_text(result["report"])
     for heading in (
         "Processing",
+        "Performance",
+        "Timing",
+        "Task stream",
+        "Task times",
+        "Resources",
         "Observation",
         "Antennas",
         "uv coverage",
@@ -582,9 +605,12 @@ def test_html_report_of_a_monitored_single_task_run(tmp_path):
         "Sky components",
     ):
         assert f">{heading}</h" in text, heading
-    assert "Cluster CPU" in text
+    assert "Cluster CPU" in text and "CPU per worker slot" in text
+    assert "CPU per task" in text
+    assert "most a given time (T_simulate_task)" in text
     assert "shortest baseline" in text and "longest baseline" in text
-    assert text.count("data:image/png;base64,") >= 9
+    # processing (9 without I/O counters) and the 6 results figures
+    assert text.count("data:image/png;base64,") >= 9 + 6
     assert (
         tmp_path / "vla_sim_report_files" / "point_spread_function.img.zarr"
     ).exists()
@@ -613,10 +639,45 @@ def test_pdf_and_notebook_reports(tmp_path, monkeypatch):
     (html,) = (shown[0].data,)
     assert "No noise was simulated" in html
     assert "the sky image of the simulation" in html
-    assert "Cluster CPU, memory and I/O were not recorded" in html
+    assert "CPU, memory and I/O were not recorded" in html
 
 
 def test_unknown_report_format_is_refused(tmp_path):
     with pytest.raises(AssertionError):  # the param.json schema
         run(tmp_path, report="docx")
     assert not (tmp_path / "vla_sim.ps.zarr").exists()
+
+
+def test_io_engines_write_the_same_visibilities(tmp_path):
+    """The chunk and xradio I/O engines write the same MSv4 (point source,
+    sky image and noise), the chunk engine reading the sky image by offset."""
+    from xradio.image import make_empty_sky_image, write_image
+
+    arcsec = np.pi / (180 * 3600)
+    image = make_empty_sky_image(
+        phase_center=PC[0],
+        image_size=[32, 32],
+        cell_size=[-10 * arcsec, 10 * arcsec],
+        frequency_coords=[3.2e9],
+        pol_coords=["I"],
+        time_coords=[0],
+    )
+    sky = np.zeros((1, 1, 1, 32, 32))
+    sky[0, 0, 0, 20, 10] = 0.5
+    image["SKY"] = (("time", "frequency", "polarization", "l", "m"), sky)
+    store = str(tmp_path / "model.img.zarr")
+    write_image(image, store, out_format="zarr", overwrite=True)
+    loaded = {}
+    for io_engine in ("chunk", "xradio"):
+        result, _ = run(
+            tmp_path,
+            ps_store=str(tmp_path / f"{io_engine}.ps.zarr"),
+            sky_model_image=store,
+            noise_params={"random_seed": 3},
+            io_engine=io_engine,
+        )
+        loaded[io_engine] = load_processing_set(result["ps_store"])["VLA_SBand"].ds
+    for name in ("VISIBILITY", "UVW", "WEIGHT", "FLAG"):
+        np.testing.assert_array_equal(
+            loaded["chunk"][name].values, loaded["xradio"][name].values, err_msg=name
+        )

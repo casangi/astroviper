@@ -275,7 +275,7 @@ def test_peak_across_layers_and_partitions(tmp_path, monkeypatch, axes, n_partit
         data_variable="SKY_RESIDUAL", axes=axes, mask="MASK", statistics=("peak",)
     )
     distributed = statistics_module.image_statistics(
-        path, n_partitions=n_partitions, **kwargs
+        path, n_partitions=n_partitions, io_engine="xradio", **kwargs
     )
     direct = direct_statistics(dataset, **kwargs)
     xr.testing.assert_identical(distributed, direct)

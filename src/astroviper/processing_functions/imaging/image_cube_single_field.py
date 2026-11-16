@@ -393,7 +393,9 @@ def imaging_preparation_single_field(
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
-        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
         The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
         models: ``airy_disk_model(telescope, func="casa_airy")`` and
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
@@ -509,6 +511,7 @@ def image_cube_single_field(
     image_data_variables_keep=None,
     restore=False,
     restoration_output="apparent",
+    restoring_beam=None,
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
     primary_beam_params=None,
@@ -854,6 +857,28 @@ def image_cube_single_field(
         by its common power primary beam. Corrected pixels below
         ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
         selector only when ``restore=True``.
+    restoring_beam : list of float or None, optional
+        ``None`` restores each plane with its own PSF fit [CASA ``tclean``
+        ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
+        in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,
+        ``|pa| <= pi``) restores every plane to that beam as ``tclean`` does
+        since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
+        target beam, and the residual with the Gaussian that takes the plane's
+        PSF beam to the target, times the ratio of the beam areas, so it is in
+        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        beam the target does not contain, or that has no PSF fit, keeps its
+        residual unconvolved and unscaled, as ``tclean`` does, and is named in a
+        warning. The continuum imager refuses a target that does not contain its
+        PSF beam, and any target when its PSF fit failed, right after that fit
+        in its first imaging cycle: the residual update has run, but no model
+        update. With primary-beam correction a restore cutoff below 1e-3 is
+        refused (``primary_beam_limit``; in cube imaging that of
+        ``cycle_control_params``, where 0 restores at 0.2): in the transform to
+        the target, the float32 rounding of the residual divided by the primary
+        beam, large near its nulls, would spread over the corrected image. The
+        beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        ``tclean``'s ``restoringbeam='common'``, see
+        :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -928,7 +953,9 @@ def image_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
-        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
         The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
         models: ``airy_disk_model(telescope, func="casa_airy")`` and
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
@@ -1390,6 +1417,7 @@ def image_cube_single_field(
             # instead of allocating a fresh restored cube.
             consume_model="sky_model" not in image_data_variables_keep,
             restoration_output=restoration_output,
+            restoring_beam=restoring_beam,
             input_checked=True,
             primary_beam_limit=(
                 cycle_control_params.get("primary_beam_limit", 0.0) or 0.2

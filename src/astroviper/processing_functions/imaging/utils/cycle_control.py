@@ -2578,6 +2578,8 @@ def build_residual_imaging_dict(
         (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`),
         and the statistics of the residual inside and outside the clean mask
         (:func:`~astroviper.processing_functions.image_analysis.image_statistics.plane_residual_statistics`).
+        With ``max_cycles=0`` (no model update follows) the entropy,
+        ``residual_snr`` and the residual statistics are NaN, not measured.
         With ``record_iteration_history`` also an empty array for every field
         of ``ITERATION_HISTORY_FIELDS`` (no iteration ran), so that a merged
         record holds one iteration history per entry of ``iter_done``.
@@ -2611,15 +2613,23 @@ def build_residual_imaging_dict(
     max_psf_sidelobe_arr = img_xds[
         residual_data_group["max_sidelobe_point_spread_function"]
     ].values  # (ntime, nfreq, npol)
-    entropy, residual_snr = imgstats.image_residual_entropy(
-        img_xds,
-        data_group_name=image_data_group_in_name,
-        spatial_bins=entropy_spatial_bins,
-        flux_bins=entropy_flux_bins,
-        max_snr=entropy_max_snr,
-        mask=mask,
-    )
-    residual_statistics = imgstats.cube_residual_statistics(residual, mask)
+    if cycle_control_params.get("max_cycles") == 0:
+        entropy = np.full(plane_peak_nomask.shape, np.nan)
+        residual_snr = np.full(plane_peak_nomask.shape, np.nan)
+        residual_statistics = {
+            name: np.full(plane_peak_nomask.shape, np.nan)
+            for name in imgstats.RESIDUAL_STATISTICS
+        }
+    else:
+        entropy, residual_snr = imgstats.image_residual_entropy(
+            img_xds,
+            data_group_name=image_data_group_in_name,
+            spatial_bins=entropy_spatial_bins,
+            flux_bins=entropy_flux_bins,
+            max_snr=entropy_max_snr,
+            mask=mask,
+        )
+        residual_statistics = imgstats.cube_residual_statistics(residual, mask)
     rd = ImagingDict()
     for tt in range(ntime):
         for nn in range(nfreq):

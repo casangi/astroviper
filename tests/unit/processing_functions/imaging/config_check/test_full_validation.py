@@ -160,7 +160,7 @@ def test_scales_are_rejected_instead_of_sorted_or_dropped(scales):
         {"wideband_primary_beam_memory_mode": "cache"},
         {"image_chunking": {}},
         {"write_imaging_weights_to_ps": True, "weight_memory_mode": "in_memory"},
-        {"weight_memory_mode": "in_place", "skunk_works": True},
+        {"io_engine": "zarr"},
         {"n_mapping_parallelism": {"time": 2}},
         {"processing_function_threads": 0},
         {"reduce_n_batch": 1},

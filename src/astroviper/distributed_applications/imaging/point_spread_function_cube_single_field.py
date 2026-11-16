@@ -31,6 +31,8 @@ def point_spread_function_cube_single_field(
     overwrite: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
+    io_engine: str = "chunk",
+    output_image_format: str = "zarr",
     *,
     input_checked=False,
 ):
@@ -173,7 +175,9 @@ def point_spread_function_cube_single_field(
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
-        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`);
+        an Airy disk (``func="airy"``) the imager interpolates from a radial
+        table, within 1e-9 of it.
         The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
         models: ``airy_disk_model(telescope, func="casa_airy")`` and
         ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
@@ -200,6 +204,16 @@ def point_spread_function_cube_single_field(
         kernels.
     overwrite : bool
         Whether to overwrite an existing ``image_store``. Default is False.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of ``image_store``: a Zarr store, or a directory with one FITS
+        file per variable (``io_engine="chunk"`` only). Default ``"zarr"``.
     compute_backend : str
         Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
         a ``dask.delayed`` graph with
@@ -327,7 +341,7 @@ def point_spread_function_cube_single_field(
 
     # The node tasks load through XRADIO's processing set loader, which can
     # leave VISIBILITY out; a Measurement Set v2 is read only by the imager's
-    # skunk works path.
+    # chunk engine.
     from astroviper.processing_functions.imaging.config_check.param_check_driver_workflow import (
         check_input_storage,
     )
@@ -388,18 +402,44 @@ def point_spread_function_cube_single_field(
                 description="Created by the point_spread_function_cube_single_field "
                 "driver; populated by its node tasks.",
             )
-        image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
-        create_empty_data_variables_on_disk(
-            image_store,
-            POINT_SPREAD_FUNCTION_IMAGE_VARIABLES,
-            shape_dict=img_xds.sizes,
-            parallel_coords=parallel_coords,
-            compressor=Blosc(cname="lz4", clevel=5),
-            double_precision=not single_precision_image,
-            data_variable_definitions="imaging",
-        )
+        if output_image_format == "zarr":
+            image_store = write_zarr_image_store(
+                img_xds, image_store, overwrite=overwrite
+            )
+            create_empty_data_variables_on_disk(
+                image_store,
+                POINT_SPREAD_FUNCTION_IMAGE_VARIABLES,
+                shape_dict=img_xds.sizes,
+                parallel_coords=parallel_coords,
+                compressor=Blosc(cname="lz4", clevel=5),
+                double_precision=not single_precision_image,
+                data_variable_definitions="imaging",
+            )
 
     ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
+    if image_store is not None and output_image_format == "fits":
+        from astroviper.utils.chunk_io import create_empty_fits_images
+        from astroviper.utils.io import (
+            imaging_data_variables_and_dims_double_precision,
+            imaging_data_variables_and_dims_single_precision,
+        )
+
+        create_empty_fits_images(
+            image_store,
+            img_xds,
+            POINT_SPREAD_FUNCTION_IMAGE_VARIABLES,
+            double_precision=not single_precision_image,
+            telescope_name=next(iter(ps_xdt.values()))
+            .ds.attrs.get("observation_info", {})
+            .get("telescope_name")
+            or "UNKNOWN",
+            overwrite=overwrite,
+            data_variable_definitions=(
+                imaging_data_variables_and_dims_single_precision
+                if single_precision_image
+                else imaging_data_variables_and_dims_double_precision
+            ),
+        )
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, ps_xdt
     )
@@ -414,16 +454,6 @@ def point_spread_function_cube_single_field(
         for task in node_task_data_mapping.values():
             if task["data_selection"].get(ms_name) is not None:
                 task["data_selection"][ms_name]["polarization"] = selection
-
-    # The point spread function and the weight statistics read only the data
-    # group's weight, flag and uvw variables: VISIBILITY is never loaded.
-    load_data_variables = sorted(
-        {
-            ms_xdt.ds.attrs["data_groups"][processing_set_data_group_name][role]
-            for ms_xdt in ps_xdt.values()
-            for role in ("weight", "flag", "uvw")
-        }
-    )
 
     input_params = {}
     # frequency_coords is not used by the node tasks (they use
@@ -441,7 +471,14 @@ def point_spread_function_cube_single_field(
     input_params["psf_fitting_method"] = psf_fitting_method
     input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["primary_beam_params"] = primary_beam_params
-    input_params["load_data_variables"] = load_data_variables
+    # The point spread function and the weight statistics read only the data
+    # group's weight, flag and uvw variables: VISIBILITY is never loaded.
+    input_params["load_correlated_data"] = False
+    input_params["io_engine"] = io_engine
+    input_params["output_image_format"] = output_image_format
+    input_params["data_group"] = next(iter(ps_xdt.values())).ds.attrs["data_groups"][
+        processing_set_data_group_name
+    ]
     input_params["input_checked"] = True
 
     viper_graph = map(
@@ -466,7 +503,7 @@ def point_spread_function_cube_single_field(
 
     release_data_tree(ps_xdt)
     ps_xdt = None
-    if image_store is not None:
+    if image_store is not None and output_image_format == "zarr":
         zarr.consolidate_metadata(image_store)
 
     # The reduce concatenates the chunks in graph order; put the channels in

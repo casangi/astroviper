@@ -34,8 +34,8 @@ residual written is the residual of the true model.
   of, the PSF, the clean mask, the dirty image and the fitted beam of the two
   imagers agree to ``PRODUCT_RTOL`` of their peaks (measured on Linux x86-64:
   they are the same bit for bit), the primary beam to
-  ``CONTINUUM_PRIMARY_BEAM_ATOL`` (the continuum interpolates its Airy disk in
-  a table). The imaging (visibilities to image) is checked on its own: the
+  ``CONTINUUM_PRIMARY_BEAM_ATOL`` (both imagers interpolate the Airy disk in
+  tables). The imaging (visibilities to image) is checked on its own: the
   dirty image and the PSF of both imagers at the source pixels and at seeded
   others are those of a NumPy direct Fourier transform of the store's
   visibilities with the imaging weights the PSF transform got
@@ -244,10 +244,11 @@ REFERENCE_SEED = 20261026
 # The two imagers' products, relative to their peaks: the same bit for bit.
 PRODUCT_RTOL = 1e-12
 # The continuum's primary beam (a 1e4 point table of the Airy disk) against the
-# cube's, absolute: 9.1e-9.
+# cube's, absolute: 8.8e-9.
 CONTINUUM_PRIMARY_BEAM_ATOL = 1e-7
-# The cube's primary beam at the sources against the simulator's: equal.
-EXACT_PRIMARY_BEAM_ATOL = 1e-12
+# The cube's primary beam (a radial table, AIRY_TABLE_STEP) at the sources
+# against the simulator's, absolute: 2.3e-10.
+CUBE_PRIMARY_BEAM_ATOL = 1e-9
 # The dirty image of both imagers at the reference pixels against the NumPy
 # direct Fourier transform's, over the brightest apparent Stokes I flux, and
 # their PSF against its, over its peak of 1: 7.8e-14 and 1.8e-14 with the w
@@ -826,11 +827,11 @@ def assert_same_products(cube, continuum, sky):
         assert relative_difference(continuum[name], cube[name]) <= PRODUCT_RTOL, name
     assert np.array_equal(continuum["mask"], cube["mask"])
     assert relative_difference(continuum["beam"], cube["beam"]) <= PRODUCT_RTOL
-    # the cube's primary beam is the simulator's; the continuum's is a table of it
+    # both imagers interpolate the simulator's Airy disk in tables
     pixels = tuple(sky["pixels"].T)
     at_sources = cube["written_primary_beam"][0][pixels]
     difference = np.abs(at_sources - sky["primary_beam"]).max()
-    assert difference <= EXACT_PRIMARY_BEAM_ATOL, difference
+    assert difference <= CUBE_PRIMARY_BEAM_ATOL, difference
     for name in ("primary_beam", "written_primary_beam"):
         difference = np.abs(continuum[name] - cube[name]).max()
         assert difference <= CONTINUUM_PRIMARY_BEAM_ATOL, (name, difference)

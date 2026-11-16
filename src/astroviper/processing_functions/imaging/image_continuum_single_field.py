@@ -4543,6 +4543,7 @@ def restore_continuum_image(
     primary_beam_key="primary_beam",
     deconvolver="hogbom",
     restoration_output="apparent",
+    restoring_beam=None,
     continuum_mode=None,
     input_checked=False,
 ):
@@ -4604,6 +4605,29 @@ def restore_continuum_image(
         ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
         selector only when ``restore=True``.
 
+    restoring_beam : list of float, optional
+        ``None`` restores each plane with its own PSF fit [CASA ``tclean``
+        ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
+        in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,
+        ``|pa| <= pi``) restores every plane to that beam as ``tclean`` does
+        since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
+        target beam, and the residual with the Gaussian that takes the plane's
+        PSF beam to the target, times the ratio of the beam areas, so it is in
+        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        beam the target does not contain, or that has no PSF fit, keeps its
+        residual unconvolved and unscaled, as ``tclean`` does, and is named in a
+        warning. The continuum imager refuses a target that does not contain its
+        PSF beam, and any target when its PSF fit failed, right after that fit
+        in its first imaging cycle: the residual update has run, but no model
+        update. With primary-beam correction a restore cutoff below 1e-3 is
+        refused (``primary_beam_limit``; in cube imaging that of
+        ``cycle_control_params``, where 0 restores at 0.2): in the transform to
+        the target, the float32 rounding of the residual divided by the primary
+        beam, large near its nulls, would spread over the corrected image. The
+        beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        ``tclean``'s ``restoringbeam='common'``, see
+        :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
+
     continuum_mode : {"mfs", "mvc"} or None, optional
         Continuum construction convention. When omitted, infer it from the
         residual or image metadata. An explicit value must agree with any
@@ -4623,7 +4647,13 @@ def restore_continuum_image(
         Continuum dataset with the requested restored Taylor product or
         products. For at least two Taylor terms it also contains ``ALPHA`` and
         ``ALPHA_ERROR``; for at least three terms it additionally contains
-        ``BETA``.
+        ``BETA``. It also holds ``BEAM_FIT_PARAMS_SKY_RESTORED`` (role
+        ``beam_fit_params_sky``), the beam the restore applied: the target, or
+        without one the Taylor-zero PSF beam of the first polarization
+        (Stokes I), in every polarization. Without a target a plane without a
+        fit holds the beam ``tclean`` gives it, the first beam of largest area
+        of the planes with a fit, or a circle of 1e-6 arcsec when no plane has
+        one.
 
     timing_df : pandas.DataFrame
         Timing information returned by the shared restoration core.
@@ -4638,7 +4668,16 @@ def restore_continuum_image(
     CASA-style pixel-residual diagnostic, not a statistically calibrated
     one-sigma uncertainty. Validity is determined per time/polarization plane
     from the absolute flat-noise Taylor-zero image and one tenth of the peak
-    absolute flat-noise principal Taylor-zero residual."""
+    absolute flat-noise principal Taylor-zero residual.
+
+    With ``restoring_beam`` every Taylor term takes the Taylor-zero correction
+    of its residual, as CASA restores every term with the Taylor-zero beam. For
+    MFS with primary-beam correction it acts on the Taylor-divided residual
+    terms, zero outside the cutoff, after the division,
+    ``TaylorDivide(M) * B_T + TaylorDivide(R) * K``: the residual is divided
+    before it is convolved, as the model is. ``ALPHA_ERROR`` and the validity
+    threshold keep the unconvolved residuals, as CASA's ``calculateAlphaBeta``
+    does."""
 
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
@@ -4653,13 +4692,29 @@ def restore_continuum_image(
         check_driver_workflow(
             {**locals(), "restore": True}, mode=CONTINUUM_SINGLE_FIELD
         )
+        if restoring_beam is not None:
+            from astroviper.processing_functions.imaging.config_check._predicates import (
+                check_restoring_beam_within_image,
+            )
+
+            check_restoring_beam_within_image(
+                restoring_beam,
+                [img_xds.sizes["l"], img_xds.sizes["m"]],
+                [
+                    img_xds.l.values[1] - img_xds.l.values[0],
+                    img_xds.m.values[1] - img_xds.m.values[0],
+                ],
+            )
 
     import numpy as np
     import pandas as pd
 
     from astroviper.processing_functions.imaging.restore import (
+        NO_FIT_BEAM,
         _divide_taylor_polynomials,
         _restore_image_arrays,
+        _restored_beam_variable,
+        fill_planes_without_fit,
         resolve_restoration_product,
     )
     from astroviper.utils.data_group_tools import (
@@ -4841,6 +4896,7 @@ def restore_continuum_image(
                 pixel_size,
                 processing_function_threads=processing_function_threads,
                 output="apparent",
+                restoring_beam=restoring_beam,
             )
             products["apparent"] = _require_backend_product(
                 apparent_products,
@@ -4848,6 +4904,8 @@ def restore_continuum_image(
             )
             array_timing["apparent"] = apparent_timing["apparent"]
 
+        # With a target the divided residual terms, NaN outside the cutoff, are
+        # convolved after the division, as the divided model terms are.
         corrected_products, corrected_timing = _restore_image_arrays(
             intrinsic_residual_da.values,
             intrinsic_model_da.values,
@@ -4855,6 +4913,7 @@ def restore_continuum_image(
             pixel_size,
             processing_function_threads=processing_function_threads,
             output="apparent",
+            restoring_beam=restoring_beam,
         )
         products["primary_beam_corrected"] = _require_backend_product(
             corrected_products,
@@ -4875,6 +4934,7 @@ def restore_continuum_image(
             ),
             primary_beam_limit=primary_beam_limit,
             output=restoration_output,
+            restoring_beam=restoring_beam,
         )
         for required_product in (
             {"apparent"} if restoration_output in {"apparent", "both"} else set()
@@ -4899,6 +4959,30 @@ def restore_continuum_image(
         data_group_out_modified={"sky": sky_name},
         overwrite=True,
     )
+    if restoring_beam is None:
+        # The restore applies the plane zero beam of the first polarization to
+        # every Taylor term and polarization.
+        restored_beams = fill_planes_without_fit(
+            beam_da.isel(
+                {
+                    dim: [0]
+                    for dim in (
+                        "frequency",
+                        "taylor_term",
+                        "psf_taylor_order",
+                        "polarization",
+                    )
+                    if dim in beam_da.dims
+                }
+            ).values,
+            NO_FIT_BEAM,
+        )
+    else:
+        restored_beams = restoring_beam
+    img_xds["BEAM_FIT_PARAMS_SKY_RESTORED"] = _restored_beam_variable(
+        beam_da, restored_beams
+    )
+    continuum_restored_group["beam_fit_params_sky"] = "BEAM_FIT_PARAMS_SKY_RESTORED"
 
     apparent_da = None
     if "apparent" in products:
@@ -4972,14 +5056,17 @@ def restore_continuum_image(
     if "BETA" in spectral_products:
         continuum_restored_group["beta"] = "BETA"
 
+    description = (
+        "Continuum Taylor images restored with the shared clean-beam and "
+        "primary-beam implementation."
+    )
+    if restoring_beam is not None:
+        description += f" Restored to the beam {list(map(float, restoring_beam))} rad."
     modify_data_groups_xds(
         img_xds,
         data_group_out_name=image_data_group_out_restore_name,
         data_group_out=continuum_restored_group,
-        description=(
-            "Continuum Taylor images restored with the shared clean-beam and "
-            "primary-beam implementation."
-        ),
+        description=description,
     )
     timing = {"T_restore": [float(array_timing["apparent"])]}
     if needs_primary_beam:

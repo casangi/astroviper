@@ -71,6 +71,271 @@ def get_thread_info(client=None):
     return thread_info
 
 
+#: Keys of a distributed application's ``return_dict["compute_resources"]``.
+COMPUTE_RESOURCES_KEYS = (
+    "compute_backend",
+    "scheduler",
+    "processing_function_threads",
+    "mpi_world_size",
+    "n_hosts",
+    "n_workers",
+    "n_worker_slots",
+    "worker_memory_limit_bytes",
+    "n_logical_cpus",
+    "memory_total_bytes",
+    "hosts",
+)
+#: Keys of one entry of ``compute_resources["hosts"]``.
+COMPUTE_RESOURCES_HOST_KEYS = (
+    "n_workers",
+    "n_worker_slots",
+    "worker_memory_limit_bytes",
+    "n_logical_cpus",
+    "memory_total_bytes",
+)
+#: Values of ``compute_resources["scheduler"]``.
+COMPUTE_RESOURCES_SCHEDULERS = (
+    "distributed",
+    "threads",
+    "processes",
+    "synchronous",
+    "mpi4py.futures",
+)
+
+
+def _host_compute_resources():
+    """The hostname, logical CPUs and memory of the host this runs on."""
+    import os
+    import socket
+
+    import psutil
+
+    return {
+        "hostname": socket.gethostname(),
+        "n_logical_cpus": os.cpu_count(),
+        "memory_total_bytes": int(psutil.virtual_memory().total),
+    }
+
+
+def _total(values):
+    """The sum of ``values``; None when there are none or any is None."""
+    values = list(values)
+    if not values or any(value is None for value in values):
+        return None
+    return int(sum(values))
+
+
+def get_compute_resources(compute_backend, processing_function_threads):
+    """What the graphs of a distributed application are computed on.
+
+    Parameters
+    ----------
+    compute_backend : str
+        ``"dask"`` or ``"mpi"``, the engine that computes the graphs.
+    processing_function_threads : int or None
+        The threads of each node task's processing functions, as passed to
+        the application (``<= 0`` means the hardware concurrency); ``None``
+        for an application without that argument.
+
+    Returns
+    -------
+    dict
+        The keys of :data:`COMPUTE_RESOURCES_KEYS`; every value is an int, a
+        str, None (not known) or, for ``"hosts"``, a dict:
+
+        ``compute_backend``
+            ``"dask"`` or ``"mpi"``.
+        ``scheduler``
+            Dask: ``"distributed"``, ``"threads"``, ``"processes"`` or
+            ``"synchronous"``, None for a scheduler not recognised; MPI:
+            ``"mpi4py.futures"``.
+        ``processing_function_threads``
+            As passed.
+        ``mpi_world_size``
+            ``MPI.COMM_WORLD.Get_size()``; None for Dask.
+        ``n_hosts``
+            Hosts with workers; None for MPI.
+        ``n_workers``
+            Worker processes (MPI: every rank but the manager).
+        ``n_worker_slots``
+            The tasks that can run at once: the threads of the distributed
+            workers, the threads of the local thread pool, the local
+            processes, 1 for the synchronous scheduler, the MPI workers.
+        ``worker_memory_limit_bytes``
+            The sum of the distributed workers' memory limits; None when a
+            worker has none, for the local schedulers and for MPI.
+        ``n_logical_cpus``, ``memory_total_bytes``
+            Logical CPUs and memory summed over the hosts.
+        ``hosts``
+            ``{hostname: {key: value}}`` with the keys of
+            :data:`COMPUTE_RESOURCES_HOST_KEYS`, keyed by
+            ``socket.gethostname()`` on the workers (the ``hostname`` of the
+            node tasks' timing); the totals above are its sums. None for MPI
+            and for a scheduler not recognised.
+
+    Raises
+    ------
+    ValueError
+        For a ``compute_backend`` other than ``"dask"`` or ``"mpi"``.
+
+    Notes
+    -----
+    An application calls this right before its first compute, so it
+    describes the workers at that moment; workers that join or leave later
+    are not in it. With a distributed client it reads
+    ``Client.scheduler_info`` and runs one function on every worker for its
+    host; a worker that fails it raises before the compute. MPI is described
+    for the static ``mpi4py.futures`` model, where the pool is every rank but
+    the manager. A dask.config ``"pool"``, or the threaded scheduler called
+    from a thread other than the main thread without ``num_workers``, gives
+    ``n_worker_slots`` None.
+    """
+    if compute_backend == "mpi":
+        from mpi4py import MPI
+
+        mpi_world_size = int(MPI.COMM_WORLD.Get_size())
+        n_workers = mpi_world_size - 1 if mpi_world_size > 1 else None
+        return {
+            "compute_backend": "mpi",
+            "scheduler": "mpi4py.futures",
+            "processing_function_threads": processing_function_threads,
+            "mpi_world_size": mpi_world_size,
+            "n_hosts": None,
+            "n_workers": n_workers,
+            "n_worker_slots": n_workers,
+            "worker_memory_limit_bytes": None,
+            "n_logical_cpus": None,
+            "memory_total_bytes": None,
+            "hosts": None,
+        }
+    if compute_backend != "dask":
+        raise ValueError(
+            f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
+        )
+    import threading
+
+    import dask
+    import dask.local
+    import dask.multiprocessing
+    import dask.threaded
+    from dask.base import get_scheduler
+    from dask.system import CPU_COUNT
+    from distributed import Client
+
+    scheduler_function = get_scheduler()
+    client = getattr(scheduler_function, "__self__", None)
+    custom_pool = dask.config.get("pool", None) is not None
+    num_workers = dask.config.get("num_workers", None)
+    hosts = None
+    if isinstance(client, Client):
+        scheduler = "distributed"
+        workers = client.scheduler_info(n_workers=-1)["workers"]
+        by_host = {}
+        if workers:
+            host_of = client.run(_host_compute_resources, workers=list(workers))
+            for address, worker in workers.items():
+                by_host.setdefault(host_of[address]["hostname"], []).append(
+                    (worker, host_of[address])
+                )
+        hosts = {
+            hostname: {
+                "n_workers": len(records),
+                "n_worker_slots": _total(int(w["nthreads"]) for w, _ in records),
+                "worker_memory_limit_bytes": _total(
+                    int(w["memory_limit"]) if w.get("memory_limit") else None
+                    for w, _ in records
+                ),
+                "n_logical_cpus": records[0][1]["n_logical_cpus"],
+                "memory_total_bytes": records[0][1]["memory_total_bytes"],
+            }
+            for hostname, records in by_host.items()
+        } or None
+    else:
+        if scheduler_function in (None, dask.threaded.get):
+            scheduler, n_workers = "threads", 1
+            if custom_pool:
+                n_worker_slots = None
+            elif num_workers:
+                n_worker_slots = int(num_workers)
+            elif threading.current_thread() is threading.main_thread():
+                n_worker_slots = CPU_COUNT
+            else:
+                n_worker_slots = None
+        elif scheduler_function is dask.multiprocessing.get:
+            scheduler = "processes"
+            n_workers = n_worker_slots = (
+                None if custom_pool else int(num_workers or CPU_COUNT)
+            )
+        elif scheduler_function is dask.local.get_sync:
+            scheduler, n_workers, n_worker_slots = "synchronous", 1, 1
+        else:
+            scheduler = None
+        if scheduler is not None:
+            host = _host_compute_resources()
+            hosts = {
+                host.pop("hostname"): {
+                    "n_workers": n_workers,
+                    "n_worker_slots": n_worker_slots,
+                    "worker_memory_limit_bytes": None,
+                    **host,
+                }
+            }
+    values = list(hosts.values()) if hosts else []
+    return {
+        "compute_backend": "dask",
+        "scheduler": scheduler,
+        "processing_function_threads": processing_function_threads,
+        "mpi_world_size": None,
+        "n_hosts": len(hosts) if hosts else None,
+        **{key: _total(h[key] for h in values) for key in COMPUTE_RESOURCES_HOST_KEYS},
+        "hosts": hosts,
+    }
+
+
+def check_compute_resources(compute_resources):
+    """Refuse keys and values that :func:`get_compute_resources` does not write.
+
+    Absent keys are allowed: they are not known.
+
+    Parameters
+    ----------
+    compute_resources : dict
+        A ``return_dict["compute_resources"]``, or a part of one.
+
+    Raises
+    ------
+    ValueError
+        For a key outside :data:`COMPUTE_RESOURCES_KEYS`, a ``compute_backend``
+        other than ``"dask"``, ``"mpi"`` or None, a ``scheduler`` outside
+        :data:`COMPUTE_RESOURCES_SCHEDULERS` and None, or a ``hosts`` entry
+        with a key outside :data:`COMPUTE_RESOURCES_HOST_KEYS`.
+    """
+    unknown = sorted(set(compute_resources) - set(COMPUTE_RESOURCES_KEYS))
+    if unknown:
+        raise ValueError(
+            f"compute_resources has unknown keys {unknown}; the keys are "
+            f"{list(COMPUTE_RESOURCES_KEYS)}."
+        )
+    if compute_resources.get("compute_backend") not in (None, "dask", "mpi"):
+        raise ValueError(
+            "compute_resources['compute_backend'] must be 'dask', 'mpi' or None; "
+            f"got {compute_resources['compute_backend']!r}."
+        )
+    if compute_resources.get("scheduler") not in (None, *COMPUTE_RESOURCES_SCHEDULERS):
+        raise ValueError(
+            f"compute_resources['scheduler'] must be one of "
+            f"{list(COMPUTE_RESOURCES_SCHEDULERS)} or None; got "
+            f"{compute_resources['scheduler']!r}."
+        )
+    for hostname, host in (compute_resources.get("hosts") or {}).items():
+        unknown = sorted(set(host) - set(COMPUTE_RESOURCES_HOST_KEYS))
+        if unknown:
+            raise ValueError(
+                f"compute_resources['hosts'][{hostname!r}] has unknown keys "
+                f"{unknown}; the keys are {list(COMPUTE_RESOURCES_HOST_KEYS)}."
+            )
+
+
 def prime_factors(n):
     """Return the prime factorization of a positive integer.
 

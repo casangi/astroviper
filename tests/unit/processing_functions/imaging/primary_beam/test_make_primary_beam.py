@@ -233,8 +233,8 @@ def test_primary_beam_is_the_airy_disk_inside_max_rad_and_zero_beyond():
 def test_default_primary_beam_is_the_uncut_textbook_airy_disk(
     telescope, frequency_coords, cell_arcsec
 ):
-    """The default beam of a telescope is the textbook Airy power pattern, bit
-    for bit, with its first sidelobe beyond CASA's table radius."""
+    """The default beam of a telescope is the textbook Airy power pattern, to
+    1e-9 (its radial table), with its first sidelobe beyond CASA's table radius."""
     from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
         airy_disk_response,
     )
@@ -257,7 +257,7 @@ def test_default_primary_beam_is_the_uncut_textbook_airy_disk(
         ipower=2,
     )
     pb = img_xds["PRIMARY_BEAM"].values[0, :, 0]
-    np.testing.assert_array_equal(pb, expected)
+    np.testing.assert_allclose(pb, expected, rtol=0, atol=1e-9)
     cut = airy_disk_model(telescope, func="casa_airy")["max_rad_1GHz"] / (
         frequency / 1e9
     )
@@ -519,8 +519,12 @@ def test_primary_beam_is_the_simulator_beam(name, frequency_coords, casa):
         parallactic_angle[0],
     )
     simulated = (np.abs(jones[:, :, 0]) ** 2).T.reshape(outside.shape)
+    # 1e-9: the imager's "airy" beam is a radial table (AIRY_TABLE_STEP)
     np.testing.assert_allclose(
-        img_xds["PRIMARY_BEAM"].values[0, :, 0], simulated, rtol=0, atol=1e-15
+        img_xds["PRIMARY_BEAM"].values[0, :, 0],
+        simulated,
+        rtol=0,
+        atol=1e-15 if casa or name == "EVLA_" else 1e-9,
     )
 
 
