@@ -2125,7 +2125,7 @@ def _fit_primary_beam_taylor(
                     f"time={time_index}, polarization={polarization_index}."
                 )
             coefficients[time_index, :, polarization_index] = (
-                fitted_coefficients.reshape(rhs.shape[3:])
+                fitted_coefficients.reshape((nterms, *rhs.shape[3:]))
             )
 
     supported = np.isfinite(coefficients[:, 0]) & (
