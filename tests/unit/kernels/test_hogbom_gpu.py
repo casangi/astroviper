@@ -31,7 +31,9 @@ both entries and both dtypes (the NaN-payload tests).
   leave the plane they hit and the later ones unchanged, say how many planes
   they wrote, hold no device memory while the exception is kept, and the next
   call is right; ``CUPY_GPU_MEMORY_LIMIT`` is validated and a call that does
-  not fit raises RuntimeError having written nothing; without a device the
+  not fit raises RuntimeError having written nothing, after dropping the cuFFT
+  plans that ``fft=gpu`` keeps (a call that fits once they are dropped runs on
+  the GPU); without a device the
   first GPU call raises RuntimeError and routed calls still run; in a process
   forked during a GPU call the GPU call raises RuntimeError at once; a missing
   kernel source raises RuntimeError; ``--check`` and the prewarm validate the
@@ -58,7 +60,7 @@ import pytest
 from astroviper._kernels import impl
 from astroviper._kernels.__main__ import main as check_main
 from astroviper._kernels._switch import ENV, TRACE_ENV, dispatch
-from astroviper._kernels.gpu import _runtime, hogbom, prewarm
+from astroviper._kernels.gpu import _runtime, fft, hogbom, prewarm
 from tests.unit.kernels.test_hogbom_fast import (
     DECLINED,
     EDGE_CASES,
@@ -652,6 +654,56 @@ def test_the_memory_limit_is_validated_and_kept(device, run_python, limit):
         assert result["256"].startswith("RuntimeError: hogbom=gpu: the call needs")
     else:
         assert result == {"32": True, "256": True}
+
+
+EVICTS = """
+import json, numpy as np
+from astroviper._kernels.gpu import _runtime, fft, hogbom
+from tests.unit.kernels.test_hogbom_fast import _case, _run, _bits
+
+device = _runtime.require_device()
+for shape in ((257, 263), (251, 241), (199, 211), (181, 191)):  # primes: work areas
+    fft.ifft_uv_to_lm(np.ones(shape, np.complex128), fft_backend="scipy")
+kept = device.pool.used_bytes()  # the work areas of the kept cuFFT plans
+case = _case(64, 64, np.float64, planes=(1, 1, 2), niter=20, seed=65)
+reference = _run(hogbom.impl("hogbom", "clean_cube", "ref"), case)
+args = (case["residual"].copy(), case["psf"], case["model"].copy())
+stats = {}
+hogbom._run(hogbom._bind("clean_cube", args, dict(case["kwargs"])), stats)
+needed = stats["device_bytes"]
+# Fits once the plans are dropped, not beside them.
+device.pool.set_limit(size=needed + kept // 2)
+runs, run = [], hogbom._run
+hogbom._run = lambda call, stats=None: runs.append(call.entry) or run(call, stats)
+out = {"kept": kept, "needed": needed, "plans": len(fft._plans)}
+residual, model = case["residual"].copy(), case["model"].copy()
+try:
+    hogbom.clean_cube(residual, case["psf"], model, **case["kwargs"])
+    out["same"] = all(
+        np.array_equal(_bits(a), _bits(b)) for a, b in zip(reference[1:], (residual, model))
+    )
+except RuntimeError as e:
+    out["error"] = str(e)
+out |= {"runs": len(runs), "plans_after": len(fft._plans), "used": device.pool.used_bytes()}
+print("RESULT", json.dumps(out))
+"""
+
+
+def test_a_call_that_fits_once_the_fft_plans_are_dropped_runs(device, run_python):
+    """The cuFFT plans that ``fft=gpu`` keeps (their work areas: device memory
+    of the pool) give way to a Hogbom call that would not fit beside them,
+    which then runs on the GPU and gives the reference's results."""
+    out = run_python(
+        "-c",
+        EVICTS,
+        ASTROVIPER_KERNELS_GPU_MIN_PIXELS="0",
+        ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS="0",
+        PYTHONPATH=PYTHONPATH,
+    )
+    result = json.loads(out.rpartition("RESULT ")[2])
+    assert result["plans"] == fft.PLAN_CACHE and result["kept"] > 1, result
+    assert result.get("error") is None and result["same"] is True, result
+    assert result["runs"] == 1 and result["plans_after"] == 0 and result["used"] == 0
 
 
 WITHOUT_DEVICE = """

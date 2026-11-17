@@ -12,6 +12,8 @@ imported and nothing can switch later in that process.
     Comma-separated, case-insensitive, whitespace ignored, later tokens win.
     ``<impl>`` (or ``*=<impl>``) selects ``<impl>`` for every kernel that has
     it; ``<kernel>=<impl>`` for one kernel; unnamed kernels stay ``ref``.
+    So a bare ``gpu`` selects ``hogbom=gpu`` and, since ``fft=gpu`` exists,
+    ``fft=gpu`` too (``gpu,fft=ref`` keeps the transforms on the CPU).
     ``ref`` installs the wrappers but runs the reference (the overhead
     control). Anything invalid raises ``ValueError`` naming the options.
     ``python -m astroviper._kernels --check`` validates the value and imports
@@ -46,7 +48,9 @@ device, and a call that fails there may have cleaned its first planes.
 to the rounding of an FFT, not bit for bit; it runs on the CPU, with the
 reference, the calls whose planes have fewer than
 ``ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS`` pixels or that do not fit in
-``CUPY_GPU_MEMORY_LIMIT``.
+``CUPY_GPU_MEMORY_LIMIT``. It keeps the cuFFT plans of its last plane shapes
+on the device, which a GPU call (of either kernel) that would not fit
+otherwise drops first.
 
 ``ASTROVIPER_KERNELS_TRACE=<dir>``
     Each wrapped call appends one JSON line to

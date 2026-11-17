@@ -10,9 +10,10 @@ once: each Hogbom entry for each image dtype, on a small cube, and each FFT
 entry for each complex dtype, on small planes of even and odd sizes (which
 loads cuFFT), then prints the timings as one JSON line. Exits with status 1
 and the reason on standard error when the GPU cannot run them (no CuPy, no
-device, no NVRTC, an invalid ``CUPY_GPU_MEMORY_LIMIT``,
+device, no NVRTC, no cuFFT, an invalid ``CUPY_GPU_MEMORY_LIMIT``,
 ``ASTROVIPER_KERNELS_GPU_MIN_PIXELS`` or
-``ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS``, a compile error). :func:`prewarm` does
+``ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS``, a compile error, a plane that does
+not fit in the device memory that is free and allowed). :func:`prewarm` does
 the same in the calling process, which then pays none of it at its first
 call; as a Dask worker preload (``--preload astroviper._kernels.gpu.prewarm``,
 or ``DASK_DISTRIBUTED__WORKER__PRELOAD``) it prewarms each worker, and a worker
@@ -56,6 +57,14 @@ def _cube(dtype):
     }
 
 
+def _bound(call, kernel, entry):
+    """``call``, the prewarm's call of ``entry`` as the GPU module bound it,
+    or ``RuntimeError`` when the module declined it (None)."""
+    if call is None:
+        raise RuntimeError(f"{kernel}=gpu: the GPU declined the prewarm's {entry} call")
+    return call
+
+
 def prewarm():
     """Initialize CUDA, compile the selected GPU kernels (see the module
     docstring) and run them once; returns the timings (seconds), the kernels
@@ -69,12 +78,17 @@ def prewarm():
     if "hogbom" in kernels:
         for entry in hogbom._ENTRIES:
             for dtype in (np.float32, np.float64):
-                hogbom._run(hogbom._bind(entry, (), _cube(dtype)))
+                call = hogbom._bind(entry, (), _cube(dtype))
+                hogbom._run(_bound(call, "hogbom", entry))
     if "fft" in kernels:
         for entry in fft._INPUT:
+            reference = fft.impl("fft", entry, "ref")
             for dtype in (np.complex64, np.complex128):
                 for shape in ((64, 64), (63, 65)):
-                    fft._run(fft._bind(entry, (np.ones(shape, dtype),), {}))
+                    # scipy.fft is always installed, and no backend changes the GPU's work
+                    args, kwargs = (np.ones(shape, dtype),), {"fft_backend": "scipy"}
+                    call = fft._bind(entry, reference, args, kwargs)
+                    fft._run(_bound(call, "fft", entry))  # _DoesNotFit: RuntimeError
     t2 = time.perf_counter()
     return {
         "kernels": kernels,

@@ -5,9 +5,12 @@ GPU uv <-> lm transforms, selected by ``ASTROVIPER_KERNELS=fft=gpu``.
 functions (``processing_functions/imaging/fft_normalize_anti_alias_gridder.py``)
 and return what they return, transformed on the GPU by CuPy's cuFFT: per plane
 of the last two axes, the inverse transform divided by the plane's pixel count
-and the forward one unscaled, both shifted as the reference shifts them (the
-checkerboard sign flips that replace ``fftshift`` and ``ifftshift`` when both
-axes are even, the two rolls otherwise: see ``cuda/fft_shift.cu``), in the
+and the forward one unscaled, between the reference's shifts (see
+``cuda/fft_shift.cu``). When both axes are even those are the reference's
+checkerboard sign flips, cb * F(cb * x) with cb = (-1)^(i + j), which is
+fftshift(F(ifftshift(x))) only up to the sign (-1)^(n0/2 + n1/2): the
+reference folds its shifts so, and the GPU keeps its signs. Otherwise they are
+the two rolls, ifftshift before and fftshift after. The result is in the
 complex dtype of the input's precision (``complex_dtype`` for
 ``fft_lm_to_uv``), of the input's shape and in C order, for any leading axes.
 With ``overwrite_input`` the input's buffer may be destroyed: it receives the
@@ -19,18 +22,23 @@ calls that run on the CPU.
 The results are not the reference's bit for bit: cuFFT, FFTW (pyfftw) and
 pocketfft (scipy.fft) order and round their butterflies differently. With eps
 the machine epsilon of the dtype (2**-52 for complex128, 2**-23 for complex64),
-N the pixels of a plane, x the plane and y its exact transform, both the GPU's
-result and the reference's are within the usual bound of an FFT (Higham's,
-about 3.3 eps log2(N) for radix 2),
+N the pixels of a plane, x the plane and y its exact transform (the
+reference's, signs included), the tests find both the GPU's result and the
+reference's within the usual bound of an FFT (Higham's, about 3.3 eps log2(N)
+for radix 2),
 ``||result - y||_2 <= ACCURACY * eps * log2(N) * ||y||_2``, so also element
 by element, where ``||y||_2 = s * sqrt(N) * ||x||_2`` (s = 1 forward, 1/N
-inverse); the tests check it against long double transforms. That holds for
-finite planes whose transform does not overflow; elsewhere both give
-non-finite values, not necessarily in the same places. The GPU's results are
-deterministic: the same call gives the same bits. One plane is on the device at
-a time; each call ends by freeing the cached blocks of CuPy's memory pool, and
-the cuFFT plans of the last ``PLAN_CACHE`` plane shapes are kept with their
-work areas (about one plane each), for all threads.
+inverse), against long double transforms. It is a tested bound, not a
+guarantee: cuFFT transforms sizes with large prime factors by Bluestein's
+algorithm, which Higham's analysis does not cover. That holds for finite
+planes whose transform does not overflow; elsewhere both give non-finite
+values, not necessarily in the same places. The GPU's results are
+deterministic: the same call gives the same bits. One plane is on the device
+at a time; each call ends by freeing the cached blocks of CuPy's memory pool,
+and the cuFFT plans of the last ``PLAN_CACHE`` plane shapes are kept with
+their work areas (about one plane each), for all threads. A call of
+``fft=gpu`` or ``hogbom=gpu`` that would not fit in device memory drops them
+first (``_runtime.Device.reclaim``).
 
 Each call takes one path, reported to the kernel switch for its trace line:
 
@@ -38,46 +46,49 @@ Each call takes one path, reported to the kernel switch for its trace line:
     The GPU ran the call. Its trace line also has ``init_s``, the seconds the
     call spent on the first use of CUDA (the context, CuPy's import, the
     kernels' compile or load) and on making the cuFFT plan of a new plane
-    shape, ``device_s``, the seconds of its work on the device (uploads,
-    transforms and downloads), and ``versions``, those of the CUDA driver,
-    runtime and NVRTC.
+    shape, ``device_s``, the seconds from its device buffers to its result
+    (the input's conversion on the host when its dtype is not the result's,
+    then per plane the upload, the shifts, the transform and the download,
+    which the host waits for; not the allocation of the buffers and the
+    plan), and ``versions``, those of the CUDA driver, runtime and NVRTC.
 ``"routed"``
     The reference ran it, as given, because the GPU would not win or cannot
     hold it: its planes have fewer than ``ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS``
     pixels (default ``DEFAULT_MIN_PIXELS``), an axis of one pixel or more
     pixels than a cuFFT plan takes (2**31 - 1), or its device buffers and cuFFT
     plan do not fit in the device memory that is free and that
-    ``CUPY_GPU_MEMORY_LIMIT`` allows (logged once). The trace line has
-    ``reason``.
+    ``CUPY_GPU_MEMORY_LIMIT`` allows, once the kept plans are dropped (a plan
+    that cuFFT cannot allocate, ``CUFFT_ALLOC_FAILED``, does not fit; logged
+    once). The trace line has ``reason``.
 ``"declined"``
     The reference ran it, as given, because the GPU entries do not take its
     arguments as given, so that its conversions and errors stay the
-    reference's: arguments that do not bind to the reference's parameters, an
+    reference's: arguments that do not bind to the reference's parameters (or
+    a reference whose parameters are not those the GPU entries read), an
     input that is not a C-contiguous ``numpy.ndarray`` of complex64,
     complex128, float32 or float64 with two or more axes and no empty one,
     axes other than the last two in order, a ``complex_dtype`` other than
     complex64 and complex128, a thread count that is not an integer of 1 or
-    more, an ``fft_backend`` the reference would refuse or cannot import, an
-    ``overwrite_input`` that is not a bool, and a read-only input with
-    ``overwrite_input``.
+    more, an ``fft_backend`` that the reference's ``check_fft_backend`` refuses
+    or cannot import, an ``overwrite_input`` that is not a bool, and a
+    read-only input with ``overwrite_input``.
 
 The kernels plugin (``tests/kernels_plugin.py``) sets the pixel floor to 0 for
 an ``fft=gpu`` session, so that the GPU runs the tests' planes. Errors are not
-retried on the CPU: without CuPy or a CUDA device the first call that needs the
-GPU raises ``RuntimeError`` (an invalid ``CUPY_GPU_MEMORY_LIMIT`` raises
-``ValueError``), and so does a failing CUDA call, after which an input given
-with ``overwrite_input`` may hold some planes of the result.
+retried on the CPU: without CuPy, a CUDA device or cuFFT the first call that
+needs the GPU raises ``RuntimeError`` (an invalid ``CUPY_GPU_MEMORY_LIMIT``
+raises ``ValueError``), and so does a failing CUDA or cuFFT call, after which
+an input given with ``overwrite_input`` may hold some planes of the result
+(those before the failing one, in C order).
 """
 
 import collections
 import functools
-import importlib.util
 import inspect
 import logging
 import operator
 import os
 import time
-import traceback
 from typing import NamedTuple
 
 import numpy as np
@@ -113,6 +124,7 @@ _THREADS = 256  # threads per block of the shift kernels
 _GRID_ROWS = 65535  # the most blocks along y (rows) of a launch
 _INT_MAX = 2**31 - 1
 _FORWARD, _INVERSE = -1, 1  # CUFFT_FORWARD, CUFFT_INVERSE
+_CUFFT_ALLOC_FAILED = 2  # the result code of cuFFT's CuFFTError
 _C64, _C128 = np.dtype(np.complex64), np.dtype(np.complex128)
 #: The input dtypes the GPU takes, and the result's dtype for each (NumPy's).
 _COMPLEX = {
@@ -124,6 +136,24 @@ _COMPLEX = {
 _TYPES = {_C64: "c64", _C128: "c128"}  # the complex types of cuda/fft_shift.cu
 _KERNELS = tuple(f"{k}<{t}>" for t in _TYPES.values() for k in ("checkerboard", "roll"))
 _INPUT = {"ifft_uv_to_lm": "grid_2d", "fft_lm_to_uv": "image"}
+#: The reference's parameters, in order: the arguments that _bind reads.
+_PARAMETERS = {
+    "ifft_uv_to_lm": (
+        "grid_2d",
+        "fft_plane_dims",
+        "processing_function_threads",
+        "fft_backend",
+        "overwrite_input",
+    ),
+    "fft_lm_to_uv": (
+        "image",
+        "fft_plane_dims",
+        "processing_function_threads",
+        "fft_backend",
+        "complex_dtype",
+        "overwrite_input",
+    ),
+}
 #: (n0, n1, dtype) -> cuFFT plan, the latest used last (under the device lock).
 _plans = collections.OrderedDict()
 _warned = False  # whether a call that does not fit in device memory was logged
@@ -161,22 +191,35 @@ def min_pixels():
 def check_environment():
     """The checks of ``python -m astroviper._kernels --check``, which touch no
     device: the pixel floor and ``CUPY_GPU_MEMORY_LIMIT`` (``ValueError``), and
-    that CuPy is installed and can find NVRTC and the CUDA headers
+    that CuPy is installed and can find NVRTC, the CUDA headers and cuFFT
     (``RuntimeError``)."""
     min_pixels()
     _runtime.check_environment()
+    _runtime.check_cufft()
 
 
-class _DoesNotFit(Exception):
+class _DoesNotFit(RuntimeError):
     """The call's device buffers and cuFFT plan do not fit in device memory."""
+
+
+def _evict_plans():
+    """Drop the kept cuFFT plans (see ``_runtime.register_cache``); returns
+    whether there were any. Under the device lock."""
+    held = bool(_plans)
+    _plans.clear()
+    return held
+
+
+_runtime.register_cache("fft", _evict_plans)
 
 
 def _call(entry, args, kwargs):
     floor = min_pixels()
-    call = _bind(entry, args, kwargs)
+    reference = impl("fft", entry, "ref")
+    call = _bind(entry, reference, args, kwargs)
     if call is None:
         report_path("fft", DECLINED)
-        return impl("fft", entry, "ref")(*args, **kwargs)
+        return reference(*args, **kwargs)
     reason = _routing(call, floor)
     if reason is None:
         stats = {}
@@ -197,7 +240,7 @@ def _call(entry, args, kwargs):
             report_path("fft", GPU, init_s=stats.get("init_s"))
             raise
     report_path("fft", ROUTED, reason=reason)
-    return impl("fft", entry, "ref")(*args, **kwargs)
+    return reference(*args, **kwargs)
 
 
 def _log_once(message):
@@ -217,14 +260,26 @@ class _Call(NamedTuple):
     overwrite: bool
 
 
-@functools.cache
-def _signature(entry):
-    return inspect.signature(impl("fft", entry, "ref"))
+@functools.lru_cache(maxsize=8)
+def _signature(entry, reference):
+    """The signature of ``reference``, the entry's reference function, or
+    None when its parameters are not those that _bind reads."""
+    signature = inspect.signature(reference)
+    return signature if tuple(signature.parameters) == _PARAMETERS[entry] else None
 
 
-@functools.cache
-def _importable(module):
-    return importlib.util.find_spec(module) is not None
+def _backend_available(backend):
+    """Whether the reference can use ``backend``, decided as it decides it:
+    by its ``check_fft_backend``, which imports the backend's FFT module."""
+    from astroviper.processing_functions.imaging.config_check._common import (
+        check_fft_backend,
+    )
+
+    try:
+        check_fft_backend(backend)
+    except Exception:  # ImportError, or whatever a broken install raises
+        return False
+    return True
 
 
 def _int(value):
@@ -234,11 +289,14 @@ def _int(value):
     return None
 
 
-def _bind(entry, args, kwargs):
+def _bind(entry, reference, args, kwargs):
     """The call as the GPU runs it, or None for every call it does not take as
     given (see the module docstring)."""
+    signature = _signature(entry, reference)
+    if signature is None:
+        return None
     try:
-        bound = _signature(entry).bind(*args, **kwargs)
+        bound = signature.bind(*args, **kwargs)
     except TypeError:
         return None
     bound.apply_defaults()
@@ -260,9 +318,7 @@ def _bind(entry, args, kwargs):
     if threads is None or threads < 1:
         return None
     backend = get["fft_backend"]
-    if type(backend) is not str or backend not in ("scipy", "pyfftw"):
-        return None
-    if backend == "pyfftw" and not _importable("pyfftw"):
+    if type(backend) is not str or not _backend_available(backend):
         return None
     overwrite = get["overwrite_input"]
     if type(overwrite) not in (bool, np.bool_):
@@ -341,8 +397,7 @@ class _Transform:
             self.stats["device_s"] = time.perf_counter() - t0
             return out
         except BaseException as e:
-            # A kept exception must not keep the buffers (its frames hold them).
-            traceback.clear_frames(e.__traceback__)
+            _runtime.clear_frames(e)  # a kept exception must not keep the buffers
             if isinstance(e, (*self.device.errors, *self.device.fft_errors)):
                 raise RuntimeError(f"fft=gpu: CUDA error: {e}") from e
             raise
@@ -355,26 +410,22 @@ class _Transform:
     def _allocate(self):
         """The call's device buffers (one plane, two when it rolls) and its
         cuFFT plan, from the cache, or ``_DoesNotFit``."""
-        cp, call = self.cp, self.call
+        cp, call, device = self.cp, self.call, self.device
         shape = (self.n0, self.n1)
         count = 1 if self.even else 2
         needed = count * self.n0 * self.n1 * call.dtype.itemsize
-        pool = self.device.pool
         for attempt in (0, 1):
-            free, _ = cp.cuda.runtime.memGetInfo()
-            available = free + pool.free_bytes()
-            limit = pool.get_limit()
-            if limit:
-                available = min(available, limit - pool.used_bytes())
+            available, limit = device.available()
             if needed <= available:
                 try:
                     buffers = [cp.empty(shape, call.dtype) for _ in range(count)]
                     return buffers, self._plan(buffers[0])
-                except cp.cuda.memory.OutOfMemoryError:
+                except Exception as e:
+                    if not self._out_of_memory(e):
+                        raise
                     buffers = None
-            if attempt == 0 and _plans:  # the kept plans' work areas, then again
-                _plans.clear()
-                pool.free_all_blocks()
+            # Drop the kept plans (their work areas), then try again.
+            if attempt == 0 and device.reclaim():
                 continue
             break
         raise _DoesNotFit(
@@ -383,16 +434,26 @@ class _Transform:
             f"available ({_runtime.LIMIT_ENV}: {limit or 'unset'})"
         )
 
+    def _out_of_memory(self, error):
+        """Whether ``error`` is device memory running out: CuPy's pool's, or a
+        cuFFT plan that cannot be allocated (``CUFFT_ALLOC_FAILED``)."""
+        if isinstance(error, self.cp.cuda.memory.OutOfMemoryError):
+            return True
+        return (
+            isinstance(error, self.device.fft_errors)
+            and getattr(error, "result", None) == _CUFFT_ALLOC_FAILED
+        )
+
     def _plan(self, buffer):
         key = (self.n0, self.n1, self.call.dtype)
         plan = _plans.pop(key, None)
         if plan is None:
+            while len(_plans) >= PLAN_CACHE:  # room first: at most PLAN_CACHE plans
+                _plans.popitem(last=False)
             t0 = time.perf_counter()
             plan = self.device.fft_plan(buffer)
             self.stats["plan_s"] = time.perf_counter() - t0
         _plans[key] = plan  # the most recent last
-        while len(_plans) > PLAN_CACHE:
-            _plans.popitem(last=False)
         return plan
 
     def _launch(self, kernel, arrays, scale, shifts=()):
@@ -409,7 +470,7 @@ class _Transform:
         direction = _INVERSE if self.inverse else _FORWARD
         work = self.buffers[0]
         work.set(plane)
-        if self.even:
+        if self.even:  # the reference's fold: cb * F(cb * x)
             self._launch(self.checkerboard, (work,), 1.0)
             plan.fft(work, work, direction)
             self._launch(self.checkerboard, (work,), scale)

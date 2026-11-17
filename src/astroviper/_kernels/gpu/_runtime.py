@@ -22,12 +22,16 @@ with the ``spawn`` or ``forkserver`` method instead).
     driver's cache, is used only when CuPy hands the driver PTX, on a GPU
     newer than its NVRTC.)
 ``CUDA_PATH``
-    CuPy finds NVRTC and the CUDA headers with ``cuda.pathfinder``, in the
-    interpreter's own site-packages (where the gpu extra installs them) or
+    CuPy finds NVRTC, the CUDA headers and cuFFT with ``cuda.pathfinder``, in
+    the interpreter's own site-packages (where the gpu extra installs them) or
     under ``CUDA_PATH``. An environment that sees CuPy through a ``.pth`` file
     or ``PYTHONPATH`` needs ``CUDA_PATH``, set before CuPy is first imported
-    (zarr imports it): :func:`check_environment`, and so ``--check``, fails
-    without it and names the directory.
+    (zarr imports it): :func:`check_environment` (and :func:`check_cufft`),
+    and so ``--check``, fails without it and names the directory.
+
+Device memory that a GPU kernel keeps between its calls (``fft=gpu``'s cuFFT
+plans) is registered with :func:`register_cache`, so that a call of another
+kernel that would not fit frees it first (:meth:`Device.reclaim`).
 """
 
 import importlib.resources
@@ -36,6 +40,7 @@ import logging
 import os
 import threading
 import time
+import traceback
 from pathlib import Path
 
 #: The memory limit of CuPy's pool, in bytes or as a percentage.
@@ -48,10 +53,14 @@ _WHEEL_CUDA = ("nvidia", "cu13")
 #: kernels never depend on (see the top of ``cuda/hogbom_exact.cu``).
 OPTIONS = ("--std=c++17", "--fmad=false")
 
+#: cuFFT's library in the NVIDIA wheels (CUDA 13).
+_CUFFT_LIBRARY = "libcufft.so.12"
+
 _logger = logging.getLogger("astroviper.kernels")
 _lock = threading.Lock()
 _device = None
 _FORKED = "forked"  # _device in a child forked after the parent opened the device
+_caches = {}  # name -> evict(): see register_cache()
 
 
 def _after_fork_in_child():
@@ -89,6 +98,27 @@ def parse_memory_limit(value):
         f"{LIMIT_ENV}={value!r}: expected a byte count (such as 6442450944) "
         "or a percentage of the device memory (such as 25%)"
     )
+
+
+def register_cache(name, evict):
+    """Register ``evict``, which drops the device memory that a GPU kernel
+    keeps between its calls (such as cuFFT plans) and returns whether it held
+    any. :meth:`Device.reclaim` calls it, under the device lock, for a call
+    that would not fit otherwise. A later registration of ``name`` replaces
+    the earlier one."""
+    _caches[name] = evict
+
+
+def clear_frames(error):
+    """Clear the variables of the frames of ``error``'s traceback and of the
+    exceptions chained to it: they hold the call's device buffers, which its
+    memory pool could not free while a caller keeps the exception. The
+    tracebacks still print."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        traceback.clear_frames(error.__traceback__)
+        error = error.__cause__ or error.__context__
 
 
 class Device:
@@ -161,15 +191,45 @@ class Device:
         self._modules[key] = functions
         return functions
 
+    def available(self):
+        """``(bytes, limit)``: the device memory a call can still allocate
+        (the device's free memory and the pool's free blocks, within the
+        pool's limit, never negative) and the pool's limit (0: none)."""
+        free, _ = self.cp.cuda.runtime.memGetInfo()
+        pool = self.pool
+        available = free + pool.free_bytes()
+        limit = pool.get_limit()
+        if limit:
+            available = min(available, limit - pool.used_bytes())
+        return max(available, 0), limit
+
+    def reclaim(self):
+        """Drop what the GPU kernels keep on the device between their calls
+        (:func:`register_cache`) and free the pool's cached blocks, for a call
+        that would not fit otherwise; under :attr:`lock`. Returns whether a
+        cache held anything."""
+        held = False
+        for evict in list(_caches.values()):
+            held = bool(evict()) or held
+        self.pool.free_all_blocks()
+        return held
+
     def fft_plan(self, array):
         """A cuFFT plan of the complex 2-D transform of ``array``, a C-ordered
         CuPy array of two axes, with its work area from the memory pool. CuPy's
-        cuFFT is loaded at the first plan."""
+        cuFFT is loaded at the first plan: ``RuntimeError`` (as
+        :func:`check_cufft` raises it) when cuda.pathfinder cannot find it."""
         from cupy.cuda import cufft
         from cupyx.scipy.fft import get_fft_plan
 
         self.fft_errors = (cufft.CuFFTError,)
-        return get_fft_plan(array, axes=(0, 1))
+        try:
+            return get_fft_plan(array, axes=(0, 1))
+        except RuntimeError as e:  # DynamicLibNotFoundError is one
+            pathfinder = _pathfinder()
+            if pathfinder and isinstance(e, pathfinder.DynamicLibNotFoundError):
+                raise _no_cufft(self.cp.__file__, e) from e
+            raise
 
     def max_blocks(self, kernel, threads):
         """The most blocks of ``threads`` threads of ``kernel`` that the device
@@ -219,6 +279,32 @@ def check_environment():
         raise _no_toolkit(spec.origin, "cuda_runtime.h is not found")
 
 
+def check_cufft():
+    """That CuPy's ``cuda.pathfinder`` finds cuFFT, which ``fft=gpu`` loads at
+    its first plan, without touching the device (``RuntimeError``, naming the
+    ``CUDA_PATH`` to set when the NVIDIA wheels lie beside CuPy; a CuPy
+    without ``cuda.pathfinder`` finds it its own way)."""
+    spec = importlib.util.find_spec("cupy")
+    if spec is None:
+        raise RuntimeError(_NO_CUPY + "no module named 'cupy'")
+    pathfinder = _pathfinder()
+    if pathfinder is None:
+        return
+    try:
+        pathfinder.load_nvidia_dynamic_lib("cufft")
+    except pathfinder.DynamicLibNotFoundError as e:
+        raise _no_cufft(spec.origin, e) from e
+
+
+def _pathfinder():
+    """``cuda.pathfinder``, or None for a CuPy without it."""
+    try:
+        from cuda import pathfinder
+    except ImportError:
+        return None
+    return pathfinder
+
+
 def require_device():
     """The :class:`Device` of this process, set up at the first call.
 
@@ -244,22 +330,38 @@ def require_device():
     return device
 
 
+def _cuda_path_hint(cupy_init, library, them):
+    """``"; ... set CUDA_PATH=<root>"`` when the NVIDIA wheels beside CuPy
+    (``cupy_init``, its ``__init__.py``) hold ``library`` (``them``: the
+    pronoun) and ``CUDA_PATH`` is unset, else ``""``."""
+    root = Path(cupy_init).resolve().parents[1].joinpath(*_WHEEL_CUDA)
+    if os.environ.get("CUDA_PATH") or not (root / "lib" / library).is_file():
+        return ""
+    return (
+        f"; the NVIDIA wheels beside this CuPy hold {them}, but cuda.pathfinder "
+        f"searches only the interpreter's own site-packages: set CUDA_PATH={root}"
+    )
+
+
 def _no_toolkit(cupy_init, error):
     """The ``RuntimeError`` for NVRTC or the CUDA headers not found, naming the
     ``CUDA_PATH`` to set when the NVIDIA wheels lie beside CuPy
     (``cupy_init``, its ``__init__.py``) and ``CUDA_PATH`` is unset."""
-    root = Path(cupy_init).resolve().parents[1].joinpath(*_WHEEL_CUDA)
-    hint = (
-        "; the NVIDIA wheels beside this CuPy hold them, but cuda.pathfinder "
-        f"searches only the interpreter's own site-packages: set CUDA_PATH={root}"
-        if not os.environ.get("CUDA_PATH")
-        and (root / "lib" / "libnvrtc.so.13").is_file()
-        else ""
-    )
+    hint = _cuda_path_hint(cupy_init, "libnvrtc.so.13", "them")
     return RuntimeError(
         "CuPy cannot find NVRTC and the CUDA headers, which compile the GPU kernels "
         "at their first use (the gpu extra installs them with cupy-cuda13x[ctk]; "
         f"CuPy also finds them under CUDA_PATH){hint}: {error}"
+    )
+
+
+def _no_cufft(cupy_init, error):
+    """The ``RuntimeError`` for cuFFT not found (see :func:`_no_toolkit`)."""
+    hint = _cuda_path_hint(cupy_init, _CUFFT_LIBRARY, "it")
+    return RuntimeError(
+        "CuPy cannot find cuFFT, which fft=gpu loads at its first transform (the "
+        "gpu extra installs it with cupy-cuda13x[ctk]; CuPy also finds it under "
+        f"CUDA_PATH){hint}: {error}"
     )
 
 

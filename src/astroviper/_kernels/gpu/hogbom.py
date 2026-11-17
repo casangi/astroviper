@@ -71,8 +71,9 @@ Errors are not retried on the CPU. ``RuntimeError``, raised before the call
 writes anything: CuPy or a CUDA device is missing (at the first call that
 needs them), the process was forked after its parent had opened the device,
 or the call needs more device memory than is free or than
-``CUPY_GPU_MEMORY_LIMIT`` allows (see ``_runtime``; an invalid value of it
-raises ``ValueError``). ``RuntimeError`` too when a launch fails or the
+``CUPY_GPU_MEMORY_LIMIT`` allows once the cuFFT plans that ``fft=gpu`` keeps
+are dropped (see ``_runtime``; an invalid value of it raises ``ValueError``).
+``RuntimeError`` too when a launch fails or the
 watchdog aborts it: the planes before that plane are cleaned and written,
 that plane and the later ones are as they were, and the device stays usable
 for the next call (the kernel ends normally). Whatever a call raises once its
@@ -89,7 +90,6 @@ import logging
 import operator
 import os
 import time
-import traceback
 from typing import NamedTuple
 
 import numpy as np
@@ -507,16 +507,7 @@ def _run(call, stats=None):
         return _Cleaner(device, call, stats).run()
 
 
-def _clear_frames(error):
-    """Clear the variables of the frames of ``error``'s traceback and of the
-    exceptions chained to it: they hold the call's device buffers, which its
-    memory pool could not free while a caller keeps the exception. The
-    tracebacks still print."""
-    seen = set()
-    while error is not None and id(error) not in seen:
-        seen.add(id(error))
-        traceback.clear_frames(error.__traceback__)
-        error = error.__cause__ or error.__context__
+_clear_frames = _runtime.clear_frames  # shared with fft=gpu
 
 
 def _launch(kernel, grid, args):
@@ -649,12 +640,11 @@ class _Cleaner:
             -(-int(np.prod(s)) * np.dtype(d).itemsize // 512) * 512
             for s, d in sizes.values()
         )
-        pool = self.device.pool
-        free, _ = cp.cuda.runtime.memGetInfo()
-        available = free + pool.free_bytes()
-        limit = pool.get_limit()
-        if limit:
-            available = min(available, limit - pool.used_bytes())
+        available, limit = self.device.available()
+        # What other GPU kernels keep between calls (fft=gpu's cuFFT plans)
+        # gives way to a call that would not fit otherwise.
+        if needed > available and self.device.reclaim():
+            available, limit = self.device.available()
         self.stats["device_bytes"] = needed
         if needed > available:
             raise RuntimeError(

@@ -24,16 +24,25 @@ divided by the pixel count), skipped where long double is double.
   call's times; the floor is validated; the FFT module's own callers and
   feather.py go through its hook.
 * Failures: without a device the first GPU call raises RuntimeError and the
-  routed calls still run; the prewarm compiles the kernels and loads cuFFT.
+  routed calls still run; a CUDA error raises RuntimeError, and an input given
+  with ``overwrite_input`` holds the planes before the failing one; a cuFFT
+  plan that cannot be allocated runs the reference; without cuFFT ``--check``,
+  the prewarm and the first plan raise RuntimeError; the prewarm compiles the
+  kernels and loads cuFFT.
+* The hook: the reference is the module's own function even when a test
+  replaced the module's attribute before the first call.
 * The generated code: no fused or flushed operation in the PTX.
 """
 
+import collections
 import importlib.resources
 import importlib.util
 import json
+import logging
 import math
 import re
 import socket
+import sys
 
 import numpy as np
 import pytest
@@ -204,6 +213,51 @@ def test_real_images_and_complex_dtypes(gpu, dtype):
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize("shape", [(65538, 2), (65537, 3)], ids=str)
+def test_planes_of_more_rows_than_a_launch_has_blocks(gpu, entry, dtype, shape):
+    """The shift kernels loop over the rows beyond the 65535 blocks of a
+    launch's y axis (the checkerboard for (65538, 2), the rolls for (65537,
+    3), a prime). Too large for the oracle: the result is the reference's,
+    within twice the FFT bound relative to the reference's norm (each is
+    within the bound of the exact transform)."""
+    x = _plane(shape, dtype, "random", seed=sum(shape))
+    kwargs = {"complex_dtype": dtype} if entry == "fft_lm_to_uv" else {}
+    result = GPU[entry](x.copy(), **kwargs)
+    assert gpu == [entry]
+    reference = REFERENCE[entry](x.copy(), fft_backend="scipy", **kwargs)
+    assert result.dtype == reference.dtype and result.shape == reference.shape
+    norm, element = _ratios(result, reference.astype(LONG))
+    assert norm.max() <= 2.0 and element.max() <= 2.0, (norm, element)
+
+
+@pytest.mark.parametrize("complex_dtype", [np.complex64, "complex64", "complex128"])
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_complex_dtype_casts_a_complex_image(gpu, complex_dtype, overwrite):
+    """``fft_lm_to_uv`` casts a complex128 image to ``complex_dtype``, given as
+    a type or a string, as the reference does: complex64 (a lossy cast) keeps
+    the input, with ``overwrite_input`` too; complex128 with it takes the
+    input's buffer."""
+    x = _plane((24, 18), np.complex128, "random", seed=15)
+    dtype = np.dtype(complex_dtype)
+    kwargs = {"complex_dtype": complex_dtype, "overwrite_input": overwrite}
+    reference = REFERENCE["fft_lm_to_uv"](x.copy(), **kwargs)
+    image = x.copy()
+    result = GPU["fft_lm_to_uv"](image, **kwargs)
+    assert result.dtype == reference.dtype == dtype and result.flags.c_contiguous
+    if overwrite and dtype == x.dtype:
+        assert result is image
+    else:
+        assert image.tobytes() == x.tobytes() and not np.shares_memory(result, image)
+    if AVAILABLE:
+        y = _oracle(x.astype(dtype), False)  # the cast first, as NumPy casts
+        assert max(r.max() for r in _ratios(result, y)) <= 1.0
+    same = GPU["fft_lm_to_uv"](x.copy(), complex_dtype=dtype.type)
+    assert same.tobytes() == result.tobytes()
+    assert len(gpu) == 2
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
 def test_a_planes_bits_do_not_depend_on_its_stack(gpu, entry):
     stack = _plane((2, 3, 20, 14), np.complex128, "random", seed=4)
     together = GPU[entry](stack)
@@ -228,7 +282,9 @@ def test_the_result_is_typed_and_laid_out_as_the_references(gpu, entry, shape):
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
-@pytest.mark.parametrize("shape", [(12, 10), (11, 9)], ids=str)
+@pytest.mark.parametrize(
+    "shape", [(12, 10), (11, 9), (3, 11, 9), (2, 2, 7, 12)], ids=str
+)
 def test_overwrite_input_puts_the_result_in_the_inputs_buffer(gpu, entry, shape):
     x = _plane(shape, np.complex128, "random", seed=6)
     expected = GPU[entry](x.copy())
@@ -359,6 +415,22 @@ def test_declined_calls_are_the_reference(monkeypatch, paths, entry, name):
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
+def test_a_backend_the_reference_cannot_import_is_declined(monkeypatch, paths, entry):
+    """Whether pyfftw can be used is decided as the reference decides it (its
+    check_fft_backend imports pyfftw.interfaces.scipy_fft): where that import
+    fails, even with the pyfftw package found, the call is declined and raises
+    the reference's ImportError, and the GPU does not run."""
+    monkeypatch.setenv(fft.MIN_PIXELS_ENV, "0")
+    monkeypatch.setattr(fft, "_run", None)  # the GPU must not run
+    monkeypatch.setitem(sys.modules, "pyfftw.interfaces.scipy_fft", None)
+    make = _args(fft_backend="pyfftw")
+    outcome = _outcome(GPU[entry], make)
+    assert outcome == _outcome(REFERENCE[entry], make)
+    assert issubclass(outcome[0][0], ImportError)
+    assert [path for path, _ in paths] == ["declined"]
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
 @pytest.mark.parametrize(
     "shape, floor, reason",
     [
@@ -427,26 +499,29 @@ def test_the_trace_names_each_calls_path(device, monkeypatch, tmp_path):
 
 LIMITED = """
 import json, logging, numpy as np
-from astroviper._kernels.gpu import fft
+from astroviper._kernels.gpu import _runtime, fft
 
 logging.basicConfig()
 reported = []
 fft.report_path = lambda kernel, path, **fields: reported.append([path, fields.get("reason")])
-out = {}
+out, plans = {}, []
 for n in (64, 512):
     x = np.random.default_rng(n).standard_normal((2, n, n)).astype(np.complex128)
     reference = fft.impl("fft", "ifft_uv_to_lm", "ref")(x.copy(), overwrite_input=True)
     result = fft.ifft_uv_to_lm(x, overwrite_input=True)
     out[n] = [bool(np.array_equal(result, reference)), result is x]
+    plans.append(len(fft._plans))
 fft.ifft_uv_to_lm(np.ones((512, 512), np.complex128))
-print("RESULT", json.dumps({"out": out, "paths": reported}))
+used = _runtime.require_device().pool.used_bytes()
+print("RESULT", json.dumps({"out": out, "paths": reported, "plans": plans, "used": used}))
 """
 
 
 def test_a_call_that_does_not_fit_runs_the_reference(device, run_python):
     """With a 1 MiB limit a plane of 64 x 64 (64 KiB, its plan as much) runs
     on the GPU and one of 512 x 512 (4 MiB) on the CPU, as the reference runs
-    it, unchanged by the attempt; a warning is logged once."""
+    it, unchanged by the attempt, which dropped the kept plan of 64 x 64 (no
+    device memory is held after it); a warning is logged once."""
     done = run_python(
         "-c",
         LIMITED,
@@ -461,7 +536,80 @@ def test_a_call_that_does_not_fit_runs_the_reference(device, run_python):
     paths = [p for p, _ in result["paths"]]
     assert paths == ["gpu", "routed", "routed"]
     assert "bytes of device memory" in result["paths"][1][1]
+    assert result["plans"] == [1, 0] and result["used"] == 0
     assert done.stderr.count("the reference runs such calls") == 1
+
+
+def test_a_plan_that_cannot_be_allocated_runs_the_reference(
+    gpu, device, monkeypatch, paths, caplog
+):
+    """cuFFT's CUFFT_ALLOC_FAILED for a new plan is device memory running out:
+    the kept plans are dropped and the plan is tried again, and when it still
+    fails the reference runs the call, logged once; another cuFFT error raises
+    RuntimeError with the error chained."""
+    cufft = pytest.importorskip("cupy.cuda.cufft")
+    monkeypatch.setattr(fft, "_warned", False)
+    monkeypatch.setattr(fft, "_plans", collections.OrderedDict())
+    used = device.pool.used_bytes()  # the earlier tests' plans, out of reach here
+    GPU["ifft_uv_to_lm"](_plane((16, 16), np.complex128, "random"))  # one kept plan
+    assert len(fft._plans) == 1 and paths[-1][0] == "gpu"
+    attempts = []
+
+    def failing(self, array, code=2):  # 2: CUFFT_ALLOC_FAILED
+        attempts.append(array.shape)
+        raise cufft.CuFFTError(code)
+
+    monkeypatch.setattr(_runtime.Device, "fft_plan", failing)
+    x = _plane((20, 14), np.complex128, "random", seed=16)
+    with caplog.at_level(logging.WARNING, logger="astroviper.kernels"):
+        for _ in range(2):
+            result = GPU["fft_lm_to_uv"](x.copy())
+            assert result.tobytes() == REFERENCE["fft_lm_to_uv"](x.copy()).tobytes()
+    # before and after dropping the kept plan, then once (none kept)
+    assert attempts == [(20, 14)] * 3 and not fft._plans
+    assert [p for p, _ in paths[1:]] == ["routed", "routed"]
+    assert "bytes of device memory and a cuFFT plan" in paths[1][1]["reason"]
+    assert len([r for r in caplog.records if "such calls" in r.getMessage()]) == 1
+    monkeypatch.setattr(
+        _runtime.Device, "fft_plan", lambda self, array: failing(self, array, 5)
+    )
+    with pytest.raises(RuntimeError, match="CUDA error: CUFFT_INTERNAL_ERROR") as e:
+        GPU["fft_lm_to_uv"](x.copy())
+    assert isinstance(e.value.__cause__, cufft.CuFFTError)
+    assert device.pool.used_bytes() == used and not fft._plans
+
+
+def test_a_failing_launch_raises_and_the_next_call_is_right(gpu, device, monkeypatch):
+    """A CUDA error raises RuntimeError with the error chained, frees the
+    call's buffers and leaves the device usable; an input given with
+    ``overwrite_input`` holds the result in the planes before the failing one
+    (in C order) and its values in the others, one given without it is kept."""
+    x = _plane((3, 20, 14), np.complex128, "random", seed=14)
+    expected = GPU["fft_lm_to_uv"](x.copy())  # its plan is kept
+    used = device.pool.used_bytes()
+    launch, launches = fft._Transform._launch, []
+
+    def failing(self, kernel, arrays, scale, shifts=()):
+        launches.append(kernel)
+        if len(launches) == 3:  # the first of the second plane
+            raise device.cp.cuda.driver.CUDADriverError(720)  # any error of a launch
+        return launch(self, kernel, arrays, scale, shifts)
+
+    monkeypatch.setattr(fft._Transform, "_launch", failing)
+    for overwrite in (False, True):
+        launches.clear()
+        y = x.copy()
+        with pytest.raises(RuntimeError, match="fft=gpu: CUDA error") as raised:
+            GPU["fft_lm_to_uv"](y, overwrite_input=overwrite)
+        error = raised.value.__cause__
+        assert isinstance(error, device.cp.cuda.driver.CUDADriverError)
+        assert device.pool.used_bytes() == used
+        written = 1 if overwrite else 0
+        assert y[:written].tobytes() == expected[:written].tobytes()
+        assert y[written:].tobytes() == x[written:].tobytes()
+    monkeypatch.setattr(fft._Transform, "_launch", launch)
+    assert GPU["fft_lm_to_uv"](x.copy()).tobytes() == expected.tobytes()
+    assert len(gpu) == 4
 
 
 WITHOUT_DEVICE = """
@@ -549,6 +697,143 @@ def test_the_prewarm_compiles_the_kernels_and_loads_cufft(device, monkeypatch):
     assert {(64, 64, np.dtype(np.complex128)), (63, 65, np.dtype(np.complex64))} <= set(
         fft._plans
     )
+
+
+def test_the_prewarm_reports_a_plane_that_does_not_fit(device, run_python):
+    """Under a limit that holds no 64 x 64 plane the prewarm exits with
+    status 1 and the reason, as for its other failures."""
+    done = run_python(
+        "-m",
+        "astroviper._kernels.gpu.prewarm",
+        check=False,
+        ASTROVIPER_KERNELS="fft=gpu",
+        CUPY_GPU_MEMORY_LIMIT="4096",
+    )
+    assert done.returncode == 1, done.stderr
+    prefix = "GPU prewarm failed: a call on planes of 64 x 64 complex64 needs 32768 "
+    (line,) = [line for line in done.stderr.splitlines() if line.startswith(prefix)]
+    assert "bytes of device memory and a cuFFT plan, 4096 bytes are available" in line
+    assert "Traceback" not in done.stderr
+
+
+NO_CUFFT = """
+import json, numpy as np
+from cuda import pathfinder
+
+load = pathfinder.load_nvidia_dynamic_lib
+
+
+def no_cufft(name):
+    if name == "cufft":
+        raise pathfinder.DynamicLibNotFoundError("no cufft here")
+    return load(name)
+
+
+pathfinder.load_nvidia_dynamic_lib = no_cufft
+from astroviper._kernels.gpu import fft
+
+try:
+    fft.fft_lm_to_uv(np.ones((8, 8), np.complex128))
+    out = "no error"
+except Exception as e:
+    out = f"{type(e).__name__}: {e}"
+print("RESULT", json.dumps(out))
+"""
+
+
+@pytest.mark.skipif(importlib.util.find_spec("cupy") is None, reason="no CuPy")
+def test_the_check_and_the_prewarm_need_cufft(monkeypatch, capsys):
+    """Where cuda.pathfinder finds no cuFFT, ``--check`` and the prewarm of
+    ``fft=gpu`` fail at once, naming it, without touching the device;
+    ``hogbom=gpu`` does not need it."""
+    pathfinder = pytest.importorskip("cuda.pathfinder")
+    try:
+        _runtime.check_environment()
+    except RuntimeError as e:
+        pytest.skip(f"the GPU environment fails before cuFFT: {e}")
+    load = pathfinder.load_nvidia_dynamic_lib
+
+    def no_cufft(name):
+        if name == "cufft":
+            raise pathfinder.DynamicLibNotFoundError("no cufft here")
+        return load(name)
+
+    monkeypatch.setattr(pathfinder, "load_nvidia_dynamic_lib", no_cufft)
+    monkeypatch.setenv(ENV, "fft=gpu")
+    assert check_main(["--check"]) == 1 and prewarm.main([]) == 1
+    lines = capsys.readouterr().err.splitlines()
+    message = "CuPy cannot find cuFFT, which fft=gpu loads at its first transform"
+    assert len([line for line in lines if message in line]) == 2, lines
+    assert all("no cufft here" in line for line in lines if message in line)
+    monkeypatch.setenv(ENV, "hogbom=gpu")
+    assert check_main(["--check"]) == 0
+
+
+def test_without_cufft_the_first_plan_raises(device, run_python):
+    out = run_python("-c", NO_CUFFT, ASTROVIPER_KERNELS_GPU_FFT_MIN_PIXELS="0")
+    error = json.loads(out.rpartition("RESULT ")[2])
+    assert error.startswith("RuntimeError: CuPy cannot find cuFFT"), error
+    assert error.endswith("no cufft here")
+
+
+# ---------------------------------------------------------------- the hook
+SPIED = """
+import json, numpy as np
+from astroviper._kernels import impl
+from astroviper.processing_functions.imaging import fft_normalize_anti_alias_gridder as m
+
+original, calls = m.fft_lm_to_uv, []
+
+
+def tracked_fft(plane, **kwargs):  # as test_fft_plane_dimensions.py spies on it
+    calls.append(plane.shape)
+    return original(plane, **kwargs)
+
+
+m.fft_lm_to_uv = tracked_fft  # before any call resolves the reference
+x = np.random.default_rng(0).standard_normal((2, 20, 18)) + 0j
+results = [m.fft_lm_to_uv(x.copy(), fft_backend="scipy") for _ in range(2)]
+m.fft_lm_to_uv = original
+expected = original.__wrapped__(x.copy(), fft_backend="scipy")
+back = m.ifft_uv_to_lm(results[0], fft_backend="scipy")
+print("RESULT", json.dumps({
+    "calls": len(calls),
+    "errors": [float(np.abs(r - expected).max() / np.abs(expected).max()) for r in results],
+    "back": float(np.abs(back - x).max()),
+    "own": impl("fft", "fft_lm_to_uv", "ref") is original.__wrapped__,
+}))
+"""
+
+
+@pytest.mark.parametrize(
+    "selection, floor", [("fft=ref", None), ("fft=gpu", None), ("fft=gpu", "0")]
+)
+def test_a_spy_set_before_the_first_call_is_not_the_reference(
+    request, run_python, tmp_path, selection, floor
+):
+    """The reference of the hooked module's entries is its own function,
+    whatever its attribute holds at the first call: with a spy installed
+    first (calling the hooked entry it replaced) fft=ref ran the spy as the
+    reference, which recursed, and fft=gpu bound the spy's parameters (a
+    KeyError). On the GPU (floor 0) the result is within the FFT's rounding,
+    else the reference's own bits."""
+    env = {"ASTROVIPER_KERNELS": selection, "ASTROVIPER_KERNELS_TRACE": str(tmp_path)}
+    if floor is not None:
+        request.getfixturevalue("device")
+        env[fft.MIN_PIXELS_ENV] = floor
+    out = run_python("-c", SPIED, **env)
+    result = json.loads(out.rpartition("RESULT ")[2])
+    assert result["calls"] == 2 and result["own"] is True
+    tolerance = 1e-13 if floor == "0" else 0.0
+    assert max(result["errors"]) <= tolerance and result["back"] < 1e-13
+    (path,) = tmp_path.iterdir()
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    expected = "gpu" if floor == "0" else ("routed" if "gpu" in selection else "ref")
+    assert [(r["entry"], r["path"], r["error"]) for r in records] == [
+        ("fft_lm_to_uv", expected, None),
+        ("fft_lm_to_uv", expected, None),
+        ("ifft_uv_to_lm", expected, None),
+    ]
 
 
 # ---------------------------------------------------------------- the generated code

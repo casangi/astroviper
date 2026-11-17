@@ -7,6 +7,7 @@ themselves. A fake ``hogbom=fast`` implementation (this module's
 implementation. Import-time behaviour runs in subprocesses.
 """
 
+import functools
 import importlib
 import json
 import logging
@@ -208,6 +209,53 @@ def test_impl_finds_the_reference_behind_a_self_hooked_modules_wrapper(
     np.testing.assert_allclose(
         module.ifft_uv_to_lm(module.fft_lm_to_uv(plane)), plane, rtol=0, atol=1e-15
     )
+
+
+def _spy(function):
+    """A spy on ``function`` with its names, as a test installs one."""
+
+    @functools.wraps(function)
+    def spy(*args, **kwargs):
+        return function(*args, **kwargs)
+
+    return spy
+
+
+def test_a_self_hooked_reference_is_the_modules_own_function(monkeypatch):
+    """dispatch() records the function a self-hooked module defines, and impl()
+    returns it whatever the module's attribute holds at its first call (a
+    test's spy, which may call the hooked entry it replaced); without a record
+    a replacement of the attribute is returned but never kept, and a wrapper
+    there stands for the function it wraps. A spy given to dispatch() is not
+    recorded, even with the entry's names (functools.wraps)."""
+    monkeypatch.setenv(ENV, "fft=ref")
+    monkeypatch.setattr(_switch, "_resolved", {})
+    monkeypatch.setattr(_switch, "_originals", {})
+    name, entries, _ = SELF_HOOKED["fft"]
+    module = import_module(name)
+    for entry in entries:
+        own = getattr(module, entry)
+        own = getattr(own, "__wrapped__", own)
+        spy = _spy(own)
+        with monkeypatch.context() as patched:  # no record: the attribute, not kept
+            patched.setattr(module, entry, spy)
+            assert impl("fft", entry, "ref") is spy
+            assert ("fft", entry, "ref") not in _switch._resolved
+            patched.setattr(module, entry, dispatch("fft", spy))
+            assert impl("fft", entry, "ref") is spy and not _switch._originals
+        with monkeypatch.context() as patched:
+            patched.setattr(module, entry, dispatch("fft", own))  # recorded
+            assert _switch._originals == {("fft", entry): own}
+            patched.setattr(module, entry, spy)  # replaced before the first call
+            assert impl("fft", entry, "ref") is own
+            _switch._resolved.clear()
+            patched.setattr(_switch, "_originals", {})
+            patched.setattr(module, entry, dispatch("fft", spy))  # a spy's wrapper
+            assert impl("fft", entry, "ref") is spy
+        _switch._originals.clear()
+        _switch._resolved.clear()
+        assert impl("fft", entry, "ref") is own  # the attribute, or a wrapper's own
+        assert _switch._resolved[("fft", entry, "ref")] is own
 
 
 def test_impl_rejects_unhooked_entries_and_unregistered_pairs():

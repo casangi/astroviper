@@ -14,6 +14,7 @@ import resource
 import socket
 import threading
 import time
+import types
 import weakref
 from importlib import import_module
 from types import MappingProxyType
@@ -39,7 +40,8 @@ _ENTRIES = {
 }
 #: Kernels whose reference entries are Python functions of the module that
 #: hooks them, which is then their shim (the others' shims are the packages of
-#: their reference extensions): when hooked, the module holds the wrappers.
+#: their reference extensions): when hooked, the module holds the wrappers, and
+#: their reference is the function that dispatch() recorded (see impl()).
 _SELF_HOOKED = ("fft",)
 
 #: Valid (kernel, implementation) pairs: the module that provides the kernel's
@@ -75,10 +77,22 @@ _traced = set()  # (kernel, entry, impl) that wrote a trace line
 _trace_failed = set()  # trace directories whose write failure was logged
 _reported = threading.local()  # .value = (kernel, path): see report_path()
 _wrappers = weakref.WeakSet()  # the wrappers that dispatch() made
+_originals = {}  # (kernel, entry) -> a _SELF_HOOKED module's own function
 
 
 def _names(names):
     return ", ".join(sorted(names))
+
+
+def _own(kernel, entry, function):
+    """Whether ``function`` is the function ``entry`` that the reference
+    module of ``kernel``, a ``_SELF_HOOKED`` kernel, defines: not a wrapper,
+    nor a replacement of the module's attribute (such as a test's spy)."""
+    return (
+        type(function) is types.FunctionType
+        and function.__name__ == entry
+        and function.__globals__.get("__name__") == _REGISTRY[kernel]["ref"]
+    )
 
 
 @functools.lru_cache(maxsize=8)
@@ -159,6 +173,13 @@ def impl(kernel, entry, name):
     The direct API for tests and benchmarks, which works whether or not the
     shims are hooked. Raises ``ValueError`` for an unregistered combination
     and ``ImportError`` when the implementation's module is not available.
+
+    The ``ref`` entry of a ``_SELF_HOOKED`` kernel is the function its module
+    defines, as :func:`dispatch` recorded it when the module hooked it, so it
+    does not depend on what the module's attribute holds at the first call (a
+    test may have replaced it). Without a record (the module is not hooked)
+    it is the module's attribute, or the function that a wrapper there wraps;
+    a replacement of it is returned but not kept.
     """
     key = (kernel, entry, name)
     function = _resolved.get(key)
@@ -188,11 +209,19 @@ def impl(kernel, entry, name):
             "'AstroVIPER: skipping' messages)",
             name=module_name,
         ) from e
-    function = getattr(module, entry)
-    if function in _wrappers:  # the hooked module of a _SELF_HOOKED kernel's "ref"
-        function = function.__wrapped__
+    keep = True
+    if kernel in _SELF_HOOKED and name == "ref":
+        function = _originals.get((kernel, entry))
+        if function is None:
+            function = getattr(module, entry)
+            if function in _wrappers:  # one whose function dispatch() did not record
+                function = function.__wrapped__
+            keep = _own(kernel, entry, function)
+    else:
+        function = getattr(module, entry)
     with _lock:
-        function = _resolved.setdefault(key, function)
+        if keep:
+            function = _resolved.setdefault(key, function)
         announce = (kernel, name) not in _logged
         _logged.add((kernel, name))
     if announce:
@@ -220,7 +249,9 @@ def dispatch(kernel, function):
     kernel : str
         Registered kernel name.
     function : callable
-        The reference entry the shim imported from its extension.
+        The reference entry the shim imported from its extension (for a
+        ``_SELF_HOOKED`` kernel, the function its module defines, which is
+        recorded as the kernel's ``ref`` entry: see :func:`impl`).
 
     Returns
     -------
@@ -233,6 +264,10 @@ def dispatch(kernel, function):
     if entry not in _ENTRIES.get(kernel, ()):
         raise ValueError(f"{entry!r} is not a hooked entry of kernel {kernel!r}")
     selected()
+    if kernel in _SELF_HOOKED and _own(kernel, entry, function):
+        with _lock:  # the latest definition (a reloaded module's) wins
+            _originals[(kernel, entry)] = function
+            _resolved.pop((kernel, entry, "ref"), None)
 
     @functools.wraps(function)
     def wrapper(*args, **kwargs):

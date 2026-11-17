@@ -2,12 +2,16 @@
 // kernels, shipped as package data and compiled by NVRTC at the first call. cuFFT transforms the planes in between.
 //
 // The reference (fft_normalize_anti_alias_gridder.py: ifft_uv_to_lm, fft_lm_to_uv) computes, per plane of n0 x n1,
-// fftshift(F(ifftshift(x))) for the transform F (the inverse one divided by n0 n1). When both axes are even it folds
-// each shift into a sign flip of the other domain, cb * F(cb * x) with cb = (-1)^(i + j): checkerboard() does that
-// here, and roll() does the two shifts when an axis is odd. Both act on a stack of planes, given as `rows` rows of n1
-// complex values (planes of n0 rows, one after another), and take the 1/(n0 n1) of an inverse transform as `scale`
-// (1 elsewhere). Every operation is exact or rounds once to nearest, and none flushes a subnormal to zero: CuPy compiles
-// with -ftz=true, so the sign flips move bits and the float conversions are PTX without .ftz (as in hogbom_exact.cu).
+// fftshift(F(ifftshift(x))) for the transform F (the inverse one divided by n0 n1) when an axis is odd. When both axes
+// are even it computes cb * F(cb * x) with cb = (-1)^(i + j) instead, its fold of each shift into a sign flip of the
+// other domain, which is fftshift(F(ifftshift(x))) only up to the sign (-1)^(n0/2 + n1/2) (each roll by n/2 of an
+// axis of n is the flip of the other domain times (-1)^(n/2)). The GPU keeps the reference's results, so its signs:
+// checkerboard() makes the fold here, and roll() the two shifts when an axis is odd. Both act on a stack of planes,
+// given as `rows` rows of n1 complex values (planes of n0 rows, one after another), and take the 1/(n0 n1) of an
+// inverse transform as `scale` (1 elsewhere). The sign flips and the shifts are exact; the scaling rounds to nearest,
+// once for a double and twice for a float (to double, then to float: see scaled()); none flushes a subnormal to zero:
+// CuPy compiles with -ftz=true, so the sign flips move bits and the float conversions are PTX without .ftz (as in
+// hogbom_exact.cu).
 
 typedef long long i64;
 typedef unsigned int u32;
@@ -28,7 +32,8 @@ __device__ __forceinline__ double of_bits(u64 u) { double a; asm("mov.b64 %0, %1
 // -a, for every a: the sign bit flipped (the reference's a * -1.0, NaN signs aside).
 __device__ __forceinline__ float negated(float a) { return of_bits(bits_of(a) ^ 0x80000000u); }
 __device__ __forceinline__ double negated(double a) { return of_bits(bits_of(a) ^ 0x8000000000000000ull); }
-// a * s, rounded to nearest: in double for a float (its conversion to double is exact), then rounded to float.
+// a * s, rounded to nearest. For a float, the product of its exact conversion to double is rounded to double, then
+// to float: two roundings, which can differ from one rounding of the exact product by a unit in the last place.
 __device__ __forceinline__ double scaled(double a, double s) { return __dmul_rn(a, s); }
 __device__ __forceinline__ float scaled(float a, double s) {
     double d;

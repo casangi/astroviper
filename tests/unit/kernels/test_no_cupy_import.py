@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from astroviper._kernels._switch import parse
 from astroviper._kernels.gpu import _runtime
 from tests.unit.kernels.conftest import (
     ALL_REF,
@@ -155,11 +156,13 @@ GPU_FFT = "fft=gpu"
 CUPY = importlib.util.find_spec("cupy") is not None
 
 
-def _gpu_check():
+def _gpu_check(selection):
     """--check's status for a gpu selection: 1 without CuPy, or where CuPy
-    would find no NVRTC or CUDA headers."""
+    would find no NVRTC or CUDA headers (or, for ``fft=gpu``, no cuFFT)."""
     try:
         _runtime.check_environment()
+        if parse(selection)["fft"] == "gpu":
+            _runtime.check_cufft()
     except (RuntimeError, ValueError):
         return 1
     return 0
@@ -173,7 +176,7 @@ def test_hooked_process_never_imports_cupy(run_python, selection):
     out = run_python("-c", BLOCKED, ASTROVIPER_KERNELS=selection)
     result = json.loads(out.rpartition("RESULT ")[2])
     assert result["blocked"] == [] and result["errors"] == {}
-    assert result["checked"] == (_gpu_check() if "gpu" in selection else 0)
+    assert result["checked"] == (_gpu_check(selection) if "gpu" in selection else 0)
     assert result["caught"] is True, "the blocker missed an AstroVIPER import"
     if CUPY:
         assert result["cached"] is True, "the control was not a cached import"
@@ -196,4 +199,4 @@ def test_a_gpu_call_imports_cupy_in_the_gpu_runtime_only(run_python, kernel, flo
     assert result["blocked"] and all(runtime in b for b in result["blocked"])
     assert list(result["errors"]) == [kernel]
     assert result["errors"][kernel].startswith("CuPy is not available")
-    assert result["checked"] == _gpu_check() and result["caught"] is True
+    assert result["checked"] == _gpu_check(f"{kernel}=gpu") and result["caught"] is True
