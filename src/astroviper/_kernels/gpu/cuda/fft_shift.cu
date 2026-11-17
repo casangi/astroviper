@@ -2,16 +2,15 @@
 // kernels, shipped as package data and compiled by NVRTC at the first call. cuFFT transforms the planes in between.
 //
 // The reference (fft_normalize_anti_alias_gridder.py: ifft_uv_to_lm, fft_lm_to_uv) computes, per plane of n0 x n1,
-// fftshift(F(ifftshift(x))) for the transform F (the inverse one divided by n0 n1) when an axis is odd. When both axes
-// are even it computes cb * F(cb * x) with cb = (-1)^(i + j) instead, its fold of each shift into a sign flip of the
-// other domain, which is fftshift(F(ifftshift(x))) only up to the sign (-1)^(n0/2 + n1/2) (each roll by n/2 of an
-// axis of n is the flip of the other domain times (-1)^(n/2)). The GPU keeps the reference's results, so its signs:
-// checkerboard() makes the fold here, and roll() the two shifts when an axis is odd. Both act on a stack of planes,
-// given as `rows` rows of n1 complex values (planes of n0 rows, one after another), and take the 1/(n0 n1) of an
-// inverse transform as `scale` (1 elsewhere). The sign flips and the shifts are exact; the scaling rounds to nearest,
-// once for a double and twice for a float (to double, then to float: see scaled()); none flushes a subnormal to zero:
-// CuPy compiles with -ftz=true, so the sign flips move bits and the float conversions are PTX without .ftz (as in
-// hogbom_exact.cu).
+// fftshift(F(ifftshift(x))) for the transform F (the inverse one divided by n0 n1). When both axes are even it folds
+// each shift into a sign flip of the other domain, cb_centred * F(cb * x) with cb = (-1)^(i + j) and cb_centred =
+// (-1)^(i - n0/2 + j - n1/2), +1 at the centre pixel (n0/2, n1/2): checkerboard() does that here, with parity 0 before
+// the transform and (n0/2 + n1/2) mod 2 after it, and roll() does the two shifts when an axis is odd. Both act on a
+// stack of planes, given as `rows` rows of n1 complex values (planes of n0 rows, one after another), and take the
+// 1/(n0 n1) of an inverse transform as `scale` (1 elsewhere). The sign flips and the shifts are exact; the scaling
+// rounds to nearest, once for a double and twice for a float (to double, then to float: see scaled()); none flushes a
+// subnormal to zero: CuPy compiles with -ftz=true, so the sign flips move bits and the float conversions are PTX
+// without .ftz (as in hogbom_exact.cu).
 
 typedef long long i64;
 typedef unsigned int u32;
@@ -43,15 +42,16 @@ __device__ __forceinline__ float scaled(float a, double s) {
     return c;
 }
 
-// x[r, j] *= (-1)^(i + j) * scale, in place, with i = r mod n0 the row of the plane: the checkerboard, before a
-// transform (scale 1: the odd pixels' signs flipped, the others untouched) or after it.
+// x[r, j] *= (-1)^(i + j + parity) * scale, in place, with i = r mod n0 the row of the plane: the checkerboard,
+// before a transform (parity 0, scale 1: the odd pixels' signs flipped, the others untouched) or after it (parity
+// (n0/2 + n1/2) mod 2: centred).
 template <typename C>
-__global__ void checkerboard(C* x, const i64 rows, const int n0, const int n1, const double scale) {
+__global__ void checkerboard(C* x, const i64 rows, const int n0, const int n1, const int parity, const double scale) {
     for (i64 r = blockIdx.y; r < rows; r += gridDim.y) {
         const int i = (int)(r % n0);
         C* row = x + r * n1;
         for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < n1; j += gridDim.x * blockDim.x) {
-            const bool odd = (i ^ j) & 1;
+            const bool odd = (i ^ j ^ parity) & 1;
             if (scale == 1.0) {
                 if (odd) {
                     C v = row[j];

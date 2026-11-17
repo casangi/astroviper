@@ -3,8 +3,8 @@
 The implementation is called directly (``astroviper._kernels.impl``), so these
 tests run in any session; those that need the GPU skip without CuPy or a CUDA
 device. Planes of up to 127 x 131 pixels (4800 x 4800 on the DATA side). The
-oracle is the reference's transform evaluated in long double: the shifts, then
-a direct DFT along each axis (twiddles of the reduced angles, the inverse
+oracle is the shifted transform, fftshift(F(ifftshift(x))), evaluated in long
+double: the shifts, then a direct DFT along each axis (twiddles of the reduced angles, the inverse
 divided by the pixel count), skipped where long double is double.
 
 * Accuracy: random, smooth and point-source planes of even, odd and mixed
@@ -102,22 +102,18 @@ def _dft(n, sign):
 
 
 def _oracle(values, inverse):
-    """The reference's transform of the planes of ``values`` (the last two
-    axes), in long double: the DFT along each axis (divided by the pixel count
-    for the inverse) between the checkerboard sign flips when both axes are
-    even, else between ifftshift and fftshift. (The checkerboard form is the
-    shifted transform times (-1)**(n0 / 2 + n1 / 2), which the reference keeps:
-    so does the GPU.)"""
-    x = np.asarray(values).astype(LONG)
+    """The shifted transform of the planes of ``values`` (the last two axes),
+    fftshift(F(ifftshift(x))), in long double: the DFT along each axis
+    (divided by the pixel count for the inverse) between ifftshift and
+    fftshift, whatever the parities (the reference folds the shifts of even
+    planes into checkerboard sign flips)."""
+    x = np.fft.ifftshift(np.asarray(values).astype(LONG), axes=(-2, -1))
     n0, n1 = x.shape[-2:]
-    even = n0 % 2 == 0 and n1 % 2 == 0
-    signs = (-1.0) ** np.add.outer(np.arange(n0), np.arange(n1))
-    x = x * signs if even else np.fft.ifftshift(x, axes=(-2, -1))
     sign = 1 if inverse else -1
     y = _dft(n0, sign) @ x @ _dft(n1, sign)  # the DFT matrices are symmetric
     if inverse:
         y /= n0 * n1
-    return y * signs if even else np.fft.fftshift(y, axes=(-2, -1))
+    return np.fft.fftshift(y, axes=(-2, -1))
 
 
 def _ratios(result, y):
@@ -155,10 +151,12 @@ def _plane(shape, dtype, kind, seed=0):
 
 
 # ---------------------------------------------------------------- accuracy
-SHAPES = [
+SHAPES = [  # both axes even: n0/2 + n1/2 even (8 x 8, 6 x 10) and odd (10 x 12, 6 x 8)
     (8, 8),
     (6, 10),
     (10, 12),
+    (6, 8),
+    (2, 90, 120),
     (64, 64),
     (9, 15),
     (8, 7),

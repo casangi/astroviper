@@ -5,12 +5,11 @@ GPU uv <-> lm transforms, selected by ``ASTROVIPER_KERNELS=fft=gpu``.
 functions (``processing_functions/imaging/fft_normalize_anti_alias_gridder.py``)
 and return what they return, transformed on the GPU by CuPy's cuFFT: per plane
 of the last two axes, the inverse transform divided by the plane's pixel count
-and the forward one unscaled, between the reference's shifts (see
-``cuda/fft_shift.cu``). When both axes are even those are the reference's
-checkerboard sign flips, cb * F(cb * x) with cb = (-1)^(i + j), which is
-fftshift(F(ifftshift(x))) only up to the sign (-1)^(n0/2 + n1/2): the
-reference folds its shifts so, and the GPU keeps its signs. Otherwise they are
-the two rolls, ifftshift before and fftshift after. The result is in the
+and the forward one unscaled, between the reference's shifts:
+fftshift(F(ifftshift(x))) (see ``cuda/fft_shift.cu``). When both axes are even
+those are the reference's checkerboard sign flips, cb_centred * F(cb * x) with
+cb = (-1)^(i + j) and cb_centred = (-1)^(i - n0/2 + j - n1/2); otherwise they
+are the two rolls, ifftshift before and fftshift after. The result is in the
 complex dtype of the input's precision (``complex_dtype`` for
 ``fft_lm_to_uv``), of the input's shape and in C order, for any leading axes.
 With ``overwrite_input`` the input's buffer may be destroyed: it receives the
@@ -22,8 +21,8 @@ calls that run on the CPU.
 The results are not the reference's bit for bit: cuFFT, FFTW (pyfftw) and
 pocketfft (scipy.fft) order and round their butterflies differently. With eps
 the machine epsilon of the dtype (2**-52 for complex128, 2**-23 for complex64),
-N the pixels of a plane, x the plane and y its exact transform (the
-reference's, signs included), the tests find both the GPU's result and the
+N the pixels of a plane, x the plane and y its exact transform
+(fftshift(F(ifftshift(x)))), the tests find both the GPU's result and the
 reference's within the usual bound of an FFT (Higham's, about 3.3 eps log2(N)
 for radix 2),
 ``||result - y||_2 <= ACCURACY * eps * log2(N) * ||y||_2``, so also element
@@ -470,10 +469,10 @@ class _Transform:
         direction = _INVERSE if self.inverse else _FORWARD
         work = self.buffers[0]
         work.set(plane)
-        if self.even:  # the reference's fold: cb * F(cb * x)
-            self._launch(self.checkerboard, (work,), 1.0)
+        if self.even:  # the reference's fold: cb_centred * F(cb * x)
+            self._launch(self.checkerboard, (work,), 1.0, (0,))
             plan.fft(work, work, direction)
-            self._launch(self.checkerboard, (work,), scale)
+            self._launch(self.checkerboard, (work,), scale, ((n0 // 2 + n1 // 2) % 2,))
         else:  # ifftshift, the transform, then fftshift
             rolled = self.buffers[1]
             self._launch(self.roll, (work, rolled), 1.0, (n0 // 2, n1 // 2))
