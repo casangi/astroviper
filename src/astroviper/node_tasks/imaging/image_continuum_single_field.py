@@ -1512,6 +1512,12 @@ def residual_update_continuum_single_field(
         spectral_reference=image_params.get("spectral_reference", "lsrk"),
         do_sky_coords=False,
     )
+    img_xds.frequency.attrs["full_image_frequencies"] = list(
+        map(
+            float,
+            image_params.get("frequency_coords", task_coords["frequency"]["data"]),
+        )
+    )
 
     T_make_empty_image = time.time() - start
 
@@ -1536,6 +1542,7 @@ def residual_update_continuum_single_field(
             data_selection,
             processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
+            full_image_frequencies=image_params.get("frequency_coords"),
             instrument_polarization_basis=instrument_polarization_basis,
             data_group=data_group,
             load_correlated_data=not omit_observed_visibility,
@@ -2057,6 +2064,7 @@ def grid_imaging_weight_density_continuum_node(
             data_selection,
             processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
+            full_image_frequencies=image_params.get("frequency_coords"),
             instrument_polarization_basis=instrument_polarization_basis,
             data_group=data_group,
             load_correlated_data=False,
@@ -2094,6 +2102,12 @@ def grid_imaging_weight_density_continuum_node(
         pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
+    )
+    img_xds.frequency.attrs["full_image_frequencies"] = list(
+        map(
+            float,
+            image_params.get("frequency_coords", task_coords["frequency"]["data"]),
+        )
     )
 
     # Required by the xradio image accessor used to retrieve the image
@@ -2374,6 +2388,7 @@ def degrid_imaging_weights_continuum_node(
             data_selection,
             processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
+            full_image_frequencies=image_params.get("frequency_coords"),
             instrument_polarization_basis=instrument_polarization_basis,
             data_group=data_group,
             load_correlated_data=False,
@@ -2410,6 +2425,12 @@ def degrid_imaging_weights_continuum_node(
         pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
+    )
+    img_xds.frequency.attrs["full_image_frequencies"] = list(
+        map(
+            float,
+            image_params.get("frequency_coords", task_coords["frequency"]["data"]),
+        )
     )
     img_xds.attrs["type"] = "image_dataset"
 

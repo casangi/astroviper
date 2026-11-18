@@ -220,5 +220,105 @@ class TestCubePathsShareFrequencyMap(unittest.TestCase):
         )
 
 
+class TestPartitionedFrequencyMapping(unittest.TestCase):
+    """Task boundaries must retain the full image axis's mapping policy."""
+
+    def test_reported_mvc_single_channel_task(self):
+        full = 4107516045.6904545 + np.arange(8) * 533950857.6451702
+        observed = 4380616641.112875 + np.arange(13) * 8001126.285138
+        with self.assertRaises(ValueError):
+            map_visibility_frequencies_to_image(observed, full[1:2])
+        np.testing.assert_array_equal(
+            map_visibility_frequencies_to_image(
+                observed, full[1:2], full_image_frequencies=full
+            ),
+            np.zeros(13, dtype=np.int64),
+        )
+
+    def test_partition_invariance_and_global_ties(self):
+        from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
+
+        for full in (
+            np.arange(8, dtype=float) * 10,
+            np.array([0.0, 2.0, 8.0, 10.0, 30.0, 60.0, 65.0, 100.0]),
+            np.array([100.0, 65.0, 60.0, 30.0, 10.0, 8.0, 2.0, 0.0]),
+        ):
+            sorted_axis = np.sort(full)
+            observed = np.concatenate(
+                (
+                    full,
+                    (sorted_axis[1:] + sorted_axis[:-1]) / 2,
+                    full + 1e-6,
+                    full - 1e-6,
+                )
+            )
+            expected = map_to_nearest_coordinate(observed, full)
+            for chunks in (1, 2, 4, 8):
+                actual = np.full(observed.size, -1)
+                for indices in np.array_split(np.arange(8), chunks):
+                    selected = np.isin(expected, indices)
+                    local = map_visibility_frequencies_to_image(
+                        observed[selected], full[indices], full_image_frequencies=full
+                    )
+                    actual[selected] = indices[local]
+                np.testing.assert_array_equal(actual, expected)
+
+    def test_wrong_task_and_outside_global_band_remain_errors(self):
+        with self.assertRaisesRegex(ValueError, "outside this task"):
+            map_visibility_frequencies_to_image(
+                [20.0], [10.0], full_image_frequencies=[0.0, 10.0, 20.0]
+            )
+        with self.assertRaisesRegex(ValueError, "half an image channel"):
+            map_visibility_frequencies_to_image(
+                [26.0], [20.0], full_image_frequencies=[0.0, 10.0, 20.0]
+            )
+
+    def test_invalid_full_axis_or_subset(self):
+        for full in ([], [[1.0, 2.0]], [np.nan], [np.inf]):
+            with self.assertRaisesRegex(ValueError, "Full image frequencies"):
+                map_visibility_frequencies_to_image(
+                    [1.0], [1.0], full_image_frequencies=full
+                )
+        for local, full in (([1.0], [1.0, 1.0]), ([1.0, 1.0], [1.0, 2.0])):
+            with self.assertRaisesRegex(ValueError, "unique"):
+                map_visibility_frequencies_to_image(
+                    [1.0], local, full_image_frequencies=full
+                )
+        with self.assertRaisesRegex(ValueError, "subset"):
+            map_visibility_frequencies_to_image(
+                [1.0], [1.1], full_image_frequencies=[1.0, 2.0]
+            )
+
+    def test_true_single_channel_preserves_existing_behavior(self):
+        for observed in ([12.0], [9.0, 11.0]):
+            np.testing.assert_array_equal(
+                map_visibility_frequencies_to_image(observed, [10.0]),
+                map_visibility_frequencies_to_image(
+                    observed, [10.0], full_image_frequencies=[10.0]
+                ),
+            )
+
+
+def test_single_plane_gridding_and_prediction_preserve_original_boundaries():
+    """The context reaches PSF, visibility and prediction kernels after slicing."""
+    full = np.array([1.0e9, 1.2e9, 1.4e9])
+    ms, image, _ = build_datasets(
+        visibility_frequencies=[1.15e9, 1.16e9, 1.17e9],
+        image_frequencies=full,
+        sky_value=2.0 + 0j,
+    )
+    image.frequency.attrs["full_image_frequencies"] = full.tolist()
+    image = image.isel(frequency=slice(1, 2))
+    image.attrs["data_groups"]["residual"] = {}
+    cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+    get_visibility_grid_single_field(ms, cgk, image)
+    np.testing.assert_allclose(ms.VISIBILITY_MODEL.values, 2.0, atol=1e-5)
+    ms.VISIBILITY.values[:] = 1.0
+    add_visibility_grid_single_field(ms, cgk, image)
+    assert np.all(image.VISIBILITY_NORMALIZATION.values > 0)
+    add_uv_sampling_grid_single_field(ms, cgk, image)
+    assert np.all(image.UV_SAMPLING_NORMALIZATION.values > 0)
+
+
 if __name__ == "__main__":
     unittest.main()

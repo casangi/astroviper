@@ -6,6 +6,8 @@ import numpy as np
 def map_visibility_frequencies_to_image(
     visibility_frequencies,
     image_frequencies,
+    *,
+    full_image_frequencies=None,
 ):
     """Map each visibility channel onto its nearest image-frequency channel.
 
@@ -33,6 +35,11 @@ def map_visibility_frequencies_to_image(
         channel the widest visibility spacing is used instead, and when both
         axes have one channel any frequency maps onto that plane.
 
+    full_image_frequencies : array-like, optional
+        Original, unpartitioned image axis. When supplied, assignment and
+        boundary checks use this axis; returned indices refer to the local
+        ``image_frequencies`` subset. Channels belonging to other tasks raise.
+
     Returns
     -------
     numpy.ndarray
@@ -59,13 +66,43 @@ def map_visibility_frequencies_to_image(
 
     from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
 
-    frequency_map = map_to_nearest_coordinate(visibility_frequencies, image_frequencies)
+    mapping_frequencies = image_frequencies
+    local_indices = None
+    if full_image_frequencies is not None:
+        mapping_frequencies = np.asarray(full_image_frequencies, dtype=np.float64)
+        if (
+            mapping_frequencies.ndim != 1
+            or mapping_frequencies.size == 0
+            or not np.all(np.isfinite(mapping_frequencies))
+        ):
+            raise ValueError(
+                "Full image frequencies must be a nonempty finite one-dimensional axis."
+            )
+        if (
+            np.unique(mapping_frequencies).size != mapping_frequencies.size
+            or np.unique(image_frequencies).size != image_frequencies.size
+        ):
+            raise ValueError("Full and local image frequencies must be unique.")
+        # Local centres are a subset of the original coordinates, not observed
+        # frequencies to interpolate. Preserve global midpoint tie breaking.
+        lookup = {value: index for index, value in enumerate(mapping_frequencies)}
+        if any(value not in lookup for value in image_frequencies):
+            raise ValueError(
+                "Local image frequencies must be a subset of the full image axis."
+            )
+        local_indices = np.full(mapping_frequencies.size, -1, dtype=np.int64)
+        for index, value in enumerate(image_frequencies):
+            local_indices[lookup[value]] = index
+
+    frequency_map = map_to_nearest_coordinate(
+        visibility_frequencies, mapping_frequencies
+    )
     too_far = frequency_map < 0
     if np.any(too_far):
         offending = np.flatnonzero(too_far)
         separations = np.abs(
             visibility_frequencies[offending, np.newaxis]
-            - image_frequencies[np.newaxis, :]
+            - mapping_frequencies[np.newaxis, :]
         )
         nearest = np.argmin(separations, axis=1)
         raise ValueError(
@@ -73,7 +110,14 @@ def map_visibility_frequencies_to_image(
             "from the nearest image channel centre; visibility channel indices="
             f"{offending.tolist()}, visibility frequencies="
             f"{visibility_frequencies[offending].tolist()} Hz, nearest image "
-            f"frequencies={image_frequencies[nearest].tolist()} Hz, "
+            f"frequencies={mapping_frequencies[nearest].tolist()} Hz, "
             f"separations={separations[np.arange(offending.size), nearest].tolist()} Hz."
         )
+    if local_indices is not None:
+        frequency_map = local_indices[frequency_map]
+        if np.any(frequency_map < 0):
+            raise ValueError(
+                "Visibility channels map outside this task's image-frequency subset; "
+                f"visibility channel indices={np.flatnonzero(frequency_map < 0).tolist()}."
+            )
     return frequency_map

@@ -2698,3 +2698,51 @@ def test_preparation_checks_actual_taylor_layout_with_shared_predicate(
         continuum_node._prepare_continuum_image(
             image, {}, initialize_static_products=True, input_checked=input_checked
         )
+
+
+def test_weight_density_node_preserves_broad_channel_boundaries(monkeypatch):
+    """The first global-weight task keeps its full-axis frequency context."""
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
+    )
+
+    full = 4107516045.6904545 + np.arange(8) * 533950857.6451702
+    observed = 4380616641.112875 + np.arange(13) * 8001126.285138
+    params = _weight_node_params()
+    params["image_params"]["frequency_coords"] = full
+    params["task_coords"]["frequency"]["data"] = full[1:2]
+    params["input_data"] = None
+    params["data_selection"] = {"ms": {"frequency": slice(None)}}
+    calls = []
+
+    def load(*args, **kwargs):
+        np.testing.assert_array_equal(kwargs["full_image_frequencies"], full)
+        calls.append("load")
+        return {"ms": xr.Dataset(coords={"frequency": observed})}
+
+    def grid(ps, image, *args, **kwargs):
+        mapped = map_visibility_frequencies_to_image(
+            ps["ms"].frequency.values,
+            image.frequency.values,
+            full_image_frequencies=image.frequency.attrs["full_image_frequencies"],
+        )
+        np.testing.assert_array_equal(mapped, np.zeros(observed.size, dtype=np.int64))
+        calls.append("grid")
+        return xr.Dataset(
+            {
+                "WEIGHT_DENSITY_GRID": (
+                    ("frequency", "weight_polarization", "u", "v"),
+                    np.ones((1, 1, 2, 2)),
+                ),
+                "SUM_WEIGHT": (("frequency", "weight_polarization"), np.ones((1, 1))),
+            },
+            coords={"frequency": full[1:2]},
+        )
+
+    monkeypatch.setattr("astroviper.utils.node_task_io.load_processing_set", load)
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.calculate_imaging_weights.grid_imaging_weight_density_continuum",
+        grid,
+    )
+    continuum_node.grid_imaging_weight_density_continuum_node(**params)
+    assert calls == ["load", "grid"]

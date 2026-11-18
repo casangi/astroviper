@@ -2984,3 +2984,84 @@ def test_tw_hydra_fits_output_per_taylor_term(tmp_path, tw_hydra_store, continuu
             rtol=1e-6,
             atol=1e-9,
         )
+
+
+@pytest.mark.parametrize("mode", ["cube", "channel_psf", "local_beam_moments"])
+@pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
+def test_broad_image_channels_are_independent_of_task_partition(
+    tmp_path, mode, io_engine
+):
+    """Nine observed channels into three image planes, with prediction enabled."""
+    from xradio.image import load_image
+
+    from astroviper.distributed_applications.imaging import image_cube_single_field
+    from tests.unit.distributed_applications.imaging.test_image_cube_single_field import (
+        PC,
+        _simulate_point_source,
+    )
+
+    store = _simulate_point_source(tmp_path, n_channels=9)
+    products = []
+    for tasks in (1, 3):
+        path = str(tmp_path / f"{mode}_{tasks}.img.zarr")
+        params = dict(
+            ps_store=store,
+            image_store=path,
+            image_params={
+                "image_size": [64, 64],
+                "cell_size": np.deg2rad(np.array([-8.0, 8.0]) / 3600),
+                "phase_direction": PC,
+                "frequency_coords": np.array([3.4e9, 4.6e9, 5.8e9]),
+                "polarization_coords": ["I", "V"],
+                "time_coords": [0.0],
+                "fft_padding": 1.2,
+            },
+            instrument_polarization_basis="circular",
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            cycle_control_params={
+                "max_iter": 2,
+                "max_cycles": 2,
+                "threshold": 0.0,
+                "gain": 0.1,
+                "psf_sidelobe_factor": 1.5,
+                "max_iter_per_cycle": 1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": 0.8,
+            },
+            processing_set_data_group_name="base",
+            single_precision_image=False,
+            n_mapping_parallelism={"frequency": tasks},
+            io_engine=io_engine,
+            processing_function_threads=1,
+        )
+        if mode == "cube":
+            params["image_data_variables_keep"] = [
+                "sky_residual",
+                "point_spread_function",
+                "sky_model",
+            ]
+            image_cube_single_field(**params)
+        else:
+            params["image_params"].update(reference_frequency=4.6e9, n_taylor_terms=2)
+            params["imaging_weights_params"].update(
+                weighting_scope="global", casa_weighting_implementation=True
+            )
+            image_continuum_single_field(
+                **params,
+                continuum_mode="mvc",
+                mvc_model_update_approximation=mode,
+                deconvolver="mtmfs",
+                restore=False,
+            )
+        image = load_image(path)
+        arrays = {
+            name: image[name].values
+            for name in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "SKY_MODEL")
+        }
+        assert all(np.isfinite(values).all() for values in arrays.values())
+        assert np.max(np.abs(arrays["SKY_MODEL"])) > 0
+        products.append(arrays)
+    for name in products[0]:
+        np.testing.assert_allclose(
+            products[1][name], products[0][name], rtol=1e-6, atol=1e-9, err_msg=name
+        )

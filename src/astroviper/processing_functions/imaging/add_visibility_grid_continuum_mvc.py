@@ -276,7 +276,9 @@ def add_visibility_grid_mvc_single_field(
         )
 
     frequency_map = map_visibility_frequencies_to_image(
-        frequency_coord, image_frequency_coord
+        frequency_coord,
+        image_frequency_coord,
+        full_image_frequencies=img_xds.frequency.attrs.get("full_image_frequencies"),
     )
     n_image_chan = image_frequency_coord.size
 

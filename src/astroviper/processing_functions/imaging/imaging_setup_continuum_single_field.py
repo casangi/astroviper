@@ -174,6 +174,9 @@ def _mfs_channel_imaging_weight_sums(
         frequency_map = map_visibility_frequencies_to_image(
             weight.frequency.values,
             image_frequencies,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
         )
         values = np.asarray(weight.values)
         if np.any(np.isinf(values)):

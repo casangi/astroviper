@@ -161,6 +161,8 @@ def _image(node_task_inputs, image_store, frequencies):
 
     kwargs = copy.deepcopy(node_task_inputs)
     kwargs["task_coords"]["frequency"]["data"] = np.asarray(frequencies, float)
+    # This helper creates a new image axis, not a partition of the captured one.
+    kwargs["image_frequency_attrs"]["full_image_frequencies"] = list(frequencies)
     kwargs["task_coords"]["frequency"]["slice"] = slice(0, len(frequencies))
     kwargs["image_store"] = str(image_store)
     kwargs["graph_mode"] = False  # write the task's image to its own store

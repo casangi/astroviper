@@ -1195,7 +1195,7 @@ def image_cube_single_field(
 
     input_params = {}
     # Cube nodes obtain their frequency slice from task_coords. Keep the full
-    # axis on the driver instead of copying it into every task's configuration.
+    # axis in spectral metadata for mapping, not in per-channel configuration.
     input_params["image_params"] = {
         name: value
         for name, value in image_params.items()
@@ -1204,6 +1204,9 @@ def image_cube_single_field(
     # Each task's image covers its own channels; the whole image's spectral
     # reference keeps its velocities equal to the image store's.
     input_params["image_frequency_attrs"] = dict(img_xds.frequency.attrs)
+    input_params["image_frequency_attrs"]["full_image_frequencies"] = (
+        img_xds.frequency.values.tolist()
+    )
     input_params["imaging_weights_params"] = imaging_weights_params
     input_params["zarr_meta"] = zarr_meta
     input_params["to_disk"] = True

@@ -479,6 +479,9 @@ def make_point_spread_function_mvc_single_field(
         map_visibility_frequencies_to_image(
             ms_xdt.frequency.values,
             img_xds.frequency.values,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
         )
 
     if complex_dtype is None:

@@ -706,6 +706,7 @@ def load_processing_set(
     load_correlated_data=True,
     *,
     map_frequencies,
+    full_image_frequencies=None,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -754,6 +755,8 @@ def load_processing_set(
         If false, omit the observed correlated-data array. This is used by
         cached-grid MFS residual updates, which require only UVW, flags, and
         imaging weights to predict and grid the model contribution.
+    full_image_frequencies : array-like, optional
+        Original image-frequency axis used to validate task-local selections.
     map_frequencies : callable
         ``map_frequencies(visibility_frequencies, task_frequencies)`` returns
         the index of the task frequency each selected channel is imaged onto
@@ -845,7 +848,14 @@ def load_processing_set(
         # use: execution blocks converted to LSRK have channel centres a few
         # kHz apart, so their frequencies never equal the image's exactly.
         try:
-            map_frequencies(child_frequency_values, task_frequency_values)
+            mapping_context = (
+                {"full_image_frequencies": full_image_frequencies}
+                if full_image_frequencies is not None
+                else {}
+            )
+            map_frequencies(
+                child_frequency_values, task_frequency_values, **mapping_context
+            )
         except ValueError as exc:
             raise ValueError(
                 f"Selected frequencies for {ms_name!r} do not map onto the task "

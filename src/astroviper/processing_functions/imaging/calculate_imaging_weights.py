@@ -1219,6 +1219,9 @@ def calculate_imaging_weights(
         frequency_map = map_visibility_frequencies_to_image(
             freq_chan,
             img_xds.frequency.values,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
         )
 
         grid_imaging_weights(
@@ -1251,6 +1254,9 @@ def calculate_imaging_weights(
         frequency_map = map_visibility_frequencies_to_image(
             freq_chan,
             img_xds.frequency.values,
+            full_image_frequencies=img_xds.frequency.attrs.get(
+                "full_image_frequencies"
+            ),
         )
 
         imaging_weights = degrid_imaging_weights(

@@ -44,6 +44,7 @@ def load_processing_set(
     processing_set_data_group_name,
     *,
     frequency_coords,
+    full_image_frequencies=None,
     instrument_polarization_basis="linear",
     data_group=None,
     load_correlated_data=True,
@@ -66,6 +67,8 @@ def load_processing_set(
         Data group to load.
     frequency_coords : array-like
         Frequencies of the task's image channels (chunk engine).
+    full_image_frequencies : array-like, optional
+        Original image-frequency axis used to validate task-local selections.
     instrument_polarization_basis : str, optional
         ``"linear"`` or ``"circular"`` (chunk engine).
     data_group : dict, optional
@@ -113,6 +116,7 @@ def load_processing_set(
             data_group=data_group,
             processing_set_data_group_name=processing_set_data_group_name,
             frequency_coords=frequency_coords,
+            full_image_frequencies=full_image_frequencies,
             instrument_polarization_basis=instrument_polarization_basis,
             processing_function_threads=processing_function_threads,
             load_correlated_data=load_correlated_data,

@@ -803,3 +803,42 @@ def test_channel_cycle_control_params_takes_the_global_row():
     for scalar_or_per_plane in (0.5, [0.5, 0.6]):
         plain = {"threshold": scalar_or_per_plane}
         assert _channel_cycle_control_params(plain, task_coords, {}, 0) is plain
+
+
+def test_single_channel_task_keeps_full_axis_for_science(tmp_path, monkeypatch):
+    """A cube task and its per-channel science use the same broad-channel map."""
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
+    )
+
+    full = np.array([1.0e9, 1.2e9, 1.4e9])
+    observed = np.array([1.15e9, 1.16e9, 1.17e9])
+    ps = _fake_processing_set({"ms_a": observed})
+    fake = _FakeScience([1])
+
+    def science(ps_xdt, image, *args, **kwargs):
+        np.testing.assert_array_equal(
+            image.frequency.attrs["full_image_frequencies"], full
+        )
+        np.testing.assert_array_equal(
+            map_visibility_frequencies_to_image(
+                ps_xdt["ms_a"].frequency.values,
+                image.frequency.values,
+                full_image_frequencies=image.frequency.attrs["full_image_frequencies"],
+            ),
+            [0, 0, 0],
+        )
+        return fake(ps_xdt, image, *args, **kwargs)
+
+    monkeypatch.setattr(pf_imaging, "image_cube_single_field", science)
+    params = _task_inputs(tmp_path, n_chan=1)
+    params["image_params"]["frequency_coords"] = full
+    params["task_coords"] = {"frequency": {"data": full[1:2]}}
+    params["image_frequency_attrs"] = _image_frequency_attrs(full)
+    image_cube_single_field(**params, input_data=ps)
+    assert len(fake.calls) == 1
+    np.testing.assert_array_equal(fake.calls[0]["vis_frequencies"]["ms_a"], observed)

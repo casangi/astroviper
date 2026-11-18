@@ -1333,6 +1333,11 @@ def prepare_model_uv_mvc_single_field(
         ),
     )
 
+    # Reconstructed channel models must retain the original mapping boundaries.
+    mvc_xds.frequency.attrs["full_image_frequencies"] = np.asarray(
+        image_params.get("frequency_coords", frequency_values)
+    ).tolist()
+
     return mvc_xds
 
 
