@@ -62,6 +62,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             ("interpolate data coords", "T_interpolate_data_coords"),
             ("input preflight", "T_input_preflight"),
             ("write empty image", "T_write_empty_image"),
+            ("get compute resources", "T_get_compute_resources"),
         ],
     ),
     (
@@ -671,6 +672,92 @@ def _persist_continuum_weight_cache_to_processing_set(
         ms_group.attrs["data_groups"] = copy.deepcopy(ms_xdt.ds.attrs["data_groups"])
         zarr.consolidate_metadata(ps_store, path=ms_name)
     zarr.consolidate_metadata(ps_store)
+
+
+def _write_continuum_fits(
+    image_store,
+    output_image,
+    image_data_variables_keep,
+    double_precision,
+    telescope,
+    frequency_attrs,
+    restoring_beam=None,
+):
+    """Write the finished continuum image as FITS, one file per variable and
+    Taylor term (``<VARIABLE>.tt<k>.fits``) with the reference frequency on the
+    spectral axis (with ``frequency_attrs``, the spectral frame of the image
+    setup) and the beam fit in the BEAMS tables; with a ``restoring_beam`` the
+    restored images carry it as their header beam."""
+    import shutil
+
+    import xarray as xr
+
+    from astroviper.utils.chunk_io import write_fits_image
+    from astroviper.utils.io import (
+        beam_params_dims,
+        full_dims_lm,
+        imaging_data_variables_and_dims_double_precision,
+    )
+
+    registry = imaging_data_variables_and_dims_double_precision
+    kept = [
+        key
+        for key in image_data_variables_keep
+        if registry[key]["name"] in output_image
+    ]
+    beam_keys = [key for key in kept if key.startswith("beam_fit_params")]
+    frequency = output_image.frequency.copy()
+    frequency.attrs = {**frequency_attrs, **frequency.attrs}
+    beams = {}
+    for key in beam_keys:
+        beam = output_image[registry[key]["name"]]
+        # The restored beam is labelled as xradio's beam fits already.
+        if "beam_params" in beam.dims:
+            beam = beam.rename({"beam_params": "beam_params_label"})
+        if "frequency" not in beam.dims:
+            beam = beam.expand_dims(frequency=frequency.values, axis=1)
+        beams[key] = beam.transpose(*beam_params_dims)
+    os.makedirs(image_store)
+    for key in kept:
+        if key in beam_keys:
+            continue
+        name = registry[key]["name"]
+        variable = output_image[name]
+        term_dim = next(
+            (d for d in ("taylor_term", "psf_taylor_order") if d in variable.dims),
+            None,
+        )
+        terms = [None] if term_dim is None else range(variable.sizes[term_dim])
+        for term in terms:
+            plane = variable if term is None else variable.isel({term_dim: term})
+            if "frequency" not in plane.dims:
+                plane = plane.expand_dims(frequency=frequency.values, axis=1)
+            xds = xr.Dataset(
+                {name: plane.transpose(*full_dims_lm)},
+                attrs=output_image.attrs,
+            )
+            for beam_key, beam in beams.items():
+                xds[registry[beam_key]["name"]] = beam
+            xds = xds.assign_coords(frequency=frequency)
+            suffix = "" if term is None else f".tt{term}"
+            scratch = os.path.join(image_store, f".{name}{suffix}")
+            write_fits_image(
+                scratch,
+                xds,
+                [key, *beam_keys],
+                data_variable_definitions={
+                    key: {"dims": full_dims_lm},
+                    **{beam_key: {"dims": beam_params_dims} for beam_key in beam_keys},
+                },
+                double_precision=double_precision,
+                telescope_name=telescope,
+                restoring_beam=restoring_beam,
+            )
+            os.replace(
+                os.path.join(scratch, f"{name}.fits"),
+                os.path.join(image_store, f"{name}{suffix}.fits"),
+            )
+            shutil.rmtree(scratch)
 
 
 def _continuum_image_for_disk(img_xds, image_data_variables_keep):
@@ -2473,8 +2560,10 @@ def image_continuum_single_field(
     fft_backend: str = "pyfftw",
     restore: bool = False,
     restoration_output: str = "primary_beam_corrected",
+    restoring_beam: list[float] | None = None,
     gridding_kernel_params: dict[str, Any] | None = None,
-    skunk_works: bool = False,
+    io_engine: str = "chunk",
+    output_image_format: str = "zarr",
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     reduce_mode: str = "tree",
@@ -2703,7 +2792,10 @@ def image_continuum_single_field(
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
         Restoration automatically retains its selected restored Taylor
-        products and the derived ``"alpha"``, ``"alpha_error"``, and, when available, ``"beta"``.
+        products, the derived ``"alpha"``, ``"alpha_error"``, and, when
+        available, ``"beta"``, and ``"beam_fit_params_sky_restored"``, the beam
+        the restore applied; with a ``restoring_beam`` also
+        ``"beam_fit_params_point_spread_function"``.
         Restored and spectral products require ``restore=True``. Alpha products
         require at least two Taylor terms; beta requires at least three.
         MFS can retain the Taylor UV grids ``visibility`` and ``uv_sampling``;
@@ -2735,8 +2827,19 @@ def image_continuum_single_field(
     fft_backend : str
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
-    skunk_works : bool
-        Enable the experimental storage path; required for sharded output.
+    io_engine : {"chunk", "xradio"}
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of ``image_store``: a Zarr store, or (``io_engine="chunk"``) a
+        directory with one FITS file per variable and Taylor term
+        (``<VARIABLE>.tt<k>.fits``, ``PRIMARY_BEAM.fits``) with the reference
+        frequency on the spectral axis and the beam fit in the ``BEAMS``
+        tables. Default ``"zarr"``.
     cycle_control_params : dict
         CLEAN cycle controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual
@@ -2999,6 +3102,28 @@ def image_continuum_single_field(
         by its common power primary beam. Corrected pixels below
         ``primary_beam_limit`` are blanked with NaN. Imaging workflows use this
         selector only when ``restore=True``.
+    restoring_beam : list of float or None, optional
+        ``None`` restores each plane with its own PSF fit [CASA ``tclean``
+        ``restoringbeam=''``]. ``[major, minor, pa]`` (FWHM and position angle
+        in radians, as ``BEAM_FIT_PARAMS``; ``major >= minor > 0``,
+        ``|pa| <= pi``) restores every plane to that beam as ``tclean`` does
+        since CASA 5.6 (CAS-12148): the model is convolved with the unit-peak
+        target beam, and the residual with the Gaussian that takes the plane's
+        PSF beam to the target, times the ratio of the beam areas, so it is in
+        Jy per target beam. ``SKY_RESIDUAL`` is unchanged. A plane whose PSF
+        beam the target does not contain, or that has no PSF fit, keeps its
+        residual unconvolved and unscaled, as ``tclean`` does, and is named in a
+        warning. The continuum imager refuses a target that does not contain its
+        PSF beam, and any target when its PSF fit failed, right after that fit
+        in its first imaging cycle: the residual update has run, but no model
+        update. With primary-beam correction a restore cutoff below 1e-3 is
+        refused (``primary_beam_limit``; in cube imaging that of
+        ``cycle_control_params``, where 0 restores at 0.2): in the transform to
+        the target, the float32 rounding of the residual divided by the primary
+        beam, large near its nulls, would spread over the corrected image. The
+        beam is recorded as ``BEAM_FIT_PARAMS_SKY_RESTORED``. For
+        ``tclean``'s ``restoringbeam='common'``, see
+        :func:`~astroviper.processing_functions.image_analysis.common_beam.common_beam`.
 
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
@@ -3297,6 +3422,9 @@ def image_continuum_single_field(
             Node, model-update, PSF-fit, restoration, graph, and driver timing
             records. Optional cache mappings may also be present for the
             selected memory policies.
+        ``compute_resources``
+            What the graphs ran on, see
+            :func:`astroviper.utils.data_partitioning.get_compute_resources`.
     """
     if not input_checked:
         from astroviper.processing_functions.imaging.config_check import (
@@ -3309,6 +3437,13 @@ def image_continuum_single_field(
     from astroviper.utils.io import check_image_output_destination
 
     check_image_output_destination(image_store, overwrite=overwrite)
+    # With FITS output the run works in a Zarr store that the FITS files of
+    # the finished image replace, at the path given.
+    fits_store = image_store
+    if output_image_format == "fits":
+        check_image_output_destination(
+            fits_store, overwrite=overwrite, output_image_format="fits"
+        )
 
     import time
 
@@ -3336,12 +3471,13 @@ def image_continuum_single_field(
     )
     from astroviper.utils.clean_mask import load_clean_mask
     from astroviper.utils.data_group_tools import modify_data_groups_xds
+    from astroviper.utils.data_partitioning import get_compute_resources
     from astroviper.utils.io import (
         image_data_groups_for_kept_variables,
         write_zarr_image_store,
     )
     from astroviper.utils.measurement_set_v2 import is_measurement_set_v2
-    from astroviper.utils.timing import format_timing_summary
+    from astroviper.utils.timing import format_timing_summary, node_task_timing_table
 
     if compressor is None:
         compressor = BloscCodec(cname="lz4", clevel=5)
@@ -3382,6 +3518,11 @@ def image_continuum_single_field(
             "primary_beam_corrected": ("sky_restored_flat_sky",),
             "both": ("sky_restored_flat_noise", "sky_restored_flat_sky"),
         }[restoration_output]
+        # A restore records the beam it applied, a restore to a target beside
+        # the PSF beam.
+        restored_products += ("beam_fit_params_sky_restored",)
+        if restoring_beam is not None:
+            restored_products += ("beam_fit_params_point_spread_function",)
         image_data_variables_keep = list(image_data_variables_keep) + [
             key for key in restored_products if key not in image_data_variables_keep
         ]
@@ -3528,6 +3669,11 @@ def image_continuum_single_field(
     image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
     timing_distributed_application["T_write_empty_image"] = time.time() - start
 
+    # Every continuum graph is computed with Dask.
+    start = time.time()
+    compute_resources = get_compute_resources("dask", processing_function_threads)
+    timing_distributed_application["T_get_compute_resources"] = time.time() - start
+
     zarr_meta = {}
 
     input_params = {}
@@ -3560,6 +3706,9 @@ def image_continuum_single_field(
     input_params["is_first_cycle"] = True
     input_params["deconvolver"] = deconvolver
     input_params["restoration_output"] = restoration_output
+    input_params["restoring_beam"] = (
+        None if restoring_beam is None else [float(value) for value in restoring_beam]
+    )
     input_params["primary_beam_limit"] = float(primary_beam_limit)
     input_params["continuum_mode"] = continuum_mode
     input_params["mvc_model_update_approximation"] = mvc_model_update_approximation
@@ -3568,7 +3717,7 @@ def image_continuum_single_field(
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
     input_params["make_primary_beam_taylor"] = bool(restore)
-    input_params["skunk_works"] = skunk_works
+    input_params["io_engine"] = io_engine
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
     input_params["spectral_diagnostics"] = spectral_diagnostics
 
@@ -3746,14 +3895,8 @@ def image_continuum_single_field(
             "weight_memory_mode": weight_memory_mode,
             "image_store": image_store,
             "data_group": input_params["data_group"],
+            "io_engine": io_engine,
         }
-
-        if skunk_works:
-            # The preparation node shown above currently uses the standard loader.
-            logger.warning(
-                "Imaging-weight preparation currently uses the standard "
-                "processing-set loader even though skunk_works=True."
-            )
 
         if weighting in ("natural", "briggs", "briggs_abs", "uniform"):
             if weighting_scope == "global":
@@ -3944,6 +4087,7 @@ def image_continuum_single_field(
                 "spectral_diagnostics": spectral_diagnostics,
                 "restore": restore,
                 "restoration_output": restoration_output,
+                "restoring_beam": input_params["restoring_beam"],
                 "cycle_acceleration": cycle_acceleration,
                 "momentum_coefficient": momentum_coefficient,
             }
@@ -4234,6 +4378,7 @@ def image_continuum_single_field(
                 "deconvolver": deconvolver,
                 "restore": restore,
                 "restoration_output": restoration_output,
+                "restoring_beam": input_params["restoring_beam"],
                 "primary_beam_limit": primary_beam_limit,
                 "processing_function_threads": processing_function_threads,
             }
@@ -4267,6 +4412,7 @@ def image_continuum_single_field(
 
         return_dict["static_xds"] = static_xds
         return_dict["n_cycles"] = n_cycles
+        return_dict["compute_resources"] = compute_resources
 
         # The initial on-disk arrays are cube-shaped NaN placeholders.  Continuum
         # finalization instead produces Taylor-term products, so replace the store
@@ -4300,21 +4446,48 @@ def image_continuum_single_field(
             _remove_mvc_visibility_grid_cache(image_store)
         if continuum_mode == "mfs" and visibility_memory_mode == "in_place":
             _remove_mfs_visibility_grid_cache(image_store)
-        write_image(
-            output_image,
-            imagename=image_store,
-            out_format="zarr",
-            overwrite=True,
-            compressor=compressor,
-        )
-        timing_distributed_application["T_write_final_image"] = time.time() - start
+        if output_image_format == "fits":
+            import shutil
 
-        # Consolidate metadata
-        start = time.time()
-        zarr.consolidate_metadata(image_store)
-        timing_distributed_application["T_consolidate_metadata"] = time.time() - start
+            # The working Zarr store (and its caches) is replaced by the FITS
+            # files of the finished image.
+            output_image = output_image.load()
+            shutil.rmtree(image_store)
+            if os.path.lexists(fits_store):
+                shutil.rmtree(fits_store)
+            _write_continuum_fits(
+                fits_store,
+                output_image,
+                image_data_variables_keep,
+                not single_precision_image,
+                next(iter(ps_xdt.values()))
+                .ds.attrs.get("observation_info", {})
+                .get("telescope_name")
+                or "UNKNOWN",
+                img_xds.frequency.attrs,
+                restoring_beam=input_params["restoring_beam"],
+            )
+            timing_distributed_application["T_write_final_image"] = time.time() - start
+        else:
+            write_image(
+                output_image,
+                imagename=image_store,
+                out_format="zarr",
+                overwrite=True,
+                compressor=compressor,
+            )
+            timing_distributed_application["T_write_final_image"] = time.time() - start
+
+            # Consolidate metadata
+            start = time.time()
+            zarr.consolidate_metadata(image_store)
+            timing_distributed_application["T_consolidate_metadata"] = (
+                time.time() - start
+            )
     finally:
-        if weight_memory_mode == "in_place":
+        if weight_memory_mode == "in_place" and os.path.isdir(
+            os.path.join(image_store, _CONTINUUM_WEIGHT_CACHE_GROUP)
+        ):
             start = time.time()
             _remove_continuum_weight_cache(image_store)
             timing_distributed_application["T_remove_in_place_weight_cache"] = (
@@ -4349,20 +4522,13 @@ def image_continuum_single_field(
     if timing_node_tasks is None:
         timing_node_tasks = return_dict["timing_node_tasks"]
     logger.info(
-        format_timing_summary(
-            timing_node_tasks.mean(numeric_only=True).to_dict(),
+        f"AstroVIPER continuum task timing over all {len(timing_node_tasks)} graph "
+        "tasks (seconds)\n"
+        + node_task_timing_table(
+            timing_node_tasks,
             CONTINUUM_IMAGING_TIMING_PHASES,
             total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER continuum task timing: MEAN over all graph tasks (seconds)",
-        )
-    )
-    logger.info(
-        format_timing_summary(
-            timing_node_tasks.max(numeric_only=True).to_dict(),
-            CONTINUUM_IMAGING_TIMING_PHASES,
-            total_key=IMAGING_TIMING_TOTAL_KEY,
-            title="AstroVIPER continuum task timing: MAX over all graph tasks (seconds)",
-        )
+        ).to_string(float_format="{:.3f}".format)
     )
 
     timing_model_updates = _combine_graph_timing_frames(

@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+import xarray as xr
 
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     DEFAULT_GRIDDING_KERNEL_PARAMS,
@@ -15,12 +16,16 @@ from astroviper.processing_functions.imaging.utils.fft_sizing import (
     next_fft_friendly_size,
 )
 from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics import (
+    BEAM_FIT_AGREEMENT,
     FFT_PADDING,
     FIELD_OF_VIEW_MARGIN,
     GRIDDING_KERNEL_PARAMS,
+    REFIT_PIXELS_PER_BEAM,
+    REFIT_SAMPLING_RATIO,
     SPEED_OF_LIGHT,
+    UNIFORM_DISK_HALF_POWER_WIDTH,
+    beam_refit_cells,
     cell_size_from_beam,
-    cell_size_from_beam_fit,
     cell_size_guess,
     default_robust,
     field_of_view,
@@ -28,8 +33,10 @@ from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics 
     instrument_polarization_basis_from_correlations,
     longest_antenna_separation,
     max_cell_size_for_uv_coverage,
+    plausible_beam_fits,
     primary_beam_radius,
     primary_beam_telescope,
+    refitted_minor_axis,
     stokes_for_correlations,
 )
 from astroviper.processing_functions.simulation.antenna_beams import (
@@ -260,29 +267,177 @@ def test_cell_size_from_beam():
         cell_size_from_beam(1e-5, 0.0)
 
 
-def test_cell_size_from_beam_fit():
-    """The Stokes I minor axis of the highest frequency channel with a valid
-    fit, by label whatever the order of the dims."""
-    import xarray as xr
+#: Longest baseline (wavelengths) and image of the stand-in PSF passes: the minor
+#: axis is at least 1 / (3 u_max) = 3.33e-5 rad and the major axis shorter than
+#: 200 cells of 1e-6 rad.
+U_MAX = 1e4
+IMAGE_SIZE = 200
+CELL = 1e-6
 
-    beam = np.zeros((3, 2, 3))  # frequency, polarization, beam_params_label
-    beam[:, 0, 1] = [3e-5, 2e-5, 0.0]  # Stokes I minor axes; the top channel flagged
-    beam[:, 1, 1] = 1e-5  # Stokes V
-    fit = xr.DataArray(
-        beam,
-        dims=("frequency", "polarization", "beam_params_label"),
+
+def _point_spread_function_pass(
+    stokes_i_beams, frequency, uv_distance_max, image_size=IMAGE_SIZE, cell=CELL
+):
+    """The variables and attributes of a PSF pass that the beam fit heuristics
+    read; Stokes V has a beam of twice the Stokes I one."""
+    beams = np.asarray(stokes_i_beams, dtype=float).reshape(-1, 3)
+    return xr.Dataset(
+        {
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": (
+                ("frequency", "polarization", "beam_params_label"),
+                np.stack([beams, 2.0 * beams], axis=1),
+            ),
+            "UV_DISTANCE_MAX": ("frequency", np.asarray(uv_distance_max, float)),
+        },
         coords={
-            "frequency": [3e9, 3.4e9, 3.8e9],
+            "frequency": np.atleast_1d(frequency),
             "polarization": ["I", "V"],
             "beam_params_label": ["major", "minor", "pa"],
         },
+        attrs={"image_size": [image_size, image_size], "cell_size": [-cell, cell]},
     )
-    assert cell_size_from_beam_fit(fit, 5.0) == pytest.approx(4e-6)
-    assert cell_size_from_beam_fit(fit.transpose(), 4.0) == pytest.approx(5e-6)
-    fit[1, 0, 1] = np.nan
-    assert cell_size_from_beam_fit(fit, 5.0) == pytest.approx(6e-6)
-    with pytest.raises(ValueError, match="No channel has a valid beam fit"):
-        cell_size_from_beam_fit(fit.where(fit.frequency < 3e9, 0.0), 5.0)
+
+
+def test_plausible_beam_fits():
+    """Finite, 0 < minor <= major, the minor axis at least 1 / (3 u_max) and the
+    major axis shorter than the image; by label, whatever the order of the dims."""
+    limit = 1.0 / (3.0 * U_MAX)
+    extent = IMAGE_SIZE * CELL
+    cases = [
+        ([1e-4, 5e-5, 0.3], U_MAX, True),
+        ([1e-4, limit, 0.3], U_MAX, True),
+        ([1e-4, 0.99 * limit, 0.3], U_MAX, False),
+        ([0.99 * extent, 5e-5, 0.3], U_MAX, True),
+        ([extent, 5e-5, np.pi / 2], U_MAX, False),
+        ([1e-4, np.nan, 0.3], U_MAX, False),
+        ([1e-4, 5e-5, np.inf], U_MAX, False),
+        ([0.0, 0.0, 0.0], U_MAX, False),
+        ([5e-5, 1e-4, 0.3], U_MAX, False),
+        ([1e-4, 5e-5, 0.3], np.nan, False),
+    ]
+    xds = _point_spread_function_pass(
+        [beam for beam, _, _ in cases],
+        3e9 + 1e6 * np.arange(len(cases)),
+        [u_max for _, u_max, _ in cases],
+    )
+    expected = [plausible for _, _, plausible in cases]
+    plausible = plausible_beam_fits(xds)
+    np.testing.assert_array_equal(plausible.sel(polarization="I").values, expected)
+    np.testing.assert_array_equal(
+        plausible_beam_fits(xds.transpose()).sel(polarization="I").values, expected
+    )
+    # Stokes V: twice the Stokes I beams, so the beam at 0.99 of the image is not.
+    assert not plausible.sel(polarization="V").values[3]
+
+
+def _beams(minor_axes, pa=0.3):
+    minor_axes = np.asarray(minor_axes, dtype=float)
+    return np.stack([2.0 * minor_axes, minor_axes, np.full(minor_axes.size, pa)], 1)
+
+
+def test_beam_refit_cells_from_the_plausible_fits():
+    """The highest channel with data is refitted, here one whose fit is junk
+    (longer than the image); the cells put REFIT_PIXELS_PER_BEAM and
+    REFIT_SAMPLING_RATIO times as many pixels across the median of the
+    plausible minor axes scaled to its frequency, which an off fit does not move."""
+    frequency = np.array([3.0e9, 3.1e9, 3.2e9, 3.3e9, 3.4e9, 3.5e9])
+    minor_axis = 5e-5  # at 3.4 GHz
+    beams = _beams(minor_axis * 3.4e9 / frequency)
+    beams[2, 1] *= 1.1
+    beams[4] = [1.0, 3e-4, np.pi / 2]
+    beams[5] = 0.0
+    uv_distance_max = np.full(frequency.size, U_MAX)
+    uv_distance_max[5] = np.nan
+    refit_frequency, estimate, cells = beam_refit_cells(
+        _point_spread_function_pass(beams, frequency, uv_distance_max)
+    )
+    assert refit_frequency == 3.4e9
+    assert estimate == pytest.approx(minor_axis, rel=1e-12)
+    np.testing.assert_allclose(
+        cells,
+        [
+            estimate / REFIT_PIXELS_PER_BEAM,
+            estimate / (REFIT_PIXELS_PER_BEAM * REFIT_SAMPLING_RATIO),
+        ],
+        rtol=1e-15,
+    )
+
+
+def test_beam_refit_cells_without_a_plausible_fit():
+    """Without a plausible fit the cells sample the half power width of a
+    uniformly weighted disk out to the longest baseline of the channel."""
+    frequency = np.array([3.0e9, 3.4e9])
+    beams = [[1.0, 3e-4, np.pi / 2], [np.nan, np.nan, np.nan]]
+    refit_frequency, estimate, cells = beam_refit_cells(
+        _point_spread_function_pass(beams, frequency, [0.9 * U_MAX, U_MAX])
+    )
+    width = UNIFORM_DISK_HALF_POWER_WIDTH / U_MAX
+    assert (refit_frequency, estimate) == (3.4e9, None)
+    np.testing.assert_allclose(
+        cells,
+        [
+            width / REFIT_PIXELS_PER_BEAM,
+            width / (REFIT_PIXELS_PER_BEAM * REFIT_SAMPLING_RATIO),
+        ],
+        rtol=1e-15,
+    )
+    with pytest.raises(ValueError, match="No channel has data"):
+        beam_refit_cells(
+            _point_spread_function_pass(beams, frequency, [np.nan, np.nan])
+        )
+
+
+def _refit(beam, image_size=IMAGE_SIZE, cell=CELL):
+    return _point_spread_function_pass([beam], 3.4e9, [U_MAX], image_size, cell)
+
+
+def test_refitted_minor_axis_of_two_refits_that_agree():
+    """Two plausible refits within a factor BEAM_FIT_AGREEMENT give the smaller
+    minor axis, whatever the estimate."""
+    minor_axis = 2.0**-14
+    first = _refit([1.5e-4, minor_axis, 0.3])
+    agreeing = _refit([1.5e-4, BEAM_FIT_AGREEMENT * minor_axis, 0.3], 250, 0.8e-6)
+    assert refitted_minor_axis([first, agreeing], None) == minor_axis
+    assert refitted_minor_axis([agreeing, first], 3.0 * minor_axis) == minor_axis
+    too_far = np.nextafter(BEAM_FIT_AGREEMENT * minor_axis, np.inf)
+    with pytest.raises(ValueError, match="give no plausible minor axis"):
+        refitted_minor_axis([first, _refit([1.5e-4, too_far, 0.3])], None)
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        # longer than the image, the position angle at the bound of the fit
+        [1.0, 2.0e-4, np.pi / 2],
+        # plausible, but an axis-aligned fit about three times too wide
+        [1.4e-4, 1.2e-4, np.pi / 2],
+    ],
+)
+def test_refitted_minor_axis_of_a_junk_and_a_good_refit(junk):
+    """A refit that is not plausible, or that agrees with nothing, does not
+    count: the good refit counts through the estimate of the PSF pass, and
+    without the estimate nothing counts."""
+    good = _refit([1.0e-4, 4.0e-5, 0.96])
+    for refits in ([_refit(junk), good], [good, _refit(junk)]):
+        assert refitted_minor_axis(refits, 4.6e-5) == 4.0e-5
+        for estimate in (None, 2.0e-4):
+            with pytest.raises(ValueError, match="give no plausible minor axis"):
+                refitted_minor_axis(refits, estimate)
+
+
+def test_refitted_minor_axis_of_refits_that_agree_only_with_the_estimate():
+    """Refits that disagree with each other count when each agrees with the
+    estimate; the smaller minor axis is taken. Two refits that are not
+    plausible give nothing, whatever the estimate."""
+    estimate = 5.0e-5
+    low = _refit([1.5e-4, 0.82 * estimate, 0.3])
+    high = _refit([1.5e-4, 1.2 * estimate, 0.3])
+    assert refitted_minor_axis([high, low], estimate) == 0.82 * estimate
+    with pytest.raises(ValueError, match="give no plausible minor axis"):
+        refitted_minor_axis([high, low], None)
+    junk = [_refit([1.0, estimate, np.pi / 2]), _refit([np.nan, np.nan, np.nan])]
+    with pytest.raises(ValueError, match="give no plausible minor axis"):
+        refitted_minor_axis(junk, estimate)
 
 
 def test_max_cell_size_for_uv_coverage():

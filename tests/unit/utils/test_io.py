@@ -39,6 +39,18 @@ class TestImageDataGroupsForKeptVariables:
         groups = image_data_groups_for_kept_variables(["sky_restored"])
         assert groups == {"restored": {"sky": "SKY_RESTORED"}}
 
+    def test_restoring_beam_is_the_beam_of_the_restored_group(self):
+        """xradio exports the restored image with the beam of this role."""
+        groups = image_data_groups_for_kept_variables(
+            ["sky_restored", "beam_fit_params_sky_restored"]
+        )
+        assert groups == {
+            "restored": {
+                "sky": "SKY_RESTORED",
+                "beam_fit_params_sky": "BEAM_FIT_PARAMS_SKY_RESTORED",
+            }
+        }
+
     def test_continuum_spectral_products_join_the_restored_group(self):
         """Alpha, its error, and beta have stable public registry roles."""
         groups = image_data_groups_for_kept_variables(["alpha", "alpha_error", "beta"])
@@ -68,6 +80,73 @@ class TestImageDataGroupsForKeptVariables:
                 imaging_data_variables_and_dims_double_precision[key]["name"]
                 == imaging_data_variables_and_dims_single_precision[key]["name"]
             )
+
+
+class TestBeamFitParamsStorage:
+    def test_beam_fits_are_float64_in_both_registries(self):
+        for registry in (
+            imaging_data_variables_and_dims_double_precision,
+            imaging_data_variables_and_dims_single_precision,
+        ):
+            for key, definition in registry.items():
+                if key.startswith("beam_fit_params"):
+                    assert definition["dtype"] == "<f8", key
+
+    def test_a_fit_survives_a_single_precision_store(self, tmp_path):
+        """A fit written to and read from a single-precision store is unchanged;
+        the restoring beam carries the attributes of xradio's beam variable."""
+        import numpy as np
+        import xarray as xr
+
+        from astroviper.utils.io import (
+            create_empty_data_variables_on_disk,
+            write_result_chunk_to_disk_using_zarr,
+            write_zarr_image_store,
+        )
+
+        img_xds = TestWriteZarrImageStore._image_xds()
+        image_store = write_zarr_image_store(img_xds, str(tmp_path / "cube.img.zarr"))
+        keep = [
+            "sky_residual",
+            "beam_fit_params_point_spread_function",
+            "beam_fit_params_sky_restored",
+        ]
+        create_empty_data_variables_on_disk(
+            image_store,
+            keep,
+            shape_dict=img_xds.sizes,
+            parallel_coords=None,
+            compressor=None,
+            double_precision=False,
+            data_variable_definitions="imaging",
+        )
+        rng = np.random.default_rng(5)
+        beam_shape = (1, 2, 1, 3)
+        fit = rng.uniform(1e-6, 1e-5, beam_shape)
+        target = np.broadcast_to(fit.max(axis=1, keepdims=True), beam_shape)
+        beam_dims = ["time", "frequency", "polarization", "beam_params_label"]
+        chunk_xds = img_xds.assign(
+            SKY_RESIDUAL=(
+                ["time", "frequency", "polarization", "l", "m"],
+                rng.standard_normal((1, 2, 1, 8, 6)).astype(np.float32),
+            ),
+            BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION=(beam_dims, fit),
+            BEAM_FIT_PARAMS_SKY_RESTORED=(beam_dims, target),
+        )
+        write_result_chunk_to_disk_using_zarr(
+            image_store, keep, {"frequency": {"slice": slice(0, 2)}}, chunk_xds
+        )
+        stored = xr.open_zarr(image_store)
+        assert stored["SKY_RESIDUAL"].dtype == np.float32
+        for name, values in (
+            ("BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION", fit),
+            ("BEAM_FIT_PARAMS_SKY_RESTORED", target),
+        ):
+            assert stored[name].dtype == np.float64
+            np.testing.assert_array_equal(stored[name].values, values)
+        attrs = stored["BEAM_FIT_PARAMS_SKY_RESTORED"].attrs
+        assert attrs["type"] == "beam_fit_params_sky"
+        assert attrs["units"] == "rad"
 
 
 class TestCreateEmptyDataVariablesImageChunkingSharding:
@@ -350,3 +429,79 @@ class TestImageOutputDestination:
             write_zarr_image_store(TestWriteZarrImageStore._image_xds(), str(path))
         assert list(path.iterdir()) == [marker]
         assert marker.read_bytes() == b"keep concurrent output"
+
+
+class TestWriteResultChunk:
+    @staticmethod
+    def _image_store(tmp_path, name, image_sharding=None):
+        import zarr
+
+        from astroviper.utils.io import create_empty_data_variables_on_disk
+
+        store = str(tmp_path / name)
+        zarr.open_group(store, mode="w")
+        create_empty_data_variables_on_disk(
+            store,
+            ["sky_residual"],
+            shape_dict={
+                "time": 1,
+                "frequency": 4,
+                "polarization": 2,
+                "l": 8,
+                "m": 8,
+            },
+            parallel_coords={"frequency": {"data_chunks": [[0], [1], [2], [3]]}},
+            compressor=zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+            double_precision=False,
+            data_variable_definitions="imaging",
+            image_sharding=image_sharding,
+        )
+        return store
+
+    @pytest.mark.parametrize(
+        "io_engine, image_sharding",
+        [("xradio", None), ("chunk", None), ("chunk", {"frequency": 2})],
+    )
+    def test_writes_the_chunk(self, tmp_path, io_engine, image_sharding):
+        import numpy as np
+        import xarray as xr
+        import zarr
+
+        from astroviper.utils.io import write_result_chunk
+
+        store = self._image_store(tmp_path, "img.zarr", image_sharding)
+        values = np.random.default_rng(2).standard_normal((1, 1, 2, 8, 8))
+        chunk = xr.Dataset(
+            {
+                "SKY_RESIDUAL": (
+                    ["time", "frequency", "polarization", "l", "m"],
+                    values.astype("<f4"),
+                )
+            }
+        )
+        write_result_chunk(
+            io_engine,
+            store,
+            ["sky_residual"],
+            {"frequency": {"slice": slice(2, 3)}},
+            chunk,
+            image_sharding=image_sharding,
+        )
+        back = zarr.open_array(store + "/SKY_RESIDUAL")[:]
+        np.testing.assert_array_equal(back[:, 2:3], values.astype("<f4"))
+        assert np.isnan(np.delete(back, 2, axis=1)).all()
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"io_engine": "zarr"}, "io_engine must be"),
+            ({"io_engine": "xradio", "output_image_format": "fits"}, "chunk"),
+            ({"io_engine": "xradio", "image_sharding": {"frequency": 2}}, "chunk"),
+        ],
+    )
+    def test_refuses(self, kwargs, match):
+        from astroviper.utils.io import write_result_chunk
+
+        engine = kwargs.pop("io_engine")
+        with pytest.raises(ValueError, match=match):
+            write_result_chunk(engine, "unused", [], {}, None, **kwargs)

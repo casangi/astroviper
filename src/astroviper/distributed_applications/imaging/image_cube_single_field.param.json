@@ -38,12 +38,13 @@
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
         "restoration_output": { "type": "string", "allowed": ["apparent", "primary_beam_corrected", "both"] },
+        "restoring_beam": { "type": ["list", "ndarray"], "nullable": true },
         "psf_fitting_method": { "type": "string", "allowed": ["astroviper", "casa"] },
         "gridding_kernel_params": { "type": ["dict"], "nullable": true },
         "primary_beam_params": { "type": ["dict"], "nullable": true },
         "clean_mask": { "type": ["str"], "nullable": true },
         "auto_mask_params": { "type": ["dict"], "nullable": true },
-        "skunk_works": { "type": "boolean" },
+        "io_engine": { "type": ["str"], "allowed": ["chunk", "xradio"] },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
         "reduce_mode": {
@@ -57,6 +58,7 @@
         "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true },
         "msv2_open_options": { "type": ["dict"], "nullable": true },
         "parameters_file": { "type": ["str"], "nullable": true },
-        "report": { "type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"] }
+        "report": { "type": ["str"], "nullable": true, "allowed": ["html", "pdf", "notebook"] },
+        "find_continuum_first_round": { "type": "boolean" }
     }
 }

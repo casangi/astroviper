@@ -188,11 +188,16 @@ A distributed application takes `report=None | "html" | "pdf" | "notebook"` and,
 once its output is written, makes a report through `utils.report.make_report`
 (a failing report is logged and never costs the run its results). Every report
 starts with the common processing section (`utils.report.add_processing_section`:
-timing, task stream, cluster resources); the application's results section lives
+performance measures, timing, task stream, task times, the resources of the cluster,
+of the worker slots and of the tasks); the application's results section lives
 next to it (`<application>_report.py`), built with `utils.report.Report` and the
 pyplot-free figures of `utils/report_plots.py`. For the task stream and the
 resource monitor, a node task records `start_unixtime` and its execution identity
 (`hostname`, `process_pid`, `thread_native_id`, `worker_name`) and returns a dict.
+Right before its first compute the application records what its graphs run on
+(`utils.data_partitioning.get_compute_resources`, the driver step
+`T_get_compute_resources`) under `return_dict["compute_resources"]`, which the
+performance measures and the plots of `utils/resource_plots.py` read.
 
 ### The `simulation` subdomain (port of SIRIUS)
 `simulate_processing_set` is a **pure generator**: there is no input processing
@@ -282,12 +287,12 @@ path is untouched. A sample with any loaded correlation flagged is dropped for
 all of them (no pseudo Stokes I), which gives every plane the same uv coverage
 and hence the same PSF.
 
-**Measurement Set v2 input (skunk works).** `image_cube_single_field` also
-images a Measurement Set v2 directly when `skunk_works=True`
+**Measurement Set v2 input.** `image_cube_single_field` also
+images a Measurement Set v2 directly, with either I/O engine
 (`utils/measurement_set_v2.py::is_measurement_set_v2` detects it; guards in
-the driver refuse `skunk_works=False`, a missing engine, the write-back flags,
+the driver refuse a missing engine, the write-back flags,
 an empty `scan_intents` selection and an MSv4 without the data group (or one
-of its four roles; `check_data_group_skunk_works_msv2`) before anything is
+of its four roles; `check_data_group_msv2`) before anything is
 written). AstroVIPER has no MSv2 reader of its own: the driver opens the MS
 lazily with XRADIO's `xradio_msv2` engine (`open_msv2`,
 `array_backend="xarray"`, `partition_cache="read"` unless
@@ -297,8 +302,8 @@ mapping exactly as for a Zarr processing set, and `add_lazy_input_data`
 gives every task, under the mapping key `lazy_input_data`, the lazily indexed
 data-group variables of its selection (baseline names as integer codes into a
 name table, to keep the graph payload small). The node task reads them with
-`load_processing_set_skunk_works_msv2`
-(`node_tasks/imaging/utils/skunk_works_msv2.py`); an `MSv2ChangedError` aborts
+`load_processing_set_msv2`
+(`utils/measurement_set_v2_input.py`); an `MSv2ChangedError` aborts
 the run instead of skipping the chunk. Every value comes from the engine, so
 the images equal those of the MS converted with
 `convert_msv2_to_processing_set` (same `partition_scheme`). python-casacore

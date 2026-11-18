@@ -43,11 +43,11 @@ def test_primary_beam_cache_roundtrip_preserves_disjoint_reordered_channels(
         store, image, image.frequency.values, ["XX", "YY"], single_precision, None
     )
     first = image.isel(frequency=[2, 0])
-    _write_wideband_primary_beam_in_place(first, store)
+    _write_wideband_primary_beam_in_place(first, store, "xradio")
     # Writing one partition must not overwrite another partition's channels.
     unwritten = _load_wideband_primary_beam_in_place(image.isel(frequency=[1]), store)
     assert np.isnan(unwritten.PRIMARY_BEAM).all()
-    _write_wideband_primary_beam_in_place(image.isel(frequency=[1]), store)
+    _write_wideband_primary_beam_in_place(image.isel(frequency=[1]), store, "xradio")
     for selection in ([2, 0], [1], [0, 1, 2]):
         subset = image.isel(frequency=selection)
         loaded = _load_wideband_primary_beam_in_place(subset, store)

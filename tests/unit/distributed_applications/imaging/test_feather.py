@@ -209,6 +209,45 @@ class FeatherTest(FeatherShared, unittest.TestCase):
         )
         self._rm(self.feather_expected)  # cleanup after test
 
+    def test_io_engines_and_fits_write_the_same_image(self):
+        """The chunk engine writes the image of the xradio engine, in Zarr and
+        in FITS (with the interferometer beams in the BEAMS table)."""
+        from astroviper.distributed_applications.imaging import feather
+
+        self._ensure_inputs()
+        outputs = {
+            "xradio": ("feather_xradio.img.zarr", {"io_engine": "xradio"}),
+            "chunk": ("feather_chunk.img.zarr", {"io_engine": "chunk"}),
+            "fits": (
+                "feather_fits",
+                {"io_engine": "chunk", "output_image_format": "fits"},
+            ),
+        }
+        for name, options in outputs.values():
+            feather(
+                outim={"name": name, "overwrite": True},
+                highres=self.int_zarr,
+                lowres=self.sd_zarr,
+                sdfactor=1.0,
+                **options,
+            )
+        try:
+            xradio = load_image(outputs["xradio"][0])
+            chunk = load_image(outputs["chunk"][0])
+            fits = open_image({"sky": os.path.join(outputs["fits"][0], "SKY.fits")})
+            np.testing.assert_array_equal(chunk["SKY"].values, xradio["SKY"].values)
+            np.testing.assert_allclose(
+                fits["SKY"].values, xradio["SKY"].values, rtol=1e-6, atol=1e-7
+            )
+            np.testing.assert_allclose(
+                fits["BEAM_FIT_PARAMS_SKY"].values,
+                xradio["BEAM_FIT_PARAMS_SKY"].values,
+                rtol=1e-6,
+            )
+        finally:
+            for name, _ in outputs.values():
+                self._rm(name)
+
     def test_output_name_without_img_zarr_extension(self):
         """A ``.zarr`` output name is written as given by earlier XRADIO versions
         and as ``.img.zarr`` by later ones; feather fills the store written."""

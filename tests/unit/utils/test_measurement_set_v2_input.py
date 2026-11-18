@@ -1,4 +1,4 @@
-"""Unit tests for the Measurement Set v2 input of the skunk-works imaging path.
+"""Unit tests for the Measurement Set v2 input of cube imaging.
 
 Two kinds of tests:
 
@@ -31,15 +31,15 @@ import xarray as xr
 from xarray.backends import BackendArray
 from xarray.core import indexing
 
-from astroviper.node_tasks.imaging.utils import (
+from astroviper.utils import measurement_set_v2_input
+from astroviper.utils.measurement_set_v2_input import (
     add_lazy_input_data,
-    check_data_group_skunk_works_msv2,
+    check_data_group_msv2,
     is_fatal_load_error,
-    load_processing_set_skunk_works_msv2,
+    load_processing_set_msv2,
     msv2_engine_available,
-    open_processing_set_skunk_works_msv2,
+    open_processing_set_msv2,
     require_msv2_engine,
-    skunk_works_msv2,
 )
 
 _ENGINE_AVAILABLE, _ENGINE_REASON = msv2_engine_available()
@@ -248,7 +248,7 @@ def test_add_lazy_input_data_loads_the_selected_values():
     mapping = make_mapping()
     add_lazy_input_data(ps_xdt, mapping, "corrected")
 
-    loaded = load_processing_set_skunk_works_msv2(mapping[1]["lazy_input_data"])
+    loaded = load_processing_set_msv2(mapping[1]["lazy_input_data"])
 
     assert reads, "the load reads the data"
     for ms_name, selection in mapping[1]["data_selection"].items():
@@ -324,7 +324,7 @@ def _add_lazy_input_data(ps_xdt, group):
 #: the open (before anything is written).
 data_group_checks = pytest.mark.parametrize(
     "check",
-    [_add_lazy_input_data, check_data_group_skunk_works_msv2],
+    [_add_lazy_input_data, check_data_group_msv2],
     ids=["add_lazy_input_data", "check_data_group"],
 )
 
@@ -360,7 +360,7 @@ def test_data_group_missing_variable(check):
 @pytest.mark.parametrize("group", ["base", "corrected"])
 def test_check_data_group_reads_nothing(group):
     reads = []
-    check_data_group_skunk_works_msv2(make_lazy_ps(reads), group)
+    check_data_group_msv2(make_lazy_ps(reads), group)
     assert reads == []
 
 
@@ -372,11 +372,11 @@ def test_check_data_group_checks_every_measurement_set():
     mapping = {0: {"data_selection": {"ms_0": {"frequency": slice(0, 2)}}}}
     add_lazy_input_data(ps_xdt, mapping, "base")
     with pytest.raises(ValueError, match=r"ms_1 lacks the variables"):
-        check_data_group_skunk_works_msv2(ps_xdt, "base")
+        check_data_group_msv2(ps_xdt, "base")
 
 
 # --------------------------------------------------------------------------- #
-# load_processing_set_skunk_works_msv2 (not gated)
+# load_processing_set_msv2 (not gated)
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "array_options",
@@ -391,7 +391,7 @@ def test_load_gives_contiguous_writeable_numpy(array_options):
     mapping = {0: {"data_selection": {"ms_0": {"frequency": slice(1, 4)}}}}
     add_lazy_input_data(ps_xdt, mapping, "base")
 
-    loaded = load_processing_set_skunk_works_msv2(mapping[0]["lazy_input_data"])
+    loaded = load_processing_set_msv2(mapping[0]["lazy_input_data"])
 
     assert isinstance(loaded, xr.DataTree)
     assert list(loaded.children) == ["ms_0"]
@@ -416,8 +416,8 @@ def test_load_copies_only_when_needed():
     }
     add_lazy_input_data(ps_xdt, mapping, "base")
 
-    whole = load_processing_set_skunk_works_msv2(mapping[0]["lazy_input_data"])
-    part = load_processing_set_skunk_works_msv2(mapping[1]["lazy_input_data"])
+    whole = load_processing_set_msv2(mapping[0]["lazy_input_data"])
+    part = load_processing_set_msv2(mapping[1]["lazy_input_data"])
 
     for name in ("VISIBILITY", "FLAG", "WEIGHT", "UVW"):
         source = arrays[("ms_0", name)].values
@@ -437,16 +437,16 @@ def test_load_leaves_the_task_selection_lazy():
     add_lazy_input_data(ps_xdt, mapping, "base")
     lazy_input_data = mapping[1]["lazy_input_data"]
 
-    first = load_processing_set_skunk_works_msv2(lazy_input_data)
+    first = load_processing_set_msv2(lazy_input_data)
     n_reads = len(reads)
-    second = load_processing_set_skunk_works_msv2(lazy_input_data)
+    second = load_processing_set_msv2(lazy_input_data)
 
     assert n_reads > 0 and len(reads) == 2 * n_reads
     xr.testing.assert_identical(first, second)
 
 
 def test_load_with_no_measurement_set():
-    assert len(load_processing_set_skunk_works_msv2({}).children) == 0
+    assert len(load_processing_set_msv2({}).children) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -474,7 +474,7 @@ def test_baseline_codes_rebuild_the_names_exactly():
         assert shipped[code_name].dims == ("baseline_id",)
         np.testing.assert_array_equal(table[shipped[code_name].values], source[name])
 
-    loaded = load_processing_set_skunk_works_msv2(mapping[1]["lazy_input_data"])
+    loaded = load_processing_set_msv2(mapping[1]["lazy_input_data"])
 
     for ms_name in ("ms_0", "ms_1"):
         got = loaded[ms_name].to_dataset()
@@ -499,11 +499,11 @@ def test_baseline_codes_use_the_smallest_unsigned_type(n_names, dtype):
             "baseline_antenna2_name": ("baseline_id", names[::-1]),
         }
     )
-    encoded = skunk_works_msv2._encode_baseline_antenna_names(dataset)
+    encoded = measurement_set_v2_input._encode_baseline_antenna_names(dataset)
     assert encoded["baseline_antenna1_code"].dtype == dtype
     assert encoded.attrs[NAME_TABLE].size == n_names
     xr.testing.assert_identical(
-        skunk_works_msv2._decode_baseline_antenna_names(encoded), dataset
+        measurement_set_v2_input._decode_baseline_antenna_names(encoded), dataset
     )
 
 
@@ -511,18 +511,18 @@ def test_baseline_codes_without_names():
     """A dataset without name coordinates, or without a name table, passes
     through unchanged."""
     dataset = xr.Dataset(coords={"frequency": [1.0, 2.0]})
-    assert skunk_works_msv2._encode_baseline_antenna_names(dataset) is dataset
+    assert measurement_set_v2_input._encode_baseline_antenna_names(dataset) is dataset
     named = dataset.assign_coords(baseline_antenna1_name=("baseline_id", ["A", "B"]))
-    assert skunk_works_msv2._decode_baseline_antenna_names(named) is named
+    assert measurement_set_v2_input._decode_baseline_antenna_names(named) is named
 
 
 def test_baseline_codes_with_one_name_coordinate():
     """A dataset with only one of the two name coordinates round-trips."""
     named = xr.Dataset(coords={"baseline_antenna1_name": ("baseline_id", ["B", "A"])})
-    encoded = skunk_works_msv2._encode_baseline_antenna_names(named)
+    encoded = measurement_set_v2_input._encode_baseline_antenna_names(named)
     assert set(encoded.coords) == {"baseline_antenna1_code"}
     xr.testing.assert_identical(
-        skunk_works_msv2._decode_baseline_antenna_names(encoded), named
+        measurement_set_v2_input._decode_baseline_antenna_names(encoded), named
     )
 
 
@@ -618,14 +618,16 @@ class OpenRecorder:
 @pytest.fixture
 def open_recorder(monkeypatch):
     recorder = OpenRecorder()
-    monkeypatch.setattr(skunk_works_msv2, "require_msv2_engine", lambda: recorder)
+    monkeypatch.setattr(
+        measurement_set_v2_input, "require_msv2_engine", lambda: recorder
+    )
     monkeypatch.delenv("XRADIO_MSV2_PARTITION_CACHE", raising=False)
     return recorder
 
 
 def test_open_defaults(open_recorder, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    ps_xdt = open_processing_set_skunk_works_msv2("data.ms", ["OBSERVE_TARGET#*"])
+    ps_xdt = open_processing_set_msv2("data.ms", ["OBSERVE_TARGET#*"])
     assert ps_xdt is open_recorder.result
     ((ms_path, kwargs),) = open_recorder.calls
     assert ms_path == os.path.join(os.getcwd(), "data.ms")  # absolute
@@ -639,14 +641,14 @@ def test_open_defaults(open_recorder, tmp_path, monkeypatch):
 
 def test_open_expands_user(open_recorder, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    open_processing_set_skunk_works_msv2("~/data.ms")
+    open_processing_set_msv2("~/data.ms")
     assert open_recorder.calls[0][0] == str(tmp_path / "data.ms")
 
 
 def test_open_partition_cache_from_environment(open_recorder, monkeypatch):
     """With XRADIO_MSV2_PARTITION_CACHE set, XRADIO's own default applies."""
     monkeypatch.setenv("XRADIO_MSV2_PARTITION_CACHE", "auto")
-    open_processing_set_skunk_works_msv2("/data.ms")
+    open_processing_set_msv2("/data.ms")
     assert "partition_cache" not in open_recorder.calls[0][1]
 
 
@@ -658,7 +660,7 @@ def test_open_user_options_win(open_recorder):
         "skip_columns": ["WEIGHT_SPECTRUM"],
     }
     given = copy.deepcopy(options)
-    open_processing_set_skunk_works_msv2("/data.ms", msv2_open_options=options)
+    open_processing_set_msv2("/data.ms", msv2_open_options=options)
     kwargs = open_recorder.calls[0][1]
     assert {key: kwargs[key] for key in options} == options
     assert kwargs["array_backend"] == "xarray"
@@ -668,9 +670,7 @@ def test_open_user_options_win(open_recorder):
 @pytest.mark.parametrize("key", ["array_backend", "scan_intents"])
 def test_open_reserved_options(open_recorder, key):
     with pytest.raises(ValueError, match=rf"may not set \['{key}'\]"):
-        open_processing_set_skunk_works_msv2(
-            "/data.ms", msv2_open_options={key: "dask"}
-        )
+        open_processing_set_msv2("/data.ms", msv2_open_options={key: "dask"})
     assert open_recorder.calls == []  # refused before the open
 
 
@@ -680,21 +680,19 @@ def test_open_reserved_options_before_the_engine_check(monkeypatch):
     def no_engine():
         raise ImportError("no engine")
 
-    monkeypatch.setattr(skunk_works_msv2, "require_msv2_engine", no_engine)
+    monkeypatch.setattr(measurement_set_v2_input, "require_msv2_engine", no_engine)
     with pytest.raises(ValueError, match="array_backend"):
-        open_processing_set_skunk_works_msv2(
+        open_processing_set_msv2(
             "/data.ms", msv2_open_options={"array_backend": "dask"}
         )
     with pytest.raises(ImportError, match="no engine"):
-        open_processing_set_skunk_works_msv2("/data.ms")
+        open_processing_set_msv2("/data.ms")
 
 
 def test_open_empty_after_scan_intents(open_recorder):
     open_recorder.result = xr.DataTree()
     with pytest.raises(ValueError, match=r"scan_intents=None"):
-        open_processing_set_skunk_works_msv2(
-            "/data.ms", scan_intents=["OBSERVE_TARGET#ON_SOURCE"]
-        )
+        open_processing_set_msv2("/data.ms", scan_intents=["OBSERVE_TARGET#ON_SOURCE"])
 
 
 def test_open_empty_after_a_scan_intent_string(open_recorder):
@@ -702,16 +700,14 @@ def test_open_empty_after_a_scan_intent_string(open_recorder):
     it whole."""
     open_recorder.result = xr.DataTree()
     with pytest.raises(ValueError, match=r"\['OBSERVE_TARGET#ON_SOURCE'\]"):
-        open_processing_set_skunk_works_msv2(
-            "/data.ms", scan_intents="OBSERVE_TARGET#ON_SOURCE"
-        )
+        open_processing_set_msv2("/data.ms", scan_intents="OBSERVE_TARGET#ON_SOURCE")
     assert open_recorder.calls[0][1]["scan_intents"] == "OBSERVE_TARGET#ON_SOURCE"
 
 
 def test_open_empty_measurement_set(open_recorder):
     open_recorder.result = xr.DataTree()
     with pytest.raises(ValueError, match=r"no visibilities"):
-        open_processing_set_skunk_works_msv2("/data.ms")
+        open_processing_set_msv2("/data.ms")
 
 
 def test_is_fatal_load_error(monkeypatch):
@@ -741,7 +737,7 @@ def test_is_fatal_load_error_without_engine(monkeypatch):
 @pytest.fixture(scope="module")
 def opened_msv2(imageable_msv2):
     """The generated Measurement Set, opened once for the module (read only)."""
-    return open_processing_set_skunk_works_msv2(
+    return open_processing_set_msv2(
         imageable_msv2, msv2_open_options={"partition_cache": "read"}
     )
 
@@ -813,7 +809,7 @@ def test_loader_equals_production(
     mapping = {0: {"data_selection": data_selection}}
 
     add_lazy_input_data(opened_msv2, mapping, group)
-    loaded = load_processing_set_skunk_works_msv2(mapping[0]["lazy_input_data"])
+    loaded = load_processing_set_msv2(mapping[0]["lazy_input_data"])
 
     assert_equals_production(
         loaded, load_production(imageable_msv2_ps, data_selection, group), group
@@ -878,7 +874,7 @@ def test_mapping_and_tasks_equal_production(opened_msv2, imageable_msv2_ps, grou
 
     for task in mapping.values():
         assert_equals_production(
-            load_processing_set_skunk_works_msv2(task["lazy_input_data"]),
+            load_processing_set_msv2(task["lazy_input_data"]),
             load_production(imageable_msv2_ps, task["data_selection"], group),
             group,
         )
@@ -889,12 +885,12 @@ def test_open_scan_intents(imageable_msv2):
     """The generated MSv4s have the intent ``scan_intent#subscan_intent``; the
     imaging's usual default intent leaves none."""
     options = {"partition_cache": "read"}
-    ps_xdt = open_processing_set_skunk_works_msv2(
+    ps_xdt = open_processing_set_msv2(
         imageable_msv2, ["scan_intent#subscan_intent"], msv2_open_options=options
     )
     assert len(ps_xdt.children) == 4
     with pytest.raises(ValueError, match="scan_intents=None"):
-        open_processing_set_skunk_works_msv2(
+        open_processing_set_msv2(
             imageable_msv2, ["OBSERVE_TARGET#ON_SOURCE"], msv2_open_options=options
         )
 
@@ -959,11 +955,11 @@ def test_spawned_process_reads_a_pickled_task(opened_msv2, imageable_msv2):
     with ProcessPoolExecutor(
         max_workers=1, mp_context=multiprocessing.get_context("spawn")
     ) as executor:
-        spawned = executor.submit(
-            load_processing_set_skunk_works_msv2, lazy_input_data
-        ).result(timeout=300)
+        spawned = executor.submit(load_processing_set_msv2, lazy_input_data).result(
+            timeout=300
+        )
 
-    loaded = load_processing_set_skunk_works_msv2(lazy_input_data)
+    loaded = load_processing_set_msv2(lazy_input_data)
     xr.testing.assert_identical(spawned, loaded)
     for ms_name in lazy_input_data:
         for name in NAME_COORDINATES:
@@ -993,11 +989,11 @@ def test_open_and_load_do_not_write(imageable_msv2, tmp_path, monkeypatch):
     shutil.copytree(imageable_msv2, ms_path)
     before = _file_state(ms_path)
 
-    ps_xdt = open_processing_set_skunk_works_msv2(ms_path)
+    ps_xdt = open_processing_set_msv2(ms_path)
     mapping = _graph_mapping(ps_xdt, n_chunks=3)
     add_lazy_input_data(ps_xdt, mapping, "corrected")
     for task in mapping.values():
-        load_processing_set_skunk_works_msv2(task["lazy_input_data"])
+        load_processing_set_msv2(task["lazy_input_data"])
 
     assert _file_state(ms_path) == before
     assert not os.path.exists(os.path.join(ms_path, "XRADIO_PARTITIONS"))

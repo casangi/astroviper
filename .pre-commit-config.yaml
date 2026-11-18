@@ -1,3 +1,5 @@
+# Vendored from the ALMA pipeline; kept as close to its source as possible.
+exclude: ^src/astroviper/distributed_applications/imaging/find_continuum/findContinuum\.py$
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.3.0

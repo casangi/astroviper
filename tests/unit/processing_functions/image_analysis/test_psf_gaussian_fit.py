@@ -3,7 +3,6 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
-    FWHM_factor,
     _max_sidelobe_after_gaussian_subtraction,
     extract_main_lobe,
     psf_gaussian_fit_core,
@@ -11,6 +10,7 @@ from astroviper.processing_functions.image_analysis.point_spread_function_gaussi
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
     point_spread_function_gaussian_fit as psf_gaussian_fit,
 )
+from astroviper.utils._gaussian_math import SIG2FWHM
 
 
 def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
@@ -98,6 +98,16 @@ def test_psf_gaussian_fit_custom_window():
         truth_values,
         rtol=1e-3,
         atol=5,
+    )
+
+
+def test_psf_gaussian_fit_returns_exact_fwhm():
+    """The fitted axes are 2 sqrt(2 ln 2) sigma; 2.355 sigma is 7.6e-5 larger."""
+    result = psf_gaussian_fit(create_test_xds())
+    np.testing.assert_allclose(
+        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].values[0, 0, 0, :2],
+        0.2 * 2.0 * np.sqrt(2.0 * np.log(2.0)),
+        rtol=1e-5,
     )
 
 
@@ -404,7 +414,7 @@ def test_psf_gaussian_fit_core_uses_resampled_interval_scale():
         interpolation_method="splinef2d",
     )
 
-    expected_fwhm = sigma_pixels * delta[0] * FWHM_factor
+    expected_fwhm = sigma_pixels * delta[0] * SIG2FWHM
     np.testing.assert_allclose(
         result[0, 0, 0, :2], expected_fwhm, rtol=2.0e-3, atol=0.0
     )
@@ -564,7 +574,7 @@ def test_gaussian_subtraction_removes_main_beam_before_sidelobe_measurement():
     psf = np.exp(-0.5 * (l_grid**2 + m_grid**2) / sigma**2)
     psf[5, 5] += 0.25
     data = psf[None, None, None, ...]
-    beam = np.array([[[[sigma * FWHM_factor, sigma * FWHM_factor, 0.0]]]])
+    beam = np.array([[[[sigma * SIG2FWHM, sigma * SIG2FWHM, 0.0]]]])
 
     result = _max_sidelobe_after_gaussian_subtraction(
         data,
@@ -573,6 +583,22 @@ def test_gaussian_subtraction_removes_main_beam_before_sidelobe_measurement():
     )
 
     np.testing.assert_allclose(result, [[[0.25]]], atol=1e-12)
+
+
+def test_gaussian_subtraction_removes_gaussian_of_given_fwhm():
+    """A beam given as FWHM, as the casa fit gives it, removes its Gaussian."""
+    fwhm = 9.0
+    offsets = np.arange(51) - 25
+    # half maximum at fwhm / 2 from the peak
+    psf = 2.0 ** (-4.0 * (offsets[:, None] ** 2 + offsets[None, :] ** 2) / fwhm**2)
+
+    result = _max_sidelobe_after_gaussian_subtraction(
+        psf[None, None, None],
+        np.array([[[[fwhm, fwhm, 0.0]]]]),
+        np.array([1.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(result, [[[0.0]]], atol=1e-12)
 
 
 @pytest.mark.parametrize("pa", [0.0, 0.35, np.pi / 4, np.pi / 2, 2.225])
@@ -600,7 +626,7 @@ def test_gaussian_subtraction_respects_elliptical_beam_pa(pa, cell, sidelobe):
     )
     psf = np.exp(-0.5 * exponent)
     psf[5, 5] += sidelobe
-    beam = np.array([[[[sigma_major * FWHM_factor, sigma_minor * FWHM_factor, pa]]]])
+    beam = np.array([[[[sigma_major * SIG2FWHM, sigma_minor * SIG2FWHM, pa]]]])
 
     result = _max_sidelobe_after_gaussian_subtraction(
         psf[None, None, None], beam, np.asarray(cell)
@@ -614,7 +640,7 @@ def test_gaussian_subtraction_keeps_negative_sidelobe_magnitude():
     data = np.zeros((1, 1, 1, 21, 21), dtype=np.float64)
     data[0, 0, 0, 10, 10] = 1.0
     data[0, 0, 0, 2, 2] = -0.4
-    beam = np.array([[[[FWHM_factor, FWHM_factor, 0.0]]]])
+    beam = np.array([[[[SIG2FWHM, SIG2FWHM, 0.0]]]])
 
     result = _max_sidelobe_after_gaussian_subtraction(
         data,
@@ -652,8 +678,8 @@ def _max_sidelobe_reference(psf_image, ellipse_params, delta, fallback):
         fitted = peak * np.exp(
             -0.5
             * (
-                (major / (beam[0] / FWHM_factor)) ** 2
-                + (minor / (beam[1] / FWHM_factor)) ** 2
+                (major / (beam[0] / SIG2FWHM)) ** 2
+                + (minor / (beam[1] / SIG2FWHM)) ** 2
             )
         )
         delobed_maximum = np.max(np.where(finite, psf_2d - fitted, -np.inf))
@@ -679,8 +705,8 @@ def test_gaussian_subtraction_matches_whole_plane_formula(dtype):
             -0.5 * ((l_grid / sigma_l) ** 2 + (m_grid / sigma_m) ** 2)
         ) + 0.05 * rng.standard_normal((n_l, n_m))
         beam[index] = [
-            FWHM_factor * max(sigma_l, sigma_m) * 0.05,
-            FWHM_factor * min(sigma_l, sigma_m) * 0.05,
+            SIG2FWHM * max(sigma_l, sigma_m) * 0.05,
+            SIG2FWHM * min(sigma_l, sigma_m) * 0.05,
             rng.uniform(-np.pi, np.pi),
         ]
     psf[0, 0, 1, 3, 4] = np.nan
@@ -714,7 +740,7 @@ def test_gaussian_subtraction_peak_memory():
     axis = np.arange(n) - n // 2
     psf[..., :, :] = np.exp(-0.5 * (axis[:, None] ** 2 + axis[None, :] ** 2) / 9.0)
     psf[0, 0, 1, 0, 0] = np.nan
-    beam = np.tile([3.0 * FWHM_factor, 3.0 * FWHM_factor, 0.0], (1, 1, 2, 1))
+    beam = np.tile([3.0 * SIG2FWHM, 3.0 * SIG2FWHM, 0.0], (1, 1, 2, 1))
 
     # Leave tracing that someone else started (e.g. pytest -X tracemalloc) on.
     was_tracing = tracemalloc.is_tracing()
@@ -751,9 +777,9 @@ def test_psf_gaussian_fit_core_per_slice_boxes():
     assert result.shape == (1, 2, 1, 3)
     # Wider input Gaussian -> larger fitted major axis.
     assert result[0, 1, 0, 0] > result[0, 0, 0, 0]
-    # Each slice is recovered close to its analytic FWHM (sigma * FWHM_factor).
-    assert np.isclose(result[0, 0, 0, 0], 0.1 * FWHM_factor, rtol=0.15)
-    assert np.isclose(result[0, 1, 0, 0], 0.3 * FWHM_factor, rtol=0.15)
+    # Each slice is recovered close to its analytic FWHM (sigma * SIG2FWHM).
+    assert np.isclose(result[0, 0, 0, 0], 0.1 * SIG2FWHM, rtol=0.15)
+    assert np.isclose(result[0, 1, 0, 0], 0.3 * SIG2FWHM, rtol=0.15)
 
 
 def test_psf_gaussian_fit_core_broadcasts_single_box():
