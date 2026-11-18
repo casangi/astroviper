@@ -584,5 +584,110 @@ class TestDegridImagingWeightsCpp(unittest.TestCase):
             )
 
 
+def test_weighting_unaligned_buffers_preserve_results_and_storage(unaligned_array):
+    """Both kernels read/write the supplied bytes without array replacement."""
+    import pickle
+
+    for dtype in (np.float32, np.float64):
+        for truncate in (False, True):
+            common = dict(
+                uvw=np.array([[[12.0, -7.0, 0.0]]]),
+                frequency_coord=np.array([1e9]),
+                chan_map=np.zeros(1, dtype=np.int64),
+                n_uv=np.array([16, 16], dtype=np.int64),
+                delta_lm=np.array([1e-4, 1e-4]),
+                truncate_uv_cells=truncate,
+            )
+            cases = [
+                (
+                    grid_imaging_weights,
+                    dict(
+                        common,
+                        grid=np.zeros((1, 1, 16, 16), dtype=dtype),
+                        sum_weight=np.zeros((1, 1)),
+                        data_weights=np.full((1, 1, 1, 1), 3.0),
+                    ),
+                ),
+                (
+                    degrid_imaging_weights,
+                    dict(
+                        common,
+                        imaging_weight=np.zeros((1, 1, 1, 1)),
+                        grid_imaging_weight=np.full((1, 1, 16, 16), 2.0, dtype=dtype),
+                        briggs_factors=np.array([[[2.0]], [[1.0]]]),
+                        pol_map=np.zeros(1, dtype=np.int64),
+                        data_weight=np.full((1, 1, 1, 1), 3.0),
+                    ),
+                ),
+            ]
+            for kernel, kwargs in cases:
+                expected = {
+                    k: v.copy() if isinstance(v, np.ndarray) else v
+                    for k, v in kwargs.items()
+                }
+                kernel(**expected)
+                arrays = [k for k, v in kwargs.items() if isinstance(v, np.ndarray)]
+                for key in arrays + ["all"]:
+                    for offset in range(1, 8):
+                        trial = {
+                            k: v.copy() if isinstance(v, np.ndarray) else v
+                            for k, v in kwargs.items()
+                        }
+                        selected = arrays if key == "all" else [key]
+                        for name in selected:
+                            trial[name] = unaligned_array(trial[name], offset)
+                        pointers = {k: trial[k].ctypes.data for k in arrays}
+                        kernel(**trial)
+                        for name in arrays:
+                            np.testing.assert_array_equal(trial[name], expected[name])
+                            assert trial[name].ctypes.data == pointers[name]
+                        for name in selected:
+                            assert trial[name].base[:offset] == bytes([0xA5]) * offset
+                            assert trial[name].base[-1] == 0xA5
+                trial = {
+                    k: v.copy().view(pickle.loads(pickle.dumps(v.dtype)))
+                    if isinstance(v, np.ndarray)
+                    else v
+                    for k, v in kwargs.items()
+                }
+                kernel(**trial)
+                for name in arrays:
+                    np.testing.assert_array_equal(trial[name], expected[name])
+
+
+def test_degrid_density_grid_after_distributed_deserialization():
+    """A received frame may start at a byte offset, as in the HOPS failure."""
+    from distributed.protocol import deserialize, serialize
+
+    source = np.full((1, 1, 16, 16), 2.0, dtype=np.float64)
+    header, frames = serialize(source)
+    received_frames = []
+    for frame in frames:
+        raw = memoryview(frame).cast("B")
+        storage = bytearray(raw.nbytes + 6)
+        storage[6:] = raw
+        received_frames.append(memoryview(storage)[6:])
+    grid = deserialize(header, received_frames)
+    assert grid.flags.c_contiguous
+    assert not grid.flags.aligned
+    assert grid.ctypes.data % 8 == 6
+    output = np.zeros((1, 1, 1, 1))
+    degrid_imaging_weights(
+        imaging_weight=output,
+        grid_imaging_weight=grid,
+        briggs_factors=np.ones((2, 1, 1)),
+        uvw=np.zeros((1, 1, 3)),
+        frequency_coord=np.array([1e9]),
+        chan_map=np.zeros(1, dtype=np.int64),
+        pol_map=np.zeros(1, dtype=np.int64),
+        data_weight=np.ones_like(output),
+        n_uv=np.array([16, 16]),
+        delta_lm=np.array([1e-4, 1e-4]),
+    )
+    np.testing.assert_array_equal(output, np.full_like(output, 1 / 3))
+    np.testing.assert_array_equal(grid, source)
+    assert np.shares_memory(grid, np.frombuffer(received_frames[0], dtype=np.uint8))
+
+
 if __name__ == "__main__":
     unittest.main()

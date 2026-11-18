@@ -1,3 +1,4 @@
+#include "array_alignment.hpp"
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -19,6 +20,7 @@ namespace {
 
 template <typename T>
 py::buffer_info check_array(py::array& arr, const char* name, const std::vector<py::ssize_t>& shape, bool writable) {
+    astroviper::require_aligned(arr, name);
     if (!arr.dtype().equal(py::dtype::of<T>()))
         throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
                                  py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
@@ -42,6 +44,7 @@ py::buffer_info check_array(py::array& arr, const char* name, const std::vector<
 
 template <typename T>
 py::buffer_info check_strided_residual(py::array& arr, const std::vector<py::ssize_t>& shape) {
+    astroviper::require_aligned(arr, "arr");
     if (!arr.dtype().equal(py::dtype::of<T>()))
         throw std::runtime_error("residual has wrong dtype; expected " +
                                  py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
@@ -80,6 +83,7 @@ MemoryInterval memory_interval(const py::buffer_info& info) {
 }
 
 void stack_dims(const py::array& stack, const char* name, int& n, int& ny, int& nx, bool psf_stack = false) {
+    astroviper::require_aligned(stack, name);
     if (stack.ndim() != 3) throw std::runtime_error(std::string(name) + " must be a 3-D array (nterms, ny, nx)");
     const py::ssize_t nplanes = stack.shape(0);
     if (nplanes < 1) throw std::runtime_error(std::string(name) + " must have at least one plane");
@@ -114,6 +118,9 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
                     double threshold_per_cycle, double mask_threshold, int max_iter_divergence,
                     double divergence_rms_factor, double divergence_peak_factor,
                     bool record_iteration_history) {
+    astroviper::require_aligned(residual, "residual");
+    astroviper::require_aligned(psf, "psf");
+    astroviper::require_aligned(model, "model");
     int nterms, ny, nx;
     stack_dims(residual, "residual", nterms, ny, nx);
     const std::vector<py::ssize_t> stack = {nterms, ny, nx};
@@ -196,6 +203,9 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                double gain, double threshold_per_cycle, double mask_threshold,
                                int max_iter_divergence, double divergence_rms_factor,
                                double divergence_peak_factor, bool record_iteration_history) {
+    astroviper::require_aligned(residual, "residual");
+    astroviper::require_aligned(psf, "psf");
+    astroviper::require_aligned(model, "model");
     if (residual.dtype().equal(py::dtype::of<float>()))
         return clean_impl<float>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle_updated, gain,
                                  threshold_per_cycle, mask_threshold, max_iter_divergence,
@@ -209,6 +219,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
 
 template <typename T>
 py::dict hessian_impl(py::array psf, const std::vector<float>& scales, float small_scale_bias) {
+    astroviper::require_aligned(psf, "psf");
     int npsf, ny, nx;
     stack_dims(psf, "psf", npsf, ny, nx, true);
     const int nterms = npsf / 2 + 1;
@@ -240,6 +251,7 @@ py::dict hessian_impl(py::array psf, const std::vector<float>& scales, float sma
 }
 
 static py::dict hessian_dispatch(py::array psf, const std::vector<float>& scales, float small_scale_bias) {
+    astroviper::require_aligned(psf, "psf");
     if (psf.dtype().equal(py::dtype::of<float>())) return hessian_impl<float>(psf, scales, small_scale_bias);
     if (psf.dtype().equal(py::dtype::of<double>())) return hessian_impl<double>(psf, scales, small_scale_bias);
     throw std::runtime_error("psf must be float32 or float64");
@@ -247,6 +259,8 @@ static py::dict hessian_dispatch(py::array psf, const std::vector<float>& scales
 
 template <typename T>
 void principal_impl(py::array residual, py::array inverse_hessian) {
+    astroviper::require_aligned(residual, "residual");
+    astroviper::require_aligned(inverse_hessian, "inverse_hessian");
     int nterms, ny, nx;
     stack_dims(residual, "residual", nterms, ny, nx);
     py::buffer_info ri = check_array<T>(residual, "residual", {nterms, ny, nx}, true);
@@ -256,6 +270,8 @@ void principal_impl(py::array residual, py::array inverse_hessian) {
 }
 
 static void principal_dispatch(py::array residual, py::array inverse_hessian) {
+    astroviper::require_aligned(residual, "residual");
+    astroviper::require_aligned(inverse_hessian, "inverse_hessian");
     if (residual.dtype().equal(py::dtype::of<float>()))
         principal_impl<float>(residual, inverse_hessian);
     else if (residual.dtype().equal(py::dtype::of<double>()))

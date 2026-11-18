@@ -1,3 +1,4 @@
+#include "array_alignment.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <complex>
@@ -59,6 +60,18 @@ void anti_alias_grid_bind(
     int interpolation,
     int processing_function_threads
 ) {
+    astroviper::require_aligned(grid, "grid");
+    astroviper::require_aligned(normalization, "normalization");
+    astroviper::require_aligned(vis_data, "vis_data");
+    astroviper::require_aligned(uvw, "uvw");
+    astroviper::require_aligned(frequency_coord, "frequency_coord");
+    astroviper::require_aligned(frequency_map, "frequency_map");
+    astroviper::require_aligned(time_map, "time_map");
+    astroviper::require_aligned(pol_map, "pol_map");
+    astroviper::require_aligned(weight, "weight");
+    astroviper::require_aligned(cgk_1D, "cgk_1D");
+    astroviper::require_aligned(n_uv, "n_uv");
+    astroviper::require_aligned(delta_lm, "delta_lm");
     auto grid_info  = grid.request();
     auto norm_info  = normalization.request();
     auto vis_info   = vis_data.request();
@@ -86,8 +99,8 @@ void anti_alias_grid_bind(
     const py::dtype dt_c64  = py::dtype::of<cflt>();
     const py::dtype dt_c128 = py::dtype::of<cdbl>();
     const py::dtype grid_dtype = grid.dtype();
-    const bool grid_is_c64  = grid_dtype.is(dt_c64);
-    const bool grid_is_c128 = grid_dtype.is(dt_c128);
+    const bool grid_is_c64  = grid_dtype.equal(dt_c64);
+    const bool grid_is_c128 = grid_dtype.equal(dt_c128);
     if (!grid_is_c64 && !grid_is_c128)
         throw std::runtime_error(
             "grid must be complex64 or complex128 (no implicit conversion is "
@@ -164,6 +177,17 @@ void anti_alias_grid_uv_sampling_bind(
     int interpolation,
     int processing_function_threads
 ) {
+    astroviper::require_aligned(grid, "grid");
+    astroviper::require_aligned(normalization, "normalization");
+    astroviper::require_aligned(uvw, "uvw");
+    astroviper::require_aligned(frequency_coord, "frequency_coord");
+    astroviper::require_aligned(frequency_map, "frequency_map");
+    astroviper::require_aligned(time_map, "time_map");
+    astroviper::require_aligned(pol_map, "pol_map");
+    astroviper::require_aligned(weight, "weight");
+    astroviper::require_aligned(cgk_1D, "cgk_1D");
+    astroviper::require_aligned(n_uv, "n_uv");
+    astroviper::require_aligned(delta_lm, "delta_lm");
     auto grid_info = grid.request();
     auto norm_info = normalization.request();
     auto uvw_info  = uvw.request();
@@ -187,8 +211,8 @@ void anti_alias_grid_uv_sampling_bind(
     const py::dtype dt_c64  = py::dtype::of<cflt>();
     const py::dtype dt_c128 = py::dtype::of<cdbl>();
     const py::dtype grid_dtype = grid.dtype();
-    const bool grid_is_c64  = grid_dtype.is(dt_c64);
-    const bool grid_is_c128 = grid_dtype.is(dt_c128);
+    const bool grid_is_c64  = grid_dtype.equal(dt_c64);
+    const bool grid_is_c128 = grid_dtype.equal(dt_c128);
     if (!grid_is_c64 && !grid_is_c128)
         throw std::runtime_error(
             "grid must be complex64 or complex128 (no implicit conversion is "
@@ -270,6 +294,16 @@ void anti_alias_degrid_bind(
     int interpolation,
     int processing_function_threads
 ) {
+    astroviper::require_aligned(grid, "grid");
+    astroviper::require_aligned(vis_data, "vis_data");
+    astroviper::require_aligned(uvw, "uvw");
+    astroviper::require_aligned(frequency_coord, "frequency_coord");
+    astroviper::require_aligned(frequency_map, "frequency_map");
+    astroviper::require_aligned(time_map, "time_map");
+    astroviper::require_aligned(pol_map, "pol_map");
+    astroviper::require_aligned(cgk_1D, "cgk_1D");
+    astroviper::require_aligned(n_uv, "n_uv");
+    astroviper::require_aligned(delta_lm, "delta_lm");
     auto grid_info = grid.request();
     auto vis_info  = vis_data.request();
     auto uvw_info  = uvw.request();
@@ -292,16 +326,16 @@ void anti_alias_degrid_bind(
     const py::dtype dt_c128 = py::dtype::of<cdbl>();
 
     const py::dtype grid_dtype = grid.dtype();
-    const bool grid_is_c64  = grid_dtype.is(dt_c64);
-    const bool grid_is_c128 = grid_dtype.is(dt_c128);
+    const bool grid_is_c64  = grid_dtype.equal(dt_c64);
+    const bool grid_is_c128 = grid_dtype.equal(dt_c128);
     if (!grid_is_c64 && !grid_is_c128)
         throw std::runtime_error(
             "grid must be complex64 or complex128 (no implicit conversion is "
             "performed)");
 
     const py::dtype vis_dtype = vis_data.dtype();
-    const bool vis_is_c64  = vis_dtype.is(dt_c64);
-    const bool vis_is_c128 = vis_dtype.is(dt_c128);
+    const bool vis_is_c64  = vis_dtype.equal(dt_c64);
+    const bool vis_is_c128 = vis_dtype.equal(dt_c128);
     if (!vis_is_c64 && !vis_is_c128)
         throw std::runtime_error(
             "vis_data must be complex64 or complex128 (no implicit conversion "

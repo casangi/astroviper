@@ -504,3 +504,94 @@ def test_pickled_uv_sampling_arrays_are_accepted_in_place(dtype):
     dft_image_uv_sampling(psf, normalization, *args)
     assert psf.__array_interface__["data"][0] == psf_ptr
     assert np.any(psf != 0) and np.all(normalization > 0)
+
+
+def test_dft_image_native_alignment_contract(unaligned_array):
+    """Reject unsafe buffers before writes; equivalent dtypes remain valid."""
+    import numpy as np
+    import pytest
+
+    from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        dft_image,
+    )
+
+    uvw = np.zeros((1, 1, 3))
+    freq = np.array([1e9])
+    imap = np.zeros(1, dtype=np.int64)
+    wt = np.ones((1, 1, 1, 1))
+    dft = dict(
+        uvw=uvw,
+        frequency_coord=freq,
+        frequency_map=imap,
+        time_map=imap,
+        pol_map=imap,
+        l=np.arange(4) * 0.001,
+        m=np.arange(4) * 0.001,
+        processing_function_threads=1,
+    )
+    kwargs = dict(
+        dft,
+        image=np.zeros((1, 1, 1, 4, 4)),
+        normalization=np.zeros((1, 1, 1)),
+        vis_data=np.ones((1, 1, 1, 1), dtype=np.complex128),
+        weight=wt,
+    )
+    dft_image(
+        **{k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
+    )
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        trial = {
+            k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+        }
+        trial[key] = unaligned_array(value)
+        before = {k: v.copy() for k, v in trial.items() if isinstance(v, np.ndarray)}
+        with pytest.raises(ValueError, match="naturally aligned"):
+            dft_image(**trial)
+        for name, expected in before.items():
+            np.testing.assert_array_equal(trial[name], expected)
+
+
+def test_dft_predict_native_alignment_contract(unaligned_array):
+    """Reject unsafe buffers before writes; equivalent dtypes remain valid."""
+    import numpy as np
+    import pytest
+
+    from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        dft_predict,
+    )
+
+    uvw = np.zeros((1, 1, 3))
+    freq = np.array([1e9])
+    imap = np.zeros(1, dtype=np.int64)
+    dft = dict(
+        uvw=uvw,
+        frequency_coord=freq,
+        frequency_map=imap,
+        time_map=imap,
+        pol_map=imap,
+        l=np.arange(4) * 0.001,
+        m=np.arange(4) * 0.001,
+        processing_function_threads=1,
+    )
+    kwargs = dict(
+        dft,
+        model=np.ones((1, 1, 1, 4, 4)),
+        vis_data=np.zeros((1, 1, 1, 1), dtype=np.complex128),
+    )
+    dft_predict(
+        **{k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
+    )
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        trial = {
+            k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+        }
+        trial[key] = unaligned_array(value)
+        before = {k: v.copy() for k, v in trial.items() if isinstance(v, np.ndarray)}
+        with pytest.raises(ValueError, match="naturally aligned"):
+            dft_predict(**trial)
+        for name, expected in before.items():
+            np.testing.assert_array_equal(trial[name], expected)

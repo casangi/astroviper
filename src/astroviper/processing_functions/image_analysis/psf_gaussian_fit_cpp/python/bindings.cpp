@@ -1,3 +1,4 @@
+#include "array_alignment.hpp"
 // pybind11 bindings for the CASA-compatible PSF Gaussian fit.
 //
 // Follows the AstroVIPER pybind11 memory contract: typed py::array_t without
@@ -24,6 +25,8 @@ int fit_psf_beam_impl(
     double psfcutoff,
     py::array_t<double, py::array::c_style> beams,
     int n_threads) {
+    astroviper::require_aligned(psf, "psf");
+    astroviper::require_aligned(beams, "beams");
     if (psf.ndim() != 3)
         throw std::invalid_argument("psf must be [n_plane, nx, ny].");
     const std::size_t n_plane = static_cast<std::size_t>(psf.shape(0));

@@ -1,3 +1,4 @@
+#include "scalar_buffer.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <cstdint>
@@ -99,17 +100,16 @@ void grid_imaging_weights_bind(
         throw std::runtime_error(
             "sum_weight must be a writable array (modified in place)");
 
-    // Compare native PEP 3118 formats rather than Python dtype identity: arrays
-    // deserialized in a distributed worker need not reuse NumPy's dtype singleton.
+    // Compare dtype values, independently of buffer alignment and descriptor identity.
     const bool grid_is_f32 =
-        grid_info.format == py::format_descriptor<float>::format();
+        grid.dtype().equal(py::dtype::of<float>());
     const bool grid_is_f64 =
-        grid_info.format == py::format_descriptor<double>::format();
+        grid.dtype().equal(py::dtype::of<double>());
     if (!grid_is_f32 && !grid_is_f64)
         throw std::runtime_error(
             "grid must be float32 or float64 (no implicit conversion is "
             "performed; the array is modified in place)");
-    if (sum_info.format != py::format_descriptor<double>::format())
+    if (!sum_weight.dtype().equal(py::dtype::of<double>()))
         throw std::runtime_error(
             "sum_weight must be native float64 (no implicit conversion is "
             "performed; the array is modified in place)");
@@ -129,21 +129,23 @@ void grid_imaging_weights_bind(
 
     (void)n_uv;  // grid dimensions are taken from the grid array itself
 
-    auto dlm = delta_lm.unchecked<1>();
+    if (delta_lm.ndim() != 1 || delta_lm.shape(0) != 2)
+        throw std::runtime_error("delta_lm must have shape (2,)");
+    astroviper::ScalarBuffer<const double, false> dlm(delta_lm.request().ptr);
 
     // Capture raw pointers before releasing the GIL; the underlying numpy
     // buffers remain valid for the duration of the call because Python owns
     // the arrays.
-    double*        sum_ptr      = static_cast<double*>(sum_info.ptr);
-    const double*  uvw_ptr      = static_cast<const double*>(uvw_info.ptr);
-    const double*  freq_ptr     = frequency_coord.data();
-    const int64_t* chan_map_ptr = chan_map.data();
-    const double*  wt_ptr       = static_cast<const double*>(wt_info.ptr);
-    const double   dl           = dlm(0);
-    const double   dm           = dlm(1);
+    void* sum_ptr = sum_info.ptr;
+    const void* uvw_ptr = uvw_info.ptr;
+    const void* freq_ptr = frequency_coord.request().ptr;
+    const void* chan_map_ptr = chan_map.request().ptr;
+    const void* wt_ptr = wt_info.ptr;
+    const double   dl           = dlm[0];
+    const double   dm           = dlm[1];
 
     if (grid_is_f64) {
-        double* grid_ptr = static_cast<double*>(grid_info.ptr);
+        void* grid_ptr = grid_info.ptr;
         py::gil_scoped_release release;
         imaging_weighting::grid_imaging_weights<double>(
             grid_ptr, sum_ptr, uvw_ptr, freq_ptr, chan_map_ptr, wt_ptr,
@@ -151,7 +153,7 @@ void grid_imaging_weights_bind(
             n_time, n_baseline, n_vis_chan, n_pol, dl, dm,
             truncate_uv_cells);
     } else {
-        float* grid_ptr = static_cast<float*>(grid_info.ptr);
+        void* grid_ptr = grid_info.ptr;
         py::gil_scoped_release release;
         imaging_weighting::grid_imaging_weights<float>(
             grid_ptr, sum_ptr, uvw_ptr, freq_ptr, chan_map_ptr, wt_ptr,
@@ -217,14 +219,14 @@ void degrid_imaging_weights_bind(
 
     // Keep the check stable across process serialization (see the grid path).
     const bool grid_is_f32 =
-        grid_info.format == py::format_descriptor<float>::format();
+        grid_imaging_weight.dtype().equal(py::dtype::of<float>());
     const bool grid_is_f64 =
-        grid_info.format == py::format_descriptor<double>::format();
+        grid_imaging_weight.dtype().equal(py::dtype::of<double>());
     if (!grid_is_f32 && !grid_is_f64)
         throw std::runtime_error(
             "grid_imaging_weight must be float32 or float64 (no implicit "
             "conversion is performed)");
-    if (out_info.format != py::format_descriptor<double>::format())
+    if (!imaging_weight.dtype().equal(py::dtype::of<double>()))
         throw std::runtime_error(
             "imaging_weight must be native float64 (no implicit conversion is "
             "performed; the array is modified in place)");
@@ -246,20 +248,22 @@ void degrid_imaging_weights_bind(
 
     (void)n_uv;  // grid dimensions are taken from the grid array itself
 
-    auto dlm = delta_lm.unchecked<1>();
+    if (delta_lm.ndim() != 1 || delta_lm.shape(0) != 2)
+        throw std::runtime_error("delta_lm must have shape (2,)");
+    astroviper::ScalarBuffer<const double, false> dlm(delta_lm.request().ptr);
 
-    double*        out_ptr      = static_cast<double*>(out_info.ptr);
-    const double*  briggs_ptr   = static_cast<const double*>(briggs_info.ptr);
-    const double*  uvw_ptr      = static_cast<const double*>(uvw_info.ptr);
-    const double*  freq_ptr     = frequency_coord.data();
-    const int64_t* chan_map_ptr = chan_map.data();
-    const int64_t* pol_map_ptr  = pol_map.data();
-    const double*  wt_ptr       = static_cast<const double*>(wt_info.ptr);
-    const double   dl           = dlm(0);
-    const double   dm           = dlm(1);
+    void* out_ptr = out_info.ptr;
+    const void* briggs_ptr = briggs_info.ptr;
+    const void* uvw_ptr = uvw_info.ptr;
+    const void* freq_ptr = frequency_coord.request().ptr;
+    const void* chan_map_ptr = chan_map.request().ptr;
+    const void* pol_map_ptr = pol_map.request().ptr;
+    const void* wt_ptr = wt_info.ptr;
+    const double   dl           = dlm[0];
+    const double   dm           = dlm[1];
 
     if (grid_is_f64) {
-        const double* grid_ptr = static_cast<const double*>(grid_info.ptr);
+        const void* grid_ptr = grid_info.ptr;
         py::gil_scoped_release release;
         imaging_weighting::degrid_imaging_weights<double>(
             out_ptr, grid_ptr, briggs_ptr, uvw_ptr, freq_ptr,
@@ -268,7 +272,7 @@ void degrid_imaging_weights_bind(
             n_time, n_baseline, n_vis_chan, n_pol, n_pol_out, dl, dm,
             truncate_uv_cells);
     } else {
-        const float* grid_ptr = static_cast<const float*>(grid_info.ptr);
+        const void* grid_ptr = grid_info.ptr;
         py::gil_scoped_release release;
         imaging_weighting::degrid_imaging_weights<float>(
             out_ptr, grid_ptr, briggs_ptr, uvw_ptr, freq_ptr,
@@ -290,7 +294,8 @@ PYBIND11_MODULE(_grid_imaging_weights_ext, m) {
           "the direct and conjugate cells independently. The grid may be "
           "float32 or float64. The kernel is serial so weight sums are "
           "bit-reproducible; processing_function_threads is accepted for API "
-          "consistency and ignored.",
+          "consistency and ignored. Unaligned contiguous buffers are supported "
+          "without array copies.",
           py::arg("grid"),
           py::arg("sum_weight"),
           py::arg("uvw"),
@@ -311,7 +316,8 @@ PYBIND11_MODULE(_grid_imaging_weights_ext, m) {
           "default; CASA continuum mode truncates and skips cell zero. The "
           "kernel is serial so results are "
           "bit-reproducible; processing_function_threads is accepted for API "
-          "consistency and ignored.",
+          "consistency and ignored. Unaligned contiguous buffers are supported "
+          "without array copies.",
           py::arg("imaging_weight"),
           py::arg("grid_imaging_weight"),
           py::arg("briggs_factors"),

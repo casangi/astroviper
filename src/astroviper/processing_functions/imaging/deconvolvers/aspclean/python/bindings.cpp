@@ -1,3 +1,4 @@
+#include "array_alignment.hpp"
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -23,6 +24,7 @@ template <typename T>
 static py::buffer_info check_array(py::array& arr, const char* name, int ndim,
                                    const std::vector<py::ssize_t>& shape,
                                    bool writable) {
+    astroviper::require_aligned(arr, name);
     if (!arr.dtype().equal(py::dtype::of<T>()))
         throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
                                  py::cast<std::string>(py::dtype::of<T>().attr("name")));
@@ -67,6 +69,10 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
                            double divergence_rms_factor, double divergence_peak_factor,
                            int processing_function_threads, bool asp_stop_after_hogbom_run,
                            const aspclean::AspOptions& options) {
+    astroviper::require_aligned(residual, "residual");
+    astroviper::require_aligned(psf, "psf");
+    astroviper::require_aligned(model, "model");
+    astroviper::require_aligned(mask, "mask");
     const int ny = static_cast<int>(residual.shape(0));
     const int nx = static_cast<int>(residual.shape(1));
     const std::vector<py::ssize_t> shp = {ny, nx};
@@ -163,6 +169,10 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                bool asp_residual_component_positive_only,
                                double asp_significance_gain, double asp_no_change_tolerance,
                                bool record_iteration_history, double asp_min_mask_coverage) {
+    astroviper::require_aligned(residual, "residual");
+    astroviper::require_aligned(psf, "psf");
+    astroviper::require_aligned(model, "model");
+    astroviper::require_aligned(mask, "mask");
     aspclean::AspOptions options;
     options.asp_scale_significance = asp_scale_significance;
     options.asp_significance = asp_significance;
@@ -207,6 +217,12 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
                           int processing_function_threads, int max_iter_divergence,
                           double divergence_rms_factor, double divergence_peak_factor,
                           bool asp_stop_after_hogbom_run, const aspclean::AspOptions& options) {
+    astroviper::require_aligned(residual, "residual");
+    astroviper::require_aligned(psf, "psf");
+    astroviper::require_aligned(model, "model");
+    astroviper::require_aligned(mask, "mask");
+    astroviper::require_aligned(threshold_per_cycle, "threshold_per_cycle");
+    astroviper::require_aligned(max_iter_per_cycle_updated, "max_iter_per_cycle_updated");
     const int nt = static_cast<int>(residual.shape(0));
     const int nf = static_cast<int>(residual.shape(1));
     const int np_img = static_cast<int>(residual.shape(2));
@@ -355,6 +371,12 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     bool asp_residual_component_positive_only,
                                     double asp_significance_gain, double asp_no_change_tolerance,
                                     bool record_iteration_history, double asp_min_mask_coverage) {
+    astroviper::require_aligned(residual, "residual");
+    astroviper::require_aligned(psf, "psf");
+    astroviper::require_aligned(model, "model");
+    astroviper::require_aligned(mask, "mask");
+    astroviper::require_aligned(threshold_per_cycle, "threshold_per_cycle");
+    astroviper::require_aligned(max_iter_per_cycle_updated, "max_iter_per_cycle_updated");
     aspclean::AspOptions options;
     options.asp_scale_significance = asp_scale_significance;
     options.asp_significance = asp_significance;
@@ -394,6 +416,7 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
 // a full 2D image, so it is validated zero-copy (float64, C-contiguous) —
 // never forcecast.
 static double psf_width_helper(py::array psf) {
+    astroviper::require_aligned(psf, "psf");
     if (psf.ndim() != 2) throw std::runtime_error("psf must be a 2D array");
     const std::vector<py::ssize_t> shp = {psf.shape(0), psf.shape(1)};
     py::buffer_info info = check_array<double>(psf, "psf", 2, shp, false);

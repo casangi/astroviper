@@ -1764,3 +1764,31 @@ class TestMaskCoverage:
         mask[64, 65] = 0.0
         out, *_ = self._clean(psf, dirty, mask, 1, asp_min_mask_coverage=0.99)
         np.testing.assert_array_equal(out["components"][0, :3], [64, 64, 0])
+
+
+def test_asp_native_alignment_contract(unaligned_array):
+    """Reject unsafe buffers before writes; equivalent dtypes remain valid."""
+    import numpy as np
+    import pytest
+    from astroviper.processing_functions.imaging.deconvolvers.aspclean._aspclean_ext import (
+        clean as asp,
+    )
+
+    r = np.zeros((16, 16))
+    r[8, 8] = 1
+    p = r.copy()
+    model = r * 0
+    kwargs = dict(residual=r, psf=p, model=model, max_iter_per_cycle_updated=1)
+    asp(**{k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()})
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        trial = {
+            k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+        }
+        trial[key] = unaligned_array(value)
+        before = {k: v.copy() for k, v in trial.items() if isinstance(v, np.ndarray)}
+        with pytest.raises(ValueError, match="naturally aligned"):
+            asp(**trial)
+        for name, expected in before.items():
+            np.testing.assert_array_equal(trial[name], expected)

@@ -1,3 +1,4 @@
+#include "array_alignment.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <algorithm>
@@ -36,6 +37,7 @@ static void require_writable(const py::buffer_info& info, const char* name) {
 
 static void require_map(const py::array_t<int64_t, py::array::c_style>& map, py::ssize_t length,
                         int64_t limit, const char* name) {
+    astroviper::require_aligned(map, name);
     if (map.ndim() != 1 || map.shape(0) != length)
         throw std::runtime_error(std::string(name) + " must have one entry per visibility " +
                                  "index along its axis (" + std::to_string(length) + ")");
@@ -53,6 +55,8 @@ static void require_map(const py::array_t<int64_t, py::array::c_style>& map, py:
 static void require_direction_cosines(const py::array_t<double, py::array::c_style>& l,
                                       const py::array_t<double, py::array::c_style>& m,
                                       py::ssize_t n_l, py::ssize_t n_m) {
+    astroviper::require_aligned(l, "l");
+    astroviper::require_aligned(m, "m");
     if (l.ndim() != 1 || l.shape(0) != n_l)
         throw std::runtime_error("l must have one entry per image row (" + std::to_string(n_l) + ")");
     if (m.ndim() != 1 || m.shape(0) != n_m)
@@ -107,6 +111,7 @@ static VisibilityShape visibility_shape(const py::buffer_info& uvw_info,
 // ---------------------------------------------------------------------------
 static void check_image(const py::buffer_info& image_info, const py::buffer_info& norm_info,
                         const py::array& normalization) {
+    astroviper::require_aligned(normalization, "normalization");
     if (image_info.ndim != 5)
         throw std::runtime_error("image must be 5-D (m_time, m_chan, m_pol, n_l, n_m)");
     if (norm_info.ndim != 3 || norm_info.shape[0] != image_info.shape[0] ||
@@ -136,6 +141,17 @@ void dft_image_bind(
     py::array_t<double,  py::array::c_style | py::array::forcecast>  m,               // (n_m,) direction cosines
     int processing_function_threads
 ) {
+    astroviper::require_aligned(image, "image");
+    astroviper::require_aligned(normalization, "normalization");
+    astroviper::require_aligned(vis_data, "vis_data");
+    astroviper::require_aligned(uvw, "uvw");
+    astroviper::require_aligned(frequency_coord, "frequency_coord");
+    astroviper::require_aligned(frequency_map, "frequency_map");
+    astroviper::require_aligned(time_map, "time_map");
+    astroviper::require_aligned(pol_map, "pol_map");
+    astroviper::require_aligned(weight, "weight");
+    astroviper::require_aligned(l, "l");
+    astroviper::require_aligned(m, "m");
     auto image_info = image.request();
     auto norm_info = normalization.request();
     auto vis_info = vis_data.request();
@@ -209,6 +225,16 @@ void dft_image_uv_sampling_bind(
     py::array_t<double,  py::array::c_style | py::array::forcecast>  m,               // (n_m,)
     int processing_function_threads
 ) {
+    astroviper::require_aligned(image, "image");
+    astroviper::require_aligned(normalization, "normalization");
+    astroviper::require_aligned(uvw, "uvw");
+    astroviper::require_aligned(frequency_coord, "frequency_coord");
+    astroviper::require_aligned(frequency_map, "frequency_map");
+    astroviper::require_aligned(time_map, "time_map");
+    astroviper::require_aligned(pol_map, "pol_map");
+    astroviper::require_aligned(weight, "weight");
+    astroviper::require_aligned(l, "l");
+    astroviper::require_aligned(m, "m");
     auto image_info = image.request();
     auto norm_info = normalization.request();
     auto uvw_info = uvw.request();
@@ -279,6 +305,15 @@ void dft_predict_bind(
     py::array_t<double,  py::array::c_style | py::array::forcecast>  m,               // (n_m,)
     int processing_function_threads
 ) {
+    astroviper::require_aligned(model, "model");
+    astroviper::require_aligned(vis_data, "vis_data");
+    astroviper::require_aligned(uvw, "uvw");
+    astroviper::require_aligned(frequency_coord, "frequency_coord");
+    astroviper::require_aligned(frequency_map, "frequency_map");
+    astroviper::require_aligned(time_map, "time_map");
+    astroviper::require_aligned(pol_map, "pol_map");
+    astroviper::require_aligned(l, "l");
+    astroviper::require_aligned(m, "m");
     auto model_info = model.request();
     auto vis_info = vis_data.request();
     auto uvw_info = uvw.request();
@@ -354,6 +389,7 @@ void dft_predict_bind(
 }
 
 py::tuple cos_sin_turns_bind(py::array_t<double, py::array::c_style | py::array::forcecast> turns) {
+    astroviper::require_aligned(turns, "turns");
     py::array_t<double> cos_values(turns.size());
     py::array_t<double> sin_values(turns.size());
     const double* in = turns.data();

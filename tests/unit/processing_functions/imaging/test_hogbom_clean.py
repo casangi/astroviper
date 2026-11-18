@@ -1361,5 +1361,36 @@ def test_explicit_iteration_budget_controls_point_updates(
     assert model.sum() == pytest.approx(1 - expected_residual, abs=2e-7)
 
 
+def test_hogbom_native_alignment_contract(unaligned_array):
+    """Reject unsafe buffers before writes; equivalent dtypes remain valid."""
+    import numpy as np
+    import pytest
+
+    from astroviper.processing_functions.imaging.deconvolvers.hogbom import (
+        clean as hogbom,
+    )
+
+    r = np.zeros((16, 16))
+    r[8, 8] = 1
+    p = r.copy()
+    model = r * 0
+    kwargs = dict(dirty_image=r, psf=p, model=model, max_iter_per_cycle_updated=1)
+    hogbom(
+        **{k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
+    )
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        trial = {
+            k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+        }
+        trial[key] = unaligned_array(value)
+        before = {k: v.copy() for k, v in trial.items() if isinstance(v, np.ndarray)}
+        with pytest.raises(ValueError, match="naturally aligned"):
+            hogbom(**trial)
+        for name, expected in before.items():
+            np.testing.assert_array_equal(trial[name], expected)
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

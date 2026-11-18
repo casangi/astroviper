@@ -1,3 +1,4 @@
+#include "array_alignment.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -30,6 +31,7 @@ static py::buffer_info validate_inplace_array(py::array& arr,
                                               const char* name,
                                               int ny, int nx,
                                               bool require_writable) {
+    astroviper::require_aligned(arr, name);
     if (!arr.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error(
             std::string(name) + " has wrong dtype; expected " +
@@ -68,6 +70,7 @@ static py::buffer_info validate_inplace_cube(py::array& arr,
                                              int nt, int nf, int np_dim,
                                              int ny, int nx,
                                              bool require_writable) {
+    astroviper::require_aligned(arr, name);
     if (!arr.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error(
             std::string(name) + " has wrong dtype; expected " +
@@ -113,6 +116,7 @@ template<typename U>
 static py::buffer_info validate_per_plane_array(py::array& arr,
                                                 const char* name,
                                                 int nt, int nf, int np_dim) {
+    astroviper::require_aligned(arr, name);
     if (!arr.dtype().equal(py::dtype::of<U>())) {
         throw std::runtime_error(
             std::string(name) + " has wrong dtype; expected " +
@@ -185,6 +189,8 @@ static py::list per_plane_iteration_history(
  */
 template<typename T>
 py::tuple maximg_impl(py::array image_array, py::array mask_array) {
+    astroviper::require_aligned(image_array, "image_array");
+    astroviper::require_aligned(mask_array, "mask_array");
     if (image_array.ndim() != 2) {
         throw std::runtime_error("Image must be 2D array");
     }
@@ -226,6 +232,8 @@ py::tuple maximg_impl(py::array image_array, py::array mask_array) {
  * wrong dtype is never silently copy-converted).
  */
 static py::tuple maximg_dispatch(py::array image, py::array mask) {
+    astroviper::require_aligned(image, "image");
+    astroviper::require_aligned(mask, "mask");
     auto dt = image.dtype();
     if (dt.equal(py::dtype::of<float>())) {
         return maximg_impl<float>(image, mask);
@@ -262,6 +270,10 @@ py::dict hclean_impl(
     T divergence_peak_factor,
     bool record_iteration_history
 ) {
+    astroviper::require_aligned(dirty_image, "dirty_image");
+    astroviper::require_aligned(psf_array, "psf_array");
+    astroviper::require_aligned(model_image, "model_image");
+    astroviper::require_aligned(mask_array, "mask_array");
     // First, read dirty_image shape so we can cross-validate the others.
     if (!dirty_image.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error("dirty_image has wrong dtype");
@@ -442,6 +454,12 @@ py::dict hclean_cube_impl(
     bool record_iteration_history,
     bool many_threads
 ) {
+    astroviper::require_aligned(residual_cube, "residual_cube");
+    astroviper::require_aligned(psf_cube, "psf_cube");
+    astroviper::require_aligned(model_cube, "model_cube");
+    astroviper::require_aligned(mask_cube, "mask_cube");
+    astroviper::require_aligned(max_iter_per_cycle_updated, "max_iter_per_cycle_updated");
+    astroviper::require_aligned(threshold_per_cycle, "threshold_per_cycle");
     if (!residual_cube.dtype().equal(py::dtype::of<T>())) {
         throw std::runtime_error("residual_cube has wrong dtype");
     }
@@ -662,6 +680,10 @@ static py::dict clean_dispatch(
     double divergence_peak_factor,
     bool record_iteration_history
 ) {
+    astroviper::require_aligned(dirty_image, "dirty_image");
+    astroviper::require_aligned(psf_array, "psf_array");
+    astroviper::require_aligned(model_image, "model_image");
+    astroviper::require_aligned(mask_array, "mask_array");
     auto dt = dirty_image.dtype();
     if (dt.equal(py::dtype::of<float>())) {
         return hclean_impl<float>(
@@ -708,6 +730,12 @@ static py::dict clean_cube_dispatch(
     double divergence_peak_factor,
     bool record_iteration_history
 ) {
+    astroviper::require_aligned(residual_cube, "residual_cube");
+    astroviper::require_aligned(psf_cube, "psf_cube");
+    astroviper::require_aligned(model_cube, "model_cube");
+    astroviper::require_aligned(mask_cube, "mask_cube");
+    astroviper::require_aligned(max_iter_per_cycle_updated, "max_iter_per_cycle_updated");
+    astroviper::require_aligned(threshold_per_cycle, "threshold_per_cycle");
     auto dt = residual_cube.dtype();
     if (dt.equal(py::dtype::of<float>())) {
         return hclean_cube_impl<float>(
@@ -758,6 +786,12 @@ static py::dict clean_cube_many_threads_dispatch(
     double divergence_peak_factor,
     bool record_iteration_history
 ) {
+    astroviper::require_aligned(residual_cube, "residual_cube");
+    astroviper::require_aligned(psf_cube, "psf_cube");
+    astroviper::require_aligned(model_cube, "model_cube");
+    astroviper::require_aligned(mask_cube, "mask_cube");
+    astroviper::require_aligned(max_iter_per_cycle_updated, "max_iter_per_cycle_updated");
+    astroviper::require_aligned(threshold_per_cycle, "threshold_per_cycle");
     auto dt = residual_cube.dtype();
     if (dt.equal(py::dtype::of<float>())) {
         return hclean_cube_impl<float>(

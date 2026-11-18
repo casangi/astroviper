@@ -120,3 +120,37 @@ def test_pipeline_fitting_method(tmp_path):
             image_data_group_out_name="residual",
             fitting_method="bogus",
         )
+
+
+def test_psf_fit_native_alignment_contract(unaligned_array):
+    """Reject unsafe buffers before writes; equivalent dtypes remain valid."""
+    import numpy as np
+    import pytest
+    from astroviper.processing_functions.image_analysis.psf_gaussian_fit_cpp._psf_gaussian_fit_ext import (
+        fit_psf_beam,
+    )
+
+    x, y = np.mgrid[-16:16, -16:16]
+    gaussian = np.exp(-(x * x + y * y) / 8)[None, None, None]
+    kwargs = dict(
+        psf=gaussian.reshape(1, 32, 32),
+        delta_x=1e-4,
+        delta_y=1e-4,
+        psfcutoff=0.35,
+        beams=np.zeros((1, 3)),
+    )
+    fit_psf_beam(
+        **{k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
+    )
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        trial = {
+            k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+        }
+        trial[key] = unaligned_array(value)
+        before = {k: v.copy() for k, v in trial.items() if isinstance(v, np.ndarray)}
+        with pytest.raises(ValueError, match="naturally aligned"):
+            fit_psf_beam(**trial)
+        for name, expected in before.items():
+            np.testing.assert_array_equal(trial[name], expected)
