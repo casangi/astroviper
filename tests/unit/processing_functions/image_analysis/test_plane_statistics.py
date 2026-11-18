@@ -1,6 +1,7 @@
 """Unit tests for the per-plane (l, m) image statistics."""
 
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -9,6 +10,7 @@ from astroviper.processing_functions.image_analysis.plane_statistics import (
     PLANE_STATISTIC_NAMES,
     calculate_plane_statistics,
     concatenate_plane_statistics,
+    plane_statistics_from_dataframe,
     plane_statistics_to_dataframe,
 )
 
@@ -326,3 +328,59 @@ def test_shared_interfaces_match_for_full_cube_and_masks(dtype):
                 result[name].dtype == plane[name + suffix].dtype == np.dtype("float64")
             )
         assert result.sizes == {"time": 2, "frequency": 3, "polarization": 2}
+
+
+def test_from_dataframe_inverts_to_dataframe():
+    """Coordinate values and statistics keep the order of the table (Q before
+    I is not sorted back); the velocity coordinate written as a statistic
+    becomes a coordinate again."""
+    img_xds = _make_image(n_freq=3).assign_coords(polarization=["Q", "I"])
+    stats = calculate_plane_statistics(img_xds)
+    stats["sky_residual"]["entropy"] = stats["sky_residual"]["rms"] * 0.5
+    stats["sky_residual"] = stats["sky_residual"].assign_coords(
+        velocity=("frequency", [-5.0, 0.0, 5.0])
+    )
+    stats["sky_restored"] = stats["sky_restored"].isel(frequency=[2, 0])
+    frame = plane_statistics_to_dataframe(stats)
+    assert "velocity" in set(frame["statistic"])
+
+    rebuilt = plane_statistics_from_dataframe(frame)
+    assert list(rebuilt) == ["sky_residual", "sky_restored"]
+    residual = rebuilt["sky_residual"]
+    assert residual["polarization"].values.tolist() == ["Q", "I"]
+    assert residual["velocity"].dims == ("frequency",)
+    assert "velocity" not in residual.data_vars
+    assert list(residual.data_vars) == list(stats["sky_residual"].data_vars)
+    xr.testing.assert_identical(
+        residual.drop_attrs(), stats["sky_residual"].drop_attrs()
+    )
+    restored = rebuilt["sky_restored"]
+    np.testing.assert_array_equal(restored["frequency"], [1.2e9, 1.0e9])
+    assert restored.attrs == {}
+    pd.testing.assert_frame_equal(plane_statistics_to_dataframe(rebuilt), frame)
+
+
+def test_from_dataframe_missing_planes_and_refusals():
+    frame = pd.DataFrame(
+        {
+            "image_variable": ["sky_residual"] * 3,
+            "statistic": ["max", "max", "velocity"],
+            "time": [0.0] * 3,
+            "frequency": [1e9, 2e9, 1e9],
+            "polarization": ["I", "Q", "I"],
+            "value": [1.0, 2.0, 7.0],
+        }
+    )
+    statistics = plane_statistics_from_dataframe(frame)["sky_residual"]
+    np.testing.assert_array_equal(
+        statistics["max"].values, [[[1.0, np.nan], [np.nan, 2.0]]]
+    )
+    np.testing.assert_array_equal(statistics["velocity"].values, [7.0, np.nan])
+    assert statistics["max"].dtype == np.float64
+
+    varying = pd.concat(
+        [frame, frame.iloc[[2]].assign(polarization="Q", value=8.0)], ignore_index=True
+    )
+    with pytest.raises(ValueError, match="'velocity'"):
+        plane_statistics_from_dataframe(varying)
+    assert plane_statistics_from_dataframe(plane_statistics_to_dataframe({})) == {}

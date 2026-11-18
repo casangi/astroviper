@@ -27,9 +27,11 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
                 "determine chunks + parallel coords",
                 "T_determine_chunks_and_parallel_coords",
             ),
+            ("write sky image", "T_write_sky_image"),
             ("create empty MSv4 on disk", "T_create_empty_measurement_set"),
             ("interpolate data coords", "T_interpolate_data_coords"),
             ("create map/reduce graph", "T_create_map_reduce_graph"),
+            ("get compute resources", "T_get_compute_resources"),
             ("generate dask graph", "T_generate_dask_graph"),
             ("compute dask graph", "T_compute_dask_graph"),
             ("consolidate metadata + schema check", "T_consolidate_metadata"),
@@ -81,6 +83,7 @@ def simulate_processing_set(
     sky_components: list | None = None,
     sky_model_image: str | None = None,
     sky_model_image_predict: dict | None = None,
+    io_engine: str = "chunk",
     point_source_flux: np.ndarray | list | None = None,
     point_source_ra_dec: np.ndarray | list | None = None,
     beam_params: dict | None = None,
@@ -169,6 +172,13 @@ def simulate_processing_set(
         ``{"predict": "gridded", "gridding_kernel_params": ...,
         "fft_padding": 1.2}``, FFT and degridding with an anti-aliasing kernel,
         which has no w term and so needs ``uvw_params["w_term"]`` False.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
     point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy, optional
         Flux of every point source in the four instrumental correlations
         (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes
@@ -323,24 +333,28 @@ def simulate_processing_set(
         ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
         gives ``cube_report.html``), or ``"notebook"``, displayed in the
         calling Jupyter notebook. The report has a processing section common
-        to all distributed applications (timing, task stream and, with
-        ``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a
-        results section of the application's own; the products it makes with
-        other distributed applications are kept in ``<name>_report_files``
-        next to the output store. It is made after the output is written: a
-        failure while making it is logged and leaves the results intact.
-        ``None`` (default): no report.
+        to all distributed applications (performance measures, timing, task
+        stream, task times and, with ``monitor_resources_seconds``, the CPU,
+        memory and I/O of the cluster, of every worker slot and of the tasks)
+        and a results section of the application's own; the products it
+        makes with other distributed applications are kept in
+        ``<name>_report_files`` next to the output store. It is made after
+        the output is written: a failure while making it is logged and leaves
+        the results intact. ``None`` (default): no report.
 
     Returns
     -------
     dict
         ``{"timing_node_tasks": pandas.DataFrame (one row per task),
         "timing_distributed_application": dict, "ps_store": str, "ms_name": str,
-        "sky_image_store": str or None, "report": str or None}``;
+        "sky_image_store": str or None, "compute_resources": dict,
+        "report": str or None}``;
         ``"sky_image_store"`` is the path of the Zarr store the sky image was
-        written to (``None`` without ``sky_image_params``) and ``"report"`` the
-        path of the report file written (``None`` without one, for
-        ``report="notebook"`` and when the report failed).
+        written to (``None`` without ``sky_image_params``),
+        ``"compute_resources"`` what the graphs ran on (see
+        :func:`astroviper.utils.data_partitioning.get_compute_resources`) and
+        ``"report"`` the path of the report file written (``None`` without
+        one, for ``report="notebook"`` and when the report failed).
 
     Notes
     -----
@@ -383,6 +397,7 @@ def simulate_processing_set(
     )
     from astroviper.utils.data_partitioning import (
         calculate_data_chunking,
+        get_compute_resources,
         get_thread_info,
     )
     from astroviper.utils.measurement_set_tools import (
@@ -396,7 +411,7 @@ def simulate_processing_set(
         resolve_fields,
     )
     from astroviper.utils.telescope_layout import observatory_position
-    from astroviper.utils.timing import format_timing_summary
+    from astroviper.utils.timing import format_timing_summary, node_task_timing_table
 
     application_start = _time.time()
     timing_distributed_application = {}
@@ -661,6 +676,7 @@ def simulate_processing_set(
         "sky_components": sky_components,
         "sky_model_image": sky_model_image,
         "sky_model_image_predict": sky_model_image_predict,
+        "io_engine": io_engine,
         "phase_center_ra_dec": phase_center_ra_dec,
         "beam_models": list(beam_models),
         "beam_model_map": beam_model_map,
@@ -690,6 +706,11 @@ def simulate_processing_set(
     viper_graph = reduce(viper_graph, combine_timing_data_frames, {}, mode="tree")
     timing_distributed_application["T_create_map_reduce_graph"] = _time.time() - start
 
+    start = _time.time()
+    compute_resources = get_compute_resources(
+        compute_backend, processing_function_threads
+    )
+    timing_distributed_application["T_get_compute_resources"] = _time.time() - start
     if compute_backend == "mpi":
         from graphviper.graph_tools import processes_with_mpi
 
@@ -754,12 +775,21 @@ def simulate_processing_set(
     )
     if hasattr(timing_node_tasks, "sort_values") and "task_id" in timing_node_tasks:
         timing_node_tasks = timing_node_tasks.sort_values("task_id", ignore_index=True)
+    if len(timing_node_tasks):
+        logger.info(
+            "simulate_processing_set node-task timing over the "
+            f"{len(timing_node_tasks)} (time, frequency) chunks (seconds)\n"
+            + node_task_timing_table(timing_node_tasks).to_string(
+                float_format="{:.3f}".format
+            )
+        )
     result = {
         "timing_node_tasks": timing_node_tasks,
         "timing_distributed_application": timing_distributed_application,
         "ps_store": ps_store,
         "ms_name": ms_name,
         "sky_image_store": sky_image_store,
+        "compute_resources": compute_resources,
         "report": None,
     }
     if report is not None:

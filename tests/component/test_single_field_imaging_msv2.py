@@ -1,9 +1,9 @@
-"""Component tests: imaging a Measurement Set v2 directly (skunk_works).
+"""Component tests: imaging a Measurement Set v2 directly (io_engine="chunk").
 
 One field of the real ALMA Measurement Set v2
 ``Antennae_North.cal.lsrk.split.ms`` (8 channels of a spectral window with
 decreasing frequencies, XX and YY) is imaged by ``image_cube_single_field``
-with ``ps_store`` set to the Measurement Set itself and ``skunk_works=True``:
+with ``ps_store`` set to the Measurement Set itself and ``io_engine="chunk"``:
 the driver opens it with XRADIO's
 ``xradio_msv2`` engine and every node task reads its own selection through
 the engine. The tests check that
@@ -35,7 +35,7 @@ import shutil
 import numpy as np
 import pytest
 
-from astroviper.node_tasks.imaging.utils import msv2_engine_available
+from astroviper.utils.measurement_set_v2_input import msv2_engine_available
 
 _ENGINE_AVAILABLE, _ENGINE_REASON = msv2_engine_available()
 pytestmark = pytest.mark.skipif(
@@ -184,7 +184,7 @@ def _image_cube(ps_store, image_store, image_params, **overrides):
         single_precision_image=False,
         processing_function_threads=1,
         n_mapping_parallelism={"frequency": N_FREQUENCY_CHUNKS},
-        skunk_works=True,
+        io_engine="chunk",
         overwrite=True,
     )
     arguments.update(overrides)
@@ -233,7 +233,7 @@ def test_msv2_images_equal_production_on_the_conversion(
     msv2_store, result, before, after = msv2_image
     production_store = str(tmp_path / "production.img.zarr")
     production = _image_cube(
-        antennae_ps, production_store, image_params, skunk_works=False
+        antennae_ps, production_store, image_params, io_engine="xradio"
     )
 
     _assert_imaged(result)
@@ -362,7 +362,9 @@ def test_three_field_observation_is_refused_before_output(
             str(output),
             image_params,
             msv2_open_options={"partition_scheme": ["FIELD_ID"]},
-            skunk_works=input_format == "msv2" or output_format == "fits",
+            io_engine="chunk"
+            if input_format == "msv2" or output_format == "fits"
+            else "xradio",
             output_image_format=output_format,
         )
     for field in ("North_0", "North_1", "North_2"):

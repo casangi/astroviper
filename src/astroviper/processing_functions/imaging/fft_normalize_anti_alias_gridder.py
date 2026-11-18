@@ -440,22 +440,37 @@ def fft_norm_img_xds(
     )
 
 
-def _fold_shift_checkerboard(arr, axes):
-    """Multiply ``arr`` in place by the separable checkerboard ``(-1)**(i+j+...)``.
+def _fold_shift_checkerboard(arr, axes, centred=False):
+    """Multiply ``arr`` in place by a separable checkerboard of signs along ``axes``.
 
-    For even-length axes an ``fftshift`` / ``ifftshift`` (each a roll by ``N/2``)
-    can be replaced by a pointwise multiply by ``(-1)**k`` in the opposite
-    domain, so ``fftshift(fft(ifftshift(x))) == cb * fft(cb * x)`` with
-    ``cb = (-1)**(sum of axis indices)``.  The checkerboard is applied as a 1-D
-    sign broadcast per axis (no full 2-D kernel), which avoids the two
-    full-array roll-copies the shifts would make.  ``arr`` keeps its dtype (the
-    real sign array broadcasts without upcasting a complex array).
+    On an even axis of length ``n`` the roll by ``n/2`` of an ``fftshift`` /
+    ``ifftshift`` is a pointwise multiply by ``c[k] = (-1)**k`` in the other
+    domain, for the forward and the inverse transform ``F`` alike:
+    ``F(ifftshift(x)) == c * F(x)`` and ``fftshift(F(y)) == F(c * y)``. The
+    two shifts of a centred transform fold to::
+
+        fftshift(F(ifftshift(x))) == c_centred * F(c * x)
+
+    with ``c_centred[k] = (-1)**(k - n/2) = (-1)**(n/2) * c[k]``, the
+    checkerboard that is ``+1`` at the centre pixel ``k = n/2``, where
+    ``fftshift`` puts the origin. ``centred=False`` multiplies by ``c`` along
+    each axis (before the transform), ``centred=True`` by ``c_centred`` (after
+    it). ``c`` on both sides would be off by ``(-1)**(n0/2 + n1/2)``: the
+    negated transform when that sum is odd (e.g. a 90 x 120 plane).
+
+    Each checkerboard is a 1-D sign broadcast per axis (no full 2-D kernel),
+    which avoids the two full-array roll-copies the shifts would make; the
+    centring only flips that 1-D sign, so it costs no extra pass. ``arr``
+    keeps its dtype (the real sign array broadcasts without upcasting a
+    complex array).
     """
     sign_dtype = arr.real.dtype
     for ax in axes:
         n = arr.shape[ax]
         sign = np.ones(n, dtype=sign_dtype)
         sign[1::2] = -1.0
+        if centred and (n // 2) % 2:
+            sign = -sign
         shape = [1] * arr.ndim
         shape[ax] = n
         arr *= sign.reshape(shape)
@@ -524,8 +539,11 @@ def ifft_uv_to_lm(
     even = all(grid_2d.shape[ax] % 2 == 0 for ax in fft_plane_dims)
     if even:
         # Fold the ifftshift/fftshift into checkerboard multiplies (lower peak
-        # memory, fewer passes): fftshift(ifft2(ifftshift(x))) == cb*ifft2(cb*x).
-        # The padded grid axes are even (next_fft_friendly_size(even=True)).
+        # memory, fewer passes): fftshift(ifft2(ifftshift(x))) ==
+        # cb_centred * ifft2(cb * x), cb = (-1)**(i + j) and cb_centred =
+        # (-1)**(i - n0/2 + j - n1/2), +1 at the centre pixel (see
+        # _fold_shift_checkerboard). The padded grid axes are even
+        # (next_fft_friendly_size(even=True)).
         # Own the buffer unless the caller ceded it via overwrite_input.
         work = grid_2d if overwrite_input else grid_2d.copy()
         _fold_shift_checkerboard(work, fft_plane_dims)
@@ -535,7 +553,7 @@ def ifft_uv_to_lm(
             workers=processing_function_threads,
             overwrite_x=True,
         )
-        _fold_shift_checkerboard(sky, fft_plane_dims)
+        _fold_shift_checkerboard(sky, fft_plane_dims, centred=True)
     else:
         # Odd axis: the two shifts are not a simple checkerboard; use the rolls.
         sky = fft.fftshift(
@@ -606,7 +624,7 @@ def fft_lm_to_uv(
     even = all(work.shape[ax] % 2 == 0 for ax in fft_plane_dims)
     if even:
         # Fold the shifts into checkerboard multiplies (see ifft_uv_to_lm):
-        # fftshift(fft2(ifftshift(x))) == cb * fft2(cb * x).
+        # fftshift(fft2(ifftshift(x))) == cb_centred * fft2(cb * x).
         # Own the buffer unless the caller ceded it via overwrite_input
         # (asarray is a no-copy view when the dtype already matches).
         if work is image and not overwrite_input:
@@ -618,7 +636,7 @@ def fft_lm_to_uv(
             workers=processing_function_threads,
             overwrite_x=True,
         )
-        _fold_shift_checkerboard(uv, fft_plane_dims)
+        _fold_shift_checkerboard(uv, fft_plane_dims, centred=True)
         return uv
     return fft.fftshift(
         fft.fft2(

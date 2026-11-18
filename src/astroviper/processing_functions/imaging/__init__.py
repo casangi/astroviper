@@ -2,6 +2,11 @@ from astroviper.processing_functions.imaging.correct_sky_by_primary_beam import 
     correct_sky_by_primary_beam,
 )
 from astroviper.processing_functions.imaging.feather import feather_core
+from astroviper.processing_functions.imaging.find_continuum import (
+    finalize_find_continuum_reductions,
+    find_continuum_cube_reductions,
+    merge_find_continuum_reductions,
+)
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     accumulate_continuum_model,
     model_update_mtmfs_single_field,
@@ -22,4 +27,7 @@ __all__ = [
     "feather_core",
     "restore_image",
     "correct_sky_by_primary_beam",
+    "find_continuum_cube_reductions",
+    "merge_find_continuum_reductions",
+    "finalize_find_continuum_reductions",
 ]

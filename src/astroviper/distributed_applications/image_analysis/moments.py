@@ -137,6 +137,33 @@ ALLOWED_PARALLEL_AXES = ("frequency", "l", "m", "time")
 MOMENTS_MEMORY_FRACTION = 0.8
 MOMENTS_TASK_BASELINE_GB = 1.5
 
+# Driver steps of timing_distributed_application in execution order
+# (format_timing_summary layout); T_total is the total.
+DISTRIBUTED_APPLICATION_TIMING_PHASES = [
+    (
+        "DISTRIBUTED APPLICATION (driver)",
+        None,
+        [
+            ("open input image", "T_open_input_image"),
+            (
+                "determine chunks + parallel coords",
+                "T_determine_chunks_and_parallel_coords",
+            ),
+            ("create empty image xds", "T_make_empty_image_xds"),
+            ("write empty image to disk", "T_write_empty_image"),
+            ("create empty data vars on disk", "T_create_empty_data_variables"),
+            ("interpolate data coords", "T_interpolate_data_coords"),
+            ("create map graph", "T_create_map_graph"),
+            ("generate dask graph", "T_generate_dask_graph"),
+            ("get compute resources", "T_get_compute_resources"),
+            ("compute dask graph", "T_compute_dask_graph"),
+            ("consolidate metadata", "T_consolidate_metadata"),
+            ("write FITS images", "T_write_fits"),
+            ("collect node task timing", "T_collect_timing_node_tasks"),
+        ],
+    ),
+]
+
 
 def _open_input_image(input_image_store, selection):
     """Open the input image lazily and apply the user selection.
@@ -225,6 +252,9 @@ def moments(
     monitor_resources_seconds: float | None = None,
     dimension_flags: dict | None = None,
     image_data_group_in_role: str = "sky",
+    io_engine: str = "chunk",
+    output_image_format: str = "zarr",
+    report: str | None = None,
 ):
     """Collapse an on-disk image along one axis into moment maps (CASA ``immoments``).
 
@@ -339,7 +369,7 @@ def moments(
         If set, sample each node task's worker-process CPU / memory / I/O
         usage every this many seconds (graphviper's
         :func:`~graphviper.graph_tools.map.monitor_node_task`) and carry the
-        series into the returned frame as list-valued columns
+        series into ``timing_node_tasks`` as list-valued columns
         (``time_seconds``, ``cpu_percent``, ``memory_rss_bytes`` and, on
         Linux, ``read_bytes``/``write_bytes``/``read_chars``/``write_chars``)
         plus the scalar ``sample_interval_seconds`` and page-fault counts.
@@ -348,14 +378,60 @@ def moments(
         Role of ``image_data_group_in_name`` whose data variable is collapsed,
         e.g. ``"sky_primary_beam_corrected"`` of the imager's ``"restored"``
         group.  Only the default ``"sky"`` falls back to ``"SKY"``.
+    io_engine : {"chunk", "xradio"}, optional
+        I/O engine of the node tasks. ``"chunk"`` reads and writes Zarr chunk
+        blobs (and FITS data blocks) directly by byte offset
+        (:mod:`astroviper.utils.chunk_io`); ``"xradio"`` reads with XRADIO's
+        loaders and xarray and writes with zarr-python. A Measurement Set v2
+        and CASA or FITS images are read through XRADIO by both. Default
+        ``"chunk"``.
+    output_image_format : {"zarr", "fits"}, optional
+        Format of ``moments_image_store``: a Zarr store, or a directory with one
+        FITS file per moment map (``io_engine="chunk"`` only), written from the
+        node tasks' Zarr maps at the end. Default ``"zarr"``.
+    report : str, optional
+        Make a report of the run: ``"html"`` (one self contained file) or
+        ``"pdf"``, written next to the output store as
+        ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
+        gives ``cube_report.html``), or ``"notebook"``, displayed in the
+        calling Jupyter notebook. The report has a processing section common
+        to all distributed applications (performance measures, timing, task
+        stream, task times and, with ``monitor_resources_seconds``, the CPU,
+        memory and I/O of the cluster, of every worker slot and of the tasks)
+        and a results section of the application's own; the products it
+        makes with other distributed applications are kept in
+        ``<name>_report_files`` next to the output store. It is made after
+        the output is written: a failure while making it is logged and leaves
+        the results intact. ``None`` (default): no report.
 
     Returns
     -------
-    pandas.DataFrame
-        Per-task timing frame (``task_id``, ``streamed``,
-        ``n_read_block_planes``, ``T_load``, ``T_moments``, ``T_write``,
-        ``T_moments_task``, ``start_unixtime``, ``hostname``, worker identity
-        and, when monitored, the resource series), one row per graph node.
+    dict
+        ``{"timing_node_tasks", "timing_distributed_application",
+        "n_mapping_parallelism", "compute_resources", "moments_image_store",
+        "report"}``:
+
+        * ``"timing_node_tasks"`` is a :class:`pandas.DataFrame`, one row per
+          node task sorted by ``task_id``: ``task_id``, ``streamed``,
+          ``n_read_block_planes``, ``T_load``, ``T_moments``, ``T_stream_read``,
+          ``T_accumulate``, ``T_write``, ``T_moments_task``, ``start_unixtime``,
+          ``hostname``, ``process_pid``, ``thread_native_id``, ``worker_name``
+          and, when monitored, the resource series.
+        * ``"timing_distributed_application"`` is a dict of the driver steps
+          (``T_*`` seconds, the steps of
+          ``DISTRIBUTED_APPLICATION_TIMING_PHASES``), the total ``T_total``
+          and the unixtime anchors ``compute_start_unixtime``,
+          ``compute_end_unixtime``, ``application_start_unixtime`` and
+          ``application_end_unixtime``.
+        * ``"n_mapping_parallelism"`` is ``{parallel_axis: number of chunks}``
+          as run, in the order of the axes; the node task of ``task_id`` k
+          works on the chunks ``numpy.unravel_index(k, tuple(values))``.
+        * ``"compute_resources"``: what the graph ran on, see
+          :func:`astroviper.utils.data_partitioning.get_compute_resources`.
+        * ``"moments_image_store"`` is the store the moment maps were written
+          to (see Notes).
+        * ``"report"`` is the path of the report file written (``None``
+          without one, for ``report="notebook"`` and when the report failed).
 
     Raises
     ------
@@ -375,7 +451,18 @@ def moments(
     ``moments_image_store`` that ends in ``.img.zarr`` is kept by every
     version. With ``overwrite=False``, ``RuntimeError`` is raised if either
     ``moments_image_store`` or that store exists; ``overwrite=True`` replaces
-    only the store the moment maps are written to.
+    only the store the moment maps are written to. The store written is
+    returned as ``moments_image_store``.
+
+    The report (see
+    :func:`~astroviper.distributed_applications.image_analysis.moments_report.moments_report`)
+    adds to the processing section the task maps, per task on the grid of
+    two parallel axes. Its results section: the phases of every node task,
+    the read rate per task (monitored runs on Linux), and the moment maps per
+    Stokes plane when the store holds one frequency and more than one ``l``
+    and ``m`` (moment axis ``frequency``; a moment over ``time`` of a cube is
+    not drawn), every k-th pixel along ``l`` and ``m`` for maps with a side
+    larger than 2048 pixels.
     """
     import dask
     import pandas as pd
@@ -389,6 +476,7 @@ def moments(
 
     from astroviper.utils.data_partitioning import (
         calculate_data_chunking,
+        get_compute_resources,
         get_thread_info,
     )
     from astroviper.utils.io import (
@@ -396,6 +484,8 @@ def moments(
         write_zarr_image_store,
     )
 
+    timing_distributed_application = {}
+    application_start = time.time()
     if selection is None:
         selection = {}
     if compressor is None:
@@ -409,6 +499,13 @@ def moments(
         raise ValueError(
             "Only one of include_pixel_range and exclude_pixel_range may be given."
         )
+    if output_image_format not in ("zarr", "fits"):
+        raise ValueError("output_image_format must be 'zarr' or 'fits'.")
+    if output_image_format == "fits" and io_engine != "chunk":
+        raise ValueError("FITS output needs io_engine='chunk'.")
+    # With FITS output the node tasks write a Zarr store that the FITS files
+    # replace, at the path given.
+    fits_store = moments_image_store
     if not overwrite and os.path.exists(moments_image_store):
         raise RuntimeError(
             f"Already existing file {moments_image_store} will not be overwritten. "
@@ -416,11 +513,13 @@ def moments(
         )
 
     # --- Read input image metadata (lazy: no pixel data is loaded) ------------
+    start = time.time()
     img_xds = _open_input_image(input_image_store, selection)
     sky_name, mask_name = resolve_moments_input_variables(
         img_xds, image_data_group_in_name, use_mask, image_data_group_in_role
     )
     sky = img_xds[sky_name]
+    timing_distributed_application["T_open_input_image"] = time.time() - start
     if moment_axis not in sky.dims:
         raise ValueError(
             f"moment_axis '{moment_axis}' is not a dimension of {sky_name} "
@@ -636,7 +735,9 @@ def moments(
         + str({axis: chunk_len[axis] for axis in parallel_axes})
         + ")"
     )
-    T_determine_chunks = time.time() - start
+    timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
+        time.time() - start
+    )
 
     # --- Create the empty output image on disk --------------------------------
     # Coordinates are the input coordinates with the moment axis collapsed to
@@ -663,11 +764,13 @@ def moments(
     # spec Zarr v3's to_zarr rejects (mirrors the feather driver).
     for variable_name in moments_img_xds.variables:
         moments_img_xds[variable_name].encoding = {}
+    timing_distributed_application["T_make_empty_image_xds"] = time.time() - start
     # The store written can differ from the moments_image_store given (the
     # ".img.zarr" extension of newer XRADIO versions); everything below uses
     # the store written. The check above tests the moments_image_store given;
     # XRADIO raises FileExistsError, before writing anything, if the store
     # written exists.
+    start = time.time()
     try:
         moments_image_store = write_zarr_image_store(
             moments_img_xds, moments_image_store, overwrite=overwrite
@@ -677,6 +780,8 @@ def moments(
             "Already existing image store will not be overwritten. To "
             f"overwrite it, set overwrite=True ({exc})"
         ) from exc
+    timing_distributed_application["T_write_empty_image"] = time.time() - start
+    start = time.time()
 
     # Pre-allocate the moment data variables (NaN-filled) so each map task can
     # lazily write its own slice in parallel.  Image-valued moments follow the
@@ -703,15 +808,19 @@ def moments(
         double_precision=not single_precision_image,
         data_variable_definitions=data_variable_definitions,
     )
-    T_create_output = time.time() - start
+    timing_distributed_application["T_create_empty_data_variables"] = (
+        time.time() - start
+    )
 
     # --- Build and run the map graph ------------------------------------------
     # Interpolate in index space (see above); the graph's input_data only
     # carries coordinates, so either dataset works for the map call.
+    start = time.time()
     input_data = {"img": index_xds}
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, input_data
     )
+    timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
 
     input_params = {
         "input_image_store": input_image_store,
@@ -726,6 +835,7 @@ def moments(
         "selection": selection,
         "moments_data_variables": moments_data_variables,
         "memory_budget_gb": memory_budget_gb,
+        "io_engine": io_engine,
         # Full-image flags, validated here once; each node task slices them to
         # its chunk. Normalized so index-range lists reach workers as compact
         # bool arrays.
@@ -742,27 +852,101 @@ def moments(
         in_memory_compute=False,
         monitor_resources_seconds=monitor_resources_seconds,
     )
+    timing_distributed_application["T_create_map_graph"] = time.time() - start
+    start = time.time()
     dask_graph = generate_dask_workflow(viper_graph)
-    logger.debug("Time to create moments graph " + str(time.time() - start) + "s")
+    timing_distributed_application["T_generate_dask_graph"] = time.time() - start
 
     start = time.time()
+    compute_resources = get_compute_resources("dask", None)
+    timing_distributed_application["T_get_compute_resources"] = time.time() - start
+    start = time.time()
     results = dask.compute(dask_graph)
-    logger.info("Time to compute() moments " + str(time.time() - start) + "s")
-    logger.debug(
-        "Moments driver timings: determine chunks "
-        + str(T_determine_chunks)
-        + "s, create output "
-        + str(T_create_output)
-        + "s"
-    )
+    end = time.time()
+    timing_distributed_application["T_compute_dask_graph"] = end - start
+    timing_distributed_application["compute_start_unixtime"] = start
+    timing_distributed_application["compute_end_unixtime"] = end
 
-    zarr.consolidate_metadata(moments_image_store)
+    start = time.time()
+    if output_image_format == "fits":
+        import shutil
 
+        from astroviper.utils.chunk_io import write_fits_image
+        from astroviper.utils.node_task_io import open_image
+
+        if os.path.lexists(fits_store):
+            shutil.rmtree(fits_store)
+        write_fits_image(
+            fits_store,
+            open_image(io_engine, moments_image_store).load(),
+            moments_data_variables,
+            data_variable_definitions=data_variable_definitions,
+            double_precision=any(
+                np.dtype(definition["dtype"]).itemsize == 8
+                for definition in data_variable_definitions.values()
+            ),
+        )
+        shutil.rmtree(moments_image_store)
+        moments_image_store = fits_store
+        timing_distributed_application["T_consolidate_metadata"] = 0.0
+        timing_distributed_application["T_write_fits"] = time.time() - start
+    else:
+        zarr.consolidate_metadata(moments_image_store)
+        timing_distributed_application["T_consolidate_metadata"] = time.time() - start
+        timing_distributed_application["T_write_fits"] = 0.0
+
+    start = time.time()
     frames = []
     _collect_dataframes(results, frames)
+    timing_node_tasks = pd.DataFrame()
     if frames:
-        timing_df = pd.concat(frames, ignore_index=True)
-        if "task_id" in timing_df:
-            timing_df = timing_df.sort_values("task_id", ignore_index=True)
-        return timing_df
-    return pd.DataFrame()
+        timing_node_tasks = pd.concat(frames, ignore_index=True)
+        if "task_id" in timing_node_tasks:
+            timing_node_tasks = timing_node_tasks.sort_values(
+                "task_id", ignore_index=True
+            )
+    timing_distributed_application["T_collect_timing_node_tasks"] = time.time() - start
+
+    application_end = time.time()
+    timing_distributed_application["T_total"] = application_end - application_start
+    timing_distributed_application["application_start_unixtime"] = application_start
+    timing_distributed_application["application_end_unixtime"] = application_end
+
+    from astroviper.utils.timing import format_timing_summary, node_task_timing_table
+
+    logger.info(
+        format_timing_summary(
+            timing_distributed_application,
+            DISTRIBUTED_APPLICATION_TIMING_PHASES,
+            total_key="T_total",
+            title="moments timing (driver, seconds)",
+            total_label="TOTAL (driver wall time)",
+        )
+    )
+    if len(timing_node_tasks):
+        logger.info(
+            f"moments node-task timing over the {len(timing_node_tasks)} chunks "
+            "(seconds)\n"
+            + node_task_timing_table(timing_node_tasks).to_string(
+                float_format="{:.3f}".format
+            )
+        )
+
+    return_dict = {
+        "timing_node_tasks": timing_node_tasks,
+        "timing_distributed_application": timing_distributed_application,
+        "n_mapping_parallelism": {
+            axis: len(parallel_coords[axis]["data_chunks"]) for axis in parallel_axes
+        },
+        "compute_resources": compute_resources,
+        "moments_image_store": moments_image_store,
+        "report": None,
+    }
+    if report is not None:
+        from astroviper.distributed_applications.image_analysis.moments_report import (
+            moments_report,
+        )
+        from astroviper.utils.report import make_report
+
+        return_dict["report"] = make_report(moments_report, return_dict, report=report)
+    return return_dict
