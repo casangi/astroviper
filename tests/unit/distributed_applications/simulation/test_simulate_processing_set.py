@@ -654,6 +654,15 @@ def test_pdf_and_notebook_reports(tmp_path, monkeypatch):
     assert "CPU, memory and I/O were not recorded" in html
 
 
+def test_report_of_a_spectral_window_added_to_a_processing_set(tmp_path):
+    """The report is of the MSv4 written, not the first of the processing set."""
+    c_band = {**FREQ_PARAMS, "freq_start": 5e9, "spectral_window_name": "CBand"}
+    run(tmp_path, frequency_params=c_band)
+    result, _ = run(tmp_path, report="html")
+    text = _report_text(result["report"])
+    assert "VLA_SBand" in text and "VLA_CBand" not in text
+
+
 def test_unknown_report_format_is_refused(tmp_path):
     with pytest.raises(AssertionError):  # the param.json schema
         run(tmp_path, report="docx")
