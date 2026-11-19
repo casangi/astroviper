@@ -2716,7 +2716,7 @@ def test_weight_density_node_preserves_broad_channel_boundaries(monkeypatch):
     calls = []
 
     def load(*args, **kwargs):
-        np.testing.assert_array_equal(kwargs["full_image_frequencies"], full)
+        assert len(kwargs["frequency_boundaries"]) == 1
         calls.append("load")
         return {"ms": xr.Dataset(coords={"frequency": observed})}
 
@@ -2724,7 +2724,7 @@ def test_weight_density_node_preserves_broad_channel_boundaries(monkeypatch):
         mapped = map_visibility_frequencies_to_image(
             ps["ms"].frequency.values,
             image.frequency.values,
-            full_image_frequencies=image.frequency.attrs["full_image_frequencies"],
+            frequency_boundaries=image.frequency.attrs["frequency_boundaries"],
         )
         np.testing.assert_array_equal(mapped, np.zeros(observed.size, dtype=np.int64))
         calls.append("grid")

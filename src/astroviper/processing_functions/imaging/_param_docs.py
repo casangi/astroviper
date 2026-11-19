@@ -525,6 +525,12 @@ _FIND_CONTINUUM_ULTRA_PARAM_DOCS = {
 }
 
 IMAGING_PARAM_DOCS = {
+    "frequency_boundaries": (
+        "Precomputed image-channel acceptance intervals (Hz), keyed by channel\n"
+        "centre. Each pair gives the lowest and highest accepted float64\n"
+        "frequency, both inclusive. Only task-local channel records are needed.\n"
+        "When omitted, use the supplied image axis to infer channel widths."
+    ),
     "make_primary_beam_taylor": (
         "Collect the first-cycle inputs needed for primary-beam Taylor products.\n"
         "Distributed MFS and MVC form additive Taylor-fit inputs in map tasks,\n"

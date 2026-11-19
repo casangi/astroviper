@@ -482,6 +482,7 @@ def make_point_spread_function_mvc_single_field(
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
+            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
         )
 
     if complex_dtype is None:

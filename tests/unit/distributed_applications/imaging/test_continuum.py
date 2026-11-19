@@ -2986,7 +2986,9 @@ def test_tw_hydra_fits_output_per_taylor_term(tmp_path, tw_hydra_store, continuu
         )
 
 
-@pytest.mark.parametrize("mode", ["cube", "channel_psf", "local_beam_moments"])
+@pytest.mark.parametrize(
+    "mode", ["cube", "cube_exact_psf", "psf_cube", "channel_psf", "local_beam_moments"]
+)
 @pytest.mark.parametrize("io_engine", ["chunk", "xradio"])
 def test_broad_image_channels_are_independent_of_task_partition(
     tmp_path, mode, io_engine
@@ -3010,6 +3012,10 @@ def test_broad_image_channels_are_independent_of_task_partition(
     assert len(children) == 1
     # A second observation reaches the same task after its output arrays exist.
     shutil.copytree(Path(store) / children[0], Path(store) / "second_observation")
+    import zarr
+
+    zarr.consolidate_metadata(store)
+    assert len(open_processing_set(store).children) == 2
     products = []
     for tasks in (1, 3):
         path = str(tmp_path / f"{mode}_{tasks}.img.zarr")
@@ -3043,7 +3049,16 @@ def test_broad_image_channels_are_independent_of_task_partition(
             io_engine=io_engine,
             processing_function_threads=1,
         )
-        if mode == "cube":
+        if mode == "psf_cube":
+            from astroviper.distributed_applications.imaging.point_spread_function_cube_single_field import (
+                point_spread_function_cube_single_field,
+            )
+
+            params.pop("cycle_control_params")
+            point_spread_function_cube_single_field(**params)
+        elif mode in ("cube", "cube_exact_psf"):
+            if mode == "cube_exact_psf":
+                params["cycle_control_params"]["exact_psf_subtraction"] = True
             params["image_data_variables_keep"] = [
                 "sky_residual",
                 "point_spread_function",
@@ -3065,10 +3080,15 @@ def test_broad_image_channels_are_independent_of_task_partition(
         image = load_image(path)
         arrays = {
             name: image[name].values
-            for name in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "SKY_MODEL")
+            for name in (
+                ("POINT_SPREAD_FUNCTION",)
+                if mode == "psf_cube"
+                else ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "SKY_MODEL")
+            )
         }
         assert all(np.isfinite(values).all() for values in arrays.values())
-        assert np.max(np.abs(arrays["SKY_MODEL"])) > 0
+        if mode != "psf_cube":
+            assert np.max(np.abs(arrays["SKY_MODEL"])) > 0
         products.append(arrays)
     for name in products[0]:
         np.testing.assert_allclose(

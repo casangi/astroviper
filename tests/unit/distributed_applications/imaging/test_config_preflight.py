@@ -150,6 +150,12 @@ def test_cube_graph_omits_driver_only_arrays_without_changing_images(
             assert "frequency_coords" not in task["image_params"]
             assert "spectral_diagnostics" not in task
             assert task["task_coords"]["frequency"]["data"].size > 0
+            assert "full_image_frequencies" not in task["image_frequency_attrs"]
+            coordinate = task["task_coords"]["frequency"]
+            assert len(coordinate["frequency_boundaries"]) == len(coordinate["data"])
+            assert set(coordinate["frequency_boundaries"]) == {
+                str(float(f)) for f in coordinate["data"]
+            }
 
         with xr.open_zarr(params["image_store"]) as image:
             diagnostics = image.attrs["input_validation"]

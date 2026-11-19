@@ -13,6 +13,7 @@ Coverage:
 import unittest
 
 import numpy as np
+import pytest
 
 from astroviper.processing_functions.imaging.add_visibility_grid import (
     add_visibility_grid_single_field,
@@ -27,7 +28,9 @@ from astroviper.processing_functions.imaging.make_point_spread_function import (
     add_uv_sampling_grid_single_field,
 )
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+    calculate_frequency_boundaries,
     map_visibility_frequencies_to_image,
+    select_frequency_boundaries,
 )
 from tests.unit.processing_functions.imaging.degrid_test_datasets import (
     OVERSAMPLING,
@@ -299,7 +302,10 @@ class TestPartitionedFrequencyMapping(unittest.TestCase):
             )
 
 
-def test_single_plane_gridding_and_prediction_preserve_original_boundaries():
+@pytest.mark.parametrize("context_kind", ["legacy", "boundaries"])
+def test_single_plane_gridding_and_prediction_preserve_original_boundaries(
+    context_kind,
+):
     """The context reaches PSF, visibility and prediction kernels after slicing."""
     full = np.array([1.0e9, 1.2e9, 1.4e9])
     ms, image, _ = build_datasets(
@@ -307,7 +313,12 @@ def test_single_plane_gridding_and_prediction_preserve_original_boundaries():
         image_frequencies=full,
         sky_value=2.0 + 0j,
     )
-    image.frequency.attrs["full_image_frequencies"] = full.tolist()
+    if context_kind == "legacy":
+        image.frequency.attrs["full_image_frequencies"] = full.tolist()
+    else:
+        image.frequency.attrs["frequency_boundaries"] = calculate_frequency_boundaries(
+            full
+        )
     image = image.isel(frequency=slice(1, 2))
     image.attrs["data_groups"]["residual"] = {}
     cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
@@ -322,3 +333,79 @@ def test_single_plane_gridding_and_prediction_preserve_original_boundaries():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_precomputed_boundaries_match_graph_at_adjacent_floats():
+    """Closed float64 intervals preserve actual graph arithmetic, not rounded midpoints."""
+    import json
+
+    from graphviper.graph_tools.coordinate_utils import map_to_nearest_coordinate
+
+    rng = np.random.default_rng(456)
+    for axis in (
+        np.array([0.0, 2.0, 8.0, 10.0, 30.0, 60.0, 65.0, 100.0]),
+        np.array([100.0, 65.0, 60.0, 30.0, 10.0, 8.0, 2.0, 0.0]),
+        np.array([30.0, 0.0, 100.0, 2.0, 65.0, 8.0, 60.0, 10.0]),
+        4107516045.6904545 + np.arange(8) * 533950857.6451702,
+        rng.uniform(1.0e9, 2.0e9, 40),
+        np.array([-1.0e9, np.nextafter(1.0e9, np.inf)]),
+    ):
+        boundaries = json.loads(json.dumps(calculate_frequency_boundaries(axis)))
+        endpoints = np.asarray(list(boundaries.values())).ravel()
+        midpoints = (np.sort(axis)[:-1] + np.sort(axis)[1:]) / 2
+        probes = np.concatenate(
+            (
+                axis,
+                endpoints,
+                midpoints,
+                np.nextafter(endpoints, -np.inf),
+                np.nextafter(endpoints, np.inf),
+                np.nextafter(midpoints, -np.inf),
+                np.nextafter(midpoints, np.inf),
+                rng.uniform(axis.min() - np.ptp(axis), axis.max() + np.ptp(axis), 100),
+            )
+        )
+        expected = map_to_nearest_coordinate(probes, axis)
+        for indices in (
+            np.arange(axis.size),
+            np.arange(axis.size)[::2],
+            np.array([0]),
+            np.array([axis.size - 1]),
+        ):
+            local_axis = axis[indices]
+            context = select_frequency_boundaries(boundaries, local_axis)
+            assert len(context) == len(indices)
+            for value, owner in zip(probes, expected, strict=True):
+                if owner in indices:
+                    actual = map_visibility_frequencies_to_image(
+                        [value], local_axis, frequency_boundaries=context
+                    )
+                    assert indices[actual[0]] == owner
+                else:
+                    with np.testing.assert_raises_regex(
+                        ValueError, "outside this task"
+                    ):
+                        map_visibility_frequencies_to_image(
+                            [value], local_axis, frequency_boundaries=context
+                        )
+
+
+def test_boundary_preparation_rejects_invalid_axes_and_missing_channels():
+    for axis in ([], [[1.0, 2.0]], [np.inf], [1.0, 1.0]):
+        with np.testing.assert_raises(ValueError):
+            calculate_frequency_boundaries(axis)
+    with np.testing.assert_raises_regex(ValueError, "subset"):
+        select_frequency_boundaries(calculate_frequency_boundaries([1.0, 2.0]), [3.0])
+
+
+def test_precomputed_boundary_payload_scales_with_owned_channels():
+    import pickle
+
+    lengths = []
+    for count in (100, 10000):
+        axis = np.arange(count, dtype=float)
+        boundaries = calculate_frequency_boundaries(axis)
+        local = select_frequency_boundaries(boundaries, axis[50:51])
+        assert len(local) == 1
+        lengths.append(len(pickle.dumps(local)))
+    assert lengths[0] == lengths[1]

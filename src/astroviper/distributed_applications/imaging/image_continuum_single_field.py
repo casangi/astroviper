@@ -3627,6 +3627,12 @@ def image_continuum_single_field(
     )
 
     # Make Parallel Coords
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        calculate_frequency_boundaries,
+    )
+
+    frequency_boundaries = calculate_frequency_boundaries(img_xds.frequency.values)
+
     parallel_coords = {}
     parallel_coords["frequency"] = make_parallel_coord(
         coord=img_xds.frequency, n_chunks=n_frequency_chunks
@@ -3645,6 +3651,16 @@ def image_continuum_single_field(
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, ps_xdt
     )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        select_frequency_boundaries,
+    )
+
+    for task in node_task_data_mapping.values():
+        coordinate = task["task_coords"]["frequency"]
+        coordinate["frequency_boundaries"] = select_frequency_boundaries(
+            frequency_boundaries, coordinate["data"]
+        )
+
     timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
 
     from astroviper.node_tasks.imaging.config_check import preflight_imaging_inputs

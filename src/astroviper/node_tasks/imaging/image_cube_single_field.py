@@ -129,6 +129,7 @@ def _visibility_to_image_frequency_maps(ps_xdt, img_xds):
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
+            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
         )
         for ms_name, ms_xdt in ps_xdt.items()
     }
@@ -1260,11 +1261,12 @@ def image_cube_single_field(
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
-    img_xds.frequency.attrs["full_image_frequencies"] = list(
-        map(
-            float,
-            image_params.get("frequency_coords", task_coords["frequency"]["data"]),
-        )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        task_frequency_boundaries,
+    )
+
+    img_xds.frequency.attrs["frequency_boundaries"] = task_frequency_boundaries(
+        task_coords, image_params
     )
     img_xds = _with_image_spectral_reference(img_xds, image_frequency_attrs)
     T_make_empty_image = time.time() - start
@@ -1287,9 +1289,7 @@ def image_cube_single_field(
                 data_selection,
                 processing_set_data_group_name,
                 frequency_coords=task_coords["frequency"]["data"],
-                full_image_frequencies=img_xds.frequency.attrs[
-                    "full_image_frequencies"
-                ],
+                frequency_boundaries=img_xds.frequency.attrs["frequency_boundaries"],
                 instrument_polarization_basis=instrument_polarization_basis,
                 data_group=data_group,
                 processing_function_threads=processing_function_threads,
@@ -1441,6 +1441,7 @@ def image_cube_single_field(
             # Its input deliberately includes channels assigned to other planes.
             img_chan.frequency.attrs = dict(img_chan.frequency.attrs)
             img_chan.frequency.attrs.pop("full_image_frequencies", None)
+            img_chan.frequency.attrs.pop("frequency_boundaries", None)
         if accumulator is None:
             accumulator = _ImageChunkAccumulator(
                 img_xds, chan_index, min(chunk_channels, n_chan - chan_index)

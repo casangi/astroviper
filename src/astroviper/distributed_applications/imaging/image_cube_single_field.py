@@ -1168,6 +1168,12 @@ def image_cube_single_field(
     )
 
     # Make Parallel Coords
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        calculate_frequency_boundaries,
+    )
+
+    frequency_boundaries = calculate_frequency_boundaries(img_xds.frequency.values)
+
     parallel_coords = {}
     parallel_coords["frequency"] = make_parallel_coord(
         coord=img_xds.frequency, n_chunks=n_frequency_chunks
@@ -1194,8 +1200,8 @@ def image_cube_single_field(
     zarr_meta = {}
 
     input_params = {}
-    # Cube nodes obtain their frequency slice from task_coords. Keep the full
-    # axis in spectral metadata for mapping, not in per-channel configuration.
+    # Cube nodes obtain their frequency slice and precomputed
+    # channel boundaries in task_coords, not the full axis in each payload.
     input_params["image_params"] = {
         name: value
         for name, value in image_params.items()
@@ -1204,9 +1210,6 @@ def image_cube_single_field(
     # Each task's image covers its own channels; the whole image's spectral
     # reference keeps its velocities equal to the image store's.
     input_params["image_frequency_attrs"] = dict(img_xds.frequency.attrs)
-    input_params["image_frequency_attrs"]["full_image_frequencies"] = (
-        img_xds.frequency.values.tolist()
-    )
     input_params["imaging_weights_params"] = imaging_weights_params
     input_params["zarr_meta"] = zarr_meta
     input_params["to_disk"] = True
@@ -1274,6 +1277,16 @@ def image_cube_single_field(
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, ps_xdt
     )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        select_frequency_boundaries,
+    )
+
+    for task in node_task_data_mapping.values():
+        coordinate = task["task_coords"]["frequency"]
+        coordinate["frequency_boundaries"] = select_frequency_boundaries(
+            frequency_boundaries, coordinate["data"]
+        )
+
     timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
 
     # Load only the correlations that are needed: their index positions are

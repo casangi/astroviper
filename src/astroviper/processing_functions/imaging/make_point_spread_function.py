@@ -321,6 +321,7 @@ def add_uv_sampling_grid_single_field(
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
+            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
         )
     else:  # continuum
         n_imag_chan = 1  # Making only one continuum image.
@@ -799,6 +800,7 @@ def make_subtraction_point_spread_function_single_field(
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
+    psf_xds.frequency.attrs.update(img_xds.frequency.attrs)
     psf_xds.attrs["type"] = "image_dataset"
     psf_xds = psf_xds.xr_img.add_data_group(
         new_data_group_name="residual",

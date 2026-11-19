@@ -436,6 +436,7 @@ def calculate_weight_statistics_single_field(
             full_image_frequencies=img_xds.frequency.attrs.get(
                 "full_image_frequencies"
             ),
+            frequency_boundaries=img_xds.frequency.attrs.get("frequency_boundaries"),
         )
         samples_per_time = int(cross.sum()) * ms_xdt.sizes["frequency"] * len(order)
         times_per_block = max(1, BLOCK_SAMPLES // max(samples_per_time, 1))

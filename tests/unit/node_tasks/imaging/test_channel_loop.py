@@ -805,7 +805,9 @@ def test_channel_cycle_control_params_takes_the_global_row():
         assert _channel_cycle_control_params(plain, task_coords, {}, 0) is plain
 
 
-def test_single_channel_task_keeps_full_axis_for_science(tmp_path, monkeypatch):
+def test_single_channel_task_keeps_precomputed_boundaries_for_science(
+    tmp_path, monkeypatch
+):
     """A cube task and its per-channel science use the same broad-channel map."""
     import astroviper.processing_functions.imaging as pf_imaging
     from astroviper.node_tasks.imaging.image_cube_single_field import (
@@ -821,14 +823,13 @@ def test_single_channel_task_keeps_full_axis_for_science(tmp_path, monkeypatch):
     fake = _FakeScience([1])
 
     def science(ps_xdt, image, *args, **kwargs):
-        np.testing.assert_array_equal(
-            image.frequency.attrs["full_image_frequencies"], full
-        )
+        assert "full_image_frequencies" not in image.frequency.attrs
+        assert len(image.frequency.attrs["frequency_boundaries"]) == 1
         np.testing.assert_array_equal(
             map_visibility_frequencies_to_image(
                 ps_xdt["ms_a"].frequency.values,
                 image.frequency.values,
-                full_image_frequencies=image.frequency.attrs["full_image_frequencies"],
+                frequency_boundaries=image.frequency.attrs["frequency_boundaries"],
             ),
             [0, 0, 0],
         )

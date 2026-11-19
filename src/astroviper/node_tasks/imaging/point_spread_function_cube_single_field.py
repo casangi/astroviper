@@ -278,6 +278,13 @@ def point_spread_function_cube_single_field(
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        task_frequency_boundaries,
+    )
+
+    img_xds.frequency.attrs["frequency_boundaries"] = task_frequency_boundaries(
+        task_coords, image_params
+    )
     T_make_empty_image = time.time() - start
 
     start = time.time()
@@ -292,6 +299,7 @@ def point_spread_function_cube_single_field(
             data_selection,
             processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
+            frequency_boundaries=img_xds.frequency.attrs["frequency_boundaries"],
             instrument_polarization_basis=instrument_polarization_basis,
             data_group=data_group,
             load_correlated_data=load_correlated_data,
