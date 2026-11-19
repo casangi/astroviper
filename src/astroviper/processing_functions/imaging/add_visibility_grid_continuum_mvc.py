@@ -349,6 +349,8 @@ def add_visibility_grid_mvc_single_field(
     # Create or validate output arrays.
     # ------------------------------------------------------------------
     if visibility_name not in img_xds:
+        # Keep coordinate metadata (especially the unpartitioned frequency
+        # axis) when the first child allocates outputs for later children.
         visibility_coords = {
             "time": img_xds.coords["time"],
             "frequency": img_xds.coords["frequency"],
@@ -373,14 +375,7 @@ def add_visibility_grid_mvc_single_field(
                 "u",
                 "v",
             ),
-            coords={
-                "time": img_xds.coords["time"],
-                "frequency": (
-                    "frequency",
-                    image_frequency_coord,
-                ),
-                "polarization": img_xds.coords["polarization"],
-            },
+            coords=visibility_coords,
         )
 
         img_xds[normalization_name] = xr.DataArray(
@@ -394,12 +389,8 @@ def add_visibility_grid_mvc_single_field(
                 "polarization",
             ),
             coords={
-                "time": img_xds.coords["time"],
-                "frequency": (
-                    "frequency",
-                    image_frequency_coord,
-                ),
-                "polarization": img_xds.coords["polarization"],
+                dim: visibility_coords[dim]
+                for dim in ("time", "frequency", "polarization")
             },
         )
 

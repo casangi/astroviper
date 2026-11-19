@@ -3001,6 +3001,15 @@ def test_broad_image_channels_are_independent_of_task_partition(
     )
 
     store = _simulate_point_source(tmp_path, n_channels=9)
+    import shutil
+    from pathlib import Path
+
+    from xradio.measurement_set import open_processing_set
+
+    children = list(open_processing_set(store).children)
+    assert len(children) == 1
+    # A second observation reaches the same task after its output arrays exist.
+    shutil.copytree(Path(store) / children[0], Path(store) / "second_observation")
     products = []
     for tasks in (1, 3):
         path = str(tmp_path / f"{mode}_{tasks}.img.zarr")
