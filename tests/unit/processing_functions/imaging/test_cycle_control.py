@@ -16,6 +16,7 @@ Tests cover:
 import unittest
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from astroviper.processing_functions.image_analysis.image_statistics import (
@@ -47,6 +48,7 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (  # Sto
     make_cycle_control_state,
     merge_imaging_dicts,
     per_plane_threshold_per_cycle,
+    plot_convergence_history,
     record_model_update,
     reset,
     reset_stopcode,
@@ -3574,3 +3576,41 @@ class TestThresholdTolerance(unittest.TestCase):
         controller = make_cycle_control_state(threshold_tolerance=np.float32(0.25))
         self.assertEqual(get_state(controller)["threshold_tolerance"], 0.25)
         self.assertIs(type(controller["threshold_tolerance"]), float)
+
+
+def test_plot_convergence_history_of_two_cycles():
+    """The plot of a plane is built from a two-cycle imaging_dict, without a
+    display."""
+    hv = pytest.importorskip("holoviews")
+    pytest.importorskip("bokeh")
+    rd = {}
+    for start_peakres, peakres, start_model_flux, model_flux in (
+        (1.0, 0.5, 0.0, 0.5),
+        (0.5, 0.2, 0.5, 0.8),
+    ):
+        add_to_imaging_dict(
+            rd,
+            {
+                "start_peakres": start_peakres,
+                "peakres": peakres,
+                "iter_done": 100,
+                "start_model_flux": start_model_flux,
+                "model_flux": model_flux,
+            },
+            time=0,
+            pol=0,
+            chan=0,
+        )
+
+    plot = plot_convergence_history(rd)
+
+    assert isinstance(plot, hv.DynamicMap)
+    assert [(kdim.name, kdim.values) for kdim in plot.kdims] == [
+        ("Stokes", ["I"]),
+        ("Channel", [0]),
+    ]
+    peakres_curve, model_flux_curve = plot["I", 0]
+    np.testing.assert_array_equal(peakres_curve.dimension_values(0), [0, 100, 200])
+    np.testing.assert_array_equal(peakres_curve.dimension_values(1), [1.0, 0.5, 0.2])
+    np.testing.assert_array_equal(model_flux_curve.dimension_values(0), [0, 100, 200])
+    np.testing.assert_array_equal(model_flux_curve.dimension_values(1), [0.0, 0.5, 0.8])

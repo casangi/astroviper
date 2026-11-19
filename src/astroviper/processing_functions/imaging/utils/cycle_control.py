@@ -2073,60 +2073,63 @@ def get_state(cycle_control_state) -> dict[str, Any]:
 # ============================================================================
 
 
-class ConvergencePlots:
+def plot_convergence_history(imaging_dict, time=0, stokes="I", chan=0, **kwargs):
     """
-    Class for creating convergence visualization plots from imaging_dict.
+    Plot interactive convergence history from imaging_dict.
 
-    This class provides methods to create interactive HoloViews plots showing
-    deconvolution convergence history, including peak residual evolution over
-    iterations.
+    Creates an interactive HoloViews plot showing peak residual and model flux
+    evolution over iterations, with widgets to select Stokes parameter and channel.
+    Displays dual y-axis plot with Peak Residual (left, blue) and Model Flux (right, red).
 
     Parameters
     ----------
     imaging_dict : dict
-        imaging_dict with convergence history (peakres, iter_done fields)
+        imaging_dict with convergence history (peakres, iter_done, model_flux fields)
+    time : int, optional
+        Time index to plot (default: 0)
+    stokes : str, optional
+        Initial Stokes parameter to display: 'I', 'Q', 'U', or 'V' (default: 'I')
+    chan : int, optional
+        Initial channel index to display (default: 0)
+    **kwargs : dict, optional
+        Additional plotting options:
+        - width : int, plot width in pixels per subplot (default: 700)
+        - height : int, plot height in pixels (default: 400)
+        - responsive : bool, make plot responsive (default: False)
 
-    Attributes
-    ----------
-    imaging_dict : dict
-        The imaging_dict containing convergence data
-    stokes_to_pol : dict
-        Mapping from Stokes parameter names to polarization indices
+    Returns
+    -------
+    holoviews.DynamicMap
+        Interactive dual y-axis plot with Stokes and channel selector widgets
 
     Examples
     --------
     >>> rd = {}
     >>> for cycle in range(5):
-    ...     add_to_imaging_dict(rd, {'peakres': 1.0 * 0.7**cycle, 'iter_done': 100},
+    ...     add_to_imaging_dict(rd, {'peakres': 1.0 * 0.7**cycle, 'iter_done': 100, 'model_flux': 0.5 * cycle},
     ...                         time=0, pol=0, chan=0)
-    >>> plotter = ConvergencePlots(rd)
-    >>> plot = plotter.plot_history(time=0, stokes='I', chan=0)
+    >>> plot = plot_convergence_history(rd, time=0, stokes='I', chan=0)
     >>> plot  # Display in Jupyter notebook
+
+    Notes
+    -----
+    - Requires holoviews with bokeh backend
+    - Uses lazy imports to avoid hard dependency
+    - Displays error message if selected (time, pol, chan) not found
+    - Falls back to single-axis plot if no model_flux data in imaging_dict
     """
+    stokes_to_pol = {"I": 0, "Q": 1, "U": 2, "V": 3}
 
-    def __init__(self, imaging_dict):
-        """
-        Initialize ConvergencePlots with an imaging_dict.
+    # Plotting parameters for make_plot
+    width = kwargs.get("width", 700)
+    height = kwargs.get("height", 400)
+    responsive = kwargs.get("responsive", False)
 
-        Parameters
-        ----------
-        imaging_dict : dict
-            imaging_dict containing convergence history
-        """
-        self.imaging_dict = imaging_dict
-        self.stokes_to_pol = {"I": 0, "Q": 1, "U": 2, "V": 3}
-
-        # Default plotting parameters (set by plot_history)
-        self.width = 700
-        self.height = 400
-        self.responsive = False
-        self.time = 0
-
-    def make_plot(self, stokes_sel, chan_sel):
+    def make_plot(stokes_sel, chan_sel):
         """
         Generate a convergence plot for given Stokes and channel selection.
 
-        This method is called by HoloViews DynamicMap when widget values change.
+        This function is called by HoloViews DynamicMap when widget values change.
 
         Parameters
         ----------
@@ -2152,23 +2155,23 @@ class ConvergencePlots:
                 "Install with: pip install holoviews bokeh"
             ) from e
 
-        pol_sel = self.stokes_to_pol.get(stokes_sel, 0)
+        pol_sel = stokes_to_pol.get(stokes_sel, 0)
 
         # Get data for this (time, pol, chan)
-        key = Key(time=self.time, pol=pol_sel, chan=chan_sel)
+        key = Key(time=time, pol=pol_sel, chan=chan_sel)
 
-        if key not in self.imaging_dict:
+        if key not in imaging_dict:
             # Show error message
             return hv.Curve([]).opts(
-                title=f"No data for Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
+                title=f"No data for Time={time}, Stokes={stokes_sel}, Channel={chan_sel}",
                 xlabel="Cumulative Iterations",
                 ylabel="Peak Residual (Jy)",
-                width=self.width,
-                height=self.height,
+                width=width,
+                height=height,
                 show_grid=True,
             )
 
-        data = self.imaging_dict[key]
+        data = imaging_dict[key]
 
         # Extract history
         peakres_history = data.get("peakres", [])
@@ -2185,11 +2188,11 @@ class ConvergencePlots:
 
         if not peakres_history or not iter_done_history:
             return hv.Curve([]).opts(
-                title=f"No convergence history - Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
+                title=f"No convergence history - Time={time}, Stokes={stokes_sel}, Channel={chan_sel}",
                 xlabel="Cumulative Iterations",
                 ylabel="Peak Residual (Jy)",
-                width=self.width,
-                height=self.height,
+                width=width,
+                height=height,
                 show_grid=True,
             )
 
@@ -2238,167 +2241,79 @@ class ConvergencePlots:
 
             # Overlay both curves with dual y-axes
             overlay = (peakres_curve * modelflux_curve).opts(
-                title=f"Convergence History - Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
+                title=f"Convergence History - Time={time}, Stokes={stokes_sel}, Channel={chan_sel}",
                 xlabel="Cumulative Iterations",
                 ylabel="Peak Residual (Jy)",
-                width=self.width,
-                height=self.height,
+                width=width,
+                height=height,
                 show_grid=True,
                 show_legend=True,
-                responsive=self.responsive,
+                responsive=responsive,
                 multi_y=True,  # Enable dual y-axes
             )
             return overlay
         else:
             # Fall back to single plot if no model flux data
             return peakres_curve.opts(
-                title=f"Convergence History - Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
+                title=f"Convergence History - Time={time}, Stokes={stokes_sel}, Channel={chan_sel}",
                 xlabel="Cumulative Iterations",
                 ylabel="Peak Residual (Jy)",
-                width=self.width,
-                height=self.height,
+                width=width,
+                height=height,
                 show_grid=True,
                 show_legend=True,
                 tools=["hover"],
-                responsive=self.responsive,
+                responsive=responsive,
             )
 
-    def plot_history(self, time=0, stokes="I", chan=0, **kwargs):
-        """
-        Plot interactive convergence history.
+    # Lazy imports
+    try:
+        import holoviews as hv
 
-        Creates an interactive HoloViews plot showing peak residual and model flux
-        evolution over iterations, with widgets to select Stokes parameter and channel.
-        Displays dual y-axis plot with Peak Residual (left, blue) and Model Flux (right, red).
+        hv.extension("bokeh")
+    except ImportError as e:
+        raise ImportError(
+            "ConvergencePlots requires holoviews and bokeh. "
+            "Install with: pip install holoviews bokeh"
+        ) from e
 
-        Parameters
-        ----------
-        time : int, optional
-            Time index to plot (default: 0)
-        stokes : str, optional
-            Initial Stokes parameter to display: 'I', 'Q', 'U', or 'V' (default: 'I')
-        chan : int, optional
-            Initial channel index to display (default: 0)
-        **kwargs : dict, optional
-            Additional plotting options:
-            - width : int, plot width in pixels per subplot (default: 700)
-            - height : int, plot height in pixels (default: 400)
-            - responsive : bool, make plot responsive (default: False)
-
-        Returns
-        -------
-        holoviews.DynamicMap
-            Interactive dual y-axis plot with Stokes and channel selector widgets
-
-        Notes
-        -----
-        - Requires holoviews with bokeh backend
-        - Uses lazy imports to avoid hard dependency
-        - Falls back to single-axis plot if no model_flux data in imaging_dict
-        """
-        # Store plotting parameters as instance variables for access in make_plot
-        self.time = time
-        self.width = kwargs.get("width", 700)
-        self.height = kwargs.get("height", 400)
-        self.responsive = kwargs.get("responsive", False)
-
-        # Lazy imports
-        try:
-            import holoviews as hv
-
-            hv.extension("bokeh")
-        except ImportError as e:
-            raise ImportError(
-                "ConvergencePlots requires holoviews and bokeh. "
-                "Install with: pip install holoviews bokeh"
-            ) from e
-
-        # Extract available channels and stokes from imaging_dict
-        available_keys = list(self.imaging_dict.keys())
-        if not available_keys:
-            return hv.Curve([]).opts(
-                title="No data in ImagingDict",
-                xlabel="Cumulative Iterations",
-                ylabel="Peak Residual (Jy)",
-            )
-
-        channels = sorted({k.chan for k in available_keys if k.time == time})
-        pols = sorted({k.pol for k in available_keys if k.time == time})
-        stokes_available = [s for s, p in self.stokes_to_pol.items() if p in pols]
-
-        if not channels:
-            return hv.Curve([]).opts(
-                title=f"No data for time={time}",
-                xlabel="Cumulative Iterations",
-                ylabel="Peak Residual (Jy)",
-            )
-
-        # Create widgets
-        if stokes_available:
-            stokes_default = (
-                stokes if stokes in stokes_available else stokes_available[0]
-            )
-        else:
-            stokes_default = "I"
-
-        chan_default = chan if chan in channels else (channels[0] if channels else 0)
-
-        # Create DynamicMap with widgets
-        dmap = hv.DynamicMap(self.make_plot, kdims=["Stokes", "Channel"])
-        dmap = dmap.redim.values(
-            Stokes=stokes_available if stokes_available else ["I"],
-            Channel=channels if channels else [0],
+    # Extract available channels and stokes from imaging_dict
+    available_keys = list(imaging_dict.keys())
+    if not available_keys:
+        return hv.Curve([]).opts(
+            title="No data in ImagingDict",
+            xlabel="Cumulative Iterations",
+            ylabel="Peak Residual (Jy)",
         )
-        dmap = dmap.redim.default(Stokes=stokes_default, Channel=chan_default)
 
-        return dmap
+    channels = sorted({k.chan for k in available_keys if k.time == time})
+    pols = sorted({k.pol for k in available_keys if k.time == time})
+    stokes_available = [s for s, p in stokes_to_pol.items() if p in pols]
 
+    if not channels:
+        return hv.Curve([]).opts(
+            title=f"No data for time={time}",
+            xlabel="Cumulative Iterations",
+            ylabel="Peak Residual (Jy)",
+        )
 
-def plot_convergence_history(imaging_dict, time=0, stokes="I", chan=0, **kwargs):
-    """
-    Plot interactive convergence history from imaging_dict.
+    # Create widgets
+    if stokes_available:
+        stokes_default = stokes if stokes in stokes_available else stokes_available[0]
+    else:
+        stokes_default = "I"
 
-    Convenience function that wraps ConvergencePlots.plot_history() for
-    backward compatibility and quick plotting. Displays dual y-axis plot
-    of peak residual (blue, left) and model flux (red, right) evolution over iterations.
+    chan_default = chan if chan in channels else (channels[0] if channels else 0)
 
-    Parameters
-    ----------
-    imaging_dict : dict
-        imaging_dict with convergence history (peakres, iter_done, model_flux fields)
-    time : int, optional
-        Time index to plot (default: 0)
-    stokes : str, optional
-        Initial Stokes parameter to display: 'I', 'Q', 'U', or 'V' (default: 'I')
-    chan : int, optional
-        Initial channel index to display (default: 0)
-    **kwargs : dict, optional
-        Additional plotting options (e.g., width, height)
+    # Create DynamicMap with widgets
+    dmap = hv.DynamicMap(make_plot, kdims=["Stokes", "Channel"])
+    dmap = dmap.redim.values(
+        Stokes=stokes_available if stokes_available else ["I"],
+        Channel=channels if channels else [0],
+    )
+    dmap = dmap.redim.default(Stokes=stokes_default, Channel=chan_default)
 
-    Returns
-    -------
-    holoviews.DynamicMap
-        Interactive dual y-axis plot with Stokes and channel selector widgets
-
-    Examples
-    --------
-    >>> rd = {}
-    >>> for cycle in range(5):
-    ...     add_to_imaging_dict(rd, {'peakres': 1.0 * 0.7**cycle, 'iter_done': 100, 'model_flux': 0.5 * cycle},
-    ...                         time=0, pol=0, chan=0)
-    >>> plot = plot_convergence_history(rd, time=0, stokes='I', chan=0)
-    >>> plot  # Display in Jupyter notebook
-
-    Notes
-    -----
-    - Requires holoviews with bokeh backend
-    - Uses lazy imports to avoid hard dependency
-    - Displays error message if selected (time, pol, chan) not found
-    - Falls back to single-axis plot if no model_flux data in imaging_dict
-    - For more control, use ConvergencePlots class directly
-    """
-    plotter = ConvergencePlots(imaging_dict)
-    return plotter.plot_history(time=time, stokes=stokes, chan=chan, **kwargs)
+    return dmap
 
 
 # ============================================================================
