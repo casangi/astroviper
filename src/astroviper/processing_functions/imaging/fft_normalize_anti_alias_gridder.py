@@ -1,12 +1,7 @@
 import time
 
 import numpy as np
-<<<<<<< Updated upstream:src/astroviper/processing_functions/imaging/fft_normalize_anti_alias_gridder.py
 import toolviper.utils.logger as logger
-=======
-import scipy.fft
-from toolviper.utils import debug
->>>>>>> Stashed changes:src/astroviper/processing_functions/imaging/fft_normalize_prolate_spheriodal_gridder.py
 import xarray as xr
 
 # from memory_profiler import profile
