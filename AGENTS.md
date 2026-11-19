@@ -154,9 +154,8 @@ the future.
    images one frequency channel at a time so every channel runs its own
    imaging cycle loop); never write a processing function that assumes a
    single time, channel or polarization plane.
-   > **Open question:** should temporary/cache data (e.g. a cfcache) be allowed
-   > to be written to disk from this layer? Undecided — raise it before relying
-   > on either answer.
+   Temporary and cache data (for example a cache of gridding convolution
+   functions) are read and written by node tasks, never from this layer.
 4. **`utils/`** — Cross-cutting helpers. Most important:
    `utils/data_group_tools.py` (data-group bookkeeping — read it before touching
    data groups) and `utils/io.py` (Zarr variable definitions + chunk writers).
@@ -597,6 +596,21 @@ per-variable nodes.
     (`CycleController`); **iteration control** is the stop test inside the
     model update (the deconvolver kernels). A quantity keeps one name from the
     cycle controller down to the kernel arguments.
+- **Interface classes**: a class exists only where several implementations
+  share an interface (imagers, gridders, deconvolvers, solvers). It has the
+  metaclass `astroviper.utils.interface.Interface`, which enforces the first
+  two rules:
+  - static methods only: no `__init__`, instances, class methods or
+    properties;
+  - class attributes are constants that declare the implementation (its
+    `name`, what it supports) and are never reassigned;
+  - a base class defines the interface and the shared helpers, and a subclass
+    calls a helper through the base-class name (no dispatch through `cls` or
+    `self`);
+  - a registry (`make_registry`) maps the user's string to a class, which is
+    then passed down as an argument; drivers never name an implementation;
+  - a method receives all its inputs as arguments, and state lives in the
+    datasets it is given (`ps_xdt`, `img_xds`, `gcf_xds`), never in the class.
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
   astroviper.processing_functions.imaging.residual_update import ...`). Relative
