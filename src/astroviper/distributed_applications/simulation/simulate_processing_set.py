@@ -132,6 +132,9 @@ def simulate_processing_set(
     ----------
     ps_store : str
         Output processing-set directory (conventionally ``<name>.ps.zarr``).
+        The MSv4 is added to an existing processing set, so calls with
+        different ``ms_name`` (by default, different spectral windows) write
+        into one processing set.
     antenna_xds : xr.Dataset
         MSv4 antenna dataset describing the array, e.g. from
         :func:`astroviper.utils.telescope_layout.read_telescope_layout`.  Its
@@ -306,7 +309,8 @@ def simulate_processing_set(
         Compressor for the output Zarr arrays; ``None`` selects
         ``Blosc(cname="lz4", clevel=5)``.
     overwrite : bool
-        Replace an existing ``ps_store``.
+        Replace an MSv4 of the same name in ``ps_store`` (its other MSv4s are
+        kept), or a ``ps_store`` that is not a processing set.
     compute_backend : {"dask", "mpi"}
         Execute the GraphVIPER graph with Dask (default) or with
         :func:`graphviper.graph_tools.processes_with_mpi`.
