@@ -1,5 +1,4 @@
 import copy
-from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -9,11 +8,6 @@ from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
-
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
 
 
 def add_visibility_grid_mosaic(
@@ -198,7 +192,7 @@ def add_visibility_grid_mosaic(
 
 def add_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: "GriddingKernel | np.ndarray",
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -214,7 +208,7 @@ def add_visibility_grid_single_field(
 
     Reads correlated visibility data and imaging weights from ``ms_xds``, grids
     them onto the UV plane using a separable 1-D convolutional gridding kernel
-    (``cgk_1D``), and accumulates the result into ``img_xds``.  The gridded
+    (``gcf_xds``), and accumulates the result into ``img_xds``.  The gridded
     visibilities and their normalization (sum of weights) are stored as new
     data variables in ``img_xds``, and a corresponding output data group is
     registered via
@@ -223,7 +217,7 @@ def add_visibility_grid_single_field(
     This function is the non-mosaic counterpart of
     :func:`add_visibility_grid_mosaic`.  It uses the separable anti-aliasing gridder (the C++ ``anti_alias_grid`` kernel, the
     standard gridder in CASA) rather than the direction-dependent mosaic
-    gridder, so no GCF dataset is required.
+    gridder, so ``gcf_xds`` needs only the anti-alias term.
 
     Parameters
     ----------
@@ -231,12 +225,14 @@ def add_visibility_grid_single_field(
         Measurement set dataset.  Must contain the data variables referenced
         by ``ms_data_group_in_name`` (``correlated_data``, ``uvw``,
         ``weight_imaging``) and a ``frequency`` coordinate.
-    cgk_1D : GriddingKernel or np.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
-        whose table, support and oversampling go to the C++
-        ``anti_alias_grid`` kernel), or a bare table of CASA's
-        prolate spheroidal kernel of support 7.
+    gcf_xds : xr.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7;
+        its table, support and oversampling go to the C++
+        ``anti_alias_grid`` kernel.
     img_xds : xr.Dataset
         Image dataset that accumulates the gridded visibilities.  The arrays
         named by ``image_data_group_out_modified`` are created on the first call
@@ -273,6 +269,12 @@ def add_visibility_grid_single_field(
         Padding factor applied to the image size when computing the UV-grid
         dimensions: ``n_uv = fft_padding * [img_xds.sizes["l"], img_xds.sizes["m"]]``.
         Values greater than ``1.0`` reduce aliasing from the FFT.
+    processing_function_threads : int, default ``1``
+        Threads handed to the C++ gridding kernel.
+    complex_dtype : numpy.dtype, optional
+        Complex precision of the gridded visibilities (``complex64`` for a
+        single-precision image, ``complex128`` otherwise).  Defaults to
+        ``numpy.complex128``.
 
     Returns
     -------
@@ -373,10 +375,10 @@ def add_visibility_grid_single_field(
         anti_alias_grid,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
+        anti_alias_kernel_arguments,
     )
 
-    kernel = as_gridding_kernel(cgk_1D)
+    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
     anti_alias_grid(
         grid,
         normalization,
@@ -387,11 +389,11 @@ def add_visibility_grid_single_field(
         time_map,
         pol_map,
         imaging_weight,
-        kernel.table,
+        table,
         n_uv,
         delta_lm,
-        support=kernel.support,
-        oversampling=kernel.oversampling,
-        interpolation=kernel.interpolation_code,
+        support=support,
+        oversampling=oversampling,
+        interpolation=interpolation,
         processing_function_threads=processing_function_threads,
     )

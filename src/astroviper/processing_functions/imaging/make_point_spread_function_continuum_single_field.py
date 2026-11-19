@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import copy
 import time
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -33,11 +32,6 @@ from astroviper.utils.data_group_tools import (
     modify_data_groups_xds,
 )
 from astroviper.utils.param_docs import shares_param_docs
-
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
 
 
 def _validate_mtmfs_parameters(
@@ -58,7 +52,7 @@ def _validate_mtmfs_parameters(
 
 def add_uv_sampling_grid_continuum_single_field(
     ms_xdt: xr.Dataset,
-    cgk_1D: GriddingKernel | np.ndarray,
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     *,
     n_psf_taylor_terms: int,
@@ -92,12 +86,14 @@ def add_uv_sampling_grid_continuum_single_field(
     ms_xdt : xarray.Dataset
         One Measurement Set partition with visibility coordinates and imaging
         weights.
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
-        whose table, support and oversampling go to the C++
-        ``anti_alias_grid_uv_sampling`` kernel), or a bare table of
-        CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7;
+        its table, support and oversampling go to the C++
+        ``anti_alias_grid_uv_sampling`` kernel.
     img_xds : xarray.Dataset
         Image dataset whose UV-sampling arrays are updated in place.
     n_psf_taylor_terms : int
@@ -120,6 +116,9 @@ def add_uv_sampling_grid_continuum_single_field(
         Threads supplied to the C++ gridder.
     complex_dtype : numpy.dtype or None, optional
         Complex dtype of the accumulated UV grids.
+    input_checked : bool, optional
+        Whether an upper layer has validated this unchanged configuration.
+        Direct calls default to False.
 
     Notes
     -----
@@ -273,10 +272,10 @@ def add_uv_sampling_grid_continuum_single_field(
         anti_alias_grid_uv_sampling,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
+        anti_alias_kernel_arguments,
     )
 
-    kernel = as_gridding_kernel(cgk_1D)
+    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
 
     # Reuse the existing continuum channel map. With one image-time plane, each
     # Taylor-order view has the contiguous layout required by the C++ gridder.
@@ -309,12 +308,12 @@ def add_uv_sampling_grid_continuum_single_field(
             time_map,
             pol_map,
             effective_weight,
-            kernel.table,
+            table,
             n_uv,
             delta_lm,
-            support=kernel.support,
-            oversampling=kernel.oversampling,
-            interpolation=kernel.interpolation_code,
+            support=support,
+            oversampling=oversampling,
+            interpolation=interpolation,
             processing_function_threads=processing_function_threads,
         )
 

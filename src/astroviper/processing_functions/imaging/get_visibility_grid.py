@@ -1,17 +1,10 @@
-from typing import TYPE_CHECKING
-
 import numpy as np
 import xarray as xr
-
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
 
 
 def get_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: "GriddingKernel | np.ndarray",
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     ms_data_group_out_name: str = "model",
@@ -26,7 +19,7 @@ def get_visibility_grid_single_field(
 
     Samples a model UV grid stored in ``img_xds`` at each visibility's
     ``(u, v)`` coordinate using a separable 1-D convolutional gridding kernel
-    (``cgk_1D``), and writes the resulting predicted visibilities into
+    (``gcf_xds``), and writes the resulting predicted visibilities into
     ``ms_xds`` under the data variable named by
     ``ms_data_group_out_modified["correlated_data"]`` (default
     ``"VISIBILITY_MODEL"``).  A corresponding output data group is registered
@@ -36,8 +29,8 @@ def get_visibility_grid_single_field(
     This function is the inverse of
     :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`:
     it predicts visibilities *from* a UV-plane model rather than gridding
-    observed visibilities onto a UV plane.  It uses the separable C++ anti-aliasing degridder (the standard gridder in CASA) and therefore does not
-    require a GCF dataset. Cube and continuum callers share that numerical
+    observed visibilities onto a UV plane.  It uses the separable C++ anti-aliasing degridder (the standard gridder in CASA), so its ``gcf_xds``
+    needs only the anti-alias term. Cube and continuum callers share that numerical
     primitive without sharing their spectral-model preparation APIs.
 
     Parameters
@@ -48,10 +41,12 @@ def get_visibility_grid_single_field(
         ``frequency`` coordinate.  On the first call the output visibility
         data variable is created on ``ms_xds`` as a ``complex128`` array shaped
         like the input ``correlated_data``.
-    cgk_1D : GriddingKernel or np.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xr.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset holding the model UV grid.  Must expose an image data
         group under ``image_data_group_in_name`` whose ``"visibility"`` role
@@ -146,7 +141,7 @@ def get_visibility_grid_single_field(
 
     degrid_visibility_grid_single_field(
         ms_xds,
-        cgk_1D,
+        gcf_xds,
         img_xds,
         img_xds[model_name].values,
         frequency_map,

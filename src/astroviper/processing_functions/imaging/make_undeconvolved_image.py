@@ -10,7 +10,7 @@ def make_undeconvolved_image_single_field(
     ps_xdt,
     img_xds,
     image_params,
-    cgk_1D,
+    gcf_xds,
     model_exists,
     ms_data_group_in_name="corrected",
     image_data_group_out_name="residual",
@@ -49,10 +49,12 @@ def make_undeconvolved_image_single_field(
         Distributed single-field imagers require exactly one image time plane and
         an explicit ``fft_padding``. Designed kernels, including the default,
         require padding at least 1.05; CASA's fixed kernel permits 1.0.
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     model_exists : bool
         Accepted for call-site compatibility with the imaging cycle loop;
         currently unused (the UV-sampling/PSF grid is built once in
@@ -100,7 +102,7 @@ def make_undeconvolved_image_single_field(
         T_start_vis = time.time()
         add_visibility_grid_single_field(
             ms_xdt,
-            cgk_1D,
+            gcf_xds,
             img_xds,
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_out_name,

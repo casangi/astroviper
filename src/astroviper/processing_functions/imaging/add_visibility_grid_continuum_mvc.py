@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
 
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
-
 
 def add_visibility_grid_mvc_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: GriddingKernel | np.ndarray,
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -54,12 +48,14 @@ def add_visibility_grid_mvc_single_field(
         coordinates, imaging weights, and a one-dimensional frequency
         coordinate.
 
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
-        whose table, support and oversampling go to the C++
-        ``anti_alias_grid`` kernel), or a bare table of CASA's
-        prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7;
+        its table, support and oversampling go to the C++
+        ``anti_alias_grid`` kernel.
 
     img_xds : xarray.Dataset
         Image dataset receiving the frequency-resolved MVC UV grids. Its
@@ -133,7 +129,7 @@ def add_visibility_grid_mvc_single_field(
         anti_alias_grid,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
+        anti_alias_kernel_arguments,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -463,7 +459,7 @@ def add_visibility_grid_mvc_single_field(
     grid = img_xds[visibility_name].values
     normalization = img_xds[normalization_name].values
 
-    kernel = as_gridding_kernel(cgk_1D)
+    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
     anti_alias_grid(
         grid,
         normalization,
@@ -474,12 +470,12 @@ def add_visibility_grid_mvc_single_field(
         time_map,
         pol_map,
         weight_imaging,
-        kernel.table,
+        table,
         n_uv,
         delta_lm,
-        support=kernel.support,
-        oversampling=kernel.oversampling,
-        interpolation=kernel.interpolation_code,
+        support=support,
+        oversampling=oversampling,
+        interpolation=interpolation,
         processing_function_threads=(processing_function_threads),
     )
 

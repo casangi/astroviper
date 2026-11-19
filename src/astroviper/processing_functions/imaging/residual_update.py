@@ -571,7 +571,7 @@ def residual_update_cube_single_field(
                 processing_function_threads=processing_function_threads,
                 fft_backend=fft_backend,
                 complex_dtype=complex_dtype,
-                gridding_kernel=cgk_1D,
+                gcf_xds=cgk_1D,
                 new_polarization_basis=instrument_polarization_basis,
             )
             T_fft_degrid += time.time() - start
@@ -722,7 +722,7 @@ def residual_update_cube_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=complex_dtype,
-            gridding_kernel=cgk_1D,
+            gcf_xds=cgk_1D,
         )
         T_fft_grid += time.time() - start
 
@@ -767,7 +767,7 @@ def residual_update_cube_single_field(
 def make_visibility_model_single_field(
     ps_xdt,
     img_xds,
-    cgk_1D,
+    gcf_xds,
     ms_data_group_in_name="base",
     ms_data_group_out_name="model",
     ms_data_group_out_modified=None,
@@ -789,10 +789,12 @@ def make_visibility_model_single_field(
         in place.
     img_xds : xarray.Dataset
         Image dataset holding the model uv-grid to degrid from.
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     ms_data_group_in_name : str, optional
         Measurement-set data group being imaged (the caller's
         ``processing_set_data_group_name``).  The degridder reads its ``uvw``
@@ -819,7 +821,7 @@ def make_visibility_model_single_field(
     for ms_xdt in ps_xdt.values():
         get_visibility_grid_single_field(
             ms_xdt,
-            cgk_1D,
+            gcf_xds,
             img_xds,
             ms_data_group_in_name=ms_data_group_in_name,
             ms_data_group_out_name=ms_data_group_out_name,

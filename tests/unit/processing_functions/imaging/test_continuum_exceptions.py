@@ -4,6 +4,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    as_gridding_kernel,
+)
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     accumulate_continuum_model,
     apply_mvc_primary_beam_convention,
@@ -272,7 +275,11 @@ def test_prediction_rejects_incomplete_models_and_frequencies(fault, error, mess
         child = xr.Dataset({"frequency": (("a", "b"), [[100.0, 110.0]])})
     with pytest.raises(error, match=message):
         make_visibility_model_continuum_single_field(
-            {"child": child}, model, np.ones(8), n_taylor_terms, reference
+            {"child": child},
+            model,
+            as_gridding_kernel(np.ones(8)),
+            n_taylor_terms,
+            reference,
         )
 
 

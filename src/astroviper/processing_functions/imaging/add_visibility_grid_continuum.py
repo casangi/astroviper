@@ -1,20 +1,14 @@
 """Taylor-weighted visibility gridding for MT-MFS continuum imaging."""
 
 import copy
-from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
 
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
-
 
 def add_visibility_grid_continuum_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: "GriddingKernel | np.ndarray",
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     n_taylor_terms: int,
     reference_frequency: float,
@@ -56,12 +50,14 @@ def add_visibility_grid_continuum_single_field(
     ms_xds : xr.Dataset
         Measurement-set dataset containing correlated data, UVW coordinates,
         imaging weights, and a frequency coordinate.
-    cgk_1D : GriddingKernel or np.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
-        whose table, support and oversampling go to the C++
-        ``anti_alias_grid`` kernel), or a bare table of CASA's
-        prolate spheroidal kernel of support 7.
+    gcf_xds : xr.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7;
+        its table, support and oversampling go to the C++
+        ``anti_alias_grid`` kernel.
     img_xds : xr.Dataset
         Image dataset that receives the Taylor uv grids.
     n_taylor_terms : int
@@ -107,7 +103,7 @@ def add_visibility_grid_continuum_single_field(
         anti_alias_grid,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
+        anti_alias_kernel_arguments,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -269,7 +265,7 @@ def add_visibility_grid_continuum_single_field(
         frequency_coord.astype(np.float64, copy=False) - reference_frequency
     ) / reference_frequency
 
-    kernel = as_gridding_kernel(cgk_1D)
+    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
 
     # Common zeroth-order normalization.
     zeroth_normalization = np.zeros(
@@ -305,12 +301,12 @@ def add_visibility_grid_continuum_single_field(
             time_map,
             pol_map,
             taylor_imaging_weight,
-            kernel.table,
+            table,
             n_uv,
             delta_lm,
-            support=kernel.support,
-            oversampling=kernel.oversampling,
-            interpolation=kernel.interpolation_code,
+            support=support,
+            oversampling=oversampling,
+            interpolation=interpolation,
             processing_function_threads=processing_function_threads,
         )
 

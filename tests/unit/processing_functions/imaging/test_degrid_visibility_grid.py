@@ -21,6 +21,9 @@ from astroviper.processing_functions.imaging.get_visibility_grid import (
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    as_gridding_kernel,
+)
 from tests.unit.processing_functions.imaging.degrid_test_datasets import (
     OVERSAMPLING,
     SUPPORT,
@@ -30,7 +33,9 @@ from tests.unit.processing_functions.imaging.degrid_test_datasets import (
 
 class TestDegridVisibilityGridSingleField(unittest.TestCase):
     def setUp(self):
-        self.cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        self.cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
     # ------------------------------------------------------------------
     # Input contracts

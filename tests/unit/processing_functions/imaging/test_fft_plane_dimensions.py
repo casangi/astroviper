@@ -45,7 +45,7 @@ def _transform(image, dtype, overwrite=True, keep_grid=True):
         fft_backend="scipy",
         complex_dtype=dtype,
         overwrite=overwrite,
-        gridding_kernel=CASA_KERNEL,
+        gcf_xds=CASA_KERNEL,
     )
 
 
@@ -126,7 +126,7 @@ def _forward(image, axis, dtype, **kwargs):
         image_data_group_out_name="uv_model",
         image_data_group_out_modified={"visibility": "OUTPUT"},
         complex_dtype=dtype,
-        gridding_kernel=CASA_KERNEL,
+        gcf_xds=CASA_KERNEL,
         **kwargs,
     )
 
@@ -322,7 +322,7 @@ def test_forward_uses_output_as_workspace_and_drops_unkept_sky(axis, monkeypatch
 )
 @pytest.mark.parametrize("given", ["omitted", "None"])
 def test_gridding_kernel_is_required(function, given):
-    """No transform falls back to a default kernel (CASA's): without gridding_kernel
+    """No transform falls back to a default kernel (CASA's): without gcf_xds
     each refuses, naming the parameter, before it changes the dataset."""
     import importlib
 
@@ -346,8 +346,8 @@ def test_gridding_kernel_is_required(function, given):
             "image_data_group_out_modified": {"visibility": "OUTPUT"},
         }
     if given == "None":
-        kwargs["gridding_kernel"] = None
+        kwargs["gcf_xds"] = None
     original = image.copy(deep=True)
-    with pytest.raises(ValueError, match=f"^{function} needs gridding_kernel"):
+    with pytest.raises(ValueError, match=f"^{function} needs gcf_xds"):
         getattr(module, function)(image, image_params, fft_backend="scipy", **kwargs)
     xr.testing.assert_identical(image, original)

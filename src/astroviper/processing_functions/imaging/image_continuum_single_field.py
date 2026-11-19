@@ -849,7 +849,7 @@ def prepare_model_uv_continuum_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
-        gridding_kernel=make_gridding_kernel(
+        gcf_xds=make_gridding_kernel(
             gridding_kernel_params, image_params["fft_padding"]
         ),
     )
@@ -1328,7 +1328,7 @@ def prepare_model_uv_mvc_single_field(
         processing_function_threads=(processing_function_threads),
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
-        gridding_kernel=make_gridding_kernel(
+        gcf_xds=make_gridding_kernel(
             gridding_kernel_params, image_params["fft_padding"]
         ),
     )
@@ -2819,7 +2819,7 @@ def residual_update_continuum_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=(np.complex64 if single_precision_image else np.complex128),
-            gridding_kernel=gridding_kernel,
+            gcf_xds=gridding_kernel,
         )
 
         if "SKY_RESIDUAL_MVC_CUBE" not in img_xds:
@@ -2842,7 +2842,7 @@ def residual_update_continuum_single_field(
                 complex_dtype=(
                     np.complex64 if single_precision_image else np.complex128
                 ),
-                gridding_kernel=gridding_kernel,
+                gcf_xds=gridding_kernel,
             )
 
             if "POINT_SPREAD_FUNCTION_MVC_CUBE" not in img_xds:

@@ -1,7 +1,6 @@
 """Shared anti-aliasing gridder visibility prediction primitive."""
 
 import copy
-from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -12,16 +11,11 @@ from astroviper.utils.data_group_tools import (
 )
 from astroviper.utils.param_docs import shares_param_docs
 
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
-
 
 @shares_param_docs
 def degrid_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: "GriddingKernel | np.ndarray",
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     grid: np.ndarray,
     frequency_map: np.ndarray,
@@ -48,10 +42,12 @@ def degrid_visibility_grid_single_field(
         ``ms_data_group_in_name`` and a ``frequency`` coordinate. Cached
         continuum prediction may omit the observed visibility array if a
         registered ``weight_imaging`` array supplies its shape and dimensions.
-    cgk_1D : GriddingKernel or np.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xarray.Dataset
         Image geometry supplying direction-cell sizes and unpadded image shape.
     grid : numpy.ndarray
@@ -192,10 +188,10 @@ def degrid_visibility_grid_single_field(
         anti_alias_degrid,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
+        anti_alias_kernel_arguments,
     )
 
-    kernel = as_gridding_kernel(cgk_1D)
+    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
     anti_alias_degrid(
         grid,
         vis_data,
@@ -204,11 +200,11 @@ def degrid_visibility_grid_single_field(
         frequency_map,
         time_map,
         pol_map,
-        kernel.table,
+        table,
         n_uv,
         delta_lm,
-        support=kernel.support,
-        oversampling=kernel.oversampling,
-        interpolation=kernel.interpolation_code,
+        support=support,
+        oversampling=oversampling,
+        interpolation=interpolation,
         processing_function_threads=processing_function_threads,
     )

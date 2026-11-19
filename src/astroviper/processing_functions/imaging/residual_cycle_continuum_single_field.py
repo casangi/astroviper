@@ -518,7 +518,7 @@ def residual_cycle_continuum_single_field(
 def make_visibility_model_continuum_single_field(
     ps_xdt,
     model_xds,
-    cgk_1D,
+    gcf_xds,
     n_taylor_terms,
     reference_frequency,
     ms_data_group_in_name="base",
@@ -562,10 +562,12 @@ def make_visibility_model_continuum_single_field(
         Globally prepared Fourier-domain Taylor model. The selected image data
         group must register a visibility variable containing the Taylor
         coefficients.
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     n_taylor_terms : int
         Number of Taylor terms to reconstruct.
     reference_frequency : float
@@ -762,7 +764,7 @@ def make_visibility_model_continuum_single_field(
             )
             degrid_visibility_grid_single_field(
                 ms_xdt,
-                cgk_1D,
+                gcf_xds,
                 model_xds,
                 single_plane_grid,
                 frequency_map,

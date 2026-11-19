@@ -23,6 +23,9 @@ from astroviper.processing_functions.imaging.get_visibility_grid import (
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
 )
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    as_gridding_kernel,
+)
 from astroviper.processing_functions.imaging.make_point_spread_function import (
     add_uv_sampling_grid_single_field,
 )
@@ -158,7 +161,9 @@ class TestCubePathsShareFrequencyMap(unittest.TestCase):
         )
         # add_visibility_grid / add_uv_sampling_grid read the "residual" group.
         img_xds.attrs["data_groups"]["residual"] = {}
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         model_plane_values = np.array([1.0, 2.0, 3.0, 4.0])
         for channel, value in enumerate(model_plane_values):
@@ -197,7 +202,9 @@ class TestCubePathsShareFrequencyMap(unittest.TestCase):
             sky_value=0.0 + 0.0j,
         )
         img_xds.attrs["data_groups"]["residual"] = {}
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        cgk = as_gridding_kernel(
+            create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        )
 
         for channel in range(3):
             img_xds["SKY_MODEL"].values[:, channel] = channel + 1.0

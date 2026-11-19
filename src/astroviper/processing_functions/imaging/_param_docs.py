@@ -697,10 +697,12 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "``UV_SAMPLING_NORMALIZATION`` hold the sum of the imaging weights, the\n"
         "gridders' that sum times the kernel's stencil sums."
     ),
-    "cgk_1D": (
-        "The gridding kernel\n"
-        "(:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),\n"
-        "or a bare table of CASA's prolate spheroidal kernel of support 7."
+    "gcf_xds": (
+        "The ``gcf_xds`` of the gridding kernel, from\n"
+        ":func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,\n"
+        "or from\n"
+        ":func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`\n"
+        "for a bare table of CASA's prolate spheroidal kernel of support 7."
     ),
     "primary_beam_params": (
         "The primary beam of the imager, the power pattern that gives the clean\n"

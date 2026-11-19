@@ -10,7 +10,7 @@ def make_undeconvolved_image_continuum_single_field(
     ps_xdt,
     img_xds,
     image_params,
-    cgk_1D,
+    gcf_xds,
     n_taylor_terms=None,
     reference_frequency=None,
     ms_data_group_in_name="corrected",
@@ -67,10 +67,12 @@ def make_undeconvolved_image_continuum_single_field(
         ``primary_beam_ipower`` is the exponent applied to the voltage pattern
         (default 2, the power beam). These primary-beam keys override the inferred
         beam prescription.
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xarray.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     n_taylor_terms : int or None, optional
         Number of residual Taylor orders; defaults to ``image_params``.
     reference_frequency : float or None, optional
@@ -139,7 +141,7 @@ def make_undeconvolved_image_continuum_single_field(
         start = time.time()
         add_visibility_grid_continuum_single_field(
             ms_xdt,
-            cgk_1D,
+            gcf_xds,
             img_xds,
             n_taylor_terms=n_taylor_terms,
             reference_frequency=reference_frequency,

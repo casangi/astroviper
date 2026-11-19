@@ -206,7 +206,7 @@ def sky_image_visibilities(
             image_data_variables_keep=["sky"],
             processing_function_threads=processing_function_threads,
             complex_dtype=np.complex128,
-            gridding_kernel=kernel,
+            gcf_xds=kernel,
         )
         get_visibility_grid_single_field(
             ms_xds,

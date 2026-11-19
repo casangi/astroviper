@@ -5,9 +5,9 @@ kernel they read from a sampled table (``oversampling`` samples per uv cell
 over the half width of the kernel), and the image is divided by the kernel's
 Fourier transform afterwards (the correction, see
 :func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.ifft_norm_img_xds`).
-This module holds the parameters that select the kernel, the
-:class:`GriddingKernel` that carries the table and makes the correction, and
-the factory the imaging functions use.
+This module holds the parameters that select the kernel, the factory the
+imaging functions use, which makes the kernel's ``gcf_xds`` (see Schema
+below), and the functions that make the correction from it.
 
 Four kernel types exist:
 
@@ -55,6 +55,37 @@ imaging functions then replace gridding and FFT by the exact direct Fourier
 transform with the w term
 (:mod:`~astroviper.processing_functions.imaging.direct_fourier_transform`);
 ``support``, ``oversampling`` and ``interpolation`` do not apply to it.
+
+Schema
+------
+A kernel is the anti-alias term of a gridding convolution function dataset,
+``gcf_xds``: an :class:`xarray.Dataset` with the data variable ``ANTI_ALIAS``
+on the dimension ``anti_alias_sample``, whose coordinate is
+``k / oversampling``. ``ANTI_ALIAS`` holds the half kernel, float64 and
+C-contiguous, ``oversampling * (support // 2 + 1)`` values: entry ``k`` is the
+kernel at ``k / oversampling`` uv cells from its centre, out to
+``support // 2 + 1`` cells (the kernel is zero beyond its half width
+``support / 2``). This is the layout the C++ gridder and degridder read
+(``kernel_lookup.hpp``). The attributes of ``ANTI_ALIAS`` are:
+
+``kernel_type``
+    The kernel type the table holds (one of :data:`KERNEL_TYPES`).
+``support``
+    Number of grid points the kernel spans along one axis (odd), an int.
+``oversampling``
+    Samples of the table per uv cell, an int.
+``interpolation``
+    How the gridders read the table (a key of :data:`INTERPOLATIONS`).
+``correction``
+    The image plane correction (:func:`correction`): ``"analytic"``, Schwab's
+    correction of the ``prolate_spheroidal_casa`` kernel, or
+    ``"table_transform"``, the transform of the kernel the gridders apply.
+``shape``
+    A dict of the numbers that define the kernel beyond the four parameters
+    (the shape parameters of the prolate spheroidal function or of the
+    exponential of a semicircle, the aliasing error or misfit, the padding
+    designed for, the file of a shipped least misfit table), for the record;
+    empty for the ``prolate_spheroidal_casa`` kernel.
 """
 
 from __future__ import annotations
@@ -62,6 +93,7 @@ from __future__ import annotations
 import functools
 
 import numpy as np
+import xarray as xr
 
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     coordinates,
@@ -108,7 +140,7 @@ DEFAULT_GRIDDING_KERNEL_PARAMS = {
 }
 # the numerical corrections are kept above this fraction of their centre
 # value, so that the division of the padded image stays finite; a sensible
-# kernel is far above it over the image kept (see GriddingKernel.correction_1D)
+# kernel is far above it over the image kept (see correction_1D)
 CORRECTION_FLOOR = 1e-6
 
 __all__ = [
@@ -117,11 +149,14 @@ __all__ = [
     "DIRECT_FOURIER_TRANSFORM",
     "INTERPOLATIONS",
     "KERNEL_TYPES",
-    "GriddingKernel",
+    "anti_alias_kernel_arguments",
     "as_gridding_kernel",
+    "correction",
+    "correction_1D",
     "is_direct_fourier_transform",
     "kept_half_width",
     "make_gridding_kernel",
+    "map_error",
     "resolve_gridding_kernel_params",
 ]
 
@@ -233,17 +268,22 @@ def kept_half_width(fft_padding):
     return 0.5 / float(fft_padding)
 
 
-class GriddingKernel:
-    """A sampled gridding kernel and its image plane correction.
+def _gcf_xds_from_table(
+    table,
+    support,
+    oversampling,
+    kernel_type="prolate_spheroidal_casa",
+    interpolation="nearest",
+    correction="analytic",
+    shape=None,
+):
+    """The ``gcf_xds`` of a sampled gridding kernel (see the module docstring).
 
     Parameters
     ----------
     table : numpy.ndarray
-        The half kernel, float64, ``oversampling * (support // 2 + 1)`` values:
-        entry ``k`` is the kernel at ``k / oversampling`` uv cells from its
-        centre, out to ``support // 2 + 1`` cells (the kernel is zero beyond
-        its half width ``support / 2``). This is the layout the C++ gridder
-        and degridder read (``kernel_lookup.hpp``).
+        The half kernel, ``oversampling * (support // 2 + 1)`` values; the
+        dataset holds the table itself when it is float64 and C-contiguous.
     support : int
         Number of grid points the kernel spans along one axis (odd).
     oversampling : int
@@ -252,192 +292,217 @@ class GriddingKernel:
         The kernel type the table holds (one of :data:`KERNEL_TYPES`).
     interpolation : str
         How the gridders read the table (a key of :data:`INTERPOLATIONS`).
-    correction : callable, optional
-        The image plane correction at image coordinates (an array in units
-        of the padded image width, ``[-0.5, 0.5)`` spanning the padded
-        image), normalised to 1 at the image centre. The default is Schwab's
-        correction of the ``prolate_spheroidal_casa`` kernel; the other kernel
-        types pass the transform of the kernel applied.
+    correction : str
+        ``"analytic"`` or ``"table_transform"`` (see :func:`correction`).
     shape : dict, optional
-        The numbers that define the kernel beyond the four parameters (the
-        shape parameters of the prolate spheroidal function or of the
-        exponential of a semicircle, the aliasing error or misfit, the
-        padding designed for, the file of a shipped least misfit table), for
+        The numbers that define the kernel beyond the four parameters, for
         the record.
+
+    Returns
+    -------
+    xarray.Dataset
     """
+    table = np.ascontiguousarray(table, dtype=np.float64)
+    _check_table_size(table, support, oversampling)
+    from astroviper.processing_functions.imaging.config_check._gridding import (
+        check_kernel_options,
+    )
 
-    def __init__(
-        self,
+    check_kernel_options(kernel_type, interpolation)
+    attrs = {
+        "kernel_type": kernel_type,
+        "support": int(support),
+        "oversampling": int(oversampling),
+        "interpolation": interpolation,
+        "correction": correction,
+        "shape": dict(shape or {}),
+    }
+    return xr.Dataset(
+        {"ANTI_ALIAS": (("anti_alias_sample",), table, attrs)},
+        coords={"anti_alias_sample": np.arange(table.size) / int(oversampling)},
+    )
+
+
+def _check_table_size(table, support, oversampling):
+    """Refuse a table that is not the half kernel of this support and oversampling."""
+    expected = table_size(support, oversampling)
+    if table.ndim != 1 or table.size != expected:
+        raise ValueError(
+            f"a kernel table of support {support} and oversampling "
+            f"{oversampling} has {expected} entries, got shape {table.shape}"
+        )
+
+
+def anti_alias_kernel_arguments(gcf_xds):
+    """The kernel arguments of the C++ gridders and degridder.
+
+    ``anti_alias_grid``, ``anti_alias_grid_uv_sampling`` and
+    ``anti_alias_degrid`` take the table as their positional argument
+    ``cgk_1D`` and ``support``, ``oversampling`` and ``interpolation`` as
+    keywords.
+
+    Parameters
+    ----------
+    gcf_xds : xarray.Dataset
+        The kernel's ``gcf_xds`` (see the module docstring).
+
+    Returns
+    -------
+    table : numpy.ndarray
+        ``gcf_xds["ANTI_ALIAS"].values``, the half kernel table.
+    support : int
+    oversampling : int
+    interpolation : int
+        The C++ code of the lookup (a value of :data:`INTERPOLATIONS`).
+
+    Raises
+    ------
+    ValueError
+        If the table is not the half kernel of its ``support`` and
+        ``oversampling``: the C++ lookup does not check its size.
+    """
+    term = gcf_xds["ANTI_ALIAS"]
+    table = term.values
+    _check_table_size(table, term.attrs["support"], term.attrs["oversampling"])
+    return (
         table,
-        support,
-        oversampling,
-        kernel_type="prolate_spheroidal_casa",
-        interpolation="nearest",
-        correction=None,
-        shape=None,
-    ):
-        table = np.ascontiguousarray(table, dtype=np.float64)
-        expected = table_size(support, oversampling)
-        if table.ndim != 1 or table.size != expected:
-            raise ValueError(
-                f"a kernel table of support {support} and oversampling "
-                f"{oversampling} has {expected} entries, got shape {table.shape}"
-            )
-        from astroviper.processing_functions.imaging.config_check._gridding import (
-            check_kernel_options,
-        )
+        term.attrs["support"],
+        term.attrs["oversampling"],
+        INTERPOLATIONS[term.attrs["interpolation"]],
+    )
 
-        check_kernel_options(kernel_type, interpolation)
-        self.table = table
-        self.support = int(support)
-        self.oversampling = int(oversampling)
-        self.kernel_type = kernel_type
-        self.interpolation = interpolation
-        self.shape = dict(shape or {})
-        self._correction = correction
-        self._correction_1D = {}
 
-    def __repr__(self):
-        shape = "".join(
-            f", {key}={value:.4g}" if isinstance(value, float) else f", {key}={value!r}"
-            for key, value in self.shape.items()
-        )
-        return (
-            f"GriddingKernel({self.kernel_type}, support={self.support}, "
-            f"oversampling={self.oversampling}, interpolation={self.interpolation}"
-            f"{shape})"
-        )
+def correction(gcf_xds, x):
+    """The image plane correction at image coordinates ``x``.
 
-    @property
-    def params(self):
-        """The parameters that make this kernel (a ``gridding_kernel_params`` dict)."""
-        return {
-            "type": self.kernel_type,
-            "support": self.support,
-            "oversampling": self.oversampling,
-            "interpolation": self.interpolation,
-        }
+    The gridded image is divided by it: the transform of the kernel at
+    the image coordinates (units of the padded image width), normalised
+    to 1 at the image centre. Beyond the image kept the numerical
+    corrections are floored at :data:`CORRECTION_FLOOR` so that the
+    division of the padded image stays finite (the padding is cropped,
+    and the model is zero there).
 
-    @property
-    def interpolation_code(self):
-        """The ``interpolation`` argument of the C++ gridders."""
-        return INTERPOLATIONS[self.interpolation]
+    Parameters
+    ----------
+    gcf_xds : xarray.Dataset
+        The kernel's ``gcf_xds`` (see the module docstring).
+    x : array_like
+        Any shape.
 
-    def stencil_values(self, offsets):
-        """The kernel values the gridders apply at the stencil points.
+    Returns
+    -------
+    numpy.ndarray
+        float64, the shape of ``x``.
 
-        Parameters
-        ----------
-        offsets : array_like
-            Nearest grid point minus the visibility position, cells, any
-            shape.
+    Raises
+    ------
+    ValueError
+        For a ``correction`` attribute other than ``"analytic"`` and
+        ``"table_transform"``.
+    """
+    term = gcf_xds["ANTI_ALIAS"]
+    return _correction(
+        term.attrs["correction"],
+        term.values,
+        term.attrs["oversampling"],
+        term.attrs["interpolation"],
+        x,
+    )
 
-        Returns
-        -------
-        numpy.ndarray
-            Shape ``offsets.shape + (support,)``, stencil point ``i`` being
-            ``i - support // 2`` cells from the nearest grid point.
-        """
-        return stencil_values(
-            self.table, self.support, self.oversampling, self.interpolation, offsets
-        )
 
-    def transform(self, x):
-        """Fourier transform of the kernel the gridders apply.
+def _correction(correction, table, oversampling, interpolation, x):
+    """:func:`correction` of a table and its attributes."""
+    x = np.asarray(x, dtype=np.float64)
+    if correction == "analytic":
+        # Schwab's transform of the prolate spheroidal kernel
+        return prolate_spheroidal_function(np.abs(2.0 * x))[0]
+    if correction != "table_transform":
+        raise ValueError(f"unknown kernel correction {correction!r}")
+    return np.maximum(
+        _table_correction(table, oversampling, interpolation)(x), CORRECTION_FLOOR
+    )
 
-        Parameters
-        ----------
-        x : array_like
-            Image coordinates in units of the padded image width.
 
-        Returns
-        -------
-        numpy.ndarray
-            See :func:`~.kernel_lookup.table_transform`.
-        """
-        return table_transform(self.table, self.oversampling, self.interpolation, x)
+def correction_1D(gcf_xds, n_pixels):
+    """The image plane correction along one axis of the padded image.
 
-    def correction(self, x):
-        """The image plane correction at image coordinates ``x``.
+    Parameters
+    ----------
+    gcf_xds : xarray.Dataset
+        The kernel's ``gcf_xds`` (see the module docstring).
+    n_pixels : int
+        Pixels of the padded image along the axis (the padding factor of
+        the image is what makes it larger than the image kept).
 
-        The gridded image is divided by it: the transform of the kernel at
-        the image coordinates (units of the padded image width), normalised
-        to 1 at the image centre. Beyond the image kept the numerical
-        corrections are floored at :data:`CORRECTION_FLOOR` so that the
-        division of the padded image stays finite (the padding is cropped,
-        and the model is zero there).
+    Returns
+    -------
+    numpy.ndarray
+        float64 of length ``n_pixels``, :func:`correction` at the pixel
+        positions (computed once per table, correction and axis length and
+        kept, read only).
+    """
+    term = gcf_xds["ANTI_ALIAS"]
+    return _correction_1D(
+        term.attrs["correction"],
+        term.attrs["oversampling"],
+        term.attrs["interpolation"],
+        np.ascontiguousarray(term.values, dtype=np.float64).tobytes(),
+        int(n_pixels),
+    )
 
-        Parameters
-        ----------
-        x : array_like
-            Any shape.
 
-        Returns
-        -------
-        numpy.ndarray
-            float64, the shape of ``x``.
-        """
-        x = np.asarray(x, dtype=np.float64)
-        if self._correction is None:
-            # Schwab's transform of the prolate spheroidal kernel
-            return prolate_spheroidal_function(np.abs(2.0 * x))[0]
-        return np.maximum(self._correction(x), CORRECTION_FLOOR)
+@functools.cache
+def _correction_1D(correction, oversampling, interpolation, table_bytes, n_pixels):
+    # the key holds the table's bytes, so that a table with the same
+    # attributes cannot get another table's correction
+    table = np.frombuffer(table_bytes, dtype=np.float64)
+    values = _correction(
+        correction, table, oversampling, interpolation, coordinates(n_pixels)
+    )
+    values.setflags(write=False)
+    return values
 
-    def correction_1D(self, n_pixels):
-        """The image plane correction along one axis of the padded image.
 
-        Parameters
-        ----------
-        n_pixels : int
-            Pixels of the padded image along the axis (the padding factor of
-            the image is what makes it larger than the image kept).
+def map_error(gcf_xds, x, offsets_per_cell=4):
+    """The rms map error of the kernel at image positions ``x``.
 
-        Returns
-        -------
-        numpy.ndarray
-            float64 of length ``n_pixels``, :meth:`correction` at the pixel
-            positions (computed once per axis length and kept, read only).
-        """
-        n_pixels = int(n_pixels)
-        if n_pixels not in self._correction_1D:
-            values = self.correction(coordinates(n_pixels))
-            values.setflags(write=False)
-            self._correction_1D[n_pixels] = values
-        return self._correction_1D[n_pixels]
+    The degridded visibility of a unit source at ``x`` over the ideal
+    fringe, minus 1, as the rms over the position of the visibility
+    within a uv cell: the kernel's aliasing plus the error of its table
+    lookup, with the degridder's division by the stencil sum and the
+    correction applied. It is what limits the residual of a self
+    consistent imaging cycle (one axis; the two axes multiply).
 
-    def map_error(self, x, offsets_per_cell=4):
-        """The rms map error of the kernel at image positions ``x``.
+    Parameters
+    ----------
+    gcf_xds : xarray.Dataset
+        The kernel's ``gcf_xds`` (see the module docstring).
+    x : array_like
+        Image coordinates in units of the padded image width.
+    offsets_per_cell : int
+        Visibility offsets per table cell the rms is taken over.
 
-        The degridded visibility of a unit source at ``x`` over the ideal
-        fringe, minus 1, as the rms over the position of the visibility
-        within a uv cell: the kernel's aliasing plus the error of its table
-        lookup, with the degridder's division by the stencil sum and the
-        correction applied. It is what limits the residual of a self
-        consistent imaging cycle (one axis; the two axes multiply).
-
-        Parameters
-        ----------
-        x : array_like
-            Image coordinates in units of the padded image width.
-        offsets_per_cell : int
-            Visibility offsets per table cell the rms is taken over.
-
-        Returns
-        -------
-        numpy.ndarray
-            float64, the shape of ``x``.
-        """
-        x = np.asarray(x, dtype=np.float64)
-        n_offsets = int(offsets_per_cell) * self.oversampling
-        offsets = -0.5 + (np.arange(n_offsets) + 0.5) / n_offsets
-        values = self.stencil_values(offsets)  # (n_off, W)
-        rel = np.arange(self.support) - self.support // 2
-        phase = np.exp(2j * np.pi * np.multiply.outer(rel, x.ravel()))  # (W, n_x)
-        response = values @ phase / values.sum(axis=1)[:, None]
-        response /= self.correction(x.ravel())[None, :]
-        fringe = np.exp(-2j * np.pi * np.multiply.outer(offsets, x.ravel()))
-        error = np.sqrt(np.mean(np.abs(response - fringe) ** 2, axis=0))
-        return error.reshape(x.shape)
+    Returns
+    -------
+    numpy.ndarray
+        float64, the shape of ``x``.
+    """
+    term = gcf_xds["ANTI_ALIAS"]
+    support = term.attrs["support"]
+    oversampling = term.attrs["oversampling"]
+    x = np.asarray(x, dtype=np.float64)
+    n_offsets = int(offsets_per_cell) * oversampling
+    offsets = -0.5 + (np.arange(n_offsets) + 0.5) / n_offsets
+    values = stencil_values(
+        term.values, support, oversampling, term.attrs["interpolation"], offsets
+    )  # (n_off, W)
+    rel = np.arange(support) - support // 2
+    phase = np.exp(2j * np.pi * np.multiply.outer(rel, x.ravel()))  # (W, n_x)
+    response = values @ phase / values.sum(axis=1)[:, None]
+    response /= correction(gcf_xds, x.ravel())[None, :]
+    fringe = np.exp(-2j * np.pi * np.multiply.outer(offsets, x.ravel()))
+    error = np.sqrt(np.mean(np.abs(response - fringe) ** 2, axis=0))
+    return error.reshape(x.shape)
 
 
 def _table_correction(table, oversampling, interpolation):
@@ -451,12 +516,13 @@ def _table_correction(table, oversampling, interpolation):
 
 
 def make_gridding_kernel(gridding_kernel_params=None, fft_padding=None):
-    """Make the kernel the parameters select.
+    """Make the ``gcf_xds`` of the kernel the parameters select.
 
-    The kernel of a parameter set and padding is made once per process and
-    returned again on every later call (the imaging functions ask for it at
-    every residual update); the kernel, its table and the corrections it
-    keeps per image axis are read only.
+    The ``gcf_xds`` of a parameter set and padding is made once per process
+    and returned again on every later call (the imaging functions ask for it
+    at every residual update). The returned dataset is shared: do not modify
+    it. Its table and the corrections :func:`correction_1D` keeps per image
+    axis are read only.
 
     Parameters
     ----------
@@ -471,7 +537,8 @@ def make_gridding_kernel(gridding_kernel_params=None, fft_padding=None):
 
     Returns
     -------
-    GriddingKernel
+    xarray.Dataset
+        The kernel's ``gcf_xds`` (see the module docstring).
 
     Raises
     ------
@@ -514,13 +581,13 @@ def _make_gridding_kernel(
     }
     if params["type"] == "prolate_spheroidal_casa":
         table = create_prolate_spheroidal_kernel_1D(oversampling, support)
-        correction = None  # Schwab's analytic correction, CASA's bit for bit
+        correction = "analytic"  # Schwab's analytic correction, CASA's bit for bit
         if (oversampling, interpolation) != (
             CASA_GRIDDING_KERNEL_PARAMS["oversampling"],
             CASA_GRIDDING_KERNEL_PARAMS["interpolation"],
         ):
-            correction = _table_correction(table, oversampling, interpolation)
-        kernel = GriddingKernel(
+            correction = "table_transform"
+        gcf_xds = _gcf_xds_from_table(
             table,
             support,
             oversampling,
@@ -528,8 +595,8 @@ def _make_gridding_kernel(
             interpolation,
             correction=correction,
         )
-        kernel.table.setflags(write=False)
-        return kernel
+        gcf_xds["ANTI_ALIAS"].values.setflags(write=False)
+        return gcf_xds
     x0 = kept_half_width(fft_padding)
     if params["type"] == "exponential_semicircle":
         from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_exponential_semicircle import (
@@ -584,37 +651,37 @@ def _make_gridding_kernel(
             "correction is clamped at, so the image near that edge would be scaled "
             "wrongly: use a larger fft_padding or a smaller support"
         )
-    kernel = GriddingKernel(
+    gcf_xds = _gcf_xds_from_table(
         table,
         support,
         oversampling,
         params["type"],
         interpolation,
-        correction=correction,
+        correction="table_transform",
         shape=shape,
     )
-    kernel.table.setflags(write=False)
-    return kernel
+    gcf_xds["ANTI_ALIAS"].values.setflags(write=False)
+    return gcf_xds
 
 
 def as_gridding_kernel(cgk_1D):
-    """The :class:`GriddingKernel` of a kernel argument.
+    """The ``gcf_xds`` of a bare kernel table.
 
-    The imaging functions take either a :class:`GriddingKernel` or, as they
-    always did, the bare prolate spheroidal half kernel table of support 7
-    (whose oversampling is its length over 4).
+    A bare table is the prolate spheroidal half kernel of support 7 (whose
+    oversampling is its length over 4): the ``prolate_spheroidal_casa``
+    kernel with nearest lookup and Schwab's analytic correction, whatever the
+    oversampling.
 
     Parameters
     ----------
-    cgk_1D : GriddingKernel or numpy.ndarray
-        The kernel, or a table of the ``prolate_spheroidal_casa`` kernel.
+    cgk_1D : numpy.ndarray
+        A table of the ``prolate_spheroidal_casa`` kernel.
 
     Returns
     -------
-    GriddingKernel
+    xarray.Dataset
+        The kernel's ``gcf_xds`` (see the module docstring).
     """
-    if isinstance(cgk_1D, GriddingKernel):
-        return cgk_1D
     table = np.asarray(cgk_1D)
     cells = PROLATE_SPHEROIDAL_SUPPORT // 2 + 1
     if table.ndim != 1 or table.size % cells != 0:
@@ -623,4 +690,4 @@ def as_gridding_kernel(cgk_1D):
             f"support {PROLATE_SPHEROIDAL_SUPPORT} (a multiple of {cells} entries), "
             f"got shape {table.shape}"
         )
-    return GriddingKernel(table, PROLATE_SPHEROIDAL_SUPPORT, table.size // cells)
+    return _gcf_xds_from_table(table, PROLATE_SPHEROIDAL_SUPPORT, table.size // cells)

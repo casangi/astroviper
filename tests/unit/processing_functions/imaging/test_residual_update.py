@@ -20,6 +20,11 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     CASA_GRIDDING_KERNEL_PARAMS,
+    as_gridding_kernel,
+    correction,
+)
+from astroviper.processing_functions.imaging.gridding_convolution_functions.kernel_lookup import (
+    stencil_values,
 )
 from astroviper.processing_functions.imaging.residual_update import (
     imaging_setup_single_field,
@@ -386,13 +391,20 @@ def _degrid_error(kernel, x, y, n_offsets=4000):
     sum and by the correction; the two axes multiply.
     """
     offsets = -0.5 + (np.arange(n_offsets) + 0.5) / n_offsets
-    values = kernel.stencil_values(offsets)
-    rel = np.arange(kernel.support) - kernel.support // 2
+    attrs = kernel["ANTI_ALIAS"].attrs
+    values = stencil_values(
+        kernel["ANTI_ALIAS"].values,
+        attrs["support"],
+        attrs["oversampling"],
+        attrs["interpolation"],
+        offsets,
+    )
+    rel = np.arange(attrs["support"]) - attrs["support"] // 2
     moments = []
     for pos in (x, y):
         response = values @ np.exp(2j * np.pi * rel * pos)
         ratio = response * np.exp(2j * np.pi * offsets * pos) / values.sum(axis=1)
-        ratio /= kernel.correction(np.array([pos]))[0]
+        ratio /= correction(kernel, np.array([pos]))[0]
         moments.append((np.mean(np.abs(ratio) ** 2), np.mean(ratio)))
     (sq_x, mean_x), (sq_y, mean_y) = moments
     return np.sqrt(sq_x * sq_y - 2.0 * (mean_x * mean_y).real + 1.0)
@@ -498,7 +510,10 @@ def test_make_visibility_model_reads_the_input_data_group(data_group_name):
     cgk_1D = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
 
     make_visibility_model_single_field(
-        ps_xdt, img_xds, cgk_1D, ms_data_group_in_name=data_group_name
+        ps_xdt,
+        img_xds,
+        as_gridding_kernel(cgk_1D),
+        ms_data_group_in_name=data_group_name,
     )
 
     for ms_xdt in ps_xdt.values():
@@ -520,7 +535,10 @@ def test_make_visibility_model_missing_input_data_group_raises():
 
     with pytest.raises(AssertionError, match="Data group corrected not found"):
         make_visibility_model_single_field(
-            ps_xdt, img_xds, cgk_1D, ms_data_group_in_name="corrected"
+            ps_xdt,
+            img_xds,
+            as_gridding_kernel(cgk_1D),
+            ms_data_group_in_name="corrected",
         )
 
 

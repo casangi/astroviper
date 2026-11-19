@@ -2671,7 +2671,7 @@ def _prepare_continuum_image(
             processing_function_threads=config["processing_function_threads"],
             fft_backend=config["fft_backend"],
             complex_dtype=config["complex_dtype"],
-            gridding_kernel=gridding_kernel,
+            gcf_xds=gridding_kernel,
         )
 
     if continuum_mode == "mfs" and residual_output_name not in img_xds:
@@ -2858,7 +2858,7 @@ def _prepare_continuum_image(
                 processing_function_threads=config["processing_function_threads"],
                 fft_backend=config["fft_backend"],
                 complex_dtype=config["complex_dtype"],
-                gridding_kernel=gridding_kernel,
+                gcf_xds=gridding_kernel,
             )
 
         # register name of data group

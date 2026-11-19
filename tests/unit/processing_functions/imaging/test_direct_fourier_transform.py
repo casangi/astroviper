@@ -32,6 +32,7 @@ from astroviper.processing_functions.imaging.direct_fourier_transform import (
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     make_gridding_kernel,
+    map_error,
 )
 from astroviper.processing_functions.imaging.make_point_spread_function import (
     make_subtraction_point_spread_function_single_field,
@@ -284,7 +285,7 @@ def test_agreement_with_the_gridder_to_its_kernel_error(simulated):
     gridder = _image(store, "small_100GHz", ES7, pixel=pixel)
     size = dft["dirty"].shape[-1]
     x = (np.arange(size) - size // 2) / padded_grid_size([size, size], FFT_PADDING)[0]
-    error = make_gridding_kernel(ES7, FFT_PADDING).map_error(x)
+    error = map_error(make_gridding_kernel(ES7, FFT_PADDING), x)
     floor = error[:, None] + error[None, :]  # per pixel, the two axes' errors add
     # measured: 0.27 (dirty), 0.24 (psf) and 0.03 (residual) of the largest map error
     for name, scale in (("dirty", STOKES[0]), ("psf", 1.0), ("residual", STOKES[0])):

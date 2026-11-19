@@ -6,7 +6,6 @@ first step of forming the point spread function.
 """
 
 import copy
-from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -16,11 +15,6 @@ from astroviper.utils.data_group_tools import (
     modify_data_groups_xds,
 )
 from astroviper.utils.param_docs import shares_param_docs
-
-if TYPE_CHECKING:
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        GriddingKernel,
-    )
 
 
 def add_uv_sampling_grid_mosaic(
@@ -205,7 +199,7 @@ def add_uv_sampling_grid_mosaic(
 
 def add_uv_sampling_grid_single_field(
     ms_xdt: xr.Dataset,
-    cgk_1D: "GriddingKernel | np.ndarray",
+    gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -220,7 +214,7 @@ def add_uv_sampling_grid_single_field(
     """Accumulate the UV-sampling grid for a single-field observation into an image dataset.
 
     Reads imaging weights from ``ms_xdt``, grids them onto the UV plane using a
-    separable 1-D convolutional gridding kernel (``cgk_1D``), and accumulates
+    separable 1-D convolutional gridding kernel (``gcf_xds``), and accumulates
     the result into ``img_xds``.  The UV-sampling grid and its normalization
     (sum of weights) are stored as new data variables in ``img_xds``, and a
     corresponding output data group is registered via
@@ -228,7 +222,8 @@ def add_uv_sampling_grid_single_field(
 
     This function is the non-mosaic counterpart of
     :func:`add_uv_sampling_grid_mosaic`.  It uses the separable anti-aliasing gridder (the standard gridder in CASA) rather than the
-    direction-dependent mosaic gridder, so no GCF dataset is required.
+    direction-dependent mosaic gridder, so ``gcf_xds`` needs only the
+    anti-alias term.
 
     Parameters
     ----------
@@ -236,10 +231,12 @@ def add_uv_sampling_grid_single_field(
         Measurement set dataset.  Must contain the data variables referenced
         by ``ms_data_group_in_name`` (``uvw``, ``weight_imaging``) and a
         ``frequency`` coordinate.
-    cgk_1D : GriddingKernel or np.ndarray
-        The gridding kernel
-        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
-        or a bare table of CASA's prolate spheroidal kernel of support 7.
+    gcf_xds : xr.Dataset
+        The ``gcf_xds`` of the gridding kernel, from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
+        or from
+        :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
+        for a bare table of CASA's prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset that accumulates the UV-sampling grid.  The arrays
         named by ``image_data_group_out_modified`` are created on the first call
@@ -370,10 +367,10 @@ def add_uv_sampling_grid_single_field(
         anti_alias_grid_uv_sampling,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        as_gridding_kernel,
+        anti_alias_kernel_arguments,
     )
 
-    kernel = as_gridding_kernel(cgk_1D)
+    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
     anti_alias_grid_uv_sampling(
         grid,
         normalization,
@@ -383,12 +380,12 @@ def add_uv_sampling_grid_single_field(
         time_map,
         pol_map,
         imaging_weight,
-        kernel.table,
+        table,
         n_uv,
         delta_lm,
-        support=kernel.support,
-        oversampling=kernel.oversampling,
-        interpolation=kernel.interpolation_code,
+        support=support,
+        oversampling=oversampling,
+        interpolation=interpolation,
         processing_function_threads=processing_function_threads,
     )
 
@@ -620,7 +617,7 @@ def make_point_spread_function_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
-        gridding_kernel=cgk_1D,
+        gcf_xds=cgk_1D,
     )
     T_fft_norm = time.time() - T_start_fft_norm
 
