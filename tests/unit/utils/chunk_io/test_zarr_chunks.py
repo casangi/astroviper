@@ -78,6 +78,48 @@ def test_read_v3_sharded_multichannel(tmp_path, fsel):
     assert _equal(got, zarr.open_array(path)[:, :, fsel, :])
 
 
+@pytest.mark.parametrize("layout", ["v2", "v3", "sharded"])
+@pytest.mark.parametrize(
+    "dtype, fill",
+    [
+        ("complex64", 0j),
+        ("complex64", 2 - 3j),
+        ("complex128", 2 - 3j),
+        ("complex128", complex(float("nan"), float("inf"))),
+        ("complex64", complex(float("-inf"), float("nan"))),
+        ("float32", float("nan")),
+        ("float64", float("-inf")),
+        ("int32", -7),
+        ("bool", True),
+    ],
+)
+def test_read_encoded_fill_values(tmp_path, layout, dtype, fill):
+    """Missing/empty chunks and masked units fill the caller's existing buffer."""
+    path = str(tmp_path / "fills")
+    kwargs = {"dimension_names": ("frequency", "polarization")}
+    if layout == "v2":
+        kwargs = {"zarr_format": 2}
+    elif layout == "sharded":
+        kwargs["shards"] = (4, 4)
+    arr = zarr.create_array(
+        path, shape=(7, 4), chunks=(2, 4), dtype=dtype, fill_value=fill, **kwargs
+    )
+    if layout == "v2":
+        arr.attrs["_ARRAY_DIMENSIONS"] = ["frequency", "polarization"]
+    # One stored chunk, one empty inner chunk, and an entirely absent shard.
+    arr[:2, :] = 1
+    out = np.empty((6, 4), dtype=dtype)
+    got, dims = read_array_region(path, {"frequency": slice(1, 7)}, out=out)
+    assert got is out
+    assert dims == ["frequency", "polarization"]
+    np.testing.assert_array_equal(got, arr[1:7, :])
+    got, _ = read_array_region(
+        path, {"frequency": slice(1, 7)}, out=out, chunk_mask=np.array(False)
+    )
+    assert got is out
+    np.testing.assert_array_equal(got, np.full(out.shape, fill, dtype=dtype))
+
+
 def _write_minimal_processing_set_child(store, ms_name, frequencies, offset=0):
     """Write one tiny child used by direct-loader frequency-selection tests."""
     frequencies = np.asarray(frequencies, dtype=np.float64)
@@ -559,11 +601,24 @@ def test_write_roundtrip(tmp_path, compressor, processing_function_threads):
         assert _equal(back, vals[v])
 
 
-def test_write_roundtrip_edge_chunk(tmp_path):
+@pytest.mark.parametrize(
+    "dtype, fill",
+    [("float32", float("nan")), ("complex64", 2 - 3j), ("complex128", 2 - 3j)],
+)
+def test_write_roundtrip_edge_chunk(tmp_path, dtype, fill):
     """Last chunk is partial (5 channels, chunk size 2): pad to full chunk."""
     freq_chunks = [list(range(2)), list(range(2)), list(range(1))]
     store = _make_image_store(tmp_path, None, freq_chunks)
-    vals = np.random.default_rng(5).standard_normal((1, 1, 2, 16, 16)).astype("<f4")
+    zarr.create_array(
+        store + "/SKY_RESIDUAL",
+        shape=(1, 5, 2, 16, 16),
+        chunks=(1, 2, 2, 16, 16),
+        dtype=dtype,
+        fill_value=fill,
+        dimension_names=("time", "frequency", "polarization", "l", "m"),
+        overwrite=True,
+    )
+    vals = np.random.default_rng(5).standard_normal((1, 1, 2, 16, 16)).astype(dtype)
     img = xr.Dataset(
         {"SKY_RESIDUAL": (["time", "frequency", "polarization", "l", "m"], vals)}
     )

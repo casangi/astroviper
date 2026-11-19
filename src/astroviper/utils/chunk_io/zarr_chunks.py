@@ -99,6 +99,17 @@ def _np_dtype(meta_dtype):
     return np.dtype(meta_dtype)
 
 
+def _decode_fill_value(fill, dtype):
+    """Decode numeric JSON fill metadata to one scalar, without array copies."""
+    if fill is None:
+        return None
+    if dtype.kind == "c" and isinstance(fill, (list, tuple)):
+        # Both Zarr formats encode complex fills as [real, imaginary].
+        # float also decodes the JSON strings NaN, Infinity and -Infinity.
+        fill = complex(float(fill[0]), float(fill[1]))
+    return dtype.type(fill) if dtype.kind in "biufc" else fill
+
+
 def _read_array_meta(array_path):
     """Read just one array's Zarr metadata (no data, no group/tree open).
 
@@ -121,7 +132,9 @@ def _read_array_meta(array_path):
             "sep": key.get("separator", "/"),
             "codecs": codecs,
             "sharding": sharding["configuration"] if sharding else None,
-            "fill_value": m.get("fill_value"),
+            "fill_value": _decode_fill_value(
+                m.get("fill_value"), _np_dtype(m["data_type"])
+            ),
             "bool_encoded": m.get("attributes", {}).get("dtype") == "bool",
         }
 
@@ -141,7 +154,7 @@ def _read_array_meta(array_path):
         "compressor": m.get("compressor"),
         "filters": m.get("filters"),
         "order": m.get("order", "C"),
-        "fill_value": m.get("fill_value"),
+        "fill_value": _decode_fill_value(m.get("fill_value"), np.dtype(m["dtype"])),
         "bool_encoded": attrs.get("dtype") == "bool",
     }
 
