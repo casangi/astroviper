@@ -285,11 +285,12 @@ def add_uv_sampling_grid_single_field(
     --------
     add_uv_sampling_grid_mosaic : Mosaic (direction-dependent GCF) variant.
     """
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
+    )
+
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "uv_sampling": "UV_SAMPLING",
-            "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-        }
+        image_data_group_out_modified = dict(GridderAntiAlias.grid_uv_sampling_roles)
     # Deep copy so that inputs are not modified
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
@@ -320,30 +321,24 @@ def add_uv_sampling_grid_single_field(
         frequency_map = (np.zeros(n_chan)).astype(int)
 
     n_imag_pol = weight_imaging.shape[3]
-    pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
     # Time Map #Currently not implemented.
     n_image_time = 1
-    n_time = ms_xdt.sizes["time"]
-    time_map = (np.zeros(n_time)).astype(int)
-
-    from astroviper.processing_functions.imaging.utils.fft_sizing import (
-        padded_grid_size,
-    )
-
-    n_uv = padded_grid_size([img_xds.sizes["l"], img_xds.sizes["m"]], fft_padding)
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     if complex_dtype is None:
         complex_dtype = np.complex128
 
     if image_data_group_out["uv_sampling"] not in img_xds:
+        grid_values, grid_dims, _ = GridderAntiAlias.new_grid(
+            img_xds,
+            (n_image_time, n_imag_chan, n_imag_pol),
+            uv_sampling=True,
+            fft_padding=fft_padding,
+            complex_dtype=complex_dtype,
+        )
         img_xds[image_data_group_out["uv_sampling"]] = xr.DataArray(
-            np.zeros(
-                (n_image_time, n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]),
-                dtype=complex_dtype,
-            ),
-            dims=["time", "frequency", "polarization", "u", "v"],
+            grid_values,
+            dims=["time", "frequency", "polarization", *grid_dims],
         )
         img_xds[image_data_group_out["uv_sampling_normalization"]] = xr.DataArray(
             np.zeros((n_image_time, n_imag_chan, n_imag_pol), dtype=np.double),
@@ -359,33 +354,18 @@ def add_uv_sampling_grid_single_field(
     grid = img_xds[image_data_group_out["uv_sampling"]].values
     normalization = img_xds[image_data_group_out["uv_sampling_normalization"]].values
 
-    uvw = ms_xdt[ms_data_group_in["uvw"]].values
-    frequency_coord = ms_xdt.frequency.values
     imaging_weight = ms_xdt[ms_data_group_in["weight_imaging"]].values
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
-        anti_alias_grid_uv_sampling,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        anti_alias_kernel_arguments,
-    )
-
-    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
-    anti_alias_grid_uv_sampling(
-        grid,
-        normalization,
-        uvw,
-        frequency_coord,
-        frequency_map,
-        time_map,
-        pol_map,
-        imaging_weight,
-        table,
-        n_uv,
-        delta_lm,
-        support=support,
-        oversampling=oversampling,
-        interpolation=interpolation,
+    GridderAntiAlias.grid_uv_sampling(
+        ms_xdt,
+        img_xds,
+        gcf_xds,
+        weights=imaging_weight,
+        frequency_map=frequency_map,
+        grid=grid,
+        normalization=normalization,
+        ms_data_group_in_name=ms_data_group_in_name,
+        fft_padding=fft_padding,
         processing_function_threads=processing_function_threads,
     )
 
@@ -544,8 +524,8 @@ def make_point_spread_function_single_field(
 
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-        ifft_norm_img_xds,
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         is_direct_fourier_transform,
@@ -592,10 +572,7 @@ def make_point_spread_function_single_field(
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_in_name,
             image_data_group_out_name=image_data_group_out_name,
-            image_data_group_out_modified={
-                "uv_sampling": "UV_SAMPLING",
-                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-            },
+            image_data_group_out_modified=dict(GridderAntiAlias.grid_uv_sampling_roles),
             overwrite=True,
             chan_mode="cube",
             fft_padding=image_params["fft_padding"],
@@ -605,7 +582,7 @@ def make_point_spread_function_single_field(
         T_uv_sampling_grid += time.time() - T_start_uv
 
     T_start_fft_norm = time.time()
-    img_xds = ifft_norm_img_xds(
+    img_xds = GridderAntiAlias.uv_to_image(
         img_xds,
         image_params=image_params,
         image_data_group_in_name=image_data_group_in_name,
@@ -613,6 +590,7 @@ def make_point_spread_function_single_field(
         image_data_group_out_modified={
             "point_spread_function": "POINT_SPREAD_FUNCTION",
         },
+        overwrite=True,
         image_data_variables_keep=image_data_variables_keep,
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,

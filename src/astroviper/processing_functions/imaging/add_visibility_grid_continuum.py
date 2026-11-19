@@ -99,11 +99,8 @@ def add_visibility_grid_continuum_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
-        anti_alias_grid,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        anti_alias_kernel_arguments,
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -122,10 +119,7 @@ def add_visibility_grid_continuum_single_field(
 
     # Prepare image data group
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "visibility": "VISIBILITY",
-            "visibility_normalization": "VISIBILITY_NORMALIZATION",
-        }
+        image_data_group_out_modified = dict(GridderAntiAlias.grid_roles)
     image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     ms_data_group_in = ms_xds.attrs["data_groups"][ms_data_group_in_name]
@@ -150,11 +144,7 @@ def add_visibility_grid_continuum_single_field(
 
     n_chan = weight_imaging.shape[2]
     n_imag_time = 1
-    n_time = ms_xds.sizes["time"]
     n_imag_pol = weight_imaging.shape[3]
-
-    time_map = np.zeros(n_time, dtype=int)
-    pol_map = np.arange(n_imag_pol, dtype=int)
 
     # Each gridder invocation writes all input channels into one output plane.
     frequency_map = np.zeros(n_chan, dtype=int)
@@ -163,7 +153,6 @@ def add_visibility_grid_continuum_single_field(
         [img_xds.sizes["l"], img_xds.sizes["m"]],
         fft_padding,
     )
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     # sanity check on naming of axes
     if "taylor_term" not in img_xds.coords:
@@ -200,14 +189,20 @@ def add_visibility_grid_continuum_single_field(
             for dim in ("time", "taylor_term", "polarization", "u", "v")
             if dim in img_xds.coords
         }
+        grid_values, grid_dims, _ = GridderAntiAlias.new_grid(
+            img_xds,
+            (n_imag_time, n_taylor_terms, n_imag_pol),
+            uv_sampling=False,
+            fft_padding=fft_padding,
+            complex_dtype=complex_dtype,
+        )
         img_xds[visibility_name] = xr.DataArray(
-            np.zeros(expected_grid_shape, dtype=complex_dtype),
+            grid_values,
             dims=[
                 "time",
                 "taylor_term",
                 "polarization",
-                "u",
-                "v",
+                *grid_dims,
             ],
             coords=coords,
         )
@@ -246,12 +241,10 @@ def add_visibility_grid_continuum_single_field(
                 f"{expected_normalization_shape}."
             )
 
-    # extract grid, correlated data, uvw and frequencies
+    # extract grid and frequencies
     grid = img_xds[visibility_name].values
     normalization = img_xds[normalization_name].values
 
-    vis_data = ms_xds[ms_data_group_in["correlated_data"]].values
-    uvw = ms_xds[ms_data_group_in["uvw"]].values
     frequency_coord = np.asarray(ms_xds.frequency.values)
 
     if frequency_coord.shape[0] != n_chan:
@@ -264,8 +257,6 @@ def add_visibility_grid_continuum_single_field(
     x = (
         frequency_coord.astype(np.float64, copy=False) - reference_frequency
     ) / reference_frequency
-
-    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
 
     # Common zeroth-order normalization.
     zeroth_normalization = np.zeros(
@@ -291,22 +282,16 @@ def add_visibility_grid_continuum_single_field(
         )
 
         # gridding functionality
-        anti_alias_grid(
-            grid_view,
-            temporary_normalization,
-            vis_data,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            taylor_imaging_weight,
-            table,
-            n_uv,
-            delta_lm,
-            support=support,
-            oversampling=oversampling,
-            interpolation=interpolation,
+        GridderAntiAlias.grid(
+            ms_xds,
+            img_xds,
+            gcf_xds,
+            weights=taylor_imaging_weight,
+            frequency_map=frequency_map,
+            grid=grid_view,
+            normalization=temporary_normalization,
+            ms_data_group_in_name=ms_data_group_in_name,
+            fft_padding=fft_padding,
             processing_function_threads=processing_function_threads,
         )
 

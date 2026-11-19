@@ -746,8 +746,8 @@ def prepare_model_uv_continuum_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-        fft_norm_continuum_img_xds,
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         is_direct_fourier_transform,
@@ -835,23 +835,27 @@ def prepare_model_uv_continuum_single_field(
             )
         return model_uv_xds
 
-    model_uv_xds = fft_norm_continuum_img_xds(
+    model_uv_xds = GridderAntiAlias.image_to_uv(
         model_uv_xds,
         image_params=image_params,
+        plane_dim="taylor_term",
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
         image_data_group_out_modified={
             "visibility": "VISIBILITY_MODEL",
         },
+        overwrite=True,
         # The accumulated image-domain model is returned separately. Keeping
         # it here would double the large state copied to each map task.
         image_data_variables_keep=[],
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
+        data_variables_to_process=None,
         complex_dtype=complex_dtype,
         gcf_xds=make_gridding_kernel(
             gridding_kernel_params, image_params["fft_padding"]
         ),
+        new_polarization_basis=None,
     )
 
     output_data_groups = model_uv_xds.attrs.get("data_groups", {})
@@ -1166,8 +1170,8 @@ def prepare_model_uv_mvc_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-        fft_norm_img_xds,
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         make_gridding_kernel,
@@ -1316,21 +1320,25 @@ def prepare_model_uv_mvc_single_field(
 
     complex_dtype = np.complex64 if single_precision_image else np.complex128
 
-    mvc_xds = fft_norm_img_xds(
+    mvc_xds = GridderAntiAlias.image_to_uv(
         mvc_xds,
         image_params=image_params,
+        plane_dim="frequency",
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         image_data_group_out_modified={
             "visibility": "VISIBILITY_MODEL",
         },
+        overwrite=True,
         image_data_variables_keep=["sky"],
         processing_function_threads=(processing_function_threads),
         fft_backend=fft_backend,
+        data_variables_to_process=None,
         complex_dtype=complex_dtype,
         gcf_xds=make_gridding_kernel(
             gridding_kernel_params, image_params["fft_padding"]
         ),
+        new_polarization_basis=None,
     )
 
     return mvc_xds
@@ -2795,8 +2803,8 @@ def residual_update_continuum_single_field(
         mvc_observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
 
     if continuum_mode == "mvc":
-        from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-            ifft_norm_img_xds,
+        from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+            GridderAntiAlias,
         )
         from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
             make_gridding_kernel,
@@ -2807,7 +2815,7 @@ def residual_update_continuum_single_field(
             gridding_kernel_params, image_params["fft_padding"]
         )
 
-        img_xds = ifft_norm_img_xds(
+        img_xds = GridderAntiAlias.uv_to_image(
             img_xds,
             image_params=image_params,
             image_data_group_in_name="residual",
@@ -2815,6 +2823,7 @@ def residual_update_continuum_single_field(
             image_data_group_out_modified={
                 "sky": "SKY_RESIDUAL_MVC_CUBE",
             },
+            overwrite=True,
             image_data_variables_keep=[],
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
@@ -2828,7 +2837,7 @@ def residual_update_continuum_single_field(
             )
 
         if is_first_cycle:
-            img_xds = ifft_norm_img_xds(
+            img_xds = GridderAntiAlias.uv_to_image(
                 img_xds,
                 image_params=image_params,
                 image_data_group_in_name="residual",
@@ -2836,6 +2845,7 @@ def residual_update_continuum_single_field(
                 image_data_group_out_modified={
                     "point_spread_function": "POINT_SPREAD_FUNCTION_MVC_CUBE",
                 },
+                overwrite=True,
                 image_data_variables_keep=[],
                 processing_function_threads=processing_function_threads,
                 fft_backend=fft_backend,

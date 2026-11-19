@@ -125,11 +125,8 @@ def add_visibility_grid_mvc_single_field(
             mode=CONTINUUM_SINGLE_FIELD,
         )
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
-        anti_alias_grid,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        anti_alias_kernel_arguments,
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -143,10 +140,7 @@ def add_visibility_grid_mvc_single_field(
     )
 
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "visibility": "VISIBILITY",
-            "visibility_normalization": ("VISIBILITY_NORMALIZATION"),
-        }
+        image_data_group_out_modified = dict(GridderAntiAlias.grid_roles)
 
     if complex_dtype is None:
         complex_dtype = np.complex128
@@ -205,7 +199,6 @@ def add_visibility_grid_mvc_single_field(
     # Validate visibility-domain arrays.
     # ------------------------------------------------------------------
     visibility_data = np.asarray(ms_xds[ms_data_group_in["correlated_data"]].values)
-    uvw = np.asarray(ms_xds[ms_data_group_in["uvw"]].values)
     weight_imaging = np.asarray(ms_xds[ms_data_group_in["weight_imaging"]].values)
 
     if weight_imaging.ndim != 4:
@@ -223,7 +216,6 @@ def add_visibility_grid_mvc_single_field(
             f"{weight_imaging.shape}."
         )
 
-    n_time = weight_imaging.shape[0]
     n_chan = weight_imaging.shape[2]
     n_pol = weight_imaging.shape[3]
 
@@ -290,7 +282,7 @@ def add_visibility_grid_mvc_single_field(
         raise KeyError("The MVC image dataset must contain a time coordinate.")
 
     # ------------------------------------------------------------------
-    # Construct grid maps.
+    # Image time plane.
     # ------------------------------------------------------------------
     n_image_time = 1
 
@@ -300,17 +292,6 @@ def add_visibility_grid_mvc_single_field(
             "one image time plane; received "
             f"{img_xds.sizes['time']}."
         )
-
-    # All input integrations contribute to one image time plane.
-    time_map = np.zeros(
-        n_time,
-        dtype=np.int64,
-    )
-
-    pol_map = np.arange(
-        n_pol,
-        dtype=np.int64,
-    )
 
     # ------------------------------------------------------------------
     # Determine UV-grid geometry.
@@ -322,8 +303,6 @@ def add_visibility_grid_mvc_single_field(
         ],
         fft_padding,
     )
-
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     expected_grid_shape = (
         n_image_time,
@@ -355,17 +334,20 @@ def add_visibility_grid_mvc_single_field(
         if "v" in img_xds.coords:
             visibility_coords["v"] = img_xds.coords["v"]
 
+        grid_values, grid_dims, _ = GridderAntiAlias.new_grid(
+            img_xds,
+            (n_image_time, n_image_chan, n_pol),
+            uv_sampling=False,
+            fft_padding=fft_padding,
+            complex_dtype=complex_dtype,
+        )
         img_xds[visibility_name] = xr.DataArray(
-            np.zeros(
-                expected_grid_shape,
-                dtype=complex_dtype,
-            ),
+            grid_values,
             dims=(
                 "time",
                 "frequency",
                 "polarization",
-                "u",
-                "v",
+                *grid_dims,
             ),
             coords={
                 "time": img_xds.coords["time"],
@@ -459,24 +441,17 @@ def add_visibility_grid_mvc_single_field(
     grid = img_xds[visibility_name].values
     normalization = img_xds[normalization_name].values
 
-    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
-    anti_alias_grid(
-        grid,
-        normalization,
-        visibility_data,
-        uvw,
-        frequency_coord,
-        frequency_map,
-        time_map,
-        pol_map,
-        weight_imaging,
-        table,
-        n_uv,
-        delta_lm,
-        support=support,
-        oversampling=oversampling,
-        interpolation=interpolation,
-        processing_function_threads=(processing_function_threads),
+    GridderAntiAlias.grid(
+        ms_xds,
+        img_xds,
+        gcf_xds,
+        weights=weight_imaging,
+        frequency_map=frequency_map,
+        grid=grid,
+        normalization=normalization,
+        ms_data_group_in_name=ms_data_group_in_name,
+        fft_padding=fft_padding,
+        processing_function_threads=processing_function_threads,
     )
 
     # ------------------------------------------------------------------

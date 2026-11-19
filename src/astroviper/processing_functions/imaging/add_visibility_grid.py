@@ -288,11 +288,12 @@ def add_visibility_grid_single_field(
     astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp.anti_alias_grid :
         C++ separable anti-aliasing gridder.
     """
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
+    )
+
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "visibility": "VISIBILITY",
-            "visibility_normalization": "VISIBILITY_NORMALIZATION",
-        }
+        image_data_group_out_modified = dict(GridderAntiAlias.grid_roles)
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     # Read the MS input data group directly; the MS is read-only here.
@@ -326,30 +327,24 @@ def add_visibility_grid_single_field(
 
     # Time Map #Currently not implemented.
     n_imag_time = 1
-    n_time = ms_xds.sizes["time"]
-    time_map = (np.zeros(n_time)).astype(int)
 
     n_imag_pol = weight_imaging.shape[3]
-    pol_map = (np.arange(0, n_imag_pol)).astype(int)
-
-    from astroviper.processing_functions.imaging.utils.fft_sizing import (
-        padded_grid_size,
-    )
-
-    n_uv = padded_grid_size([img_xds.sizes["l"], img_xds.sizes["m"]], fft_padding)
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     if complex_dtype is None:
         complex_dtype = np.complex128
 
     # Initialise output arrays on the first call; subsequent calls accumulate.
     if image_data_group_out["visibility"] not in img_xds:
+        grid_values, grid_dims, _ = GridderAntiAlias.new_grid(
+            img_xds,
+            (n_imag_time, n_imag_chan, n_imag_pol),
+            uv_sampling=False,
+            fft_padding=fft_padding,
+            complex_dtype=complex_dtype,
+        )
         img_xds[image_data_group_out["visibility"]] = xr.DataArray(
-            np.zeros(
-                (n_imag_time, n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]),
-                dtype=complex_dtype,
-            ),
-            dims=["time", "frequency", "polarization", "u", "v"],
+            grid_values,
+            dims=["time", "frequency", "polarization", *grid_dims],
         )
         img_xds[image_data_group_out["visibility_normalization"]] = xr.DataArray(
             np.zeros((n_imag_time, n_imag_chan, n_imag_pol), dtype=np.double),
@@ -366,34 +361,17 @@ def add_visibility_grid_single_field(
     grid = img_xds[image_data_group_out["visibility"]].values
     normalization = img_xds[image_data_group_out["visibility_normalization"]].values
 
-    vis_data = ms_xds[ms_data_group_in["correlated_data"]].values
-    uvw = ms_xds[ms_data_group_in["uvw"]].values
-    frequency_coord = ms_xds.frequency.values
     imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
-        anti_alias_grid,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        anti_alias_kernel_arguments,
-    )
-
-    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
-    anti_alias_grid(
-        grid,
-        normalization,
-        vis_data,
-        uvw,
-        frequency_coord,
-        frequency_map,
-        time_map,
-        pol_map,
-        imaging_weight,
-        table,
-        n_uv,
-        delta_lm,
-        support=support,
-        oversampling=oversampling,
-        interpolation=interpolation,
+    GridderAntiAlias.grid(
+        ms_xds,
+        img_xds,
+        gcf_xds,
+        weights=imaging_weight,
+        frequency_map=frequency_map,
+        grid=grid,
+        normalization=normalization,
+        ms_data_group_in_name=ms_data_group_in_name,
+        fft_padding=fft_padding,
         processing_function_threads=processing_function_threads,
     )

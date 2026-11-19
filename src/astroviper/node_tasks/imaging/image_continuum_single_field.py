@@ -2615,8 +2615,8 @@ def _prepare_continuum_image(
     from astroviper.processing_functions.imaging.direct_fourier_transform import (
         normalize_dft_image,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-        ifft_norm_img_xds,
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         is_direct_fourier_transform,
@@ -2659,7 +2659,7 @@ def _prepare_continuum_image(
         gridding_kernel = make_gridding_kernel(
             config["gridding_kernel_params"], image_params["fft_padding"]
         )
-        img_xds = ifft_norm_img_xds(
+        img_xds = GridderAntiAlias.uv_to_image(
             img_xds,
             image_params=image_params,
             image_data_group_in_name=image_data_group_name,
@@ -2667,6 +2667,7 @@ def _prepare_continuum_image(
             image_data_group_out_modified={
                 "sky": residual_output_name,
             },
+            overwrite=True,
             image_data_variables_keep=config["image_data_variables_keep"],
             processing_function_threads=config["processing_function_threads"],
             fft_backend=config["fft_backend"],
@@ -2846,7 +2847,7 @@ def _prepare_continuum_image(
         if continuum_mode == "mfs" and direct_fourier_transform:
             normalize_dft_image(img_xds, image_data_group_name, uv_sampling=True)
         elif continuum_mode == "mfs":
-            img_xds = ifft_norm_img_xds(
+            img_xds = GridderAntiAlias.uv_to_image(
                 img_xds,
                 image_params=image_params,
                 image_data_group_in_name=image_data_group_name,
@@ -2854,6 +2855,7 @@ def _prepare_continuum_image(
                 image_data_group_out_modified={
                     "point_spread_function": "POINT_SPREAD_FUNCTION",
                 },
+                overwrite=True,
                 image_data_variables_keep=config["image_data_variables_keep"],
                 processing_function_threads=config["processing_function_threads"],
                 fft_backend=config["fft_backend"],

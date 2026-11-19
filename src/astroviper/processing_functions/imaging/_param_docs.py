@@ -1076,6 +1076,20 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "The distributed cube writer does not publish UV grids; standalone\n"
         "processing functions may retain their working grids in memory."
     ),
+    "uv_to_image.image_data_group_in_name": (
+        "Image data group of the accumulated arrays."
+    ),
+    "image_to_uv.image_data_group_in_name": "Image data group of the model images.",
+    "uv_to_image.image_data_variables_keep": (
+        "Roles of the uv grids kept in ``img_xds`` after the transform\n"
+        '(``"visibility"``, ``"uv_sampling"``); the other grids transformed\n'
+        "in this call are deleted from it. ``None`` keeps none."
+    ),
+    "image_to_uv.image_data_variables_keep": (
+        "Roles of the images kept in ``img_xds`` after the transform\n"
+        '(``"sky"``); the other images transformed in this call are deleted\n'
+        "from it. ``None`` keeps none."
+    ),
     "restore_continuum_image.continuum_mode": (
         "Continuum construction convention. When omitted, infer it from the\n"
         "residual or image metadata. An explicit value must agree with any\n"

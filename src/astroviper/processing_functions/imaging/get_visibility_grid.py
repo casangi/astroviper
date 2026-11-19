@@ -117,11 +117,17 @@ def get_visibility_grid_single_field(
     degrid_visibility_grid_single_field :
         Shared anti-aliasing gridder numerical primitive.
     """
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
+    )
+
     if ms_data_group_out_modified is None:
         ms_data_group_out_modified = {
             "correlated_data": "VISIBILITY_MODEL",
         }
-    model_name = img_xds.attrs["data_groups"][image_data_group_in_name]["visibility"]
+    model_name = img_xds.attrs["data_groups"][image_data_group_in_name][
+        GridderAntiAlias.degrid_role
+    ]
 
     n_chan = ms_xds.sizes["frequency"]
     if chan_mode == "cube":
@@ -135,14 +141,10 @@ def get_visibility_grid_single_field(
     else:  # continuum
         frequency_map = (np.zeros(n_chan)).astype(int)
 
-    from astroviper.processing_functions.imaging.degrid_visibility_grid import (
-        degrid_visibility_grid_single_field,
-    )
-
-    degrid_visibility_grid_single_field(
+    GridderAntiAlias.degrid(
         ms_xds,
-        gcf_xds,
         img_xds,
+        gcf_xds,
         img_xds[model_name].values,
         frequency_map,
         ms_data_group_in_name=ms_data_group_in_name,

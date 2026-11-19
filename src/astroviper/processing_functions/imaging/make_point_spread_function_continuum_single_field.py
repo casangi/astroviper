@@ -136,11 +136,12 @@ def add_uv_sampling_grid_continuum_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
+    )
+
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "uv_sampling": "UV_SAMPLING",
-            "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-        }
+        image_data_group_out_modified = dict(GridderAntiAlias.grid_uv_sampling_roles)
 
     if complex_dtype is None:
         complex_dtype = np.complex128
@@ -176,9 +177,7 @@ def add_uv_sampling_grid_continuum_single_field(
     # The current single-field image gridder maps all input times into one image
     # time plane, matching the cube implementation.
     n_image_time = 1
-    time_map = np.zeros(n_time, dtype=np.int64)
     frequency_map = np.zeros(n_chan, dtype=np.int64)
-    pol_map = np.arange(n_pol, dtype=np.int64)
 
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -188,29 +187,25 @@ def add_uv_sampling_grid_continuum_single_field(
         [img_xds.sizes["l"], img_xds.sizes["m"]],
         fft_padding,
     )
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     uv_name = image_data_group_out["uv_sampling"]
     norm_name = image_data_group_out["uv_sampling_normalization"]
 
     if uv_name not in img_xds:
+        grid_values, grid_dims, _ = GridderAntiAlias.new_grid(
+            img_xds,
+            (n_image_time, n_psf_taylor_terms, n_pol),
+            uv_sampling=True,
+            fft_padding=fft_padding,
+            complex_dtype=complex_dtype,
+        )
         img_xds[uv_name] = xr.DataArray(
-            np.zeros(
-                (
-                    n_image_time,
-                    n_psf_taylor_terms,
-                    n_pol,
-                    n_uv[0],
-                    n_uv[1],
-                ),
-                dtype=complex_dtype,
-            ),
+            grid_values,
             dims=[
                 "time",
                 "psf_taylor_order",
                 "polarization",
-                "u",
-                "v",
+                *grid_dims,
             ],
             coords={
                 "psf_taylor_order": np.arange(
@@ -264,18 +259,7 @@ def add_uv_sampling_grid_continuum_single_field(
     target_grid = img_xds[uv_name].values
     target_normalization = img_xds[norm_name].values
 
-    uvw = np.asarray(ms_xdt[ms_data_group_in["uvw"]].values)
-
     x_frequency = (frequency_coord - reference_frequency) / reference_frequency
-
-    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
-        anti_alias_grid_uv_sampling,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
-        anti_alias_kernel_arguments,
-    )
-
-    table, support, oversampling, interpolation = anti_alias_kernel_arguments(gcf_xds)
 
     # Reuse the existing continuum channel map. With one image-time plane, each
     # Taylor-order view has the contiguous layout required by the C++ gridder.
@@ -299,21 +283,16 @@ def add_uv_sampling_grid_continuum_single_field(
             dtype=np.float64,
         )
 
-        anti_alias_grid_uv_sampling(
-            grid_view,
-            temporary_normalization,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            effective_weight,
-            table,
-            n_uv,
-            delta_lm,
-            support=support,
-            oversampling=oversampling,
-            interpolation=interpolation,
+        GridderAntiAlias.grid_uv_sampling(
+            ms_xdt,
+            img_xds,
+            gcf_xds,
+            weights=effective_weight,
+            frequency_map=frequency_map,
+            grid=grid_view,
+            normalization=temporary_normalization,
+            ms_data_group_in_name=ms_data_group_in_name,
+            fft_padding=fft_padding,
             processing_function_threads=processing_function_threads,
         )
 
@@ -462,6 +441,9 @@ def make_point_spread_function_mvc_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
+    )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         make_gridding_kernel,
     )
@@ -503,10 +485,7 @@ def make_point_spread_function_mvc_single_field(
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_in_name,
             image_data_group_out_name=image_data_group_out_name,
-            image_data_group_out_modified={
-                "uv_sampling": "UV_SAMPLING",
-                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-            },
+            image_data_group_out_modified=dict(GridderAntiAlias.grid_uv_sampling_roles),
             overwrite=True,
             chan_mode="cube",
             fft_padding=image_params["fft_padding"],
@@ -691,6 +670,9 @@ def make_point_spread_function_continuum_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
+    )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         is_direct_fourier_transform,
         make_gridding_kernel,
@@ -758,10 +740,7 @@ def make_point_spread_function_continuum_single_field(
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_in_name,
             image_data_group_out_name=image_data_group_out_name,
-            image_data_group_out_modified={
-                "uv_sampling": "UV_SAMPLING",
-                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-            },
+            image_data_group_out_modified=dict(GridderAntiAlias.grid_uv_sampling_roles),
             overwrite=True,
             fft_padding=image_params["fft_padding"],
             processing_function_threads=processing_function_threads,

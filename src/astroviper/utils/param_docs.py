@@ -139,6 +139,7 @@ def _target_files():
         "processing_functions/imaging/make_point_spread_function.py",
         "processing_functions/imaging/make_undeconvolved_image.py",
         "processing_functions/imaging/degrid_visibility_grid.py",
+        "processing_functions/imaging/gridders/gridder_base.py",
         "processing_functions/imaging/direct_fourier_transform.py",
         "processing_functions/imaging/cycle_acceleration.py",
         "processing_functions/imaging/utils/imaging_parameter_heuristics.py",

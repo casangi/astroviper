@@ -619,8 +619,8 @@ def make_visibility_model_continuum_single_field(
 
     import numpy as np
 
-    from astroviper.processing_functions.imaging.degrid_visibility_grid import (
-        degrid_visibility_grid_single_field,
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
     )
 
     # ------------------------------------------------------------
@@ -645,7 +645,7 @@ def make_visibility_model_continuum_single_field(
         )
 
     model_data_group = data_groups[image_data_group_in_name]
-    model_visibility_name = model_data_group.get("visibility")
+    model_visibility_name = model_data_group.get(GridderAntiAlias.degrid_role)
 
     if model_visibility_name is None:
         raise KeyError(
@@ -762,10 +762,10 @@ def make_visibility_model_continuum_single_field(
                 np.expand_dims(taylor_grid.values, axis=1),
                 dtype=native_grid_dtype,
             )
-            degrid_visibility_grid_single_field(
+            GridderAntiAlias.degrid(
                 ms_xdt,
-                gcf_xds,
                 model_xds,
+                gcf_xds,
                 single_plane_grid,
                 frequency_map,
                 ms_data_group_in_name=ms_data_group_in_name,

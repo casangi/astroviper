@@ -115,6 +115,9 @@ def make_undeconvolved_image_continuum_single_field(
     from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
         add_visibility_grid_continuum_single_field,
     )
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
+    )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
 
     if complex_dtype is None:
@@ -148,10 +151,7 @@ def make_undeconvolved_image_continuum_single_field(
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_out_name,
             image_data_group_out_name=image_data_group_out_name,
-            image_data_group_out_modified={
-                "visibility": "VISIBILITY",
-                "visibility_normalization": "VISIBILITY_NORMALIZATION",
-            },
+            image_data_group_out_modified=dict(GridderAntiAlias.grid_roles),
             overwrite=True,
             fft_padding=image_params["fft_padding"],
             processing_function_threads=processing_function_threads,

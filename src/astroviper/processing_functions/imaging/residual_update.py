@@ -511,9 +511,8 @@ def residual_update_cube_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
-        fft_norm_img_xds,
-        ifft_norm_img_xds,
+    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
+        GridderAntiAlias,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         is_direct_fourier_transform,
@@ -559,17 +558,20 @@ def residual_update_cube_single_field(
         # the dataset turns to that basis (which relabels the grid).
         if not direct_fourier_transform:
             start = time.time()
-            img_xds = fft_norm_img_xds(
+            img_xds = GridderAntiAlias.image_to_uv(
                 img_xds,
                 image_params=image_params,
+                plane_dim="frequency",
                 image_data_group_in_name=image_data_group_in_name,
                 image_data_group_out_name=image_data_group_in_name,
                 image_data_group_out_modified={
                     "visibility": "VISIBILITY_MODEL",
                 },
+                overwrite=True,
                 image_data_variables_keep=["sky"],
                 processing_function_threads=processing_function_threads,
                 fft_backend=fft_backend,
+                data_variables_to_process=None,
                 complex_dtype=complex_dtype,
                 gcf_xds=cgk_1D,
                 new_polarization_basis=instrument_polarization_basis,
@@ -710,7 +712,7 @@ def residual_update_cube_single_field(
         T_grid = time.time() - T_start_grid
 
         start = time.time()
-        img_xds = ifft_norm_img_xds(
+        img_xds = GridderAntiAlias.uv_to_image(
             img_xds,
             image_params=image_params,
             image_data_group_in_name=image_data_group_out_name,
@@ -718,6 +720,7 @@ def residual_update_cube_single_field(
             image_data_group_out_modified={
                 "sky": "SKY_RESIDUAL",
             },
+            overwrite=True,
             image_data_variables_keep=image_data_variables_keep,
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
