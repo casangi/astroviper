@@ -53,8 +53,17 @@ def test_class_attributes_are_constant():
         {"run": classmethod(lambda cls, value: value)},
         {"value": property(lambda self: 1)},
         {"__init__": lambda self: None},
+        {"__init_subclass__": lambda cls: None},
+        {"__class_getitem__": lambda cls, item: None},
     ],
-    ids=["function", "classmethod", "property", "init"],
+    ids=[
+        "function",
+        "classmethod",
+        "property",
+        "init",
+        "init_subclass",
+        "class_getitem",
+    ],
 )
 def test_a_class_body_holds_static_methods_only(namespace):
     with pytest.raises(TypeError, match="static"):

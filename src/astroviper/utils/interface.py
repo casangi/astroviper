@@ -13,21 +13,24 @@ class Interface(type):
 
     A class with this metaclass cannot be instantiated, its attributes cannot
     be reassigned or deleted once the class body is defined, and every
-    function in its body is a ``staticmethod``.
+    function in its body other than a dunder method is a ``staticmethod``.
 
     Raises
     ------
     TypeError
-        If a class body defines ``__init__``, a ``classmethod``, a
-        ``property`` or a function that is not a ``staticmethod``, or if the
-        class is called.
+        If a class body defines ``__init__``, ``__init_subclass__``,
+        ``__class_getitem__``, a ``classmethod``, a ``property`` or a
+        function that is neither a ``staticmethod`` nor a dunder method, or
+        if the class is called.
     AttributeError
         If a class attribute is assigned or deleted.
     """
 
     def __new__(mcs, name, bases, namespace):
         for key, value in namespace.items():
-            if key == "__init__" or isinstance(value, (classmethod, property)):
+            if key in ("__init__", "__init_subclass__", "__class_getitem__") or (
+                isinstance(value, (classmethod, property))
+            ):
                 raise TypeError(
                     f"{name}.{key}: an interface class has static methods only."
                 )
