@@ -459,9 +459,10 @@ def create_empty_measurement_set_v4_on_disk(
     double_precision: bool = True,
     overwrite: bool = False,
 ) -> str:
-    """Write a processing set containing one empty MSv4 ready for chunk-wise writes.
+    """Write an empty MSv4 ready for chunk-wise writes into a new or existing processing set.
 
-    Creates ``<ps_store>/`` (root group with ``type="processing_set"``),
+    Creates ``<ps_store>/`` (root group with ``type="processing_set"``) unless
+    it is already a processing set, whose other MSv4s are kept,
     ``<ps_store>/<ms_name>`` with the coordinates/attrs of ``ms_xds`` and the
     ``antenna_xds`` / ``field_and_source_base_xds`` children, then pre-allocates
     ``VISIBILITY``, ``UVW``, ``WEIGHT`` and ``FLAG`` (chunked along the
@@ -482,6 +483,9 @@ def create_empty_measurement_set_v4_on_disk(
     double_precision : bool
         ``VISIBILITY`` complex128 / ``WEIGHT`` float64 if True, else complex64 / float32.
     overwrite : bool
+        Replace an MSv4 named ``ms_name`` in ``ps_store``, or a ``ps_store``
+        that is not a processing set. Without it either raises
+        ``FileExistsError``.
 
     Returns
     -------
@@ -490,7 +494,9 @@ def create_empty_measurement_set_v4_on_disk(
     """
     import shutil
 
+    import zarr
     from xradio._utils.zarr.config import ZARR_FORMAT
+    from zarr.errors import BaseZarrError
 
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
@@ -499,20 +505,32 @@ def create_empty_measurement_set_v4_on_disk(
     )
 
     if os.path.exists(ps_store):
+        try:
+            root_type = zarr.open_group(ps_store, mode="r").attrs.get("type")
+        except BaseZarrError:  # a directory or array, not a group
+            root_type = None
+        if root_type != "processing_set":
+            if not overwrite:
+                raise FileExistsError(
+                    f"{ps_store} exists; pass overwrite=True to replace it."
+                )
+            shutil.rmtree(ps_store)
+    ms_path = os.path.join(ps_store, ms_name)
+    if os.path.exists(ms_path):
         if not overwrite:
             raise FileExistsError(
-                f"{ps_store} exists; pass overwrite=True to replace it."
+                f"{ms_path} exists; pass overwrite=True to replace it."
             )
-        shutil.rmtree(ps_store)
+        shutil.rmtree(ms_path)
 
-    root = xr.DataTree()
-    root.attrs["type"] = "processing_set"
-    root.to_zarr(store=ps_store, mode="w", zarr_format=ZARR_FORMAT)
+    if not os.path.exists(ps_store):
+        root = xr.DataTree()
+        root.attrs["type"] = "processing_set"
+        root.to_zarr(store=ps_store, mode="w", zarr_format=ZARR_FORMAT)
 
     ms_xdt = xr.DataTree(ms_xds)
     ms_xdt["antenna_xds"] = xr.DataTree(antenna_xds)
     ms_xdt["field_and_source_base_xds"] = xr.DataTree(field_and_source_xds)
-    ms_path = os.path.join(ps_store, ms_name)
     ms_xdt.to_zarr(store=ms_path, mode="w", zarr_format=ZARR_FORMAT)
 
     definitions = (
