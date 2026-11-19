@@ -355,10 +355,14 @@ def test_continuum_configuration_cache_and_reduction_regression(
     assert "SKY_RESTORED_FLAT_NOISE" not in reference
     assert result["n_cycles"] == reference_result["n_cycles"] == 2
     # max_iter is per image plane; the reported total sums polarizations.
-    assert 0 < result["controller"].total_iter_done <= 8 * actual.sizes["polarization"]
     assert (
-        result["controller"].total_iter_done
-        == reference_result["controller"].total_iter_done
+        0
+        < result["cycle_control_state"]["total_iter_done"]
+        <= 8 * actual.sizes["polarization"]
+    )
+    assert (
+        result["cycle_control_state"]["total_iter_done"]
+        == reference_result["cycle_control_state"]["total_iter_done"]
     )
     assert actual.sizes["taylor_term"] == 2
     assert actual.sizes["psf_taylor_order"] == 3
@@ -762,14 +766,15 @@ def test_automatic_cycles_match_the_resolved_explicit_limit(
     limit = max(
         (
             value
-            for value in automatic["controller"].max_cycles_auto.values()
+            for value in automatic["cycle_control_state"]["max_cycles_auto"].values()
             if value is not None
         ),
         default=1,
     )
     assert isinstance(limit, int) and limit > 0
     assert any(
-        value is not None for value in automatic["controller"].max_cycles_auto.values()
+        value is not None
+        for value in automatic["cycle_control_state"]["max_cycles_auto"].values()
     )
     explicit, explicit_image = _run(
         store,

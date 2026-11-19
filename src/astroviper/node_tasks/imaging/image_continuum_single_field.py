@@ -3178,32 +3178,35 @@ def _prepare_post_update_continuum_model_state(
     return model_xds, model_uv_xds
 
 
-def _stop_codes_after_model_update(controller, deconvolution):
+def _stop_codes_after_model_update(cycle_control_state, deconvolution):
     """Imaging stop codes of the residual each plane's model update ended with.
 
-    The cycle controller decides on the residual of the next residual update
+    Cycle control decides on the residual of the next residual update
     and only books a model update (``record_model_update``), so after the
-    model update its ``stop_code_imaging`` still holds the codes of the check
+    model update ``stop_code_imaging`` still holds the codes of the check
     before it. The plain-step planes are chosen before the next residual
-    exists, so the controller's stop test is made, on a copy, on the
+    exists, so the stop test is made, on a copy of the state, on the
     deconvolver's own residual: the latest ``peakres`` and ``masksum`` in
     ``deconvolution``, with the budgets and the no progress and divergence
     runs the model update has booked. The entropy is not followed, as that
-    test belongs to the residual of a residual update. Neither ``controller``
-    nor ``deconvolution`` changes. Returns a ``(time, polarization)`` array.
+    test belongs to the residual of a residual update. Neither
+    ``cycle_control_state`` nor ``deconvolution`` changes. Returns a
+    ``(time, polarization)`` array.
     """
     import copy
 
-    probe = copy.deepcopy(controller)
-    probe.entropy_stop = False
-    probe.check_convergence(copy.deepcopy(deconvolution))
-    return probe.stop_code_imaging[:, 0, :]
+    from astroviper.processing_functions.imaging.utils import check_convergence
+
+    probe = copy.deepcopy(cycle_control_state)
+    probe["entropy_stop"] = False
+    check_convergence(probe, copy.deepcopy(deconvolution))
+    return probe["stop_code_imaging"][:, 0, :]
 
 
 def _accelerate_continuum_model_increment(
     model_update_xds,
     residual_before_model_update,
-    controller,
+    cycle_control_state,
     deconvolution,
     input_params,
 ):
@@ -3212,7 +3215,7 @@ def _accelerate_continuum_model_increment(
     The model update added its components to the previous model
     (``input_params["model_xds"]``, none in the first imaging cycle) in place;
     its increment is its model minus that model, positionally.
-    The plain increment is taken where the controller's stop test, made on
+    The plain increment is taken where the cycle control stop test, made on
     the residual the model update ended with
     (:func:`_stop_codes_after_model_update`), would stop a plane: by the
     conjugate gradient on planes whose residual is below the global
@@ -3234,10 +3237,10 @@ def _accelerate_continuum_model_increment(
     )
 
     stop_codes = xr.DataArray(
-        _stop_codes_after_model_update(controller, deconvolution),
+        _stop_codes_after_model_update(cycle_control_state, deconvolution),
         dims=("time", "polarization"),
     )
-    entropy_followed = np.isfinite(controller.max_entropy[:, 0, :])
+    entropy_followed = np.isfinite(cycle_control_state["max_entropy"][:, 0, :])
     state_xds = input_params.get("cycle_acceleration_state_xds")
     model_increment = model_update_xds["SKY_MODEL"]
     previous_model_xds = input_params.get("model_xds")
@@ -3680,7 +3683,7 @@ def continuum_cycle_append_node(
                 _accelerate_continuum_model_increment(
                     model_update_xds,
                     residual_before_model_update,
-                    return_dict["controller"],
+                    return_dict["cycle_control_state"],
                     return_dict["deconvolution"],
                     input_params,
                 )
@@ -3944,7 +3947,7 @@ def model_update_continuum_single_field(
             ▼
     model_update_continuum_single_field
             │
-            ├── updates the cycle controller
+            ├── updates the cycle control state
             ├── determines the model-update parameters
             ├── calls model_update_mtmfs_single_field
             ├── updates the continuum sky model
@@ -3984,9 +3987,9 @@ def model_update_continuum_single_field(
         ``is_first_cycle``
             Whether this is the first imaging cycle. Defaults to ``True``.
 
-        ``controller``
-            Existing :class:`CycleController`. If omitted, a new controller is
-            constructed from ``cycle_control_params``.
+        ``cycle_control_state``
+            Existing cycle control state. If omitted, a new one is made from
+            ``cycle_control_params``.
 
         ``image_data_group_in_name``
             Residual image data-group name. Defaults to ``"residual"``.
@@ -4020,8 +4023,8 @@ def model_update_continuum_single_field(
         ``"timing_node_tasks"``
             Timing dataframe including the model-update stage.
 
-        ``"controller"``
-            Updated cycle controller.
+        ``"cycle_control_state"``
+            Updated cycle control state.
 
         ``"residual_converged"``
             True only when refreshed residual statistics confirm a stop,
@@ -4047,11 +4050,18 @@ def model_update_continuum_single_field(
         model_update_mtmfs_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
+        check_convergence,
+        check_refreshed_residual_divergence,
         copy_residual_statistics,
+        ensure_planes,
         get_per_cycle_limits,
-        make_continuum_cycle_controller,
+        make_cycle_control_state_from_params,
         merge_imaging_dicts,
+        plane_threshold,
         record_cycle_time,
+        record_model_update,
+        resolve_max_cycles,
+        update_counts,
     )
 
     node_start = time.time()
@@ -4119,11 +4129,11 @@ def model_update_continuum_single_field(
         )
 
     # -------------------------------------------------------------
-    # Obtain the cycle controller.
+    # Obtain the cycle control state.
     # -------------------------------------------------------------
-    controller = input_params.get("controller")
-    if controller is None:
-        controller = make_continuum_cycle_controller(cycle_control_params)
+    cycle_control_state = input_params.get("cycle_control_state")
+    if cycle_control_state is None:
+        cycle_control_state = make_cycle_control_state_from_params(cycle_control_params)
 
     # A fresh map/reduce graph does not contain the preceding append node's
     # convergence history. Accept that persistent state through input_params so
@@ -4146,7 +4156,9 @@ def model_update_continuum_single_field(
     # check consumes neither iterations nor a model-update cycle; a threshold
     # stop reported by the preceding model update may be revoked here.
     start = time.time()
-    controller.ensure_planes(img_xds.sizes["time"], 1, img_xds.sizes["polarization"])
+    ensure_planes(
+        cycle_control_state, img_xds.sizes["time"], 1, img_xds.sizes["polarization"]
+    )
     residual_imaging_dict = build_continuum_residual_imaging_dict(
         img_xds, image_data_group_in_name, cycle_control_params
     )
@@ -4164,7 +4176,9 @@ def model_update_continuum_single_field(
     # another model update. Asp is excluded because a healthy scale change can
     # transiently raise its peak; its own scale-aware safeguards remain active.
     if input_params.get("continuum_mode", "mfs") == "mvc" and deconvolver != "asp":
-        diverged = controller.check_refreshed_residual_divergence(residual_imaging_dict)
+        diverged = check_refreshed_residual_divergence(
+            cycle_control_state, residual_imaging_dict
+        )
         if diverged:
             details = ", ".join(
                 f"(time={idx[0]}, polarization={idx[2]}): {previous:.6g} -> "
@@ -4178,7 +4192,7 @@ def model_update_continuum_single_field(
                 "converged solution; the resulting image is not scientifically "
                 "usable."
             )
-    if controller.max_cycles == "auto":
+    if cycle_control_state["max_cycles"] == "auto":
         import numpy as np
 
         from astroviper.processing_functions.imaging.weight_statistics import (
@@ -4187,7 +4201,7 @@ def model_update_continuum_single_field(
 
         sensitivity = None
         if any(
-            controller._plane_threshold(pol) <= 0
+            plane_threshold(cycle_control_state, pol) <= 0
             for pol in range(img_xds.sizes["polarization"])
         ):
             if "auto_weight_sums" not in input_data:
@@ -4200,9 +4214,11 @@ def model_update_continuum_single_field(
                 ),
                 (img_xds.sizes["time"], 1, img_xds.sizes["polarization"]),
             )
-        controller.resolve_max_cycles(residual_imaging_dict, sensitivity=sensitivity)
+        resolve_max_cycles(
+            cycle_control_state, residual_imaging_dict, sensitivity=sensitivity
+        )
 
-    stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
+    stopcode, stopdesc = check_convergence(cycle_control_state, residual_imaging_dict)
     if stopcode.imaging != 0:
         # No processing-function update follows convergence. Validate the
         # actual final products here, with the same content-verified cache.
@@ -4244,7 +4260,7 @@ def model_update_continuum_single_field(
                     {key: [value] for key, value in timing.items()}
                 ),
                 "deconvolution": combined_deconvolve_dict,
-                "controller": controller,
+                "cycle_control_state": cycle_control_state,
                 "stopcode": stopcode,
                 "stopdesc": stopdesc,
                 "residual_statistics": residual_imaging_dict,
@@ -4257,7 +4273,7 @@ def model_update_continuum_single_field(
     # Reuse the shared controls with fresh statistics on every cycle, rather
     # than using the preceding approximate model-update residual history.
     max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
-        controller, residual_imaging_dict
+        cycle_control_state, residual_imaging_dict
     )
 
     timing["T_cycle_control"] = time.time() - start
@@ -4316,8 +4332,8 @@ def model_update_continuum_single_field(
     # The model update decides nothing: its iterations, its stop code and the
     # no progress and divergence runs are booked for the stop test on the next
     # refreshed residual. stopcode and stopdesc stay those of the check above.
-    controller.update_counts(deconvolve_dict)
-    controller.record_model_update(deconvolve_dict)
+    update_counts(cycle_control_state, deconvolve_dict)
+    record_model_update(cycle_control_state, deconvolve_dict)
 
     combined_deconvolve_dict = merge_imaging_dicts(
         [
@@ -4355,7 +4371,7 @@ def model_update_continuum_single_field(
             "deconvolution": combined_deconvolve_dict,
             "residual_converged": False,
             "residual_statistics": residual_imaging_dict,
-            "controller": controller,
+            "cycle_control_state": cycle_control_state,
             "stopcode": stopcode,
             "stopdesc": stopdesc,
             "is_first_cycle": False,

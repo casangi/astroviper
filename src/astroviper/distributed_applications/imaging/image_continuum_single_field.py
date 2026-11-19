@@ -3401,8 +3401,9 @@ def image_continuum_single_field(
             Number of model-update cycles performed.
         ``deconvolution`` and ``residual_statistics``
             Accumulated deconvolution and final residual statistics.
-        ``controller``, ``stopcode``, ``stopdesc`` and ``residual_converged``
-            Final cycle-controller state and convergence result.
+        ``cycle_control_state``, ``stopcode``, ``stopdesc`` and
+        ``residual_converged``
+            Final cycle control state and convergence result.
         ``timing_node_tasks``, ``timing_model_update``, ``timing_psf_fit``,
         ``timing_restore``, ``timing_graphs`` and
         ``timing_distributed_application``
@@ -3451,7 +3452,7 @@ def image_continuum_single_field(
         CONTINUUM_IMAGING_TIMING_PHASES,
         CONTINUUM_MODEL_UPDATE_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
-        make_continuum_cycle_controller,
+        make_cycle_control_state_from_params,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
         correlation_selection,
@@ -3713,7 +3714,7 @@ def image_continuum_single_field(
         "max_cycles"
     ) == "auto" and np.any(np.asarray(cycle_control_params.get("threshold", 0.0)) <= 0)
 
-    controller = make_continuum_cycle_controller(cycle_control_params)
+    cycle_control_state = make_cycle_control_state_from_params(cycle_control_params)
 
     image_params = resolved_image_params
     input_params["image_params"] = image_params
@@ -4055,7 +4056,7 @@ def image_continuum_single_field(
                 "deconvolver": deconvolver,
                 "processing_function_threads": processing_function_threads,
                 "is_first_cycle": is_first_cycle,
-                "controller": controller,
+                "cycle_control_state": cycle_control_state,
                 "image_data_group_in_name": "residual",
                 "image_data_group_out_name": "model",
                 "image_params": image_params,
@@ -4188,7 +4189,7 @@ def image_continuum_single_field(
 
             # Get current status for bookkeeping
             last_cycle_return_dict = cycle_return_dict
-            controller = cycle_return_dict["controller"]
+            cycle_control_state = cycle_return_dict["cycle_control_state"]
 
             # ---------------------------------------------------------
             # Capture append-prepared state for the next cycle.

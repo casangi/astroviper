@@ -16,7 +16,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     make_mvc_taylor_normal_equation_contributions,
 )
 from astroviper.processing_functions.imaging.utils import (
-    make_continuum_cycle_controller,
+    make_cycle_control_state_from_params,
 )
 
 driver = importlib.import_module(
@@ -40,16 +40,16 @@ def test_continuum_controller_receives_entropy_parameters():
         "entropy_flux_bins": 8,
     }
 
-    controller = make_continuum_cycle_controller(params)
+    controller = make_cycle_control_state_from_params(params)
 
-    assert controller.entropy_stop is True
-    assert controller.entropy_max_snr == 4.5
-    assert controller.entropy_spatial_bins == 5
-    assert controller.entropy_flux_bins == 8
+    assert controller["entropy_stop"] is True
+    assert controller["entropy_max_snr"] == 4.5
+    assert controller["entropy_spatial_bins"] == 5
+    assert controller["entropy_flux_bins"] == 8
 
 
 def test_continuum_controller_uses_entropy_defaults():
-    controller = make_continuum_cycle_controller(
+    controller = make_cycle_control_state_from_params(
         {
             "max_iter": 100,
             "max_cycles": 5,
@@ -62,10 +62,10 @@ def test_continuum_controller_uses_entropy_defaults():
         }
     )
 
-    assert controller.entropy_stop is False
-    assert controller.entropy_max_snr == 6.0
-    assert controller.entropy_spatial_bins == 7
-    assert controller.entropy_flux_bins == 10
+    assert controller["entropy_stop"] is False
+    assert controller["entropy_max_snr"] == 6.0
+    assert controller["entropy_spatial_bins"] == 7
+    assert controller["entropy_flux_bins"] == 10
 
 
 @pytest.mark.parametrize("partition", [(7,), (1, 6), (2, 1, 4), (1, 1, 1, 1, 1, 1, 1)])

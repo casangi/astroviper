@@ -24,7 +24,7 @@ def imaging_preparation_single_field(
 
     Everything that is done a single time per chunk happens here:
 
-    * construction of the :class:`CycleController` and the (empty) combined
+    * construction of the cycle control state and the (empty) combined
       return dict, and
     * the imaging weights, the point spread function and the primary beam (via
       :func:`~astroviper.processing_functions.imaging.residual_update.imaging_setup_single_field`).
@@ -411,8 +411,8 @@ def imaging_preparation_single_field(
 
     Returns
     -------
-    controller : CycleController
-        Freshly constructed controller (``stopcode.imaging == 0``).
+    cycle_control_state : dict
+        Freshly made cycle control state (``stopcode`` with ``imaging == 0``).
     img_xds : xarray.Dataset
         Image dataset with the PSF and primary beam, in the Stokes basis.
     return_df : pandas.DataFrame
@@ -438,12 +438,12 @@ def imaging_preparation_single_field(
         imaging_setup_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        make_continuum_cycle_controller,
+        make_cycle_control_state_from_params,
     )
 
     logger.debug("Processing chunk " + str(task_id))
 
-    controller = make_continuum_cycle_controller(cycle_control_params)
+    cycle_control_state = make_cycle_control_state_from_params(cycle_control_params)
     combined_imaging_dict = {}
 
     # Once-only imaging setup: imaging weights, PSF and primary beam. The dirty
@@ -466,7 +466,7 @@ def imaging_preparation_single_field(
     )
     T_setup = time.time() - start
 
-    return controller, img_xds, return_df, combined_imaging_dict, T_setup
+    return cycle_control_state, img_xds, return_df, combined_imaging_dict, T_setup
 
 
 @shares_param_docs
@@ -498,8 +498,8 @@ def image_cube_single_field(
     """Run the imaging cycle CLEAN loop for one single-field image chunk.
 
     Performs the once-per-chunk setup (imaging weights, PSF, primary beam), then
-    iterates imaging cycles (a residual update followed by a model update) under the
-    :class:`CycleController` until convergence. The stop test is made after
+    iterates imaging cycles (a residual update followed by a model update) under
+    cycle control until convergence. The stop test is made after
     every residual update, the first included, on the residual that update has
     just made; the loop ends only there, so ``N`` model updates take ``N + 1``
     residual updates and the residual written is that of the last one.  Every
@@ -1072,11 +1072,15 @@ def image_cube_single_field(
     from astroviper.processing_functions.imaging.utils import (
         accumulate_timing,
         build_residual_imaging_dict,
+        check_convergence,
         copy_residual_statistics,
+        ensure_planes,
         get_per_cycle_limits,
         merge_imaging_dicts,
         record_cycle_time,
+        record_model_update,
         resolve_auto_max_cycles,
+        update_counts,
     )
     from astroviper.utils.clean_mask import install_clean_mask
 
@@ -1087,12 +1091,12 @@ def image_cube_single_field(
     # turns to Stokes on img_xds.
     correlation_coords = img_xds.polarization.values.copy()
 
-    # All once-only work -- controller setup, imaging weights, PSF and primary
+    # All once-only work -- cycle control setup, imaging weights, PSF and primary
     # beam creation -- happens in the preparation step before the imaging cycle
     # loop. The dirty image and the first model update are the first iteration
     # of the loop below.
     (
-        controller,
+        cycle_control_state,
         img_xds,
         setup_return_df,
         combined_imaging_dict,
@@ -1233,31 +1237,34 @@ def image_cube_single_field(
         # the sensitivity of the imaging weights (a no-op afterwards, and for
         # a number).
         resolve_auto_max_cycles(
-            controller,
+            cycle_control_state,
             residual_imaging_dict,
             ps_xdt,
             img_xds,
             cycle_control_params,
             processing_set_data_group_name=processing_set_data_group_name,
         )
-        stopcode, stopdesc = controller.check_convergence(residual_imaging_dict)
+        stopcode, stopdesc = check_convergence(
+            cycle_control_state, residual_imaging_dict
+        )
         timing["T_stop_test"] += time.time() - start
 
         # ---- Model-update phase (cycle control + deconvolve + convergence) ----
         model_phase_start = time.time()
         if stopcode.imaging == 0:
             logger.debug("Doing model update")
-            # Size the controller's per-plane state to this cube so cycle
+            # Size the per-plane state to this cube so cycle
             # control (max_iter and threshold) is tracked independently for every
             # (time, frequency, polarization) plane before the deconvolver runs.
             start = time.time()
-            controller.ensure_planes(
+            ensure_planes(
+                cycle_control_state,
                 img_xds.sizes["time"],
                 img_xds.sizes["frequency"],
                 img_xds.sizes["polarization"],
             )
             max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
-                controller, residual_imaging_dict
+                cycle_control_state, residual_imaging_dict
             )
             timing["T_cycle_control"] += time.time() - start
 
@@ -1304,8 +1311,8 @@ def image_cube_single_field(
             # and the no progress and divergence runs are booked for the stop
             # test after the next residual update.
             start = time.time()
-            controller.update_counts(imaging_dict)
-            controller.record_model_update(imaging_dict)
+            update_counts(cycle_control_state, imaging_dict)
+            record_model_update(cycle_control_state, imaging_dict)
         else:
             # The record ends with the stop test that ended the loop.
             start = time.time()

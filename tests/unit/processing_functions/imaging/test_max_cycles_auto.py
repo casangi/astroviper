@@ -37,10 +37,15 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     MODEL_UPDATE_DIVERGENCE,
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,
     MODEL_UPDATE_THRESHOLD_PER_CYCLE,
-    CycleController,
     StopCode,
+    check_convergence,
     format_imaging_dict,
+    make_cycle_control_state,
+    record_model_update,
     resolve_auto_max_cycles,
+    resolve_max_cycles,
+    update_counts,
+    update_parameters,
     validate_max_cycles,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
@@ -79,7 +84,7 @@ def _dirty_record(planes):
 
 
 def _controller(threshold=0.0, **kw):
-    return CycleController(
+    return make_cycle_control_state(
         max_iter=1000,
         max_cycles="auto",
         threshold=threshold,
@@ -101,13 +106,13 @@ class TestValidation:
     )
     def test_accepted(self, value):
         assert validate_max_cycles(value) == value
-        assert CycleController(max_cycles=value).max_cycles == value
+        assert make_cycle_control_state(max_cycles=value)["max_cycles"] == value
 
     @pytest.mark.parametrize("value", [5.0, np.float64(5), np.float32(5), np.int64(5)])
     def test_a_number_becomes_an_int(self, value):
         for resolved in (
             validate_max_cycles(value),
-            CycleController(max_cycles=value).max_cycles,
+            make_cycle_control_state(max_cycles=value)["max_cycles"],
         ):
             assert resolved == 5
             assert type(resolved) is int
@@ -134,31 +139,34 @@ class TestValidation:
         with pytest.raises(ValueError, match='integer >= -1 or "auto"'):
             validate_max_cycles(value)
         with pytest.raises(ValueError, match="max_cycles"):
-            CycleController(max_cycles=value)
+            make_cycle_control_state(max_cycles=value)
 
     def test_auto_needs_a_psf_fraction_below_one(self):
         with pytest.raises(ValueError, match="max_psf_fraction below 1"):
             validate_max_cycles("auto", 1.0)
         with pytest.raises(ValueError, match="max_psf_fraction below 1"):
-            CycleController(max_cycles="auto", max_psf_fraction=1.0)
+            make_cycle_control_state(max_cycles="auto", max_psf_fraction=1.0)
         assert validate_max_cycles("auto", 0.8) == "auto"
         # a number keeps accepting it
         assert validate_max_cycles(3, 1.0) == 3
-        assert CycleController(max_cycles=3, max_psf_fraction=1.0).max_cycles == 3
+        assert (
+            make_cycle_control_state(max_cycles=3, max_psf_fraction=1.0)["max_cycles"]
+            == 3
+        )
 
     def test_update_parameters(self):
-        controller = CycleController(max_cycles=4)
-        assert controller.update_parameters(max_cycles=6.0) == (0, "")
-        assert controller.max_cycles == 6
-        assert type(controller.max_cycles) is int
-        code, message = controller.update_parameters(max_cycles="auto")
+        controller = make_cycle_control_state(max_cycles=4)
+        assert update_parameters(controller, max_cycles=6.0) == (0, "")
+        assert controller["max_cycles"] == 6
+        assert type(controller["max_cycles"]) is int
+        code, message = update_parameters(controller, max_cycles="auto")
         assert code == -1
         assert "given when the controller is created" in message
         for value in (2.7, True, -2, "5"):
-            code, message = controller.update_parameters(max_cycles=value)
+            code, message = update_parameters(controller, max_cycles=value)
             assert code == -1
             assert message.startswith("max_cycles must be an integer >= -1")
-        assert controller.max_cycles == 6
+        assert controller["max_cycles"] == 6
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +180,9 @@ class TestResolveMaxCycles:
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100)})
         expected = predicted_imaging_cycles(1.0, 0.01, 0.2) + EXTRA_CYCLES
         assert expected == 3 + EXTRA_CYCLES
-        assert controller.resolve_max_cycles(record) == expected
-        assert controller.max_cycles == expected
-        assert controller.max_cycles_auto == {(0, 0, 0): expected}
+        assert resolve_max_cycles(controller, record) == expected
+        assert controller["max_cycles"] == expected
+        assert controller["max_cycles_auto"] == {(0, 0, 0): expected}
 
     def test_noise_reference(self):
         controller = _controller(threshold=0.0)
@@ -182,25 +190,25 @@ class TestResolveMaxCycles:
         noise = np.full((1, 1, 1), 1e-3)
         expected = NOISY_CYCLE_SAFETY * predicted_imaging_cycles(1.0, 1e-3, 0.2)
         assert expected == NOISY_CYCLE_SAFETY * 5
-        assert controller.resolve_max_cycles(record, sensitivity=noise) == expected
+        assert resolve_max_cycles(controller, record, sensitivity=noise) == expected
 
     def test_psf_fraction_is_clamped(self):
         # sidelobe 0.9 -> f = max_psf_fraction = 0.8; sidelobe 0.01 -> 0.05
         for sidelobe, fraction in ((0.9, 0.8), (0.01, 0.05)):
             controller = _controller(threshold=0.01)
-            controller.resolve_max_cycles(
-                _dirty_record({(0, 0, 0): (1.0, sidelobe, 100)})
+            resolve_max_cycles(
+                controller, _dirty_record({(0, 0, 0): (1.0, sidelobe, 100)})
             )
-            assert controller.max_cycles == (
+            assert controller["max_cycles"] == (
                 predicted_imaging_cycles(1.0, 0.01, fraction) + EXTRA_CYCLES
             )
 
     def test_zero_psf_fraction_is_one_cycle(self):
-        controller = CycleController(
+        controller = make_cycle_control_state(
             max_cycles="auto", threshold=0.01, min_psf_fraction=0.0
         )
-        controller.resolve_max_cycles(_dirty_record({(0, 0, 0): (1.0, 0.0, 100)}))
-        assert controller.max_cycles == 1 + EXTRA_CYCLES
+        resolve_max_cycles(controller, _dirty_record({(0, 0, 0): (1.0, 0.0, 100)}))
+        assert controller["max_cycles"] == 1 + EXTRA_CYCLES
 
     def test_largest_limit_of_the_planes(self):
         """Per plane threshold: Stokes I against its threshold, Stokes Q
@@ -213,9 +221,9 @@ class TestResolveMaxCycles:
         limit_i = predicted_imaging_cycles(1.0, 0.01, 0.2) + EXTRA_CYCLES
         limit_q = NOISY_CYCLE_SAFETY * predicted_imaging_cycles(0.05, 1e-5, 0.2)
         assert limit_q > limit_i
-        controller.resolve_max_cycles(record, sensitivity=noise)
-        assert controller.max_cycles == limit_q
-        assert controller.max_cycles_auto == {(0, 0, 0): limit_i, (0, 0, 1): limit_q}
+        resolve_max_cycles(controller, record, sensitivity=noise)
+        assert controller["max_cycles"] == limit_q
+        assert controller["max_cycles_auto"] == {(0, 0, 0): limit_i, (0, 0, 1): limit_q}
 
     def test_planes_without_a_prediction_are_left_out(self):
         controller = _controller(threshold=0.0)
@@ -229,10 +237,10 @@ class TestResolveMaxCycles:
         )
         noise = np.array([[[1e-3, 1e-3, 1e-3, np.inf]]])
         pixels = np.array([[[100, 0, 100, 100]]])
-        controller.resolve_max_cycles(record, sensitivity=noise, mask_pixels=pixels)
+        resolve_max_cycles(controller, record, sensitivity=noise, mask_pixels=pixels)
         expected = NOISY_CYCLE_SAFETY * predicted_imaging_cycles(1.0, 1e-3, 0.2)
-        assert controller.max_cycles == expected
-        assert controller.max_cycles_auto == {
+        assert controller["max_cycles"] == expected
+        assert controller["max_cycles_auto"] == {
             (0, 0, 0): expected,
             (0, 0, 1): None,
             (0, 0, 2): None,
@@ -241,31 +249,32 @@ class TestResolveMaxCycles:
 
     def test_masksum_of_the_record_without_mask_pixels(self):
         controller = _controller(threshold=0.01)
-        controller.resolve_max_cycles(
-            _dirty_record({(0, 0, 0): (1.0, 0.2, 0), (0, 0, 1): (0.5, 0.2, 10)})
+        resolve_max_cycles(
+            controller,
+            _dirty_record({(0, 0, 0): (1.0, 0.2, 0), (0, 0, 1): (0.5, 0.2, 10)}),
         )
-        assert controller.max_cycles_auto[(0, 0, 0)] is None
-        assert controller.max_cycles == (
+        assert controller["max_cycles_auto"][(0, 0, 0)] is None
+        assert controller["max_cycles"] == (
             predicted_imaging_cycles(0.5, 0.01, 0.2) + EXTRA_CYCLES
         )
 
     def test_no_plane_with_a_prediction_gives_one_cycle(self):
         controller = _controller(threshold=0.0)
-        controller.resolve_max_cycles(_dirty_record({(0, 0, 0): (1.0, 0.2, 100)}))
-        assert controller.max_cycles == 1
-        assert controller.max_cycles_auto == {(0, 0, 0): None}
+        resolve_max_cycles(controller, _dirty_record({(0, 0, 0): (1.0, 0.2, 100)}))
+        assert controller["max_cycles"] == 1
+        assert controller["max_cycles_auto"] == {(0, 0, 0): None}
 
     def test_a_number_is_left_alone(self):
-        controller = CycleController(max_cycles=4, threshold=0.01)
+        controller = make_cycle_control_state(max_cycles=4, threshold=0.01)
         assert (
-            controller.resolve_max_cycles(_dirty_record({(0, 0, 0): (1, 0.2, 9)})) == 4
+            resolve_max_cycles(controller, _dirty_record({(0, 0, 0): (1, 0.2, 9)})) == 4
         )
-        assert controller.max_cycles_auto is None
+        assert controller["max_cycles_auto"] is None
 
     def test_counts_down_like_a_number(self):
         controller = _controller(threshold=0.01)
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100)})
-        limit = controller.resolve_max_cycles(record)
+        limit = resolve_max_cycles(controller, record)
         model_update = {}
         add_to_imaging_dict(
             model_update,
@@ -276,36 +285,39 @@ class TestResolveMaxCycles:
         )
         n_model_updates = 0
         while True:
-            stopcode, _ = controller.check_convergence(record)
+            stopcode, _ = check_convergence(controller, record)
             if stopcode.imaging != IMAGING_CONTINUE:
                 break
             n_model_updates += 1
-            controller.update_counts(model_update)
-            controller.record_model_update(model_update)
+            update_counts(controller, model_update)
+            record_model_update(controller, model_update)
         assert stopcode.imaging == IMAGING_MAX_CYCLES
         assert n_model_updates == limit
 
     def test_checks_stamp_the_limit_of_the_plane(self):
         controller = _controller(threshold=0.01)
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100), (0, 0, 1): (0.0, 0.2, 9)})
-        controller.resolve_max_cycles(record)
-        controller.check_convergence(record)
-        assert record[Key(time=0, pol=0, chan=0)]["max_cycles_auto"] == (
-            controller.max_cycles
+        resolve_max_cycles(controller, record)
+        check_convergence(controller, record)
+        assert (
+            record[Key(time=0, pol=0, chan=0)]["max_cycles_auto"]
+            == controller["max_cycles"]
         )
         assert record[Key(time=0, pol=1, chan=0)]["max_cycles_auto"] is None
 
     def test_a_number_stamps_nothing(self):
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100)})
-        CycleController(max_cycles=3, threshold=0.01).check_convergence(record)
+        check_convergence(
+            make_cycle_control_state(max_cycles=3, threshold=0.01), record
+        )
         assert "max_cycles_auto" not in record[Key(time=0, pol=0, chan=0)]
 
     def test_unresolved_auto_is_refused(self):
         record = _dirty_record({(0, 0, 0): (1.0, 0.2, 100)})
         with pytest.raises(ValueError, match="not resolved"):
-            _controller().check_convergence(record)
+            check_convergence(_controller(), record)
         with pytest.raises(ValueError, match="not resolved"):
-            _controller().update_counts(record)
+            update_counts(_controller(), record)
 
 
 # ---------------------------------------------------------------------------
@@ -413,13 +425,16 @@ class TestResolveAutoMaxCycles:
         data_groups = copy.deepcopy(xds.attrs["data_groups"])
         ms_xds = ps_xdt["ms_0"].to_dataset().copy(deep=True)
         levels = []
-        resolve = CycleController.resolve_max_cycles
+        cycle_control = importlib.import_module(
+            "astroviper.processing_functions.imaging.utils.cycle_control"
+        )
+        resolve = cycle_control.resolve_max_cycles
 
         def spy(controller, imaging_dict, sensitivity=None, mask_pixels=None):
             levels.append(sensitivity)
             return resolve(controller, imaging_dict, sensitivity, mask_pixels)
 
-        monkeypatch.setattr(CycleController, "resolve_max_cycles", spy)
+        monkeypatch.setattr(cycle_control, "resolve_max_cycles", spy)
         controller, limit = self._resolve(xds, ps_xdt)
         (level,) = levels
         statistics = calculate_weight_statistics_single_field(ps_xdt, xds, "base")
@@ -429,9 +444,9 @@ class TestResolveAutoMaxCycles:
         expected = NOISY_CYCLE_SAFETY * predicted_imaging_cycles(
             25.0, _sensitivity(), 0.2
         )
-        assert limit == controller.max_cycles == expected
+        assert limit == controller["max_cycles"] == expected
         # plane 1 has no pixel at or above the cutoff: left out
-        assert controller.max_cycles_auto == {(0, 0, 0): expected, (0, 0, 1): None}
+        assert controller["max_cycles_auto"] == {(0, 0, 0): expected, (0, 0, 1): None}
         # neither the dataset nor the processing set is modified
         assert "MASK" not in xds
         assert xds.attrs["data_groups"] == data_groups
@@ -446,7 +461,7 @@ class TestResolveAutoMaxCycles:
         peaks = np.abs(xds["SKY_RESIDUAL"].values[0, 0, :, 3:8, 4:16]).max(
             axis=(-2, -1)
         )
-        assert controller.max_cycles_auto == {
+        assert controller["max_cycles_auto"] == {
             (0, 0, pol): NOISY_CYCLE_SAFETY
             * predicted_imaging_cycles(peaks[pol], _sensitivity(), 0.2)
             for pol in range(2)
@@ -458,18 +473,18 @@ class TestResolveAutoMaxCycles:
         wholly below the primary beam cutoff (no processing set needed)."""
         xds, _ = _dirty_dataset()
         controller, _ = self._resolve(xds, None, threshold=0.5)
-        assert controller.max_cycles == (
+        assert controller["max_cycles"] == (
             predicted_imaging_cycles(25.0, 0.5, 0.2) + EXTRA_CYCLES
         )
         controller, _ = self._resolve(xds, None, threshold=[0.5, 0.0])
-        assert controller.max_cycles_auto == {
+        assert controller["max_cycles_auto"] == {
             (0, 0, 0): predicted_imaging_cycles(25.0, 0.5, 0.2) + EXTRA_CYCLES,
             (0, 0, 1): None,
         }
 
     def test_a_number_is_left_alone(self):
         xds, _ = _dirty_dataset()
-        controller = CycleController(max_cycles=2)
+        controller = make_cycle_control_state(max_cycles=2)
         assert resolve_auto_max_cycles(controller, {}, None, xds, {}) == 2
 
 

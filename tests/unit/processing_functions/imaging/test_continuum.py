@@ -2652,8 +2652,8 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
         build_continuum_residual_imaging_dict,
     )
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         get_per_cycle_limits,
+        make_cycle_control_state,
     )
 
     residual = np.full((2, 3, 2, 3, 4), 1000.0)
@@ -2682,7 +2682,7 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
         assert values["peakres"] == [peaks[key.time, key.pol]]
         assert values["masksum"] == [8 if with_mask else 12]
         assert values["max_psf_sidelobe"] == 0.2
-    controller = CycleController(max_iter=10, max_iter_per_cycle=3)
+    controller = make_cycle_control_state(max_iter=10, max_iter_per_cycle=3)
     limits, thresholds = get_per_cycle_limits(controller, stats)
     assert limits.shape == (2, 1, 2)
     np.testing.assert_array_equal(limits, 3)

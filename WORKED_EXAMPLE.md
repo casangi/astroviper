@@ -94,7 +94,7 @@ task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True
 ### 12.3 Science — `processing_functions/imaging/image_cube_single_field.py`
 The **cycle control and bookkeeping helpers** (not science kernels) live in
 the `processing_functions/imaging/utils/` subpackage: `cycle_control.py`
-(`CycleController`, stop codes, `merge_imaging_dicts`,
+(the cycle control functions, stop codes, `merge_imaging_dicts`,
 `get_per_cycle_limits`, the `get_*_from_imaging_dict` extractors,
 `format_/print_imaging_dict`), `imaging_dict.py` (`Key`,
 `add_to_imaging_dict`, `select_from_imaging_dict`),
@@ -107,7 +107,7 @@ public symbols).
 Runs the CLEAN loop of **imaging cycles**, each one **residual update**
 followed by one **model update** (the CASA names in brackets are for
 orientation only: `max_cycles` [CASA `nmajor`], `max_iter` [CASA `niter`]),
-via `CycleController`:
+via the cycle control functions on `cycle_control_state`:
 - **Residual update** — `residual_update_cube_single_field(...)`: degrid
   model → compute residual visibilities → grid → FFT-normalize → form residual
   image (+ PSF on the first iteration), primary beam, and imaging weights

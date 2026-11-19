@@ -579,7 +579,7 @@ per-variable nodes.
     `SKY_MODEL`).
   - **Functions / variables**: `snake_case`, **descriptive** (`image_size`, not
     `imsize`).
-  - **Classes**: `CamelCase` (`CycleController`, `ReturnDict`).
+  - **Classes**: `CamelCase` (`Interface`, `ReturnDict`).
   - **Consistency**: Parameter names should be consistent throughout the stack.
     One name per parameter and one spelling per value: no aliases, no case
     folding. An unsupported value or combination is refused, never coerced or
@@ -592,10 +592,11 @@ per-variable nodes.
     parameters. Never call anything a major or minor cycle (major/minor axis
     of a Gaussian beam is fine). CASA parameter names may be cited in brackets
     for orientation, e.g. `max_cycles` [CASA `nmajor`]. **Cycle control** is
-    the stop test between the residual update and the model update
-    (`CycleController`); **iteration control** is the stop test inside the
-    model update (the deconvolver kernels). A quantity keeps one name from the
-    cycle controller down to the kernel arguments.
+    the stop test between the residual update and the model update (the
+    functions of `utils/cycle_control.py`, which work on the dictionary
+    `cycle_control_state`); **iteration control** is the stop test inside the
+    model update (the deconvolver kernels). A quantity keeps one name from
+    cycle control down to the kernel arguments.
 - **Interface classes**: a class exists only where several implementations
   share an interface (imagers, gridders, deconvolvers, solvers). It has the
   metaclass `astroviper.utils.interface.Interface`, which enforces the first

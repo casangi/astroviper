@@ -321,4 +321,4 @@ def test_channel_psf_runaway_stops_on_refreshed_taylor_zero_residual(
         )
 
     assert result["stopcode"].imaging == IMAGING_DIVERGENCE
-    assert result["controller"].refreshed_residual_divergence_stopped.any()
+    assert result["cycle_control_state"]["refreshed_residual_divergence_stopped"].any()

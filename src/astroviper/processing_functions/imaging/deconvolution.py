@@ -339,8 +339,8 @@ def _per_plane_per_cycle_limits(deconvolve_params, nt, nf, npol, threshold_dtype
     with a per-plane iteration limit and a per-plane stopping threshold rather
     than single scalars. ``deconvolve_params["max_iter_per_cycle_updated"]``
     and ``deconvolve_params["threshold_per_cycle"]`` may each be either a
-    scalar or an ``(nt, nf, npol)`` array (supplied by the
-    :class:`CycleController`, indexed ``(time, frequency, polarization)``).
+    scalar or an ``(nt, nf, npol)`` array (supplied by
+    ``get_per_cycle_limits``, indexed ``(time, frequency, polarization)``).
     A scalar is broadcast to every plane. A call without them (outside the
     imaging cycle loop) is one model update with all of ``max_iter`` left:
     ``max_iter_per_cycle_updated`` is ``min(max_iter_per_cycle, max_iter)``
@@ -552,7 +552,7 @@ def create_imaging_dict(
         ``max_iter_per_cycle_updated``, 2 reached ``threshold_per_cycle``, 4
         diverged, 5 a test of the deconvolver itself). Every plane's
         ``stop_code`` placeholder carries it as the model update stop code,
-        which the :class:`CycleController` keeps when it stamps the imaging
+        which cycle control keeps when it stamps the imaging
         stop code, and its ``model_update_stop_code`` field records it, so
         that the merged record holds the code of every model update.
 
@@ -1228,7 +1228,7 @@ def hogbom_clean(
     A diverged model update does not end the plane's imaging cycles: the next
     residual update recomputes the true residual and cleaning resumes from it,
     unless the plane's last ``max_cycles_divergence`` model updates all
-    diverged (cycle control, see :class:`CycleController`).
+    diverged (cycle control, see ``check_convergence``).
 
     **Iteration history.** With ``record_iteration_history`` every plane
     records, for iteration ``k`` of the model update,

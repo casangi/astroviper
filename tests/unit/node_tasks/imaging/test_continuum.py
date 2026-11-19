@@ -1044,7 +1044,7 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
-    controller = imaging_utils.CycleController(**params)
+    controller = imaging_utils.make_cycle_control_state(**params)
     iterations = np.array([[[4]]], dtype=np.int64)
     thresholds = np.array([[[0.125]]])
 
@@ -1084,7 +1084,7 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
             {"image": image},
             {
                 "cycle_control_params": params,
-                "controller": controller,
+                "cycle_control_state": controller,
                 "is_first_cycle": initial,
             },
         )
@@ -1098,8 +1098,8 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
     """Both backends add to a copy of the previous model in place, as the cube
     does, and report its cumulative fluxes, which are booked unchanged."""
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         StopCode,
+        make_cycle_control_state,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
@@ -1156,7 +1156,7 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         "max_psf_fraction": 0.8,
         "primary_beam_limit": 0.2,
     }
-    controller = CycleController(
+    controller = make_cycle_control_state(
         **{key: value for key, value in params.items() if key != "primary_beam_limit"}
     )
     previous_model = xr.Dataset({"SKY_MODEL": xr.zeros_like(image.SKY_RESIDUAL)})
@@ -1207,7 +1207,7 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {
-            "controller": controller,
+            "cycle_control_state": controller,
             "deconvolver": deconvolver,
             "cycle_control_params": params,
             "is_first_cycle": False,
@@ -1223,12 +1223,12 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         model_update=MODEL_UPDATE_CONTINUE,
     )
     assert result["stopdesc"] == "Continue imaging cycles"
-    assert controller.total_iter_done == 3
-    assert controller.cycles_done == 1
-    assert controller.max_cycles == 2
-    np.testing.assert_array_equal(controller.max_iter_remaining[0, 0], [9, 8])
+    assert controller["total_iter_done"] == 3
+    assert controller["cycles_done"] == 1
+    assert controller["max_cycles"] == 2
+    np.testing.assert_array_equal(controller["max_iter_remaining"][0, 0], [9, 8])
     np.testing.assert_array_equal(
-        controller.stop_code_model_update[0, 0],
+        controller["stop_code_model_update"][0, 0],
         [MODEL_UPDATE_MAX_ITER_PER_CYCLE, MODEL_UPDATE_MAX_ITER_PER_CYCLE],
     )
     assert result["timing_model_update"].loc[0, "T_mtmfs"] == pytest.approx(0.25)
@@ -1260,8 +1260,8 @@ def test_native_mtmfs_node_books_a_diverged_model_update(
 ):
     """A plane the MT-MFS divergence test stops is booked as diverged."""
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         StopCode,
+        make_cycle_control_state,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
@@ -1280,11 +1280,11 @@ def test_native_mtmfs_node_books_a_diverged_model_update(
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
-    controller = CycleController(**params)
+    controller = make_cycle_control_state(**params)
     result = continuum_node.model_update_continuum_single_field(
         {"image": make_runaway_taylor_image()},
         {
-            "controller": controller,
+            "cycle_control_state": controller,
             "deconvolver": "mtmfs",
             "cycle_control_params": {
                 **params,
@@ -1306,9 +1306,9 @@ def test_native_mtmfs_node_books_a_diverged_model_update(
         model_update=MODEL_UPDATE_CONTINUE,
     )
     assert not result["residual_converged"]
-    assert controller.total_iter_done == iterations
-    assert controller.stop_code_model_update[0, 0, 0] == stop_code
-    assert controller.diverged_model_updates[0, 0, 0] == diverged_model_updates
+    assert controller["total_iter_done"] == iterations
+    assert controller["stop_code_model_update"][0, 0, 0] == stop_code
+    assert controller["diverged_model_updates"][0, 0, 0] == diverged_model_updates
 
 
 @pytest.mark.parametrize(
@@ -1326,8 +1326,8 @@ def test_mvc_stops_when_exact_taylor_zero_residual_grows_threefold(
     model-update kernel again, and emits the required unusable-image warning.
     """
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         StopCode,
+        make_cycle_control_state,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_DIVERGENCE,
@@ -1344,7 +1344,7 @@ def test_mvc_stops_when_exact_taylor_zero_residual_grows_threefold(
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
-    controller = CycleController(**params)
+    controller = make_cycle_control_state(**params)
     backend_calls = 0
 
     def backend(image, deconvolver, controls, **kwargs):
@@ -1374,7 +1374,7 @@ def test_mvc_stops_when_exact_taylor_zero_residual_grows_threefold(
     common = {
         "continuum_mode": "mvc",
         "mvc_model_update_approximation": mvc_model_update_approximation,
-        "controller": controller,
+        "cycle_control_state": controller,
         "deconvolver": "mtmfs",
         "cycle_control_params": params,
     }
@@ -1392,7 +1392,7 @@ def test_mvc_stops_when_exact_taylor_zero_residual_grows_threefold(
     assert backend_calls == 1
     assert second["residual_converged"]
     assert second["stopcode"] == StopCode(IMAGING_DIVERGENCE, MODEL_UPDATE_CONTINUE)
-    assert controller.refreshed_residual_divergence_stopped[0, 0, 0]
+    assert controller["refreshed_residual_divergence_stopped"][0, 0, 0]
     assert any("not scientifically usable" in warning for warning in warnings)
 
 
@@ -1412,7 +1412,7 @@ def test_native_mtmfs_imaging_cycles_clean_what_the_stop_test_measures(
     """
     from scipy.signal import fftconvolve
 
-    from astroviper.processing_functions.imaging.utils import CycleController
+    from astroviper.processing_functions.imaging.utils import make_cycle_control_state
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_THRESHOLD,
     )
@@ -1482,7 +1482,7 @@ def test_native_mtmfs_imaging_cycles_clean_what_the_stop_test_measures(
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
-    controller = CycleController(**params)
+    controller = make_cycle_control_state(**params)
     cycle_control_params = {**params, "scales": [0.0]}
     if primary_beam_limit is not None:
         cycle_control_params["primary_beam_limit"] = primary_beam_limit
@@ -1493,7 +1493,7 @@ def test_native_mtmfs_imaging_cycles_clean_what_the_stop_test_measures(
         result = continuum_node.model_update_continuum_single_field(
             {"image": image(residual)},
             {
-                "controller": controller,
+                "cycle_control_state": controller,
                 "deconvolver": "mtmfs",
                 "cycle_control_params": cycle_control_params,
                 "deconvolution": deconvolution,
@@ -1510,7 +1510,7 @@ def test_native_mtmfs_imaging_cycles_clean_what_the_stop_test_measures(
         pytest.fail("The imaging cycles did not end within 30.")
 
     assert result["stopcode"].imaging == IMAGING_THRESHOLD
-    level = params["threshold"] * (1 + controller.threshold_tolerance)
+    level = params["threshold"] * (1 + controller["threshold_tolerance"])
     near_outer = (slice(outer[0] - 2, outer[0] + 3), slice(outer[1] - 2, outer[1] + 3))
     if primary_beam_limit is None:
         assert primary_beam[outer] == pytest.approx(0.146, abs=1e-3)
@@ -1532,8 +1532,8 @@ def test_asp_node_books_the_model_update_of_every_plane(asp_options):
     are booked with record_model_update, and the node stop code is that of
     the check on the refreshed residual."""
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         StopCode,
+        make_cycle_control_state,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
@@ -1552,11 +1552,11 @@ def test_asp_node_books_the_model_update_of_every_plane(asp_options):
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
-    controller = CycleController(**params)
+    controller = make_cycle_control_state(**params)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {
-            "controller": controller,
+            "cycle_control_state": controller,
             "deconvolver": "asp",
             "cycle_control_params": {
                 **params,
@@ -1581,12 +1581,16 @@ def test_asp_node_books_the_model_update_of_every_plane(asp_options):
     )
     # Measured: every plane spends its 40 iterations (stop code 1).
     np.testing.assert_array_equal(iterations, 40)
-    assert controller.total_iter_done == iterations.sum()
-    assert controller.cycles_done == 1
-    np.testing.assert_array_equal(controller.max_iter_remaining[:, 0], 100 - iterations)
-    np.testing.assert_array_equal(controller.stop_code_model_update[:, 0], stop_codes)
+    assert controller["total_iter_done"] == iterations.sum()
+    assert controller["cycles_done"] == 1
     np.testing.assert_array_equal(
-        controller.diverged_model_updates[:, 0],
+        controller["max_iter_remaining"][:, 0], 100 - iterations
+    )
+    np.testing.assert_array_equal(
+        controller["stop_code_model_update"][:, 0], stop_codes
+    )
+    np.testing.assert_array_equal(
+        controller["diverged_model_updates"][:, 0],
         (stop_codes == MODEL_UPDATE_DIVERGENCE).astype(int),
     )
     assert result["stopcode"] == StopCode(
@@ -1607,8 +1611,8 @@ def test_asp_node_books_a_diverged_model_update(
 ):
     """A plane the Asp divergence test stops is booked as diverged."""
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         StopCode,
+        make_cycle_control_state,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
@@ -1627,11 +1631,11 @@ def test_asp_node_books_a_diverged_model_update(
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
-    controller = CycleController(**params)
+    controller = make_cycle_control_state(**params)
     result = continuum_node.model_update_continuum_single_field(
         {"image": make_single_term_runaway_image()},
         {
-            "controller": controller,
+            "cycle_control_state": controller,
             "deconvolver": "asp",
             "cycle_control_params": {
                 **params,
@@ -1653,9 +1657,9 @@ def test_asp_node_books_a_diverged_model_update(
         model_update=MODEL_UPDATE_CONTINUE,
     )
     assert not result["residual_converged"]
-    assert controller.total_iter_done == iterations
-    assert controller.stop_code_model_update[0, 0, 0] == stop_code
-    assert controller.diverged_model_updates[0, 0, 0] == diverged_model_updates
+    assert controller["total_iter_done"] == iterations
+    assert controller["stop_code_model_update"][0, 0, 0] == stop_code
+    assert controller["diverged_model_updates"][0, 0, 0] == diverged_model_updates
 
 
 def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch):
@@ -1708,26 +1712,27 @@ def _with_single_term_psf(image):
 
 
 def test_zero_max_iter_uses_current_controller_fields():
-    from astroviper.processing_functions.imaging.utils import CycleController
+    from astroviper.processing_functions.imaging.utils import make_cycle_control_state
 
     image = _model_dataset(0.0).rename({"SKY_MODEL": "SKY_RESIDUAL"})
     image.attrs["data_groups"]["residual"] = {"sky": "SKY_RESIDUAL"}
     image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (("time", "polarization"), [[0.1]])
-    controller = CycleController(max_iter=0)
+    controller = make_cycle_control_state(max_iter=0)
     image = _with_single_term_psf(image)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
-        {"cycle_control_params": {"max_iter": 0}, "controller": controller},
+        {"cycle_control_params": {"max_iter": 0}, "cycle_control_state": controller},
     )
     assert result["stopcode"].imaging == 1
     assert result["stopcode"].model_update == 0
-    np.testing.assert_array_equal(controller.max_iter_remaining, 0)
+    np.testing.assert_array_equal(controller["max_iter_remaining"], 0)
 
 
 def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_ENTROPY,
-        CycleController,
+        ensure_planes,
+        make_cycle_control_state,
     )
 
     rng = np.random.default_rng(20261013)
@@ -1756,9 +1761,9 @@ def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
             }
         },
     )
-    controller = CycleController(max_iter=100, entropy_stop=True)
-    controller.ensure_planes(1, 1, 1)
-    controller.max_entropy[0, 0, 0] = 1.0e6
+    controller = make_cycle_control_state(max_iter=100, entropy_stop=True)
+    ensure_planes(controller, 1, 1, 1)
+    controller["max_entropy"][0, 0, 0] = 1.0e6
 
     def unexpected_update(*args, **kwargs):
         pytest.fail("An entropy-stopped residual must not run a model update")
@@ -1770,7 +1775,7 @@ def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {
-            "controller": controller,
+            "cycle_control_state": controller,
             "cycle_control_params": {
                 "max_iter": 100,
                 "gain": 0.1,
@@ -1782,7 +1787,7 @@ def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
 
     assert result["residual_converged"]
     assert result["stopcode"].imaging == IMAGING_ENTROPY
-    assert controller.entropy_stopped[0, 0, 0]
+    assert controller["entropy_stopped"][0, 0, 0]
     fields = next(iter(result["residual_statistics"].values()))
     assert np.isfinite(fields["entropy"][0])
     assert np.isfinite(fields["residual_snr"][0])
@@ -1845,10 +1850,10 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
         IMAGING_MAX_ITER,
         IMAGING_THRESHOLD,
         IMAGING_ZERO_MASK,
-        CycleController,
+        make_cycle_control_state,
     )
 
-    controller = CycleController(
+    controller = make_cycle_control_state(
         max_iter=max_iter, max_cycles=max_cycles, threshold=0.1
     )
     image = xr.Dataset(
@@ -1880,7 +1885,7 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
         {
-            "controller": controller,
+            "cycle_control_state": controller,
             "cycle_control_params": {
                 "max_iter": max_iter,
                 "primary_beam_limit": 0.2,
@@ -1895,17 +1900,15 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
     }[reason]
     assert result["residual_converged"]
     assert result["stopcode"].imaging == expected
-    assert controller.total_iter_done == controller.cycles_done == 0
-    assert controller.max_cycles == max_cycles
-    assert np.all(controller.max_iter_remaining == max_iter)
+    assert controller["total_iter_done"] == controller["cycles_done"] == 0
+    assert controller["max_cycles"] == max_cycles
+    assert np.all(controller["max_iter_remaining"] == max_iter)
     assert not result["deconvolution"]
     assert np.all(result["image"].SKY_MODEL.values == 0)
 
 
 def test_model_update_constructs_controller_when_omitted():
     """A direct node call builds the documented continuum cycle controller."""
-    from astroviper.processing_functions.imaging.utils import CycleController
-
     image = xr.Dataset(
         {
             "SKY_RESIDUAL": (
@@ -1944,8 +1947,8 @@ def test_model_update_constructs_controller_when_omitted():
         {"cycle_control_params": params},
     )
 
-    assert isinstance(result["controller"], CycleController)
-    assert result["controller"].max_cycles == 2
+    assert isinstance(result["cycle_control_state"], dict)
+    assert result["cycle_control_state"]["max_cycles"] == 2
     assert result["residual_converged"]
 
 
@@ -2033,13 +2036,16 @@ def _run_accelerated_append(
 ):
     """Run an MVC append whose model update adds ``z = r / 4`` to the model,
     with ``B z = z / 2``."""
-    from astroviper.processing_functions.imaging.utils import CycleController
+    from astroviper.processing_functions.imaging.utils import (
+        ensure_planes,
+        make_cycle_control_state,
+    )
 
     _stub_mvc_beam_diagnostic(monkeypatch)
     image = _acceleration_image(seed, scale)
     residual = image.SKY_RESIDUAL.copy(deep=True)
-    controller = CycleController(max_iter=100)
-    controller.ensure_planes(1, 1, 2)
+    controller = make_cycle_control_state(max_iter=100)
+    ensure_planes(controller, 1, 1, 2)
 
     def fake_model_update(input_data, input_params, *, input_checked=False):
         assert input_checked is True
@@ -2053,7 +2059,7 @@ def _run_accelerated_append(
         image.SKY_RESIDUAL.values -= 0.5 * increment.values
         return {
             "image": image,
-            "controller": controller,
+            "cycle_control_state": controller,
             "deconvolution": {},
             "residual_converged": converged,
             "timing_model_update": pd.DataFrame({"T_model_update": [0.0]}),
@@ -2233,7 +2239,7 @@ def test_converged_appends_take_no_accelerated_step(monkeypatch):
 def test_only_conjugate_gradient_writes_back_the_hogbom_residual(
     monkeypatch, params, write_back
 ):
-    from astroviper.processing_functions.imaging.utils import CycleController
+    from astroviper.processing_functions.imaging.utils import make_cycle_control_state
 
     image = _acceleration_image(0).isel(taylor_term=slice(0, 1))
     image["POINT_SPREAD_FUNCTION"] = (
@@ -2270,7 +2276,7 @@ def test_only_conjugate_gradient_writes_back_the_hogbom_residual(
         continuum_node.model_update_continuum_single_field(
             {"image": image},
             {
-                "controller": CycleController(**controls),
+                "cycle_control_state": make_cycle_control_state(**controls),
                 "cycle_control_params": {**controls, "primary_beam_limit": 0.2},
                 **params,
             },
@@ -2298,13 +2304,14 @@ def test_plain_step_planes_follow_the_stop_test_after_the_model_update(
     import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
-        CycleController,
+        ensure_planes,
+        make_cycle_control_state,
     )
 
-    controller = CycleController(max_iter=100, threshold=0.1)
-    controller.ensure_planes(1, 1, 4)
-    controller.max_iter_remaining[0, 0, 1] = 0
-    controller.max_entropy[0, 0, 3] = 1.0
+    controller = make_cycle_control_state(max_iter=100, threshold=0.1)
+    ensure_planes(controller, 1, 1, 4)
+    controller["max_iter_remaining"][0, 0, 1] = 0
+    controller["max_entropy"][0, 0, 3] = 1.0
     deconvolution = {}
     for pol, peak in enumerate((0.101, 0.5, 0.5, 0.5)):
         add_to_imaging_dict(
@@ -2314,7 +2321,7 @@ def test_plain_step_planes_follow_the_stop_test_after_the_model_update(
             pol=pol,
             chan=0,
         )
-    controller_before = copy.deepcopy(controller.__dict__)
+    controller_before = copy.deepcopy(controller)
     deconvolution_before = copy.deepcopy(deconvolution)
     captured = {}
 
@@ -2335,9 +2342,9 @@ def test_plain_step_planes_follow_the_stop_test_after_the_model_update(
     )
     assert captured["planes"].dims == ("time", "polarization")
     np.testing.assert_array_equal(captured["planes"], [expected])
-    np.testing.assert_array_equal(controller.stop_code_imaging, IMAGING_CONTINUE)
+    np.testing.assert_array_equal(controller["stop_code_imaging"], IMAGING_CONTINUE)
     for name, value in controller_before.items():
-        np.testing.assert_equal(getattr(controller, name), value)
+        np.testing.assert_equal(controller[name], value)
     assert deconvolution == deconvolution_before
 
 
@@ -2355,8 +2362,8 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
     _stub_mvc_beam_diagnostic(monkeypatch)
     import astroviper.processing_functions.imaging.cycle_acceleration as acceleration
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         StopCode,
+        make_cycle_control_state,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
@@ -2387,7 +2394,7 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
-    controller = CycleController(**controls)
+    controller = make_cycle_control_state(**controls)
 
     def backend(image_arg, deconvolver, controls, **kwargs):
         image_arg["SKY_MODEL"] = 0.25 * image_arg.SKY_RESIDUAL
@@ -2441,7 +2448,7 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
         {
             "continuum_mode": "mvc",
             "deconvolver": "mtmfs",
-            "controller": controller,
+            "cycle_control_state": controller,
             "cycle_control_params": {**controls, "primary_beam_limit": 0.2},
             "cycle_acceleration": cycle_acceleration,
             "momentum_coefficient": 0.5,
@@ -2450,8 +2457,8 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
 
     assert not result["residual_converged"]
     np.testing.assert_array_equal(captured["planes"], [expected])
-    np.testing.assert_array_equal(controller.stop_code_imaging, IMAGING_CONTINUE)
-    np.testing.assert_array_equal(controller.max_iter_remaining[0, 0], [1, 0])
+    np.testing.assert_array_equal(controller["stop_code_imaging"], IMAGING_CONTINUE)
+    np.testing.assert_array_equal(controller["max_iter_remaining"][0, 0], [1, 0])
     for fields in result["deconvolution"].values():
         assert fields["stop_code"].imaging == IMAGING_CONTINUE
 
@@ -2473,8 +2480,8 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
     momentum's second step ``z + mu_2 v``."""
     _stub_mvc_beam_diagnostic(monkeypatch)
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         StopCode,
+        make_cycle_control_state,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
@@ -2564,14 +2571,14 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
     first_residual = first_image.SKY_RESIDUAL.copy(deep=True)
     first = continuum_node.continuum_cycle_append_node(
         {"image": first_image},
-        {**params, "controller": CycleController(**controls)},
+        {**params, "cycle_control_state": make_cycle_control_state(**controls)},
     )
     second = continuum_node.continuum_cycle_append_node(
         {"image": image(1, 0.5)},
         {
             **params,
             "is_first_cycle": False,
-            "controller": first["controller"],
+            "cycle_control_state": first["cycle_control_state"],
             "deconvolution": first["deconvolution"],
             "model_xds": first["model_xds"],
             "cycle_acceleration_state_xds": first["cycle_acceleration_state_xds"],

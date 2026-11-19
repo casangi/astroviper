@@ -1847,8 +1847,8 @@ def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
         (cached_result, cached),
     ):
         assert result["n_cycles"] == 2
-        assert result["controller"].cycles_done == 2
-        assert result["controller"].total_iter_done > 0
+        assert result["cycle_control_state"]["cycles_done"] == 2
+        assert result["cycle_control_state"]["total_iter_done"] > 0
         assert result["deconvolution"]
         assert image.SKY_MODEL.sizes["taylor_term"] == 2
         assert np.nanmax(np.abs(image.SKY_MODEL.isel(taylor_term=0))) > 0.0
@@ -2851,9 +2851,13 @@ def test_refreshed_residual_resumes_after_provisional_threshold_without_restorin
     assert result["stopcode"].imaging == (
         IMAGING_MAX_CYCLES if max_iter == 100 else IMAGING_MAX_ITER
     )
-    assert result["controller"].cycles_done == result["n_cycles"] == expected_updates
+    assert (
+        result["cycle_control_state"]["cycles_done"]
+        == result["n_cycles"]
+        == expected_updates
+    )
     assert len(result["timing_graphs"]) == expected_updates + 2
-    assert result["controller"].total_iter_done > 0
+    assert result["cycle_control_state"]["total_iter_done"] > 0
     assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8
     assert result["residual_statistics"]
 

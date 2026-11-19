@@ -37,9 +37,11 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_CONTINUE,
     MODEL_UPDATE_DIVERGENCE,
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,
-    CycleController,
     StopCode,
+    check_convergence,
+    make_cycle_control_state,
     merge_imaging_dicts,
+    update_counts,
 )
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     select_from_imaging_dict,
@@ -734,13 +736,13 @@ class TestDeconvolveReportsDivergence:
         assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
         # ... and kept by the controller, which lets the imaging cycles go on:
         # the next residual update recomputes the true residual.
-        controller = CycleController(max_iter=40, threshold=0.0, gain=0.5)
-        controller.update_counts(imaging_dict)
-        stopcode, _ = controller.check_convergence(imaging_dict, model_update_ran=True)
+        controller = make_cycle_control_state(max_iter=40, threshold=0.0, gain=0.5)
+        update_counts(controller, imaging_dict)
+        stopcode, _ = check_convergence(controller, imaging_dict, model_update_ran=True)
         assert stopcode.imaging == IMAGING_CONTINUE
         assert entry["stop_code"].model_update == MODEL_UPDATE_DIVERGENCE
-        assert controller.stop_code_model_update[0, 0, 0] == MODEL_UPDATE_DIVERGENCE
-        assert controller.max_iter_remaining[0, 0, 0] == 35
+        assert controller["stop_code_model_update"][0, 0, 0] == MODEL_UPDATE_DIVERGENCE
+        assert controller["max_iter_remaining"][0, 0, 0] == 35
 
     def test_healthy_model_update_reports_its_stop_code(self):
         xds = self._xds(sidelobe=0.0)
@@ -753,10 +755,10 @@ class TestDeconvolveReportsDivergence:
         assert entry["stop_code"] == StopCode(
             IMAGING_CONTINUE, MODEL_UPDATE_MAX_ITER_PER_CYCLE
         )
-        controller = CycleController(max_iter=40, threshold=0.0, gain=0.5)
-        controller.check_convergence(imaging_dict, model_update_ran=True)
+        controller = make_cycle_control_state(max_iter=40, threshold=0.0, gain=0.5)
+        check_convergence(controller, imaging_dict, model_update_ran=True)
         assert entry["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
-        assert controller.stop_code_model_update[0, 0, 0] == (
+        assert controller["stop_code_model_update"][0, 0, 0] == (
             MODEL_UPDATE_MAX_ITER_PER_CYCLE
         )
 
