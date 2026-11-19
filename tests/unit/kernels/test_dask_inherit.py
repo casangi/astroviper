@@ -113,9 +113,9 @@ def test_workers_run_the_driver_selection(run_python, tmp_path):
             ("hogbom", "clean_cube", "ref", None)
         ]
     # The submitted wrapper ran in a task thread of the worker that holds it.
-    (loop_thread,) = [
+    (loop_thread,) = (
         w["thread"] for w in result["workers"] if w["pid"] == result["task_pid"]
-    ]
+    )
     tasks = [
         r
         for r in _worker_records(trace, result["task_pid"])

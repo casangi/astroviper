@@ -709,7 +709,7 @@ def test_the_prewarm_reports_a_plane_that_does_not_fit(device, run_python):
     )
     assert done.returncode == 1, done.stderr
     prefix = "GPU prewarm failed: a call on planes of 64 x 64 complex64 needs 32768 "
-    (line,) = [line for line in done.stderr.splitlines() if line.startswith(prefix)]
+    (line,) = (line for line in done.stderr.splitlines() if line.startswith(prefix))
     assert "bytes of device memory and a cuFFT plan, 4096 bytes are available" in line
     assert "Traceback" not in done.stderr
 
