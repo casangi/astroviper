@@ -3306,7 +3306,7 @@ def _book_accelerated_model_flux(deconvolve_dict, model_step, previous_model_xds
         model = model + taylor_term_zero(previous_model_xds["SKY_MODEL"])
     model_flux_by_sign = cube_flux_by_sign(model)
 
-    for key, fields in deconvolve_dict.data.items():
+    for key, fields in deconvolve_dict.items():
         model_flux = fields.get("model_flux")
         start_model_flux = fields.get("start_model_flux")
         if model_flux is None or start_model_flux is None:
@@ -3607,7 +3607,7 @@ def continuum_cycle_append_node(
             threshold_per_cycle = np.full(
                 previous_state["planes_stopped"].shape, np.inf
             )
-            for key, fields in input_params["deconvolution"].data.items():
+            for key, fields in input_params["deconvolution"].items():
                 threshold_per_cycle[key.time, key.chan, key.pol] = fields[
                     "threshold_per_cycle"
                 ][-1]
@@ -3634,15 +3634,15 @@ def continuum_cycle_append_node(
     model_update_input_params.pop("static_xds", None)
 
     # A residual-update reduce has no deconvolution work of its own, but keeps
-    # the result schema stable by returning an empty ImagingDict. Do not let
+    # the result schema stable by returning an empty imaging_dict. Do not let
     # that placeholder hide the history supplied by the previous model update.
     reduced_deconvolution = input_data.get("deconvolution")
     previous_deconvolution = input_params.get("deconvolution")
     if (
         reduced_deconvolution is not None
-        and not reduced_deconvolution.data
+        and not reduced_deconvolution
         and previous_deconvolution is not None
-        and previous_deconvolution.data
+        and previous_deconvolution
     ):
         input_data["deconvolution"] = previous_deconvolution
 
@@ -4047,7 +4047,6 @@ def model_update_continuum_single_field(
         model_update_mtmfs_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        ImagingDict,
         copy_residual_statistics,
         get_per_cycle_limits,
         make_continuum_cycle_controller,
@@ -4135,7 +4134,7 @@ def model_update_continuum_single_field(
     )
 
     if combined_deconvolve_dict is None:
-        combined_deconvolve_dict = ImagingDict()
+        combined_deconvolve_dict = {}
 
     timing = {
         "T_cycle_control": 0.0,

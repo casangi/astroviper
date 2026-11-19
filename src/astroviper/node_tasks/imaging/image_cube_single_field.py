@@ -69,14 +69,14 @@ def _global_channel_offset(data_selection):
 def _remap_imaging_dict_to_global_channels(
     combined_imaging_dict, task_coords, data_selection
 ):
-    """Shift a chunk-local deconvolve ImagingDict onto image channel numbers.
+    """Shift a chunk-local deconvolve imaging_dict onto image channel numbers.
 
     The per-chunk ``image_cube_single_field`` labels channels ``0..N-1`` within
     the chunk; the offset is the image channel of the task's first channel
     (:func:`_image_channel_start`), so the planes of different spectral windows
     do not collide.
 
-    Returns a new ImagingDict whose ``Key.chan`` values are image channel
+    Returns a new imaging_dict whose ``Key.chan`` values are image channel
     numbers. A no-op returning the input unchanged when the offset is 0.
     """
 
@@ -96,18 +96,15 @@ def _shift_imaging_dict_channels(imaging_dict, chan_offset):
     for a zero offset.
     """
     from astroviper.processing_functions.imaging.utils.imaging_dict import (
-        ImagingDict,
         Key,
     )
 
     if chan_offset == 0:
         return imaging_dict
 
-    shifted = ImagingDict()
-    for key, value in imaging_dict.data.items():
-        shifted.data[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = (
-            value
-        )
+    shifted = {}
+    for key, value in imaging_dict.items():
+        shifted[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = value
     return shifted
 
 
@@ -1180,7 +1177,8 @@ def image_cube_single_field(
           round failed are logged and counted in
           ``n_failed_first_round_chunks``.
         * ``"deconvolution"`` : the per-plane deconvolution
-          :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`,
+          ``imaging_dict``
+          (:mod:`~astroviper.processing_functions.imaging.utils.imaging_dict`),
           with channels remapped to global channel numbers.
         * ``"image_statistics"`` : ``{image_variable_key: xarray.Dataset}`` of
           NaN-ignoring per-plane statistics of the image-domain variables
@@ -1295,10 +1293,6 @@ def image_cube_single_field(
         # otherwise tear down every node after this task exhausts its retries).
         import pandas as pd
 
-        from astroviper.processing_functions.imaging.utils.imaging_dict import (
-            ImagingDict,
-        )
-
         row = _log_task_io_failure(
             "load", exc, task_id, image_store, data_selection, task_coords
         )
@@ -1312,7 +1306,7 @@ def image_cube_single_field(
         )
         return {
             "timing_node_tasks": pd.DataFrame({k: [v] for k, v in row.items()}),
-            "deconvolution": ImagingDict(),
+            "deconvolution": {},
             "image_statistics": {},
         }
     T_load = time.time() - start

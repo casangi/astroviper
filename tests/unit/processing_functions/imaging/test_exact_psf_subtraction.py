@@ -87,7 +87,7 @@ def _untimed(record):
     """The record without the wall times of its cycles."""
     return {
         key: {f: v for f, v in fields.items() if f not in CYCLE_TIMING_FIELDS}
-        for key, fields in record.data.items()
+        for key, fields in record.items()
     }
 
 

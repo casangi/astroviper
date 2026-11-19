@@ -242,7 +242,7 @@ def test_continuum_asp_recovers_simulated_sources(
     assert controller.cycles_done >= 2
     # Every model update is booked: the iterations of the per-plane records
     # add up to the controller's total, and every plane has a known stop code.
-    planes = result["deconvolution"].data.values()
+    planes = result["deconvolution"].values()
     assert sum(int(np.sum(fields["iter_done"])) for fields in planes) == (
         controller.total_iter_done
     )
@@ -318,7 +318,7 @@ def test_continuum_asp_with_an_explicit_clean_mask(
 
     assert warnings == []
     assert controller.cycles_done >= 2
-    planes = result["deconvolution"].data.values()
+    planes = result["deconvolution"].values()
     assert sum(int(np.sum(fields["iter_done"])) for fields in planes) == (
         controller.total_iter_done
     )

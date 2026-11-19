@@ -534,7 +534,7 @@ def _add_deconvolution(document, return_dict):
     )
     if not any(
         "model_update_stop_code" in fields
-        for fields in return_dict["deconvolution"].data.values()
+        for fields in return_dict["deconvolution"].values()
     ):
         document.note("The deconvolver recorded no model update stop codes.")
     if not np.any(np.isfinite(per_channel["entropy"])):

@@ -196,7 +196,7 @@ def test_matches_imager_setup(natural_point_spread_function, natural_dirty_image
         dirty_image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0],
         rtol=1e-6,
     )
-    records = result["deconvolution"].data
+    records = result["deconvolution"]
     imager_sidelobe = np.array(
         [
             [

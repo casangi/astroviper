@@ -646,13 +646,13 @@ def image(
         ),
         stop_code={
             STOKES[key.pol]: int(fields["stop_code"].imaging)
-            for key, fields in final.data.items()
+            for key, fields in final.items()
         },
         iterations={
             STOKES[key.pol]: np.atleast_1d(fields["iter_done"])[
                 :n_model_updates
             ].tolist()
-            for key, fields in result["deconvolution"].data.items()
+            for key, fields in result["deconvolution"].items()
         },
     )
     return captured
@@ -967,7 +967,7 @@ def test_hogbom_divergence_stop(tmp_path, field):
             DEFAULT_GRIDDING_KERNEL_PARAMS,
             f"divergence_{name}",
             controls={**DIVERGENCE_CONTROLS, **change},
-        )["record"].data
+        )["record"]
         for name, change in (
             ("on", {}),
             ("off", {"max_iter_divergence": -1, "max_cycles": 1}),

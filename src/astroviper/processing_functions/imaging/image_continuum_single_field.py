@@ -3153,7 +3153,7 @@ def build_continuum_residual_imaging_dict(
 
     Returns
     -------
-    astroviper.processing_functions.imaging.utils.ImagingDict
+    dict
         One synthetic frequency plane of residual statistics for the shared
         iteration controller.
     """
@@ -3165,7 +3165,7 @@ def build_continuum_residual_imaging_dict(
     )
     from astroviper.processing_functions.imaging.utils import (
         ITERATION_HISTORY_FIELDS,
-        ImagingDict,
+        add_to_imaging_dict,
         validate_entropy_params,
     )
 
@@ -3220,7 +3220,7 @@ def build_continuum_residual_imaging_dict(
         max_snr=entropy_max_snr,
     )
     residual_statistics = imgstats.cube_residual_statistics(residual.values, support)
-    statistics = ImagingDict()
+    statistics = {}
     for tt in range(residual.sizes["time"]):
         for pp in range(residual.sizes["polarization"]):
             finite = np.isfinite(absolute[tt, pp])
@@ -3242,7 +3242,8 @@ def build_continuum_residual_imaging_dict(
             if cycle_control_params.get("record_iteration_history", False):
                 for field in ITERATION_HISTORY_FIELDS:
                     fields[field] = np.empty(0)
-            statistics.add(
+            add_to_imaging_dict(
+                statistics,
                 fields,
                 time=tt,
                 chan=0,
@@ -3445,8 +3446,8 @@ def _model_update_native_mtmfs(
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
     from astroviper.processing_functions.imaging.utils import (
         ITERATION_HISTORY_FIELDS,
-        ImagingDict,
         StopCode,
+        add_to_imaging_dict,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         IMAGING_CONTINUE,
@@ -3544,7 +3545,7 @@ def _model_update_native_mtmfs(
         if "SKY_MODEL" in img_xds
         else np.zeros_like(residual)
     )
-    imaging_dict = ImagingDict()
+    imaging_dict = {}
     start = time.time()
     for tt in range(ntime):
         for pp in range(npol):
@@ -3655,7 +3656,7 @@ def _model_update_native_mtmfs(
                 fields["iteration_model_flux"] = start_model_flux + np.cumsum(
                     fields["iteration_component_flux"]
                 )
-            imaging_dict.add(fields, time=tt, pol=pp, chan=0)
+            add_to_imaging_dict(imaging_dict, fields, time=tt, pol=pp, chan=0)
 
     img_xds["SKY_MODEL"] = residual_da.copy(data=model)
     img_xds.attrs.setdefault("data_groups", {})[image_data_group_out_name] = {
@@ -3812,7 +3813,7 @@ def model_update_mtmfs_single_field(
 
     Returns
     -------
-    deconvolve_dict : ImagingDict
+    deconvolve_dict : dict
         Per-plane deconvolution statistics returned by the selected backend.
 
     return_df : pandas.DataFrame

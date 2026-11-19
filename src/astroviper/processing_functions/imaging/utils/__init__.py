@@ -1,6 +1,6 @@
 """Common (non-science) helpers for the imaging processing functions.
 
-Holds the cycle control logic, the :class:`ImagingDict` convergence
+Holds the cycle control logic, the ``imaging_dict`` convergence
 container, and small timing-bookkeeping helpers that are shared across the
 imaging processing functions but are not themselves imaging science kernels.
 """
@@ -34,11 +34,12 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
     ITERATION_HISTORY_FIELDS,
-    ImagingDict,
     Key,
+    add_to_imaging_dict,
     deconvolution_per_channel,
     imaging_dict_from_dataframe,
     imaging_dict_to_dataframe,
+    select_from_imaging_dict,
 )
 from astroviper.processing_functions.imaging.utils.timing import (
     CONTINUUM_IMAGING_TIMING_PHASES,
@@ -53,7 +54,8 @@ from astroviper.processing_functions.imaging.utils.visibility import (
 )
 
 __all__ = [
-    "ImagingDict",
+    "add_to_imaging_dict",
+    "select_from_imaging_dict",
     "imaging_dict_to_dataframe",
     "imaging_dict_from_dataframe",
     "deconvolution_per_channel",

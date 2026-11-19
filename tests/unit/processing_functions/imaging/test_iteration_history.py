@@ -38,8 +38,8 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     ITERATION_HISTORY_FIELDS,
-    ImagingDict,
     Key,
+    add_to_imaging_dict,
     imaging_dict_to_dataframe,
 )
 
@@ -402,7 +402,7 @@ class TestDeconvolve:
             deconvolve_params={**params, "record_iteration_history": True},
             processing_function_threads=2,
         )
-        for key, entry in imaging_dict.data.items():
+        for key, entry in imaging_dict.items():
             (n_iter,) = entry["iter_done"]
             assert n_iter == 30
             for field in ITERATION_HISTORY_FIELDS:
@@ -433,7 +433,7 @@ class TestDeconvolve:
             img_xds=_image_dataset(),
             deconvolve_params={"gain": GAIN, "max_iter": 10},
         )
-        for entry in imaging_dict.data.values():
+        for entry in imaging_dict.values():
             for field in ITERATION_HISTORY_FIELDS:
                 assert field not in entry
 
@@ -452,7 +452,7 @@ class TestDeconvolve:
                 "record_iteration_history": True,
             },
         )
-        for key, entry in imaging_dict.data.items():
+        for key, entry in imaging_dict.items():
             history = {field: entry[field][0] for field in ITERATION_HISTORY_FIELDS}
             n = len(history["iteration_component_flux"])
             assert 0 < n <= entry["iter_done"][0]
@@ -510,10 +510,11 @@ class TestDeconvolve:
 
 def _two_cycle_record():
     """One plane, two cycles of 3 and 2 iterations, merged as the loop does."""
-    combined = ImagingDict()
+    combined = {}
     for peaks, rms in (([1.0, -0.8, 0.7], [0.3, 0.25, 0.2]), ([0.5, 0.4], [0.15, 0.1])):
-        cycle = ImagingDict()
-        cycle.add(
+        cycle = {}
+        add_to_imaging_dict(
+            cycle,
             {
                 "iter_done": len(peaks),
                 "iteration_peak_residual": np.array(peaks),
@@ -532,7 +533,7 @@ class TestRecord:
         assert set(ITERATION_HISTORY_FIELDS) <= FIELD_ACCUM
 
     def test_merge_keeps_one_array_per_cycle(self):
-        entry = _two_cycle_record().data[Key(time=0, pol=0, chan=0)]
+        entry = _two_cycle_record()[Key(time=0, pol=0, chan=0)]
         assert entry["iter_done"] == [3, 2]
         peaks = entry["iteration_peak_residual"]
         assert [len(cycle) for cycle in peaks] == [3, 2]
@@ -566,7 +567,7 @@ class TestRecord:
         imaging_dict = build_residual_imaging_dict(
             xds, "residual", {"gain": GAIN, "record_iteration_history": record}
         )
-        (entry,) = imaging_dict.data.values()
+        (entry,) = imaging_dict.values()
         for field in ITERATION_HISTORY_FIELDS:
             if record:
                 (history,) = entry[field]

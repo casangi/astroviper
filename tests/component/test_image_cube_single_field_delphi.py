@@ -167,7 +167,7 @@ def test_delphi_parameters_file_then_image_from_it(tmp_path, named_field):
     assert np.all((residual_rms > 0.5 * sensitivity) & (residual_rms < 2 * sensitivity))
     # Every plane stops on its threshold, within the tolerance and max_cycles: a round
     # trip check of the file's controls; their values are tested in the unit tests.
-    for key, entry in result["deconvolution"].data.items():
+    for key, entry in result["deconvolution"].items():
         assert entry["stop_code"].imaging == IMAGING_THRESHOLD, key
         assert len(entry["iter_done"]) - 1 <= controls["max_cycles"], key
         assert abs(entry["peakres"][-1]) <= threshold[key.chan][key.pol] * (

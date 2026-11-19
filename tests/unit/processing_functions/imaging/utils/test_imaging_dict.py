@@ -1,4 +1,4 @@
-"""Unit tests for the ImagingDict -> DataFrame flattening, its inverse and the
+"""Unit tests for the imaging_dict -> DataFrame flattening, its inverse and the
 per-channel arrays of the deconvolution summary."""
 
 import numpy as np
@@ -8,8 +8,8 @@ import xarray as xr
 
 from astroviper.processing_functions.imaging.utils.cycle_control import StopCode
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
-    ImagingDict,
     Key,
+    add_to_imaging_dict,
     deconvolution_per_channel,
     imaging_dict_from_dataframe,
     imaging_dict_to_dataframe,
@@ -17,10 +17,11 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
 
 
 def _make_imaging_dict():
-    rd = ImagingDict()
+    rd = {}
     # channel 0: deconvolved over 2 cycles
     for cycle in range(2):
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {
                 "iter_done": [40, 25][cycle],
                 "peakres": [0.05, 0.002][cycle],
@@ -35,7 +36,8 @@ def _make_imaging_dict():
             pol=0,
             chan=0,
         )
-    rd.add(
+    add_to_imaging_dict(
+        rd,
         {
             "stop_code": StopCode(imaging=2, model_update=0),
             "stop_description": "threshold",
@@ -45,7 +47,8 @@ def _make_imaging_dict():
         chan=0,
     )
     # channel 1: never deconvolved (no iterations recorded)
-    rd.add(
+    add_to_imaging_dict(
+        rd,
         {
             "iter_done": 0,
             "peakres": 0.001,
@@ -79,7 +82,7 @@ def test_flattens_history_and_stop_code():
 
 
 def test_empty_dict_gives_empty_frame():
-    df = imaging_dict_to_dataframe(ImagingDict())
+    df = imaging_dict_to_dataframe({})
     assert df.empty
     assert "iter_total" in df.columns
 
@@ -102,11 +105,11 @@ def _assert_frames_equal(rebuilt, frame):
 def test_from_dataframe_inverts_to_dataframe():
     imaging_dict = _make_imaging_dict()
     history = [np.array([0.3, 0.2]), np.array([0.1])]
-    imaging_dict.data[Key(0, 0, 0)]["iteration_peak_residual"] = history
+    imaging_dict[Key(0, 0, 0)]["iteration_peak_residual"] = history
     frame = imaging_dict_to_dataframe(imaging_dict)
     rebuilt = imaging_dict_from_dataframe(frame)
-    assert list(rebuilt.data) == [Key(0, 0, 0), Key(0, 1, 1)]
-    fields = rebuilt.data[Key(0, 0, 0)]
+    assert list(rebuilt) == [Key(0, 0, 0), Key(0, 1, 1)]
+    fields = rebuilt[Key(0, 0, 0)]
     assert fields["stop_code"] == StopCode(imaging=2, model_update=0)
     assert isinstance(fields["stop_code"], StopCode)
     assert fields["iter_done"] == [40, 25]
@@ -114,8 +117,8 @@ def test_from_dataframe_inverts_to_dataframe():
     for derived in ("n_cycles", "iter_total", "peakres_final", "stop_code_imaging"):
         assert derived not in fields
     # the plane without these fields does not get them back as NaN
-    assert "gain" not in rebuilt.data[Key(0, 1, 1)]
-    assert "iteration_peak_residual" not in rebuilt.data[Key(0, 1, 1)]
+    assert "gain" not in rebuilt[Key(0, 1, 1)]
+    assert "iteration_peak_residual" not in rebuilt[Key(0, 1, 1)]
     _assert_frames_equal(imaging_dict_to_dataframe(rebuilt), frame)
 
 
@@ -134,11 +137,9 @@ def test_from_dataframe_of_feather_cells_and_empty_frames():
             "peakres_start": [None],
         }
     )
-    fields = imaging_dict_from_dataframe(frame).data[Key(0, 1, 3)]
+    fields = imaging_dict_from_dataframe(frame)[Key(0, 1, 3)]
     assert fields == {"iter_done": [0, 0], "entropy": [None, None], "clean_box": [1, 2]}
-    assert (
-        imaging_dict_from_dataframe(imaging_dict_to_dataframe(ImagingDict())).data == {}
-    )
+    assert imaging_dict_from_dataframe(imaging_dict_to_dataframe({})) == {}
 
 
 def _deconvolution_return_dict(entropy=True):
@@ -154,10 +155,10 @@ def _deconvolution_return_dict(entropy=True):
         data,
         coords={"time": [0.0], "frequency": frequency, "polarization": ["I", "Q"]},
     )
-    record = ImagingDict()
+    record = {}
     for pol in range(2):
         # recorded as channel 0 but at 1.2 GHz: two model updates
-        record.data[Key(0, pol, 0)] = {
+        record[Key(0, pol, 0)] = {
             "frequency": 1.2e9,
             "iter_done": [10, 5, 0],
             "start_peakres": [-0.4, 0.1],
@@ -167,7 +168,7 @@ def _deconvolution_return_dict(entropy=True):
             "stop_code": StopCode(imaging=2, model_update=2),
         }
         # recorded as channel 5 but at 1.0 GHz: no model update ran
-        record.data[Key(0, pol, 5)] = {
+        record[Key(0, pol, 5)] = {
             "frequency": 1.0e9,
             "iter_done": [0, 0],
             "start_peakres": [0.3],
@@ -175,7 +176,7 @@ def _deconvolution_return_dict(entropy=True):
             "model_update_stop_code": [0],
             "stop_code": StopCode(imaging=4, model_update=0),
         }
-    record.data[Key(1, 0, 0)] = {"iter_done": [7]}  # another time plane
+    record[Key(1, 0, 0)] = {"iter_done": [7]}  # another time plane
     return {"deconvolution": record, "image_statistics": {"sky_residual": statistics}}
 
 
@@ -216,32 +217,29 @@ def test_deconvolution_per_channel():
     np.testing.assert_array_equal(
         result["iterations"], [[7, nan], [nan, nan], [nan, nan]]
     )
-    return_dict["deconvolution"].data.pop(Key(1, 0, 0))
+    return_dict["deconvolution"].pop(Key(1, 0, 0))
     assert deconvolution_per_channel(return_dict, time_index=1) is None
 
 
 def test_deconvolution_per_channel_by_channel_number_and_refusals():
     return_dict = _deconvolution_return_dict(entropy=False)
-    for fields in return_dict["deconvolution"].data.values():
+    for fields in return_dict["deconvolution"].values():
         fields.pop("frequency", None)
         fields.pop("model_update_stop_code", None)
-    return_dict["deconvolution"].data.pop(Key(1, 0, 0))
+    return_dict["deconvolution"].pop(Key(1, 0, 0))
     with pytest.raises(ValueError, match="outside the 3 channels"):
         deconvolution_per_channel(return_dict)  # channel 5
     for pol in range(2):
-        return_dict["deconvolution"].data.pop(Key(0, pol, 5))
+        return_dict["deconvolution"].pop(Key(0, pol, 5))
     result = deconvolution_per_channel(return_dict)
     np.testing.assert_array_equal(result["iterations"][0], [15, 15])
     assert np.all(np.isnan(result["entropy"]))
     assert result["model_update_stop_code_counts"] == {}
 
-    assert deconvolution_per_channel({"deconvolution": ImagingDict()}) is None
+    assert deconvolution_per_channel({"deconvolution": {}}) is None
     assert (
-        deconvolution_per_channel(
-            {"deconvolution": ImagingDict(), "image_statistics": {}}
-        )
-        is None
+        deconvolution_per_channel({"deconvolution": {}, "image_statistics": {}}) is None
     )
-    empty = {**return_dict, "deconvolution": ImagingDict()}
+    empty = {**return_dict, "deconvolution": {}}
     assert deconvolution_per_channel(empty) is None
     assert deconvolution_per_channel({**return_dict, "deconvolution": None}) is None

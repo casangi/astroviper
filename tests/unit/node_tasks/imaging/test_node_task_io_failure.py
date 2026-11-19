@@ -80,7 +80,7 @@ def test_load_failure_returns_marked_row_instead_of_raising(tmp_path):
     assert df["task_id"].iloc[0] == 7
     assert df["task_error"].iloc[0]  # carries the original exception repr
     assert "T_image_cube_task" in df.columns
-    assert result["deconvolution"].data == {}  # empty ImagingDict merges cleanly
+    assert result["deconvolution"] == {}  # empty imaging_dict merges cleanly
 
 
 def test_failed_rows_merge_through_the_standard_reduce(tmp_path):
@@ -98,7 +98,7 @@ def test_failed_rows_merge_through_the_standard_reduce(tmp_path):
     combined = combine_return_data_frames([r1, r2], {})
     assert len(combined["timing_node_tasks"]) == 2
     assert list(combined["timing_node_tasks"]["task_failed_phase"]) == ["load", "load"]
-    assert combined["deconvolution"].data == {}
+    assert combined["deconvolution"] == {}
 
 
 def test_reduce_records_timing_provenance(tmp_path):
@@ -288,7 +288,7 @@ def test_lazy_input_data_read_failure_is_skipped(tmp_path):
     assert "OSError" in df["task_error"].iloc[0]
     assert "unreadable tile" in df["task_error"].iloc[0]
     assert df["failed_channel_start"].iloc[0] == 5
-    assert result["deconvolution"].data == {}
+    assert result["deconvolution"] == {}
 
 
 def test_changed_measurement_set_aborts_the_task(tmp_path, monkeypatch):

@@ -2676,8 +2676,8 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
     original = image.copy(deep=True)
     params = {"gain": 0.1}
     stats = build_continuum_residual_imaging_dict(image, "residual", params)
-    assert len(stats.data) == 4
-    for key, values in stats.data.items():
+    assert len(stats) == 4
+    for key, values in stats.items():
         assert key.chan == 0
         assert values["peakres"] == [peaks[key.time, key.pol]]
         assert values["masksum"] == [8 if with_mask else 12]
@@ -2715,7 +2715,7 @@ def test_continuum_statistics_record_taylor_zero_entropy():
     )
 
     disabled = build_continuum_residual_imaging_dict(image, "residual", {"gain": 0.1})
-    for fields in disabled.data.values():
+    for fields in disabled.values():
         assert len(fields["entropy"]) == len(fields["residual_snr"]) == 1
         # the residual statistics are those of Taylor term zero
         assert fields["rms_in_mask"][0] < 100
@@ -2731,8 +2731,8 @@ def test_continuum_statistics_record_taylor_zero_entropy():
             "entropy_flux_bins": 8,
         },
     )
-    quiet = enabled.data[Key(time=0, chan=0, pol=0)]
-    bright = enabled.data[Key(time=0, chan=0, pol=1)]
+    quiet = enabled[Key(time=0, chan=0, pol=0)]
+    bright = enabled[Key(time=0, chan=0, pol=1)]
     assert np.isfinite(quiet["entropy"][0])
     assert quiet["residual_snr"][0] < 6.0
     assert np.isnan(bright["entropy"][0])
@@ -2778,7 +2778,7 @@ def test_refreshed_statistics_respect_clean_support(explicit_mask):
     stats = build_continuum_residual_imaging_dict(
         image, "residual", {"primary_beam_limit": 0.2}
     )
-    fields = next(iter(stats.data.values()))
+    fields = next(iter(stats.values()))
     assert fields["peakres"] == [0.05]
     assert fields["peakres_nomask"] == [10.0]
     assert fields["masksum"] == [2]

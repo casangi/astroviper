@@ -13,7 +13,7 @@ import astroviper.processing_functions.imaging.image_continuum_single_field as c
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _create_mfs_visibility_grid_cache_store,
 )
-from astroviper.processing_functions.imaging.utils import ImagingDict
+from astroviper.processing_functions.imaging.utils import add_to_imaging_dict
 from astroviper.utils.clean_mask import install_clean_mask
 from tests.utils.continuum_images import (
     make_runaway_taylor_image,
@@ -561,9 +561,10 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
 
 def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch):
     """An empty reduce placeholder must not hide prior deconvolution history."""
-    reduced_history = ImagingDict()
-    previous_history = ImagingDict()
-    previous_history.add(
+    reduced_history = {}
+    previous_history = {}
+    add_to_imaging_dict(
+        previous_history,
         {"peakres": 2.5, "max_psf_sidelobe": 0.35},
         time=0,
         pol=0,
@@ -651,12 +652,14 @@ def test_append_takes_threshold_reached_from_the_record(
     auto_mask_call, threshold, stokes_q, expected
 ):
     """From the latest threshold_per_cycle of every plane in the forwarded record."""
-    record = ImagingDict()
-    record.add({"threshold_per_cycle": 1.0}, time=0, pol=0, chan=0)
-    record.add({"threshold_per_cycle": 0.1}, time=0, pol=0, chan=0)
+    record = {}
+    add_to_imaging_dict(record, {"threshold_per_cycle": 1.0}, time=0, pol=0, chan=0)
+    add_to_imaging_dict(record, {"threshold_per_cycle": 0.1}, time=0, pol=0, chan=0)
     if stokes_q is not None:
-        record.add({"threshold_per_cycle": 1.0}, time=0, pol=1, chan=0)
-        record.add({"threshold_per_cycle": stokes_q}, time=0, pol=1, chan=0)
+        add_to_imaging_dict(record, {"threshold_per_cycle": 1.0}, time=0, pol=1, chan=0)
+        add_to_imaging_dict(
+            record, {"threshold_per_cycle": stokes_q}, time=0, pol=1, chan=0
+        )
 
     continuum_node.continuum_cycle_append_node(
         {"image": xr.Dataset()},
@@ -1171,9 +1174,10 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         model[0, 0] += 1.0
         if deconvolver == "mtmfs":
             model[0, 1] -= 0.25
-        result = ImagingDict()
+        result = {}
         for pol, iterations in enumerate((1, 2)):
-            result.add(
+            add_to_imaging_dict(
+                result,
                 {
                     "iter_done": iterations,
                     "peakres": 0.5,
@@ -1228,8 +1232,8 @@ def test_continuum_node_updates_controller_and_cumulative_flux(
         [MODEL_UPDATE_MAX_ITER_PER_CYCLE, MODEL_UPDATE_MAX_ITER_PER_CYCLE],
     )
     assert result["timing_model_update"].loc[0, "T_mtmfs"] == pytest.approx(0.25)
-    assert len(result["deconvolution"].data) == 2
-    for pol, fields in enumerate(result["deconvolution"].data.values()):
+    assert len(result["deconvolution"]) == 2
+    for pol, fields in enumerate(result["deconvolution"].values()):
         assert fields["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
         assert np.isfinite(fields["hessian_condition_number"]).all()
         previous_flux = 16.0 * (pol + 2)
@@ -1294,7 +1298,7 @@ def test_native_mtmfs_node_books_a_diverged_model_update(
         if diverged_model_updates
         else MODEL_UPDATE_MAX_ITER_PER_CYCLE
     )
-    (fields,) = result["deconvolution"].data.values()
+    (fields,) = result["deconvolution"].values()
     assert fields["iter_done"] == [iterations]
     assert fields["stop_code"].model_update == stop_code
     assert result["stopcode"] == StopCode(
@@ -1346,8 +1350,9 @@ def test_mvc_stops_when_exact_taylor_zero_residual_grows_threefold(
     def backend(image, deconvolver, controls, **kwargs):
         nonlocal backend_calls
         backend_calls += 1
-        result = ImagingDict()
-        result.add(
+        result = {}
+        add_to_imaging_dict(
+            result,
             {
                 "iter_done": 1,
                 "peakres": 0.5,
@@ -1562,8 +1567,7 @@ def test_asp_node_books_the_model_update_of_every_plane(asp_options):
     )
 
     records = {
-        (key.time, key.pol): fields
-        for key, fields in result["deconvolution"].data.items()
+        (key.time, key.pol): fields for key, fields in result["deconvolution"].items()
     }
     assert sorted(records) == [(0, 0), (0, 1), (1, 0), (1, 1)]
     iterations = np.array(
@@ -1641,7 +1645,7 @@ def test_asp_node_books_a_diverged_model_update(
         if diverged_model_updates
         else MODEL_UPDATE_MAX_ITER_PER_CYCLE
     )
-    (fields,) = result["deconvolution"].data.values()
+    (fields,) = result["deconvolution"].values()
     assert fields["iter_done"] == [iterations]
     assert fields["stop_code"].model_update == stop_code
     assert result["stopcode"] == StopCode(
@@ -1779,7 +1783,7 @@ def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
     assert result["residual_converged"]
     assert result["stopcode"].imaging == IMAGING_ENTROPY
     assert controller.entropy_stopped[0, 0, 0]
-    fields = next(iter(result["residual_statistics"].data.values()))
+    fields = next(iter(result["residual_statistics"].values()))
     assert np.isfinite(fields["entropy"][0])
     assert np.isfinite(fields["residual_snr"][0])
     assert np.all(result["image"].SKY_MODEL.values == 0)
@@ -1894,7 +1898,7 @@ def test_refreshed_stop_skips_model_update_and_preserves_counters(
     assert controller.total_iter_done == controller.cycles_done == 0
     assert controller.max_cycles == max_cycles
     assert np.all(controller.max_iter_remaining == max_iter)
-    assert not result["deconvolution"].data
+    assert not result["deconvolution"]
     assert np.all(result["image"].SKY_MODEL.values == 0)
 
 
@@ -2050,7 +2054,7 @@ def _run_accelerated_append(
         return {
             "image": image,
             "controller": controller,
-            "deconvolution": ImagingDict(),
+            "deconvolution": {},
             "residual_converged": converged,
             "timing_model_update": pd.DataFrame({"T_model_update": [0.0]}),
         }
@@ -2301,13 +2305,17 @@ def test_plain_step_planes_follow_the_stop_test_after_the_model_update(
     controller.ensure_planes(1, 1, 4)
     controller.max_iter_remaining[0, 0, 1] = 0
     controller.max_entropy[0, 0, 3] = 1.0
-    deconvolution = ImagingDict()
+    deconvolution = {}
     for pol, peak in enumerate((0.101, 0.5, 0.5, 0.5)):
-        deconvolution.add(
-            {"iter_done": 1, "peakres": peak, "masksum": 16}, time=0, pol=pol, chan=0
+        add_to_imaging_dict(
+            deconvolution,
+            {"iter_done": 1, "peakres": peak, "masksum": 16},
+            time=0,
+            pol=pol,
+            chan=0,
         )
     controller_before = copy.deepcopy(controller.__dict__)
-    deconvolution_before = copy.deepcopy(deconvolution.data)
+    deconvolution_before = copy.deepcopy(deconvolution)
     captured = {}
 
     def step(*args, plain_step_planes, cycle_acceleration_state_xds, **kwargs):
@@ -2330,7 +2338,7 @@ def test_plain_step_planes_follow_the_stop_test_after_the_model_update(
     np.testing.assert_array_equal(controller.stop_code_imaging, IMAGING_CONTINUE)
     for name, value in controller_before.items():
         np.testing.assert_equal(getattr(controller, name), value)
-    assert deconvolution.data == deconvolution_before
+    assert deconvolution == deconvolution_before
 
 
 @pytest.mark.parametrize(
@@ -2383,14 +2391,15 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
 
     def backend(image_arg, deconvolver, controls, **kwargs):
         image_arg["SKY_MODEL"] = 0.25 * image_arg.SKY_RESIDUAL
-        result = ImagingDict()
+        result = {}
         for pol, (iterations, peak, code) in enumerate(
             (
                 (1, 0.101, MODEL_UPDATE_THRESHOLD_PER_CYCLE),
                 (2, 0.5, MODEL_UPDATE_MAX_ITER_PER_CYCLE),
             )
         ):
-            result.add(
+            add_to_imaging_dict(
+                result,
                 {
                     "iter_done": iterations,
                     "peakres": peak,
@@ -2443,7 +2452,7 @@ def test_plain_step_planes_follow_the_residual_the_model_update_ends_with(
     np.testing.assert_array_equal(captured["planes"], [expected])
     np.testing.assert_array_equal(controller.stop_code_imaging, IMAGING_CONTINUE)
     np.testing.assert_array_equal(controller.max_iter_remaining[0, 0], [1, 0])
-    for fields in result["deconvolution"].data.values():
+    for fields in result["deconvolution"].values():
         assert fields["stop_code"].imaging == IMAGING_CONTINUE
 
 
@@ -2501,9 +2510,10 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
         image_arg.SKY_RESIDUAL.values -= 0.5 * increment.values
         model_flux = taylor_zero_flux(image_arg.SKY_MODEL)
         model = image_arg.SKY_MODEL.isel(time=0, taylor_term=0).values
-        result = ImagingDict()
+        result = {}
         for pol in range(2):
-            result.add(
+            add_to_imaging_dict(
+                result,
                 {
                     "iter_done": 1,
                     "peakres": float(
@@ -2576,7 +2586,7 @@ def test_accelerated_imaging_cycles_book_the_flux_of_the_accelerated_model(
             first_flux, taylor_zero_flux(2.0 * first_residual), rtol=1e-12
         )
     for pol in range(2):
-        fields = second["deconvolution"].data[Key(time=0, pol=pol, chan=0)]
+        fields = second["deconvolution"][Key(time=0, pol=pol, chan=0)]
         assert len(fields["model_flux"]) == len(fields["start_model_flux"]) == 2
         assert fields["start_model_flux"][0] == 0.0
         assert fields["model_flux"][0] == pytest.approx(first_flux[pol], rel=1e-12)

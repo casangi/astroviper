@@ -417,7 +417,7 @@ def imaging_preparation_single_field(
         Image dataset with the PSF and primary beam, in the Stokes basis.
     return_df : pandas.DataFrame
         One-row timing frame from the setup step.
-    combined_imaging_dict : ImagingDict
+    combined_imaging_dict : dict
         Empty accumulator for the per-plane convergence statistics.
     T_setup : float
         Wall-clock time of the setup step (seconds).
@@ -438,14 +438,13 @@ def imaging_preparation_single_field(
         imaging_setup_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        ImagingDict,
         make_continuum_cycle_controller,
     )
 
     logger.debug("Processing chunk " + str(task_id))
 
     controller = make_continuum_cycle_controller(cycle_control_params)
-    combined_imaging_dict = ImagingDict()
+    combined_imaging_dict = {}
 
     # Once-only imaging setup: imaging weights, PSF and primary beam. The dirty
     # image and the model update are NOT done here.
@@ -1022,7 +1021,7 @@ def image_cube_single_field(
         With ``exact_psf_subtraction`` (and ``max_iter > 0``) it also holds
         ``T_prep_subtraction_psf``, the time of the PSF of twice the image
         size, which ``T_prep`` includes.
-    combined_imaging_dict : ImagingDict
+    combined_imaging_dict : dict
         Per-plane convergence statistics for this chunk: one entry per model
         update and a closing entry from the stop test that ended the loop
         (``iter_done`` 0, ``peakres`` the peak of the written residual inside

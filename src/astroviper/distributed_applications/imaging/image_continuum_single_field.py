@@ -1889,11 +1889,7 @@ def combine_continuum_chunks(input_data, input_params):
     else:
         # Keep the output schema stable even when no input supplied
         # deconvolution metadata.
-        from astroviper.processing_functions.imaging.utils.imaging_dict import (
-            ImagingDict,
-        )
-
-        combined_deconvolution = ImagingDict()
+        combined_deconvolution = {}
 
     return_dict = {
         "image": combined_image,

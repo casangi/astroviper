@@ -7,7 +7,7 @@ from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbo
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     COMPONENT_COUNT_FIELDS,
     ITERATION_HISTORY_FIELDS,
-    ImagingDict,
+    add_to_imaging_dict,
 )
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
@@ -515,7 +515,7 @@ def create_imaging_dict(
     selected_calculations: dict,
 ):
     """
-    Build the per-plane :class:`ImagingDict` summarizing a CLEAN run.
+    Build the per-plane ``imaging_dict`` summarizing a CLEAN run.
 
     Parameters
     ----------
@@ -570,7 +570,7 @@ def create_imaging_dict(
 
     Returns
     -------
-    ImagingDict
+    dict
         Per-plane deconvolution statistics indexed by
         ``(time, chan, pol)``.
     """
@@ -626,7 +626,7 @@ def create_imaging_dict(
         threshold_per_cycle_used = deconvolve_params.get("threshold", None)
     threshold_per_cycle_is_per_plane = np.ndim(threshold_per_cycle_used) > 0
 
-    imaging_dict = ImagingDict()
+    imaging_dict = {}
 
     for tt in range(ntime):
         for nn in range(nchan):
@@ -690,7 +690,7 @@ def create_imaging_dict(
                     model_flux_negative[tt, nn, pp]
                 )
 
-                imaging_dict.add(returnvals, time=tt, pol=pp, chan=nn)
+                add_to_imaging_dict(imaging_dict, returnvals, time=tt, pol=pp, chan=nn)
 
     return imaging_dict
 
@@ -757,7 +757,7 @@ def deconvolve(
 
     Returns
     -------
-    imaging_dict : ImagingDict
+    imaging_dict : dict
         Per-plane deconvolution statistics, indexed by
         ``(time, chan, pol)``. Each entry contains iteration count, peak
         residuals before and after, model fluxes, and PSF bookkeeping.

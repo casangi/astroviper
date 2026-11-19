@@ -223,7 +223,7 @@ def test_channel_without_visibilities_next_to_a_mapped_channel(
         if chan == without_visibilities:
             # the chunk's visibility channel is gridded onto it
             assert float(np.abs(alone.SKY_MODEL.values).max()) > 0.1
-        alone_dict = alone_result["deconvolution"].data
+        alone_dict = alone_result["deconvolution"]
         assert alone_dict
         for key, value in alone_dict.items():
             moved = Key(time=key.time, pol=key.pol, chan=key.chan + chan)
@@ -231,7 +231,7 @@ def test_channel_without_visibilities_next_to_a_mapped_channel(
             _assert_same(
                 {
                     f: v
-                    for f, v in both_result["deconvolution"].data[moved].items()
+                    for f, v in both_result["deconvolution"][moved].items()
                     if f not in CYCLE_TIMING_FIELDS
                 },
                 {f: v for f, v in value.items() if f not in CYCLE_TIMING_FIELDS},
@@ -245,7 +245,7 @@ def test_channel_without_visibilities_next_to_a_mapped_channel(
                     variable.values,
                     f"channel {chan} statistics {key} {name}",
                 )
-    assert len(both_result["deconvolution"].data) == 2 * len(alone_dict)
+    assert len(both_result["deconvolution"]) == 2 * len(alone_dict)
 
 
 def test_node_task_releases_everything_by_reference_counting(node_task_inputs):
@@ -306,7 +306,7 @@ def test_node_task_releases_everything_by_reference_counting(node_task_inputs):
         assert not collections_inside, (
             f"garbage collections inside the node task: {collections_inside}"
         )
-        assert result["deconvolution"].data
+        assert result["deconvolution"]
         del result, kwargs
         gc.set_debug(gc.DEBUG_SAVEALL)
         gc.collect()

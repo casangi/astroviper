@@ -465,27 +465,19 @@ def run_image(
     # a continuum run that makes the dirty image only has no record
     run = {
         "record": next(
-            (
-                fields
-                for key, fields in result["deconvolution"].data.items()
-                if key.pol == 0
-            ),
+            (fields for key, fields in result["deconvolution"].items() if key.pol == 0),
             None,
         ),
         "stop_code": next(
             (
                 int(fields["stop_code"].imaging)
-                for key, fields in stops.data.items()
+                for key, fields in stops.items()
                 if key.pol == 0
             ),
             None,
         ),
         "final entropy": next(
-            (
-                fields["entropy"][-1]
-                for key, fields in stops.data.items()
-                if key.pol == 0
-            ),
+            (fields["entropy"][-1] for key, fields in stops.items() if key.pol == 0),
             None,
         ),
         "beam": beam.isel({dim: 0 for dim in beam.dims if dim != label}).values,

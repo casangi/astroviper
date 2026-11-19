@@ -74,7 +74,7 @@ def model_update_cube_single_field(
 
     Returns
     -------
-    imaging_dict : ImagingDict
+    imaging_dict : dict
         Per-plane deconvolution statistics for this cycle. Every plane
         carries the reason the deconvolver ended its model update as the
         model update stop code (iteration control: ``MODEL_UPDATE_*`` of

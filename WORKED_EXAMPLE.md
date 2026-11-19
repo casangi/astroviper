@@ -96,7 +96,8 @@ The **cycle control and bookkeeping helpers** (not science kernels) live in
 the `processing_functions/imaging/utils/` subpackage: `cycle_control.py`
 (`CycleController`, stop codes, `merge_imaging_dicts`,
 `get_per_cycle_limits`, the `get_*_from_imaging_dict` extractors,
-`format_/print_imaging_dict`), `imaging_dict.py` (`ImagingDict`, `Key`),
+`format_/print_imaging_dict`), `imaging_dict.py` (`Key`,
+`add_to_imaging_dict`, `select_from_imaging_dict`),
 `timing.py` (`accumulate_timing`), and `visibility.py`
 (`drop_auto_correlations` — the shared cross-correlation filter used by the PSF
 and undeconvolved-image gridders; do not re-inline it). Import them from
@@ -117,7 +118,7 @@ via `CycleController`:
 - After every residual update, the first included, the stop test (cycle
   control) checks the residual that update has just made; a plane that
   continues gets another model update. Per-plane stats accumulate into an
-  `ImagingDict`. The loop ends only at the stop test, so the last residual
+  `imaging_dict`. The loop ends only at the stop test, so the last residual
   update produces the written residual image.
 - When `restore=True` (off by default), a final `restore_image(...)` step
   (`processing_functions/imaging/restore.py`) convolves the model with the clean

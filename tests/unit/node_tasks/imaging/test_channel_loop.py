@@ -28,8 +28,8 @@ from astroviper.node_tasks.imaging.image_cube_single_field import (
     _with_image_spectral_reference,
 )
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
-    ImagingDict,
     Key,
+    add_to_imaging_dict,
 )
 
 VIS_FREQUENCIES = np.array([1.0e9, 1.1e9, 1.2e9])
@@ -170,9 +170,13 @@ class _FakeScience:
                 "n_cycles": [n_cycles],
             }
         )
-        imaging_dict = ImagingDict()
-        imaging_dict.add(
-            {"iter_done": 5 * (chan + 1), "peakres": 0.1}, time=0, pol=0, chan=0
+        imaging_dict = {}
+        add_to_imaging_dict(
+            imaging_dict,
+            {"iter_done": 5 * (chan + 1), "peakres": 0.1},
+            time=0,
+            pol=0,
+            chan=0,
         )
         return img_xds, timing, imaging_dict
 
@@ -248,8 +252,8 @@ def test_node_task_images_one_channel_at_a_time(tmp_path, fake_science):
 
     # Imaging dict: one entry per channel, on chunk-local (here global) channels.
     deconv = result["deconvolution"]
-    assert sorted(deconv.data) == [Key(time=0, pol=0, chan=c) for c in range(3)]
-    assert deconv.data[Key(0, 0, 1)]["iter_done"] == [10]
+    assert sorted(deconv) == [Key(time=0, pol=0, chan=c) for c in range(3)]
+    assert deconv[Key(0, 0, 1)]["iter_done"] == [10]
 
     # Per-plane image statistics cover the whole chunk.
     stats = result["image_statistics"]["sky_residual"]
@@ -296,7 +300,7 @@ def test_imaging_dict_channels_shift_onto_global_numbers(tmp_path, fake_science)
         **_task_inputs(tmp_path, data_selection={"ms_a": {"frequency": slice(5, 8)}}),
         input_data=ps_xdt,
     )
-    assert sorted(key.chan for key in result["deconvolution"].data) == [5, 6, 7]
+    assert sorted(key.chan for key in result["deconvolution"]) == [5, 6, 7]
 
 
 @pytest.mark.parametrize("image_chunking", [{"frequency": 1}, None])
@@ -558,7 +562,7 @@ def test_chunks_land_at_the_task_global_channels(tmp_path, fake_science, write_s
     for local, chan in enumerate(range(5, 8)):
         assert (img["SKY_RESIDUAL"].isel(frequency=chan).values == local).all()
     assert np.isnan(img["SKY_RESIDUAL"].isel(frequency=slice(0, 5)).values).all()
-    assert sorted(key.chan for key in result["deconvolution"].data) == [5, 6, 7]
+    assert sorted(key.chan for key in result["deconvolution"]) == [5, 6, 7]
 
 
 def test_chunk_task_coords():
@@ -735,20 +739,20 @@ def test_combine_channel_timing_frames():
 
 
 def test_shift_imaging_dict_channels():
-    imaging_dict = ImagingDict()
-    imaging_dict.add({"iter_done": 3}, time=0, pol=1, chan=0)
+    imaging_dict = {}
+    add_to_imaging_dict(imaging_dict, {"iter_done": 3}, time=0, pol=1, chan=0)
     assert _shift_imaging_dict_channels(imaging_dict, 0) is imaging_dict
     shifted = _shift_imaging_dict_channels(imaging_dict, 4)
-    assert list(shifted.data) == [Key(time=0, pol=1, chan=4)]
-    assert shifted.data[Key(0, 1, 4)]["iter_done"] == [3]
+    assert list(shifted) == [Key(time=0, pol=1, chan=4)]
+    assert shifted[Key(0, 1, 4)]["iter_done"] == [3]
 
 
 def test_imaging_dict_channels_across_spectral_windows():
     """Each spectral window's MSv4 numbers its own channels from 0, so the
     record is placed by the task's image channels, not the data selection."""
-    imaging_dict = ImagingDict()
-    imaging_dict.add({"iter_done": 1}, time=0, pol=0, chan=0)
-    imaging_dict.add({"iter_done": 2}, time=0, pol=0, chan=1)
+    imaging_dict = {}
+    add_to_imaging_dict(imaging_dict, {"iter_done": 1}, time=0, pol=0, chan=0)
+    add_to_imaging_dict(imaging_dict, {"iter_done": 2}, time=0, pol=0, chan=1)
     second_window = {
         "frequency": {"data": [2.0e11, 2.1e11], "slice": slice(3840, 3842)}
     }
@@ -757,7 +761,7 @@ def test_imaging_dict_channels_across_spectral_windows():
     remapped = _remap_imaging_dict_to_global_channels(
         imaging_dict, second_window, data_selection
     )
-    assert [key.chan for key in remapped.data] == [3840, 3841]
+    assert [key.chan for key in remapped] == [3840, 3841]
     # a task without an image slice falls back to the data selection
     no_slice = {"frequency": {"data": [2.0e11, 2.1e11]}}
     assert _image_channel_start(no_slice, {"ms": {"frequency": slice(5, 7)}}) == 5

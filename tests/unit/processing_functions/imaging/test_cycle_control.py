@@ -2,8 +2,9 @@
 Unit tests for the cycle control module.
 
 Tests cover:
-- ImagingDict core functionality (initialization, add, sel, to_dict, repr)
-- ImagingDict utility functions (merge, extraction)
+- imaging_dict core functionality (initialization, add_to_imaging_dict,
+  select_from_imaging_dict)
+- imaging_dict utility functions (merge, extraction)
 - CycleController initialization and parameter validation
 - Adaptive threshold_per_cycle calculation
 - Convergence checking with all stop codes
@@ -49,31 +50,32 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
     ITERATION_HISTORY_FIELDS,
-    ImagingDict,
     Key,
+    add_to_imaging_dict,
+    select_from_imaging_dict,
 )
 
 # =============================================================================
-# ImagingDict Core Functionality Tests
+# imaging_dict Core Functionality Tests
 # =============================================================================
 
 
 class TestImagingDictBasics(unittest.TestCase):
-    """Test ImagingDict initialization, properties, and basic methods."""
+    """Test imaging_dict initialization and layout."""
 
     def test_empty_initialization(self):
-        """Test creating an empty ImagingDict."""
-        rd = ImagingDict()
+        """Test creating an empty imaging_dict."""
+        rd = {}
         self.assertIsNotNone(rd)
-        self.assertEqual(len(rd.data), 0)
-        self.assertIsInstance(rd.data, dict)
+        self.assertEqual(len(rd), 0)
+        self.assertIsInstance(rd, dict)
 
     def test_data_property_getter(self):
-        """Test data property getter returns internal dictionary."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
+        """Test the imaging_dict is a dictionary keyed by Key."""
+        rd = {}
+        add_to_imaging_dict(rd, {"peakres": 1.0}, time=0, pol=0, chan=0)
 
-        data = rd.data
+        data = rd
         self.assertIsInstance(data, dict)
         self.assertEqual(len(data), 1)
 
@@ -81,81 +83,18 @@ class TestImagingDictBasics(unittest.TestCase):
         key = Key(0, 0, 0)
         self.assertIn(key, data)
 
-    def test_data_property_setter(self):
-        """Test data property setter updates internal dictionary."""
-        rd = ImagingDict()
-
-        # Create new data dict
-        new_data = {Key(0, 0, 0): {"peakres": [2.5], "iter_done": [50]}}
-        rd.data = new_data
-
-        self.assertEqual(len(rd.data), 1)
-        entry = rd.sel(time=0, pol=0, chan=0)
-        self.assertEqual(entry["peakres"], [2.5])
-        self.assertEqual(entry["iter_done"], [50])
-
-    def test_to_dict_method(self):
-        """Test to_dict() returns the internal data dictionary."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.5, "iter_done": 100}, time=0, pol=0, chan=0)
-        rd.add({"peakres": 1.2, "iter_done": 80}, time=0, pol=0, chan=1)
-
-        result = rd.to_dict()
-
-        # Should return the same object as .data
-        self.assertIs(result, rd.data)
-        self.assertEqual(len(result), 2)
-
-    def test_repr_empty(self):
-        """Test __repr__() for empty ImagingDict."""
-        rd = ImagingDict()
-        repr_str = repr(rd)
-
-        # Empty dict should produce empty string (no entries)
-        self.assertEqual(repr_str, "")
-
-    def test_repr_single_entry(self):
-        """Test __repr__() for single entry."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.0, "iter_done": 50}, time=0, pol=0, chan=0)
-
-        repr_str = repr(rd)
-
-        # Should contain the key and values
-        self.assertIn("Key(time=0, pol=0, chan=0)", repr_str)
-        self.assertIn("peakres", repr_str)
-        self.assertIn("[1.0]", repr_str)  # FIELD_ACCUM stored as list
-        self.assertIn("iter_done", repr_str)
-        self.assertIn("[50]", repr_str)  # FIELD_ACCUM stored as list
-
-    def test_repr_multiple_entries(self):
-        """Test __repr__() for multiple entries."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
-        rd.add({"peakres": 0.8}, time=0, pol=0, chan=1)
-        rd.add({"peakres": 0.6}, time=0, pol=1, chan=0)
-
-        repr_str = repr(rd)
-
-        # Should contain all keys
-        self.assertIn("Key(time=0, pol=0, chan=0)", repr_str)
-        self.assertIn("Key(time=0, pol=0, chan=1)", repr_str)
-        self.assertIn("Key(time=0, pol=1, chan=0)", repr_str)
-
-        # Should have multiple lines (newline separated)
-        lines = repr_str.split("\n")
-        self.assertEqual(len(lines), 3)
-
 
 class TestImagingDictAdd(unittest.TestCase):
-    """Test ImagingDict.add() method edge cases and history tracking."""
+    """Test add_to_imaging_dict() edge cases and history tracking."""
 
     def test_add_first_entry_field_accum(self):
         """Test adding first entry with FIELD_ACCUM fields."""
-        rd = ImagingDict()
-        rd.add({"peakres": 1.5, "iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(
+            rd, {"peakres": 1.5, "iter_done": 100}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # FIELD_ACCUM fields should be stored as lists
         self.assertEqual(entry["peakres"], [1.5])
@@ -165,10 +104,12 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_first_entry_field_single_value(self):
         """Test adding first entry with FIELD_SINGLE_VALUE fields."""
-        rd = ImagingDict()
-        rd.add({"max_psf_sidelobe": 0.2, "gain": 0.1}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(
+            rd, {"max_psf_sidelobe": 0.2, "gain": 0.1}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # FIELD_SINGLE_VALUE fields should be stored as scalars
         self.assertEqual(entry["max_psf_sidelobe"], 0.2)
@@ -178,8 +119,9 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_first_entry_mixed_fields(self):
         """Test adding first entry with both FIELD_ACCUM and FIELD_SINGLE_VALUE."""
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 1.0,  # FIELD_ACCUM
                 "iter_done": 50,  # FIELD_ACCUM
@@ -191,7 +133,7 @@ class TestImagingDictAdd(unittest.TestCase):
             chan=0,
         )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # Check FIELD_ACCUM are lists
         self.assertEqual(entry["peakres"], [1.0])
@@ -203,10 +145,12 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_unknown_field(self):
         """Test adding a field not in FIELD_ACCUM or FIELD_SINGLE_VALUE."""
-        rd = ImagingDict()
-        rd.add({"custom_field": 42, "peakres": 1.0}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(
+            rd, {"custom_field": 42, "peakres": 1.0}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # Unknown fields should be treated as FIELD_SINGLE_VALUE (not accumulated)
         self.assertEqual(entry["custom_field"], 42)
@@ -217,26 +161,26 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_empty_dict(self):
         """Test adding an empty dictionary."""
-        rd = ImagingDict()
-        rd.add({}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {}, time=0, pol=0, chan=0)
 
         # Key should exist but with empty entry
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
         self.assertIsNotNone(entry)
         self.assertEqual(entry, {})
 
     def test_backward_compat_scalar_to_list(self):
         """Test backward compatibility: scalar converted to list on second add."""
-        rd = ImagingDict()
+        rd = {}
 
         # Manually create a scalar entry (simulating old data format)
         key = Key(0, 0, 0)
-        rd.data[key] = {"peakres": 1.0}  # Scalar instead of list
+        rd[key] = {"peakres": 1.0}  # Scalar instead of list
 
         # Now add new value - should convert to list and append
-        rd.add({"peakres": 0.8}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 0.8}, time=0, pol=0, chan=0)
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # Should have converted scalar to list and appended new value
         self.assertEqual(entry["peakres"], [1.0, 0.8])
@@ -244,18 +188,24 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_multiple_adds_same_key_accumulate(self):
         """Test multiple adds to same key accumulate FIELD_ACCUM values."""
-        rd = ImagingDict()
+        rd = {}
 
         # First add
-        rd.add({"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0
+        )
 
         # Second add
-        rd.add({"peakres": 0.8, "iter_done": 80}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"peakres": 0.8, "iter_done": 80}, time=0, pol=0, chan=0
+        )
 
         # Third add
-        rd.add({"peakres": 0.6, "iter_done": 60}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"peakres": 0.6, "iter_done": 60}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # FIELD_ACCUM should accumulate in lists
         self.assertEqual(entry["peakres"], [1.0, 0.8, 0.6])
@@ -263,15 +213,19 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_multiple_adds_same_key_replace_single_value(self):
         """Test multiple adds to same key replace FIELD_SINGLE_VALUE values."""
-        rd = ImagingDict()
+        rd = {}
 
         # First add
-        rd.add({"max_psf_sidelobe": 0.2, "threshold": 0.01}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"max_psf_sidelobe": 0.2, "threshold": 0.01}, time=0, pol=0, chan=0
+        )
 
         # Second add with different values
-        rd.add({"max_psf_sidelobe": 0.15, "threshold": 0.005}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"max_psf_sidelobe": 0.15, "threshold": 0.005}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # FIELD_SINGLE_VALUE should be replaced (last value wins)
         self.assertEqual(entry["max_psf_sidelobe"], 0.15)
@@ -279,15 +233,19 @@ class TestImagingDictAdd(unittest.TestCase):
 
     def test_add_partial_fields_to_existing_key(self):
         """Test adding partial fields to an existing key."""
-        rd = ImagingDict()
+        rd = {}
 
         # First add with some fields
-        rd.add({"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0
+        )
 
         # Second add with different fields
-        rd.add({"masksum": 500, "max_psf_sidelobe": 0.2}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(
+            rd, {"masksum": 500, "max_psf_sidelobe": 0.2}, time=0, pol=0, chan=0
+        )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # First fields should still exist
         self.assertEqual(entry["peakres"], [1.0])
@@ -299,30 +257,31 @@ class TestImagingDictAdd(unittest.TestCase):
 
 
 class TestImagingDictSel(unittest.TestCase):
-    """Test ImagingDict.sel() method edge cases and filtering."""
+    """Test select_from_imaging_dict() edge cases and filtering."""
 
     def setUp(self):
-        """Create test ImagingDict with multiple entries."""
-        self.rd = ImagingDict()
-        self.rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
-        self.rd.add({"peakres": 0.9}, time=0, pol=0, chan=1)
-        self.rd.add({"peakres": 0.8}, time=0, pol=1, chan=0)
-        self.rd.add({"peakres": 0.7}, time=1, pol=0, chan=0)
+        """Create test imaging_dict with multiple entries."""
+        self.rd = {}
+        add_to_imaging_dict(self.rd, {"peakres": 1.0}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(self.rd, {"peakres": 0.9}, time=0, pol=0, chan=1)
+        add_to_imaging_dict(self.rd, {"peakres": 0.8}, time=0, pol=1, chan=0)
+        add_to_imaging_dict(self.rd, {"peakres": 0.7}, time=1, pol=0, chan=0)
 
     def test_sel_no_matches_returns_none(self):
-        """Test sel() returns None when no matches found."""
-        result = self.rd.sel(time=99, pol=0, chan=0)
+        """Test select_from_imaging_dict() returns None when no matches found."""
+        result = select_from_imaging_dict(self.rd, time=99, pol=0, chan=0)
         self.assertIsNone(result)
 
-        result = self.rd.sel(time=0, pol=99, chan=0)
+        result = select_from_imaging_dict(self.rd, time=0, pol=99, chan=0)
         self.assertIsNone(result)
 
-        result = self.rd.sel(time=0, pol=0, chan=99)
+        result = select_from_imaging_dict(self.rd, time=0, pol=0, chan=99)
         self.assertIsNone(result)
 
     def test_sel_single_match_returns_dict(self):
-        """Test sel() returns single dict (not list) when one match."""
-        result = self.rd.sel(time=0, pol=0, chan=0)
+        """Test select_from_imaging_dict() returns single dict (not list) when one
+        match."""
+        result = select_from_imaging_dict(self.rd, time=0, pol=0, chan=0)
 
         # Should return a dict, not a list
         self.assertIsInstance(result, dict)
@@ -330,9 +289,9 @@ class TestImagingDictSel(unittest.TestCase):
         self.assertEqual(result["peakres"], [1.0])
 
     def test_sel_multiple_matches_returns_list(self):
-        """Test sel() returns list when multiple matches."""
+        """Test select_from_imaging_dict() returns list when multiple matches."""
         # Filter by time=0 only (should match 3 entries)
-        result = self.rd.sel(time=0)
+        result = select_from_imaging_dict(self.rd, time=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 3)
@@ -343,58 +302,59 @@ class TestImagingDictSel(unittest.TestCase):
             self.assertIn("peakres", entry)
 
     def test_sel_all_none_returns_all(self):
-        """Test sel() with all None filters returns all entries (or empty list)."""
-        result = self.rd.sel()
+        """Test select_from_imaging_dict() with all None filters returns all entries
+        (or empty list)."""
+        result = select_from_imaging_dict(self.rd)
 
         # With all None, it should return a list of all entries
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 4)
 
     def test_sel_empty_returndict(self):
-        """Test sel() on empty ImagingDict returns None."""
-        rd_empty = ImagingDict()
-        result = rd_empty.sel(time=0, pol=0, chan=0)
+        """Test select_from_imaging_dict() on empty imaging_dict returns None."""
+        rd_empty = {}
+        result = select_from_imaging_dict(rd_empty, time=0, pol=0, chan=0)
 
         self.assertIsNone(result)
 
     def test_sel_filter_by_time_only(self):
         """Test filtering by time parameter only."""
-        result = self.rd.sel(time=0)
+        result = select_from_imaging_dict(self.rd, time=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 3)  # 3 entries with time=0
 
     def test_sel_filter_by_pol_only(self):
         """Test filtering by pol parameter only."""
-        result = self.rd.sel(pol=0)
+        result = select_from_imaging_dict(self.rd, pol=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 3)  # 3 entries with pol=0
 
     def test_sel_filter_by_chan_only(self):
         """Test filtering by chan parameter only."""
-        result = self.rd.sel(chan=0)
+        result = select_from_imaging_dict(self.rd, chan=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 3)  # 3 entries with chan=0
 
     def test_sel_combined_filters(self):
         """Test filtering with multiple parameters."""
-        result = self.rd.sel(time=0, pol=0)
+        result = select_from_imaging_dict(self.rd, time=0, pol=0)
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 2)  # time=0, pol=0 matches 2 entries
 
     def test_sel_preserves_order(self):
-        """Test sel() preserves insertion order (OrderedDict behavior)."""
-        rd = ImagingDict()
+        """Test select_from_imaging_dict() preserves insertion order."""
+        rd = {}
 
         # Add in specific order
-        rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
-        rd.add({"peakres": 0.9}, time=0, pol=0, chan=1)
-        rd.add({"peakres": 0.8}, time=0, pol=0, chan=2)
+        add_to_imaging_dict(rd, {"peakres": 1.0}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 0.9}, time=0, pol=0, chan=1)
+        add_to_imaging_dict(rd, {"peakres": 0.8}, time=0, pol=0, chan=2)
 
-        result = rd.sel(time=0, pol=0)
+        result = select_from_imaging_dict(rd, time=0, pol=0)
 
         # Should return in insertion order
         self.assertEqual(result[0]["peakres"], [1.0])
@@ -402,8 +362,9 @@ class TestImagingDictSel(unittest.TestCase):
         self.assertEqual(result[2]["peakres"], [0.8])
 
     def test_sel_nonexistent_values(self):
-        """Test sel() with values that don't exist in any entry."""
-        result = self.rd.sel(time=999, pol=999, chan=999)
+        """Test select_from_imaging_dict() with values that don't exist in any
+        entry."""
+        result = select_from_imaging_dict(self.rd, time=999, pol=999, chan=999)
         self.assertIsNone(result)
 
 
@@ -449,10 +410,11 @@ class TestImagingDictFieldClassification(unittest.TestCase):
 
     def test_all_field_accum_become_lists(self):
         """Test all FIELD_ACCUM fields are stored as lists."""
-        rd = ImagingDict()
+        rd = {}
 
         # Add all FIELD_ACCUM fields
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 1.0,
                 "peakres_nomask": 1.1,
@@ -474,7 +436,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             chan=0,
         )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # All should be lists
         for field in FIELD_ACCUM:
@@ -484,10 +446,11 @@ class TestImagingDictFieldClassification(unittest.TestCase):
 
     def test_all_field_single_value_remain_scalars(self):
         """Test all FIELD_SINGLE_VALUE fields remain scalars."""
-        rd = ImagingDict()
+        rd = {}
 
         # Add all FIELD_SINGLE_VALUE fields
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {
                 "max_psf_sidelobe": 0.2,
                 "gain": 0.1,
@@ -500,7 +463,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             chan=0,
         )
 
-        entry = rd.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(rd, time=0, pol=0, chan=0)
 
         # All should be scalars (not lists)
         for field in FIELD_SINGLE_VALUE:
@@ -509,7 +472,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
 
 
 class TestImagingDictKeyBehavior(unittest.TestCase):
-    """Test Key namedtuple behavior and OrderedDict properties."""
+    """Test Key namedtuple behavior and insertion order."""
 
     def test_key_namedtuple_creation(self):
         """Test Key namedtuple can be created and accessed."""
@@ -544,82 +507,98 @@ class TestImagingDictKeyBehavior(unittest.TestCase):
         self.assertEqual(test_dict[key], "value")
 
     def test_ordered_dict_preserves_insertion_order(self):
-        """Test ImagingDict preserves insertion order."""
-        rd = ImagingDict()
+        """Test imaging_dict preserves insertion order."""
+        rd = {}
 
         # Add keys in specific order
-        rd.add({"peakres": 1.0}, time=2, pol=0, chan=0)
-        rd.add({"peakres": 0.9}, time=0, pol=0, chan=0)
-        rd.add({"peakres": 0.8}, time=1, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 1.0}, time=2, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 0.9}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"peakres": 0.8}, time=1, pol=0, chan=0)
 
         # Verify order is preserved
-        keys = list(rd.data.keys())
+        keys = list(rd.keys())
         self.assertEqual(keys[0].time, 2)
         self.assertEqual(keys[1].time, 0)
         self.assertEqual(keys[2].time, 1)
 
 
 # =============================================================================
-# ImagingDict Utility Function Tests (Merge, Extraction)
+# imaging_dict Utility Function Tests (Merge, Extraction)
 # =============================================================================
 
 
 class TestMergeImagingDicts(unittest.TestCase):
-    """Test merging multiple ImagingDict objects."""
+    """Test merging multiple imaging_dict objects."""
 
     def test_invalid_strategy_rejected_before_inspecting_records(self):
-        left = ImagingDict()
-        left.add({"peakres": 1.0}, time=0, pol=0, chan=0)
-        right = ImagingDict()
-        right.add({"peakres": 0.5}, time=0, pol=0, chan=1)
+        left = {}
+        add_to_imaging_dict(left, {"peakres": 1.0}, time=0, pol=0, chan=0)
+        right = {}
+        add_to_imaging_dict(right, {"peakres": 0.5}, time=0, pol=0, chan=1)
         for records in ([], [left], [left, right]):
             with self.subTest(records=len(records)):
                 with self.assertRaisesRegex(ValueError, "Unknown merge_strategy"):
                     merge_imaging_dicts(records, merge_strategy="invalid")
-        self.assertEqual(left.sel(time=0, pol=0, chan=0)["peakres"], [1.0])
+        self.assertEqual(
+            select_from_imaging_dict(left, time=0, pol=0, chan=0)["peakres"], [1.0]
+        )
 
     def setUp(self):
-        """Create test ImagingDict objects."""
-        self.rd1 = ImagingDict()
-        self.rd1.add({"peakres": 0.5, "iter_done": 100}, time=0, pol=0, chan=0)
-        self.rd1.add({"peakres": 0.4, "iter_done": 90}, time=0, pol=0, chan=1)
+        """Create test imaging_dict objects."""
+        self.rd1 = {}
+        add_to_imaging_dict(
+            self.rd1, {"peakres": 0.5, "iter_done": 100}, time=0, pol=0, chan=0
+        )
+        add_to_imaging_dict(
+            self.rd1, {"peakres": 0.4, "iter_done": 90}, time=0, pol=0, chan=1
+        )
 
-        self.rd2 = ImagingDict()
-        self.rd2.add({"peakres": 0.3, "iter_done": 120}, time=0, pol=0, chan=2)
-        self.rd2.add({"peakres": 0.6, "iter_done": 80}, time=0, pol=0, chan=3)
+        self.rd2 = {}
+        add_to_imaging_dict(
+            self.rd2, {"peakres": 0.3, "iter_done": 120}, time=0, pol=0, chan=2
+        )
+        add_to_imaging_dict(
+            self.rd2, {"peakres": 0.6, "iter_done": 80}, time=0, pol=0, chan=3
+        )
 
-        self.rd3 = ImagingDict()
-        self.rd3.add({"peakres": 0.2, "iter_done": 110}, time=0, pol=1, chan=0)
+        self.rd3 = {}
+        add_to_imaging_dict(
+            self.rd3, {"peakres": 0.2, "iter_done": 110}, time=0, pol=1, chan=0
+        )
 
     def test_merge_non_overlapping_keys(self):
         """Test merging dicts with no overlapping keys."""
         merged = merge_imaging_dicts([self.rd1, self.rd2, self.rd3])
-        self.assertEqual(len(merged.data), 5)
+        self.assertEqual(len(merged), 5)
 
         # Check all entries present
-        self.assertIsNotNone(merged.sel(time=0, pol=0, chan=0))
-        self.assertIsNotNone(merged.sel(time=0, pol=0, chan=1))
-        self.assertIsNotNone(merged.sel(time=0, pol=0, chan=2))
-        self.assertIsNotNone(merged.sel(time=0, pol=0, chan=3))
-        self.assertIsNotNone(merged.sel(time=0, pol=1, chan=0))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=0, chan=0))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=0, chan=1))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=0, chan=2))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=0, chan=3))
+        self.assertIsNotNone(select_from_imaging_dict(merged, time=0, pol=1, chan=0))
 
     def test_merge_strategy_latest(self):
         """Test 'latest' merge strategy overwrites with last value."""
-        rd_conflict = ImagingDict()
-        rd_conflict.add({"peakres": 0.9, "iter_done": 50}, time=0, pol=0, chan=0)
+        rd_conflict = {}
+        add_to_imaging_dict(
+            rd_conflict, {"peakres": 0.9, "iter_done": 50}, time=0, pol=0, chan=0
+        )
 
         merged = merge_imaging_dicts([self.rd1, rd_conflict], merge_strategy="latest")
 
         # Should use value from rd_conflict (last in list)
         # Note: fields are stored as lists even for single values (history tracking)
-        entry = merged.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(merged, time=0, pol=0, chan=0)
         self.assertEqual(entry["peakres"], [0.9])  # Now a list
         self.assertEqual(entry["iter_done"], [50])  # Now a list
 
     def test_merge_strategy_error_raises_on_conflict(self):
         """Test 'error' merge strategy raises on overlapping keys."""
-        rd_conflict = ImagingDict()
-        rd_conflict.add({"peakres": 0.9, "iter_done": 50}, time=0, pol=0, chan=0)
+        rd_conflict = {}
+        add_to_imaging_dict(
+            rd_conflict, {"peakres": 0.9, "iter_done": 50}, time=0, pol=0, chan=0
+        )
 
         with self.assertRaises(ValueError) as context:
             merge_imaging_dicts([self.rd1, rd_conflict], merge_strategy="error")
@@ -628,12 +607,12 @@ class TestMergeImagingDicts(unittest.TestCase):
 
     def test_merge_strategy_update(self):
         """Test 'update' merge strategy merges dict values."""
-        rd_partial = ImagingDict()
-        rd_partial.add({"new_field": 123}, time=0, pol=0, chan=0)
+        rd_partial = {}
+        add_to_imaging_dict(rd_partial, {"new_field": 123}, time=0, pol=0, chan=0)
 
         merged = merge_imaging_dicts([self.rd1, rd_partial], merge_strategy="update")
 
-        entry = merged.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(merged, time=0, pol=0, chan=0)
         # Should have both original and new fields
         # History-tracked fields (FIELD_ACCUM) are stored as lists
         self.assertEqual(entry["peakres"], [0.5])  # Now a list
@@ -644,29 +623,31 @@ class TestMergeImagingDicts(unittest.TestCase):
     def test_merge_strategy_update_concatenates_history(self):
         """Test 'update' merge strategy concatenates FIELD_ACCUM history lists."""
         # Create a second dict with same key but new values
-        rd_second_cycle = ImagingDict()
-        rd_second_cycle.add({"peakres": 0.3, "iter_done": 50}, time=0, pol=0, chan=0)
+        rd_second_cycle = {}
+        add_to_imaging_dict(
+            rd_second_cycle, {"peakres": 0.3, "iter_done": 50}, time=0, pol=0, chan=0
+        )
 
         # Merge with update strategy
         merged = merge_imaging_dicts(
             [self.rd1, rd_second_cycle], merge_strategy="update"
         )
 
-        entry = merged.sel(time=0, pol=0, chan=0)
+        entry = select_from_imaging_dict(merged, time=0, pol=0, chan=0)
         # FIELD_ACCUM fields should be concatenated
         self.assertEqual(entry["peakres"], [0.5, 0.3])  # Concatenated history
         self.assertEqual(entry["iter_done"], [100, 50])  # Concatenated history
 
     def test_merge_empty_list(self):
-        """Test merging empty list returns empty ImagingDict."""
+        """Test merging empty list returns empty imaging_dict."""
         merged = merge_imaging_dicts([])
-        self.assertEqual(len(merged.data), 0)
+        self.assertEqual(len(merged), 0)
 
     def test_merge_invalid_strategy(self):
         """Test invalid merge strategy raises error."""
         # Create conflicting dicts to trigger the merge strategy check
-        rd_conflict = ImagingDict()
-        rd_conflict.add({"peakres": 0.9}, time=0, pol=0, chan=0)
+        rd_conflict = {}
+        add_to_imaging_dict(rd_conflict, {"peakres": 0.9}, time=0, pol=0, chan=0)
 
         with self.assertRaises(ValueError) as context:
             merge_imaging_dicts([self.rd1, rd_conflict], merge_strategy="invalid")
@@ -675,14 +656,15 @@ class TestMergeImagingDicts(unittest.TestCase):
 
 
 class TestImagingDictUtilities(unittest.TestCase):
-    """Test ImagingDict extraction utility functions."""
+    """Test imaging_dict extraction utility functions."""
 
     def setUp(self):
-        """Create test ImagingDict with realistic deconvolution data."""
-        self.rd = ImagingDict()
+        """Create test imaging_dict with realistic deconvolution data."""
+        self.rd = {}
 
         # Add entries for multiple planes
-        self.rd.add(
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 1.0,
                 "peakres_nomask": 1.2,
@@ -695,7 +677,8 @@ class TestImagingDictUtilities(unittest.TestCase):
             chan=0,
         )
 
-        self.rd.add(
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 0.8,
                 "peakres_nomask": 0.9,
@@ -708,7 +691,8 @@ class TestImagingDictUtilities(unittest.TestCase):
             chan=1,
         )
 
-        self.rd.add(
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 0.5,
                 "peakres_nomask": 0.6,
@@ -790,9 +774,11 @@ class TestImagingDictUtilities(unittest.TestCase):
         self.assertEqual(max_sidelobe, 0.15)
 
     def test_get_max_psf_sidelobe_default(self):
-        """Test default PSF sidelobe when not in ImagingDict."""
-        rd_empty = ImagingDict()
-        rd_empty.add({"peakres": 1.0, "iter_done": 50}, time=0, pol=0, chan=0)
+        """Test default PSF sidelobe when not in imaging_dict."""
+        rd_empty = {}
+        add_to_imaging_dict(
+            rd_empty, {"peakres": 1.0, "iter_done": 50}, time=0, pol=0, chan=0
+        )
 
         max_sidelobe = get_max_psf_sidelobe_from_imaging_dict(rd_empty)
 
@@ -800,15 +786,15 @@ class TestImagingDictUtilities(unittest.TestCase):
         self.assertEqual(max_sidelobe, 0.2)
 
     def test_get_peak_residual_empty_returndict(self):
-        """Test getting peak residual from empty ImagingDict."""
-        rd_empty = ImagingDict()
+        """Test getting peak residual from empty imaging_dict."""
+        rd_empty = {}
         peak = get_peak_residual_from_imaging_dict(rd_empty)
 
         self.assertEqual(peak, 0.0)
 
     def test_get_masksum_empty_returndict(self):
-        """Test getting masksum from empty ImagingDict."""
-        rd_empty = ImagingDict()
+        """Test getting masksum from empty imaging_dict."""
+        rd_empty = {}
         masksum = get_masksum_from_imaging_dict(rd_empty)
 
         self.assertEqual(masksum, 0.0)
@@ -822,7 +808,7 @@ class TestCycleControllerInitialization(unittest.TestCase):
         controller = CycleController()
 
         # max_iter is a per-plane array allocated lazily; _max_iter holds the
-        # scalar per-plane budget until the first ImagingDict is seen.
+        # scalar per-plane budget until the first imaging_dict is seen.
         self.assertIsNone(controller.max_iter_remaining)
         self.assertEqual(controller._max_iter, 1000)
         self.assertEqual(controller.max_cycles, -1)
@@ -873,7 +859,7 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
     """Test adaptive threshold_per_cycle calculation."""
 
     def setUp(self):
-        """Create controller and test ImagingDict."""
+        """Create controller and test imaging_dict."""
         self.controller = CycleController(
             max_iter=1000,
             psf_sidelobe_factor=1.5,
@@ -883,8 +869,9 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
     def test_basic_threshold_per_cycle_calculation(self):
         """Test basic adaptive threshold calculation."""
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.2},
             time=0,
             pol=0,
@@ -902,9 +889,10 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
     def test_threshold_per_cycle_clamping_min(self):
         """Test threshold_per_cycle clamping to min_psf_fraction."""
-        rd = ImagingDict()
+        rd = {}
         # Very small PSF sidelobe
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.01},
             time=0,
             pol=0,
@@ -922,9 +910,10 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
     def test_threshold_per_cycle_clamping_max(self):
         """Test threshold_per_cycle clamping to max_psf_fraction."""
-        rd = ImagingDict()
+        rd = {}
         # Very large PSF sidelobe
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.9},
             time=0,
             pol=0,
@@ -948,8 +937,9 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
             psf_sidelobe_factor=1.0,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.2},
             time=0,
             pol=0,
@@ -972,8 +962,9 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
             max_iter_per_cycle=100,  # Cap at 100 per cycle
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.2},
             time=0,
             pol=0,
@@ -994,8 +985,9 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
             max_iter_per_cycle=100,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0, "max_psf_sidelobe": 0.2},
             time=0,
             pol=0,
@@ -1010,9 +1002,10 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
         self.assertEqual(max_iter_per_cycle_updated, 50)
 
     def test_default_psf_sidelobe_used(self):
-        """Test default PSF sidelobe when not in ImagingDict."""
-        rd = ImagingDict()
-        rd.add(
+        """Test default PSF sidelobe when not in imaging_dict."""
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 1.0},  # No max_psf_sidelobe
             time=0,
             pol=0,
@@ -1030,7 +1023,7 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
 
 
 class TestBuildResidualImagingDict(unittest.TestCase):
-    """Test seeding of the first-model-update ImagingDict from the residual image."""
+    """Test seeding of the first-model-update imaging_dict from the residual image."""
 
     def _make_img_xds(self, residual_peak, real_sidelobe):
         residual = np.zeros((1, 1, 1, 4, 4))
@@ -1063,10 +1056,10 @@ class TestBuildResidualImagingDict(unittest.TestCase):
         key = Key(time=0, chan=0, pol=0)
         skipped = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "max_cycles": 0}
-        ).data[key]
+        )[key]
         measured = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "max_cycles": 1}
-        ).data[key]
+        )[key]
         for field in ("peakres", "peakres_nomask", "masksum", "max_psf_sidelobe"):
             self.assertEqual(skipped[field], measured[field])
         for field in ("entropy", "residual_snr", *RESIDUAL_STATISTICS):
@@ -1079,7 +1072,7 @@ class TestBuildResidualImagingDict(unittest.TestCase):
         rd = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "max_psf_fraction": 0.9}
         )
-        entry = rd.data[Key(time=0, chan=0, pol=0)]
+        entry = rd[Key(time=0, chan=0, pol=0)]
         self.assertEqual(entry["max_psf_sidelobe"], real_sidelobe)
 
     def test_threshold_per_cycle_uses_measured_sidelobe_not_max_psf_fraction(self):
@@ -1123,8 +1116,9 @@ class TestCheckConvergence(unittest.TestCase):
             threshold=0.01,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
@@ -1140,8 +1134,9 @@ class TestCheckConvergence(unittest.TestCase):
     def test_preserves_model_update_stop_code(self):
         """A post-model-update check keeps the deconvolver's reason per plane."""
         controller = CycleController(max_iter=1000, threshold=0.01)
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 0.5,
                 "masksum": 100,
@@ -1166,7 +1161,7 @@ class TestCheckConvergence(unittest.TestCase):
             MODEL_UPDATE_MAX_ITER_PER_CYCLE,
         )
         self.assertEqual(
-            rd.sel(time=0, pol=0, chan=0)["stop_code"],
+            select_from_imaging_dict(rd, time=0, pol=0, chan=0)["stop_code"],
             StopCode(
                 imaging=IMAGING_CONTINUE,
                 model_update=MODEL_UPDATE_MAX_ITER_PER_CYCLE,
@@ -1177,8 +1172,9 @@ class TestCheckConvergence(unittest.TestCase):
     def test_scalar_stop_code_is_not_treated_as_a_model_update_code(self):
         """Only the typed StopCode contract can report a model-update reason."""
         controller = CycleController(max_iter=1000, threshold=0.01)
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100, "iter_done": 1, "stop_code": 4},
             time=0,
             pol=0,
@@ -1191,15 +1187,16 @@ class TestCheckConvergence(unittest.TestCase):
             controller.stop_code_model_update[0, 0, 0], MODEL_UPDATE_CONTINUE
         )
         self.assertEqual(
-            rd.sel(time=0, pol=0, chan=0)["stop_code"],
+            select_from_imaging_dict(rd, time=0, pol=0, chan=0)["stop_code"],
             StopCode(IMAGING_CONTINUE, MODEL_UPDATE_CONTINUE),
         )
 
     def test_fresh_residual_check_keeps_model_update_stop_code(self):
         """A later residual-only check keeps the code until the next model update."""
         controller = CycleController(max_iter=1000, threshold=0.01)
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 0.5,
                 "masksum": 100,
@@ -1229,11 +1226,12 @@ class TestCheckConvergence(unittest.TestCase):
     def test_aggregates_mixed_model_update_stop_codes(self):
         """Mixed plane results remain exact per plane and aggregate safely."""
         controller = CycleController(max_iter=1000, threshold=0.01)
-        rd = ImagingDict()
+        rd = {}
         for pol, model_update in enumerate(
             (MODEL_UPDATE_THRESHOLD_PER_CYCLE, MODEL_UPDATE_DIVERGENCE)
         ):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": 0.5,
                     "masksum": 100,
@@ -1259,15 +1257,16 @@ class TestCheckConvergence(unittest.TestCase):
         )
         self.assertEqual(desc, "Continue imaging cycles")
         self.assertEqual(
-            [entry["stop_code"].model_update for entry in rd.data.values()],
+            [entry["stop_code"].model_update for entry in rd.values()],
             [MODEL_UPDATE_THRESHOLD_PER_CYCLE, MODEL_UPDATE_DIVERGENCE],
         )
 
     def test_rejects_unknown_model_update_stop_code(self):
         """Do not silently propagate an undocumented native return code."""
         controller = CycleController(max_iter=1000)
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 0.5,
                 "masksum": 100,
@@ -1285,8 +1284,9 @@ class TestCheckConvergence(unittest.TestCase):
         """Test stopping when mask is zero (priority 1)."""
         controller = CycleController(max_iter=1000)
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 0},  # Zero mask!
             time=0,
             pol=0,
@@ -1302,8 +1302,9 @@ class TestCheckConvergence(unittest.TestCase):
         """Test stopping when max_iter exhausted (priority 2)."""
         controller = CycleController(max_iter=0)  # No iterations left
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
@@ -1322,8 +1323,9 @@ class TestCheckConvergence(unittest.TestCase):
             threshold=0.5,  # Set threshold
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.3, "masksum": 100},  # Below threshold
             time=0,
             pol=0,
@@ -1342,8 +1344,9 @@ class TestCheckConvergence(unittest.TestCase):
             threshold=0.5,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},  # Exactly at threshold
             time=0,
             pol=0,
@@ -1362,8 +1365,9 @@ class TestCheckConvergence(unittest.TestCase):
             threshold=0.0,
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
@@ -1383,8 +1387,9 @@ class TestCheckConvergence(unittest.TestCase):
             threshold=1.0,  # Also below threshold
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 0},  # Zero mask
             time=0,
             pol=0,
@@ -1403,8 +1408,9 @@ class TestCheckConvergence(unittest.TestCase):
             threshold=1.0,  # Also below threshold
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
@@ -1423,8 +1429,9 @@ class TestCheckConvergence(unittest.TestCase):
             max_cycles=-1,  # Unlimited
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.5, "masksum": 100},
             time=0,
             pol=0,
@@ -1442,8 +1449,9 @@ class TestCheckConvergence(unittest.TestCase):
             threshold=0.0,  # Disabled
         )
 
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {"peakres": 0.001, "masksum": 100},  # Very low residual
             time=0,
             pol=0,
@@ -1459,8 +1467,8 @@ class TestCheckConvergence(unittest.TestCase):
         """Test controller's internal stopcode is updated."""
         controller = CycleController(max_iter=0)
 
-        rd = ImagingDict()
-        rd.add({"peakres": 0.5, "masksum": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"peakres": 0.5, "masksum": 100}, time=0, pol=0, chan=0)
 
         stopcode, desc = controller.check_convergence(rd)
 
@@ -1476,8 +1484,8 @@ class TestUpdateCounts(unittest.TestCase):
         """Test basic count decrementing."""
         controller = CycleController(max_iter=1000, max_cycles=5)
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 100}, time=0, pol=0, chan=0)
 
         controller.update_counts(rd)
 
@@ -1494,11 +1502,11 @@ class TestUpdateCounts(unittest.TestCase):
         """Test multiple count updates accumulate correctly."""
         controller = CycleController(max_iter=1000, max_cycles=5)
 
-        rd1 = ImagingDict()
-        rd1.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd1 = {}
+        add_to_imaging_dict(rd1, {"iter_done": 100}, time=0, pol=0, chan=0)
 
-        rd2 = ImagingDict()
-        rd2.add({"iter_done": 150}, time=0, pol=0, chan=0)
+        rd2 = {}
+        add_to_imaging_dict(rd2, {"iter_done": 150}, time=0, pol=0, chan=0)
 
         controller.update_counts(rd1)
         controller.update_counts(rd2)
@@ -1514,8 +1522,8 @@ class TestUpdateCounts(unittest.TestCase):
         """Test max_iter doesn't go negative."""
         controller = CycleController(max_iter=50)
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 100}, time=0, pol=0, chan=0)
 
         controller.update_counts(rd)
 
@@ -1526,11 +1534,11 @@ class TestUpdateCounts(unittest.TestCase):
         """Test max_cycles doesn't go negative."""
         controller = CycleController(max_cycles=1)
 
-        rd1 = ImagingDict()
-        rd1.add({"iter_done": 50}, time=0, pol=0, chan=0)
+        rd1 = {}
+        add_to_imaging_dict(rd1, {"iter_done": 50}, time=0, pol=0, chan=0)
 
-        rd2 = ImagingDict()
-        rd2.add({"iter_done": 50}, time=0, pol=0, chan=0)
+        rd2 = {}
+        add_to_imaging_dict(rd2, {"iter_done": 50}, time=0, pol=0, chan=0)
 
         controller.update_counts(rd1)
         controller.update_counts(rd2)
@@ -1542,8 +1550,8 @@ class TestUpdateCounts(unittest.TestCase):
         """Test max_cycles=-1 (unlimited) never decrements."""
         controller = CycleController(max_iter=1000, max_cycles=-1)
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 100}, time=0, pol=0, chan=0)
 
         controller.update_counts(rd)
 
@@ -1555,10 +1563,10 @@ class TestUpdateCounts(unittest.TestCase):
         """Test update sums iterations across multiple planes."""
         controller = CycleController(max_iter=1000)
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 50}, time=0, pol=0, chan=0)
-        rd.add({"iter_done": 30}, time=0, pol=0, chan=1)
-        rd.add({"iter_done": 20}, time=0, pol=1, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 50}, time=0, pol=0, chan=0)
+        add_to_imaging_dict(rd, {"iter_done": 30}, time=0, pol=0, chan=1)
+        add_to_imaging_dict(rd, {"iter_done": 20}, time=0, pol=1, chan=0)
 
         controller.update_counts(rd)
 
@@ -1586,8 +1594,8 @@ class TestUpdateCounts(unittest.TestCase):
             imaging=IMAGING_THRESHOLD, model_update=MODEL_UPDATE_CONTINUE
         )
 
-        rd = ImagingDict()
-        rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 100}, time=0, pol=0, chan=0)
 
         controller.update_counts(rd)
 
@@ -1762,8 +1770,8 @@ class TestResetMethods(unittest.TestCase):
         controller = CycleController(max_iter=1000, max_cycles=5)
 
         # Simulate some work
-        rd = ImagingDict()
-        rd.add({"iter_done": 300}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 300}, time=0, pol=0, chan=0)
         controller.update_counts(rd)
 
         # Modify stopcode
@@ -1786,8 +1794,8 @@ class TestResetMethods(unittest.TestCase):
         controller = CycleController(max_iter=1000)
 
         # Simulate some work
-        rd = ImagingDict()
-        rd.add({"iter_done": 300}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 300}, time=0, pol=0, chan=0)
         controller.update_counts(rd)
 
         # Set converged
@@ -1820,8 +1828,8 @@ class TestGetState(unittest.TestCase):
         )
 
         # Simulate some work
-        rd = ImagingDict()
-        rd.add({"iter_done": 200}, time=0, pol=0, chan=0)
+        rd = {}
+        add_to_imaging_dict(rd, {"iter_done": 200}, time=0, pol=0, chan=0)
         controller.update_counts(rd)
 
         state = controller.get_state()
@@ -1860,9 +1868,10 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
         for cycle, (residual, iters) in enumerate(
             zip(residuals, iterations_per_cycle, strict=False)
         ):
-            # Create ImagingDict for this cycle
-            rd = ImagingDict()
-            rd.add(
+            # Create imaging_dict for this cycle
+            rd = {}
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": residual,
                     "masksum": 100,
@@ -1905,8 +1914,9 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
         # Simulate imaging cycles
         for cycle in range(5):
-            rd = ImagingDict()
-            rd.add(
+            rd = {}
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": 0.5,  # Stays high
                     "masksum": 100,
@@ -1938,8 +1948,9 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
         # Simulate imaging cycles
         for cycle in range(5):
-            rd = ImagingDict()
-            rd.add(
+            rd = {}
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": 0.5,  # Stays high
                     "masksum": 100,
@@ -1977,8 +1988,9 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
         masksums = [100, 50, 0]  # Mask disappears
 
         for cycle, masksum in enumerate(masksums):
-            rd = ImagingDict()
-            rd.add(
+            rd = {}
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": 0.5,
                     "masksum": masksum,
@@ -2007,8 +2019,9 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
         )
 
         # First phase: run until iteration limit
-        rd1 = ImagingDict()
-        rd1.add(
+        rd1 = {}
+        add_to_imaging_dict(
+            rd1,
             {
                 "peakres": 0.8,
                 "masksum": 100,
@@ -2033,8 +2046,9 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
         controller.reset_stopcode()
 
         # Second phase: run more cycles
-        rd2 = ImagingDict()
-        rd2.add(
+        rd2 = {}
+        add_to_imaging_dict(
+            rd2,
             {
                 "peakres": 0.3,  # Below threshold now
                 "masksum": 100,
@@ -2065,8 +2079,9 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
         )
 
         # Simulate 3 workers processing different channels
-        rd1 = ImagingDict()
-        rd1.add(
+        rd1 = {}
+        add_to_imaging_dict(
+            rd1,
             {
                 "peakres": 0.5,
                 "masksum": 100,
@@ -2078,8 +2093,9 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
             chan=0,
         )
 
-        rd2 = ImagingDict()
-        rd2.add(
+        rd2 = {}
+        add_to_imaging_dict(
+            rd2,
             {
                 "peakres": 0.8,  # Highest residual
                 "masksum": 80,
@@ -2091,8 +2107,9 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
             chan=1,
         )
 
-        rd3 = ImagingDict()
-        rd3.add(
+        rd3 = {}
+        add_to_imaging_dict(
+            rd3,
             {
                 "peakres": 0.3,
                 "masksum": 120,
@@ -2140,8 +2157,9 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
         controller = CycleController(threshold=0.5)
 
         # Chan 0: zero mask, Chan 1: valid
-        rd = ImagingDict()
-        rd.add(
+        rd = {}
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 1.0,
                 "masksum": 0,  # Zero mask
@@ -2151,7 +2169,8 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
             pol=0,
             chan=0,
         )
-        rd.add(
+        add_to_imaging_dict(
+            rd,
             {
                 "peakres": 0.3,
                 "masksum": 100,  # Valid mask
@@ -2189,12 +2208,13 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
 
 
 class TestImagingDictKeyValidation(unittest.TestCase):
-    """Test key validation in ImagingDict utility functions."""
+    """Test key validation in imaging_dict utility functions."""
 
     def setUp(self):
-        """Create test ImagingDict with known keys."""
-        self.rd = ImagingDict()
-        self.rd.add(
+        """Create test imaging_dict with known keys."""
+        self.rd = {}
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 1.0,
                 "masksum": 100,
@@ -2206,7 +2226,8 @@ class TestImagingDictKeyValidation(unittest.TestCase):
             pol=0,
             chan=0,
         )
-        self.rd.add(
+        add_to_imaging_dict(
+            self.rd,
             {
                 "peakres": 0.8,
                 "masksum": 80,
@@ -2262,15 +2283,15 @@ class TestImagingDictKeyValidation(unittest.TestCase):
         self.assertEqual(result, 1.0)
 
     def test_get_peak_residual_empty_returndict_with_filter(self):
-        """Test KeyError on empty ImagingDict with explicit filter."""
-        rd_empty = ImagingDict()
+        """Test KeyError on empty imaging_dict with explicit filter."""
+        rd_empty = {}
         with self.assertRaises(KeyError) as context:
             get_peak_residual_from_imaging_dict(rd_empty, time=0, pol=0, chan=0)
         self.assertIn("empty", str(context.exception))
 
     def test_get_peak_residual_empty_returndict_no_filter(self):
-        """Test no error on empty ImagingDict without filters."""
-        rd_empty = ImagingDict()
+        """Test no error on empty imaging_dict without filters."""
+        rd_empty = {}
         result = get_peak_residual_from_imaging_dict(rd_empty)  # All None
         self.assertEqual(result, 0.0)  # Default value
 
@@ -2361,12 +2382,13 @@ class TestNoProgressStop(unittest.TestCase):
 
     @staticmethod
     def _model_update(iter_done, peakres=(0.5, 0.0), stop_codes=(None, None)):
-        """ImagingDict of one model update for two planes (pol 0 and pol 1)."""
-        rd = ImagingDict()
+        """imaging_dict of one model update for two planes (pol 0 and pol 1)."""
+        rd = {}
         for pol, (iters, peak, code) in enumerate(
             zip(iter_done, peakres, stop_codes, strict=True)
         ):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": peak,
                     "masksum": 100,
@@ -2409,7 +2431,7 @@ class TestNoProgressStop(unittest.TestCase):
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         # ... but pol 1 is stopped.
         self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_NO_PROGRESS)
-        entry = second.data[list(second.data)[1]]
+        entry = second[list(second)[1]]
         self.assertEqual(entry["stop_code"].imaging, IMAGING_NO_PROGRESS)
         self.assertEqual(
             entry["stop_description"], IMAGING_STOP_DESCRIPTIONS[IMAGING_NO_PROGRESS]
@@ -2503,7 +2525,7 @@ class TestNoProgressStop(unittest.TestCase):
         # A diverged model update does not end the imaging cycles.
         self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         self.assertEqual(stopcode.model_update, MODEL_UPDATE_CONTINUE)
-        entries = list(rd.data.values())
+        entries = list(rd.values())
         self.assertEqual(entries[0]["stop_code"].model_update, MODEL_UPDATE_DIVERGENCE)
         self.assertEqual(entries[1]["stop_code"].model_update, MODEL_UPDATE_CONTINUE)
         self.assertEqual(
@@ -2562,7 +2584,7 @@ class TestModelUpdateStopCode(unittest.TestCase):
                 controller.stop_code_model_update[0, 0].tolist(), list(codes)
             )
             self.assertEqual(
-                [e["stop_code"].model_update for e in rd.data.values()], list(codes)
+                [e["stop_code"].model_update for e in rd.values()], list(codes)
             )
 
     def test_a_check_on_the_residual_keeps_the_code(self):
@@ -2579,7 +2601,7 @@ class TestModelUpdateStopCode(unittest.TestCase):
         controller.check_convergence(residual)
         self.assertEqual(controller.stop_code_model_update[0, 0].tolist(), codes)
         self.assertEqual(
-            [e["stop_code"].model_update for e in residual.data.values()], codes
+            [e["stop_code"].model_update for e in residual.values()], codes
         )
 
     def test_a_model_update_that_did_not_run_keeps_the_code(self):
@@ -2597,7 +2619,7 @@ class TestModelUpdateStopCode(unittest.TestCase):
             controller, (MODEL_UPDATE_CONTINUE, MODEL_UPDATE_CONTINUE), (0, 0)
         )
         self.assertEqual(controller.stop_code_model_update[0, 0].tolist(), codes)
-        self.assertEqual([e["stop_code"].model_update for e in rd.data.values()], codes)
+        self.assertEqual([e["stop_code"].model_update for e in rd.values()], codes)
         # nor does it count for, or break, a run of diverged model updates
         self.assertEqual(controller.diverged_model_updates[0, 0].tolist(), [0, 1])
 
@@ -2624,12 +2646,12 @@ class TestModelUpdateStopCode(unittest.TestCase):
             controller.stop_code_imaging[0, 0].tolist(),
             [IMAGING_DIVERGENCE, IMAGING_CONTINUE],
         )
-        entry = rd.data[list(rd.data)[0]]
+        entry = rd[list(rd)[0]]
         self.assertEqual(
             entry["stop_description"], IMAGING_STOP_DESCRIPTIONS[IMAGING_DIVERGENCE]
         )
         # the plane gets no more iterations ...
-        for fields in rd.data.values():
+        for fields in rd.values():
             fields["max_psf_sidelobe"] = 0.2
         limits, _ = get_per_cycle_limits(controller, rd)
         self.assertEqual(limits[0, 0].tolist(), [0, 980])
@@ -2701,11 +2723,10 @@ class TestRefreshedResidualDivergence(unittest.TestCase):
 
     @staticmethod
     def _residual(*peaks):
-        from astroviper.processing_functions.imaging.utils import ImagingDict
-
-        residual = ImagingDict()
+        residual = {}
         for pol, peak in enumerate(peaks):
-            residual.add(
+            add_to_imaging_dict(
+                residual,
                 {"peakres": peak, "masksum": 16, "iter_done": 0},
                 time=0,
                 chan=0,
@@ -2745,12 +2766,8 @@ class TestRefreshedResidualDivergence(unittest.TestCase):
         )
 
     def test_empty_statistics_do_not_allocate_state(self):
-        from astroviper.processing_functions.imaging.utils import ImagingDict
-
         controller = self._controller()
-        self.assertEqual(
-            controller.check_refreshed_residual_divergence(ImagingDict()), []
-        )
+        self.assertEqual(controller.check_refreshed_residual_divergence({}), [])
         self.assertIsNone(controller.previous_refreshed_peak_residual)
 
     def test_stop_is_final_and_reset_clears_the_baseline(self):
@@ -2813,7 +2830,7 @@ class TestRecordModelUpdate(unittest.TestCase):
         self.assertEqual(controller.divergence_stopped[0, 0].tolist(), [True, False])
         self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), [0, 0])
         self.assertEqual(controller.stopcode, StopCode(0, MODEL_UPDATE_CONTINUE))
-        self.assertEqual(list(rd.data.values())[0]["stop_code"], diverged)
+        self.assertEqual(list(rd.values())[0]["stop_code"], diverged)
         # the stop test on the residual of the next residual update decides
         stopcode, _ = controller.check_convergence(self._model_update((0, 0)))
         self.assertEqual(
@@ -2873,7 +2890,7 @@ class TestRecordModelUpdate(unittest.TestCase):
             )
             self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), imaging)
             self.assertEqual(
-                [fields["stop_code"] for fields in rd.data.values()],
+                [fields["stop_code"] for fields in rd.values()],
                 [StopCode(i, m) for i, m in zip(imaging, mu_code, strict=True)],
             )
         # every plane has stopped, for different reasons: the largest code
@@ -2887,15 +2904,23 @@ class TestPerPlaneStateGrowth(unittest.TestCase):
         )
 
         controller = CycleController(max_iter=100)
-        small = ImagingDict()
-        small.add(
-            {"peakres": 1.0, "masksum": 10, "iter_done": 30}, time=0, pol=0, chan=0
+        small = {}
+        add_to_imaging_dict(
+            small,
+            {"peakres": 1.0, "masksum": 10, "iter_done": 30},
+            time=0,
+            pol=0,
+            chan=0,
         )
         controller.update_counts(small)
         self.assertEqual(controller.max_iter_remaining.shape, (1, 1, 1))
-        large = ImagingDict()
-        large.add(
-            {"peakres": 1.0, "masksum": 10, "iter_done": 5}, time=0, pol=1, chan=2
+        large = {}
+        add_to_imaging_dict(
+            large,
+            {"peakres": 1.0, "masksum": 10, "iter_done": 5},
+            time=0,
+            pol=1,
+            chan=2,
         )
         controller.check_convergence(large, model_update_ran=True)
         self.assertEqual(controller.max_iter_remaining.shape, (1, 3, 2))
@@ -2918,10 +2943,11 @@ class TestEntropyStop(unittest.TestCase):
 
     @staticmethod
     def _residual(entropy, snr=(3.0, 3.0), peakres=(0.5, 0.4)):
-        """ImagingDict of the residual of one residual update, two planes."""
-        rd = ImagingDict()
+        """imaging_dict of the residual of one residual update, two planes."""
+        rd = {}
         for pol in range(2):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {
                     "peakres": peakres[pol],
                     "masksum": 100,
@@ -2937,9 +2963,10 @@ class TestEntropyStop(unittest.TestCase):
 
     @staticmethod
     def _model_update(iter_done):
-        rd = ImagingDict()
+        rd = {}
         for pol, iters in enumerate(iter_done):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {"peakres": 0.3, "masksum": 100, "iter_done": iters},
                 time=0,
                 pol=pol,
@@ -2994,7 +3021,7 @@ class TestEntropyStop(unittest.TestCase):
         self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_ENTROPY)
         self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
         self.assertEqual(budget[0, 0].tolist(), [0, 900])
-        entries = list(update.data.values())
+        entries = list(update.values())
         self.assertEqual(entries[0]["stop_code"].imaging, IMAGING_ENTROPY)
         self.assertEqual(
             entries[0]["stop_description"], IMAGING_STOP_DESCRIPTIONS[IMAGING_ENTROPY]
@@ -3004,7 +3031,7 @@ class TestEntropyStop(unittest.TestCase):
         stopcode, _, rd = self._cycle(controller, (7.51, 7.44))
         self.assertEqual(stopcode.imaging, IMAGING_ENTROPY)
         self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), [10, 10])
-        self.assertEqual([e["stop_code"].imaging for e in rd.data.values()], [10, 10])
+        self.assertEqual([e["stop_code"].imaging for e in rd.values()], [10, 10])
 
     def test_the_stop_is_final(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -3125,7 +3152,7 @@ class TestEntropyStop(unittest.TestCase):
         controller = self._controller(max_iter_per_cycle=200)
         self._cycle(controller, (7.5, 7.4))
         _, _, update = self._cycle(controller, (7.4, 7.5))
-        for fields in update.data.values():
+        for fields in update.values():
             fields["max_psf_sidelobe"] = 0.2
         max_iter_per_cycle_updated, _ = get_per_cycle_limits(controller, update)
         self.assertEqual(max_iter_per_cycle_updated[0, 0].tolist(), [0, 200])
@@ -3212,10 +3239,10 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
         on = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
         )
-        for key, fields in off.data.items():
-            np.testing.assert_equal(fields["entropy"], on.data[key]["entropy"])
-        self.assertEqual(len(on.data), 4)
-        for key, fields in on.data.items():
+        for key, fields in off.items():
+            np.testing.assert_equal(fields["entropy"], on[key]["entropy"])
+        self.assertEqual(len(on), 4)
+        for key, fields in on.items():
             self.assertEqual(len(fields["entropy"]), 1)
             self.assertEqual(len(fields["residual_snr"]), 1)
             if (key.chan, key.pol) == (1, 1):
@@ -3242,15 +3269,15 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
             img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
         )
         key = Key(time=0, chan=0, pol=0)
-        self.assertLess(coarse.data[key]["entropy"][0], 2.5)
-        self.assertGreater(fine.data[key]["entropy"][0], 7.0)
+        self.assertLess(coarse[key]["entropy"][0], 2.5)
+        self.assertGreater(fine[key]["entropy"][0], 7.0)
         # a lower limit on the ratio of peak to RMS leaves the noise planes out
         strict = build_residual_imaging_dict(
             img_xds,
             "residual",
             {"gain": 0.1, "entropy_stop": True, "entropy_max_snr": 2.0},
         )
-        self.assertTrue(np.isnan(strict.data[key]["entropy"][0]))
+        self.assertTrue(np.isnan(strict[key]["entropy"][0]))
 
     def test_wrong_parameter_is_refused(self):
         with self.assertRaisesRegex(ValueError, "entropy_stop"):
@@ -3268,9 +3295,10 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
         residual = build_residual_imaging_dict(
             img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
         )
-        update = ImagingDict()
-        for key in residual.data:
-            update.add(
+        update = {}
+        for key in residual:
+            add_to_imaging_dict(
+                update,
                 {"peakres": 0.1, "masksum": 10, "iter_done": 5},
                 time=key.time,
                 pol=key.pol,
@@ -3278,19 +3306,15 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
             )
         copy_residual_statistics(update, residual)
         key = Key(time=0, chan=0, pol=1)
-        self.assertEqual(update.data[key]["entropy"], residual.data[key]["entropy"])
-        self.assertEqual(
-            update.data[key]["residual_snr"], residual.data[key]["residual_snr"]
-        )
+        self.assertEqual(update[key]["entropy"], residual[key]["entropy"])
+        self.assertEqual(update[key]["residual_snr"], residual[key]["residual_snr"])
         # the statistics of the residual the model update started from
         for field in RESIDUAL_STATISTICS:
-            self.assertEqual(
-                update.data[key][f"start_{field}"], residual.data[key][field]
-            )
+            self.assertEqual(update[key][f"start_{field}"], residual[key][field])
         # one value per imaging cycle in the merged record
         merged = merge_imaging_dicts([update, update])
-        self.assertEqual(len(merged.data[key]["entropy"]), 2)
-        self.assertEqual(len(merged.data[key]["start_rms_in_mask"]), 2)
+        self.assertEqual(len(merged[key]["entropy"]), 2)
+        self.assertEqual(len(merged[key]["start_rms_in_mask"]), 2)
 
     def test_residual_statistics_of_every_plane(self):
         from astroviper.processing_functions.image_analysis.image_statistics import (
@@ -3299,11 +3323,11 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
 
         img_xds = self._img_xds()
         record = build_residual_imaging_dict(img_xds, "residual", {"gain": 0.1})
-        for key, fields in record.data.items():
+        for key, fields in record.items():
             plane = img_xds["SKY_RESIDUAL"].values[key.time, key.chan, key.pol]
             for field, value in plane_residual_statistics(plane).items():
                 np.testing.assert_equal(fields[field], [value])
-        self.assertEqual(record.data[Key(time=0, chan=1, pol=1)]["max_in_mask"], [50.0])
+        self.assertEqual(record[Key(time=0, chan=1, pol=1)]["max_in_mask"], [50.0])
 
     def test_record_cycle_time(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -3312,7 +3336,7 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
 
         record = build_residual_imaging_dict(self._img_xds(), "residual", {"gain": 0.1})
         record_cycle_time(record, "t_residual_update", 1.5)
-        for fields in record.data.values():
+        for fields in record.values():
             self.assertEqual(fields["t_residual_update"], [1.5])
 
 
@@ -3325,9 +3349,10 @@ class TestPerStokesThreshold(unittest.TestCase):
 
     @staticmethod
     def _planes(peaks):
-        rd = ImagingDict()
+        rd = {}
         for pol, peak in enumerate(peaks):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {"peakres": peak, "masksum": 100, "max_psf_sidelobe": 0.2},
                 time=0,
                 pol=pol,
@@ -3390,10 +3415,11 @@ class TestThresholdTolerance(unittest.TestCase):
 
     @staticmethod
     def _record(peaks, npol):
-        rd = ImagingDict()
+        rd = {}
         for chan, peak in enumerate(peaks):
             for pol in range(npol):
-                rd.add(
+                add_to_imaging_dict(
+                    rd,
                     {"peakres": float(peak), "masksum": 100, "max_psf_sidelobe": 0.2},
                     time=0,
                     pol=pol,
@@ -3473,9 +3499,10 @@ class TestThresholdTolerance(unittest.TestCase):
         )
 
         threshold = 1e-3
-        rd = ImagingDict()
+        rd = {}
         for pol, peak in enumerate((1.01 * threshold, 5 * threshold, 0.5 * threshold)):
-            rd.add(
+            add_to_imaging_dict(
+                rd,
                 {"peakres": peak, "masksum": 100, "max_psf_sidelobe": 0.2},
                 time=0,
                 pol=pol,
