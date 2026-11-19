@@ -706,7 +706,8 @@ def test_a_call_that_fits_once_the_fft_plans_are_dropped_runs(device, run_python
     if result["areas"] == 0:
         pytest.skip("this cuFFT gives the plans of these planes no work area")
     assert result["plans"] == fft.PLAN_CACHE, result
-    assert result["kept"] >= result["areas"] > 0, result  # the work areas are the pool's
+    # The work areas of the kept plans are device memory of the pool.
+    assert result["kept"] >= result["areas"] > 0, result
     assert result.get("error") is None and result["same"] is True, result
     assert result["runs"] == 1 and result["plans_after"] == 0 and result["used"] == 0
 
