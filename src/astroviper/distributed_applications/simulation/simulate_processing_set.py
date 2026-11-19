@@ -121,8 +121,8 @@ def simulate_processing_set(
     """Simulate the visibilities of a sky of analytic components and write them as an MSv4 processing set.
 
     Builds the time/frequency axes and all MSv4 metadata, creates the empty
-    processing set on disk (one measurement set: one spectral window, one
-    polarization setup, one or more fields), maps the
+    MSv4 (one spectral window, one polarization setup, one or more fields) in
+    a new or existing processing set on disk, maps the
     ``simulate_processing_set`` node task over ``(time, frequency)`` chunks with
     GraphVIPER (each task computes uvw, beams, the visibility DFT and noise for
     its chunk and region-writes ``VISIBILITY``, ``UVW``, ``WEIGHT``, ``FLAG``),
