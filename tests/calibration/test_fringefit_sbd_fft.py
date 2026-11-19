@@ -18,7 +18,7 @@ import pytest
 import toolviper
 from xradio.measurement_set import convert_msv2_to_processing_set, open_processing_set
 
-from astroviper.calibration.fringefit import apply_cal_ps, fringefit_ps
+from astroviper.distributed_applications.calibration.fringefit import apply_cal_ps, fringefit_fft_ps
 
 MSV2_NAME = "global_vlbi_gg084b_reduced.ms"
 PARTITION_SCHEME = ["FIELD_ID", "SCAN_NUMBER", "SPW"]
