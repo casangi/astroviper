@@ -2679,7 +2679,7 @@ def residual_update_continuum_single_field(
 
     timing = {
         "T_prep": 0.0,
-        "T_residual_cycle": 0.0,
+        "T_residual_update": 0.0,
         "task_id": task_id,
     }
 
@@ -2769,7 +2769,7 @@ def residual_update_continuum_single_field(
         input_checked=True,
     )
 
-    timing["T_residual_cycle"] = time.time() - start
+    timing["T_residual_update"] = time.time() - start
     accumulate_timing(timing, residual_return_df)
 
     # MVC channels are exclusively owned by this map task. Normalize and

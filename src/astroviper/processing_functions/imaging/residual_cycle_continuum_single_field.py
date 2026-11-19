@@ -21,7 +21,7 @@ def residual_cycle_continuum_single_field(
     observed_visibility_grid_xds=None,
     image_data_group_in_name="model",
     image_data_group_out_name="residual",
-    last_residual_cycle=False,
+    last_residual_update=False,
     gridding_kernel_params=None,
     *,
     input_checked: bool = False,
@@ -149,7 +149,7 @@ def residual_cycle_continuum_single_field(
         data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Image data group receiving the residual Taylor products.
-    last_residual_cycle : bool, optional
+    last_residual_update : bool, optional
         Indicates whether this is the final residual calculation after the last
         model update.
     gridding_kernel_params : dict, optional
@@ -503,7 +503,7 @@ def residual_cycle_continuum_single_field(
             "T_grid": [T_grid],
             "n_taylor_terms": [n_taylor_terms],
             "is_first_cycle": [bool(is_first_cycle)],
-            "last_residual_cycle": [bool(last_residual_cycle)],
+            "last_residual_update": [bool(last_residual_update)],
         }
     )
 

@@ -116,7 +116,7 @@ CONTINUUM_IMAGING_TIMING_PHASES = [
     ),
     (
         "RESIDUAL UPDATE",
-        "T_residual_cycle",
+        "T_residual_update",
         [
             ("gcf kernel", "T_gcf"),
             ("degrid (model->vis)", "T_degrid"),
