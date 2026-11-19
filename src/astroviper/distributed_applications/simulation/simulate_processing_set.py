@@ -6,9 +6,7 @@ import os
 from typing import Any
 
 import numpy as np
-
-import toolviper
-from toolviper.utils import validate
+import toolviper.utils.parameter
 import xarray as xr
 from numcodecs import Blosc
 
@@ -70,7 +68,9 @@ def combine_timing_data_frames(input_data, input_params):
 
 
 @shares_param_docs
-@toolviper.utils.validate(config_dir=_PARAM_CONFIG_DIR, add_data_type=xr.Dataset)
+@toolviper.utils.parameter.validate(
+    config_dir=_PARAM_CONFIG_DIR, add_data_type=xr.Dataset
+)
 def simulate_processing_set(
     ps_store: str,
     antenna_xds: xr.Dataset,

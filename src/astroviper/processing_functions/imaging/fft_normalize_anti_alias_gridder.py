@@ -559,7 +559,7 @@ def ifft_uv_to_lm(
             ),
             axes=fft_plane_dims,
         )
-    debug("Time for ifft_uv_to_lm: " + str(time.time() - start))
+    logger.debug("Time for ifft_uv_to_lm: " + str(time.time() - start))
     return sky
 
 
