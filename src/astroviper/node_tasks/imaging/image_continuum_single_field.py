@@ -3933,8 +3933,8 @@ def model_update_continuum_single_field(
 
     This node is intended for the GraphViper append stage following the global
     reduce operation. It receives the globally accumulated continuum image
-    products, determines the model-update parameters using the iteration
-    controller, executes one continuum model-update step, and returns the updated
+    products, determines the model-update parameters with the cycle control
+    functions, executes one continuum model-update step, and returns the updated
     image dataset in memory.
 
     No image or processing-set data are read from or written to disk.

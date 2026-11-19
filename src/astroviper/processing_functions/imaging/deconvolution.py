@@ -571,8 +571,8 @@ def create_imaging_dict(
     Returns
     -------
     dict
-        Per-plane deconvolution statistics indexed by
-        ``(time, chan, pol)``.
+        Per-plane deconvolution statistics keyed by
+        ``Key(time, pol, chan)``.
     """
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     model_data_group = img_xds.attrs["data_groups"][image_data_group_out_name]
@@ -618,8 +618,8 @@ def create_imaging_dict(
             StopCode,
         )
 
-    # Record the threshold_per_cycle each plane was actually cleaned to: the
-    # controller supplies a per-plane array; standalone callers a scalar (or
+    # Record the threshold_per_cycle each plane was actually cleaned to: cycle
+    # control supplies a per-plane array; standalone callers a scalar (or
     # nothing, in which case the absolute ``threshold`` applies).
     threshold_per_cycle_used = deconvolve_params.get("threshold_per_cycle", None)
     if threshold_per_cycle_used is None:
@@ -758,8 +758,8 @@ def deconvolve(
     Returns
     -------
     imaging_dict : dict
-        Per-plane deconvolution statistics, indexed by
-        ``(time, chan, pol)``. Each entry contains iteration count, peak
+        Per-plane deconvolution statistics, keyed by
+        ``Key(time, pol, chan)``. Each entry contains iteration count, peak
         residuals before and after, model fluxes, and PSF bookkeeping.
         Each entry also holds the statistics of the residual after the model
         update

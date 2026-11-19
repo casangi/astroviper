@@ -171,7 +171,7 @@ def _validate_imaging_dict_selection(
         # Get available keys for the error message
         available_keys = list(imaging_dict.keys())
         if len(available_keys) == 0:
-            available_str = "ImagingDict is empty"
+            available_str = "imaging_dict is empty"
         elif len(available_keys) <= 10:
             available_str = f"Available keys: {available_keys}"
         else:
@@ -1138,6 +1138,8 @@ def check_refreshed_residual_divergence(
 
     Parameters
     ----------
+    cycle_control_state : dict
+        Cycle control state (:func:`make_cycle_control_state`).
     imaging_dict : dict
         Statistics of an exact refreshed residual.
     factor : float, optional
@@ -1215,6 +1217,8 @@ def calculate_per_cycle_limits(
 
     Parameters:
     -----------
+    cycle_control_state : dict
+        Cycle control state (:func:`make_cycle_control_state`).
     imaging_dict : dict
         imaging_dict containing deconvolution statistics including:
         - 'max_psf_sidelobe': Maximum PSF sidelobe level
@@ -1310,6 +1314,8 @@ def per_plane_threshold_per_cycle(
 
     Parameters
     ----------
+    cycle_control_state : dict
+        Cycle control state (:func:`make_cycle_control_state`).
     imaging_dict : dict
         Per-plane statistics (``peakres`` and ``max_psf_sidelobe``).
     time, pol, chan : int, optional
@@ -1393,6 +1399,8 @@ def resolve_max_cycles(
 
     Parameters
     ----------
+    cycle_control_state : dict
+        Cycle control state (:func:`make_cycle_control_state`).
     imaging_dict : dict
         Statistics of the dirty image of every plane: ``peakres``,
         ``max_psf_sidelobe`` and ``masksum``.
@@ -1542,6 +1550,8 @@ def check_convergence(
 
     Parameters:
     -----------
+    cycle_control_state : dict
+        Cycle control state (:func:`make_cycle_control_state`).
     imaging_dict : dict
         imaging_dict containing deconvolution statistics including:
         - 'peakres': Current peak residual
@@ -1714,6 +1724,8 @@ def record_model_update(
 
     Parameters
     ----------
+    cycle_control_state : dict
+        Cycle control state (:func:`make_cycle_control_state`).
     imaging_dict : dict
         Result of the model update (``iter_done`` and ``stop_code``).
     time, pol, chan : int, optional
@@ -1802,6 +1814,8 @@ def update_counts(
 
     Parameters:
     -----------
+    cycle_control_state : dict
+        Cycle control state (:func:`make_cycle_control_state`).
     imaging_dict : dict
         imaging_dict containing iteration statistics including:
         - 'iter_done': Number of iterations completed in this imaging cycle
@@ -1883,6 +1897,8 @@ def update_parameters(
 
     Parameters:
     -----------
+    cycle_control_state : dict
+        Cycle control state (:func:`make_cycle_control_state`).
     max_iter : int, optional
         New maximum iteration count
 
@@ -2151,7 +2167,7 @@ def plot_convergence_history(imaging_dict, time=0, stokes="I", chan=0, **kwargs)
             hv.extension("bokeh")
         except ImportError as e:
             raise ImportError(
-                "ConvergencePlots requires holoviews and bokeh. "
+                "plot_convergence_history requires holoviews and bokeh. "
                 "Install with: pip install holoviews bokeh"
             ) from e
 
@@ -2273,7 +2289,7 @@ def plot_convergence_history(imaging_dict, time=0, stokes="I", chan=0, **kwargs)
         hv.extension("bokeh")
     except ImportError as e:
         raise ImportError(
-            "ConvergencePlots requires holoviews and bokeh. "
+            "plot_convergence_history requires holoviews and bokeh. "
             "Install with: pip install holoviews bokeh"
         ) from e
 
@@ -2281,7 +2297,7 @@ def plot_convergence_history(imaging_dict, time=0, stokes="I", chan=0, **kwargs)
     available_keys = list(imaging_dict.keys())
     if not available_keys:
         return hv.Curve([]).opts(
-            title="No data in ImagingDict",
+            title="No data in imaging_dict",
             xlabel="Cumulative Iterations",
             ylabel="Peak Residual (Jy)",
         )
@@ -2491,7 +2507,7 @@ def build_residual_imaging_dict(
         Per-plane ``peakres`` (the absolute peak of the residual inside the
         clean mask, 0 for an empty mask), ``peakres_nomask`` (that of the
         whole plane), ``masksum`` (the pixels of the clean mask) and
-        ``iter_done`` (0), indexed ``(time, chan, pol)``, ``entropy`` and
+        ``iter_done`` (0), keyed by ``Key(time, pol, chan)``, ``entropy`` and
         ``residual_snr``, the entropy of the whole plane and the ratio of the
         peak inside the same clean mask to the RMS of the plane
         (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`),

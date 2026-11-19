@@ -102,7 +102,9 @@ the `processing_functions/imaging/utils/` subpackage: `cycle_control.py`
 (`drop_auto_correlations` — the shared cross-correlation filter used by the PSF
 and undeconvolved-image gridders; do not re-inline it). Import them from
 `astroviper.processing_functions.imaging.utils` (the package re-exports the
-public symbols).
+public symbols, except `calculate_per_cycle_limits`,
+`per_plane_threshold_per_cycle`, `reset`, `reset_stopcode`, `get_state` and
+`update_parameters`, which are imported from `utils.cycle_control`).
 
 Runs the CLEAN loop of **imaging cycles**, each one **residual update**
 followed by one **model update** (the CASA names in brackets are for

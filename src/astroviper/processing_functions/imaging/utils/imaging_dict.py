@@ -11,7 +11,14 @@ indices of an image plane, to a dictionary of fields of two kinds:
 - a field in ``FIELD_SINGLE_VALUE`` is a single value, which
   :func:`add_to_imaging_dict` replaces.
 
-A field in neither set is kept as a single value.
+A field in neither set is kept as a single value. Such fields are
+``stop_code`` (a ``StopCode``, or None; ``create_imaging_dict``,
+``check_convergence``, the native MT-MFS model update),
+``stop_description`` (``check_convergence``, native MT-MFS), ``stokes``,
+``frequency`` and ``time`` (``create_imaging_dict``, native MT-MFS),
+``min_psf_fraction`` and ``max_psf_fraction`` (``create_imaging_dict``),
+and ``scales``, ``hessian_condition_number`` and
+``taylor_hessian_condition_number`` (native MT-MFS).
 """
 
 from collections import namedtuple
@@ -146,7 +153,21 @@ def add_to_imaging_dict(imaging_dict, value, time, pol, chan):
 
 
 def select_from_imaging_dict(imaging_dict, time=None, pol=None, chan=None):
-    """Get all items matching the given criteria"""
+    """Select the fields of the planes that match the given indices.
+
+    Parameters
+    ----------
+    imaging_dict : dict
+        The imaging_dict to select from.
+    time, pol, chan : int or None
+        Indices to match; None matches every value.
+
+    Returns
+    -------
+    dict, list of dict or None
+        The fields of the one matching plane, a list of the fields of
+        several matching planes, or None when no plane matches.
+    """
     matches = []
     for key, value in imaging_dict.items():
         if (

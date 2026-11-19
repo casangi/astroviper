@@ -3129,10 +3129,10 @@ def make_auto_mask_continuum(
 def build_continuum_residual_imaging_dict(
     img_xds, image_data_group_in_name, cycle_control_params
 ):
-    """Present Taylor-zero residual statistics as one plane to the controller.
+    """Present Taylor-zero residual statistics as one plane to cycle control.
 
     Continuum Högbom updates only Taylor term zero. Its fitted sidelobe has
-    dimensions (time, polarization), whereas the shared controller expects
+    dimensions (time, polarization), whereas shared cycle control expects
     (time, frequency, polarization). Build a temporary view with one frequency
     plane, broadcasting masks and sidelobes by dimension name. Peaks are
     measured on finite pixels of the support every model update cleans
@@ -3154,8 +3154,8 @@ def build_continuum_residual_imaging_dict(
     Returns
     -------
     dict
-        One synthetic frequency plane of residual statistics for the shared
-        iteration controller.
+        One synthetic frequency plane of residual statistics for shared
+        cycle control.
     """
     import numpy as np
     import xarray as xr
