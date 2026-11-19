@@ -19,6 +19,7 @@ def make_undeconvolved_image_continuum_single_field(
     complex_dtype=None,
     *,
     input_checked: bool = False,
+    gridder: str = "anti_alias",
 ):
     """Grid residual visibilities into MT-MFS residual Taylor uv grids.
 
@@ -34,6 +35,11 @@ def make_undeconvolved_image_continuum_single_field(
     and
 
     ``VISIBILITY_NORMALIZATION(time, taylor_term, polarization)``.
+
+    A gridder that accumulates into the image itself
+    (``"direct_fourier_transform"``) makes ``SKY_RESIDUAL(time, taylor_term,
+    polarization, l, m)`` in place of ``VISIBILITY``, after deleting an
+    existing residual image.
 
     Parameters
     ----------
@@ -92,6 +98,11 @@ def make_undeconvolved_image_continuum_single_field(
         Runtime checks on newly created data always remain active. For graph nodes
         using an input_params dictionary, its input_checked entry also carries this
         flag. Set it only for an unchanged configuration in the same imaging mode.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default) or ``"direct_fourier_transform"``,
+        which uses neither ``gcf_xds`` nor ``image_params["fft_padding"]``.
 
     Returns
     -------
@@ -115,8 +126,8 @@ def make_undeconvolved_image_continuum_single_field(
     from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
         add_visibility_grid_continuum_single_field,
     )
-    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
-        GridderAntiAlias,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
 
@@ -131,6 +142,13 @@ def make_undeconvolved_image_continuum_single_field(
         reference_frequency = float(image_params["reference_frequency"])
     else:
         reference_frequency = float(reference_frequency)
+
+    if "sky" in GRIDDERS[gridder].grid_roles:
+        # The gridder accumulates into the residual Taylor images themselves.
+        data_group = img_xds.attrs["data_groups"].get(image_data_group_out_name, {})
+        image_name = data_group.get("sky", GRIDDERS[gridder].grid_roles["sky"])
+        if image_name in img_xds:
+            img_xds.xr_img.delete_data_variables(variables=[image_name])
 
     T_vis_mask = 0.0
     T_uv_sampling_grid = 0.0
@@ -151,12 +169,17 @@ def make_undeconvolved_image_continuum_single_field(
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_out_name,
             image_data_group_out_name=image_data_group_out_name,
-            image_data_group_out_modified=dict(GridderAntiAlias.grid_roles),
+            image_data_group_out_modified=dict(GRIDDERS[gridder].grid_roles),
             overwrite=True,
-            fft_padding=image_params["fft_padding"],
+            fft_padding=(
+                image_params["fft_padding"]
+                if "anti_alias" in GRIDDERS[gridder].gcf_terms
+                else None
+            ),
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
             input_checked=True,
+            gridder=gridder,
         )
         T_vis_grid += time.time() - start
 

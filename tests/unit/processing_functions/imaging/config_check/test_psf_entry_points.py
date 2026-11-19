@@ -4,6 +4,7 @@ import importlib
 from unittest.mock import Mock
 
 import pytest
+import xarray as xr
 
 from astroviper.processing_functions.imaging import config_check
 
@@ -25,9 +26,6 @@ def test_mfs_dft_dispatch_preserves_configuration_and_skips_kernel(
     module = importlib.import_module(
         "astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field"
     )
-    dft = importlib.import_module(
-        "astroviper.processing_functions.imaging.direct_fourier_transform"
-    )
     kernel = importlib.import_module(
         "astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel"
     )
@@ -35,21 +33,31 @@ def test_mfs_dft_dispatch_preserves_configuration_and_skips_kernel(
     monkeypatch.setattr(config_check, "check_residual_update", check)
     build = Mock(side_effect=AssertionError("DFT needs no kernel table"))
     monkeypatch.setattr(kernel, "make_gridding_kernel", build)
-    result = object()
-    transform = Mock(return_value=result)
     monkeypatch.setattr(
-        dft, "make_dft_point_spread_function_continuum_single_field", transform
+        "astroviper.processing_functions.imaging.utils.drop_auto_correlations", Mock()
     )
+    transform = Mock()
+    monkeypatch.setattr(
+        module, "add_uv_sampling_grid_continuum_single_field", transform
+    )
+    ms_xdt = object()
+    img_xds = xr.Dataset(attrs={"data_groups": {"residual": {}}})
     params = {"n_taylor_terms": 2, "reference_frequency": 1e9}
     recipe = {"type": "dft"}
-    assert (
-        module.make_point_spread_function_continuum_single_field(
-            None, None, params, gridding_kernel_params=recipe, input_checked=checked
-        )
-        is result
+    result, _ = module.make_point_spread_function_continuum_single_field(
+        {"ms": ms_xdt},
+        img_xds,
+        params,
+        gridding_kernel_params=recipe,
+        input_checked=checked,
     )
+    assert result is img_xds
     assert check.call_count == (0 if checked else 1)
-    assert transform.call_args.args == (None, None, 3, 1e9)
+    assert transform.call_args.args == (ms_xdt, None, img_xds)
+    assert transform.call_args.kwargs["n_psf_taylor_terms"] == 3
+    assert transform.call_args.kwargs["reference_frequency"] == 1e9
+    assert transform.call_args.kwargs["fft_padding"] is None
+    assert transform.call_args.kwargs["gridder"] == "direct_fourier_transform"
     build.assert_not_called()
     assert params == {"n_taylor_terms": 2, "reference_frequency": 1e9}
     assert recipe == {"type": "dft"}

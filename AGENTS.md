@@ -610,8 +610,10 @@ per-variable nodes.
   - a base class defines the interface and the shared helpers, and a subclass
     calls a helper through the base-class name (no dispatch through `cls` or
     `self`);
-  - a registry (`make_registry`) maps the user's string to a class, which is
-    then passed down as an argument; drivers never name an implementation;
+  - a registry (`make_registry`) maps the user's string to a class; every
+    public function takes the registry name (a `str` such as `"anti_alias"`),
+    and the class is looked up in the registry where its methods are called;
+    drivers never name an implementation;
   - a method receives all its inputs as arguments, and state lives in the
     datasets it is given (`ps_xdt`, `img_xds`, `gcf_xds`), never in the class.
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.

@@ -746,8 +746,8 @@ def prepare_model_uv_continuum_single_field(
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
-        GridderAntiAlias,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         is_direct_fourier_transform,
@@ -811,31 +811,14 @@ def prepare_model_uv_continuum_single_field(
         overwrite=True,
     )
 
-    if is_direct_fourier_transform(gridding_kernel_params):
-        # The direct Fourier transform predicts from the Taylor model images
-        # themselves: no FFT, padding or kernel correction.
-        model_uv_xds[model_sky_name].attrs.update(
-            {
-                "description": (
-                    "Global continuum Taylor model in the correlation basis, "
-                    "predicted by the direct Fourier transform."
-                ),
-                "n_taylor_terms": n_taylor_terms,
-                "instrument_polarization_basis": (instrument_polarization_basis),
-            }
-        )
-        if image_data_group_out_name != image_data_group_in_name:
-            from astroviper.utils.data_group_tools import modify_data_groups_xds
-
-            modify_data_groups_xds(
-                model_uv_xds,
-                image_data_group_out_name,
-                {"sky": model_sky_name},
-                description="Continuum Taylor model for the direct Fourier transform.",
-            )
-        return model_uv_xds
-
-    model_uv_xds = GridderAntiAlias.image_to_uv(
+    # The direct Fourier transform predicts from the Taylor model images
+    # themselves: no FFT, padding or kernel correction.
+    gridder = (
+        "direct_fourier_transform"
+        if is_direct_fourier_transform(gridding_kernel_params)
+        else "anti_alias"
+    )
+    model_uv_xds = GRIDDERS[gridder].image_to_uv(
         model_uv_xds,
         image_params=image_params,
         plane_dim="taylor_term",
@@ -852,8 +835,10 @@ def prepare_model_uv_continuum_single_field(
         fft_backend=fft_backend,
         data_variables_to_process=None,
         complex_dtype=complex_dtype,
-        gcf_xds=make_gridding_kernel(
-            gridding_kernel_params, image_params["fft_padding"]
+        gcf_xds=(
+            make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
+            if "anti_alias" in GRIDDERS[gridder].gcf_terms
+            else None
         ),
         new_polarization_basis=None,
     )
@@ -867,7 +852,7 @@ def prepare_model_uv_continuum_single_field(
         )
 
     output_model_group = output_data_groups[image_data_group_out_name]
-    model_visibility_name = output_model_group.get("visibility")
+    model_visibility_name = output_model_group.get(GRIDDERS[gridder].degrid_role)
 
     if model_visibility_name is None:
         raise RuntimeError(
@@ -899,6 +884,9 @@ def prepare_model_uv_continuum_single_field(
             "description": (
                 "Global Fourier-domain continuum Taylor model used for "
                 "distributed degridding."
+                if GRIDDERS[gridder].degrid_role == "visibility"
+                else "Global continuum Taylor model in the correlation basis, "
+                "predicted by the direct Fourier transform."
             ),
             "n_taylor_terms": n_taylor_terms,
             "instrument_polarization_basis": (instrument_polarization_basis),

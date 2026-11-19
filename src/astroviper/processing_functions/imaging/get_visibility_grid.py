@@ -14,6 +14,7 @@ def get_visibility_grid_single_field(
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
+    gridder: str = "anti_alias",
 ):
     """Degrid a UV-domain model onto measurement-set visibility coordinates.
 
@@ -52,7 +53,9 @@ def get_visibility_grid_single_field(
         group under ``image_data_group_in_name`` whose ``"visibility"`` role
         names a data variable shaped ``(time, frequency, polarization, u, v)``,
         the same ``(u, v)`` axis order used by the C++
-        ``anti_alias_grid`` kernel.
+        ``anti_alias_grid`` kernel (the role is the ``degrid_role`` of the
+        gridder: ``"sky"``, a model image ``(time, frequency, polarization,
+        l, m)``, for ``"direct_fourier_transform"``).
         Cell size and image dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
     ms_data_group_in_name : str, default ``"base"``
@@ -83,6 +86,11 @@ def get_visibility_grid_single_field(
     processing_function_threads : int, default ``1``
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
+    gridder : str, default ``"anti_alias"``
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` or ``"direct_fourier_transform"``, which uses neither
+        ``gcf_xds`` nor ``fft_padding``.
 
     Returns
     -------
@@ -117,8 +125,8 @@ def get_visibility_grid_single_field(
     degrid_visibility_grid_single_field :
         Shared anti-aliasing gridder numerical primitive.
     """
-    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
-        GridderAntiAlias,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
 
     if ms_data_group_out_modified is None:
@@ -126,8 +134,12 @@ def get_visibility_grid_single_field(
             "correlated_data": "VISIBILITY_MODEL",
         }
     model_name = img_xds.attrs["data_groups"][image_data_group_in_name][
-        GridderAntiAlias.degrid_role
+        GRIDDERS[gridder].degrid_role
     ]
+    model = img_xds[model_name]
+    if GRIDDERS[gridder].degrid_role == "sky":
+        # A model image may be stored in any dimension order.
+        model = model.transpose("time", "frequency", "polarization", "l", "m")
 
     n_chan = ms_xds.sizes["frequency"]
     if chan_mode == "cube":
@@ -141,11 +153,11 @@ def get_visibility_grid_single_field(
     else:  # continuum
         frequency_map = (np.zeros(n_chan)).astype(int)
 
-    GridderAntiAlias.degrid(
+    GRIDDERS[gridder].degrid(
         ms_xds,
         img_xds,
         gcf_xds,
-        img_xds[model_name].values,
+        model.values,
         frequency_map,
         ms_data_group_in_name=ms_data_group_in_name,
         ms_data_group_out_name=ms_data_group_out_name,

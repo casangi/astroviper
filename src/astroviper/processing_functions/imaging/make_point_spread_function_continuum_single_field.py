@@ -66,6 +66,7 @@ def add_uv_sampling_grid_continuum_single_field(
     processing_function_threads: int = 1,
     complex_dtype=None,
     input_checked: bool = False,
+    gridder: str = "anti_alias",
 ) -> None:
     """Accumulate Taylor-weighted UV-sampling grids for one measurement set.
 
@@ -107,7 +108,8 @@ def add_uv_sampling_grid_continuum_single_field(
     image_data_group_out_name : str, optional
         Image data group in which to register the UV-sampling arrays.
     image_data_group_out_modified : dict or None, optional
-        Role-to-variable-name overrides for the output data group.
+        Role-to-variable-name overrides for the output data group. Default
+        the ``grid_uv_sampling_roles`` of the gridder.
     overwrite : bool, optional
         Permit replacement of existing registered output variables.
     fft_padding : float, optional
@@ -119,6 +121,12 @@ def add_uv_sampling_grid_continuum_single_field(
     input_checked : bool, optional
         Whether an upper layer has validated this unchanged configuration.
         Direct calls default to False.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default) or ``"direct_fourier_transform"``,
+        which accumulates into the point spread function itself and uses
+        neither ``gcf_xds`` nor ``fft_padding``.
 
     Notes
     -----
@@ -136,12 +144,12 @@ def add_uv_sampling_grid_continuum_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
-        GridderAntiAlias,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
 
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = dict(GridderAntiAlias.grid_uv_sampling_roles)
+        image_data_group_out_modified = dict(GRIDDERS[gridder].grid_uv_sampling_roles)
 
     if complex_dtype is None:
         complex_dtype = np.complex128
@@ -183,16 +191,38 @@ def add_uv_sampling_grid_continuum_single_field(
         padded_grid_size,
     )
 
-    n_uv = padded_grid_size(
-        [img_xds.sizes["l"], img_xds.sizes["m"]],
-        fft_padding,
-    )
+    grid_role, normalization_role = GRIDDERS[gridder].grid_uv_sampling_roles
+    # The gridder accumulates into a uv grid or into the point spread function.
+    into_image = grid_role == "point_spread_function"
 
-    uv_name = image_data_group_out["uv_sampling"]
-    norm_name = image_data_group_out["uv_sampling_normalization"]
+    if into_image:
+        if "psf_taylor_order" not in img_xds.coords:
+            img_xds.coords["psf_taylor_order"] = np.arange(
+                n_psf_taylor_terms, dtype=np.int64
+            )
+        elif img_xds.sizes["psf_taylor_order"] != n_psf_taylor_terms:
+            raise ValueError(
+                "Existing psf_taylor_order coordinate has length "
+                f"{img_xds.sizes['psf_taylor_order']}, but {n_psf_taylor_terms} "
+                "planes were requested."
+            )
+        # The new arrays take the coordinate of the image they belong to.
+        psf_taylor_order = img_xds.coords["psf_taylor_order"].values
+    else:
+        n_uv = padded_grid_size(
+            [img_xds.sizes["l"], img_xds.sizes["m"]],
+            fft_padding,
+        )
+        psf_taylor_order = np.arange(
+            n_psf_taylor_terms,
+            dtype=np.int64,
+        )
+
+    uv_name = image_data_group_out[grid_role]
+    norm_name = image_data_group_out[normalization_role]
 
     if uv_name not in img_xds:
-        grid_values, grid_dims, _ = GridderAntiAlias.new_grid(
+        grid_values, grid_dims, grid_type = GRIDDERS[gridder].new_grid(
             img_xds,
             (n_image_time, n_psf_taylor_terms, n_pol),
             uv_sampling=True,
@@ -207,13 +237,10 @@ def add_uv_sampling_grid_continuum_single_field(
                 "polarization",
                 *grid_dims,
             ],
-            coords={
-                "psf_taylor_order": np.arange(
-                    n_psf_taylor_terms,
-                    dtype=np.int64,
-                )
-            },
+            coords={"psf_taylor_order": psf_taylor_order},
         )
+        if grid_type is not None:
+            img_xds[uv_name].attrs["type"] = grid_type
 
         img_xds[norm_name] = xr.DataArray(
             np.zeros(
@@ -225,12 +252,7 @@ def add_uv_sampling_grid_continuum_single_field(
                 "psf_taylor_order",
                 "polarization",
             ],
-            coords={
-                "psf_taylor_order": np.arange(
-                    n_psf_taylor_terms,
-                    dtype=np.int64,
-                )
-            },
+            coords={"psf_taylor_order": psf_taylor_order},
         )
 
         modify_data_groups_xds(
@@ -242,6 +264,22 @@ def add_uv_sampling_grid_continuum_single_field(
                 "add_uv_sampling_grid_continuum_single_field."
             ),
         )
+    elif into_image:
+        image_dims = ("time", "psf_taylor_order", "polarization", "l", "m")
+        image_shape = tuple(
+            n_psf_taylor_terms if dim == "psf_taylor_order" else img_xds.sizes[dim]
+            for dim in image_dims
+        )
+        if (
+            img_xds[uv_name].dims != image_dims
+            or img_xds[uv_name].shape != image_shape
+            or img_xds[norm_name].shape != image_shape[:3]
+        ):
+            raise ValueError(
+                f"Existing {uv_name} has dimensions {img_xds[uv_name].dims} and "
+                f"shape {img_xds[uv_name].shape}; expected {image_dims} and "
+                f"{image_shape}."
+            )
     else:
         expected_grid_shape = (
             n_image_time,
@@ -283,7 +321,7 @@ def add_uv_sampling_grid_continuum_single_field(
             dtype=np.float64,
         )
 
-        GridderAntiAlias.grid_uv_sampling(
+        GRIDDERS[gridder].grid_uv_sampling(
             ms_xdt,
             img_xds,
             gcf_xds,
@@ -536,7 +574,7 @@ def make_point_spread_function_continuum_single_field(
     With ``gridding_kernel_params={"type": "dft"}`` the orders are the exact
     direct Fourier transforms of the weighted imaging weights, w term
     included, over the unpadded image, still to be normalised
-    (:func:`~astroviper.processing_functions.imaging.direct_fourier_transform.make_dft_point_spread_function_continuum_single_field`);
+    (:class:`~astroviper.processing_functions.imaging.gridders.direct_fourier_transform.gridder_direct_fourier_transform.GridderDirectFourierTransform`);
     no ``UV_SAMPLING`` grid is made.
 
     Parameters
@@ -670,8 +708,8 @@ def make_point_spread_function_continuum_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
-        GridderAntiAlias,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         is_direct_fourier_transform,
@@ -700,26 +738,28 @@ def make_point_spread_function_continuum_single_field(
         np.asarray(image_params["reference_frequency"]).reshape(())
     )
 
-    if is_direct_fourier_transform(gridding_kernel_params):
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
-            make_dft_point_spread_function_continuum_single_field,
+    gridder = (
+        "direct_fourier_transform"
+        if is_direct_fourier_transform(gridding_kernel_params)
+        else "anti_alias"
+    )
+    if "point_spread_function" in GRIDDERS[gridder].grid_uv_sampling_roles:
+        # The gridder accumulates into the point spread functions themselves.
+        data_group = img_xds.attrs["data_groups"].get(image_data_group_out_name, {})
+        image_name = data_group.get(
+            "point_spread_function",
+            GRIDDERS[gridder].grid_uv_sampling_roles["point_spread_function"],
         )
-
-        return make_dft_point_spread_function_continuum_single_field(
-            ps_xdt,
-            img_xds,
-            n_psf_taylor_terms,
-            reference_frequency,
-            ms_data_group_in_name=ms_data_group_in_name,
-            image_data_group_in_name=image_data_group_in_name,
-            image_data_group_out_name=image_data_group_out_name,
-            processing_function_threads=processing_function_threads,
-            complex_dtype=complex_dtype,
-            input_checked=True,
-        )
+        if image_name in img_xds:
+            img_xds.xr_img.delete_data_variables(variables=[image_name])
 
     start = time.time()
-    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
+    if "anti_alias" in GRIDDERS[gridder].gcf_terms:
+        fft_padding = image_params["fft_padding"]
+        gcf_xds = make_gridding_kernel(gridding_kernel_params, fft_padding)
+    else:
+        fft_padding = None
+        gcf_xds = None
     T_gcf = time.time() - start
 
     T_vis_mask = 0.0
@@ -733,19 +773,22 @@ def make_point_spread_function_continuum_single_field(
         start = time.time()
         add_uv_sampling_grid_continuum_single_field(
             ms_xdt,
-            cgk_1D,
+            gcf_xds,
             img_xds,
             n_psf_taylor_terms=n_psf_taylor_terms,
             reference_frequency=reference_frequency,
             ms_data_group_in_name=ms_data_group_in_name,
             image_data_group_in_name=image_data_group_in_name,
             image_data_group_out_name=image_data_group_out_name,
-            image_data_group_out_modified=dict(GridderAntiAlias.grid_uv_sampling_roles),
+            image_data_group_out_modified=dict(
+                GRIDDERS[gridder].grid_uv_sampling_roles
+            ),
             overwrite=True,
-            fft_padding=image_params["fft_padding"],
+            fft_padding=fft_padding,
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
             input_checked=True,
+            gridder=gridder,
         )
         T_uv_sampling_grid += time.time() - start
 

@@ -27,8 +27,8 @@ import astroviper.distributed_applications as distributed_applications
 from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
     LINEAR_CORR_TO_STOKES,
 )
-from astroviper.processing_functions.imaging.direct_fourier_transform import (
-    make_dft_visibility_model_single_field,
+from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
+    add_visibility_grid_continuum_single_field,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
     make_gridding_kernel,
@@ -37,9 +37,19 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.grid
 from astroviper.processing_functions.imaging.make_point_spread_function import (
     make_subtraction_point_spread_function_single_field,
 )
+from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
+    make_point_spread_function_continuum_single_field,
+)
+from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
+    make_undeconvolved_image_continuum_single_field,
+)
+from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
+    make_visibility_model_continuum_single_field,
+)
 from astroviper.processing_functions.imaging.residual_update import (
     calculate_residual_visibilities,
     imaging_setup_single_field,
+    make_visibility_model_single_field,
     residual_update_cube_single_field,
 )
 from astroviper.processing_functions.imaging.utils.fft_sizing import padded_grid_size
@@ -432,7 +442,9 @@ def test_the_prediction_into_an_existing_output_is_subtracted(model_group):
         attrs={"data_groups": {"model": {"sky": "SKY_MODEL"}}},
     )
     ps_xdt = xr.DataTree.from_dict({"ms": ms_xds})
-    make_dft_visibility_model_single_field(ps_xdt, img_xds)
+    make_visibility_model_single_field(
+        ps_xdt, img_xds, None, gridder="direct_fourier_transform"
+    )
     calculate_residual_visibilities(ps_xdt, ms_data_group_in_observed="base")
     # a model pixel at the phase centre predicts its flux on every baseline
     np.testing.assert_allclose(
@@ -440,22 +452,95 @@ def test_the_prediction_into_an_existing_output_is_subtracted(model_group):
     )
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "add_dft_image_continuum_single_field",
-        "make_dft_undeconvolved_image_continuum_single_field",
-        "make_dft_point_spread_function_continuum_single_field",
-        "make_dft_visibility_model_continuum_single_field",
-    ],
-)
+@pytest.mark.parametrize("plane_dim", ["frequency", "taylor_term"])
+def test_the_prediction_reads_the_model_by_dimension_name(plane_dim):
+    """A model stored with its dimensions reversed predicts the same visibilities."""
+    model_dims = ("time", plane_dim, "polarization", "l", "m")
+    planes = {"frequency": [1.0e9, 1.1e9], "taylor_term": [0, 1]}
+    predictions = []
+    for order in (model_dims, model_dims[::-1]):
+        ms_xds = xr.Dataset(
+            {
+                "VISIBILITY": (
+                    ("time", "baseline_id", "frequency", "polarization"),
+                    np.zeros((2, 6, 2, 2), np.complex128),
+                ),
+                "UVW": (
+                    ("time", "baseline_id", "uvw_label"),
+                    np.random.default_rng(1).uniform(-2.0e3, 2.0e3, (2, 6, 3)),
+                ),
+            },
+            coords={"frequency": [1.0e9, 1.1e9], "polarization": ["XX", "YY"]},
+            attrs={
+                "data_groups": {"base": {"correlated_data": "VISIBILITY", "uvw": "UVW"}}
+            },
+        )
+        img_xds = xr.Dataset(
+            {
+                "SKY_MODEL": (
+                    model_dims,
+                    np.random.default_rng(2).random((1, 2, 2, 4, 4)),
+                )
+            },
+            coords={
+                plane_dim: planes[plane_dim],
+                "polarization": ["XX", "YY"],
+                "l": np.arange(4) * -1.0e-4,
+                "m": np.arange(4) * 2.0e-4,
+            },
+            attrs={"data_groups": {"model": {"sky": "SKY_MODEL"}}},
+        )
+        img_xds["SKY_MODEL"] = img_xds["SKY_MODEL"].transpose(*order)
+        ps_xdt = xr.DataTree.from_dict({"ms": ms_xds})
+        if plane_dim == "frequency":
+            make_visibility_model_single_field(
+                ps_xdt, img_xds, None, gridder="direct_fourier_transform"
+            )
+        else:
+            make_visibility_model_continuum_single_field(
+                ps_xdt,
+                img_xds,
+                None,
+                2,
+                1.05e9,
+                input_checked=True,
+                gridder="direct_fourier_transform",
+            )
+        predictions.append(ps_xdt["ms"]["VISIBILITY_MODEL"].values)
+    np.testing.assert_array_equal(predictions[1], predictions[0])
+
+
+# The continuum functions with the direct Fourier transform, called with
+# None for every data argument.
+CONTINUUM_DFT_CALLS = {
+    "add_visibility_grid_continuum_single_field": lambda count, frequency: (
+        add_visibility_grid_continuum_single_field(
+            None, None, None, count, frequency, gridder="direct_fourier_transform"
+        )
+    ),
+    "make_undeconvolved_image_continuum_single_field": lambda count, frequency: (
+        make_undeconvolved_image_continuum_single_field(
+            None, None, {}, None, count, frequency, gridder="direct_fourier_transform"
+        )
+    ),
+    "make_point_spread_function_continuum_single_field": lambda count, frequency: (
+        make_point_spread_function_continuum_single_field(
+            None, None, {}, count, frequency, gridding_kernel_params=DFT
+        )
+    ),
+    "make_visibility_model_continuum_single_field": lambda count, frequency: (
+        make_visibility_model_continuum_single_field(
+            None, None, None, count, frequency, gridder="direct_fourier_transform"
+        )
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(CONTINUUM_DFT_CALLS))
 @pytest.mark.parametrize(
     "count,frequency",
     [(1.5, 1e9), (True, 1e9), ("2", 1e9), (1, "1e9"), (1, 0), (1, float("nan"))],
 )
 def test_dft_rejects_original_parameters_before_accessing_data(name, count, frequency):
-    from astroviper.processing_functions.imaging import direct_fourier_transform
-
-    function = getattr(direct_fourier_transform, name)
     with pytest.raises((TypeError, ValueError)):
-        function(None, None, count, frequency)
+        CONTINUUM_DFT_CALLS[name](count, frequency)

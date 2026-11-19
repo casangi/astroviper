@@ -1077,7 +1077,8 @@ flag. Set it only for an unchanged configuration in the same imaging mode.""",
         "processing functions may retain their working grids in memory."
     ),
     "uv_to_image.image_data_group_in_name": (
-        "Image data group of the accumulated arrays."
+        "Image data group of the accumulated arrays; not read by a gridder\n"
+        "that accumulates into the images."
     ),
     "image_to_uv.image_data_group_in_name": "Image data group of the model images.",
     "uv_to_image.image_data_variables_keep": (

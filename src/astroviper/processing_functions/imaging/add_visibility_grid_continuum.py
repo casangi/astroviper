@@ -22,6 +22,7 @@ def add_visibility_grid_continuum_single_field(
     complex_dtype=None,
     *,
     input_checked: bool = False,
+    gridder: str = "anti_alias",
 ):
     """Grid visibilities into MT-MFS residual Taylor uv grids.
 
@@ -71,7 +72,8 @@ def add_visibility_grid_continuum_single_field(
     image_data_group_out_name : str, optional
         Image data group under which the Taylor grids are registered.
     image_data_group_out_modified : dict, optional
-        Output role-to-variable mapping.
+        Output role-to-variable mapping. Default the ``grid_roles`` of the
+        gridder.
     overwrite : bool, optional
         Passed to the data-group helper.
     fft_padding : float, optional
@@ -84,6 +86,12 @@ def add_visibility_grid_continuum_single_field(
     input_checked : bool, optional
         Skip shared configuration checks after validation by an upper layer.
         Existing data/product checks always run.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default) or ``"direct_fourier_transform"``,
+        which accumulates into the residual Taylor images themselves and uses
+        neither ``gcf_xds`` nor ``fft_padding``.
 
     Returns
     -------
@@ -99,8 +107,8 @@ def add_visibility_grid_continuum_single_field(
 
         check_residual_update(locals(), mode=CONTINUUM_SINGLE_FIELD)
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
-        GridderAntiAlias,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
@@ -119,7 +127,7 @@ def add_visibility_grid_continuum_single_field(
 
     # Prepare image data group
     if image_data_group_out_modified is None:
-        image_data_group_out_modified = dict(GridderAntiAlias.grid_roles)
+        image_data_group_out_modified = dict(GRIDDERS[gridder].grid_roles)
     image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     ms_data_group_in = ms_xds.attrs["data_groups"][ms_data_group_in_name]
@@ -149,10 +157,15 @@ def add_visibility_grid_continuum_single_field(
     # Each gridder invocation writes all input channels into one output plane.
     frequency_map = np.zeros(n_chan, dtype=int)
 
-    n_uv = padded_grid_size(
-        [img_xds.sizes["l"], img_xds.sizes["m"]],
-        fft_padding,
-    )
+    grid_role, normalization_role = GRIDDERS[gridder].grid_roles
+    # The gridder accumulates into a uv grid or into the residual image.
+    into_image = grid_role == "sky"
+
+    if not into_image:
+        n_uv = padded_grid_size(
+            [img_xds.sizes["l"], img_xds.sizes["m"]],
+            fft_padding,
+        )
 
     # sanity check on naming of axes
     if "taylor_term" not in img_xds.coords:
@@ -161,21 +174,20 @@ def add_visibility_grid_continuum_single_field(
             dtype=np.int32,
         )
     elif img_xds.sizes["taylor_term"] != n_taylor_terms:
+        if into_image:
+            raise ValueError(
+                "Existing taylor_term coordinate has length "
+                f"{img_xds.sizes['taylor_term']}, but {n_taylor_terms} planes "
+                "were requested."
+            )
         raise ValueError(
             "Existing taylor_term coordinate has length "
             f"{img_xds.sizes['taylor_term']}, but n_taylor_terms={n_taylor_terms}."
         )
 
-    visibility_name = image_data_group_out["visibility"]
-    normalization_name = image_data_group_out["visibility_normalization"]
+    visibility_name = image_data_group_out[grid_role]
+    normalization_name = image_data_group_out[normalization_role]
 
-    expected_grid_shape = (
-        n_imag_time,
-        n_taylor_terms,
-        n_imag_pol,
-        n_uv[0],
-        n_uv[1],
-    )
     expected_normalization_shape = (
         n_imag_time,
         n_taylor_terms,
@@ -189,7 +201,7 @@ def add_visibility_grid_continuum_single_field(
             for dim in ("time", "taylor_term", "polarization", "u", "v")
             if dim in img_xds.coords
         }
-        grid_values, grid_dims, _ = GridderAntiAlias.new_grid(
+        grid_values, grid_dims, grid_type = GRIDDERS[gridder].new_grid(
             img_xds,
             (n_imag_time, n_taylor_terms, n_imag_pol),
             uv_sampling=False,
@@ -206,6 +218,8 @@ def add_visibility_grid_continuum_single_field(
             ],
             coords=coords,
         )
+        if grid_type is not None:
+            img_xds[visibility_name].attrs["type"] = grid_type
 
         normalization_coords = {
             dim: img_xds.coords[dim]
@@ -227,7 +241,31 @@ def add_visibility_grid_continuum_single_field(
                 "with add_visibility_grid_continuum_single_field."
             ),
         )
+    elif into_image:
+        image_dims = ("time", "taylor_term", "polarization", "l", "m")
+        image_shape = tuple(
+            n_taylor_terms if dim == "taylor_term" else img_xds.sizes[dim]
+            for dim in image_dims
+        )
+        if (
+            img_xds[visibility_name].dims != image_dims
+            or img_xds[visibility_name].shape != image_shape
+            or img_xds[normalization_name].shape != image_shape[:3]
+        ):
+            raise ValueError(
+                f"Existing {visibility_name} has dimensions "
+                f"{img_xds[visibility_name].dims} and shape "
+                f"{img_xds[visibility_name].shape}; expected {image_dims} and "
+                f"{image_shape}."
+            )
     else:
+        expected_grid_shape = (
+            n_imag_time,
+            n_taylor_terms,
+            n_imag_pol,
+            n_uv[0],
+            n_uv[1],
+        )
         if img_xds[visibility_name].shape != expected_grid_shape:
             raise ValueError(
                 f"Existing {visibility_name} has shape "
@@ -282,7 +320,7 @@ def add_visibility_grid_continuum_single_field(
         )
 
         # gridding functionality
-        GridderAntiAlias.grid(
+        GRIDDERS[gridder].grid(
             ms_xds,
             img_xds,
             gcf_xds,
@@ -310,19 +348,20 @@ def add_visibility_grid_continuum_single_field(
     normalization[...] += zeroth_normalization
 
     # Format output
-    img_xds[visibility_name].attrs.update(
-        {
-            "description": "MT-MFS Taylor-weighted visibility uv grids.",
-            "n_taylor_terms": n_taylor_terms,
-            "reference_frequency": reference_frequency,
-        }
-    )
-    img_xds[normalization_name].attrs.update(
-        {
-            "description": (
-                "Normalization sums for MT-MFS Taylor-weighted visibility uv grids."
-            ),
-            "n_taylor_terms": n_taylor_terms,
-            "reference_frequency": reference_frequency,
-        }
-    )
+    if not into_image:
+        img_xds[visibility_name].attrs.update(
+            {
+                "description": "MT-MFS Taylor-weighted visibility uv grids.",
+                "n_taylor_terms": n_taylor_terms,
+                "reference_frequency": reference_frequency,
+            }
+        )
+        img_xds[normalization_name].attrs.update(
+            {
+                "description": (
+                    "Normalization sums for MT-MFS Taylor-weighted visibility uv grids."
+                ),
+                "n_taylor_terms": n_taylor_terms,
+                "reference_frequency": reference_frequency,
+            }
+        )

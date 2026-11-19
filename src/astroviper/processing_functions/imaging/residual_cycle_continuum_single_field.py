@@ -232,6 +232,9 @@ def residual_cycle_continuum_single_field(
     import numpy as np
     import pandas as pd
 
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
+    )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         is_direct_fourier_transform,
         make_gridding_kernel,
@@ -256,12 +259,18 @@ def residual_cycle_continuum_single_field(
 
     # The type "dft" replaces the degridding, the gridding and their FFTs by
     # the exact direct Fourier transforms (no kernel, padding or correction).
-    direct_fourier_transform = is_direct_fourier_transform(gridding_kernel_params)
+    gridder = (
+        "direct_fourier_transform"
+        if is_direct_fourier_transform(gridding_kernel_params)
+        else "anti_alias"
+    )
     start = time.time()
-    if not direct_fourier_transform:
-        cgk_1D = make_gridding_kernel(
-            gridding_kernel_params, image_params["fft_padding"]
-        )
+    if "anti_alias" in GRIDDERS[gridder].gcf_terms:
+        fft_padding = image_params["fft_padding"]
+        gcf_xds = make_gridding_kernel(gridding_kernel_params, fft_padding)
+    else:
+        fft_padding = None
+        gcf_xds = None
     T_gcf = time.time() - start
 
     T_degrid = 0.0
@@ -286,42 +295,23 @@ def residual_cycle_continuum_single_field(
 
             degrid_start = time.time()
 
-            if direct_fourier_transform:
-                from astroviper.processing_functions.imaging.direct_fourier_transform import (
-                    make_dft_visibility_model_continuum_single_field,
-                )
-
-                make_dft_visibility_model_continuum_single_field(
-                    ps_xdt,
-                    model_uv_xds,
-                    n_taylor_terms=n_taylor_terms,
-                    reference_frequency=reference_frequency,
-                    ms_data_group_in_name=ps_data_group_name,
-                    ms_data_group_out_name="model",
-                    ms_data_group_out_modified={
-                        "correlated_data": "VISIBILITY_MODEL",
-                    },
-                    image_data_group_in_name=image_data_group_in_name,
-                    processing_function_threads=processing_function_threads,
-                    input_checked=True,
-                )
-            else:
-                make_visibility_model_continuum_single_field(
-                    ps_xdt,
-                    model_uv_xds,
-                    cgk_1D,
-                    n_taylor_terms=n_taylor_terms,
-                    reference_frequency=reference_frequency,
-                    ms_data_group_in_name=ps_data_group_name,
-                    ms_data_group_out_name="model",
-                    ms_data_group_out_modified={
-                        "correlated_data": "VISIBILITY_MODEL",
-                    },
-                    image_data_group_in_name=image_data_group_in_name,
-                    processing_function_threads=processing_function_threads,
-                    fft_padding=image_params["fft_padding"],
-                    input_checked=True,
-                )
+            make_visibility_model_continuum_single_field(
+                ps_xdt,
+                model_uv_xds,
+                gcf_xds,
+                n_taylor_terms=n_taylor_terms,
+                reference_frequency=reference_frequency,
+                ms_data_group_in_name=ps_data_group_name,
+                ms_data_group_out_name="model",
+                ms_data_group_out_modified={
+                    "correlated_data": "VISIBILITY_MODEL",
+                },
+                image_data_group_in_name=image_data_group_in_name,
+                processing_function_threads=processing_function_threads,
+                fft_padding=fft_padding,
+                input_checked=True,
+                gridder=gridder,
+            )
 
             T_degrid += time.time() - degrid_start
 
@@ -378,7 +368,7 @@ def residual_cycle_continuum_single_field(
             make_visibility_model_single_field(
                 ps_xdt,
                 local_model_uv_xds,
-                cgk_1D,
+                gcf_xds,
                 ms_data_group_in_name=ps_data_group_name,
                 ms_data_group_out_name="model",
                 ms_data_group_out_modified={
@@ -412,27 +402,7 @@ def residual_cycle_continuum_single_field(
 
     start = time.time()
 
-    if continuum_mode == "mfs" and direct_fourier_transform:
-        from astroviper.processing_functions.imaging.direct_fourier_transform import (
-            make_dft_undeconvolved_image_continuum_single_field,
-        )
-
-        (
-            img_xds,
-            make_undeconvolved_image_return_df,
-        ) = make_dft_undeconvolved_image_continuum_single_field(
-            ps_xdt,
-            img_xds,
-            n_taylor_terms,
-            reference_frequency,
-            ms_data_group_in_name=ps_data_group_name,
-            image_data_group_out_name=image_data_group_out_name,
-            processing_function_threads=processing_function_threads,
-            complex_dtype=complex_dtype,
-            input_checked=True,
-        )
-
-    elif continuum_mode == "mfs":
+    if continuum_mode == "mfs":
         from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
             make_undeconvolved_image_continuum_single_field,
         )
@@ -444,7 +414,7 @@ def residual_cycle_continuum_single_field(
             ps_xdt,
             img_xds,
             image_params,
-            cgk_1D,
+            gcf_xds,
             n_taylor_terms=n_taylor_terms,
             reference_frequency=reference_frequency,
             ms_data_group_in_name=ps_data_group_name,
@@ -452,6 +422,7 @@ def residual_cycle_continuum_single_field(
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
             input_checked=True,
+            gridder=gridder,
         )
 
     elif continuum_mode == "mvc":
@@ -466,7 +437,7 @@ def residual_cycle_continuum_single_field(
             ps_xdt,
             img_xds,
             image_params,
-            cgk_1D,
+            gcf_xds,
             ms_data_group_in_name=ps_data_group_name,
             image_data_group_out_name=image_data_group_out_name,
             processing_function_threads=processing_function_threads,
@@ -528,6 +499,7 @@ def make_visibility_model_continuum_single_field(
     processing_function_threads=1,
     fft_padding=1.2,
     input_checked=False,
+    gridder="anti_alias",
 ):
     """Predict channel-dependent model visibilities from a Fourier Taylor model.
 
@@ -561,7 +533,9 @@ def make_visibility_model_continuum_single_field(
     model_xds : xarray.Dataset
         Globally prepared Fourier-domain Taylor model. The selected image data
         group must register a visibility variable containing the Taylor
-        coefficients.
+        coefficients (the role is the ``degrid_role`` of the gridder:
+        ``"sky"``, the Taylor model images in the correlation basis, for
+        ``"direct_fourier_transform"``).
     gcf_xds : xarray.Dataset
         The ``gcf_xds`` of the gridding kernel, from
         :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.make_gridding_kernel`,
@@ -593,6 +567,11 @@ def make_visibility_model_continuum_single_field(
     input_checked : bool, optional
         Whether an upper layer has validated this unchanged configuration.
         Direct calls default to False.
+    gridder : str, optional
+        Registry name of the gridder (a key of
+        :data:`~astroviper.processing_functions.imaging.gridders.gridder_registry.GRIDDERS`):
+        ``"anti_alias"`` (the default) or ``"direct_fourier_transform"``,
+        which uses neither ``gcf_xds`` nor ``fft_padding``.
 
     Returns
     -------
@@ -619,8 +598,8 @@ def make_visibility_model_continuum_single_field(
 
     import numpy as np
 
-    from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
-        GridderAntiAlias,
+    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
+        GRIDDERS,
     )
 
     # ------------------------------------------------------------
@@ -645,7 +624,25 @@ def make_visibility_model_continuum_single_field(
         )
 
     model_data_group = data_groups[image_data_group_in_name]
-    model_visibility_name = model_data_group.get(GridderAntiAlias.degrid_role)
+    model_visibility_name = model_data_group.get(GRIDDERS[gridder].degrid_role)
+
+    if GRIDDERS[gridder].degrid_role == "sky":
+        # The checks of the model images that a gridder degrids from.
+        if model_visibility_name is None or model_visibility_name not in model_xds:
+            raise KeyError(
+                f"Image data group {image_data_group_in_name!r} does not name a sky "
+                "variable of model_xds."
+            )
+        model = model_xds[model_visibility_name]
+        if (
+            "taylor_term" not in model.dims
+            or model.sizes["taylor_term"] < n_taylor_terms
+        ):
+            raise ValueError(
+                f"The model {model_visibility_name!r} must have at least "
+                f"{n_taylor_terms} Taylor terms; it has dimensions "
+                f"{dict(model.sizes)}."
+            )
 
     if model_visibility_name is None:
         raise KeyError(
@@ -678,12 +675,19 @@ def make_visibility_model_continuum_single_field(
     # Ignore any extra Taylor terms that may be present.
     model_taylor_grid = model_taylor_grid.isel(taylor_term=slice(0, n_taylor_terms))
     model_grid_dtype = np.dtype(model_taylor_grid.dtype)
-    if not np.issubdtype(model_grid_dtype, np.complexfloating):
+    if GRIDDERS[gridder].degrid_role == "sky":
+        # Model images are degridded in their own precision and may be stored
+        # in any dimension order.
+        model_taylor_grid = model_taylor_grid.transpose(
+            "time", "taylor_term", "polarization", "l", "m"
+        )
+        native_grid_dtype = model_grid_dtype
+    elif not np.issubdtype(model_grid_dtype, np.complexfloating):
         raise TypeError(
             "The Fourier Taylor model must use complex64 or complex128; "
             f"received {model_grid_dtype}."
         )
-    if model_grid_dtype.itemsize == np.dtype(np.complex64).itemsize:
+    elif model_grid_dtype.itemsize == np.dtype(np.complex64).itemsize:
         native_grid_dtype = np.complex64
     elif model_grid_dtype.itemsize == np.dtype(np.complex128).itemsize:
         native_grid_dtype = np.complex128
@@ -762,7 +766,7 @@ def make_visibility_model_continuum_single_field(
                 np.expand_dims(taylor_grid.values, axis=1),
                 dtype=native_grid_dtype,
             )
-            GridderAntiAlias.degrid(
+            GRIDDERS[gridder].degrid(
                 ms_xdt,
                 model_xds,
                 gcf_xds,

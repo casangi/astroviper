@@ -253,7 +253,10 @@ class Gridder(metaclass=Interface):
         Makes the images that ``image_data_group_out_modified`` names (roles
         ``"sky"`` and ``"point_spread_function"``) from the arrays of
         :meth:`grid` and :meth:`grid_uv_sampling` in the input data group, and
-        registers the output data group.
+        registers the output data group. A gridder that accumulates into the
+        images themselves (``"sky"`` in :attr:`grid_roles`) instead divides
+        the images of those roles in the output data group by their
+        normalization, in place, and registers no group.
 
         Parameters
         ----------
@@ -282,10 +285,11 @@ class Gridder(metaclass=Interface):
             :func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.as_gridding_kernel`
             for a bare table of CASA's prolate spheroidal kernel of support 7.
         image_data_group_in_name : str
-            Image data group of the accumulated arrays.
+            Image data group of the accumulated arrays; not read by a gridder
+            that accumulates into the images.
         image_data_group_out_name : str
-            Image data group the images are registered under.
-        image_data_group_out_modified : dict or None
+            Image data group of the images.
+        image_data_group_out_modified : dict
             Role-to-variable mapping of the images to make.
         overwrite : bool
             Whether an existing output data group or variable may be replaced.
@@ -332,7 +336,10 @@ class Gridder(metaclass=Interface):
 
         Makes the arrays that ``image_data_group_out_modified`` names from the
         images of the roles in ``data_variables_to_process``, and registers
-        the output data group.
+        the output data group. A gridder that degrids from the images
+        themselves (:attr:`degrid_role` ``"sky"``) makes no arrays: it
+        registers those images under the output data group when its name
+        differs from that of the input data group.
 
         Parameters
         ----------
