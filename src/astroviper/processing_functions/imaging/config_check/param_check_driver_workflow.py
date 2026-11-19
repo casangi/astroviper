@@ -39,14 +39,14 @@ def check_driver_workflow(config, *, mode, require_complete=False):
     ValueError
         If memory mode, backend, output policy or restoring beam is invalid.
     NotImplementedError
-        If multifield imaging is requested.
+        If mosaic imaging is requested.
     """
     # ========================================================================
     # 1. Supported workflows and restoration
     # ========================================================================
 
     # --- Supported imaging mode ---
-    # Reject multifield requests before creating outputs or constructing a graph.
+    # Reject mosaic requests before creating outputs or constructing a graph.
     mode.require_supported()
     require_mapping("config", config)
 

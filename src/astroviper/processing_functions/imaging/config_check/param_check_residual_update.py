@@ -43,14 +43,14 @@ def check_residual_update(config, *, mode, require_complete=False):
     ValueError
         If frequencies, continuum mode, or weighting scope are invalid.
     NotImplementedError
-        If multifield imaging is requested.
+        If mosaic imaging is requested.
     """
     # ========================================================================
     # 1. Supported execution choices
     # ========================================================================
 
     # --- Supported imaging mode ---
-    # Reject multifield requests until their residual-update path is implemented.
+    # Reject mosaic requests until their residual-update path is implemented.
     mode.require_supported()
     require_mapping("config", config)
 

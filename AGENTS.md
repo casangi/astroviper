@@ -675,7 +675,7 @@ per-variable nodes.
     Metadata preflight must stay cheap: inspect coordinates, attributes, shapes,
     and dtypes without reading bulk sample arrays or doing imaging work.
   - **Design for all imaging modes:** each imaging validator distinguishes cube
-    and continuum, and single-field and multifield layouts. Multifield execution
+    and continuum, and single-field and mosaic layouts. Mosaic execution
     is currently unsupported, but its rules belong in the same validation
     architecture. Keep checks in clear logical blocks, with a description of
     each check and motivation for numerical acceptance criteria.

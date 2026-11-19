@@ -21,12 +21,12 @@ module, inserts defaults, or modifies supplied configuration or arrays.
 | --- | --- | --- |
 | `cube` | `single_field` | Supported |
 | `continuum` | `single_field` | Supported |
-| `cube` | `multifield` | Raises `NotImplementedError` |
-| `continuum` | `multifield` | Raises `NotImplementedError` |
+| `cube` | `mosaic` | Raises `NotImplementedError` |
+| `continuum` | `mosaic` | Raises `NotImplementedError` |
 
 Every validator takes `ImagingMode(imaging_kind, field_layout)`. Continuum
 `mfs`/`mvc` specifies how continuum products are formed, independently of these
-axes. Future multifield requirements belong in each of the three validators.
+axes. Future mosaic requirements belong in each of the three validators.
 
 ## Configuration boundaries
 
@@ -62,7 +62,7 @@ use `require_*` predicates; the legacy `check_params` helper inserts defaults
 and is not interchangeable with them. The three validators cover geometry, frequencies,
 weighting, algorithm compatibility, scales, gain, stopping controls, memory
 policies, backend capabilities, restoration, and output compatibility.
-Unsupported requested features raise, including multifield execution,
+Unsupported requested features raise, including mosaic execution,
 continuum MPI, continuum graph visualization, and cube global
 weighting. The cube Dask graph visualization and cube MPI setup remain supported.
 `field_name` is retained as a string or `None` in all driver interfaces. Delphi
