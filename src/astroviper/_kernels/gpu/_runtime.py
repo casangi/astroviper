@@ -219,16 +219,19 @@ class Device:
         CuPy array of two axes, with its work area from the memory pool. CuPy's
         cuFFT is loaded at the first plan: ``RuntimeError`` (as
         :func:`check_cufft` raises it) when cuda.pathfinder cannot find it."""
-        from cupy.cuda import cufft
-        from cupyx.scipy.fft import get_fft_plan
-
-        self.fft_errors = (cufft.CuFFTError,)
         try:
+            from cupy.cuda import cufft
+            from cupyx.scipy.fft import get_fft_plan
+
+            self.fft_errors = (cufft.CuFFTError,)
             return get_fft_plan(array, axes=(0, 1))
-        except RuntimeError as e:  # DynamicLibNotFoundError is one
+        except (ImportError, RuntimeError) as e:
+            # cuda.pathfinder's DynamicLibNotFoundError (a RuntimeError), which
+            # CuPy's lazy import of cupy.cuda.cufft re-raises as an ImportError.
+            missing = e if isinstance(e, RuntimeError) else e.__cause__
             pathfinder = _pathfinder()
-            if pathfinder and isinstance(e, pathfinder.DynamicLibNotFoundError):
-                raise _no_cufft(self.cp.__file__, e) from e
+            if pathfinder and isinstance(missing, pathfinder.DynamicLibNotFoundError):
+                raise _no_cufft(self.cp.__file__, missing) from e
             raise
 
     def max_blocks(self, kernel, threads):

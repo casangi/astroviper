@@ -662,9 +662,11 @@ from astroviper._kernels.gpu import _runtime, fft, hogbom
 from tests.unit.kernels.test_hogbom_fast import _case, _run, _bits
 
 device = _runtime.require_device()
-for shape in ((257, 263), (251, 241), (199, 211), (181, 191)):  # primes: work areas
+# cuFFT 12 gives the plans of the first two a work area, not those of the primes.
+for shape in ((500, 500), (1000, 1000), (199, 211), (181, 191)):
     fft.ifft_uv_to_lm(np.ones(shape, np.complex128), fft_backend="scipy")
 kept = device.pool.used_bytes()  # the work areas of the kept cuFFT plans
+areas = sum(p.work_area.mem.size for p in fft._plans.values() if p.work_area is not None)
 case = _case(64, 64, np.float64, planes=(1, 1, 2), niter=20, seed=65)
 reference = _run(hogbom.impl("hogbom", "clean_cube", "ref"), case)
 args = (case["residual"].copy(), case["psf"], case["model"].copy())
@@ -675,7 +677,7 @@ needed = stats["device_bytes"]
 device.pool.set_limit(size=needed + kept // 2)
 runs, run = [], hogbom._run
 hogbom._run = lambda call, stats=None: runs.append(call.entry) or run(call, stats)
-out = {"kept": kept, "needed": needed, "plans": len(fft._plans)}
+out = {"kept": kept, "areas": areas, "needed": needed, "plans": len(fft._plans)}
 residual, model = case["residual"].copy(), case["model"].copy()
 try:
     hogbom.clean_cube(residual, case["psf"], model, **case["kwargs"])
@@ -701,7 +703,10 @@ def test_a_call_that_fits_once_the_fft_plans_are_dropped_runs(device, run_python
         PYTHONPATH=PYTHONPATH,
     )
     result = json.loads(out.rpartition("RESULT ")[2])
-    assert result["plans"] == fft.PLAN_CACHE and result["kept"] > 1, result
+    if result["areas"] == 0:
+        pytest.skip("this cuFFT gives the plans of these planes no work area")
+    assert result["plans"] == fft.PLAN_CACHE, result
+    assert result["kept"] >= result["areas"] > 0, result  # the work areas are the pool's
     assert result.get("error") is None and result["same"] is True, result
     assert result["runs"] == 1 and result["plans_after"] == 0 and result["used"] == 0
 
