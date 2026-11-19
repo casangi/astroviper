@@ -21,3 +21,5 @@ set(_av_image_analysis src/astroviper/processing_functions/image_analysis)
 add_subdirectory(${_av_image_analysis}/psf_gaussian_fit_cpp)
 set(_av_simulation src/astroviper/processing_functions/simulation)
 add_subdirectory(${_av_simulation}/visibility_kernel_cpp)
+# Fast kernels beside the reference ones, selected by ASTROVIPER_KERNELS at run time.
+add_subdirectory(src/astroviper/_kernels/fast)

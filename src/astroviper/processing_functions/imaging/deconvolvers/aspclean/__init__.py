@@ -28,3 +28,8 @@ __all__ = [
     "convolve_centered",
     "lbfgs_minimize",
 ]
+if __import__("os").environ.get("ASTROVIPER_KERNELS"):
+    from astroviper._kernels import dispatch as _dispatch
+
+    clean = _dispatch("asp", clean)
+    clean_cube = _dispatch("asp", clean_cube)
