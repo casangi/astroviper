@@ -118,15 +118,6 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
 
-def _make_continuum_cycle_controller(cycle_control_params):
-    """Build the shared controller with every continuum cycle control option."""
-    from astroviper.processing_functions.imaging.utils import (
-        make_continuum_cycle_controller,
-    )
-
-    return make_continuum_cycle_controller(cycle_control_params)
-
-
 def _create_wideband_primary_beam_cache_store(
     image_store,
     img_xds,
@@ -3464,6 +3455,7 @@ def image_continuum_single_field(
         CONTINUUM_IMAGING_TIMING_PHASES,
         CONTINUUM_MODEL_UPDATE_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
+        make_continuum_cycle_controller,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
         correlation_selection,
@@ -3725,7 +3717,7 @@ def image_continuum_single_field(
         "max_cycles"
     ) == "auto" and np.any(np.asarray(cycle_control_params.get("threshold", 0.0)) <= 0)
 
-    controller = _make_continuum_cycle_controller(cycle_control_params)
+    controller = make_continuum_cycle_controller(cycle_control_params)
 
     image_params = resolved_image_params
     input_params["image_params"] = image_params

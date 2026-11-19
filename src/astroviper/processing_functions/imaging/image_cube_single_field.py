@@ -438,38 +438,13 @@ def imaging_preparation_single_field(
         imaging_setup_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        CycleController,
         ImagingDict,
-        validate_entropy_params,
-    )
-    from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
-        THRESHOLD_TOLERANCE,
+        make_continuum_cycle_controller,
     )
 
     logger.debug("Processing chunk " + str(task_id))
 
-    # The entropy stop is optional: its keys take their defaults when absent.
-    entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
-        validate_entropy_params(cycle_control_params)
-    )
-    controller = CycleController(
-        max_iter=cycle_control_params["max_iter"],
-        max_cycles=cycle_control_params["max_cycles"],
-        threshold=cycle_control_params["threshold"],
-        gain=cycle_control_params["gain"],
-        psf_sidelobe_factor=cycle_control_params["psf_sidelobe_factor"],
-        min_psf_fraction=cycle_control_params["min_psf_fraction"],
-        max_psf_fraction=cycle_control_params["max_psf_fraction"],
-        max_iter_per_cycle=cycle_control_params["max_iter_per_cycle"],
-        entropy_stop=entropy_stop,
-        entropy_max_snr=entropy_max_snr,
-        entropy_spatial_bins=entropy_spatial_bins,
-        entropy_flux_bins=entropy_flux_bins,
-        max_cycles_divergence=cycle_control_params.get("max_cycles_divergence", -1),
-        threshold_tolerance=cycle_control_params.get(
-            "threshold_tolerance", THRESHOLD_TOLERANCE
-        ),
-    )
+    controller = make_continuum_cycle_controller(cycle_control_params)
     combined_imaging_dict = ImagingDict()
 
     # Once-only imaging setup: imaging weights, PSF and primary beam. The dirty
