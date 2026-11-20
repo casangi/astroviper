@@ -107,6 +107,8 @@ void anti_alias_grid_bind(
     const int n_vis_chan = static_cast<int>(frequency_map.shape(0));
     const int n_pol      = static_cast<int>(pol_map.shape(0));
 
+    if (delta_lm.ndim() != 1 || delta_lm.shape(0) != 2)
+        throw std::runtime_error("delta_lm must have shape (2,)");
     astroviper::ScalarBuffer<const double, false> dlm(delta_lm.data());
 
     // Capture raw pointers before releasing the GIL; py::array_t accessors
@@ -207,6 +209,8 @@ void anti_alias_grid_uv_sampling_bind(
     const int n_vis_chan = static_cast<int>(frequency_map.shape(0));
     const int n_pol      = static_cast<int>(pol_map.shape(0));
 
+    if (delta_lm.ndim() != 1 || delta_lm.shape(0) != 2)
+        throw std::runtime_error("delta_lm must have shape (2,)");
     astroviper::ScalarBuffer<const double, false> dlm(delta_lm.data());
 
     double*       norm_ptr          = static_cast<double*>(normalization.mutable_data());
@@ -316,6 +320,8 @@ void anti_alias_degrid_bind(
     const int n_vis_chan = static_cast<int>(frequency_map.shape(0));
     const int n_pol      = static_cast<int>(pol_map.shape(0));
 
+    if (delta_lm.ndim() != 1 || delta_lm.shape(0) != 2)
+        throw std::runtime_error("delta_lm must have shape (2,)");
     astroviper::ScalarBuffer<const double, false> dlm(delta_lm.data());
 
     const void*    grid_ptr_raw  = grid_info.ptr;
