@@ -2,6 +2,8 @@
 // for the conventions reproduced here.
 
 #include "../include/mt_fft.hpp"
+#include "scalar_buffer.hpp"
+#include <vector>
 
 // Header-only PocketFFT, compiled single-threaded: deterministic results and
 // no internal thread pool inside a kernel that may itself run on many Dask
@@ -38,7 +40,16 @@ void forward_r2c(const T* real, std::complex<T>* spec, int nx, int ny) {
 
     // Real -> complex along the fast (nx) axis, then complex -> complex along
     // the slow (ny) axis. Forward, unscaled (fft0 convention).
-    pocketfft::r2c(shape_t{sny, snx}, sr, sc, /*axis=*/1, /*forward=*/true, real, spec, static_cast<T>(1));
+    if (astroviper::naturally_aligned<T>(real)) {
+        pocketfft::r2c(shape_t{sny, snx}, sr, sc, /*axis=*/1, /*forward=*/true, real, spec, static_cast<T>(1));
+    } else {
+        std::vector<T> row(snx);
+        for (std::size_t y = 0; y < sny; ++y) {
+            std::memcpy(row.data(), reinterpret_cast<const unsigned char*>(real) + y * snx * sizeof(T), snx * sizeof(T));
+            pocketfft::r2c(shape_t{snx}, stride_t{sizeof(T)}, stride_t{sizeof(std::complex<T>)}, 0, true,
+                           row.data(), spec + y * sncx, static_cast<T>(1));
+        }
+    }
     pocketfft::c2c(shape_t{sny, sncx}, sc, sc, shape_t{0}, /*forward=*/true, spec, spec, static_cast<T>(1));
 }
 

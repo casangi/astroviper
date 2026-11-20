@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include "scalar_buffer.hpp"
 #include <cmath>
 #include <cstdlib>
 
@@ -52,14 +53,14 @@ inline void stencil_kernel_values(
             const int    k   = std::min(static_cast<int>(pos), last);
             const int    k1  = std::min(k + 1, last);
             const double w   = pos - static_cast<double>(k);
-            values[i] = cgk_1D[k] * (1.0 - w) + cgk_1D[k1] * w;
+            astroviper::scalar_store(values, i, astroviper::scalar_load(cgk_1D, k) * (1.0 - w) + astroviper::scalar_load(cgk_1D, k1) * w);
         }
     } else {
         const int center_offset_indx =
             static_cast<int>(std::floor(offset * oversampling + 0.5));
         for (int i = 0; i < support; ++i) {
-            values[i] = cgk_1D[std::abs(
-                oversampling * (i - support_center) + center_offset_indx)];
+            astroviper::scalar_store(values, i, astroviper::scalar_load(cgk_1D, std::abs(
+                oversampling * (i - support_center) + center_offset_indx)));
         }
     }
 }

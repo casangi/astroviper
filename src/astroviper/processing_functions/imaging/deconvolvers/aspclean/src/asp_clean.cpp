@@ -23,6 +23,7 @@
 // None of this changes what is computed beyond rounding.
 
 #include "../include/asp_clean.hpp"
+#include "scalar_buffer.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -82,8 +83,7 @@ void flip_inplace(std::vector<V>& a, int nx, int ny) {
         const int sj = (j + cy) % ny;
         for (int i = 0; i < nx; ++i) {
             const int si = (i + cx) % nx;
-            out[static_cast<std::size_t>(j) * nx + i] =
-                a[static_cast<std::size_t>(sj) * nx + si];
+            astroviper::scalar_store(out, static_cast<std::size_t>(j) * nx + i, astroviper::scalar_load(a, static_cast<std::size_t>(sj) * nx + si));
         }
     }
     a.swap(out);
@@ -123,12 +123,12 @@ void find_max_abs_mask_box(const V* a, const Mat& w, const Box& box, double& max
     double mn = 0.0, mx = 0.0;
     int mnI = 0, mnJ = 0, mxI = 0, mxJ = 0;
     if (box.i0 == 0 && box.j0 == 0 && box.i1 == nx - 1 && box.j1 == ny - 1)
-        mn = mx = static_cast<double>(a[0]) * w(0, 0);
+        mn = mx = static_cast<double>(astroviper::scalar_load(a, 0)) * w(0, 0);
     for (int j = box.j0; j <= box.j1; ++j) {
         const V* arow = a + static_cast<std::size_t>(j) * nx;
         const double* wrow = w.d.data() + static_cast<std::size_t>(j) * nx;
         for (int i = box.i0; i <= box.i1; ++i) {
-            const double v = static_cast<double>(arow[i]) * wrow[i];
+            const double v = static_cast<double>(astroviper::scalar_load(arow, i)) * astroviper::scalar_load(wrow, i);
             if (v > mx) { mx = v; mxI = i; mxJ = j; }
             if (v < mn) { mn = v; mnI = i; mnJ = j; }
         }
@@ -226,7 +226,7 @@ struct PsfCutoutSpectra {
                 const int pi = cx + di;
                 if (pi < 0 || pi >= nx) continue;
                 grid[row + static_cast<std::size_t>((di + lx) % lx)] =
-                    psf[static_cast<std::size_t>(pj) * nx + pi];
+                    astroviper::scalar_load(psf, static_cast<std::size_t>(pj) * nx + pi);
             }
         }
         if (cache.size() >= 8) cache.erase(cache.begin());
@@ -369,7 +369,7 @@ struct AspObjective {
                 const std::size_t k = row + static_cast<std::size_t>(i + ox);
                 const double aspConvPsf = convA[k];
                 const double dAspConvPsf = convD[k];
-                const double res = static_cast<double>(drow[i]) * inv_rescale - amp * aspConvPsf;
+                const double res = static_cast<double>(astroviper::scalar_load(drow, i)) * inv_rescale - amp * aspConvPsf;
                 func += res * res;
                 dA += -2.0 * res * aspConvPsf;
                 dS += -2.0 * amp * res * dAspConvPsf;
@@ -508,21 +508,21 @@ private:
 
     // ---- accessors into caller buffers ----
     double dirtyAt(int i, int j) const {
-        return static_cast<double>(residual_[static_cast<std::size_t>(j) * nx_ + i]);
+        return static_cast<double>(astroviper::scalar_load(residual_, static_cast<std::size_t>(j) * nx_ + i));
     }
     void dirtySet(int i, int j, double v) {
-        residual_[static_cast<std::size_t>(j) * nx_ + i] = static_cast<T>(v);
+        astroviper::scalar_store(residual_, static_cast<std::size_t>(j) * nx_ + i, static_cast<T>(v));
     }
     double modelAt(int i, int j) const {
-        return static_cast<double>(model_[static_cast<std::size_t>(j) * nx_ + i]);
+        return static_cast<double>(astroviper::scalar_load(model_, static_cast<std::size_t>(j) * nx_ + i));
     }
     void modelAdd(int i, int j, double v) {
-        model_[static_cast<std::size_t>(j) * nx_ + i] += static_cast<T>(v);
+        astroviper::scalar_add(model_, static_cast<std::size_t>(j) * nx_ + i, static_cast<T>(v));
     }
     double modelSum() const {
         double s = 0.0;
         for (std::size_t k = 0; k < static_cast<std::size_t>(nx_) * ny_; ++k)
-            s += static_cast<double>(model_[k]);
+            s += static_cast<double>(astroviper::scalar_load(model_, k));
         return s;
     }
 
@@ -541,7 +541,7 @@ private:
         // opposite edge, and cuts most of it off with a box around the
         // component.
         psfd_.resize(static_cast<std::size_t>(nx_) * ny_);
-        for (std::size_t k = 0; k < psfd_.size(); ++k) psfd_[k] = static_cast<double>(psf_[k]);
+        for (std::size_t k = 0; k < psfd_.size(); ++k) psfd_[k] = static_cast<double>(astroviper::scalar_load(psf_, k));
         padNx_ = good_fft_size((3 * nx_ + 1) / 2);
         padNy_ = good_fft_size((3 * ny_ + 1) / 2);
         {
@@ -588,7 +588,7 @@ private:
         const int ns = static_cast<int>(initScaleSizes_.size());
         noiseScale_.assign(ns, std::numeric_limits<double>::infinity());
         std::vector<double> dirtyd(static_cast<std::size_t>(nx_) * ny_);
-        for (std::size_t k = 0; k < dirtyd.size(); ++k) dirtyd[k] = static_cast<double>(residual_[k]);
+        for (std::size_t k = 0; k < dirtyd.size(); ++k) dirtyd[k] = static_cast<double>(astroviper::scalar_load(residual_, k));
         std::vector<cd> spec;
         if (ns > 1) aspfft::rfft2_half(dirtyd.data(), nx_, ny_, spec, fftThreads_.get());
         std::vector<double> conv;
@@ -628,7 +628,7 @@ private:
                       grid.begin() + static_cast<std::ptrdiff_t>(j) * lx);
         aspfft::rfft2_half(grid.data(), lx, ly, spec, fftThreads_.get());
         for (std::size_t k = 0; k < spec.size(); ++k)
-            spec[k] = aspfft::mul(spec[k], adjoint ? std::conj(psfFT[k]) : psfFT[k]);
+            astroviper::scalar_store(spec, k, aspfft::mul(astroviper::scalar_load(spec, k), adjoint ? std::conj(psfFT[k]) : psfFT[k]));
         aspfft::irfft2_half(spec.data(), lx, ly, grid.data(), fftThreads_.get());
         out.resize(static_cast<std::size_t>(bx) * by);
         for (int j = 0; j < by; ++j)
@@ -929,7 +929,7 @@ private:
             const cd yk = Y[static_cast<std::size_t>(ky)];
             const std::size_t base = static_cast<std::size_t>(ky) * hx;
             for (int kx = 0; kx < hx; ++kx)
-                prod[base + kx] = aspfft::mul(spec[base + kx], aspfft::mul(X[static_cast<std::size_t>(kx)], yk));
+                prod[base + kx] = aspfft::mul(astroviper::scalar_load(spec, base + kx), aspfft::mul(X[static_cast<std::size_t>(kx)], yk));
         }
         out.resize(static_cast<std::size_t>(nx_) * ny_);
         aspfft::irfft2_half(prod.data(), nx_, ny_, out.data(), fftThreads_.get());
@@ -960,7 +960,7 @@ private:
         for (int j = 0; j < ny_; ++j)
             for (int i = 0; i < nx_; ++i) {
                 const double v = mask_
-                    ? static_cast<double>(mask_[static_cast<std::size_t>(j) * nx_ + i])
+                    ? static_cast<double>(astroviper::scalar_load(mask_, static_cast<std::size_t>(j) * nx_ + i))
                     : 1.0;
                 maskMat_(i, j) = v;
                 if (v > maxMask) maxMask = v;
@@ -1138,7 +1138,7 @@ private:
                 dirtyConvInitScales_.resize(nInitScales_);
             std::vector<double>& dirtyd = work_.convD;
             dirtyd.resize(static_cast<std::size_t>(nx_) * ny_);
-            for (std::size_t k = 0; k < dirtyd.size(); ++k) dirtyd[k] = static_cast<double>(residual_[k]);
+            for (std::size_t k = 0; k < dirtyd.size(); ++k) dirtyd[k] = static_cast<double>(astroviper::scalar_load(residual_, k));
             aspfft::rfft2_half(dirtyd.data(), nx_, ny_, dirtyFT_, fftThreads_.get());
             for (int s = 1; s < nInitScales_; ++s) {
                 dirtyConvInitScales_[s].nx = nx_;
@@ -1426,7 +1426,7 @@ private:
                 for (int j = j0; j < j1; ++j) {
                     const double* prow = psfd_.data() + static_cast<std::size_t>(j + dj) * nx_;
                     for (int i = i0; i < i1; ++i)
-                        dirtySet(i, j, dirtyAt(i, j) - scaleFactor * prow[i + di]);
+                        dirtySet(i, j, dirtyAt(i, j) - scaleFactor * astroviper::scalar_load(prow, i + di));
                 }
                 timing_.t_update_point += lap(clock);
                 timing_.n_point_components += 1;
@@ -1452,8 +1452,8 @@ private:
                     const cd ay = norm * Y[static_cast<std::size_t>(ky)];
                     const std::size_t base = static_cast<std::size_t>(ky) * hx;
                     for (int kx = 0; kx < hx; ++kx)
-                        spec[base + kx] = aspfft::mul(aspfft::mul(ay, X[static_cast<std::size_t>(kx)]),
-                                                      psfXfrPad_[base + kx]);
+                        astroviper::scalar_store(spec, base + kx, aspfft::mul(aspfft::mul(ay, X[static_cast<std::size_t>(kx)]),
+                                                      psfXfrPad_[base + kx]));
                 }
                 std::vector<double>& conv = work_.convA;
                 conv.resize(static_cast<std::size_t>(padNx_) * padNy_);
@@ -1463,7 +1463,7 @@ private:
                     const double* crow = conv.data() + static_cast<std::size_t>(j) * padNx_;
                     for (int i = 0; i < nx_; ++i) {
                         modelAdd(i, j, scaleFactor * (gyj * rx[static_cast<std::size_t>(i)]));
-                        dirtySet(i, j, dirtyAt(i, j) - scaleFactor * crow[i]);
+                        dirtySet(i, j, dirtyAt(i, j) - scaleFactor * astroviper::scalar_load(crow, i));
                     }
                 }
                 timing_.t_update_scale += lap(clock);
@@ -1534,19 +1534,19 @@ void convolve_centered(const double* a, const double* b, int nx, int ny,
     std::vector<cd> fb = aspfft::rfft2_forward(b, nx, ny);
     std::vector<double> res;
     conv_from_spectra(fa, fb, nx, ny, res);
-    std::copy(res.begin(), res.end(), out);
+    for (std::size_t i = 0; i < res.size(); ++i) astroviper::scalar_store(out, i, res[i]);
 }
 
 double psf_gaussian_width(const double* psf, int nx, int ny) {
     // Locate the PSF peak (expected near the centre, value ~ 1).
     int px = nx / 2, py = ny / 2;
-    double peak = psf[static_cast<std::size_t>(py) * nx + px];
+    double peak = astroviper::scalar_load(psf, static_cast<std::size_t>(py) * nx + px);
     for (int j = 0; j < ny; ++j)
         for (int i = 0; i < nx; ++i) {
-            const double v = psf[static_cast<std::size_t>(j) * nx + i];
+            const double v = astroviper::scalar_load(psf, static_cast<std::size_t>(j) * nx + i);
             if (v > peak) { peak = v; px = i; py = j; }
         }
-    if (peak <= 0.0) return std::max(1.0, 2.5 * std::abs(psf[0]) + 1.0);
+    if (peak <= 0.0) return std::max(1.0, 2.5 * std::abs(astroviper::scalar_load(psf, 0)) + 1.0);
 
     // Quadratic-in-log least-squares fit of the main lobe:
     //   ln(psf/peak) ~ a0 + a1 dx + a2 dy + a3 dx^2 + a4 dx dy + a5 dy^2
@@ -1560,7 +1560,7 @@ double psf_gaussian_width(const double* psf, int nx, int ny) {
         for (int di = -win; di <= win; ++di) {
             const int i = px + di;
             if (i < 0 || i >= nx) continue;
-            const double val = psf[static_cast<std::size_t>(j) * nx + i] / peak;
+            const double val = astroviper::scalar_load(psf, static_cast<std::size_t>(j) * nx + i) / peak;
             if (val <= cutoff) continue;
             const double dx = di, dy = dj;
             const double basis[6] = {1.0, dx, dy, dx * dx, dx * dy, dy * dy};
@@ -1576,10 +1576,10 @@ double psf_gaussian_width(const double* psf, int nx, int ny) {
     auto fwhm_fallback = [&]() {
         // Count main-lobe pixels above half maximum along the peak row/column.
         int wx = 1, wy = 1;
-        for (int i = px + 1; i < nx && psf[static_cast<std::size_t>(py) * nx + i] / peak > 0.5; ++i) ++wx;
-        for (int i = px - 1; i >= 0 && psf[static_cast<std::size_t>(py) * nx + i] / peak > 0.5; --i) ++wx;
-        for (int j = py + 1; j < ny && psf[static_cast<std::size_t>(j) * nx + px] / peak > 0.5; ++j) ++wy;
-        for (int j = py - 1; j >= 0 && psf[static_cast<std::size_t>(j) * nx + px] / peak > 0.5; --j) ++wy;
+        for (int i = px + 1; i < nx && astroviper::scalar_load(psf, static_cast<std::size_t>(py) * nx + i) / peak > 0.5; ++i) ++wx;
+        for (int i = px - 1; i >= 0 && astroviper::scalar_load(psf, static_cast<std::size_t>(py) * nx + i) / peak > 0.5; --i) ++wx;
+        for (int j = py + 1; j < ny && astroviper::scalar_load(psf, static_cast<std::size_t>(j) * nx + px) / peak > 0.5; ++j) ++wy;
+        for (int j = py - 1; j >= 0 && astroviper::scalar_load(psf, static_cast<std::size_t>(j) * nx + px) / peak > 0.5; --j) ++wy;
         return std::ceil((wx + wy) / 2.0);
     };
 
@@ -1656,10 +1656,10 @@ AspResult clean_plane(T* residual, T* model, const T* psf, const T* mask,
     if (mask != nullptr) {
         const std::size_t n = static_cast<std::size_t>(nx) * ny;
         for (std::size_t k = 0; k < n; ++k)
-            if (!(static_cast<double>(mask[k]) > kMaskThreshold) &&
-                !std::isfinite(residual[k])) {
-                nonFinite.emplace_back(k, residual[k]);
-                residual[k] = T(0);
+            if (!(static_cast<double>(astroviper::scalar_load(mask, k)) > kMaskThreshold) &&
+                !std::isfinite(astroviper::scalar_load(residual, k))) {
+                nonFinite.emplace_back(k, astroviper::scalar_load(residual, k));
+                astroviper::scalar_store(residual, k, T(0));
             }
     }
     Cleaner<T> cleaner(residual, model, psf, mask, nx, ny, gain, threshold_per_cycle,
@@ -1667,7 +1667,7 @@ AspResult clean_plane(T* residual, T* model, const T* psf, const T* mask,
                        asp_largest_scale, asp_stop_point_mode, asp_scale_normalization_method,
                        asp_stop_after_hogbom_run, verbose, divergence, fft_threads, options);
     const AspResult result = cleaner.run();
-    for (const auto& [k, value] : nonFinite) residual[k] = value;
+    for (const auto& [k, value] : nonFinite) astroviper::scalar_store(residual, k, value);
     return result;
 }
 
@@ -1732,7 +1732,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
             // plane uses its own threshold and iteration limit.
             results[p] = clean_plane<T>(residual + img_off, model + img_off,
                                            psf + psf_off, maskp, nx, ny, gain,
-                                           threshold_per_cycle[p], max_iter_per_cycle_updated[p],
+                                           astroviper::scalar_load(threshold_per_cycle, p), astroviper::scalar_load(max_iter_per_cycle_updated, p),
                                            asp_fused_threshold, asp_psf_width, asp_largest_scale,
                                            asp_stop_point_mode, asp_scale_normalization_method,
                                            asp_stop_after_hogbom_run, false, divergence,

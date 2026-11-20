@@ -15,6 +15,7 @@
 //      at most 50 rounds); the final fallback is a round 2.5-pixel beam.
 
 #include "psf_gaussian_fit.hpp"
+#include "scalar_buffer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -55,7 +56,7 @@ void find_n_points(int nrow, double amin, int px, int py, double dx, double dy,
     trc[0] = 0;
     trc[1] = 0;
 
-    auto value = [&](int i, int j) { return psf[static_cast<std::size_t>(i) * ny + j]; };
+    auto value = [&](int i, int j) { return astroviper::scalar_load(psf, static_cast<std::size_t>(i) * ny + j); };
 
     int npoints = 0;
     int iflip = 1;
@@ -343,7 +344,7 @@ int fit_plane(const double* psf_in, std::size_t nx_in, std::size_t ny_in,
     double bamp = 0.0;
     for (int i = 0; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
-            const double v = psf_in[static_cast<std::size_t>(i) * ny + j];
+            const double v = astroviper::scalar_load(psf_in, static_cast<std::size_t>(i) * ny + j);
             if (v > bamp) {
                 bamp = v;
                 px = i;
@@ -357,8 +358,9 @@ int fit_plane(const double* psf_in, std::size_t nx_in, std::size_t ny_in,
         throw std::runtime_error(
             "Peak of psf is outside the inner quarter of defined image");
 
-    std::vector<double> lpsf(psf_in, psf_in + static_cast<std::size_t>(nx) * ny);
-    for (auto& v : lpsf) v /= bamp;
+    std::vector<double> lpsf(static_cast<std::size_t>(nx) * ny);
+    for (std::size_t i = 0; i < lpsf.size(); ++i)
+        lpsf[i] = astroviper::scalar_load(psf_in, i) / bamp;
 
     constexpr int kNrow = 20;          // CASA npix
     constexpr int kExpandPixel = 5;    // CASA expand_pixel
@@ -435,9 +437,9 @@ int fit_plane(const double* psf_in, std::size_t nx_in, std::size_t ny_in,
     }
 
     if (!converged) {
-        beam[0] = 2.5 * dx;
-        beam[1] = 2.5 * dx;
-        beam[2] = 0.0;
+        astroviper::scalar_store(beam, 0, 2.5 * dx);
+        astroviper::scalar_store(beam, 1, 2.5 * dx);
+        astroviper::scalar_store(beam, 2, 0.0);
         return 1;
     }
 
@@ -463,9 +465,9 @@ int fit_plane(const double* psf_in, std::size_t nx_in, std::size_t ny_in,
         else
             pa += M_PI;
     }
-    beam[0] = major;
-    beam[1] = minor;
-    beam[2] = pa;
+    astroviper::scalar_store(beam, 0, major);
+    astroviper::scalar_store(beam, 1, minor);
+    astroviper::scalar_store(beam, 2, pa);
     return 0;
 }
 

@@ -15,6 +15,7 @@ Coverage:
 import unittest
 
 import numpy as np
+import pytest
 from reference_gridders import anti_alias_grid_reference
 
 from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
@@ -581,10 +582,6 @@ class TestSinglePrecisionDegrid(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestGridKernelInterpolation(unittest.TestCase):
     """The linear interpolation of the kernel table (interpolation=1)."""
 
@@ -671,3 +668,115 @@ class TestGridOtherSupports(unittest.TestCase):
                     )
                     np.testing.assert_allclose(grid, ref_grid, rtol=0, atol=1e-10)
                     np.testing.assert_allclose(norm, ref_norm, rtol=0, atol=1e-10)
+
+
+def test_anti_grid_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid,
+    )
+
+    uvw = np.zeros((1, 1, 3))
+    freq = np.array([1e9])
+    imap = np.zeros(1, dtype=np.int64)
+    wt = np.ones((1, 1, 1, 1))
+    uv = np.array([16, 16])
+    dlm = np.array([1e-4, 1e-4])
+    base = dict(
+        grid=np.ones((1, 1, 1, 16, 16), dtype=np.complex128),
+        vis_data=np.ones((1, 1, 1, 1), dtype=np.complex128),
+        uvw=uvw,
+        frequency_coord=freq,
+        frequency_map=imap,
+        time_map=imap,
+        pol_map=imap,
+        cgk_1D=np.ones(8),
+        n_uv=uv,
+        delta_lm=dlm,
+        support=3,
+        oversampling=2,
+        interpolation=0,
+        processing_function_threads=1,
+    )
+    kwargs = dict(base, normalization=np.zeros((1, 1, 1)), weight=wt)
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    anti_alias_grid(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            anti_alias_grid(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5
+
+
+@pytest.mark.parametrize(
+    "kernel_name",
+    ["anti_alias_grid", "anti_alias_grid_uv_sampling", "anti_alias_degrid"],
+)
+@pytest.mark.parametrize("grid_dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize(
+    "shape", [(), (0,), (1,), (3,), (1, 2), (2, 1), (2, 2), (1, 1, 2)]
+)
+def test_anti_alias_entry_points_reject_delta_lm_shape_before_writes(
+    kernel_name, grid_dtype, shape, unaligned_array
+):
+    from astroviper.processing_functions.imaging.gridders import anti_alias_grid_cpp
+
+    kwargs = dict(
+        grid=np.full((1, 1, 1, 16, 16), 1.0 + 2.0j, dtype=grid_dtype),
+        uvw=np.zeros((1, 1, 3)),
+        frequency_coord=np.array([1.0e9]),
+        frequency_map=np.zeros(1, dtype=np.int64),
+        time_map=np.zeros(1, dtype=np.int64),
+        pol_map=np.zeros(1, dtype=np.int64),
+        cgk_1D=np.ones(8),
+        n_uv=np.array([16, 16], dtype=np.int64),
+        support=3,
+        oversampling=2,
+        interpolation=0,
+        processing_function_threads=1,
+    )
+    if kernel_name != "anti_alias_grid_uv_sampling":
+        kwargs["vis_data"] = np.full((1, 1, 1, 1), 3.0 + 4.0j, dtype=np.complex128)
+    if kernel_name != "anti_alias_degrid":
+        kwargs.update(
+            normalization=np.full((1, 1, 1), 5.0), weight=np.ones((1, 1, 1, 1))
+        )
+    # Compare the full backing storage, including guards, for every output.
+    guarded = {}
+    for name in ("grid", "normalization", "vis_data"):
+        if name in kwargs:
+            kwargs[name] = unaligned_array(kwargs[name], 8)
+            guarded[name] = bytes(kwargs[name].base)
+    kernel = getattr(anti_alias_grid_cpp, kernel_name)
+    for unaligned in (False, True):
+        delta_lm = np.full(shape, 1.0e-4)
+        kwargs["delta_lm"] = unaligned_array(delta_lm, 1) if unaligned else delta_lm
+        before = {
+            name: value.copy()
+            for name, value in kwargs.items()
+            if isinstance(value, np.ndarray)
+        }
+        with pytest.raises(RuntimeError, match=r"^delta_lm must have shape \(2,\)$"):
+            kernel(**kwargs)
+        for name, expected in before.items():
+            np.testing.assert_array_equal(kwargs[name], expected, err_msg=name)
+        for name, storage in guarded.items():
+            assert bytes(kwargs[name].base) == storage
+
+
+if __name__ == "__main__":
+    unittest.main()

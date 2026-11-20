@@ -458,9 +458,9 @@ def test_binding_validation():
         dft_image(image[0], normalization, *args)
     with pytest.raises(RuntimeError, match="normalization must have shape"):
         dft_image(image, normalization[:, :1], *args)
-    with pytest.raises(RuntimeError, match="normalization must be float64"):
+    with pytest.raises(RuntimeError, match="normalization.*expected native float64"):
         dft_image(image, normalization.astype(np.float32), *args)
-    with pytest.raises(RuntimeError, match="image must be"):
+    with pytest.raises(RuntimeError, match="image has wrong dtype"):
         dft_image(image.real.astype(np.int64), normalization, *args)
     read_only = image.copy()
     read_only.setflags(write=False)
@@ -488,11 +488,13 @@ def test_binding_validation():
     with pytest.raises(TypeError):
         dft_image(image, normalization, *_image_args(bad))
     vis = np.zeros(inp["vis_data"].shape, dtype=np.complex128)
-    with pytest.raises(RuntimeError, match="vis_data must be complex64 or complex128"):
+    with pytest.raises(
+        RuntimeError, match="vis_data.*expected native complex64 or complex128"
+    ):
         dft_predict(image, vis.real.copy(), *_predict_args(inp))
-    with pytest.raises(RuntimeError, match="model must be"):
+    with pytest.raises(RuntimeError, match="model has wrong dtype"):
         dft_predict(image.real.astype(np.int32), vis, *_predict_args(inp))
-    with pytest.raises(RuntimeError, match="image must be float32 or float64"):
+    with pytest.raises(RuntimeError, match="image.*expected native float32 or float64"):
         dft_image_uv_sampling(image, normalization, *_uv_sampling_args(inp))
 
 
@@ -530,3 +532,100 @@ def test_pickled_uv_sampling_arrays_are_accepted_in_place(dtype):
     dft_image_uv_sampling(psf, normalization, *args)
     assert psf.__array_interface__["data"][0] == psf_ptr
     assert np.any(psf != 0) and np.all(normalization > 0)
+
+
+def test_dft_image_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        dft_image,
+    )
+
+    uvw = np.zeros((1, 1, 3))
+    freq = np.array([1e9])
+    imap = np.zeros(1, dtype=np.int64)
+    wt = np.ones((1, 1, 1, 1))
+    dft = dict(
+        uvw=uvw,
+        frequency_coord=freq,
+        frequency_map=imap,
+        time_map=imap,
+        pol_map=imap,
+        l=np.arange(4) * 0.001,
+        m=np.arange(4) * 0.001,
+        processing_function_threads=1,
+    )
+    kwargs = dict(
+        dft,
+        image=np.zeros((1, 1, 1, 4, 4)),
+        normalization=np.zeros((1, 1, 1)),
+        vis_data=np.ones((1, 1, 1, 1), dtype=np.complex128),
+        weight=wt,
+    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    dft_image(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            dft_image(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5
+
+
+def test_dft_predict_native_alignment_contract(unaligned_array):
+    """Use external unaligned buffers in place and retain equivalent dtype support."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.gridders.direct_fourier_transform_cpp import (
+        dft_predict,
+    )
+
+    uvw = np.zeros((1, 1, 3))
+    freq = np.array([1e9])
+    imap = np.zeros(1, dtype=np.int64)
+    dft = dict(
+        uvw=uvw,
+        frequency_coord=freq,
+        frequency_map=imap,
+        time_map=imap,
+        pol_map=imap,
+        l=np.arange(4) * 0.001,
+        m=np.arange(4) * 0.001,
+        processing_function_threads=1,
+    )
+    kwargs = dict(
+        dft,
+        model=np.ones((1, 1, 1, 4, 4)),
+        vis_data=np.zeros((1, 1, 1, 1), dtype=np.complex128),
+    )
+    reference = {
+        k: v.copy() if isinstance(v, np.ndarray) else v for k, v in kwargs.items()
+    }
+    dft_predict(**reference)
+    for key, value in kwargs.items():
+        if not isinstance(value, np.ndarray) or value.dtype.alignment == 1:
+            continue
+        for offset in range(1, value.dtype.alignment):
+            trial = {
+                k: v.copy() if isinstance(v, np.ndarray) else v
+                for k, v in kwargs.items()
+            }
+            trial[key] = unaligned_array(value, offset)
+            dft_predict(**trial)
+            for name, expected in reference.items():
+                if isinstance(expected, np.ndarray):
+                    np.testing.assert_array_equal(trial[name], expected)
+            assert trial[key].base[0] == 0xA5
+            assert trial[key].base[-1] == 0xA5
