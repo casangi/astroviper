@@ -13,6 +13,7 @@ only the shard index and the compressed chunks of a selection.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import threading
 import time
@@ -39,9 +40,30 @@ DIMS = ("time", "baseline_id", "frequency", "polarization")
 
 def _equal(a, b):
     a, b = np.asarray(a), np.asarray(b)
-    if a.dtype.kind in "fc":
+    if a.dtype.kind == "c" or b.dtype.kind == "c":
+        return _equal(a.real, b.real) and _equal(a.imag, b.imag)
+    if a.dtype.kind == "f" or b.dtype.kind == "f":
         return np.array_equal(a, b, equal_nan=True)
     return np.array_equal(a, b)
+
+
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+@pytest.mark.parametrize(
+    "expected, corrupted",
+    [
+        (complex(float("nan"), float("inf")), complex(float("nan"), float("nan"))),
+        (complex(float("-inf"), float("nan")), complex(float("nan"), float("nan"))),
+        (complex(float("nan"), float("inf")), complex(float("nan"), float("-inf"))),
+        (complex(1, float("nan")), complex(2, float("nan"))),
+    ],
+)
+def test_equal_checks_both_complex_components(dtype, expected, corrupted):
+    """A NaN in one component must not hide corruption in the other."""
+    original = np.array([expected], dtype=dtype)
+    changed = np.array([corrupted], dtype=dtype)
+    assert _equal(original, original.copy())
+    assert not _equal(original, changed)
+    assert not _equal(changed, original)
 
 
 # --------------------------------------------------------------------------- #
@@ -76,6 +98,304 @@ def test_read_v3_sharded_multichannel(tmp_path, fsel):
     got, dims = read_array_region(path, {"frequency": fsel})
     assert dims == list(DIMS)
     assert _equal(got, zarr.open_array(path)[:, :, fsel, :])
+
+
+@pytest.mark.parametrize("layout", ["v2", "v3", "sharded"])
+@pytest.mark.parametrize(
+    "dtype, fill",
+    [
+        ("complex64", 0j),
+        ("complex64", 2 - 3j),
+        ("complex128", 2 - 3j),
+        ("complex64", complex(float("nan"), float("inf"))),
+        ("complex128", complex(float("nan"), float("inf"))),
+        ("complex64", complex(float("-inf"), float("nan"))),
+        ("complex128", complex(float("-inf"), float("nan"))),
+        ("float32", float("nan")),
+        ("float64", float("-inf")),
+        ("int32", -7),
+        ("bool", True),
+        ("bool", False),
+    ],
+)
+def test_read_encoded_fill_values(tmp_path, layout, dtype, fill):
+    """Missing/empty chunks and masked units fill the caller's existing buffer."""
+    path = str(tmp_path / "fills")
+    kwargs = {"dimension_names": ("frequency", "polarization")}
+    if layout == "v2":
+        kwargs = {"zarr_format": 2}
+    elif layout == "sharded":
+        kwargs["shards"] = (4, 4)
+    arr = zarr.create_array(
+        path, shape=(7, 4), chunks=(2, 4), dtype=dtype, fill_value=fill, **kwargs
+    )
+    if layout == "v2":
+        arr.attrs["_ARRAY_DIMENSIONS"] = ["frequency", "polarization"]
+    # One stored chunk, one empty inner chunk, and an entirely absent shard.
+    stored_value = not fill if dtype == "bool" else 1
+    arr[:2, :] = stored_value
+    out = np.empty((6, 4), dtype=dtype)
+    counters = {}
+    got, dims = read_array_region(
+        path, {"frequency": slice(1, 7)}, out=out, counters=counters
+    )
+    assert got is out
+    assert dims == ["frequency", "polarization"]
+    assert _equal(got, arr[1:7, :])
+    assert counters["bytes"] > 0  # A fill-only write would omit the chunk.
+    if dtype == "bool":
+        np.testing.assert_array_equal(got[0], np.full(4, stored_value))
+        np.testing.assert_array_equal(got[1:], np.full((5, 4), fill))
+        if layout == "sharded":
+            # Distinguish an omitted inner chunk in an existing shard from
+            # an entirely missing shard; both return the fill without data I/O.
+            for selection, expected_opens in [(slice(2, 4), 1), (slice(4, 7), 0)]:
+                missing_counters = {}
+                missing, _ = read_array_region(
+                    path, {"frequency": selection}, counters=missing_counters
+                )
+                np.testing.assert_array_equal(missing, np.full(missing.shape, fill))
+                assert missing_counters["bytes"] == 0
+                assert missing_counters["shard_opens"] == expected_opens
+                assert (missing_counters["index_bytes"] > 0) == bool(expected_opens)
+    got, _ = read_array_region(
+        path, {"frequency": slice(1, 7)}, out=out, chunk_mask=np.array(False)
+    )
+    assert got is out
+    assert _equal(got, np.full(out.shape, fill, dtype=dtype))
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize("fully_written", [False, True])
+@pytest.mark.parametrize(
+    "dtype, encoded",
+    [
+        ("float16", "0x7e00"),
+        ("float32", "0x7fc00000"),
+        ("float64", "0x7ff8000000000000"),
+        ("float32", "0x80000000"),
+        ("float64", "0x3ff8000000000000"),
+        ("complex64", ["0x7fc00000", "0x7f800000"]),
+        ("complex128", ["0xfff0000000000000", "0x7ff8000000000000"]),
+    ],
+)
+def test_read_hex_fill_values(tmp_path, sharded, fully_written, dtype, encoded):
+    """Hex fills must not block stored chunks; missing chunks match Zarr."""
+    path = tmp_path / "hex_fill"
+    kwargs = {"shards": (4, 2)} if sharded else {}
+    arr = zarr.create_array(
+        str(path),
+        shape=(6, 2),
+        chunks=(2, 2),
+        dtype=dtype,
+        dimension_names=("frequency", "polarization"),
+        **kwargs,
+    )
+    arr[: (6 if fully_written else 2), :] = 3
+    meta_path = path / "zarr.json"
+    meta = json.loads(meta_path.read_text())
+    meta["fill_value"] = encoded
+    meta_path.write_text(json.dumps(meta))
+    expected = zarr.open_array(str(path), mode="r")[:]
+    out = np.empty((6, 2), dtype=dtype)
+    got, _ = read_array_region(str(path), {}, out=out)
+    assert got is out
+    for actual_part, expected_part in [
+        (got.real, expected.real),
+        (got.imag, expected.imag),
+    ]:
+        np.testing.assert_array_equal(actual_part, expected_part)
+        np.testing.assert_array_equal(
+            np.signbit(actual_part), np.signbit(expected_part)
+        )
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize("dtype", ["float32", "complex64"])
+def test_big_endian_v3_rejected_before_chunk_io(tmp_path, sharded, dtype):
+    """Refuse valid big-endian stores without reading bad values or writing."""
+    from astroviper.utils.chunk_io.zarr_chunks import precreate_sharded_files
+
+    path = tmp_path / "SKY_RESIDUAL"
+    dims = ("time", "frequency", "polarization", "l", "m")
+    shape = (1, 2, 1, 2, 2)
+    kwargs = {"shards": shape} if sharded else {}
+    arr = zarr.create_array(
+        str(path),
+        shape=shape,
+        chunks=(1, 1, 1, 2, 2),
+        dtype=dtype,
+        dimension_names=dims,
+        serializer=zarr.codecs.BytesCodec(endian="big"),
+        **kwargs,
+    )
+    data = np.arange(1, 9, dtype=np.float32).reshape(shape).astype(dtype)
+    arr[:] = data
+    np.testing.assert_array_equal(zarr.open_array(str(path), mode="r")[:], data)
+    before = {
+        p.relative_to(path): p.read_bytes() for p in path.rglob("*") if p.is_file()
+    }
+    out = np.full(shape, 42, dtype=dtype)
+    with pytest.raises(NotImplementedError, match="Big-endian Zarr v3 bytes codecs"):
+        read_array_region(str(path), {}, out=out)
+    np.testing.assert_array_equal(out, np.full(shape, 42, dtype=dtype))
+    img = xr.Dataset({"SKY_RESIDUAL": (dims, data)})
+    writer = write_zarr_sharded if sharded else write_zarr
+    with pytest.raises(NotImplementedError, match="Big-endian Zarr v3 bytes codecs"):
+        writer(
+            str(tmp_path), ["sky_residual"], {"frequency": {"slice": slice(0, 2)}}, img
+        )
+    if sharded:
+        with pytest.raises(
+            NotImplementedError, match="Big-endian Zarr v3 bytes codecs"
+        ):
+            precreate_sharded_files(str(path))
+    after = {
+        p.relative_to(path): p.read_bytes() for p in path.rglob("*") if p.is_file()
+    }
+    assert after == before
+
+
+def test_big_endian_shard_index_rejected(tmp_path):
+    """The same restriction applies to the shard's uint64 index codec."""
+    from astroviper.utils.chunk_io.zarr_chunks import _read_array_meta
+
+    path = tmp_path / "index"
+    zarr.create_array(
+        str(path),
+        shape=(4,),
+        chunks=(2,),
+        shards=(4,),
+        dtype="float32",
+        dimension_names=("frequency",),
+    )
+    meta_path = path / "zarr.json"
+    meta = json.loads(meta_path.read_text())
+    for codec in meta["codecs"][0]["configuration"]["index_codecs"]:
+        if codec["name"] == "bytes":
+            codec["configuration"]["endian"] = "big"
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(NotImplementedError, match="Big-endian Zarr v3 bytes codecs"):
+        _read_array_meta(str(path))
+
+
+@pytest.mark.parametrize(
+    "dtype, fill",
+    [("S3", b"ab"), ("S4", b"\xff\x00ab"), ("V4", np.void(b"\xff\x00ab"))],
+)
+def test_v2_base64_fills_read_and_edge_padding(tmp_path, dtype, fill):
+    """Decode byte fills for missing/masked chunks and actual edge padding."""
+    path = tmp_path / "SKY_RESIDUAL"
+    dtype = np.dtype(dtype)
+    arr = zarr.create_array(
+        str(path),
+        zarr_format=2,
+        shape=(5,),
+        chunks=(2,),
+        dtype=dtype,
+        fill_value=fill,
+        compressors=None,
+    )
+    arr.attrs["_ARRAY_DIMENSIONS"] = ["frequency"]
+    arr[:2] = dtype.type(b"xy")
+    out = np.empty(5, dtype=dtype)
+    got, dims = read_array_region(str(path), {}, out=out)
+    assert got is out
+    assert dims == ["frequency"]
+    np.testing.assert_array_equal(got, arr[:])
+    got, _ = read_array_region(str(path), {}, out=out, chunk_mask=np.array(False))
+    np.testing.assert_array_equal(got, np.full(5, fill, dtype=dtype))
+
+    values = np.array([dtype.type(b"end")], dtype=dtype)
+    image = xr.Dataset({"SKY_RESIDUAL": (["frequency"], values)})
+    write_zarr(
+        str(tmp_path),
+        ["sky_residual"],
+        {"frequency": {"slice": slice(4, 5)}},
+        image,
+    )
+    np.testing.assert_array_equal(zarr.open_array(str(path), mode="r")[4:], values)
+    # Inspect the full uncompressed edge chunk: its second cell is padding,
+    # beyond the array extent and therefore invisible in a normal Zarr read.
+    edge = np.frombuffer((path / "2").read_bytes(), dtype=dtype)
+    expected = np.full(2, fill, dtype=dtype)
+    expected[0] = values[0]
+    np.testing.assert_array_equal(edge, expected)
+
+
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_base64_fill_decoding_is_format_and_dtype_specific(zarr_format):
+    """Unicode stays literal; the v2 rule must not alter v3 byte metadata."""
+    from astroviper.utils.chunk_io.zarr_chunks import _decode_fill_value
+
+    assert _decode_fill_value("YWI=", np.dtype("U4"), zarr_format=zarr_format) == "YWI="
+    if zarr_format == 3:
+        assert _decode_fill_value("YWI=", np.dtype("S4"), zarr_format=3) == "YWI="
+    assert _decode_fill_value(None, np.dtype("S4"), zarr_format=zarr_format) is None
+
+
+@pytest.mark.parametrize(
+    "dtype, stored",
+    [
+        ("float32", 3),
+        ("float64", 3),
+        ("complex64", 3 - 2j),
+        ("complex128", 3 - 2j),
+        ("int32", 3),
+        ("uint32", 3),
+        ("bool", True),
+        ("U4", "xy"),
+        ("S4", b"xy"),
+        ("V4", np.void(b"abcd")),
+        ("datetime64[ns]", "2026-01-01"),
+        ("timedelta64[ns]", 3),
+    ],
+)
+def test_v2_null_fill_defaults_match_zarr(tmp_path, dtype, stored):
+    """Null fills follow a documented compatibility policy, not a v2 mandate."""
+    path = tmp_path / "SKY_RESIDUAL"
+    dtype = np.dtype(dtype)
+    arr = zarr.create_array(
+        str(path),
+        zarr_format=2,
+        shape=(5,),
+        chunks=(2,),
+        dtype=dtype,
+        compressors=None,
+    )
+    arr.attrs["_ARRAY_DIMENSIONS"] = ["frequency"]
+    values = np.full(1, stored, dtype=dtype)
+    arr[:2] = values[0]
+    # Set actual JSON null: creation APIs can substitute their own defaults.
+    meta_path = path / ".zarray"
+    meta = json.loads(meta_path.read_text())
+    meta["fill_value"] = None
+    meta_path.write_text(json.dumps(meta))
+    expected = zarr.open_array(str(path), mode="r")[:]
+    default = expected[2]
+    out = np.empty(5, dtype=dtype)
+    got, _ = read_array_region(str(path), {}, out=out)
+    assert got is out
+    np.testing.assert_array_equal(got.real, expected.real)
+    if dtype.kind == "c":
+        np.testing.assert_array_equal(got.imag, expected.imag)
+    got, _ = read_array_region(str(path), {}, out=out, chunk_mask=np.array(False))
+    assert got is out
+    np.testing.assert_array_equal(got, np.full(5, default, dtype=dtype))
+
+    image = xr.Dataset({"SKY_RESIDUAL": (["frequency"], values)})
+    write_zarr(
+        str(tmp_path), ["sky_residual"], {"frequency": {"slice": slice(4, 5)}}, image
+    )
+    expected[4] = values[0]
+    np.testing.assert_array_equal(zarr.open_array(str(path), mode="r")[:], expected)
+    # Padding outside the logical array is undefined by v2, but our writer
+    # deliberately uses the same deterministic fallback as the reader.
+    padded = np.frombuffer((path / "2").read_bytes(), dtype=dtype)
+    expected_padding = np.full(2, default, dtype=dtype)
+    expected_padding[0] = values[0]
+    np.testing.assert_array_equal(padded, expected_padding)
+    assert json.loads(meta_path.read_text())["fill_value"] is None
 
 
 def _write_minimal_processing_set_child(store, ms_name, frequencies, offset=0):
@@ -559,11 +879,36 @@ def test_write_roundtrip(tmp_path, compressor, processing_function_threads):
         assert _equal(back, vals[v])
 
 
-def test_write_roundtrip_edge_chunk(tmp_path):
+@pytest.mark.parametrize(
+    "dtype, fill",
+    [("float32", float("nan")), ("complex64", 2 - 3j), ("complex128", 2 - 3j)],
+)
+@pytest.mark.parametrize("hex_fill", [False, True])
+def test_write_roundtrip_edge_chunk(tmp_path, dtype, fill, hex_fill):
     """Last chunk is partial (5 channels, chunk size 2): pad to full chunk."""
     freq_chunks = [list(range(2)), list(range(2)), list(range(1))]
     store = _make_image_store(tmp_path, None, freq_chunks)
-    vals = np.random.default_rng(5).standard_normal((1, 1, 2, 16, 16)).astype("<f4")
+    zarr.create_array(
+        store + "/SKY_RESIDUAL",
+        shape=(1, 5, 2, 16, 16),
+        chunks=(1, 2, 2, 16, 16),
+        dtype=dtype,
+        fill_value=fill,
+        dimension_names=("time", "frequency", "polarization", "l", "m"),
+        overwrite=True,
+    )
+    if hex_fill:
+        from pathlib import Path
+
+        meta_path = Path(store) / "SKY_RESIDUAL" / "zarr.json"
+        meta = json.loads(meta_path.read_text())
+        meta["fill_value"] = (
+            ["0x7fc00000", "0x00000000"]
+            if dtype.startswith("complex")
+            else "0x7fc00000"
+        )
+        meta_path.write_text(json.dumps(meta))
+    vals = np.random.default_rng(5).standard_normal((1, 1, 2, 16, 16)).astype(dtype)
     img = xr.Dataset(
         {"SKY_RESIDUAL": (["time", "frequency", "polarization", "l", "m"], vals)}
     )
@@ -571,6 +916,78 @@ def test_write_roundtrip_edge_chunk(tmp_path):
     write_zarr(store, ["sky_residual"], task_coords, img)
     back = zarr.open_array(store + "/SKY_RESIDUAL")[:, 4:5, :, :, :]
     assert _equal(back, vals)
+
+
+@pytest.mark.parametrize("layout", ["v2", "v3", "sharded"])
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+@pytest.mark.parametrize(
+    "fill",
+    [2 - 3j, complex(float("nan"), float("nan")), complex(float("nan"), float("inf"))],
+)
+def test_complex_uv_edge_padding(tmp_path, layout, dtype, fill):
+    """Partial u/v edge chunks retain complex fills in all storage layouts."""
+    from astroviper.utils.chunk_io.zarr_chunks import precreate_sharded_files
+
+    path = tmp_path / "VISIBILITY"
+    dims = ("time", "frequency", "polarization", "u", "v")
+    shape = (1, 1, 1, 3, 5)
+    chunks = (1, 1, 1, 2, 2)
+    kwargs = {"dimension_names": dims}
+    if layout == "v2":
+        kwargs = {"zarr_format": 2}
+    elif layout == "sharded":
+        kwargs["shards"] = (1, 1, 1, 4, 4)
+    arr = zarr.create_array(
+        str(path),
+        shape=shape,
+        chunks=chunks,
+        dtype=dtype,
+        fill_value=fill,
+        compressors=None,
+        **kwargs,
+    )
+    if layout == "v2":
+        arr.attrs["_ARRAY_DIMENSIONS"] = list(dims)
+    elif layout == "sharded":
+        # The fixed-slot writer requires the CRC-free index used by the
+        # production image/cache creation path. No data have been written yet.
+        meta_path = path / "zarr.json"
+        meta = json.loads(meta_path.read_text())
+        meta["codecs"][0]["configuration"]["index_codecs"] = [
+            {"name": "bytes", "configuration": {"endian": "little"}}
+        ]
+        meta_path.write_text(json.dumps(meta))
+        precreate_sharded_files(str(path))
+
+    values = np.full((1, 1, 1, 1, 1), 7 - 11j, dtype=dtype)
+    image = xr.Dataset({"VISIBILITY": (dims, values)})
+    task_coords = {"u": {"slice": slice(2, 3)}, "v": {"slice": slice(4, 5)}}
+    writer = write_zarr_sharded if layout == "sharded" else write_zarr
+    writer(str(tmp_path), ["visibility"], task_coords, image)
+
+    expected = np.full(shape, fill, dtype=dtype)
+    expected[..., 2:3, 4:5] = values
+    back = zarr.open_array(str(path), mode="r")[:]
+    ours, _ = read_array_region(str(path), {})
+    assert _equal(back, expected)
+    assert _equal(ours, expected)
+
+    # Inspect padding beyond BOTH logical u/v edges, which ordinary array
+    # reads omit. Each file is uncompressed; sharded blobs use an index offset.
+    if layout == "sharded":
+        with (path / "c/0/0/0/0/1").open("rb") as fh:
+            fh.seek(-4 * 16, os.SEEK_END)
+            index = np.frombuffer(fh.read(4 * 16), dtype="<u8").reshape(4, 2)
+            offset, length = map(int, index[2])  # Inner u/v position (1, 0).
+            fh.seek(offset)
+            blob = fh.read(length)
+    else:
+        key = "0.0.0.1.2" if layout == "v2" else "c/0/0/0/1/2"
+        blob = (path / key).read_bytes()
+    padded = np.frombuffer(blob, dtype=dtype).reshape(chunks)
+    expected_padding = np.full(chunks, fill, dtype=dtype)
+    expected_padding[..., :1, :1] = values
+    assert _equal(padded, expected_padding)
 
 
 @pytest.mark.parametrize("processing_function_threads", [1, 4])
