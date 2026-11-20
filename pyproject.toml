@@ -150,15 +150,19 @@ ignore = ["E741"]
 omit = ["*/find_continuum/findContinuum.py"]
 
 [tool.pytest.ini_options]
+# tests/conftest.py limits BLAS to one thread before NumPy is imported; zarr's
+# pytest plugin would import it first.
+addopts = "-p no:zarr"
 # Silence noisy, non-actionable zarr V3 warnings across the whole test suite.
 # pytest's per-test warning capture resets import-time filters, so these must be
 # set here rather than only in src/astroviper/__init__.py (which covers
-# non-pytest runtime use). The first is matched by its specific category; the
-# second is matched by message because its category (zarr.errors.ZarrUserWarning)
-# is a broad base class we do not want to silence wholesale.
+# non-pytest runtime use). Both are matched by message: naming a zarr category
+# here makes pytest import zarr, and with it NumPy, before tests/conftest.py, and
+# the second's category (zarr.errors.ZarrUserWarning) is a broad base class we
+# do not want to silence wholesale.
 filterwarnings = [
     # Fixed-length UTF string dtypes (XRADIO Zarr stores) have no stable V3 spec.
-    "ignore::zarr.errors.UnstableSpecificationWarning",
+    "ignore:The data type .* does not have a Zarr V3 specification",
     # Consolidated metadata is not yet part of the Zarr V3 spec.
     "ignore:Consolidated metadata is currently not part in the Zarr format 3 specification",
 ]
