@@ -456,7 +456,7 @@ def read_array_region(
         if out is not None and not relative_indices
         else np.empty(bounds, dtype=values_dtype)
     )
-    fill = meta["fill_value"] if meta["fill_value"] is not None else 0
+    fill = _fill_value(meta)
 
     sharding = meta["sharding"]
     unit_shape = tuple(sharding["chunk_shape"]) if sharding else oc
@@ -1033,11 +1033,20 @@ def _encode_chunk_blob(chunk, meta):
 
 
 def _fill_value(meta):
-    """The fill value used to pad partial (array-edge) chunks before encoding."""
+    """Return the explicit fill or a dtype-specific compatibility default.
+
+    Zarr v2 leaves missing data with a null fill undefined. Match zarr-python's
+    deterministic defaults for reads, skipped chunks and edge padding: zero
+    (including raw bytes), empty strings, or NaT for datetimes/timedeltas.
+    Only a scalar is allocated; explicit fills are returned unchanged.
+    """
     fill = meta["fill_value"]
-    if fill is None or (isinstance(fill, float) and np.isnan(fill)):
-        fill = np.nan if meta["dtype"].kind in "fc" else 0
-    return fill
+    if fill is not None:
+        return fill
+    dtype = meta["dtype"]
+    if dtype.kind in "Mm":
+        return np.full((), "NaT", dtype=dtype)[()]
+    return np.zeros((), dtype=dtype)[()]
 
 
 def _task_chunk_grid(dims, shape, chunk_shape, task_coords, array_path):

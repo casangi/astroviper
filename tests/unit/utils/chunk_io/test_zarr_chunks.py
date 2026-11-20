@@ -334,6 +334,70 @@ def test_base64_fill_decoding_is_format_and_dtype_specific(zarr_format):
     assert _decode_fill_value(None, np.dtype("S4"), zarr_format=zarr_format) is None
 
 
+@pytest.mark.parametrize(
+    "dtype, stored",
+    [
+        ("float32", 3),
+        ("float64", 3),
+        ("complex64", 3 - 2j),
+        ("complex128", 3 - 2j),
+        ("int32", 3),
+        ("uint32", 3),
+        ("bool", True),
+        ("U4", "xy"),
+        ("S4", b"xy"),
+        ("V4", np.void(b"abcd")),
+        ("datetime64[ns]", "2026-01-01"),
+        ("timedelta64[ns]", 3),
+    ],
+)
+def test_v2_null_fill_defaults_match_zarr(tmp_path, dtype, stored):
+    """Null fills follow a documented compatibility policy, not a v2 mandate."""
+    path = tmp_path / "SKY_RESIDUAL"
+    dtype = np.dtype(dtype)
+    arr = zarr.create_array(
+        str(path),
+        zarr_format=2,
+        shape=(5,),
+        chunks=(2,),
+        dtype=dtype,
+        compressors=None,
+    )
+    arr.attrs["_ARRAY_DIMENSIONS"] = ["frequency"]
+    values = np.full(1, stored, dtype=dtype)
+    arr[:2] = values[0]
+    # Set actual JSON null: creation APIs can substitute their own defaults.
+    meta_path = path / ".zarray"
+    meta = json.loads(meta_path.read_text())
+    meta["fill_value"] = None
+    meta_path.write_text(json.dumps(meta))
+    expected = zarr.open_array(str(path), mode="r")[:]
+    default = expected[2]
+    out = np.empty(5, dtype=dtype)
+    got, _ = read_array_region(str(path), {}, out=out)
+    assert got is out
+    np.testing.assert_array_equal(got.real, expected.real)
+    if dtype.kind == "c":
+        np.testing.assert_array_equal(got.imag, expected.imag)
+    got, _ = read_array_region(str(path), {}, out=out, chunk_mask=np.array(False))
+    assert got is out
+    np.testing.assert_array_equal(got, np.full(5, default, dtype=dtype))
+
+    image = xr.Dataset({"SKY_RESIDUAL": (["frequency"], values)})
+    write_zarr(
+        str(tmp_path), ["sky_residual"], {"frequency": {"slice": slice(4, 5)}}, image
+    )
+    expected[4] = values[0]
+    np.testing.assert_array_equal(zarr.open_array(str(path), mode="r")[:], expected)
+    # Padding outside the logical array is undefined by v2, but our writer
+    # deliberately uses the same deterministic fallback as the reader.
+    padded = np.frombuffer((path / "2").read_bytes(), dtype=dtype)
+    expected_padding = np.full(2, default, dtype=dtype)
+    expected_padding[0] = values[0]
+    np.testing.assert_array_equal(padded, expected_padding)
+    assert json.loads(meta_path.read_text())["fill_value"] is None
+
+
 def _write_minimal_processing_set_child(store, ms_name, frequencies, offset=0):
     """Write one tiny child used by direct-loader frequency-selection tests."""
     frequencies = np.asarray(frequencies, dtype=np.float64)
