@@ -149,6 +149,59 @@ class TestBeamFitParamsStorage:
         assert attrs["units"] == "rad"
 
 
+def test_create_empty_data_variables_in_a_format_2_store(tmp_path):
+    """Variables added to a Zarr format 2 group (an MSv4 of an older XRADIO)
+    are format 2 arrays that xarray reads with their dtypes."""
+    import numpy as np
+    import xarray as xr
+    import zarr
+    from numcodecs import Blosc
+
+    from astroviper.utils.io import create_empty_data_variables_on_disk
+
+    store = str(tmp_path / "ms.zarr")
+    zarr.open_group(store, mode="w", zarr_format=2)
+    dims = ["time", "frequency"]
+    create_empty_data_variables_on_disk(
+        store,
+        ["data", "flag", "count"],
+        shape_dict={"time": 4, "frequency": 3},
+        parallel_coords={"time": {"data_chunks": [[0, 1], [2, 3]]}},
+        compressor=Blosc(cname="lz4", clevel=5),
+        double_precision=False,
+        data_variable_definitions={
+            "data": {"dims": dims, "dtype": "<c8", "name": "DATA"},
+            "flag": {"dims": dims, "dtype": "|b1", "name": "FLAG"},
+            "count": {"dims": dims, "dtype": "<i4", "name": "COUNT"},
+        },
+    )
+    group = zarr.open_group(store, mode="r+")
+    assert group["DATA"].metadata.zarr_format == 2
+    assert group["DATA"].chunks == (2, 3)
+    group["FLAG"][2:4] = True
+    group["COUNT"][...] = np.arange(12, dtype=np.int32).reshape(4, 3)
+    stored = xr.open_zarr(store)
+    assert stored["DATA"].dtype == np.complex64
+    assert np.isnan(stored["DATA"].values).all()
+    assert stored["FLAG"].dtype == bool
+    np.testing.assert_array_equal(stored["FLAG"].values.any(axis=1), [0, 0, 1, 1])
+    assert stored["COUNT"].dtype == np.int32
+    np.testing.assert_array_equal(stored["COUNT"].values.ravel(), np.arange(12))
+    with pytest.raises(ValueError, match="needs a Zarr format 3 store"):
+        create_empty_data_variables_on_disk(
+            store,
+            ["data"],
+            shape_dict={"time": 4, "frequency": 3},
+            parallel_coords=None,
+            compressor=None,
+            double_precision=False,
+            data_variable_definitions={
+                "data": {"dims": dims, "dtype": "<c8", "name": "DATA_SHARDED"}
+            },
+            image_sharding={"time": 4},
+        )
+
+
 class TestCreateEmptyDataVariablesImageChunkingSharding:
     """On-disk chunk and shard shapes produced by ``image_chunking`` and
     ``image_sharding`` (4 tasks x 2 channels on an 8-channel, 16x16 image)."""
