@@ -258,6 +258,16 @@ def test_mvc_grid_reuses_existing_buffers_across_children(mvc_grid_inputs, dtype
     np.testing.assert_array_equal(normalization, 6)
 
 
+def test_mvc_grid_gives_the_new_arrays_its_coordinates(mvc_grid_inputs):
+    """The arrays are created with MVC's coordinates: the image frequency as float64."""
+    ms, image = mvc_grid_inputs
+    image = image.assign_coords(frequency=np.array([1e9, 1.1e9], dtype=np.float32))
+    add_visibility_grid_mvc_single_field(ms, as_gridding_kernel(np.ones(8)), image)
+    for name in ("VISIBILITY", "VISIBILITY_NORMALIZATION"):
+        assert image[name].frequency.dtype == np.float64
+        np.testing.assert_array_equal(image[name].frequency, [1e9, 1.1e9])
+
+
 @pytest.mark.parametrize(
     "fault,message",
     [

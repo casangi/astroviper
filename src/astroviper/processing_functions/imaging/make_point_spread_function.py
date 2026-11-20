@@ -293,92 +293,26 @@ def add_uv_sampling_grid_single_field(
     --------
     add_uv_sampling_grid_mosaic : Mosaic (direction-dependent GCF) variant.
     """
-    from astroviper.processing_functions.imaging.gridders.gridder_registry import (
-        GRIDDERS,
+    from astroviper.processing_functions.imaging.add_visibility_grid import (
+        _add_grid_single_field,
     )
 
-    if image_data_group_out_modified is None:
-        image_data_group_out_modified = dict(GRIDDERS[gridder].grid_uv_sampling_roles)
-    # Deep copy so that inputs are not modified
-    _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
-
-    ms_data_group_in = ms_xdt.attrs["data_groups"][ms_data_group_in_name]
-
-    image_data_group_in, image_data_group_out = create_data_groups_in_and_out(
-        img_xds,
-        data_group_in_name=image_data_group_in_name,
-        data_group_out_name=image_data_group_out_name,
-        data_group_out_modified=_image_data_group_out_modified,
-        overwrite=overwrite,
-    )
-
-    weight_imaging = ms_xdt[ms_data_group_in["weight_imaging"]].values
-    n_chan = weight_imaging.shape[2]
-
-    if chan_mode == "cube":
-        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
-            map_visibility_frequencies_to_image,
-        )
-
-        n_imag_chan = img_xds.sizes["frequency"]
-        frequency_map = map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values, img_xds.frequency.values
-        )
-    else:  # continuum
-        n_imag_chan = 1  # Making only one continuum image.
-        frequency_map = (np.zeros(n_chan)).astype(int)
-
-    n_imag_pol = weight_imaging.shape[3]
-
-    # Time Map #Currently not implemented.
-    n_image_time = 1
-
-    if complex_dtype is None:
-        complex_dtype = np.complex128
-
-    grid_role, normalization_role = GRIDDERS[gridder].grid_uv_sampling_roles
-
-    if image_data_group_out[grid_role] not in img_xds:
-        grid_values, grid_dims, grid_type = GRIDDERS[gridder].new_grid(
-            img_xds,
-            (n_image_time, n_imag_chan, n_imag_pol),
-            uv_sampling=True,
-            fft_padding=fft_padding,
-            complex_dtype=complex_dtype,
-        )
-        img_xds[image_data_group_out[grid_role]] = xr.DataArray(
-            grid_values,
-            dims=["time", "frequency", "polarization", *grid_dims],
-        )
-        if grid_type is not None:
-            img_xds[image_data_group_out[grid_role]].attrs["type"] = grid_type
-        img_xds[image_data_group_out[normalization_role]] = xr.DataArray(
-            np.zeros((n_image_time, n_imag_chan, n_imag_pol), dtype=np.double),
-            dims=["time", "frequency", "polarization"],
-        )
-        modify_data_groups_xds(
-            img_xds,
-            image_data_group_out_name,
-            image_data_group_out,
-            description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
-        )
-
-    grid = img_xds[image_data_group_out[grid_role]].values
-    normalization = img_xds[image_data_group_out[normalization_role]].values
-
-    imaging_weight = ms_xdt[ms_data_group_in["weight_imaging"]].values
-
-    GRIDDERS[gridder].grid_uv_sampling(
+    _add_grid_single_field(
         ms_xdt,
-        img_xds,
         gcf_xds,
-        weights=imaging_weight,
-        frequency_map=frequency_map,
-        grid=grid,
-        normalization=normalization,
+        img_xds,
         ms_data_group_in_name=ms_data_group_in_name,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        image_data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+        chan_mode=chan_mode,
         fft_padding=fft_padding,
         processing_function_threads=processing_function_threads,
+        complex_dtype=complex_dtype,
+        gridder=gridder,
+        uv_sampling=True,
+        description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
     )
 
 

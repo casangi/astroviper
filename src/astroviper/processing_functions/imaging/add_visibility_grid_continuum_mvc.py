@@ -125,6 +125,9 @@ def add_visibility_grid_mvc_single_field(
             mode=CONTINUUM_SINGLE_FIELD,
         )
 
+    from astroviper.processing_functions.imaging.add_visibility_grid import (
+        _add_grid_single_field,
+    )
     from astroviper.processing_functions.imaging.gridders.anti_alias.gridder_anti_alias import (
         GridderAntiAlias,
     )
@@ -134,16 +137,10 @@ def add_visibility_grid_mvc_single_field(
     from astroviper.processing_functions.imaging.utils.frequency_mapping import (
         map_visibility_frequencies_to_image,
     )
-    from astroviper.utils.data_group_tools import (
-        create_data_groups_in_and_out,
-        modify_data_groups_xds,
-    )
+    from astroviper.utils.data_group_tools import create_data_groups_in_and_out
 
     if image_data_group_out_modified is None:
         image_data_group_out_modified = dict(GridderAntiAlias.grid_roles)
-
-    if complex_dtype is None:
-        complex_dtype = np.complex128
 
     # ------------------------------------------------------------------
     # Resolve input and output data groups.
@@ -198,8 +195,8 @@ def add_visibility_grid_mvc_single_field(
     # ------------------------------------------------------------------
     # Validate visibility-domain arrays.
     # ------------------------------------------------------------------
-    visibility_data = np.asarray(ms_xds[ms_data_group_in["correlated_data"]].values)
-    weight_imaging = np.asarray(ms_xds[ms_data_group_in["weight_imaging"]].values)
+    visibility_data = ms_xds[ms_data_group_in["correlated_data"]]
+    weight_imaging = ms_xds[ms_data_group_in["weight_imaging"]]
 
     if weight_imaging.ndim != 4:
         raise ValueError(
@@ -263,9 +260,8 @@ def add_visibility_grid_mvc_single_field(
             f"{image_frequency_coord.shape}."
         )
 
-    frequency_map = map_visibility_frequencies_to_image(
-        frequency_coord, image_frequency_coord
-    )
+    # Refuses unmappable channels before the axis checks; the gridding maps them again.
+    map_visibility_frequencies_to_image(frequency_coord, image_frequency_coord)
     n_image_chan = image_frequency_coord.size
 
     if "polarization" not in img_xds.coords:
@@ -319,77 +315,9 @@ def add_visibility_grid_mvc_single_field(
     )
 
     # ------------------------------------------------------------------
-    # Create or validate output arrays.
+    # Validate existing output arrays.
     # ------------------------------------------------------------------
-    if visibility_name not in img_xds:
-        visibility_coords = {
-            "time": img_xds.coords["time"],
-            "frequency": img_xds.coords["frequency"],
-            "polarization": img_xds.coords["polarization"],
-        }
-
-        if "u" in img_xds.coords:
-            visibility_coords["u"] = img_xds.coords["u"]
-
-        if "v" in img_xds.coords:
-            visibility_coords["v"] = img_xds.coords["v"]
-
-        grid_values, grid_dims, _ = GridderAntiAlias.new_grid(
-            img_xds,
-            (n_image_time, n_image_chan, n_pol),
-            uv_sampling=False,
-            fft_padding=fft_padding,
-            complex_dtype=complex_dtype,
-        )
-        img_xds[visibility_name] = xr.DataArray(
-            grid_values,
-            dims=(
-                "time",
-                "frequency",
-                "polarization",
-                *grid_dims,
-            ),
-            coords={
-                "time": img_xds.coords["time"],
-                "frequency": (
-                    "frequency",
-                    image_frequency_coord,
-                ),
-                "polarization": img_xds.coords["polarization"],
-            },
-        )
-
-        img_xds[normalization_name] = xr.DataArray(
-            np.zeros(
-                expected_normalization_shape,
-                dtype=np.float64,
-            ),
-            dims=(
-                "time",
-                "frequency",
-                "polarization",
-            ),
-            coords={
-                "time": img_xds.coords["time"],
-                "frequency": (
-                    "frequency",
-                    image_frequency_coord,
-                ),
-                "polarization": img_xds.coords["polarization"],
-            },
-        )
-
-        modify_data_groups_xds(
-            img_xds,
-            image_data_group_out_name,
-            image_data_group_out,
-            description=(
-                "Added frequency-resolved MVC visibility grids "
-                "with add_visibility_grid_mvc_single_field."
-            ),
-        )
-
-    else:
+    if visibility_name in img_xds:
         if normalization_name not in img_xds:
             raise KeyError(
                 f"{visibility_name!r} exists, but corresponding "
@@ -438,20 +366,31 @@ def add_visibility_grid_mvc_single_field(
     # ------------------------------------------------------------------
     # Grid directly into the output frequency cube.
     # ------------------------------------------------------------------
-    grid = img_xds[visibility_name].values
-    normalization = img_xds[normalization_name].values
-
-    GridderAntiAlias.grid(
+    _add_grid_single_field(
         ms_xds,
-        img_xds,
         gcf_xds,
-        weights=weight_imaging,
-        frequency_map=frequency_map,
-        grid=grid,
-        normalization=normalization,
+        img_xds,
         ms_data_group_in_name=ms_data_group_in_name,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        image_data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+        chan_mode="cube",
         fft_padding=fft_padding,
         processing_function_threads=processing_function_threads,
+        complex_dtype=complex_dtype,
+        gridder="anti_alias",
+        uv_sampling=False,
+        description=(
+            "Added frequency-resolved MVC visibility grids "
+            "with add_visibility_grid_mvc_single_field."
+        ),
+        coords={
+            "time": img_xds.coords["time"],
+            "frequency": ("frequency", image_frequency_coord),
+            "polarization": img_xds.coords["polarization"],
+        },
+        n_frequency_planes=n_image_chan,
     )
 
     # ------------------------------------------------------------------
