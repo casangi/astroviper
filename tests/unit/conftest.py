@@ -193,3 +193,20 @@ def imageable_msv2_ps(imageable_msv2, tmp_path_factory):
     convert_msv2_to_processing_set(ms_copy, ps_store, partition_scheme=[])
     shutil.rmtree(os.path.dirname(ms_copy))
     return ps_store
+
+
+@pytest.fixture
+def unaligned_array():
+    """Place a small test array at a deliberately unaligned byte offset."""
+    import numpy as np
+
+    def make(array, offset=1):
+        backing = bytearray([0xA5]) * (array.nbytes + offset + 1)
+        result = np.ndarray(
+            array.shape, dtype=array.dtype, buffer=backing, offset=offset
+        )
+        result[...] = array
+        assert result.flags.c_contiguous
+        return result
+
+    return make

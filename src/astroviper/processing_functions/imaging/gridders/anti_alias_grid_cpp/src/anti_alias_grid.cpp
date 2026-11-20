@@ -1,8 +1,11 @@
 #include "../include/anti_alias_grid.hpp"
+#include "scalar_buffer.hpp"
 #include "../include/kernel_lookup.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <array>
+#include <mutex>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -20,6 +23,12 @@ namespace {
 // feature-test fallback is needed.
 template <typename T>
 inline void atomic_add_real(T* target, T value) {
+    if (reinterpret_cast<std::uintptr_t>(target) % std::atomic_ref<T>::required_alignment) {
+        static std::array<std::mutex, 256> locks;
+        std::lock_guard<std::mutex> lock(locks[(reinterpret_cast<std::uintptr_t>(target) >> 3) % locks.size()]);
+        astroviper::scalar_add(target, 0, value);
+        return;
+    }
     std::atomic_ref<T> ref(*target);
     T current = ref.load(std::memory_order_relaxed);
     while (!ref.compare_exchange_weak(
@@ -68,8 +77,8 @@ void anti_alias_grid(
     //   uv_scale[1, i] = -(freq[i] * delta_m * m_v) / c
     std::vector<double> uv_scale_u(n_vis_chan), uv_scale_v(n_vis_chan);
     for (int i = 0; i < n_vis_chan; ++i) {
-        uv_scale_u[i] = -(frequency_coord[i] * delta_l * m_u) / c;
-        uv_scale_v[i] = -(frequency_coord[i] * delta_m * m_v) / c;
+        uv_scale_u[i] = -(astroviper::scalar_load(frequency_coord, i) * delta_l * m_u) / c;
+        uv_scale_v[i] = -(astroviper::scalar_load(frequency_coord, i) * delta_m * m_v) / c;
     }
 
     const int support_center = support / 2;
@@ -106,7 +115,7 @@ void anti_alias_grid(
     // grid cell (baselines can sample overlapping UV coordinates), so every
     // write into grid / normalization goes through an atomic add.
     auto process_time_baseline = [&](int i_time, int i_baseline) {
-        const int a_time    = time_map[i_time];
+        const int a_time    = astroviper::scalar_load(time_map, i_time);
         const int vis_t_off = i_time * vis_time_stride;
         const int uvw_t_off = i_time * uvw_time_stride;
 
@@ -117,10 +126,10 @@ void anti_alias_grid(
         std::vector<double> conv_u(support), conv_v(support);
 
         for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
-            const int a_chan = frequency_map[i_chan];
+            const int a_chan = astroviper::scalar_load(frequency_map, i_chan);
 
-            const double u = uvw[uvw_b_off + 0] * uv_scale_u[i_chan];
-            const double v = uvw[uvw_b_off + 1] * uv_scale_v[i_chan];
+            const double u = astroviper::scalar_load(uvw, uvw_b_off + 0) * uv_scale_u[i_chan];
+            const double v = astroviper::scalar_load(uvw, uvw_b_off + 1) * uv_scale_v[i_chan];
 
             if (std::isnan(u) || std::isnan(v)) continue;
 
@@ -158,13 +167,13 @@ void anti_alias_grid(
             for (int i_pol = 0; i_pol < n_pol; ++i_pol) {
                 const int vis_idx = vis_c_off + i_pol;
 
-                const double sel_weight = weight[vis_idx];
-                const std::complex<double> wd = vis_data[vis_idx] * sel_weight;
+                const double sel_weight = astroviper::scalar_load(weight, vis_idx);
+                const std::complex<double> wd = astroviper::scalar_load(vis_data, vis_idx) * sel_weight;
 
                 if (std::isnan(wd.real()) || std::isnan(wd.imag())) continue;
                 if (wd == std::complex<double>(0.0, 0.0)) continue;
 
-                const int a_pol = pol_map[i_pol];
+                const int a_pol = astroviper::scalar_load(pol_map, i_pol);
 
                 const int grid_base = a_time * grid_time_stride
                                     + a_chan  * grid_chan_stride
@@ -261,8 +270,8 @@ void anti_alias_grid_uv_sampling(
 
     std::vector<double> uv_scale_u(n_vis_chan), uv_scale_v(n_vis_chan);
     for (int i = 0; i < n_vis_chan; ++i) {
-        uv_scale_u[i] = -(frequency_coord[i] * delta_l * m_u) / c;
-        uv_scale_v[i] = -(frequency_coord[i] * delta_m * m_v) / c;
+        uv_scale_u[i] = -(astroviper::scalar_load(frequency_coord, i) * delta_l * m_u) / c;
+        uv_scale_v[i] = -(astroviper::scalar_load(frequency_coord, i) * delta_m * m_v) / c;
     }
 
     const int support_center = support / 2;
@@ -288,7 +297,7 @@ void anti_alias_grid_uv_sampling(
     // Per-(time, baseline) kernel; same threading/atomic strategy as
     // anti_alias_grid.
     auto process_time_baseline = [&](int i_time, int i_baseline) {
-        const int a_time    = time_map[i_time];
+        const int a_time    = astroviper::scalar_load(time_map, i_time);
         const int wt_t_off  = i_time * wt_time_stride;
         const int uvw_t_off = i_time * uvw_time_stride;
 
@@ -299,10 +308,10 @@ void anti_alias_grid_uv_sampling(
         std::vector<double> conv_u(support), conv_v(support);
 
         for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
-            const int a_chan = frequency_map[i_chan];
+            const int a_chan = astroviper::scalar_load(frequency_map, i_chan);
 
-            const double u = uvw[uvw_b_off + 0] * uv_scale_u[i_chan];
-            const double v = uvw[uvw_b_off + 1] * uv_scale_v[i_chan];
+            const double u = astroviper::scalar_load(uvw, uvw_b_off + 0) * uv_scale_u[i_chan];
+            const double v = astroviper::scalar_load(uvw, uvw_b_off + 1) * uv_scale_v[i_chan];
 
             if (std::isnan(u) || std::isnan(v)) continue;
 
@@ -338,11 +347,11 @@ void anti_alias_grid_uv_sampling(
             const int wt_c_off = wt_b_off + i_chan * wt_chan_stride;
 
             for (int i_pol = 0; i_pol < n_pol; ++i_pol) {
-                const double weight_data = weight[wt_c_off + i_pol];
+                const double weight_data = astroviper::scalar_load(weight, wt_c_off + i_pol);
 
                 if (std::isnan(weight_data) || weight_data == 0.0) continue;
 
-                const int a_pol = pol_map[i_pol];
+                const int a_pol = astroviper::scalar_load(pol_map, i_pol);
 
                 const int grid_base = a_time * grid_time_stride
                                     + a_chan  * grid_chan_stride

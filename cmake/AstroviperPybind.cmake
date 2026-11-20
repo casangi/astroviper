@@ -185,7 +185,8 @@ function(astroviper_add_pybind_module)
     endif()
 
     pybind11_add_module(${PB_NAME} ${PB_SOURCES})
-    target_include_directories(${PB_NAME} PRIVATE ${PB_INCLUDE_DIRS})
+    target_include_directories(${PB_NAME} PRIVATE ${PB_INCLUDE_DIRS}
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/astroviper/processing_functions/include")
     target_link_libraries(${PB_NAME} PRIVATE astroviper_cpp_flags)
     install(TARGETS ${PB_NAME} DESTINATION ${PB_DESTINATION})
 endfunction()

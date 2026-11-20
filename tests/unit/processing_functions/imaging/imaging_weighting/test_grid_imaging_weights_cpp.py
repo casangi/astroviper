@@ -14,6 +14,7 @@ Coverage:
 import unittest
 
 import numpy as np
+import pytest
 
 from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp import (
     degrid_imaging_weights,
@@ -582,6 +583,274 @@ class TestDegridImagingWeightsCpp(unittest.TestCase):
                 np.array([0, 1], dtype=np.int64),
                 np.array([1.0, 1.0]),
             )
+
+
+def test_weighting_unaligned_buffers_preserve_results_and_storage(unaligned_array):
+    """Both kernels read/write the supplied bytes without array replacement."""
+    import pickle
+
+    for dtype in (np.float32, np.float64):
+        for truncate in (False, True):
+            common = dict(
+                uvw=np.array([[[12.0, -7.0, 0.0]]]),
+                frequency_coord=np.array([1e9]),
+                chan_map=np.zeros(1, dtype=np.int64),
+                n_uv=np.array([16, 16], dtype=np.int64),
+                delta_lm=np.array([1e-4, 1e-4]),
+                truncate_uv_cells=truncate,
+            )
+            cases = [
+                (
+                    grid_imaging_weights,
+                    dict(
+                        common,
+                        grid=np.zeros((1, 1, 16, 16), dtype=dtype),
+                        sum_weight=np.zeros((1, 1)),
+                        data_weights=np.full((1, 1, 1, 1), 3.0),
+                    ),
+                ),
+                (
+                    degrid_imaging_weights,
+                    dict(
+                        common,
+                        imaging_weight=np.zeros((1, 1, 1, 1)),
+                        grid_imaging_weight=np.full((1, 1, 16, 16), 2.0, dtype=dtype),
+                        briggs_factors=np.array([[[2.0]], [[1.0]]]),
+                        pol_map=np.zeros(1, dtype=np.int64),
+                        data_weight=np.full((1, 1, 1, 1), 3.0),
+                    ),
+                ),
+            ]
+            for kernel, kwargs in cases:
+                expected = {
+                    k: v.copy() if isinstance(v, np.ndarray) else v
+                    for k, v in kwargs.items()
+                }
+                kernel(**expected)
+                arrays = [k for k, v in kwargs.items() if isinstance(v, np.ndarray)]
+                for key in arrays + ["all"]:
+                    for offset in range(1, 8):
+                        trial = {
+                            k: v.copy() if isinstance(v, np.ndarray) else v
+                            for k, v in kwargs.items()
+                        }
+                        selected = arrays if key == "all" else [key]
+                        for name in selected:
+                            trial[name] = unaligned_array(trial[name], offset)
+                        kernel(**trial)
+                        for name in arrays:
+                            np.testing.assert_array_equal(trial[name], expected[name])
+                        for name in selected:
+                            assert trial[name].base[:offset] == bytes([0xA5]) * offset
+                            assert trial[name].base[-1] == 0xA5
+                trial = {
+                    k: v.copy().view(pickle.loads(pickle.dumps(v.dtype)))
+                    if isinstance(v, np.ndarray)
+                    else v
+                    for k, v in kwargs.items()
+                }
+                kernel(**trial)
+                for name in arrays:
+                    np.testing.assert_array_equal(trial[name], expected[name])
+
+
+def test_degrid_density_grid_after_distributed_deserialization():
+    """A received frame may start at a byte offset, as in the HOPS failure."""
+    from distributed.protocol import deserialize, serialize
+
+    source = np.full((1, 1, 16, 16), 2.0, dtype=np.float64)
+    header, frames = serialize(source)
+    received_frames = []
+    for frame in frames:
+        raw = memoryview(frame).cast("B")
+        storage = bytearray(raw.nbytes + 6)
+        storage[6:] = raw
+        received_frames.append(memoryview(storage)[6:])
+    grid = deserialize(header, received_frames)
+    assert grid.flags.c_contiguous
+    assert not grid.flags.aligned
+    assert grid.ctypes.data % 8 == 6
+    output = np.zeros((1, 1, 1, 1))
+    degrid_imaging_weights(
+        imaging_weight=output,
+        grid_imaging_weight=grid,
+        briggs_factors=np.ones((2, 1, 1)),
+        uvw=np.zeros((1, 1, 3)),
+        frequency_coord=np.array([1e9]),
+        chan_map=np.zeros(1, dtype=np.int64),
+        pol_map=np.zeros(1, dtype=np.int64),
+        data_weight=np.ones_like(output),
+        n_uv=np.array([16, 16]),
+        delta_lm=np.array([1e-4, 1e-4]),
+    )
+    np.testing.assert_array_equal(output, np.full_like(output, 1 / 3))
+    np.testing.assert_array_equal(grid, source)
+    assert np.shares_memory(grid, np.frombuffer(received_frames[0], dtype=np.uint8))
+
+
+def _binding_validation_case(degrid, dtype):
+    common = dict(
+        uvw=np.zeros((2, 3, 3)),
+        frequency_coord=np.full(4, 1.0e9),
+        chan_map=np.array([0, 1, 0, 1], dtype=np.int64),
+        n_uv=np.array([8, 8], dtype=np.int64),
+        delta_lm=np.array([1.0e-4, 1.0e-4]),
+    )
+    weights = np.ones((2, 3, 4, 2))
+    if degrid:
+        return degrid_imaging_weights, dict(
+            common,
+            imaging_weight=np.full_like(weights, -7.0),
+            grid_imaging_weight=np.full((2, 2, 8, 8), 2.0, dtype=dtype),
+            briggs_factors=np.ones((2, 2, 2)),
+            pol_map=np.array([1, 0], dtype=np.int64),
+            data_weight=weights,
+        )
+    return grid_imaging_weights, dict(
+        common,
+        grid=np.zeros((2, 2, 8, 8), dtype=dtype),
+        sum_weight=np.zeros((2, 2)),
+        data_weights=weights,
+    )
+
+
+# The bad entries occur after valid entries so a late kernel-side check would
+# already have changed the accumulators. All validation must precede compute.
+@pytest.mark.parametrize("degrid", [False, True], ids=["grid", "degrid"])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "name,value,message",
+    [
+        ("frequency_coord", np.array(1.0e9), "frequency_coord.*1-D"),
+        ("frequency_coord", np.ones((1, 4)), "frequency_coord.*1-D"),
+        ("frequency_coord", np.ones(1), "frequency_coord.*shape"),
+        ("frequency_coord", np.ones(5), "frequency_coord.*shape"),
+        ("chan_map", np.array(0, dtype=np.int64), "chan_map.*1-D"),
+        ("chan_map", np.zeros((1, 4), dtype=np.int64), "chan_map.*1-D"),
+        ("chan_map", np.zeros(3, dtype=np.int64), "chan_map.*shape"),
+        ("chan_map", np.zeros(5, dtype=np.int64), "chan_map.*shape"),
+        ("chan_map", np.array([0, 1, 0, -1], dtype=np.int64), "chan_map.*outside"),
+        ("chan_map", np.array([0, 1, 0, 2], dtype=np.int64), "chan_map.*outside"),
+        ("chan_map", np.array([0, 1, 0, np.iinfo(np.int64).max]), "chan_map.*outside"),
+        ("chan_map", np.array([0, 1, 0, np.iinfo(np.int64).min]), "chan_map.*outside"),
+        ("uvw", np.zeros((1, 3, 3)), "data_weight.*shape"),
+        ("uvw", np.zeros((2, 2, 3)), "data_weight.*shape"),
+    ],
+)
+def test_weight_bindings_reject_inconsistent_coordinates_before_writing(
+    degrid, dtype, name, value, message, unaligned_array
+):
+    kernel, kwargs = _binding_validation_case(degrid, dtype)
+    # Also exercise byte-safe validation of maps and coordinates after transfer.
+    kwargs[name] = unaligned_array(value, 1)
+    _assert_weight_binding_rejects_without_writes(kernel, kwargs, message)
+
+
+def _assert_weight_binding_rejects_without_writes(kernel, kwargs, message):
+    # Retain guard storage beyond every accumulator, including deliberately
+    # undersized outputs from the review reproductions.
+    guarded = []
+    for name in ("grid", "sum_weight", "imaging_weight"):
+        if name not in kwargs:
+            continue
+        value = kwargs[name]
+        storage = np.full(value.size + 64, 12345.0, dtype=value.dtype)
+        view = storage[: value.size].reshape(value.shape)
+        view[...] = value
+        kwargs[name] = view
+        guarded.append((storage, storage.copy()))
+    snapshots = {
+        name: value.copy()
+        for name, value in kwargs.items()
+        if isinstance(value, np.ndarray)
+    }
+    with pytest.raises(RuntimeError, match=message):
+        kernel(**kwargs)
+    for name, expected in snapshots.items():
+        np.testing.assert_array_equal(kwargs[name], expected, err_msg=name)
+    for storage, expected in guarded:
+        np.testing.assert_array_equal(storage, expected)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "name,shape,message",
+    [
+        ("sum_weight", (1, 2), "sum_weight.*shape"),
+        ("sum_weight", (2, 1), "sum_weight.*shape"),
+        ("sum_weight", (3, 2), "sum_weight.*shape"),
+        ("sum_weight", (2, 3), "sum_weight.*shape"),
+        ("data_weights", (1, 3, 4, 2), "data_weights.*shape"),
+        ("data_weights", (2, 2, 4, 2), "data_weights.*shape"),
+        ("data_weights", (2, 3, 3, 2), "frequency_coord.*shape"),
+        ("data_weights", (2, 3, 4, 0), "data_weights.*polarization"),
+        ("grid", (2, 0, 8, 8), "sum_weight.*shape|grid.*polarization"),
+    ],
+)
+def test_grid_weights_rejects_inconsistent_shapes_without_writes(
+    dtype, name, shape, message
+):
+    kernel, kwargs = _binding_validation_case(False, dtype)
+    kwargs[name] = np.zeros(shape, dtype=kwargs[name].dtype)
+    _assert_weight_binding_rejects_without_writes(kernel, kwargs, message)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "name,shape,message",
+    [
+        ("imaging_weight", (1, 3, 4, 2), "imaging_weight.*shape"),
+        ("imaging_weight", (2, 1, 4, 2), "imaging_weight.*shape"),
+        ("imaging_weight", (2, 3, 1, 2), "imaging_weight.*shape"),
+        ("imaging_weight", (2, 3, 4, 1), "imaging_weight.*shape"),
+        ("imaging_weight", (2, 3, 4, 3), "imaging_weight.*shape"),
+        ("briggs_factors", (2, 1, 2), "briggs_factors.*shape"),
+        ("briggs_factors", (2, 2, 1), "briggs_factors.*shape"),
+        ("briggs_factors", (2, 3, 2), "briggs_factors.*shape"),
+        ("data_weight", (1, 3, 4, 2), "data_weight.*shape"),
+        ("data_weight", (2, 2, 4, 2), "data_weight.*shape"),
+        ("data_weight", (2, 3, 3, 2), "frequency_coord.*shape"),
+    ],
+)
+def test_degrid_weights_rejects_inconsistent_shapes_without_writes(
+    dtype, name, shape, message
+):
+    kernel, kwargs = _binding_validation_case(True, dtype)
+    kwargs[name] = np.zeros(shape, dtype=kwargs[name].dtype)
+    _assert_weight_binding_rejects_without_writes(kernel, kwargs, message)
+
+
+@pytest.mark.parametrize(
+    "value,message",
+    [
+        (np.array(0, dtype=np.int64), "pol_map.*1-D"),
+        (np.zeros((1, 2), dtype=np.int64), "pol_map.*1-D"),
+        (np.zeros(3, dtype=np.int64), "pol_map.*length"),
+        (np.array([0, -1], dtype=np.int64), "pol_map.*outside"),
+        (np.array([0, 2], dtype=np.int64), "pol_map.*outside"),
+        (np.array([0, np.iinfo(np.int64).max]), "pol_map.*outside"),
+        (np.array([0, np.iinfo(np.int64).min]), "pol_map.*outside"),
+    ],
+)
+def test_degrid_weights_rejects_invalid_unaligned_polarization_maps(
+    value, message, unaligned_array
+):
+    kernel, kwargs = _binding_validation_case(True, np.float64)
+    kwargs["pol_map"] = unaligned_array(value, 1)
+    _assert_weight_binding_rejects_without_writes(kernel, kwargs, message)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("n_pol_out", [0, 1, 2])
+def test_degrid_weights_accepts_valid_unaligned_maps_and_polarization_prefixes(
+    dtype, n_pol_out, unaligned_array
+):
+    kernel, kwargs = _binding_validation_case(True, dtype)
+    kwargs["chan_map"] = unaligned_array(kwargs["chan_map"], 1)
+    kwargs["pol_map"] = unaligned_array(kwargs["pol_map"][:n_pol_out].copy(), 1)
+    kernel(**kwargs)
+    np.testing.assert_array_equal(kwargs["imaging_weight"][..., :n_pol_out], 1.0 / 3.0)
+    np.testing.assert_array_equal(kwargs["imaging_weight"][..., n_pol_out:], -7.0)
 
 
 if __name__ == "__main__":

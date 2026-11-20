@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include "scalar_buffer.hpp"
 #include <cstddef>
 #include <functional>
 #include <vector>
@@ -36,8 +37,8 @@ inline double scan_row(const T* row, const bool* mask_row, int xbeg, int xend,
     int mi = xbeg;
     double sum_squares = 0.0;
     for (int ix = xbeg; ix < xend; ++ix) {
-        if (mask_row == nullptr || mask_row[ix]) {
-            const T value = row[ix];
+        if (mask_row == nullptr || astroviper::scalar_load(mask_row, ix)) {
+            const T value = astroviper::scalar_load(row, ix);
             sum_squares += static_cast<double>(value) * static_cast<double>(value);
             const T v = std::abs(value);
             if (v > m) { m = v; mi = ix; }
@@ -95,7 +96,7 @@ inline long searched_pixels(const bool* mask, int nx,
     for (int iy = ybeg; iy < yend; ++iy) {
         const bool* mask_row = mask + static_cast<std::size_t>(iy) * nx;
         for (int ix = xbeg; ix < xend; ++ix) {
-            n += mask_row[ix] ? 1 : 0;
+            n += astroviper::scalar_load(mask_row, ix) ? 1 : 0;
         }
     }
     return n;

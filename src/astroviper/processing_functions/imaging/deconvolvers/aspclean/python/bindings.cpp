@@ -1,5 +1,7 @@
+#include "array_dtype.hpp"
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include "scalar_buffer.hpp"
 #include <pybind11/stl.h>
 
 #include <cstring>
@@ -23,9 +25,7 @@ template <typename T>
 static py::buffer_info check_array(py::array& arr, const char* name, int ndim,
                                    const std::vector<py::ssize_t>& shape,
                                    bool writable) {
-    if (!arr.dtype().equal(py::dtype::of<T>()))
-        throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
-                                 py::cast<std::string>(py::dtype::of<T>().attr("name")));
+    astroviper::require_dtype<T>(arr, name);
     if (!(arr.flags() & py::array::c_style))
         throw std::runtime_error(std::string(name) +
                                  " must be C-contiguous (no copy is made)");
@@ -195,7 +195,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                   asp_scale_normalization_method, verbose, max_iter_divergence,
                                   divergence_rms_factor, divergence_peak_factor,
                                   processing_function_threads, asp_stop_after_hogbom_run, options);
-    throw std::runtime_error("residual must be float32 or float64");
+    throw std::runtime_error(astroviper::dtype_error(residual, "residual", "float32 or float64"));
 }
 
 template <typename T>
@@ -217,8 +217,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     py::buffer_info ri = check_array<T>(residual, "residual", 5, shp, true);
     py::buffer_info mi = check_array<T>(model, "model", 5, shp, true);
 
-    if (!psf.dtype().equal(py::dtype::of<T>()))
-        throw std::runtime_error("psf has wrong dtype");
+    astroviper::require_dtype<T>(psf, "psf");
     if (psf.ndim() != 5)
         throw std::runtime_error("psf must be a 5D array");
     if (psf.shape(0) != nt || psf.shape(1) != nf || psf.shape(3) != ny ||
@@ -281,13 +280,13 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     double* pp = peak.mutable_data();
     double* fp = flux.mutable_data();
     for (int i = 0; i < nplanes; ++i) {
-        ip[i] = results[i].iterations;
-        rp[i] = results[i].retval;
-        sp[i] = results[i].stop_code;
-        cp[i] = (results[i].retval == 1);
-        dp[i] = (results[i].retval == -3);
-        pp[i] = results[i].peak_residual;
-        fp[i] = results[i].model_flux;
+        astroviper::scalar_store(ip, i, results[i].iterations);
+        astroviper::scalar_store(rp, i, results[i].retval);
+        astroviper::scalar_store(sp, i, results[i].stop_code);
+        astroviper::scalar_store(cp, i, (results[i].retval == 1));
+        astroviper::scalar_store(dp, i, (results[i].retval == -3));
+        astroviper::scalar_store(pp, i, results[i].peak_residual);
+        astroviper::scalar_store(fp, i, results[i].model_flux);
     }
 
     py::dict out;
@@ -312,7 +311,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     for (const auto& [name, member] : counts) {
         py::array_t<int> a({nt, nf, np_img});
         int* ap = a.mutable_data();
-        for (int i = 0; i < nplanes; ++i) ap[i] = results[i].*member;
+        for (int i = 0; i < nplanes; ++i) astroviper::scalar_store(ap, i, results[i].*member);
         out[name] = a;
     }
     // The iteration history: nested lists [t][f][p] of 1-D arrays, one value
@@ -387,7 +386,7 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                  asp_scale_normalization_method, processing_function_threads,
                                  max_iter_divergence, divergence_rms_factor,
                                  divergence_peak_factor, asp_stop_after_hogbom_run, options);
-    throw std::runtime_error("residual must be float32 or float64");
+    throw std::runtime_error(astroviper::dtype_error(residual, "residual", "float32 or float64"));
 }
 
 // Test helper: PSF Gaussian width estimate (mean FWHM in pixels). The PSF is
